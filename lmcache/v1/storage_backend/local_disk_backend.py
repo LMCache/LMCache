@@ -11,6 +11,7 @@ import time
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
@@ -101,11 +102,11 @@ class LocalDiskBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         metadata: Optional[LMCacheMetadata] = None,
     ):
-        if torch.cuda.is_available():
+        if torch_dev.is_available():
             super().__init__(dst_device)
         else:
             super().__init__("cpu")
@@ -394,28 +395,44 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         """
-        Blocking get function.
+        Load a cached KV chunk from disk synchronously.
+
+        The cache policy is updated only after a successful load so that a
+        failed load (``load_bytes_from_disk`` returning ``None``) does not
+        record a phantom cache hit and skew future eviction decisions.
+
+        :param key: The cache key identifying the KV chunk.
+        :returns: A ``MemoryObj`` containing the loaded KV data, or ``None``
+            if the key is not present or the load fails.
         """
-        self.disk_lock.acquire()
-        if key not in self.dict:
-            self.disk_lock.release()
-            return None
+        with self.disk_lock:
+            if key not in self.dict:
+                return None
 
-        # Update cache recency
-        self.cache_policy.update_on_hit(key, self.dict)
+            disk_meta = self.dict[key]
+            path = disk_meta.path
+            dtype = disk_meta.dtype
+            shape = disk_meta.shape
+            fmt = disk_meta.fmt
+            assert dtype is not None
+            assert shape is not None
 
-        disk_meta = self.dict[key]
-        path = disk_meta.path
-        dtype = disk_meta.dtype
-        shape = disk_meta.shape
-        fmt = disk_meta.fmt
-        assert dtype is not None
-        assert shape is not None
-
-        self.disk_lock.release()
+        # Load is performed outside the lock: it can block for a non-trivial
+        # amount of time (CPU staging pool allocation + memcpy from disk) and
+        # must not hold disk_lock while waiting, or concurrent insert/evict
+        # operations would deadlock.
         memory_obj = self.load_bytes_from_disk(
             key, path, dtype=dtype, shape=shape, fmt=fmt
         )
+
+        if memory_obj is not None:
+            # Re-acquire the lock to update the eviction policy.  The key
+            # membership check guards against the entry being evicted between
+            # the two lock regions — in that case the policy state is already
+            # consistent and no update is needed.
+            with self.disk_lock:
+                if key in self.dict:
+                    self.cache_policy.update_on_hit(key, self.dict)
 
         return memory_obj
 

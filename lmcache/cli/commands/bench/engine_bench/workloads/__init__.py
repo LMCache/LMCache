@@ -30,6 +30,10 @@ from lmcache.cli.commands.bench.engine_bench.workloads.multi_round_chat import (
     MultiRoundChatConfig,
     MultiRoundChatWorkload,
 )
+from lmcache.cli.commands.bench.engine_bench.workloads.prefix_suffix_tuner import (
+    PrefixSuffixTunerConfig,
+    PrefixSuffixTunerWorkload,
+)
 from lmcache.cli.commands.bench.engine_bench.workloads.random_prefill import (
     RandomPrefillConfig,
     RandomPrefillWorkload,
@@ -43,6 +47,8 @@ __all__ = [
     "LongDocQAWorkload",
     "MultiRoundChatConfig",
     "MultiRoundChatWorkload",
+    "PrefixSuffixTunerConfig",
+    "PrefixSuffixTunerWorkload",
     "RandomPrefillConfig",
     "RandomPrefillWorkload",
     "create_workload",
@@ -52,6 +58,7 @@ _WORKLOAD_NAMES = (
     "long-doc-permutator",
     "long-doc-qa",
     "multi-round-chat",
+    "prefix-suffix-tuner",
     "random-prefill",
 )
 
@@ -133,6 +140,22 @@ def create_workload(
             stats_collector=stats_collector,
             progress_monitor=progress_monitor,
             seed=config.seed,
+        )
+
+    if config.workload == "prefix-suffix-tuner":
+        psf_workload_config = PrefixSuffixTunerConfig.resolve(
+            tokens_per_gb_kvcache=config.tokens_per_gb_kvcache,
+            context_length=args.psf_context_length,
+            prefix_ratio=args.psf_prefix_ratio,
+            thrash=args.psf_thrash,
+        )
+        return PrefixSuffixTunerWorkload(
+            config=psf_workload_config,
+            request_sender=request_sender,
+            stats_collector=stats_collector,
+            progress_monitor=progress_monitor,
+            seed=config.seed,
+            model_name=config.model,
         )
 
     if config.workload == "random-prefill":

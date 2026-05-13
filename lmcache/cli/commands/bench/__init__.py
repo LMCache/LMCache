@@ -26,6 +26,7 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     StatsCollector,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads import create_workload
+from lmcache.cli.commands.test_cache import TestCacheCommand
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -33,6 +34,13 @@ logger = init_logger(__name__)
 
 class BenchCommand(BaseCommand):
     """CLI command for sustained performance benchmarking."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Stateless delegate for the ``kvcache`` sub-target.
+        # Cached once to avoid redundant instantiation across
+        # ``help()``, ``add_arguments()`` and ``execute()``.
+        self._kvcache_delegate = TestCacheCommand()
 
     def name(self) -> str:
         return "bench"
@@ -52,9 +60,10 @@ class BenchCommand(BaseCommand):
         inner = parser.add_subparsers(
             dest="bench_target",
             required=True,
-            metavar="{engine}",
+            metavar="{engine,kvcache}",
         )
         self._register_engine(inner)
+        self._register_kvcache(inner)
 
     def _register_engine(
         self,
@@ -99,6 +108,7 @@ class BenchCommand(BaseCommand):
                 "long-doc-permutator",
                 "long-doc-qa",
                 "multi-round-chat",
+                "prefix-suffix-tuner",
                 "random-prefill",
             ],
             help="Workload type.",
@@ -262,6 +272,36 @@ class BenchCommand(BaseCommand):
             help="Benchmark duration in seconds (default: 60).",
         )
 
+        # --- Prefix-suffix-tuner workload args ---
+        psf_group = parser.add_argument_group(
+            "prefix-suffix-tuner workload options",
+        )
+        psf_group.add_argument(
+            "--psf-context-length",
+            type=int,
+            default=8000,
+            help="Total tokens per request (prefix + breaker + suffix) "
+            "(default: 8000).",
+        )
+        psf_group.add_argument(
+            "--psf-prefix-ratio",
+            type=float,
+            default=0.8,
+            help="Fraction of context-length used by the prefix (default: 0.8). "
+            "Must be in (0.0, 1.0). The remainder (minus a 32-token breaker) is "
+            "the shared suffix.",
+        )
+        psf_group.add_argument(
+            "--psf-thrash",
+            type=float,
+            default=20.0,
+            help="Size in GB of the KV-cache tier to overflow (default: 20.0). "
+            "The workload sizes its prefix pool to slightly more than this, "
+            "so every pass-2 request misses that tier and falls through to "
+            "the next one. Use the L0 (HBM) size for vanilla vLLM baselines, "
+            "or the L1 (LMCache DRAM) size for tiered baselines.",
+        )
+
         # --- Random-prefill workload args ---
         rp_group = parser.add_argument_group(
             "random-prefill workload options",
@@ -281,8 +321,42 @@ class BenchCommand(BaseCommand):
 
         parser.set_defaults(func=self.execute)
 
+    # ------------------------------------------------------------------
+    # kvcache bench target — end-to-end MP cache sanity test
+    # ------------------------------------------------------------------
+
+    def _register_kvcache(
+        self,
+        subparsers: argparse._SubParsersAction,
+    ) -> None:
+        """Register ``lmcache bench kvcache`` subcommand.
+
+        Arguments and execution are delegated to
+        :class:`~lmcache.cli.commands.test_cache.TestCacheCommand` so
+        the per-chunk store/retrieve/checksum logic lives in a single
+        place.
+        """
+        parser = subparsers.add_parser(
+            "kvcache",
+            help=self._kvcache_delegate.help(),
+            description=(
+                "End-to-end sanity test for the LMCache MP cache server: "
+                "runs LOOKUP / STORE / RETRIEVE against a live MP server "
+                "and verifies KV cache checksums."
+            ),
+        )
+        self._kvcache_delegate.add_arguments(parser)
+        parser.set_defaults(func=self.execute)
+
+    def _bench_kvcache(self, args: argparse.Namespace) -> None:
+        """Dispatch ``lmcache bench kvcache`` to ``TestCacheCommand``."""
+        self._kvcache_delegate.execute(args)
+
     def execute(self, args: argparse.Namespace) -> None:
-        handlers = {"engine": self._bench_engine}
+        handlers = {
+            "engine": self._bench_engine,
+            "kvcache": self._bench_kvcache,
+        }
         handler = handlers.get(args.bench_target)
         if handler is None:
             print(

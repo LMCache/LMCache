@@ -85,9 +85,9 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Serving engine integrations
+   :caption: Recipes
 
-   integrations/index
+   recipes/index
 
 :raw-html:`<br />`
 

@@ -7,6 +7,7 @@ import threading
 import time
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
@@ -30,7 +31,7 @@ class RemoteBackend(StorageBackendInterface):
         metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
         plugin_name: Optional[str] = None,
     ):
         super().__init__(dst_device=dst_device)
