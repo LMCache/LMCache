@@ -83,7 +83,6 @@ def parse_extra_params(extra_args: list) -> Dict[str, Any]:
     return params
 
 
-
 async def verify_admin_key(request: Request) -> None:
     """
     FastAPI dependency that enforces admin authentication via the x-admin-key header.
