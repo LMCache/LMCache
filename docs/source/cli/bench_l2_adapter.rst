@@ -45,8 +45,30 @@ identical other flags hits exactly the same keys. This makes the
 benchmark useful as a quick regression test for adapters that should
 support a clean store -> load round-trip.
 
+.. note::
 
-Quick start
+   When ``--only`` is not given, the three operations are run **in a
+   single process in the order** ``store -> lookup -> load``. For
+   adapters whose backing storage sits behind an OS-level cache --
+   most notably the local-filesystem (``fs``) adapter, which is
+   subject to the Linux **page cache** -- this means ``lookup`` and
+   ``load`` will almost always observe the data that ``store`` just
+   wrote still hot in RAM, and the reported numbers reflect
+   page-cache throughput rather than the underlying device.
+
+   To benchmark each operation against a cold cache, run them
+   separately with ``--only`` and drop the OS caches in between, for
+   example::
+
+      lmcache bench l2-adapter --l2-adapter '...' --only store
+      sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
+      lmcache bench l2-adapter --l2-adapter '...' --only lookup
+      sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
+      lmcache bench l2-adapter --l2-adapter '...' --only load
+
+   For adapters that bypass the page cache (e.g. ``fs`` with
+   ``"use_odirect": true``) or that talk to a remote service without
+   a local cache, the default combined run is usually fine.
 -----------
 
 Benchmark the local filesystem adapter with default parameters:
