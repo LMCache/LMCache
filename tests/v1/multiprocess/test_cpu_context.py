@@ -10,9 +10,6 @@ import sys
 import pytest
 import torch
 
-# First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
-
 
 def _make_kv_caches(
     num_layers: int = 2,
@@ -356,16 +353,14 @@ def test_server_register_and_find_cpu_context_layout(
         patch("lmcache.v1.multiprocess.server.get_event_bus"),
     ):
         engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=16)
-    expected_layout_desc = MemoryLayoutDesc(
-        shapes=[torch.Size([2, 2, 16, 16])],
-        dtypes=[torch.float32],
-    )
     engine.register_kv_cache_cpu_context(
         instance_id=1,
         model_name="m",
         world_size=1,
-        layout_desc_bytes=pickle.dumps(expected_layout_desc),
         block_size=4,
+        num_layers=2,
+        hidden_dim_size=16,
+        dtype_str="float32",
         use_mla=False,
     )
 
@@ -409,16 +404,14 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
         session_cls.return_value.get_or_create.return_value = mock_session
         engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=8)
 
-    layout_desc = MemoryLayoutDesc(
-        shapes=[torch.Size([2, 2, 8, 16])],
-        dtypes=[torch.float32],
-    )
     engine.register_kv_cache_cpu_context(
         instance_id=2,
         model_name="m",
         world_size=1,
-        layout_desc_bytes=pickle.dumps(layout_desc),
         block_size=4,
+        num_layers=2,
+        hidden_dim_size=16,
+        dtype_str="float32",
         use_mla=False,
     )
     payload = torch.ones(2, 2, 8, 16)

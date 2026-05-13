@@ -120,8 +120,7 @@ def test_register_kv_caches_cpu_submits_cpu_context_registration(
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
     assert args[1] == RequestType.REGISTER_KV_CACHE_CPU_CONTEXT
-    assert len(args[2]) == 6
-    assert isinstance(args[2][3], bytes)
+    assert len(args[2]) == 8
 
 
 def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):

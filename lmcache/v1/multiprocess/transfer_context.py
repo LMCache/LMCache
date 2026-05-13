@@ -4,7 +4,6 @@
 # Standard
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Protocol
-import pickle
 
 # Third Party
 import torch
@@ -281,8 +280,10 @@ class CPUTransferContext(TransferContext):
                 instance_id,
                 model_name,
                 world_size,
-                pickle.dumps(layout_desc),
                 block_size,
+                num_layers,
+                hidden_dim_size,
+                dtype_str,
                 use_mla_flag,
             ],
         )

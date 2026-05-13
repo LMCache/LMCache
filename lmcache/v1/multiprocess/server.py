@@ -290,8 +290,10 @@ class MPCacheEngine:
         instance_id: int,
         model_name: str,
         world_size: int,
-        layout_desc_bytes: bytes,
         block_size: int,
+        num_layers: int,
+        hidden_dim_size: int,
+        dtype_str: str,
         use_mla: bool,
     ) -> None:
         """Register non-CUDA KV layout metadata for CPU context mode.
@@ -300,11 +302,29 @@ class MPCacheEngine:
             instance_id: Worker instance identifier (typically PID).
             model_name: Model name associated with this worker.
             world_size: Worker world size used in cache keys.
-            layout_desc_bytes: Pickled :class:`MemoryLayoutDesc`.
             block_size: Tokens per paged block.
+            num_layers: Number of model layers.
+            hidden_dim_size: Flattened hidden dimension per token.
+            dtype_str: Torch dtype name (for example ``"float16"``).
             use_mla: Whether the worker KV format is MLA.
+
+        Raises:
+            ValueError: If ``dtype_str`` is not a valid torch dtype name.
         """
-        layout_desc = pickle.loads(layout_desc_bytes)
+        dtype = getattr(torch, dtype_str, None)
+        if dtype is None or not isinstance(dtype, torch.dtype):
+            raise ValueError(
+                f"Invalid dtype_str '{dtype_str}': must be a valid torch dtype "
+                "attribute name (e.g. 'float16' for torch.float16, "
+                "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
+            )
+
+        shape = (
+            torch.Size([num_layers, self.chunk_size, hidden_dim_size])
+            if use_mla
+            else torch.Size([2, num_layers, self.chunk_size, hidden_dim_size])
+        )
+        layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
         self.cpu_contexts[instance_id] = CPUContextMetadata(
             layout_desc=layout_desc,
             block_size=block_size,
