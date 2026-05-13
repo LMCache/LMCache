@@ -71,7 +71,14 @@ Producers:
 | EventType | Metadata keys | Types |
 |---|---|---|
 | `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count`, `bytes_transferred` *(optional)* | `int`, `int`, `str`, `int`, `int`, `int` |
+
+`bytes_transferred` is present only when the L2 adapter overrides
+`pop_completed_store_task_bytes()` to report the bytes actually written
+on the fast path (e.g. when duplicate keys are skipped). Adapters that
+don't track per-task transfer bytes omit the field, and consumers fall
+back to the `total_bytes` value carried on the matching
+`L2_STORE_SUBMITTED` event.
 
 ---
 

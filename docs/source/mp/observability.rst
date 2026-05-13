@@ -498,6 +498,22 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
 ``"mooncake_store"``) — enabling per-backend slicing in Prometheus (e.g.
 ``lmcache_mp_l2_store_throughput_gbs{l2_name="nixl_store"}``).
 
+.. note::
+   **Store-path fast-path accounting.** Some adapters (``mock``, ``fs``,
+   ``nixl_store``) skip the write when a key is already present in the
+   backend.  That fast-path collapses
+   ``(completed_ts - submitted_ts)`` to near-zero while the submitted
+   ``total_bytes`` stays unchanged, which would inflate the store
+   throughput samples.  Those adapters report the bytes actually
+   written via the optional
+   ``L2AdapterInterface.pop_completed_store_task_bytes()`` hook, and the
+   throughput subscriber prefers that value over the submitted bytes.
+   Tasks where every key was fast-pathed report ``0`` bytes and the
+   corresponding samples are dropped (no useful throughput data) rather
+   than recorded as a spike.  Adapters without a fast-path don't
+   override the hook and the subscriber keeps using the submitted
+   ``total_bytes``.
+
 .. list-table::
    :header-rows: 1
    :widths: 40 15 45
@@ -507,7 +523,9 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
      - Description
    * - ``lmcache_mp.l2_store_throughput_gbs``
      - Histogram
-     - L1→L2 store throughput in GB/s per task.
+     - L1→L2 store throughput in GB/s per task.  Uses adapter-reported
+       transferred bytes when available; otherwise the submitted
+       ``total_bytes``.  Tasks with zero transferred bytes are dropped.
    * - ``lmcache_mp.l2_load_throughput_gbs``
      - Histogram
      - L2→L1 load throughput in GB/s per (request, adapter) pair.

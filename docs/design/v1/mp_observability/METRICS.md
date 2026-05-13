@@ -310,9 +310,22 @@ registered adapter type (e.g. `"fs"`, `"nixl_store"`, `"mooncake_store"`)
 — enabling per-adapter-type slicing in Prometheus (e.g.
 `lmcache_mp_l2_store_throughput_gbs{l2_name="nixl_store"}`).
 
+**Store-path fast-path accounting.** Some adapters (`mock`, `fs`,
+`nixl_store`) skip the write when a key is already present in the
+backend, collapsing `(completed_ts - submitted_ts)` to near-zero while
+the submitted `total_bytes` count stays unchanged. To avoid inflated
+throughput samples, those adapters override
+`L2AdapterInterface.pop_completed_store_task_bytes()` and the
+`L2_STORE_COMPLETED` event then carries a `bytes_transferred` field
+covering only the bytes actually written. When `bytes_transferred` is
+present, the store path records `bytes_transferred / dt`; when it is
+`0` (every key fast-pathed) the sample is dropped entirely. When the
+field is absent (adapter doesn't track it) the subscriber falls back
+to the submitted `total_bytes`, matching the load-path calculation.
+
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l2_store_throughput_gbs` | `lmcache_mp_l2_store_throughput_gbs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per task |
+| `lmcache_mp.l2_store_throughput_gbs` | `lmcache_mp_l2_store_throughput_gbs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `effective_bytes / (completed_ts - submitted_ts) / 1e9` per task, where `effective_bytes` is `bytes_transferred` when reported (samples with `bytes_transferred == 0` are dropped) and otherwise `total_bytes` from the SUBMITTED event |
 | `lmcache_mp.l2_load_throughput_gbs` | `lmcache_mp_l2_load_throughput_gbs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair |
 
 **What it answers:** What end-to-end throughput is each L2 adapter

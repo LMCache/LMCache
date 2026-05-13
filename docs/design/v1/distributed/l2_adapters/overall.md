@@ -66,6 +66,7 @@ silently misroute events.
 ```
 submit_store_task(keys, objects) -> L2TaskId
 pop_completed_store_tasks() -> dict[L2TaskId, bool]
+pop_completed_store_task_bytes() -> dict[L2TaskId, int]   # optional
 ```
 
 - **Caller provides buffers:** The `objects` list contains `MemoryObj` references
@@ -74,6 +75,16 @@ pop_completed_store_tasks() -> dict[L2TaskId, bool]
   The bool in the completion dict is `True` for success, `False` for failure.
 - **Pop semantics:** `pop_completed_store_tasks()` drains all completed tasks.
   Each task appears exactly once.
+- **Bytes-transferred reporting (optional):**
+  `pop_completed_store_task_bytes()` is an opt-in hook on
+  `L2AdapterInterface`. The default implementation returns `{}`, in which
+  case the StoreController omits `bytes_transferred` from
+  `L2_STORE_COMPLETED` and the throughput subscriber falls back to the
+  submitted `total_bytes`. Adapters that fast-path duplicate keys (e.g.
+  skip the write when the key already exists) SHOULD override it and
+  report the bytes actually written per task — including `0` when every
+  key was fast-pathed — so the L2 store throughput histogram reflects
+  real work rather than inflated `bytes / ~0` samples.
 
 ### Lookup and Lock Operations
 
