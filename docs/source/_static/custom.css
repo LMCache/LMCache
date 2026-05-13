@@ -68,6 +68,46 @@ div.highlight button.copybtn + button.copybtn {
     font-size: 10px;
   }
 
+.lmcache-language-switcher {
+    position: fixed;
+    top: 10px;
+    right: 72px;
+    z-index: 60;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 0 8px;
+    white-space: nowrap;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--foreground);
+}
+
+@media (max-width: 640px) {
+    .lmcache-language-switcher {
+        right: 56px;
+        font-size: 15px;
+    }
+}
+
+.lmcache-language-switcher a {
+    color: inherit;
+    opacity: 0.72;
+    text-decoration: none;
+}
+
+.lmcache-language-switcher a:hover,
+.lmcache-language-switcher a:focus-visible,
+.lmcache-language-switcher a[aria-current="page"] {
+    opacity: 1;
+}
+
+.lmcache-language-switcher__divider {
+    opacity: 0.38;
+}
+
 .lmcache-goblin {
     position: fixed;
     z-index: 25;
