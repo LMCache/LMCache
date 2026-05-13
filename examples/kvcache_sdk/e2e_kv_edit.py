@@ -165,28 +165,6 @@ def _registered_model_name(lmcache_url: str, fallback: str, timeout: float) -> s
     return fallback
 
 
-def _wait_for_hit(
-    *,
-    lmcache_url: str,
-    model_name: str,
-    tokens: list[int],
-    expected_tokens: int,
-    timeout: float,
-) -> lmc_sdk.LookupResult:
-    """Wait until LMCache lookup reports at least ``expected_tokens`` hits."""
-    deadline = time.monotonic() + timeout
-    last_result = lmc_sdk.LookupResult(0, 0, 0, 0)
-    while time.monotonic() < deadline:
-        last_result = lmc_sdk.lookup(lmcache_url, model_name=model_name, tokens=tokens)
-        if last_result.hit_tokens >= expected_tokens:
-            return last_result
-        time.sleep(1)
-    raise TimeoutError(
-        "timed out waiting for LMCache hit; "
-        f"last lookup was {last_result.hit_tokens}/{last_result.total_tokens} tokens"
-    )
-
-
 def _short_text(text: str, limit: int = 240) -> str:
     """Return a compact single-line text preview."""
     collapsed = " ".join(text.split())
@@ -227,14 +205,6 @@ def run(args: argparse.Namespace) -> None:
         args.lmcache_model_name or args.vllm_model_name,
         args.timeout,
     )
-    source_lookup = _wait_for_hit(
-        lmcache_url=args.lmcache_url,
-        model_name=lmcache_model_name,
-        tokens=source_tokens,
-        expected_tokens=cache_tokens,
-        timeout=args.store_wait_timeout,
-    )
-
     print("== Step 2: retrieve source KV into memory through lmcache.sdk ==")
     retrieve_result = lmc_sdk.retrieve(
         args.lmcache_url,
@@ -242,8 +212,11 @@ def run(args: argparse.Namespace) -> None:
         tokens=source_tokens,
         timeout=args.timeout,
     )
-    if retrieve_result.hit_tokens <= 0:
-        raise RuntimeError("source retrieve did not return any KV cache tokens")
+    if retrieve_result.hit_tokens < cache_tokens:
+        raise RuntimeError(
+            "source retrieve did not return the expected cached prefix: "
+            f"{retrieve_result.hit_tokens} < {cache_tokens}"
+        )
 
     target_prefix_tokens = target_tokens[: retrieve_result.hit_tokens]
     source_prefix_tokens = source_tokens[: retrieve_result.hit_tokens]
@@ -325,7 +298,12 @@ def run(args: argparse.Namespace) -> None:
         != target_prefix_tokens,
         "outputs_match": outputs_match,
         "store_result": store_result.__dict__,
-        "source_lookup_after_inference": source_lookup.__dict__,
+        "source_retrieve_after_inference": {
+            "total_tokens": retrieve_result.total_tokens,
+            "total_chunks": retrieve_result.total_chunks,
+            "hit_tokens": retrieve_result.hit_tokens,
+            "hit_chunks": retrieve_result.hit_chunks,
+        },
         "target_lookup_after_remap": target_lookup_after.__dict__,
         "source_latency_seconds": source_completion.elapsed_seconds,
         "target_latency_seconds": target_completion.elapsed_seconds,
@@ -363,7 +341,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fake-prefix-tokens", type=int, default=32)
     parser.add_argument("--max-tokens", type=int, default=32)
     parser.add_argument("--timeout", type=float, default=120.0)
-    parser.add_argument("--store-wait-timeout", type=float, default=120.0)
     parser.add_argument("--trust-remote-code", action="store_true")
     return parser
 

@@ -34,7 +34,6 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.6}"
 VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-1}"
 L1_SIZE_GB="${L1_SIZE_GB:-8}"
 REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-120}"
-STORE_WAIT_TIMEOUT="${STORE_WAIT_TIMEOUT:-120}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-true}"
 TMP_DIR="${TMP_DIR:-/tmp/lmcache_kvcache_sdk_e2e}"
 
@@ -112,12 +111,10 @@ stop_process() {
 
     echo "Stopping ${name}..."
     signal_process TERM "${pid}"
-    for _ in $(seq 1 20); do
-        if ! process_running "${pid}"; then
-            return 0
-        fi
-        sleep 0.5
-    done
+    timeout 10 tail --pid="${pid}" -f /dev/null >/dev/null 2>&1 || true
+    if ! process_running "${pid}"; then
+        return 0
+    fi
 
     echo "Force stopping ${name}..."
     signal_process KILL "${pid}"
@@ -139,15 +136,17 @@ trap cleanup EXIT INT TERM
 wait_for_url() {
     local url="$1"
     local timeout="${2:-300}"
-    local elapsed=0
-    while ! curl -sf "${url}" >/dev/null 2>&1; do
-        sleep 2
-        elapsed=$((elapsed + 2))
-        if [ "${elapsed}" -ge "${timeout}" ]; then
-            echo "Timed out waiting for ${url}" >&2
-            return 1
-        fi
-    done
+    local retry_delay=2
+    local retries=$(((timeout + retry_delay - 1) / retry_delay))
+    if curl -sf \
+        --retry "${retries}" \
+        --retry-delay "${retry_delay}" \
+        --retry-connrefused \
+        "${url}" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Timed out waiting for ${url}" >&2
+    return 1
 }
 
 require_command() {
@@ -264,7 +263,6 @@ python "${SCRIPT_DIR}/e2e_kv_edit.py" \
     --fake-prefix-tokens "${FAKE_PREFIX_TOKENS}" \
     --max-tokens "${MAX_TOKENS}" \
     --timeout "${REQUEST_TIMEOUT}" \
-    --store-wait-timeout "${STORE_WAIT_TIMEOUT}" \
     "${TOKENIZER_ARGS[@]}" \
     "${LMCACHE_MODEL_ARGS[@]}" \
     "${TRUST_REMOTE_CODE_DRIVER_ARGS[@]}"

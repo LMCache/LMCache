@@ -18,7 +18,7 @@ end-to-end KV remapping experiment:
    tokens.
 4. Store the source KV under the target prefix with `lmcache.sdk.store`.
 5. Send the target token IDs to vLLM so the target prefix hits the remapped KV.
-6. Print lookup counts, hit counts, latencies, response previews, and whether
+6. Print retrieve and lookup counts, latencies, response previews, and whether
    the source and target outputs match.
 
 The target prompt starts with different token IDs, so it does not rely on a
