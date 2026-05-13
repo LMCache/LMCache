@@ -16,6 +16,22 @@ MAX_ENTRIES = int(os.environ.get("TRANSLATION_MAX_ENTRIES", "500"))
 
 
 class PoEntry:
+    """One translatable message read from a ``.po`` translation file.
+
+    A ``.po`` file is a list of messages. Each message pairs the original
+    English text with its Chinese translation, plus some status markers.
+
+    Attributes:
+        start: Line number where this message begins in the file.
+        end: Line number just after this message ends in the file.
+        flags: Status markers on the message. ``"fuzzy"`` means the English
+            text changed since the last translation, so the Chinese is stale
+            and should be redone.
+        msgid: The original English text.
+        msgstr: The current Chinese translation (empty string if not yet
+            translated).
+    """
+
     def __init__(
         self,
         start: int,
@@ -31,9 +47,11 @@ class PoEntry:
         self.msgstr = msgstr
 
 def decode_po_string(value: str) -> str:
+    """Unwrap one quoted ``.po`` line into a plain Python string."""
     return json.loads(value)
 
 def encode_po_string(value: str) -> list[str]:
+    """Convert a Python string into one or more quoted ``.po`` lines."""
     if "\n" not in value:
         return [json.dumps(value, ensure_ascii=False)]
 
@@ -44,6 +62,11 @@ def encode_po_string(value: str) -> list[str]:
     return lines
 
 def collect_field(lines: list[str], index: int) -> tuple[str, int]:
+    """Read one ``msgid``/``msgstr`` value plus any continuation lines.
+
+    Returns:
+        The joined string value, and the next line number to read.
+    """
     _, raw_value = lines[index].split(" ", 1)
     values = [decode_po_string(raw_value.strip())]
     index += 1
@@ -55,6 +78,7 @@ def collect_field(lines: list[str], index: int) -> tuple[str, int]:
     return "".join(values), index
 
 def parse_entries(lines: list[str]) -> list[PoEntry]:
+    """Parse a ``.po`` file into one :class:`PoEntry` per message."""
     entries: list[PoEntry] = []
     index = 0
 
@@ -88,6 +112,7 @@ def parse_entries(lines: list[str]) -> list[PoEntry]:
     return entries
 
 def replace_msgstr(lines: list[str], entry: PoEntry, translation: str) -> None:
+    """Write a new Chinese translation into one message, modifying ``lines`` in place."""
     msgstr_index = entry.start
     while msgstr_index < entry.end and not lines[msgstr_index].startswith("msgstr "):
         msgstr_index += 1
@@ -100,6 +125,7 @@ def replace_msgstr(lines: list[str], entry: PoEntry, translation: str) -> None:
     lines[msgstr_index:msgstr_end] = ["msgstr " + encoded[0], *encoded[1:]]
 
 def clean_fuzzy_flag(lines: list[str], entry: PoEntry) -> None:
+    """Remove the ``"fuzzy"`` marker from a message, modifying ``lines`` in place."""
     for index in range(entry.start, entry.end):
         if not lines[index].startswith("#,"):
             continue
@@ -112,18 +138,25 @@ def clean_fuzzy_flag(lines: list[str], entry: PoEntry) -> None:
         return
 
 def should_translate(entry: PoEntry) -> bool:
+    """Return True if the message has English content AND (no Chinese yet OR is fuzzy)."""
     return bool(entry.msgid.strip()) and (
         not entry.msgstr.strip() or "fuzzy" in entry.flags
     )
 
 
 def endpoint_url() -> str:
+    """Build the chat-completions URL from ``TRANSLATION_API_BASE_URL``."""
     base_url = os.environ["TRANSLATION_API_BASE_URL"].rstrip("/")
     if base_url.endswith("/chat/completions"):
         return base_url
     return base_url + "/chat/completions"
 
 def translate_text(text: str) -> str:
+    """Translate one English string to Chinese via the model endpoint.
+
+    Raises:
+        RuntimeError: If the response has no message content.
+    """
     payload = {
         "model": os.environ["TRANSLATION_MODEL"],
         "messages": [
@@ -187,6 +220,12 @@ def translate_text(text: str) -> str:
         raise RuntimeError("Translation endpoint returned no message content") from exc
 
 def validate_environment() -> None:
+    """Exit with an error if any required API env var is unset.
+
+    Raises:
+        SystemExit: If ``TRANSLATION_API_BASE_URL``, ``TRANSLATION_API_KEY``,
+            or ``TRANSLATION_MODEL`` is missing.
+    """
     missing = [
         name
         for name in (
@@ -201,6 +240,11 @@ def validate_environment() -> None:
         raise SystemExit(f"Missing required translation secret(s): {joined}")
 
 def update_file(path: Path, remaining_budget: int) -> int:
+    """Translate up to ``remaining_budget`` empty/fuzzy messages in one ``.po`` file.
+
+    Returns:
+        Number of messages actually translated.
+    """
     lines = path.read_text(encoding="utf-8").splitlines()
     entries = parse_entries(lines)
     translated = 0
@@ -223,6 +267,7 @@ def update_file(path: Path, remaining_budget: int) -> int:
     return translated
 
 def main() -> int:
+    """Translate up to ``MAX_ENTRIES`` messages across all Chinese ``.po`` files."""
     po_files = sorted(LOCALE_DIR.glob("**/*.po"))
     if not po_files:
         print("No Chinese PO files found.")
