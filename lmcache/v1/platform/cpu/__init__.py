@@ -16,6 +16,7 @@ CPU-only hosts is duck-typed by
 # First Party
 from lmcache.v1.platform._registry import (
     DEFAULT_BACKEND,
+    register_kv_wrapper,
     register_stream,
 )
 from lmcache.v1.platform.cpu.stream import MockExternalStream
@@ -26,3 +27,21 @@ def _make_cpu_stream(raw_ptr, device_index):  # noqa: ARG001
 
 
 register_stream(DEFAULT_BACKEND, _make_cpu_stream)
+
+
+def _kv_wrapper_factory(tensor):
+    """Indirect-dispatch wrapper, mirrors :func:`cuda._stream_factory`.
+
+    Defers loading :mod:`lmcache.v1.platform.cpu.shm` (which pulls in
+    ``multiprocess.custom_types``, which transitively reads
+    ``lmcache.torch_dev``) until first use, so importing this package
+    during ``lmcache/__init__.py``'s bootstrap does not race the
+    ``torch_dev`` attach.
+    """
+    # First Party
+    from lmcache.v1.platform.cpu.shm import migrate_to_shm_and_wrap
+
+    return migrate_to_shm_and_wrap(tensor)
+
+
+register_kv_wrapper("cpu", _kv_wrapper_factory)

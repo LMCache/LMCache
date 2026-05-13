@@ -392,7 +392,7 @@ def create_cache_context(
             engine-specific layout detection.  Ignored in CPU mode.
     """
     # First Party
-    from lmcache.v1.multiprocess.custom_types import CpuShmTensorWrapper
+    from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
 
     if not kv_caches:
         raise ValueError("create_cache_context requires a non-empty kv_caches list")

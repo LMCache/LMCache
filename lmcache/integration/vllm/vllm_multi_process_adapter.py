@@ -15,13 +15,13 @@ from lmcache.integration.request_telemetry.factory import RequestTelemetryFactor
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform import _registry as platform_registry
 
 logger = init_logger(__name__)
 
@@ -31,49 +31,17 @@ DEFAULT_MQ_TIMEOUT: float = 300.0
 # Interval (seconds) between periodic heartbeat pings to the server.
 DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
 
-# Per-process registry of SHM segments we have created, so the same
-# tensor object is only migrated to SHM once even if wrap_kv_caches is
-# called multiple times. Maps id(tensor) -> shm_name.
-_CPU_SHM_NAMES: dict[int, str] = {}
-
 
 def _wrap_one_kv_cache(tensor):
-    # Standard
-    import ctypes
-    import os
+    """Dispatch by ``tensor.device.type`` via the platform registry.
 
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import (
-        CpuShmTensorWrapper,
-        shm_create_readwrite,
-    )
-
-    if tensor.device.type == "cuda":
-        return CudaIPCWrapper(tensor)
-
-    if tensor.device.type != "cpu":
-        raise ValueError("Unsupported device for KV cache: %s" % tensor.device)
-
-    # CPU path: re-point the tensor's storage at a POSIX SHM segment so
-    # the LMCache mp server can mmap the same physical pages.
-    tid = id(tensor)
-    shm_name = _CPU_SHM_NAMES.get(tid)
-    if shm_name is None:
-        nbytes = tensor.untyped_storage().nbytes()
-        shm_name = "/lmcache_kv_%d_%d" % (os.getpid(), tid)
-        addr = shm_create_readwrite(shm_name, nbytes)
-        buf_type = ctypes.c_uint8 * nbytes
-        buf = buf_type.from_address(addr)
-        shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
-        tensor.set_(shm_storage, tensor.storage_offset(), tensor.shape, tensor.stride())
-        _CPU_SHM_NAMES[tid] = shm_name
-        logger.info(
-            "Migrated CPU KV cache tensor (nbytes=%d) to SHM %s",
-            nbytes,
-            shm_name,
-        )
-
-    return CpuShmTensorWrapper(tensor, shm_name)
+    Concrete factories self-register at import time (CUDA in
+    ``lmcache.v1.platform.cuda``, CPU SHM in
+    ``lmcache.v1.platform.cpu.shm``), so this call site stays free of
+    if/elif chains and new accelerators plug in by registering a
+    sibling factory.
+    """
+    return platform_registry.get_kv_wrapper_factory(tensor.device.type)(tensor)
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:

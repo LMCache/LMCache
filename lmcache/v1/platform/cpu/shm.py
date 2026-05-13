@@ -1,0 +1,215 @@
+# SPDX-License-Identifier: Apache-2.0
+"""CPU-only KV-cache IPC wrapper backed by POSIX shared memory.
+
+Mirrors the GPU-mode CUDA-IPC zero-copy semantics for hosts without an
+accelerator: client and LMCache mp server map the **same** physical
+pages so transfers are pointer-shuffles rather than memcpys.
+
+Self-registers a ``"cpu"`` factory with
+:mod:`lmcache.v1.platform._registry` at import time, so the
+multiprocess adapter can dispatch by ``tensor.device.type`` without
+any if/elif chain.
+"""
+
+# Future
+from __future__ import annotations
+
+# Standard
+import ctypes
+import ctypes.util
+import os
+
+# Third Party
+import torch
+
+# First Party
+from lmcache.logging import init_logger
+from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
+
+logger = init_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Hand-rolled POSIX shared-memory helpers (shm_open + mmap via ctypes).
+#
+# Kept here (rather than in ``multiprocess/custom_types``) so the
+# CPU-specific dependency on libc/librt lives next to the only place
+# that needs it. TODO(maobaolong): replace with ``posix_ipc`` once we
+# are willing to take that runtime dependency.
+# ---------------------------------------------------------------------------
+
+_O_RDWR = os.O_RDWR
+_O_CREAT = os.O_CREAT
+_O_EXCL = os.O_EXCL
+_PROT_READ = 0x1
+_PROT_WRITE = 0x2
+_MAP_SHARED = 0x01
+
+_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+# macOS exposes shm_open in libSystem (== libc), Linux needs librt.
+_librt = _libc
+if not hasattr(_libc, "shm_open"):
+    _librt = ctypes.CDLL(ctypes.util.find_library("rt"), use_errno=True)
+
+_librt.shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint32]
+_librt.shm_open.restype = ctypes.c_int
+_librt.shm_unlink.argtypes = [ctypes.c_char_p]
+_librt.shm_unlink.restype = ctypes.c_int
+
+_libc.ftruncate.argtypes = [ctypes.c_int, ctypes.c_int64]
+_libc.ftruncate.restype = ctypes.c_int
+_libc.mmap.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int64,
+]
+_libc.mmap.restype = ctypes.c_void_p
+_libc.close.argtypes = [ctypes.c_int]
+_libc.close.restype = ctypes.c_int
+
+
+def shm_create_readwrite(name: str, nbytes: int) -> int:
+    """Create + size a POSIX SHM segment, return mapped address."""
+    fd = _librt.shm_open(name.encode("ascii"), _O_RDWR | _O_CREAT | _O_EXCL, 0o600)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "shm_open(create) failed for %s" % name)
+    if _libc.ftruncate(fd, nbytes) != 0:
+        err = ctypes.get_errno()
+        _libc.close(fd)
+        _librt.shm_unlink(name.encode("ascii"))
+        raise OSError(err, "ftruncate failed for %s" % name)
+    addr = _libc.mmap(None, nbytes, _PROT_READ | _PROT_WRITE, _MAP_SHARED, fd, 0)
+    _libc.close(fd)
+    if addr in (0, ctypes.c_void_p(-1).value):
+        _librt.shm_unlink(name.encode("ascii"))
+        raise OSError(ctypes.get_errno(), "mmap failed for %s" % name)
+    return addr
+
+
+def shm_map_readwrite(name: str, nbytes: int) -> int:
+    """Open an existing POSIX SHM segment, return mapped address."""
+    fd = _librt.shm_open(name.encode("ascii"), _O_RDWR, 0o600)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "shm_open(open) failed for %s" % name)
+    addr = _libc.mmap(None, nbytes, _PROT_READ | _PROT_WRITE, _MAP_SHARED, fd, 0)
+    _libc.close(fd)
+    if addr in (0, ctypes.c_void_p(-1).value):
+        raise OSError(ctypes.get_errno(), "mmap failed for %s" % name)
+    return addr
+
+
+def shm_unlink(name: str) -> None:
+    """Best-effort SHM segment removal."""
+    _librt.shm_unlink(name.encode("ascii"))
+
+
+# ---------------------------------------------------------------------------
+# Wrapper class                                                             #
+# ---------------------------------------------------------------------------
+
+
+class CpuShmTensorWrapper(CudaIPCWrapper):
+    """IPC wrapper for CPU tensors backed by POSIX shared memory.
+
+    Used by the ``lmcache bench kvcache --mode cpu`` path and the
+    vLLM CPU integration so that the client and the LMCache mp server
+    map the **same** physical pages for the KV cache, mirroring the
+    GPU-mode CUDA-IPC zero-copy semantics.
+
+    Subclassing :class:`CudaIPCWrapper` is load-bearing for the same
+    reason :class:`RawCudaIPCWrapper` does it: msgspec does not
+    support unions of custom ext-encoded types, so all wire-level
+    KV-cache wrappers must share the single ext code (1) registered
+    for ``CudaIPCWrapper``. Pickle preserves the subclass identity
+    so ``to_tensor`` dispatches correctly on both sides.
+    """
+
+    # POSIX shared-memory name (``/lmcache_...``) — leading ``/`` is
+    # required by ``shm_open(3)`` on both Linux and macOS.
+    SHM_NAME_PREFIX = "/lmcache_kv_"
+
+    def __init__(self, tensor: torch.Tensor, shm_name: str) -> None:
+        # First Party
+        from lmcache.v1.gpu_connector.utils import (
+            attempt_permute_to_contiguous_view,
+        )
+
+        tensor = attempt_permute_to_contiguous_view(tensor)
+        if tensor.device.type != "cpu":
+            raise ValueError(
+                "CpuShmTensorWrapper requires a CPU tensor, got %s" % tensor.device
+            )
+        if not tensor.is_contiguous():
+            raise ValueError("CpuShmTensorWrapper requires a contiguous tensor")
+
+        self.shm_name = shm_name
+        self._nbytes = tensor.untyped_storage().nbytes()
+
+        # CudaIPCWrapper interface fields. ``handle`` / ``device_uuid``
+        # are unused on the CPU path but kept to satisfy the parent
+        # contract used by equality checks.
+        self.handle = None
+        self.dtype = tensor.dtype
+        self.shape = tuple(tensor.shape)
+        self.stride = tuple(tensor.stride())
+        self.storage_offset = int(tensor.storage_offset())
+        self.device_uuid = "cpu"
+
+    def to_tensor(self) -> torch.Tensor:
+        """Reconstruct the tensor by mapping the same SHM segment."""
+        addr = shm_map_readwrite(self.shm_name, self._nbytes)
+        # ``torch.frombuffer`` requires a writable buffer; build one
+        # via ctypes so the resulting torch tensor shares storage
+        # with the SHM mapping (zero copy across processes).
+        buf_type = ctypes.c_uint8 * self._nbytes
+        buf = buf_type.from_address(addr)
+        flat = torch.frombuffer(buf, dtype=torch.uint8)
+        return flat.view(self.dtype).reshape(self.shape)
+
+
+# ---------------------------------------------------------------------------
+# Migrate-and-wrap factory (used by the multiprocess adapter)              #
+# ---------------------------------------------------------------------------
+
+# Per-process registry of SHM segments we have created, so the same
+# tensor object is only migrated to SHM once even if the factory is
+# called multiple times. Maps id(tensor) -> shm_name.
+_CPU_SHM_NAMES: dict[int, str] = {}
+
+
+def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
+    """Re-point ``tensor``'s storage at a POSIX SHM segment, then wrap.
+
+    Used as the registered ``"cpu"`` KV-wrapper factory: the LMCache mp
+    server can mmap the same physical pages on the receiving side.
+    Idempotent per ``id(tensor)`` thanks to :data:`_CPU_SHM_NAMES`.
+    """
+    tid = id(tensor)
+    shm_name = _CPU_SHM_NAMES.get(tid)
+    if shm_name is None:
+        nbytes = tensor.untyped_storage().nbytes()
+        shm_name = "%s%d_%d" % (
+            CpuShmTensorWrapper.SHM_NAME_PREFIX,
+            os.getpid(),
+            tid,
+        )
+        addr = shm_create_readwrite(shm_name, nbytes)
+        buf_type = ctypes.c_uint8 * nbytes
+        buf = buf_type.from_address(addr)
+        shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
+        tensor.set_(
+            shm_storage,
+            tensor.storage_offset(),
+            tensor.shape,
+            tensor.stride(),
+        )
+        _CPU_SHM_NAMES[tid] = shm_name
+        logger.info(
+            "Migrated CPU KV cache tensor (nbytes=%d) to SHM %s",
+            nbytes,
+            shm_name,
+        )
+
+    return CpuShmTensorWrapper(tensor, shm_name)

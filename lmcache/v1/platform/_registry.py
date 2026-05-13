@@ -31,6 +31,12 @@ DEFAULT_BACKEND: str = "cpu"
 # Per-capability table: ``{device_type: factory}``.
 _STREAM_FACTORIES: Dict[str, Callable[..., Any]] = {}
 
+# KV-cache IPC wrapper factory per device type. Concrete sub-packages
+# self-register here (CUDA -> ``CudaIPCWrapper``, CPU -> POSIX-SHM
+# wrapper) so :func:`get_kv_wrapper_factory` can dispatch by
+# ``tensor.device.type`` without any if/elif chain in the call site.
+_KV_WRAPPER_FACTORIES: Dict[str, Callable[..., Any]] = {}
+
 # Per-backend availability predicate (e.g. ``torch.cuda.is_available``).
 # The dispatcher consults this to skip a registered backend when its
 # runtime requirements are not met (e.g. CUDA build present but no GPU
@@ -44,6 +50,15 @@ def register_availability(device_type: str, predicate: Callable[[], bool]) -> No
 
 def register_stream(device_type: str, factory: Callable[..., Any]) -> None:
     _STREAM_FACTORIES[device_type] = factory
+
+
+def register_kv_wrapper(device_type: str, factory: Callable[..., Any]) -> None:
+    """Register a KV-cache IPC wrapper factory for ``device_type``.
+
+    The factory takes a single ``torch.Tensor`` and returns a wrapper
+    instance ready to be sent over the multiprocess wire.
+    """
+    _KV_WRAPPER_FACTORIES[device_type] = factory
 
 
 def is_available(device_type: str) -> bool:
@@ -70,6 +85,23 @@ def get_stream_factory(device_type: str) -> Callable[..., Any] | None:
     return _STREAM_FACTORIES.get(DEFAULT_BACKEND)
 
 
+def get_kv_wrapper_factory(device_type: str) -> Callable[..., Any]:
+    """Pick the KV-cache wrapper factory for ``device_type``.
+
+    Unlike :func:`get_stream_factory`, this lookup does NOT silently
+    fall back: a missing entry means the caller is asking for a
+    backend that nobody registered (typically because the relevant
+    sub-package was not imported), which is a programming error and
+    deserves an explicit failure.
+    """
+    factory = _KV_WRAPPER_FACTORIES.get(device_type)
+    if factory is None:
+        raise ValueError(
+            "No KV-cache wrapper factory registered for device type %r" % device_type
+        )
+    return factory
+
+
 def snapshot() -> Dict[str, Dict[str, Callable[..., Any]]]:
     """Return a deep-copy of the registry tables.
 
@@ -79,6 +111,7 @@ def snapshot() -> Dict[str, Dict[str, Callable[..., Any]]]:
     """
     return {
         "stream": dict(_STREAM_FACTORIES),
+        "kv_wrapper": dict(_KV_WRAPPER_FACTORIES),
         "availability": dict(_AVAILABILITY),
     }
 
@@ -87,5 +120,7 @@ def restore(state: Dict[str, Dict[str, Callable[..., Any]]]) -> None:
     """Restore registry tables to a previously :func:`snapshot`-ed state."""
     _STREAM_FACTORIES.clear()
     _STREAM_FACTORIES.update(state["stream"])
+    _KV_WRAPPER_FACTORIES.clear()
+    _KV_WRAPPER_FACTORIES.update(state.get("kv_wrapper", {}))
     _AVAILABILITY.clear()
     _AVAILABILITY.update(state["availability"])

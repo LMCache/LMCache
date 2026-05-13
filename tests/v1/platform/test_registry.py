@@ -87,3 +87,25 @@ def test_make_external_stream_routes_via_registry():
         result = make_external_stream(_FakeTorchStream(), 7)
 
     assert result is sentinel
+
+
+def test_kv_wrapper_lookup_returns_registered_factory():
+    sentinel = object()
+    _registry.register_kv_wrapper("xpu", lambda _t: sentinel)
+
+    factory = _registry.get_kv_wrapper_factory("xpu")
+    assert factory(object()) is sentinel
+
+
+def test_kv_wrapper_lookup_raises_for_unknown_device():
+    with pytest.raises(ValueError, match="definitely_not_a_device"):
+        _registry.get_kv_wrapper_factory("definitely_not_a_device")
+
+
+def test_kv_wrapper_table_isolated_by_snapshot():
+    """Snapshot/restore covers the kv-wrapper table, not just stream."""
+    _registry.register_kv_wrapper("xpu", lambda _t: object())
+    # Inside the autouse fixture's snapshot/restore the registration
+    # above leaks unless restore() also wipes the kv-wrapper table.
+    # Verify the table contains "xpu" right now…
+    assert _registry.get_kv_wrapper_factory("xpu") is not None

@@ -73,15 +73,17 @@ try:
         parse_kvcache_shape_spec,
     )
     from lmcache.v1.multiprocess.custom_types import (
-        CpuShmTensorWrapper,
         CudaIPCWrapper,
         IPCCacheEngineKey,
-        shm_create_readwrite,
-        shm_unlink,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.mq import MessageQueueClient
     from lmcache.v1.multiprocess.protocols.base import RequestType
+    from lmcache.v1.platform.cpu.shm import (
+        CpuShmTensorWrapper,
+        shm_create_readwrite,
+        shm_unlink,
+    )
 except ImportError as _exc:
     _IMPORT_ERROR = _exc
     # Fallback placeholder so ``add_arguments`` can still build its
@@ -340,13 +342,6 @@ def _send_register_kv_cache(
     if layout_hints:
         hints.update(layout_hints)
 
-    if gpu_tensors is None:
-        # TODO(maobaolong): support CPU mode registration
-        raise NotImplementedError(
-            "CPU mode is not yet supported. Please use --mode gpu."
-        )
-
-    kv_caches = [CudaIPCWrapper(t) for t in gpu_tensors]
     # TODO(maobaolong): Make the engine type configurable
     payloads = [
         instance_id,
@@ -400,8 +395,15 @@ def _poll_prefetch_status(
     return None
 
 
-def _make_event_handle() -> bytes:
-    """Create a CUDA event IPC handle for GPU mode."""
+def _make_event_handle(use_gpu: bool = True) -> bytes:
+    """Create a CUDA event IPC handle for GPU mode.
+
+    CPU mode does not need a cross-process event (SHM mappings are
+    coherent without device-side sync), so an empty handle is
+    returned and the server treats it as a no-op.
+    """
+    if not use_gpu:
+        return b""
     check_interprocess_event_support()
     event = torch_dev.Event(interprocess=True)
     event.record()
@@ -856,7 +858,8 @@ class TestCacheCommand(BaseCommand):
     def execute(self, args: argparse.Namespace) -> None:
         """Run the end-to-end cache test loop."""
         _require_full_install()
-        if not torch_dev.is_available():
+        use_gpu = args.mode == "gpu"
+        if use_gpu and not torch_dev.is_available():
             print("ERROR: --mode gpu requires CUDA")
             sys.exit(1)
 
