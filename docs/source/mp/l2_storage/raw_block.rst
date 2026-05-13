@@ -16,7 +16,8 @@ caller-provided load buffers during prefetch.
 - ``capacity_bytes``: Optional cap on the usable device bytes. Default ``0``
   means use the full device/file size.
 - ``use_odirect``: ``true`` or ``false`` (default ``true``).
-- ``block_align``: Device alignment in bytes (default ``4096``).
+- ``block_align``: Device alignment in bytes (default ``4096``). Must be a
+  power of two.
 - ``header_bytes``: Per-slot header reservation (default ``4096``).
 - ``meta_total_bytes``: Reserved metadata checkpoint region (default ``256MiB``).
 - ``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version knobs.
@@ -48,8 +49,13 @@ caller-provided load buffers during prefetch.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
   through ``RawBlockCore``. Slot reclamation is driven by the shared/global
   L2 eviction controller or explicit ``delete()`` calls.
+- ``slot_bytes``, ``header_bytes``, and ``meta_total_bytes`` must be multiples
+  of ``block_align``.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
   at least ``block_align``.
+- With ``O_DIRECT``, raw-block I/O rejects offsets and total I/O lengths that
+  are not multiples of ``block_align``. Misaligned write buffers use an aligned
+  bounce buffer.
 - ``persist_enabled`` must remain ``true`` for this adapter.
 - For ``use_uring_cmd=true``, ``device_path`` must use the NVMe character
   device node (e.g., ``/dev/ng0n1``) instead of the block device node

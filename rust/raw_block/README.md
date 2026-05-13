@@ -92,7 +92,11 @@ No fixed numbers are included here because results are host/device/workload depe
 ## Limitations
 
 - Linux only (`pread` / `pwrite`, O_DIRECT semantics).
-- O_DIRECT requires aligned offset, size, and user buffer address.
+- `alignment` and `block_align` must be powers of two, such as 4096.
+- O_DIRECT requires aligned offsets and I/O lengths. `batched_write` rejects
+  requests whose offset or `total_len` is not a multiple of the configured
+  alignment; misaligned write buffers are copied through an aligned bounce
+  buffer.
 
 ## Build
 
@@ -173,6 +177,8 @@ Notes:
   file used only by LMCache.
 - For `use_uring_cmd=true`, `device_path` must use the NVMe character
   device node (e.g., `/dev/ng0n1`) instead of the block device node.
+- `block_align` must be a power of two. `slot_bytes`, `header_bytes`, and
+  `meta_total_bytes` must be multiples of `block_align`.
 - With `use_odirect=true`, LMCache MP L1 alignment must be at least
   `block_align`.
 - Restart recovery uses the metadata checkpoint region on the same device.
