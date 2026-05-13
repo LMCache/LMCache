@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.utils import check_interprocess_event_support
@@ -67,6 +67,7 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 
+# Helper functions
 def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     if block_ids is None:
         return []
