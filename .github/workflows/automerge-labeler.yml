@@ -11,7 +11,7 @@ jobs:
   add_remove_labels:
     runs-on: ubuntu-latest
     steps:
-      - uses: ubuntudroid/automerge-labeler@v1
+      - uses: ubuntudroid/automerge-labeler@cb4dcb22dbb6d554309485666c2142af72e6b3c9  # v1.0.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           label: 'full'

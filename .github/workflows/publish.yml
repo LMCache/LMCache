@@ -40,7 +40,7 @@ jobs:
               with:
                 fetch-depth: 2
 
-            - uses: dorny/paths-filter@v3
+            - uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
               if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
               id: filter
               with:
@@ -115,7 +115,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -154,7 +154,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -197,7 +197,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
               with:
                   disable-sudo-and-containers: false
                   egress-policy: block
@@ -242,7 +242,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
               with:
                   disable-sudo-and-containers: false
                   egress-policy: block
@@ -287,7 +287,7 @@ jobs:
 
         steps:
             - name: Harden Runner
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
               with:
                   disable-sudo-and-containers: false
                   egress-policy: block
@@ -334,7 +334,7 @@ jobs:
 
         steps:
             - name: "Harden Runner"
-              uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+              uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450  # v2.19.1
               with:
                 disable-sudo-and-containers: false
                 egress-policy: block
@@ -360,13 +360,13 @@ jobs:
                   download-r2.pytorch.org:443
 
             - name: Login to DockerHub
-              uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+              uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
               with:
                 username: ${{ vars.DOCKERHUB_USERNAME }}
                 password: ${{ secrets.DOCKERHUB_TOKEN }}
 
             - name: Set up Docker Buildx
-              uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+              uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
 
             - name: Checkout code
               uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
