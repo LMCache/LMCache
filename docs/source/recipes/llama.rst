@@ -41,7 +41,7 @@ Validated models
 
       |
 
-      Get the chat templates for tool calling by following the `Llama tool calling guide <https://docs.vllm.ai/en/v0.11.2/features/tool_calling/#llama-models-llama3_json>`_ from vLLM.
+      Get the chat templates for tool calling by following the `Llama tool calling guide <https://docs.vllm.ai/en/latest/features/tool_calling/#llama-models-llama3_json>`_ from vLLM.
 
       Start vLLM with the LMCache MP connector:
 
