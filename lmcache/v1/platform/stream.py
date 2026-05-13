@@ -16,6 +16,12 @@ or sibling backends:
 This module never imports device-specific bindings at import time;
 each backend is loaded lazily inside the factory so CPU-only hosts
 never touch ``cuda/`` (and vice-versa).
+
+Routing strategy: :func:`make_external_stream` consults the registry
+populated by ``platform/<device>/__init__.py`` keyed by
+``lmcache.torch_device_type``; backends that report
+``is_available() == False`` are transparently skipped so callers
+fall through to the CPU mock.
 """
 
 # Future
@@ -29,8 +35,17 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.platform._registry import get_stream_factory
 
 logger = init_logger(__name__)
+
+
+def _torch_dev_type() -> str:
+    """Lazy import to avoid the ``lmcache`` -> ``platform`` cycle."""
+    # First Party
+    from lmcache import torch_device_type
+
+    return torch_device_type
 
 
 class ExternalStreamLike(Protocol):
@@ -60,30 +75,25 @@ def make_external_stream(
 ) -> ExternalStreamLike:
     """Build an external stream wrapper around a ``torch.cuda.Stream``.
 
-    Dispatch order:
+    Dispatch:
 
-    1. On CUDA-capable hosts, try :func:`cuda.stream.make_cuda_external_stream`
-       (cupy-backed).  A ``None`` return means cupy is not importable and
-       we continue down the chain.
-    2. Otherwise (or when CUDA backends declined), fall back to the CPU
-       mock in :mod:`cpu.stream`.
-
-    New accelerators can be plugged in by adding another branch here or,
-    later, by wiring a Registry — callers never need to change.
+    1. Look up the active backend factory in :mod:`_registry` keyed by
+       ``lmcache.torch_device_type``; backends that report themselves
+       unavailable at runtime fall through to the CPU default.
+    2. If a CUDA-class factory returns ``None`` (typical when ``cupy``
+       is missing) we still drop through to the CPU mock so the caller
+       always gets a usable object.
     """
     raw_ptr = _extract_raw_ptr(torch_stream)
 
-    if torch.cuda.is_available():
-        # Local import keeps CPU-only hosts from pulling in cupy.
-        # First Party
-        from lmcache.v1.platform.cuda.stream import make_cuda_external_stream
-
-        stream = make_cuda_external_stream(raw_ptr, device_index)
+    factory = get_stream_factory(_torch_dev_type())
+    if factory is not None:
+        stream = factory(raw_ptr, device_index)
         if stream is not None:
             return stream
 
     # First Party
     from lmcache.v1.platform.cpu.stream import MockExternalStream
 
-    logger.info(f"make_external_stream: MockExternalStream {raw_ptr}")
+    logger.info("make_external_stream: MockExternalStream %s", raw_ptr)
     return MockExternalStream(raw_ptr)
