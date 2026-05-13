@@ -103,8 +103,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
     def __init__(
         self,
         *,
-        device_path: str | None = None,
-        multi_device_paths: Sequence[str] | str | None = None,
+        device_paths: Sequence[str] | str,
         slot_bytes: int,
         capacity_bytes: int = 0,
         use_odirect: bool = True,
@@ -130,11 +129,10 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         """Initialize raw-block MP adapter configuration.
 
         Args:
-            device_path: Raw device path or pre-sized file path used for L2.
-                Kept for single-device compatibility.
-            multi_device_paths: Raw device paths or pre-sized file paths used for
-                sharded L2. Objects are routed by
-                ``kv_rank.local_rank % len(multi_device_paths)``.
+            device_paths: Raw device path(s) or pre-sized file path(s). A
+                single string selects one device; a list of strings or a
+                comma-separated string enables multi-device sharding. Objects
+                are routed by ``kv_rank.local_rank % len(device_paths)``.
             slot_bytes: Fixed data-slot size in bytes.
             capacity_bytes: Optional cap on usable bytes; zero uses device size.
             use_odirect: Whether to open the raw path with O_DIRECT.
@@ -158,10 +156,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             num_load_workers: Number of load worker threads.
         """
         super().__init__()
-        paths = self._normalize_multi_device_paths(device_path, multi_device_paths)
-        self.multi_device_paths = tuple(paths)
-        self.device_count = len(self.multi_device_paths)
-        self.device_path = self.multi_device_paths[0]
+        paths = self._normalize_device_paths(device_paths)
+        self.device_paths = tuple(paths)
         self.slot_bytes = int(slot_bytes)
         self.capacity_bytes = int(capacity_bytes)
         self.use_odirect = bool(use_odirect)
@@ -197,10 +193,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         if not bool(d.get("persist_enabled", True)):
             raise ValueError("raw_block requires persist_enabled=true")
 
-        multi_device_paths = cls._parse_multi_device_paths(d)
-        device_count = d.get("device_count")
-        if device_count is not None and int(device_count) != len(multi_device_paths):
-            raise ValueError("device_count must match the number of raw-block devices")
+        device_paths = cls._parse_device_paths(d)
 
         slot_bytes = d.get("slot_bytes")
         if not isinstance(slot_bytes, int) or slot_bytes <= 0:
@@ -252,7 +245,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             worker_counts[field_name] = value
 
         return cls(
-            multi_device_paths=multi_device_paths,
+            device_paths=device_paths,
             slot_bytes=slot_bytes,
             capacity_bytes=capacity_bytes,
             use_odirect=bool(d.get("use_odirect", True)),
@@ -281,13 +274,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         """Return human-readable raw-block adapter configuration help."""
         return (
             "raw_block L2 adapter config fields:\n"
-            "- device_path (str): raw device or file path (required for "
-            "single-device mode)\n"
-            "- multi_device_paths (list[str] | str): raw devices or files for "
-            "multi-device mode; objects shard by kv_rank local_rank modulo "
-            "device count\n"
-            "- device_count (int): optional validation count for "
-            "multi_device_paths\n"
+            "- device_paths (str | list[str]): raw device or file path(s); "
+            "a single string selects one device, a list of strings or CSV "
+            "string enables multi-device sharding (required)\n"
             "- slot_bytes (int): slot size in bytes, aligned to block_align "
             "(required)\n"
             "- capacity_bytes (int): optional usable capacity cap "
@@ -323,10 +312,10 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- num_load_workers (int): load worker threads (default 4)"
         )
 
-    def to_core_config(self, device_path: str | None = None) -> RawBlockCoreConfig:
+    def to_core_config(self, device_path: str) -> RawBlockCoreConfig:
         """Convert this adapter config to the shared RawBlockCore config."""
         return RawBlockCoreConfig(
-            device_path=self.device_path if device_path is None else device_path,
+            device_path=device_path,
             capacity_bytes=self.capacity_bytes,
             block_align=self.block_align,
             header_bytes=self.header_bytes,
@@ -348,55 +337,34 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         )
 
     @staticmethod
-    def _normalize_multi_device_paths(
-        device_path: str | None,
-        multi_device_paths: Sequence[str] | str | None,
-    ) -> list[str]:
+    def _normalize_device_paths(device_paths: Sequence[str] | str) -> list[str]:
         """Return validated raw-block paths in sharding order."""
-        if multi_device_paths is not None:
-            raw_paths: Sequence[str]
-            if isinstance(multi_device_paths, str):
-                raw_paths = multi_device_paths.split(",")
-            else:
-                raw_paths = multi_device_paths
-            paths = []
-            for path in raw_paths:
-                if not isinstance(path, str):
-                    raise ValueError("multi_device_paths must contain only strings")
-                stripped = path.strip()
-                if stripped:
-                    paths.append(stripped)
-        elif isinstance(device_path, str):
-            stripped = device_path.strip()
-            paths = [stripped] if stripped else []
+        raw_paths: Sequence[str]
+        if isinstance(device_paths, str):
+            raw_paths = device_paths.split(",")
         else:
-            paths = []
-
+            raw_paths = device_paths
+        paths = []
+        for path in raw_paths:
+            if not isinstance(path, str):
+                raise ValueError("device_paths must contain only strings")
+            stripped = path.strip()
+            if stripped:
+                paths.append(stripped)
         if not paths:
-            raise ValueError(
-                "device_path or multi_device_paths must provide at least one path"
-            )
+            raise ValueError("device_paths must provide at least one non-empty path")
         if len(set(paths)) != len(paths):
             raise ValueError("raw_block device paths must be unique")
         return paths
 
     @classmethod
-    def _parse_multi_device_paths(cls, d: dict) -> list[str]:
-        raw_paths = d.get("multi_device_paths")
-        if raw_paths is None:
-            if "device_path" not in d:
-                raise ValueError("device_path or multi_device_paths must be provided")
-            device_path = d.get("device_path")
-            if not isinstance(device_path, str):
-                raise ValueError("device_path must be a string")
-            if not device_path:
-                raise ValueError("device_path must be non-empty")
-            return cls._normalize_multi_device_paths(device_path, None)
-        if isinstance(raw_paths, str):
-            return cls._normalize_multi_device_paths(None, raw_paths.split(","))
-        if isinstance(raw_paths, list):
-            return cls._normalize_multi_device_paths(None, raw_paths)
-        raise ValueError("multi_device_paths must be a list of strings or a CSV string")
+    def _parse_device_paths(cls, d: dict) -> list[str]:
+        raw = d.get("device_paths")
+        if raw is None:
+            raise ValueError("device_paths must be provided")
+        if isinstance(raw, (str, list)):
+            return cls._normalize_device_paths(raw)
+        raise ValueError("device_paths must be a string or list of strings")
 
 
 class RawBlockL2Adapter(L2AdapterInterface):
@@ -453,7 +421,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
                     "fixed-buffer registration; zero-copy fixed buffers are "
                     "disabled unless registered by a future MP allocator path"
                 )
-            for device_path in config.multi_device_paths:
+            for device_path in config.device_paths:
                 self._cores.append(
                     RawBlockCore(
                         config.to_core_config(device_path),

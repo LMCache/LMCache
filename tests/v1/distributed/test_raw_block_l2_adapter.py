@@ -139,29 +139,15 @@ def _wait_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
 
 
 def _make_config(
-    device_path: str | list[str],
+    device_paths: str | list[str],
     *,
     slot_bytes: int = 64 * 1024,
     capacity_bytes: int = 0,
     io_engine: str = "posix",
     use_uring_cmd: bool = False,
 ) -> RawBlockL2AdapterConfig:
-    if isinstance(device_path, str):
-        return RawBlockL2AdapterConfig(
-            device_path=device_path,
-            slot_bytes=slot_bytes,
-            capacity_bytes=capacity_bytes,
-            use_odirect=False,
-            block_align=4096,
-            header_bytes=4096,
-            meta_total_bytes=1 * 1024 * 1024,
-            meta_enable_periodic=False,
-            num_store_workers=2,
-            num_lookup_workers=1,
-            num_load_workers=2,
-        )
     return RawBlockL2AdapterConfig(
-        multi_device_paths=device_path,
+        device_paths=device_paths,
         slot_bytes=slot_bytes,
         capacity_bytes=capacity_bytes,
         use_odirect=False,
@@ -179,7 +165,7 @@ def _make_config(
 
 def _config_dict(**overrides) -> dict[str, object]:
     config: dict[str, object] = {
-        "device_path": "/tmp/raw-block-test-device",
+        "device_paths": "/tmp/raw-block-test-device",
         "slot_bytes": 64 * 1024,
         "use_odirect": False,
     }
@@ -266,7 +252,7 @@ def test_raw_block_l2_adapter_config_parses_uring_flags():
     cfg = RawBlockL2AdapterConfig.from_dict(
         {
             "type": "raw_block",
-            "device_path": "/tmp/raw-block-dev",
+            "device_paths": "/tmp/raw-block-dev",
             "slot_bytes": 64 * 1024,
             "use_odirect": False,
             "io_engine": "io_uring",
@@ -280,7 +266,7 @@ def test_raw_block_l2_adapter_config_parses_uring_flags():
         RawBlockL2AdapterConfig.from_dict(
             {
                 "type": "raw_block",
-                "device_path": "/tmp/raw-block-dev",
+                "device_paths": "/tmp/raw-block-dev",
                 "slot_bytes": 64 * 1024,
                 "use_uring_cmd": True,
             }

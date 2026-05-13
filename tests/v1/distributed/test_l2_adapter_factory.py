@@ -88,7 +88,7 @@ class TestFactoryRegistry:
 
     def test_raw_block_factory_is_registered(self):
         config = RawBlockL2AdapterConfig(
-            device_path="/tmp/raw-block-dev",
+            device_paths="/tmp/raw-block-dev",
             slot_bytes=64 * 1024,
             use_odirect=False,
             meta_enable_periodic=False,
@@ -128,7 +128,7 @@ class TestFactoryRegistry:
                 f.truncate(8 * 1024 * 1024)
 
             config = RawBlockL2AdapterConfig(
-                device_path=dev_path,
+                device_paths=dev_path,
                 slot_bytes=64 * 1024,
                 use_odirect=False,
                 meta_total_bytes=1 * 1024 * 1024,
@@ -168,53 +168,44 @@ class TestRawBlockL2AdapterConfig:
         config.update(overrides)
         return config
 
-    def test_multi_device_paths_from_dict(self):
+    def test_device_paths_list_from_dict(self):
         cfg = RawBlockL2AdapterConfig.from_dict(
-            self._config_dict(
-                multi_device_paths=["/tmp/raw0", "/tmp/raw1"],
-                device_count=2,
-            )
+            self._config_dict(device_paths=["/tmp/raw0", "/tmp/raw1"])
         )
 
-        assert cfg.multi_device_paths == ("/tmp/raw0", "/tmp/raw1")
-        assert cfg.device_path == "/tmp/raw0"
+        assert cfg.device_paths == ("/tmp/raw0", "/tmp/raw1")
 
-    def test_multi_device_paths_from_csv(self):
+    def test_device_paths_csv_from_dict(self):
         cfg = RawBlockL2AdapterConfig.from_dict(
-            self._config_dict(multi_device_paths="/tmp/raw0,/tmp/raw1")
+            self._config_dict(device_paths="/tmp/raw0,/tmp/raw1")
         )
 
-        assert cfg.multi_device_paths == ("/tmp/raw0", "/tmp/raw1")
+        assert cfg.device_paths == ("/tmp/raw0", "/tmp/raw1")
 
-    def test_device_count_mismatch_raises(self):
-        with pytest.raises(ValueError, match="device_count"):
-            RawBlockL2AdapterConfig.from_dict(
-                self._config_dict(
-                    multi_device_paths=["/tmp/raw0", "/tmp/raw1"],
-                    device_count=3,
-                )
-            )
+    def test_device_paths_single_string_from_dict(self):
+        cfg = RawBlockL2AdapterConfig.from_dict(
+            self._config_dict(device_paths="/tmp/raw0")
+        )
+
+        assert cfg.device_paths == ("/tmp/raw0",)
 
     def test_duplicate_device_paths_raise(self):
         with pytest.raises(ValueError, match="unique"):
             RawBlockL2AdapterConfig.from_dict(
-                self._config_dict(multi_device_paths=["/tmp/raw0", "/tmp/raw0"])
+                self._config_dict(device_paths=["/tmp/raw0", "/tmp/raw0"])
             )
 
-    def test_missing_device_path_raises_missing_path_error(self):
-        with pytest.raises(
-            ValueError,
-            match="device_path or multi_device_paths must be provided",
-        ):
+    def test_missing_device_paths_raises(self):
+        with pytest.raises(ValueError, match="device_paths must be provided"):
             RawBlockL2AdapterConfig.from_dict(self._config_dict())
 
-    def test_non_string_device_path_raises_string_error(self):
-        with pytest.raises(ValueError, match="device_path must be a string"):
-            RawBlockL2AdapterConfig.from_dict(self._config_dict(device_path=123))
+    def test_wrong_type_device_paths_raises(self):
+        with pytest.raises(ValueError, match="device_paths must be a string or list"):
+            RawBlockL2AdapterConfig.from_dict(self._config_dict(device_paths=123))
 
-    def test_empty_device_path_raises_non_empty_error(self):
-        with pytest.raises(ValueError, match="device_path must be non-empty"):
-            RawBlockL2AdapterConfig.from_dict(self._config_dict(device_path=""))
+    def test_empty_device_paths_raises(self):
+        with pytest.raises(ValueError, match="at least one non-empty path"):
+            RawBlockL2AdapterConfig.from_dict(self._config_dict(device_paths=""))
 
 
 # =========================================================
