@@ -123,5 +123,5 @@ To add a new architecture:
    gpt_oss
    qwen3
    llama
-   mixtral
    phi3
+   mixtral
