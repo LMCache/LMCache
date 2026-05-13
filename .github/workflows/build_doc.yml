@@ -54,13 +54,9 @@ jobs:
           rm -rf output/dev
           # Copy Chinese dev docs to /zh_CN/ and versioned docs under /zh_CN/<version>/
           mkdir -p output/zh_CN
-          if [ -d output-zh/dev ]; then
-            cp -r output-zh/dev/* output/zh_CN/
-            rm -rf output-zh/dev
-          fi
-          if compgen -G "output-zh/*" > /dev/null; then
-            cp -r output-zh/* output/zh_CN/
-          fi
+          cp -r output-zh/dev/* output/zh_CN/
+          rm -rf output-zh/dev
+          cp -r output-zh/. output/zh_CN/
           rm -rf output-zh
 
       - name: Upload doc artifacts to GHA
