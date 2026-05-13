@@ -36,11 +36,7 @@ DEFAULT_MQ_TIMEOUT: float = 300.0
 DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
 
 
-def wrap_kv_caches(
-    kv_caches: dict[str, torch.Tensor], use_cpu_context: bool = False
-) -> KVCache:
-    if use_cpu_context:
-        return []
+def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     logger.info("KV caches keys are %s", list(kv_caches.keys()))
     return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
 
@@ -704,8 +700,13 @@ class LMCacheMPWorkerAdapter:
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
-        # Store requests submitted but not yet finished by transfer context.
-        self._pending_store_request_ids: set[str] = set()
+
+        # Request futures
+        self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
+        # request_id -> (future, block_ids)
+        self.retrieve_futures: dict[
+            str, tuple[MessagingFuture[RetrieveResult], list[int]]
+        ] = {}
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
@@ -933,7 +934,7 @@ class LMCacheMPWorkerAdapter:
                 "Transfer context is not initialized. "
                 "Call register_kv_caches() before submitting store requests."
             )
-        self.transfer_ctx.submit_store(
+        future = self.transfer_ctx.submit_store(
             request_id,
             key,
             self.instance_id,
@@ -942,7 +943,7 @@ class LMCacheMPWorkerAdapter:
             event,
             self.blocks_in_chunk,
         )
-        self._pending_store_request_ids.add(request_id)
+        self.store_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -981,7 +982,7 @@ class LMCacheMPWorkerAdapter:
                 "Transfer context is not initialized. "
                 "Call register_kv_caches() before submitting retrieve requests."
             )
-        self.transfer_ctx.submit_retrieve(
+        future = self.transfer_ctx.submit_retrieve(
             request_id,
             key,
             self.instance_id,
@@ -991,6 +992,7 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
+        self.retrieve_futures[request_id] = (future, list(op.block_ids))
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
@@ -1055,10 +1057,7 @@ class LMCacheMPWorkerAdapter:
         for req_id in finished_req_ids_from_engine:
             if req_id in self._returned_finished:
                 continue
-            if (
-                req_id in self.finished_stores
-                or req_id in self._pending_store_request_ids
-            ):
+            if req_id in self.finished_stores or req_id in self.store_futures:
                 self.previously_finished.add(req_id)
             else:
                 ret_stores.add(req_id)
@@ -1090,34 +1089,71 @@ class LMCacheMPWorkerAdapter:
             take care of deduplicating the request IDs and only return the request
             IDs that have not been returned before.
         """
-        if self.transfer_ctx is None:
-            return set(), set()
+        # If unhealthy, drain all pending futures immediately
+        if not self.is_healthy:
+            finished_stores = set(self.store_futures.keys())
+            finished_retrieves = set()
+            for request_id, (
+                _r_future,
+                r_block_ids,
+            ) in self.retrieve_futures.items():
+                finished_retrieves.add(request_id)
+                self.error_block_ids.update(r_block_ids)
+            self.store_futures.clear()
+            self.retrieve_futures.clear()
 
-        unhealthy = not self.is_healthy
-        if unhealthy:
-            finished_stores, finished_retrieves, error_block_ids = (
-                self.transfer_ctx.drain_all()
+            ret_stores = self._process_finished_stores(
+                finished_stores, finished_req_ids_from_engine
             )
-        else:
-            finished_stores, finished_retrieves, error_block_ids = (
-                self.transfer_ctx.poll_finished()
-            )
+            # A request may have a pending retrieve AND appear in
+            # finished_req_ids_from_engine (it ran without loading KV after
+            # the server died).  The scheduler processes finished_recving
+            # first and deletes the request, so we must not also report it
+            # in finished_sending.
+            ret_stores -= finished_retrieves
+            return ret_stores, finished_retrieves
 
-        self.error_block_ids.update(error_block_ids)
-        self._pending_store_request_ids.difference_update(finished_stores)
+        finished_stores = set()
+        finished_retrieves = set()
+        for request_id, s_future in self.store_futures.items():
+            if not s_future.query():
+                continue
+
+            s_result = s_future.result()
+            finished_stores.add(request_id)
+
+            if not s_result:
+                logger.error(
+                    "Something went wrong when processing the "
+                    "store request for request_id=%s",
+                    request_id,
+                )
+
+        for request_id, (r_future, _) in self.retrieve_futures.items():
+            if not r_future.query():
+                continue
+
+            r_result = r_future.result()
+            finished_retrieves.add(request_id)
+
+            if not r_result:
+                logger.error(
+                    "Something went wrong when processing the "
+                    "retrieve request for request_id=%s, result=%s",
+                    request_id,
+                    r_result,
+                )
+
+        # Remove the finished requests from the tracking dicts
+        for request_id in finished_stores:
+            self.store_futures.pop(request_id, None)
+        for request_id in finished_retrieves:
+            self.retrieve_futures.pop(request_id, None)
 
         # Update the internal states
         ret_stores = self._process_finished_stores(
             finished_stores, finished_req_ids_from_engine
         )
-
-        if unhealthy:
-            # A request may have a pending retrieve AND appear in
-            # finished_req_ids_from_engine (it ran without loading KV after
-            # the server died). The scheduler processes finished_recving
-            # first and deletes the request, so we must not also report it
-            # in finished_sending.
-            ret_stores -= finished_retrieves
 
         # the invocation of `get_finished` means that
         # these requests' KV caches are already fully stored.

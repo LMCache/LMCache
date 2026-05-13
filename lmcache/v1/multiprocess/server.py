@@ -10,6 +10,7 @@ import threading
 import time
 
 # Third Party
+import torch
 import zmq
 
 # First Party
@@ -289,12 +290,8 @@ class MPCacheEngine:
         instance_id: int,
         model_name: str,
         world_size: int,
-        engine_type: EngineType,
-        layout_hints: LayoutHints,
+        layout_desc_bytes: bytes,
         block_size: int,
-        num_layers: int,
-        hidden_dim_size: int,
-        dtype_str: str,
         use_mla: bool,
     ) -> None:
         """Register non-CUDA KV layout metadata for CPU context mode.
@@ -303,47 +300,38 @@ class MPCacheEngine:
             instance_id: Worker instance identifier (typically PID).
             model_name: Model name associated with this worker.
             world_size: Worker world size used in cache keys.
-            engine_type: Serving engine type (kept for protocol compatibility).
-            layout_hints: Optional engine layout hints (protocol compatibility).
+            layout_desc_bytes: Pickled :class:`MemoryLayoutDesc`.
             block_size: Tokens per paged block.
-            num_layers: Number of model layers.
-            hidden_dim_size: Flattened hidden dimension per token.
-            dtype_str: Torch dtype name (for example ``"float16"``).
             use_mla: Whether the worker KV format is MLA.
-                MLA stores one latent vector per token with shape
-                ``[num_layers, chunk_size, hidden_dim_size]``; non-MLA stores
-                separate K/V planes with shape
-                ``[2, num_layers, chunk_size, hidden_dim_size]``.
-
-        Raises:
-            ValueError: If ``dtype_str`` is not a valid torch dtype name.
         """
-        # Third Party
-        import torch
-
-        # Keep these for protocol compatibility with register_kv_cache().
-        del engine_type, layout_hints
-        dtype = getattr(torch, dtype_str, None)
-        if dtype is None or not isinstance(dtype, torch.dtype):
-            raise ValueError(
-                f"Invalid dtype_str '{dtype_str}': expected a torch.dtype name "
-                "(e.g. 'float16', 'bfloat16', 'float32')."
-            )
-
-        shape = (
-            # MLA has one latent state per token (no separate K/V axis),
-            # while non-MLA stores separate K and V tensors at dim 0.
-            torch.Size([num_layers, self.chunk_size, hidden_dim_size])
-            if use_mla
-            else torch.Size([2, num_layers, self.chunk_size, hidden_dim_size])
-        )
-        layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+        layout_desc = pickle.loads(layout_desc_bytes)
         self.cpu_contexts[instance_id] = CPUContextMetadata(
             layout_desc=layout_desc,
             block_size=block_size,
             use_mla=use_mla,
         )
         self.cpu_context_meta[instance_id] = (model_name, world_size)
+
+    def _resolve_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
+        """Resolve object keys from an IPC cache key.
+
+        Args:
+            key: IPC cache key describing model/session/token range.
+
+        Returns:
+            Resolved object keys for the requested token range.
+
+        Raises:
+            ValueError: If ``key.worker_id`` is ``None``.
+        """
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+        ]
+        if key.worker_id is None:
+            raise ValueError("Must resolve keys with worker_id != None")
+        return ipc_key_to_object_keys(key, chunk_hashes)
 
     @_lmcache_nvtx_annotate
     def store_cpu_chunks(
@@ -365,17 +353,7 @@ class MPCacheEngine:
         Raises:
             ValueError: If the instance has no registered cpu context.
         """
-        # Third Party
-        import torch
-
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
-        if key.worker_id is None:
-            raise ValueError("Must store with worker_id != None")
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = self._resolve_obj_keys(key)
 
         if instance_id not in self.cpu_contexts:
             raise ValueError(
@@ -426,14 +404,7 @@ class MPCacheEngine:
         Raises:
             ValueError: If the instance has no registered cpu context.
         """
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
-        if key.worker_id is None:
-            raise ValueError("Must retrieve with worker_id != None")
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = self._resolve_obj_keys(key)
 
         if instance_id not in self.cpu_contexts:
             raise ValueError(
@@ -479,16 +450,8 @@ class MPCacheEngine:
                 that signals the completion of the store operation. The second
                 element indicates whether the store operation was successful.
         """
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
-
         st = time.perf_counter()
-
-        assert key.worker_id is not None, "Must store with worker_id != None"
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = self._resolve_obj_keys(key)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -655,16 +618,8 @@ class MPCacheEngine:
                 that signals the completion of the retrieve operation. The second
                 element indicates whether the key was successfully retrieved.
         """
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
-
         st = time.perf_counter()
-
-        assert key.worker_id is not None, "Must retrieve with worker_id != None"
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = self._resolve_obj_keys(key)
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"

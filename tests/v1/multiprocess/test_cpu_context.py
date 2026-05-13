@@ -10,6 +10,9 @@ import sys
 import pytest
 import torch
 
+# First Party
+from lmcache.v1.distributed.api import MemoryLayoutDesc
+
 
 def _make_kv_caches(
     num_layers: int = 2,
@@ -83,12 +86,20 @@ def _make_hnd_flashinfer_kv_caches(
     return kv_caches
 
 
-def test_wrap_kv_caches_cpu_context_returns_empty() -> None:
-    """Verify wrap_kv_caches returns no IPC wrappers in cpu context mode."""
+def test_wrap_kv_caches_wraps_all_tensors(monkeypatch: Any) -> None:
+    """Verify wrap_kv_caches wraps all provided KV tensors."""
     # First Party
-    from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
+    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 
-    assert wrap_kv_caches(_make_kv_caches(), use_cpu_context=True) == []
+    kv_caches = _make_kv_caches()
+    monkeypatch.setattr(
+        adapter_mod,
+        "CudaIPCWrapper",
+        lambda tensor: ("wrapped", tensor),
+    )
+
+    wrapped = adapter_mod.wrap_kv_caches(kv_caches)
+    assert len(wrapped) == len(kv_caches)
 
 
 def test_compute_kv_layout_and_gather_scatter_roundtrip() -> None:
@@ -345,16 +356,16 @@ def test_server_register_and_find_cpu_context_layout(
         patch("lmcache.v1.multiprocess.server.get_event_bus"),
     ):
         engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=16)
+    expected_layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 2, 16, 16])],
+        dtypes=[torch.float32],
+    )
     engine.register_kv_cache_cpu_context(
         instance_id=1,
         model_name="m",
         world_size=1,
-        engine_type=MagicMock(),
-        layout_hints={},
+        layout_desc_bytes=pickle.dumps(expected_layout_desc),
         block_size=4,
-        num_layers=2,
-        hidden_dim_size=16,
-        dtype_str="float32",
         use_mla=False,
     )
 
@@ -398,16 +409,16 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
         session_cls.return_value.get_or_create.return_value = mock_session
         engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=8)
 
+    layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 2, 8, 16])],
+        dtypes=[torch.float32],
+    )
     engine.register_kv_cache_cpu_context(
         instance_id=2,
         model_name="m",
         world_size=1,
-        engine_type=MagicMock(),
-        layout_hints={},
+        layout_desc_bytes=pickle.dumps(layout_desc),
         block_size=4,
-        num_layers=2,
-        hidden_dim_size=16,
-        dtype_str="float32",
         use_mla=False,
     )
     payload = torch.ones(2, 2, 8, 16)

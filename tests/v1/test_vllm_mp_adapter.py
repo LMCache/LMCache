@@ -120,16 +120,20 @@ def test_register_kv_caches_cpu_submits_cpu_context_registration(
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
     assert args[1] == RequestType.REGISTER_KV_CACHE_CPU_CONTEXT
+    assert len(args[2]) == 6
+    assert isinstance(args[2][3], bytes)
 
 
-def test_submit_store_request_passes_no_transport_kwargs(fake_adapter, monkeypatch):
-    """submit_store_request should not pass mq/send kwargs after registration."""
+def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
+    """submit_store_request stores the returned future in store_futures."""
     adapter, _send_mock, _ = fake_adapter
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     adapter.kv_caches = {"layer.0": fake_tensor}
     transfer_ctx = MagicMock()
+    fake_future = MagicMock()
+    transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[0], start=0, end=4)
 
@@ -137,16 +141,19 @@ def test_submit_store_request_passes_no_transport_kwargs(fake_adapter, monkeypat
 
     assert transfer_ctx.submit_store.called
     assert transfer_ctx.submit_store.call_args.kwargs == {}
+    assert adapter.store_futures["req-1"] is fake_future
 
 
-def test_submit_retrieve_request_passes_no_transport_kwargs(fake_adapter, monkeypatch):
-    """submit_retrieve_request should not pass mq/send kwargs after registration."""
+def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatch):
+    """submit_retrieve_request stores returned future and block IDs."""
     adapter, _send_mock, _ = fake_adapter
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     adapter.kv_caches = {"layer.0": fake_tensor}
     transfer_ctx = MagicMock()
+    fake_future = MagicMock()
+    transfer_ctx.submit_retrieve.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
         token_ids=[1, 2, 3, 4],
@@ -160,3 +167,4 @@ def test_submit_retrieve_request_passes_no_transport_kwargs(fake_adapter, monkey
 
     assert transfer_ctx.submit_retrieve.called
     assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
+    assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
