@@ -425,12 +425,15 @@ jobs:
                 --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                 --target lmcache-final \
                 --tag lmcache/standalone:latest --tag lmcache/standalone:${{ env.LATEST_TAG }} \
+                --tag lmcache/standalone:latest-cu130 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu130 \
                 --file docker/Dockerfile.standalone .
 
             - name: Push lmcache/standalone container image to DockerHub
               run: |
                 docker push lmcache/standalone:latest
                 docker push lmcache/standalone:${{ env.LATEST_TAG }}
+                docker push lmcache/standalone:latest-cu130
+                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu130
 
             - name: Clean up Docker layers and cache
               run: |
