@@ -1290,6 +1290,7 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                     r_result,
                 )
+                self.error_block_ids.update(r_block_ids)
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
