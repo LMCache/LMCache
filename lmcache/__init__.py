@@ -44,16 +44,25 @@ def _detect_device() -> tuple[Any, str]:
         # Third Party
         import torch
     except ImportError:
-        return None, "cpu"  # fallback，CLI-only
+        # First Party
+        from lmcache.v1.platform.cpu.torch_dev_stub import cpu_torch_dev
+
+        return cpu_torch_dev, "cpu"  # fallback，CLI-only
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu, "hpu"
-    else:
-        # Fallback: always return torch.cuda for backward compatibility
-        # with existing tests and code paths that assume CUDA is the default.
+    elif torch.cuda.is_available():
         return torch.cuda, "cuda"
+    else:
+        # No real accelerator: hand back a duck-typed CPU stand-in that
+        # mirrors the small ``torch.cuda`` surface LMCache touches
+        # (Event(interprocess=True) / stream / current_stream / ...).
+        # First Party
+        from lmcache.v1.platform.cpu.torch_dev_stub import cpu_torch_dev
+
+        return cpu_torch_dev, "cpu"
 
 
 torch_dev, torch_device_type = _detect_device()

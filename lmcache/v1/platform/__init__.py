@@ -15,19 +15,22 @@ independently:
 
 Future accelerators (``xpu``, ``hpu``, ...) plug in by adding a sibling
 sub-package next to ``cuda/`` and ``cpu/``.
+
+Device + Event abstractions
+---------------------------
+Device-context activation and interprocess Event creation are now
+expressed directly through ``lmcache.torch_dev`` (the per-platform
+duck-typed ``torch.cuda``-shaped accessor).  Callers should write::
+
+    with torch_dev.device(dev), torch_dev.stream(stream):
+        event = torch_dev.Event(interprocess=True)
+
+instead of going through a separate registry layer; this removes one
+level of indirection and lets new accelerators plug in just by
+registering themselves in :mod:`lmcache.__init__._detect_device`.
 """
 
 # First Party
-from lmcache.v1.platform.device_ctx import (
-    InterprocessEventLike as InterprocessEventLike,
-)
-from lmcache.v1.platform.device_ctx import (
-    event_from_ipc_handle as event_from_ipc_handle,
-)
-from lmcache.v1.platform.device_ctx import make_device_context as make_device_context
-from lmcache.v1.platform.device_ctx import (
-    make_interprocess_event as make_interprocess_event,
-)
 from lmcache.v1.platform.event_notifier import HAS_EVENTFD as HAS_EVENTFD
 from lmcache.v1.platform.event_notifier import EventfdNotifier as EventfdNotifier
 from lmcache.v1.platform.event_notifier import EventNotifier as EventNotifier
@@ -45,10 +48,6 @@ from lmcache.v1.platform.stream import make_external_stream as make_external_str
 # so callers never need to know which sub-package is active.
 import lmcache.v1.platform.cpu  # noqa: F401,E402  pylint: disable=wrong-import-position
 import lmcache.v1.platform.cuda  # noqa: F401,E402  pylint: disable=wrong-import-position
-
-# Note: torch.cuda / cupy monkey-patching has been replaced by the
-# explicit strategy-dispatch helpers in :mod:`device_ctx` and
-# :mod:`stream` so no global patching is required at import time.
 
 
 def __getattr__(name: str) -> object:

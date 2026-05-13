@@ -148,9 +148,7 @@ class GPUCacheContext:
 
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
-        self.cupy_stream_ = make_external_stream(
-            self.cuda_stream_, self.device_.index
-        )
+        self.cupy_stream_ = make_external_stream(self.cuda_stream_, self.device_.index)
 
         _, high_priority = torch_dev.Stream.priority_range()
         self.high_priority_cuda_stream_ = torch_dev.Stream(
@@ -403,9 +401,7 @@ class PlainGPUCacheContext:
 
         # GPU streams
         self._cuda_stream = torch_dev.Stream(device=self._device)
-        self._cupy_stream = make_external_stream(
-            self._cuda_stream, self._device.index
-        )
+        self._cupy_stream = make_external_stream(self._cuda_stream, self._device.index)
 
         _, high_priority = torch_dev.Stream.priority_range()
         self._high_priority_cuda_stream = torch_dev.Stream(

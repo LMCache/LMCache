@@ -86,6 +86,10 @@ class TestMakeExternalStream:
         with (
             mock.patch.object(torch.cuda, "is_available", return_value=True),
             mock.patch(
+                "lmcache.v1.platform.stream._torch_dev_type",
+                return_value="cuda",
+            ),
+            mock.patch(
                 "lmcache.v1.platform.cuda.stream.make_cuda_external_stream",
                 return_value=sentinel,
             ) as m,

@@ -17,7 +17,6 @@ from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
-    check_interprocess_event_support,
 )
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -68,11 +67,6 @@ from lmcache.v1.multiprocess.protocol import (
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.platform.cache_context import create_cache_context
-from lmcache.v1.platform.device_ctx import (
-    event_from_ipc_handle,
-    make_device_context,
-    make_interprocess_event,
-)
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -324,14 +318,17 @@ class MPCacheEngine:
 
         blocks_per_chunk = self.chunk_size // gpu_context.block_size
 
-        with make_device_context(gpu_context.device, gpu_context.stream):
-            event = make_interprocess_event(gpu_context.device)
+        with (
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
+        ):
+            event = torch_dev.Event(interprocess=True)
 
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
-            vllm_event = event_from_ipc_handle(
+            vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
             vllm_event.wait(stream=gpu_context.stream)
@@ -576,11 +573,14 @@ class MPCacheEngine:
                         skip_blocks_in_chunk,
                     )
 
-        with make_device_context(gpu_context.device, gpu_context.stream):
+        with (
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
+        ):
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
-            event = make_interprocess_event(gpu_context.device)
+            event = torch_dev.Event(interprocess=True)
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False

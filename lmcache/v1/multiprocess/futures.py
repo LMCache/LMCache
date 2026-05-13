@@ -100,9 +100,7 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         if self.cpu_only_:
             self.device_ = device
         else:
-            self.device_ = (
-                device if device is not None else torch_dev.current_device()
-            )
+            self.device_ = device if device is not None else torch_dev.current_device()
 
     def _on_raw_future_complete(self):
         """
