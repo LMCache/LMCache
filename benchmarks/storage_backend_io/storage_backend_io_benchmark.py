@@ -622,6 +622,7 @@ class LocalDiskBackendBenchmark(StorageBackendBenchmark):
         use_odirect: bool,
         alignment: int,
         write_bench: bool,
+        chunk_size: int,
         verify_integrity: bool = False,
     ):
         super().__init__(
@@ -631,6 +632,7 @@ class LocalDiskBackendBenchmark(StorageBackendBenchmark):
             use_odirect,
             alignment,
             write_bench,
+            chunk_size,
             verify_integrity,
         )
         self.local_disk_dir = local_disk_dir
@@ -1062,6 +1064,7 @@ def main() -> None:
             use_odirect=args.local_disk_odirect,
             alignment=args.alignment,
             write_bench=write_bench,
+            chunk_size=args.chunk_size,
             verify_integrity=args.verify_integrity,
         )
         result = localdisk_bench.run()
@@ -1140,7 +1143,7 @@ def main() -> None:
                 f"read_ops/sec={result['read_ops_per_sec']:.2f} "
                 f"total_elapsed={result['total_elapsed_sec']:.3f}s"
             )
-            if result["verify_integrity"]:
+            if args.verify_integrity:
                 status = "PASSED" if result["integrity_passed"] else "FAILED"
                 print(
                     f"  Integrity check: {status} (errors={result['integrity_errors']})"
