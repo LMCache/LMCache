@@ -206,20 +206,24 @@ def run(args: argparse.Namespace) -> None:
         args.timeout,
     )
     print("== Step 2: retrieve source KV into memory through lmcache.sdk ==")
-    retrieve_result = lmc_sdk.retrieve(
+    retrieved_kv = lmc_sdk.retrieve(
         args.lmcache_url,
         model_name=lmcache_model_name,
         tokens=source_tokens,
         timeout=args.timeout,
     )
-    if retrieve_result.hit_tokens < cache_tokens:
+    if retrieved_kv is None:
+        raise RuntimeError("source retrieve missed the expected cached prefix")
+    retrieved_hit_tokens = int(retrieved_kv.shape[2])
+    retrieved_hit_chunks = retrieved_hit_tokens // args.chunk_size
+    if retrieved_hit_tokens < cache_tokens:
         raise RuntimeError(
             "source retrieve did not return the expected cached prefix: "
-            f"{retrieve_result.hit_tokens} < {cache_tokens}"
+            f"{retrieved_hit_tokens} < {cache_tokens}"
         )
 
-    target_prefix_tokens = target_tokens[: retrieve_result.hit_tokens]
-    source_prefix_tokens = source_tokens[: retrieve_result.hit_tokens]
+    target_prefix_tokens = target_tokens[:retrieved_hit_tokens]
+    source_prefix_tokens = source_tokens[:retrieved_hit_tokens]
     if source_prefix_tokens == target_prefix_tokens:
         raise RuntimeError("source and target token prefixes unexpectedly match")
     if len(source_tokens) != len(target_tokens):
@@ -227,26 +231,23 @@ def run(args: argparse.Namespace) -> None:
             "source and target prompt token lengths must match: "
             f"{len(source_tokens)} != {len(target_tokens)}"
         )
-    if (
-        source_tokens[-retrieve_result.hit_tokens :]
-        != target_tokens[-retrieve_result.hit_tokens :]
-    ):
+    if source_tokens[-retrieved_hit_tokens:] != target_tokens[-retrieved_hit_tokens:]:
         raise RuntimeError(
             "source and target prompts must share the cache-covered trailing tokens"
         )
 
     print("== Step 3: store source KV under different target token IDs ==")
     store_result = lmc_sdk.store(
-        retrieve_result.package,
+        retrieved_kv,
         args.lmcache_url,
         model_name=lmcache_model_name,
         tokens=target_prefix_tokens,
         timeout=args.timeout,
     )
-    if store_result.stored_tokens < retrieve_result.hit_tokens:
+    if store_result.stored_tokens < retrieved_hit_tokens:
         raise RuntimeError(
             "remap store wrote fewer tokens than were retrieved: "
-            f"{store_result.stored_tokens} < {retrieve_result.hit_tokens}"
+            f"{store_result.stored_tokens} < {retrieved_hit_tokens}"
         )
 
     print("== Step 4: target inference reuses the remapped token IDs ==")
@@ -266,22 +267,20 @@ def run(args: argparse.Namespace) -> None:
         "fake_prefix_tokens": args.fake_prefix_tokens,
         "source_prompt_tokens": len(source_tokens),
         "target_prompt_tokens": len(target_tokens),
-        "retrieved_hit_tokens": retrieve_result.hit_tokens,
-        "retrieved_hit_chunks": retrieve_result.hit_chunks,
+        "retrieved_hit_tokens": retrieved_hit_tokens,
+        "retrieved_hit_chunks": retrieved_hit_chunks,
         "source_target_same_length": len(source_tokens) == len(target_tokens),
-        "source_target_last_hit_tokens_match": source_tokens[
-            -retrieve_result.hit_tokens :
-        ]
-        == target_tokens[-retrieve_result.hit_tokens :],
+        "source_target_last_hit_tokens_match": source_tokens[-retrieved_hit_tokens:]
+        == target_tokens[-retrieved_hit_tokens:],
         "target_prefix_ids_differ_from_source": source_prefix_tokens
         != target_prefix_tokens,
         "outputs_match": outputs_match,
         "store_result": store_result.__dict__,
         "source_retrieve_after_inference": {
-            "total_tokens": retrieve_result.total_tokens,
-            "total_chunks": retrieve_result.total_chunks,
-            "hit_tokens": retrieve_result.hit_tokens,
-            "hit_chunks": retrieve_result.hit_chunks,
+            "shape": tuple(retrieved_kv.shape),
+            "dtype": str(retrieved_kv.dtype),
+            "hit_tokens": retrieved_hit_tokens,
+            "hit_chunks": retrieved_hit_chunks,
         },
         "source_latency_seconds": source_completion.elapsed_seconds,
         "target_latency_seconds": target_completion.elapsed_seconds,

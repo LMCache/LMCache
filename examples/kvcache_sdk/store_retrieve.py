@@ -13,7 +13,7 @@ import lmcache.sdk as lmc_sdk
 
 
 def _dtype_from_name(dtype_name: str) -> torch.dtype:
-    """Resolve a small set of dtype names used by the example package maker."""
+    """Resolve a small set of dtype names used by the example tensor maker."""
     dtypes = {
         "float32": torch.float32,
         "float16": torch.float16,
@@ -27,29 +27,26 @@ def _tokens(token_start: int, num_tokens: int) -> list[int]:
     return list(range(token_start, token_start + num_tokens))
 
 
-def _make_kv_package(args: argparse.Namespace) -> lmc_sdk.KVCachePackage:
-    """Create a toy in-memory KV package for SDK calls."""
+def _make_kv_tensor(args: argparse.Namespace) -> torch.Tensor:
+    """Create a toy in-memory KV tensor for SDK calls."""
     num_tokens = args.chunk_size * args.num_chunks
-    tokens = _tokens(args.token_start, num_tokens)
     dtype = _dtype_from_name(args.dtype)
     torch.manual_seed(args.seed)
-    kv = torch.randn(
+    return torch.randn(
         (2, args.num_layers, num_tokens, args.hidden_dim),
         dtype=dtype,
-    )
-    return lmc_sdk.KVCachePackage(
-        kv=kv,
-        model_name=args.model_name,
-        tokens=tokens,
-        cache_salt=args.cache_salt,
     )
 
 
 def _store_generated(args: argparse.Namespace) -> None:
-    """Generate a KV package in memory and store it through the SDK."""
+    """Generate a KV tensor in memory and store it through the SDK."""
+    num_tokens = args.chunk_size * args.num_chunks
     result = lmc_sdk.store(
-        _make_kv_package(args),
+        _make_kv_tensor(args),
         args.url,
+        model_name=args.model_name,
+        tokens=_tokens(args.token_start, num_tokens),
+        cache_salt=args.cache_salt,
         timeout=args.timeout,
     )
     print(json.dumps(result.__dict__, indent=2, default=str))
@@ -64,14 +61,13 @@ def _retrieve(args: argparse.Namespace) -> None:
         cache_salt=args.cache_salt,
         timeout=args.timeout,
     )
+    if result is None:
+        print(json.dumps({"hit_tokens": 0, "kv": None}, indent=2))
+        return
     output = {
-        "total_tokens": result.total_tokens,
-        "total_chunks": result.total_chunks,
-        "hit_tokens": result.hit_tokens,
-        "hit_chunks": result.hit_chunks,
-        "package_shape": tuple(result.package.kv.shape),
-        "package_dtype": str(result.package.kv.dtype),
-        "package_tokens": len(result.package.tokens),
+        "hit_tokens": int(result.shape[2]),
+        "kv_shape": tuple(result.shape),
+        "kv_dtype": str(result.dtype),
     }
     print(json.dumps(output, indent=2, default=str))
 
@@ -89,8 +85,8 @@ def _add_token_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--num-tokens", type=int, required=True)
 
 
-def _add_package_args(parser: argparse.ArgumentParser) -> None:
-    """Add arguments for constructing a toy KV package."""
+def _add_tensor_args(parser: argparse.ArgumentParser) -> None:
+    """Add arguments for constructing a toy KV tensor."""
     parser.add_argument("--model-name", required=True)
     parser.add_argument("--chunk-size", type=int, required=True)
     parser.add_argument("--num-chunks", type=int, required=True)
@@ -114,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     store_generated = subparsers.add_parser("store-generated")
     _add_common_http_args(store_generated)
-    _add_package_args(store_generated)
+    _add_tensor_args(store_generated)
 
     retrieve = subparsers.add_parser("retrieve")
     _add_common_http_args(retrieve)

@@ -55,11 +55,6 @@ def test_store_streams_chunked_protocol(monkeypatch) -> None:
     """``lmc_sdk.store`` streams one manifest and one frame per chunk."""
     tensor = _make_tensor()
     tokens = list(range(CHUNK_SIZE * 2 + 3))
-    package = lmc_sdk.KVCachePackage(
-        kv=tensor,
-        model_name="m",
-        tokens=tokens,
-    )
 
     captured_frames: list[bytes] = []
 
@@ -88,7 +83,12 @@ def test_store_streams_chunked_protocol(monkeypatch) -> None:
     monkeypatch.setattr(httpx, "get", fake_get)
     monkeypatch.setattr(httpx, "post", fake_post)
 
-    result = lmc_sdk.store(package, "localhost:8080")
+    result = lmc_sdk.store(
+        tensor,
+        "localhost:8080",
+        model_name="m",
+        tokens=tokens,
+    )
 
     frames = iter_decode_frames(captured_frames)
     manifest = decode_store_manifest(next(frames))
@@ -104,16 +104,10 @@ def test_store_streams_chunked_protocol(monkeypatch) -> None:
     assert chunk1_payload == _chunk_payload(tensor, 1)
 
 
-def test_store_accepts_in_memory_package(monkeypatch) -> None:
-    """``lmc_sdk.store`` applies token overrides to an in-memory package."""
+def test_store_uses_explicit_token_ids(monkeypatch) -> None:
+    """``lmc_sdk.store`` addresses a tensor with explicit token IDs."""
     tensor = _make_tensor()
-    source_tokens = list(range(CHUNK_SIZE * 2 + 3))
     target_tokens = list(range(1000, 1000 + CHUNK_SIZE * 2 + 3))
-    package = lmc_sdk.KVCachePackage(
-        kv=tensor,
-        model_name="m",
-        tokens=source_tokens,
-    )
     captured_frames: list[bytes] = []
 
     def fake_get(url: str, timeout: float) -> httpx.Response:
@@ -141,7 +135,12 @@ def test_store_accepts_in_memory_package(monkeypatch) -> None:
     monkeypatch.setattr(httpx, "get", fake_get)
     monkeypatch.setattr(httpx, "post", fake_post)
 
-    result = lmc_sdk.store(package, "localhost:8080", tokens=target_tokens)
+    result = lmc_sdk.store(
+        tensor,
+        "localhost:8080",
+        model_name="m",
+        tokens=target_tokens,
+    )
 
     frames = iter_decode_frames(captured_frames)
     manifest = decode_store_manifest(next(frames))
@@ -192,10 +191,46 @@ def test_retrieve_assembles_shards_into_memory(monkeypatch) -> None:
         tokens=tokens,
     )
 
-    assert result.hit_chunks == 2
-    assert torch.equal(result.package.kv, tensor)
-    assert result.package.model_name == "m"
-    assert result.package.tokens == tokens
+    assert result is not None
+    assert torch.equal(result, tensor)
+
+
+def test_retrieve_returns_none_on_miss(monkeypatch) -> None:
+    """``lmc_sdk.retrieve`` returns ``None`` when the server reports a miss."""
+    response_body = encode_retrieve_manifest(
+        RetrieveManifest(
+            model_name="m",
+            total_tokens=CHUNK_SIZE * 2,
+            total_chunks=2,
+            hit_tokens=0,
+            hit_chunks=0,
+            chunk_size=CHUNK_SIZE,
+            world_size=2,
+            shape=(0, 0, 0, 0),
+            shard_shape=(2, 2, CHUNK_SIZE, 4),
+            dtype=str(DTYPE),
+        )
+    )
+
+    @contextmanager
+    def fake_stream(
+        method: str,
+        url: str,
+        content: bytes,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> Iterator[httpx.Response]:
+        yield _response(method, url, content=response_body)
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
+
+    result = lmc_sdk.retrieve(
+        "http://localhost:8080",
+        model_name="m",
+        tokens=list(range(CHUNK_SIZE * 2)),
+    )
+
+    assert result is None
 
 
 def test_retrieve_rejects_missing_shard(

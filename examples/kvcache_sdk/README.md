@@ -2,8 +2,8 @@
 
 These examples show how to use the Python SDK to store and retrieve
 KV cache tensors through the LMCache MP HTTP API. The SDK path is memory-first:
-applications can retrieve a tensor package, edit its metadata, and store it
-again without writing the tensor through a local storage format.
+applications can retrieve a tensor, pair it with new token metadata, and store
+it again without writing the tensor through a local storage format.
 
 ## End-to-end vLLM flow
 
@@ -11,7 +11,7 @@ again without writing the tensor through a local storage format.
 end-to-end KV remapping experiment:
 
 1. Send a source prompt to vLLM so the normal connector stores KV in LMCache.
-2. Retrieve the source KV cache into an in-memory `KVCachePackage` with
+2. Retrieve the source KV cache into an in-memory tensor with
    `lmcache.sdk.retrieve`.
 3. Build a target token-ID prompt with different synthetic leading tokens, the
    same length as the source prompt, and identical cache-covered trailing
@@ -58,24 +58,26 @@ The core SDK pattern used by the end-to-end example is:
 ```python
 import lmcache.sdk as lmc_sdk
 
-result = lmc_sdk.retrieve(
+kv = lmc_sdk.retrieve(
     "http://localhost:8080",
     model_name="...",
     tokens=source_tokens,
 )
 
-lmc_sdk.store(
-    result.package,
-    "http://localhost:8080",
-    tokens=target_tokens,
-)
+if kv is not None:
+    lmc_sdk.store(
+        kv,
+        "http://localhost:8080",
+        model_name="...",
+        tokens=target_tokens,
+    )
 ```
 
 ## Memory-first standalone flow
 
 The standalone example can also generate a toy tensor in memory and store it
-without writing a KV package file. Set the shape fields to match `/api/status`
-for your server:
+without writing a tensor file. Set the shape fields to match `/api/status` for
+your server:
 
 ```bash
 python examples/kvcache_sdk/store_retrieve.py store-generated \
@@ -90,8 +92,7 @@ python examples/kvcache_sdk/store_retrieve.py store-generated \
 
 Retrieve the hit prefix into memory and print only metadata about the returned
 tensor. The SDK intentionally avoids file helpers; applications that want
-durability can serialize their own `KVCachePackage` fields outside
-`lmcache.sdk`.
+durability can serialize tensors and metadata outside `lmcache.sdk`.
 
 ```bash
 python examples/kvcache_sdk/store_retrieve.py retrieve \

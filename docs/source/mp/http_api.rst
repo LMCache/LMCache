@@ -318,21 +318,23 @@ The recommended client interface is the Python SDK:
 
     import lmcache.sdk as lmc_sdk
 
-    result = lmc_sdk.retrieve(
+    kv = lmc_sdk.retrieve(
         "http://localhost:8080",
         model_name="meta-llama/Llama-3.1-8B-Instruct",
         tokens=[1, 2, 3],
     )
 
-    lmc_sdk.store(
-        result.package,
-        "http://localhost:8080",
-        tokens=[4, 5, 6],
-    )
+    if kv is not None:
+        lmc_sdk.store(
+            kv,
+            "http://localhost:8080",
+            model_name="meta-llama/Llama-3.1-8B-Instruct",
+            tokens=[4, 5, 6],
+        )
 
-The SDK intentionally exposes only the in-memory ``KVCachePackage`` path.
-Applications that need files can serialize their own package fields outside
-``lmcache.sdk``.
+The SDK intentionally exposes only an in-memory tensor path. ``retrieve``
+returns a ``torch.Tensor`` on a hit and ``None`` on a miss. Applications that
+need files can serialize tensors and metadata outside ``lmcache.sdk``.
 
 The direct HTTP wire is a versioned binary frame stream implemented by
 ``lmcache.v1.multiprocess.http_apis.kv_protocol``. V1 uses

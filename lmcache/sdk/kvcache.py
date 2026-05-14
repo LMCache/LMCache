@@ -31,24 +31,6 @@ class KVCacheSDKError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class KVCachePackage:
-    """In-memory KV cache tensor plus routing metadata.
-
-    Args:
-        kv: 4-D KV tensor in canonical ``[2, num_layers, num_tokens, hidden_dim]``
-            layout.
-        model_name: Registered LMCache model name for the KV tensor.
-        tokens: Token IDs addressed by ``kv``.
-        cache_salt: Optional per-namespace isolation salt.
-    """
-
-    kv: torch.Tensor
-    model_name: str
-    tokens: list[int]
-    cache_salt: str = ""
-
-
-@dataclass(frozen=True)
 class StoreResult:
     """Result returned by :func:`store`."""
 
@@ -58,38 +40,24 @@ class StoreResult:
     stored_chunks: int
 
 
-@dataclass(frozen=True)
-class RetrieveResult:
-    """Result returned by :func:`retrieve`."""
-
-    total_tokens: int
-    total_chunks: int
-    hit_tokens: int
-    hit_chunks: int
-    package: KVCachePackage
-
-
 def store(
-    package: KVCachePackage,
+    kv: torch.Tensor,
     url: str,
     *,
-    model_name: str = "",
-    tokens: Sequence[int] = (),
+    model_name: str,
+    tokens: Sequence[int],
     cache_salt: str = "",
     timeout: float = 60.0,
 ) -> StoreResult:
-    """Store an in-memory KV cache package into an LMCache HTTP server.
+    """Store an in-memory KV cache tensor into an LMCache HTTP server.
 
     Args:
-        package: In-memory KV package. The tensor must use canonical KV_2LTD
-            layout ``[2, num_layers, num_tokens, hidden_dim]``.
+        kv: In-memory KV tensor. The tensor must use canonical KV_2LTD layout
+            ``[2, num_layers, num_tokens, hidden_dim]``.
         url: Base URL of the LMCache MP HTTP server.
-        model_name: Optional model-name override. If empty, the value is read
-            from the package metadata.
-        tokens: Optional token sequence override. If empty, the sequence is
-            read from the package metadata.
-        cache_salt: Optional cache-salt override. If empty, the value is read
-            from the package metadata when present.
+        model_name: Registered model name for the KV tensor.
+        tokens: Token IDs addressed by ``kv``.
+        cache_salt: Optional per-namespace isolation salt.
         timeout: HTTP timeout in seconds.
 
     Returns:
@@ -98,12 +66,15 @@ def store(
     Raises:
         KVCacheSDKError: If the tensor, metadata, or HTTP request is invalid.
     """
-    resolved_package = _resolve_package(package, model_name, tokens, cache_salt)
+    kv_cpu = kv.detach().cpu()
+    token_ids = list(tokens)
     chunk_size = _fetch_chunk_size(url, timeout)
-    _validate_store_package(resolved_package, chunk_size)
+    _validate_store_tensor(kv_cpu, token_ids, model_name, chunk_size)
     response = httpx.post(
         f"{_normalize_url(url)}/api/kv/store",
-        content=_iter_store_frames(resolved_package, chunk_size),
+        content=_iter_store_frames(
+            kv_cpu, model_name, token_ids, cache_salt, chunk_size
+        ),
         headers={"Content-Type": STREAM_MEDIA_TYPE},
         timeout=timeout,
     )
@@ -124,7 +95,7 @@ def retrieve(
     tokens: Sequence[int],
     cache_salt: str = "",
     timeout: float = 60.0,
-) -> RetrieveResult:
+) -> torch.Tensor | None:
     """Retrieve KV cache bytes from an LMCache HTTP server into memory.
 
     Args:
@@ -135,7 +106,9 @@ def retrieve(
         timeout: HTTP timeout in seconds.
 
     Returns:
-        Retrieve metadata and the assembled in-memory KV package.
+        The assembled KV tensor in canonical KV_2LTD layout
+        ``[2, num_layers, hit_tokens, hidden_dim]``. Returns ``None`` on a
+        cache miss.
 
     Raises:
         KVCacheSDKError: If the HTTP request or stream is invalid.
@@ -165,6 +138,14 @@ def retrieve(
                 "retrieve response did not include a manifest"
             ) from exc
         dtype = _dtype_from_name(manifest.dtype)
+        if manifest.hit_chunks == 0:
+            for frame in frames:
+                chunk_index, worker_id, _ = decode_retrieve_shard(frame)
+                raise KVCacheSDKError(
+                    "retrieve miss response included unexpected shard "
+                    f"chunk={chunk_index}, worker={worker_id}"
+                )
+            return None
         kv = torch.empty(manifest.shape, dtype=dtype)
         expected_shards = {
             (chunk_index, worker_id)
@@ -208,19 +189,7 @@ def retrieve(
                 f"retrieve response missing {len(missing_shards)} shard frames"
             )
 
-    package = KVCachePackage(
-        kv=kv,
-        model_name=manifest.model_name,
-        tokens=list(tokens)[: manifest.hit_tokens],
-        cache_salt=cache_salt,
-    )
-    return RetrieveResult(
-        total_tokens=manifest.total_tokens,
-        total_chunks=manifest.total_chunks,
-        hit_tokens=manifest.hit_tokens,
-        hit_chunks=manifest.hit_chunks,
-        package=package,
-    )
+    return kv
 
 
 def _normalize_url(url: str) -> str:
@@ -231,57 +200,48 @@ def _normalize_url(url: str) -> str:
     return stripped.rstrip("/")
 
 
-def _resolve_package(
-    package: KVCachePackage,
-    model_name: str,
+def _validate_store_tensor(
+    kv: torch.Tensor,
     tokens: Sequence[int],
-    cache_salt: str,
-) -> KVCachePackage:
-    """Apply metadata overrides to an in-memory package."""
-    if not isinstance(package, KVCachePackage):
-        raise KVCacheSDKError("package must be a KVCachePackage")
-    resolved_model_name = model_name or package.model_name
-    resolved_tokens = list(tokens) if tokens else package.tokens
-    resolved_cache_salt = cache_salt or package.cache_salt
-    if not resolved_model_name:
-        raise KVCacheSDKError("model_name must be provided or stored in the package")
-    if not resolved_tokens:
-        raise KVCacheSDKError("tokens must be provided or stored in the package")
-    return KVCachePackage(
-        kv=package.kv.detach().cpu(),
-        model_name=resolved_model_name,
-        tokens=resolved_tokens,
-        cache_salt=resolved_cache_salt,
-    )
-
-
-def _validate_store_package(package: KVCachePackage, chunk_size: int) -> None:
+    model_name: str,
+    chunk_size: int,
+) -> None:
     """Validate tensor shape against token metadata and server chunk size."""
-    if package.kv.ndim != 4:
+    if not model_name:
+        raise KVCacheSDKError("model_name must be provided")
+    if not tokens:
+        raise KVCacheSDKError("tokens must be provided")
+    if kv.ndim != 4:
         raise KVCacheSDKError(
-            f"kv tensor must be 4-D [2, L, T, D], got shape {tuple(package.kv.shape)}"
+            f"kv tensor must be 4-D [2, L, T, D], got shape {tuple(kv.shape)}"
         )
-    total_tokens = (len(package.tokens) // chunk_size) * chunk_size
+    total_tokens = (len(tokens) // chunk_size) * chunk_size
     if total_tokens == 0:
         raise KVCacheSDKError("tokens must contain at least one complete chunk")
-    if package.kv.shape[2] != total_tokens:
+    if kv.shape[2] != total_tokens:
         raise KVCacheSDKError(
-            f"kv tensor token dim {package.kv.shape[2]} does not match "
+            f"kv tensor token dim {kv.shape[2]} does not match "
             f"complete token prefix {total_tokens}"
         )
 
 
-def _iter_store_frames(package: KVCachePackage, chunk_size: int) -> Iterable[bytes]:
-    """Yield protocol frames for storing a KV package."""
-    kv = package.kv.contiguous()
+def _iter_store_frames(
+    kv: torch.Tensor,
+    model_name: str,
+    tokens: Sequence[int],
+    cache_salt: str,
+    chunk_size: int,
+) -> Iterable[bytes]:
+    """Yield protocol frames for storing a KV tensor."""
+    kv = kv.contiguous()
     shape = tuple(int(dim) for dim in kv.shape)
     if len(shape) != 4:
         raise KVCacheSDKError(f"kv tensor must be 4-D, got shape {shape}")
     yield encode_store_manifest(
         StoreManifest(
-            model_name=package.model_name,
-            tokens=package.tokens,
-            cache_salt=package.cache_salt,
+            model_name=model_name,
+            tokens=list(tokens),
+            cache_salt=cache_salt,
             shape=(shape[0], shape[1], shape[2], shape[3]),
             dtype=str(kv.dtype),
         )
