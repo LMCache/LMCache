@@ -312,7 +312,10 @@ The ``/api/kv/*`` endpoints expose bytes-level KV cache access for cache
 priming, debugging, and future editing workflows. They are not on the
 inference path; vLLM continues to use the ZMQ protocol.
 
-The recommended client interface is the Python SDK:
+LMCache SDK
+^^^^^^^^^^^
+
+The recommended client interface is ``lmcache.sdk``:
 
 .. code-block:: python
 
@@ -335,6 +338,24 @@ The recommended client interface is the Python SDK:
 The SDK intentionally exposes only an in-memory tensor path. ``retrieve``
 returns a ``torch.Tensor`` on a hit and ``None`` on a miss. Applications that
 need files can serialize tensors and metadata outside ``lmcache.sdk``.
+
+Behavior:
+
+* ``lmc_sdk.retrieve(url, model_name=..., tokens=..., cache_salt="")`` sends a
+  retrieve request and assembles the returned shard stream into a CPU
+  ``torch.Tensor`` in ``KV_2LTD`` layout:
+  ``[2, num_layers, hit_tokens, hidden_dim]``. A cache miss returns ``None``.
+  On a hit, ``kv.shape[2]`` is the number of retrieved tokens.
+* ``lmc_sdk.store(kv, url, model_name=..., tokens=..., cache_salt="")`` stores
+  a CPU copy of ``kv``. ``kv`` must be a 4-D ``KV_2LTD`` tensor, and
+  ``kv.shape[2]`` must match the complete-token prefix addressed by
+  ``tokens``. If ``tokens`` has a partial trailing chunk, the caller should pass
+  only the full-chunk tensor prefix.
+* ``store`` returns a ``StoreResult`` with ``total_tokens``, ``total_chunks``,
+  ``stored_tokens``, and ``stored_chunks``. ``stored_*`` can be smaller than
+  ``total_*`` if the server hits a write conflict or capacity pressure.
+* The SDK does not own a file format and does not call ``torch.save`` or
+  ``torch.load``. Persisting tensors is left to the application.
 
 The direct HTTP wire is a versioned binary frame stream implemented by
 ``lmcache.v1.multiprocess.http_apis.kv_protocol``. V1 uses
