@@ -56,11 +56,11 @@ jobs:
                         - '.github/workflows/publish.yml'
                         - '.github/workflows/build_main_artifacts.yml'
                         - '.github/workflows/build_cli_artifacts.yml'
-                        - '.github/workflows/build_cu130_artifacts.yml'
+                        - '.github/workflows/build_cu129_artifacts.yml'
                         - '!operator/**'
 
     # Build each artifact group in its own reusable workflow so that a
-    # failure in one (e.g. cu130) does not block publishing of the others.
+    # failure in one (e.g. cu129) does not block publishing of the others.
 
     build-main:
         needs: changes
@@ -74,12 +74,12 @@ jobs:
         name: Build CLI
         uses: ./.github/workflows/build_cli_artifacts.yml
 
-    build-cu130:
+    build-cu129:
         needs: changes
         if: needs.changes.outputs.lmcache == 'true'
-        name: Build cu130
-        uses: ./.github/workflows/build_cu130_artifacts.yml
-        # DockerHub creds needed for the cu130 manylinux image pull;
+        name: Build cu129
+        uses: ./.github/workflows/build_cu129_artifacts.yml
+        # DockerHub creds needed for the cu12.9 manylinux image pull;
         # reusable workflows do not auto-inherit secrets.
         secrets: inherit
 
@@ -273,9 +273,9 @@ jobs:
               with:
                 verbose: true
 
-    # Publish cu130 wheel to GitHub Release (not PyPI) when a release is published
-    publish-cu130-github-release:
-        name: Publish cu130 wheel to GitHub Release
+    # Publish cu12.9 wheel to GitHub Release (not PyPI) when a release is published
+    publish-cu129-github-release:
+        name: Publish cu129 wheel to GitHub Release
         if: |
             !failure() && !cancelled() &&
             needs.changes.outputs.lmcache == 'true' &&
@@ -283,7 +283,7 @@ jobs:
         permissions:
             contents: write
         runs-on: ubuntu-latest
-        needs: [changes, build-cu130, test, code-quality]
+        needs: [changes, build-cu129, test, code-quality]
 
         steps:
             - name: Harden Runner
@@ -295,27 +295,27 @@ jobs:
                     api.github.com:443
                     uploads.github.com:443
 
-            - name: Fetch cu130 release artifacts
+            - name: Fetch cu12.9 release artifacts
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
               with:
-                  name: release-cu130-artifacts
+                  name: release-cu129-artifacts
                   path: dist
 
-            - name: Publish cu13.0 wheel to dedicated GitHub Release
+            - name: Publish cu12.9 wheel to dedicated GitHub Release
               env:
                   GITHUB_TOKEN: ${{ github.token }}
               run: |
-                  gh release create "${{ github.ref_name }}-cu13" \
+                  gh release create "${{ github.ref_name }}-cu129" \
                     --repo ${{ github.repository }} \
                     --latest=false \
-                    --title "Release ${{ github.ref_name }} · CUDA 13.0" \
-                    --notes "CUDA 13.0 wheel for LMCache ${{ github.ref_name }}.
+                    --title "Release ${{ github.ref_name }} · CUDA 12.9" \
+                    --notes "CUDA 12.9 wheel for LMCache ${{ github.ref_name }}.
 
                   \`\`\`
                   VERSION=${{ github.ref_name }}
                   uv pip install lmcache==${VERSION#v} \\
-                    --extra-index-url https://download.pytorch.org/whl/cu130 \\
-                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${VERSION}-cu13 \\
+                    --extra-index-url https://download.pytorch.org/whl/cu129 \\
+                    --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/${VERSION}-cu129 \\
                     --index-strategy unsafe-best-match
                   \`\`\`" \
                     dist/*.whl
@@ -330,7 +330,7 @@ jobs:
             github.repository_owner == 'LMCache' && github.event.action == 'published'
 
         runs-on: ubuntu-latest
-        needs: [publish-pypi, publish-cu130-github-release]
+        needs: [publish-pypi, publish-cu129-github-release]
 
         steps:
             - name: "Harden Runner"
@@ -381,11 +381,12 @@ jobs:
               run: |
                 echo "LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)" >> "$GITHUB_ENV"
 
-            - name: Build lmcache/vllm-openai container image (cu12.9)
+            - name: Build lmcache/vllm-openai container image (cu13)
               run: |
                 docker build \
-                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
-                --build-arg CUDA_VERSION=12.9 \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=13.0 \
+                --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                 --target image-release \
                 --tag lmcache/vllm-openai:latest --tag lmcache/vllm-openai:${{ env.LATEST_TAG }} \
                 --file docker/Dockerfile .
@@ -416,61 +417,63 @@ jobs:
                 docker system prune -f --all
                 docker builder prune -af
 
-            - name: Build lmcache/standalone container image (cu12.9)
+            - name: Build lmcache/standalone container image (cu13)
               run: |
                 docker build \
-                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
-                --build-arg CUDA_VERSION=12.9 \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=13.0 \
+                --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                 --target lmcache-final \
                 --tag lmcache/standalone:latest --tag lmcache/standalone:${{ env.LATEST_TAG }} \
+                --tag lmcache/standalone:latest-cu130 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu130 \
                 --file docker/Dockerfile.standalone .
 
             - name: Push lmcache/standalone container image to DockerHub
               run: |
                 docker push lmcache/standalone:latest
                 docker push lmcache/standalone:${{ env.LATEST_TAG }}
+                docker push lmcache/standalone:latest-cu130
+                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu130
 
             - name: Clean up Docker layers and cache
               run: |
                 docker system prune -f --all
                 docker builder prune -af
 
-            - name: Build lmcache/vllm-openai container image (cu13)
-              if: needs.publish-cu130-github-release.result == 'success'
+            - name: Build lmcache/vllm-openai container image (cu12.9)
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
                 docker build \
-                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
-                --build-arg CUDA_VERSION=13.0 \
-                --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=12.9 \
                 --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
-                --target image-release-cu13 \
-                --tag lmcache/vllm-openai:latest-cu13 --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu13 \
+                --target image-release-cu129 \
+                --tag lmcache/vllm-openai:latest-cu129 --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129 \
                 --file docker/Dockerfile .
 
-            - name: Push lmcache/vllm-openai cu13 container image to DockerHub
-              if: needs.publish-cu130-github-release.result == 'success'
+            - name: Push lmcache/vllm-openai cu129 container image to DockerHub
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker push lmcache/vllm-openai:latest-cu13
-                docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu13
+                docker push lmcache/vllm-openai:latest-cu129
+                docker push lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129
 
             - name: Clean up Docker layers and cache
               run: |
                 docker system prune -f --all
                 docker builder prune -af
 
-            - name: Build lmcache/standalone container image (cu13)
-              if: needs.publish-cu130-github-release.result == 'success'
+            - name: Build lmcache/standalone container image (cu12.9)
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
                 docker build \
-                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
-                --build-arg CUDA_VERSION=13.0 \
-                --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
+                --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.05-cuda12.9-devel-ubuntu24.04 \
+                --build-arg CUDA_VERSION=12.9 \
                 --target lmcache-final \
-                --tag lmcache/standalone:latest-cu13 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu13 \
+                --tag lmcache/standalone:latest-cu129 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu129 \
                 --file docker/Dockerfile.standalone .
 
-            - name: Push lmcache/standalone cu13 container image to DockerHub
-              if: needs.publish-cu130-github-release.result == 'success'
+            - name: Push lmcache/standalone cu129 container image to DockerHub
+              if: needs.publish-cu129-github-release.result == 'success'
               run: |
-                docker push lmcache/standalone:latest-cu13
-                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu13
+                docker push lmcache/standalone:latest-cu129
+                docker push lmcache/standalone:${{ env.LATEST_TAG }}-cu129
