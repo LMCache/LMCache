@@ -3,6 +3,7 @@
 
 # Standard
 from collections.abc import AsyncIterator, Iterator
+import asyncio
 
 # Third Party
 from fastapi import APIRouter, HTTPException, Request
@@ -195,9 +196,10 @@ async def retrieve(body: _LookupOrRetrieveBody, request: Request) -> StreamingRe
     _check_protocol_version(body.protocol_version)
     engine = _engine_or_503(request)
     try:
-        result = engine.retrieve_kv_bytes_by_tokens(
-            model_name=body.model_name,
-            tokens=body.tokens,
+        result = await asyncio.to_thread(
+            engine.retrieve_kv_bytes_by_tokens,
+            body.model_name,
+            body.tokens,
             cache_salt=body.cache_salt,
         )
     except KeyError as exc:
@@ -221,9 +223,10 @@ async def lookup(body: _LookupOrRetrieveBody, request: Request) -> JSONResponse:
     engine = _engine_or_503(request)
     result: RetrieveBytesResult | None = None
     try:
-        result = engine.retrieve_kv_bytes_by_tokens(
-            model_name=body.model_name,
-            tokens=body.tokens,
+        result = await asyncio.to_thread(
+            engine.retrieve_kv_bytes_by_tokens,
+            body.model_name,
+            body.tokens,
             cache_salt=body.cache_salt,
         )
     except KeyError as exc:

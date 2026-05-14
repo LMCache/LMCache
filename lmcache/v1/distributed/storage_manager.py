@@ -549,6 +549,33 @@ class StorageManager:
             )
         return total_hits
 
+    def wait_for_prefetch_completion(
+        self,
+        handle: PrefetchHandle,
+        timeout: float | None = None,
+    ) -> bool:
+        """
+        Wait until a prefetch task has a queryable result.
+
+        This method does not consume the result. Call
+        :meth:`query_prefetch_status` after this method returns to retrieve
+        the hit count and release controller-side bookkeeping.
+
+        Args:
+            handle: Prefetch handle from :meth:`submit_prefetch_task`.
+            timeout: Maximum seconds to wait. ``None`` waits indefinitely.
+
+        Returns:
+            ``True`` if the task has completed or no L2 task was needed,
+            ``False`` if ``timeout`` elapsed before completion.
+        """
+        if handle.prefetch_request_id == -1:
+            return True
+        return self._prefetch_controller.wait_for_prefetch_result(
+            handle.prefetch_request_id,
+            timeout=timeout,
+        )
+
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
         Touch the keys in L1 storage, marking the keys

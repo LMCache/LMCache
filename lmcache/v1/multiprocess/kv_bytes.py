@@ -5,8 +5,8 @@
 from collections.abc import AsyncIterable, Callable, Generator, Iterator
 from dataclasses import dataclass
 from typing import Protocol, cast
+import asyncio
 import math
-import time
 
 # Third Party
 import torch
@@ -216,41 +216,21 @@ async def store_kv_bytes_by_tokens(
                 f"does not match expected {expected_chunk_bytes}"
             )
 
-        chunk_tensor = torch.frombuffer(
-            bytearray(chunk_payload),
-            dtype=per_shard_dtype,
-        ).reshape(
-            (
-                per_shard_shape[0],
-                per_shard_shape[1],
+        chunk_keys = obj_keys[seen_chunks * world_size : (seen_chunks + 1) * world_size]
+        written_keys.extend(
+            await asyncio.to_thread(
+                _store_chunk_payload,
+                chunk_payload,
+                chunk_keys,
+                per_shard_shape,
+                per_shard_dtype,
+                d_per_worker,
+                world_size,
                 chunk_size,
-                d_per_worker * world_size,
+                storage_manager,
+                layout_desc,
             )
         )
-        chunk_keys = obj_keys[seen_chunks * world_size : (seen_chunks + 1) * world_size]
-        reserved = storage_manager.reserve_write(
-            chunk_keys,
-            layout_desc,
-            "all",
-        )
-        try:
-            for worker_id in range(world_size):
-                obj_key = chunk_keys[worker_id]
-                memory_obj = reserved.get(obj_key)
-                if memory_obj is None:
-                    continue
-                d_start = worker_id * d_per_worker
-                d_end = d_start + d_per_worker
-                shard = chunk_tensor[:, :, :, d_start:d_end]
-                _memory_obj_tensor(
-                    memory_obj,
-                    per_shard_shape,
-                    per_shard_dtype,
-                ).copy_(shard)
-                written_keys.append(obj_key)
-        finally:
-            if reserved:
-                storage_manager.finish_write(list(reserved.keys()))
         seen_chunks += 1
 
     if seen_chunks != total_chunks:
@@ -415,12 +395,62 @@ def retrieve_kv_bytes_by_tokens(
 
 
 def _wait_prefetch(storage_manager: StorageManager, handle: PrefetchHandle) -> int:
-    """Block until ``handle`` finishes and return the total hit count."""
+    """Wait until ``handle`` finishes and return the total hit count."""
     while True:
         status = storage_manager.query_prefetch_status(handle)
         if status is not None:
             return status
-        time.sleep(0.001)
+        storage_manager.wait_for_prefetch_completion(handle)
+
+
+def _store_chunk_payload(
+    chunk_payload: bytes,
+    chunk_keys: list[ObjectKey],
+    per_shard_shape: tuple[int, int, int, int],
+    per_shard_dtype: torch.dtype,
+    d_per_worker: int,
+    world_size: int,
+    chunk_size: int,
+    storage_manager: StorageManager,
+    layout_desc: MemoryLayoutDesc,
+) -> list[ObjectKey]:
+    """Write one full chunk into reserved worker-shard memory objects."""
+    chunk_tensor = torch.frombuffer(
+        bytearray(chunk_payload),
+        dtype=per_shard_dtype,
+    ).reshape(
+        (
+            per_shard_shape[0],
+            per_shard_shape[1],
+            chunk_size,
+            d_per_worker * world_size,
+        )
+    )
+    reserved = storage_manager.reserve_write(
+        chunk_keys,
+        layout_desc,
+        "all",
+    )
+    written_keys: list[ObjectKey] = []
+    try:
+        for worker_id in range(world_size):
+            obj_key = chunk_keys[worker_id]
+            memory_obj = reserved.get(obj_key)
+            if memory_obj is None:
+                continue
+            d_start = worker_id * d_per_worker
+            d_end = d_start + d_per_worker
+            shard = chunk_tensor[:, :, :, d_start:d_end]
+            _memory_obj_tensor(
+                memory_obj,
+                per_shard_shape,
+                per_shard_dtype,
+            ).copy_(shard)
+            written_keys.append(obj_key)
+    finally:
+        if reserved:
+            storage_manager.finish_write(list(reserved.keys()))
+    return written_keys
 
 
 def _tensor_to_bytes(tensor: torch.Tensor) -> bytes:
