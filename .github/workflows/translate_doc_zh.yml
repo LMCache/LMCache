@@ -69,7 +69,7 @@ jobs:
           base: dev
           delete-branch: true
           add-paths: |
-            docs/source/locale/zh_CN/LC_MESSAGES/**
+            docs/source/locale/zh_CN/LC_MESSAGES/**/*.po
           commit-message: "Update Chinese documentation translations"
           title: "Update Chinese documentation translations"
           body: |
