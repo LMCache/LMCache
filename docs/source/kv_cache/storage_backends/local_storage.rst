@@ -23,6 +23,13 @@ alignment required by ``O_DIRECT``. Tensor-backed cache objects retain the
 configured direct-I/O behavior.
 
 
+Missing, unreadable, or truncated cache files are treated as failed loads.
+Blocking reads return a cache miss for the failed key. Asynchronous prefetch
+returns only the successfully loaded prefix and releases the unused staging
+buffers. Failed entries leave the cache index and accounting; file-removal
+errors are logged, and a concurrently replaced entry is retained.
+
+
 Two ways to configure LMCache Disk Offloading:
 ----------------------------------------------
 

@@ -661,19 +661,25 @@ class LocalDiskBackend(StorageBackendInterface):
         if path is None or memory_obj is None:
             return None
 
+        with self.disk_lock:
+            expected_meta = self.dict.get(key)
+
         try:
             buffer = memory_obj.byte_array
-            self.read_file(
+            if not self.read_file(
                 key,
                 buffer,
                 path,
                 memory_format=memory_obj.get_memory_format(),
-            )
+            ):
+                self._drop_stale_key_after_read_failure(key, path, expected_meta)
+                memory_obj.ref_count_down()
+                return None
 
             # Recover metadata (mirrors load_bytes_from_disk).
             with self.disk_lock:
                 disk_meta = self.dict.get(key)
-                if disk_meta is None:
+                if disk_meta is None or disk_meta is not expected_meta:
                     memory_obj.ref_count_down()
                     return None
                 memory_obj.metadata.cached_positions = disk_meta.cached_positions
@@ -836,30 +842,62 @@ class LocalDiskBackend(StorageBackendInterface):
         memory_objs: list[MemoryObj],
         write_back: bool = False,
     ) -> list[MemoryObj]:
-        """
-        Async load bytearray from disk.
+        """Load the successfully read prefix of a staged disk batch.
+
+        Args:
+            paths: Source paths in the same order as keys and memory_objs.
+            keys: Cache keys whose disk metadata is already pinned.
+            memory_objs: Allocated, pinned destinations owned by this load.
+            write_back: Retained for compatibility; currently unused.
+
+        Returns:
+            The successfully populated prefix, with memory pins retained for
+            the caller. A failed read releases every remaining staged object
+            and disk pin; the failed cache entry is invalidated.
         """
 
         logger.debug("Executing `async_load_bytes` from disk.")
-        # TODO (Jiayi): handle the case where loading fails.
-        for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
+        with self.disk_lock:
+            disk_metas = [self.dict.get(key) for key in keys]
+        loaded_mem_objs: list[MemoryObj] = []
+        for idx, (path, key, mem_obj) in enumerate(
+            zip(paths, keys, memory_objs, strict=False)
+        ):
+            expected_meta = disk_metas[idx]
             buffer = mem_obj.byte_array
-            self.read_file(
+            if not self.read_file(
                 key,
                 buffer,
                 path,
                 memory_format=mem_obj.get_memory_format(),
-            )
+            ):
+                self._release_staged_disk_loads(disk_metas[idx:], memory_objs[idx:])
+                self._drop_stale_key_after_read_failure(key, path, expected_meta)
+                break
+
+            with self.disk_lock:
+                disk_meta = self.dict.get(key)
+                metadata_matches = disk_meta is not None and disk_meta is expected_meta
+                if metadata_matches:
+                    cached_positions = disk_meta.cached_positions
+                    disk_meta.unpin()
+                else:
+                    cached_positions = None
+
+            if not metadata_matches:
+                logger.debug(
+                    "Disk metadata for key %s changed during async load.",
+                    key,
+                )
+                self._release_staged_disk_loads(disk_metas[idx:], memory_objs[idx:])
+                break
 
             # TODO(Jiayi): Please recover the metadata in a more
             # elegant way in the future.
-            cached_positions = self.dict[key].cached_positions
             mem_obj.metadata.cached_positions = cached_positions
+            loaded_mem_objs.append(mem_obj)
 
-            with self.disk_lock:
-                self.dict[key].unpin()
-
-        return memory_objs
+        return loaded_mem_objs
 
     def load_bytes_from_disk(
         self,
@@ -869,8 +907,19 @@ class LocalDiskBackend(StorageBackendInterface):
         shape: torch.Size,
         fmt: MemoryFormat,
     ) -> Optional[MemoryObj]:
-        """
-        Load bytearray from disk.
+        """Allocate staging memory and load one disk payload.
+
+        Args:
+            key: Cache key whose metadata is registered in this backend.
+            path: Source file path.
+            dtype: Tensor dtype, or None for a binary buffer.
+            shape: Logical allocation shape.
+            fmt: Stored memory format.
+
+        Returns:
+            The populated object, or None for allocation/read failure or
+            missing metadata. Failed reads release staging memory and
+            invalidate the failed cache entry.
         """
 
         dtypes = _get_disk_load_dtypes(key, dtype, fmt)
@@ -886,17 +935,31 @@ class LocalDiskBackend(StorageBackendInterface):
             )
             return None
 
+        with self.disk_lock:
+            expected_meta = self.dict.get(key)
         buffer = memory_obj.byte_array
-        self.read_file(
+        if not self.read_file(
             key,
             buffer,
             path,
             memory_format=fmt,
-        )
+        ):
+            memory_obj.ref_count_down()
+            self._drop_stale_key_after_read_failure(key, path, expected_meta)
+            return None
 
         # TODO(Jiayi): Please recover the metadata in a more
         # elegant way in the future.
-        cached_positions = self.dict[key].cached_positions
+        with self.disk_lock:
+            disk_meta = self.dict.get(key)
+            if disk_meta is None or disk_meta is not expected_meta:
+                logger.debug(
+                    "Disk metadata for key %s changed during disk load.",
+                    key,
+                )
+                memory_obj.ref_count_down()
+                return None
+            cached_positions = disk_meta.cached_positions
         memory_obj.metadata.cached_positions = cached_positions
 
         return memory_obj
@@ -948,21 +1011,20 @@ class LocalDiskBackend(StorageBackendInterface):
         buffer: bytearray | memoryview,
         path: str,
         memory_format: MemoryFormat | None = None,
-    ) -> None:
-        """Read a disk payload into a writable buffer.
+    ) -> bool:
+        """Read a complete disk payload into a writable buffer.
 
         Args:
-            key: Cache key used for logging and missing-file cleanup.
+            key: Cache key used for logging.
             buffer: Writable destination for the cached bytes.
             path: Source file path.
             memory_format: Payload format. BINARY_BUFFER always uses buffered
                 I/O; None preserves the backend's configured tensor I/O mode.
 
         Returns:
-            None. A missing file is logged and removed from the cache index.
-
-        Raises:
-            OSError: Reading fails for a reason other than a missing file.
+            True only when every requested byte was read. Missing files,
+            short reads and other OSError failures return False; the caller
+            owns staging-memory and cache-index cleanup.
         """
         use_odirect = self._use_odirect_for_memory_format(memory_format)
         start_time = time.time()
@@ -977,16 +1039,26 @@ class LocalDiskBackend(StorageBackendInterface):
         try:
             if not fblock_aligned or not use_odirect:
                 with open(path, "rb") as f:
-                    f.readinto(buffer)
+                    bytes_read = f.readinto(buffer)
             else:
                 fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
-                    fdo.readinto(buffer)
+                    bytes_read = fdo.readinto(buffer)
         except FileNotFoundError:
-            logger.warning("File not found on disk: %s", path)
-            if self.dict.get(key, None):
-                self.dict.pop(key)
-            return
+            logger.warning("File not found on disk for key %s: %s", key, path)
+            return False
+        except OSError as exc:
+            logger.warning("Failed to read disk file for key %s: %s", key, exc)
+            return False
+
+        if bytes_read != size:
+            logger.warning(
+                "Short read from disk for key %s: expected %d bytes, got %d.",
+                key,
+                size,
+                bytes_read,
+            )
+            return False
 
         disk_read_time = time.time() - start_time
         if disk_read_time > 0:
@@ -997,6 +1069,7 @@ class LocalDiskBackend(StorageBackendInterface):
             )
         else:
             logger.debug("Disk read size: %s bytes", size)
+        return True
 
     def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
@@ -1010,3 +1083,55 @@ class LocalDiskBackend(StorageBackendInterface):
     def _use_odirect_for_memory_format(self, fmt: MemoryFormat | None) -> bool:
         """Keep Python byte buffers off the alignment-sensitive direct I/O path."""
         return self.use_odirect and fmt != MemoryFormat.BINARY_BUFFER
+
+    def _release_staged_disk_loads(
+        self,
+        disk_metas: Sequence[DiskCacheMetadata | None],
+        memory_objs: Sequence[MemoryObj],
+    ) -> None:
+        """Release pins and references for the unreturned suffix of a batch."""
+        with self.disk_lock:
+            for disk_meta in disk_metas:
+                if disk_meta is not None:
+                    disk_meta.unpin()
+
+        for memory_obj in memory_objs:
+            memory_obj.unpin()
+            memory_obj.ref_count_down()
+
+    def _drop_stale_key_after_read_failure(
+        self,
+        key: CacheEngineKey,
+        path: str,
+        expected_meta: DiskCacheMetadata | None,
+    ) -> None:
+        """Invalidate the failed entry without deleting a concurrent replacement.
+
+        File removal stays under disk_lock so a new put cannot publish the
+        same path between index eviction and unlink. An unlink failure is
+        logged; the unusable entry still leaves the cache index/accounting.
+        """
+        with self.disk_lock:
+            if expected_meta is None or self.dict.get(key) is not expected_meta:
+                return
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning(
+                    "Failed to remove unreadable cache file %s: %s", path, exc
+                )
+            stale_meta = self.dict.pop(key)
+            self.current_cache_size = max(
+                0.0, self.current_cache_size - stale_meta.size
+            )
+            self.usage = max(0, self.usage - stale_meta.size)
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            self.cache_policy.update_on_force_evict(key)
+
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.EVICT,
+                key=key.chunk_hash,
+            )
