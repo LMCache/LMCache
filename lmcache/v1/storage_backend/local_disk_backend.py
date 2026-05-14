@@ -564,14 +564,17 @@ class LocalDiskBackend(StorageBackendInterface):
 
         try:
             buffer = memory_obj.byte_array
-            self.read_file(
+            if not self.read_file(
                 key,
                 buffer,
                 path,
                 use_odirect=self._use_odirect_for_memory_format(
                     memory_obj.get_memory_format()
                 ),
-            )
+            ):
+                self._drop_stale_key_after_read_failure(key, path)
+                memory_obj.ref_count_down()
+                return None
 
             # Recover metadata (mirrors load_bytes_from_disk).
             with self.disk_lock:
@@ -742,27 +745,45 @@ class LocalDiskBackend(StorageBackendInterface):
         """
 
         logger.debug("Executing `async_load_bytes` from disk.")
-        # TODO (Jiayi): handle the case where loading fails.
-        for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
+        loaded_mem_objs: list[MemoryObj] = []
+        for idx, (path, key, mem_obj) in enumerate(
+            zip(paths, keys, memory_objs, strict=False)
+        ):
             buffer = mem_obj.byte_array
-            self.read_file(
+            if not self.read_file(
                 key,
                 buffer,
                 path,
                 use_odirect=self._use_odirect_for_memory_format(
                     mem_obj.get_memory_format()
                 ),
-            )
+            ):
+                self._release_staged_disk_loads(keys[idx:], memory_objs[idx:])
+                self._drop_stale_key_after_read_failure(key, path)
+                break
+
+            with self.disk_lock:
+                disk_meta = self.dict.get(key)
+                if disk_meta is None:
+                    cached_positions = None
+                else:
+                    cached_positions = disk_meta.cached_positions
+                    disk_meta.unpin()
+
+            if disk_meta is None:
+                logger.warning(
+                    "Disk metadata for key %s disappeared during async load.",
+                    key,
+                )
+                self._release_staged_disk_loads(keys[idx:], memory_objs[idx:])
+                break
 
             # TODO(Jiayi): Please recover the metadata in a more
             # elegant way in the future.
-            cached_positions = self.dict[key].cached_positions
             mem_obj.metadata.cached_positions = cached_positions
+            loaded_mem_objs.append(mem_obj)
 
-            with self.disk_lock:
-                self.dict[key].unpin()
-
-        return memory_objs
+        return loaded_mem_objs
 
     def load_bytes_from_disk(
         self,
@@ -790,21 +811,42 @@ class LocalDiskBackend(StorageBackendInterface):
             return None
 
         buffer = memory_obj.byte_array
-        self.read_file(
+        if not self.read_file(
             key,
             buffer,
             path,
             use_odirect=self._use_odirect_for_memory_format(fmt),
-        )
+        ):
+            memory_obj.ref_count_down()
+            self._drop_stale_key_after_read_failure(key, path)
+            return None
 
         # TODO(Jiayi): Please recover the metadata in a more
         # elegant way in the future.
-        cached_positions = self.dict[key].cached_positions
+        with self.disk_lock:
+            disk_meta = self.dict.get(key)
+            if disk_meta is None:
+                logger.warning(
+                    "Disk metadata for key %s disappeared during disk load.",
+                    key,
+                )
+                memory_obj.ref_count_down()
+                return None
+            cached_positions = disk_meta.cached_positions
         memory_obj.metadata.cached_positions = cached_positions
 
         return memory_obj
 
     def write_file(self, buffer: Any, path: str, use_odirect: bool) -> None:
+        """
+        Write exactly ``len(buffer)`` bytes to ``path``.
+
+        :param buffer: Bytes-like payload to write.
+        :param path: File path to write to.
+        :param use_odirect: Whether to use ``O_DIRECT`` when the payload size
+            is filesystem-block aligned.
+        :returns: ``None``.
+        """
         start_time = time.time()
         size = len(buffer)
         if size % self.os_disk_bs != 0 or not use_odirect:
@@ -827,7 +869,15 @@ class LocalDiskBackend(StorageBackendInterface):
         buffer: Any,
         path: str,
         use_odirect: bool,
-    ) -> None:
+    ) -> bool:
+        """
+        Read exactly ``len(buffer)`` bytes from ``path`` into ``buffer``.
+
+        :param key: Cache key used for logging.
+        :param buffer: Writable bytes-like destination.
+        :param path: File path to read from.
+        :returns: ``True`` when the full payload was read, otherwise ``False``.
+        """
         start_time = time.time()
         size = len(buffer)
         fblock_aligned = size % self.os_disk_bs == 0
@@ -840,22 +890,33 @@ class LocalDiskBackend(StorageBackendInterface):
         try:
             if not fblock_aligned or not use_odirect:
                 with open(path, "rb") as f:
-                    f.readinto(buffer)
+                    bytes_read = f.readinto(buffer)
             else:
                 fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
                 with os.fdopen(fd, "rb", buffering=0) as fdo:
-                    fdo.readinto(buffer)
+                    bytes_read = fdo.readinto(buffer)
         except FileNotFoundError:
-            logger.warning(f"File not found on disk: {path}")
-            if self.dict.get(key, None):
-                self.dict.pop(key)
-            return
+            logger.warning("File not found on disk for key %s: %s", key, path)
+            return False
+        except OSError as exc:
+            logger.warning("Failed to read disk file for key %s: %s", key, exc)
+            return False
+
+        if bytes_read != size:
+            logger.warning(
+                "Short read from disk for key %s: expected %d bytes, got %d.",
+                key,
+                size,
+                bytes_read,
+            )
+            return False
 
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
+        return True
 
     def _use_odirect_for_memory_format(self, fmt: MemoryFormat) -> bool:
         return self.use_odirect and fmt != MemoryFormat.BINARY_BUFFER
@@ -868,3 +929,45 @@ class LocalDiskBackend(StorageBackendInterface):
             self.batched_msg_sender.close()
         self._read_thread_pool.shutdown(wait=True)
         self.disk_worker.close()
+
+    def _release_staged_disk_loads(
+        self,
+        keys: Sequence[CacheEngineKey],
+        memory_objs: Sequence[MemoryObj],
+    ) -> None:
+        with self.disk_lock:
+            for key in keys:
+                disk_meta = self.dict.get(key)
+                if disk_meta is not None:
+                    disk_meta.unpin()
+
+        for memory_obj in memory_objs:
+            memory_obj.unpin()
+            memory_obj.ref_count_down()
+
+    def _drop_stale_key_after_read_failure(
+        self,
+        key: CacheEngineKey,
+        path: str,
+    ) -> None:
+        with self.disk_lock:
+            stale_meta = self.dict.pop(key, None)
+            if stale_meta is None:
+                return
+            self.current_cache_size = max(
+                0.0, self.current_cache_size - stale_meta.size
+            )
+            self.usage = max(0, self.usage - stale_meta.size)
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            self.cache_policy.update_on_force_evict(key)
+
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+        if self.batched_msg_sender is not None:
+            self.batched_msg_sender.add_kv_op(
+                op_type=OpType.EVICT,
+                key=key.chunk_hash,
+            )
