@@ -5,6 +5,15 @@ name: Build CLI Artifacts
 
 on:
     workflow_call:
+    pull_request:
+        branches:
+            - dev
+            - "release-**"
+        paths:
+            - 'lmcache/cli/**.py'
+            - 'pyproject_cli.toml'
+            - 'requirements/cli.txt'
+            - '.github/workflows/build_cli_artifacts.yml'
 
 env:
     LC_ALL: en_US.UTF-8
@@ -12,6 +21,11 @@ env:
 defaults:
     run:
         shell: bash
+
+# Cancel stale runs per ref; PR and dev-push refs differ, so workflow_call is unaffected.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
 
 permissions:
     contents: read
@@ -64,8 +78,22 @@ jobs:
             - name: Smoke-test CLI wheel (no torch)
               run: |
                 pip install dist/lmcache_cli-*.whl
+
+                # CLI wheel must be pure-Python.
+                if unzip -l dist/lmcache_cli-*.whl | grep -E '\.(so|pyd)$'; then
+                  echo "::error::CLI wheel contains compiled extensions; should be pure-Python"
+                  exit 1
+                fi
+
                 python -c "import lmcache"
                 lmcache --help
+
+                # Slim-supported subcommands only (server is full-only).
+                for cmd in mock kvcache describe ping query bench tool trace; do
+                  echo "::group::lmcache $cmd --help"
+                  lmcache "$cmd" --help
+                  echo "::endgroup::"
+                done
 
             - name: Upload CLI release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
