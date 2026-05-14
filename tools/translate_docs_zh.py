@@ -15,9 +15,19 @@ LOCALE_DIR = Path("docs/source/locale/zh_CN/LC_MESSAGES")
 MAX_ENTRIES = int(os.environ.get("TRANSLATION_MAX_ENTRIES", "500"))
 
 SYSTEM_PROMPT = (
-    "Translate LMCache documentation from English to Simplified Chinese. "
-    "Return only the translated document. Do not add notes, explanations, "
-    "summaries, or comments. "
+    "You translate Sphinx gettext entries from English to Simplified Chinese. "
+    "Each request contains one focal entry to translate, optionally preceded "
+    "by a 'Source file:' line and surrounded by 'Previous entry' and "
+    "'Next entry' blocks for context. Translate ONLY the focal msgid under "
+    "'Translate this entry'. Return the Chinese translation as plain text "
+    "with no labels, no surrounding quotes, no other entries, and no "
+    "explanation. "
+    "Use the neighboring entries only to infer the section topic and to "
+    "keep terminology consistent; never include their text in your output. "
+    "If the focal msgid is a code identifier (snake_case, "
+    "SCREAMING_SNAKE_CASE, a config key, environment variable, file path, "
+    "URL, or product name), return it unchanged. "
+    "Do not add notes, explanations, summaries, or comments. "
     "Preserve all reStructuredText/Sphinx formatting exactly, including "
     "headings, indentation, directives, roles, labels, anchors, references, "
     "admonitions, lists, tables, and cross-references. "
@@ -191,6 +201,85 @@ def should_translate(entry: PoEntry) -> bool:
     )
 
 
+def build_user_message(
+    target: PoEntry,
+    previous: PoEntry | None,
+    next_: PoEntry | None,
+    source_file: str | None = None,
+) -> str:
+    """Build the chat-completions user message for one translation call.
+
+    Wraps the focal entry in labeled blocks and prepends the neighboring
+    entries (when present) so the model can disambiguate identifiers from
+    prose and reuse established terminology.
+
+    Args:
+        target: The entry being translated.
+        previous: The entry immediately before ``target``, or None at the
+            start of the file or when the neighbor has an empty msgid (the
+            gettext metadata header).
+        next_: The entry immediately after ``target``, or None at the end.
+        source_file: Optional ``.rst`` path the entries came from (e.g.,
+            ``"api_reference/configurations.rst"``).
+
+    Returns:
+        A multi-line string suitable for the ``content`` field of a user
+        message.
+    """
+    parts: list[str] = []
+
+    if source_file:
+        parts.append(f"Source file: {source_file}")
+        parts.append("")
+
+    if previous is not None and previous.msgid.strip():
+        parts.append("Previous entry (context only, do not translate):")
+        parts.append(f"  msgid: {json.dumps(previous.msgid, ensure_ascii=False)}")
+        if previous.msgstr.strip():
+            parts.append(f"  msgstr: {json.dumps(previous.msgstr, ensure_ascii=False)}")
+        parts.append("")
+
+    parts.append("Translate this entry:")
+    parts.append(f"  msgid: {json.dumps(target.msgid, ensure_ascii=False)}")
+
+    if next_ is not None and next_.msgid.strip():
+        parts.append("")
+        parts.append("Next entry (context only, do not translate):")
+        parts.append(f"  msgid: {json.dumps(next_.msgid, ensure_ascii=False)}")
+        if next_.msgstr.strip():
+            parts.append(f"  msgstr: {json.dumps(next_.msgstr, ensure_ascii=False)}")
+
+    return "\n".join(parts)
+
+
+def clean_translation_response(text: str) -> str:
+    """Strip incidental formatting the model occasionally adds to the output.
+
+    Trims whitespace, removes a leading ``msgstr:`` / ``Translation:`` label
+    if present, and unwraps a single pair of surrounding double quotes.
+
+    Args:
+        text: Raw ``message.content`` string returned by the endpoint.
+
+    Returns:
+        The Chinese translation only, ready to be written into ``msgstr``.
+    """
+    cleaned = text.strip()
+
+    for prefix in ("msgstr:", "msgstr =", "translation:"):
+        if cleaned.lower().startswith(prefix):
+            cleaned = cleaned[len(prefix) :].lstrip()
+            break
+
+    if len(cleaned) >= 2 and cleaned[0] == '"' and cleaned[-1] == '"':
+        try:
+            cleaned = json.loads(cleaned)
+        except json.JSONDecodeError:
+            cleaned = cleaned[1:-1]
+
+    return cleaned
+
+
 def endpoint_url() -> str:
     """Build the chat-completions URL from ``TRANSLATION_API_BASE_URL``."""
     base_url = os.environ["TRANSLATION_API_BASE_URL"].rstrip("/")
@@ -199,8 +288,8 @@ def endpoint_url() -> str:
     return base_url + "/chat/completions"
 
 
-def translate_text(text: str) -> str:
-    """Translate one English string to Chinese via the model endpoint.
+def translate_text(user_message: str) -> str:
+    """Send a pre-built user message to the endpoint and return the cleaned translation.
 
     Raises:
         RuntimeError: If the response has no message content.
@@ -209,7 +298,7 @@ def translate_text(text: str) -> str:
         "model": os.environ["TRANSLATION_MODEL"],
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": text},
+            {"role": "user", "content": user_message},
         ],
         "temperature": 0.2,
     }
@@ -228,9 +317,10 @@ def translate_text(text: str) -> str:
         data = json.loads(response.read().decode("utf-8"))
 
     try:
-        return data["choices"][0]["message"]["content"].strip()
+        raw = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as exc:
         raise RuntimeError("Translation endpoint returned no message content") from exc
+    return clean_translation_response(raw)
 
 
 def validate_environment() -> None:
@@ -257,6 +347,9 @@ def validate_environment() -> None:
 def update_file(path: Path, remaining_budget: int) -> int:
     """Translate up to ``remaining_budget`` empty/fuzzy messages in one ``.po`` file.
 
+    For each entry needing translation, sends the focal msgid along with its
+    immediate neighbors as contextual hints to the model.
+
     Returns:
         Number of messages actually translated.
     """
@@ -264,13 +357,24 @@ def update_file(path: Path, remaining_budget: int) -> int:
     entries = parse_entries(lines)
     translated = 0
 
-    for entry in reversed(entries):
+    try:
+        source_file = str(path.relative_to(LOCALE_DIR).with_suffix(".rst"))
+    except ValueError:
+        source_file = None
+
+    for i in reversed(range(len(entries))):
         if translated >= remaining_budget:
             break
+        entry = entries[i]
         if not should_translate(entry):
             continue
 
-        translation = translate_text(entry.msgid)
+        previous = entries[i - 1] if i > 0 else None
+        next_ = entries[i + 1] if i + 1 < len(entries) else None
+
+        user_message = build_user_message(entry, previous, next_, source_file)
+        translation = translate_text(user_message)
+
         replace_msgstr(lines, entry, translation)
         if "fuzzy" in entry.flags:
             clean_fuzzy_flag(lines, entry)
