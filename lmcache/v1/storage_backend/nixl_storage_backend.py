@@ -90,18 +90,9 @@ class NixlStorageConfig:
     enable_presence_cache: bool
     enable_async_put: bool
     use_direct_io: bool
-<<<<<<< HEAD
-<<<<<<< HEAD
-    path: str
-    use_hugepages: bool
+    path: Union[str, List[str]]
     enable_prog_thread: bool
     sync_mode: Optional[Any]  # nixl_thread_sync_t, None if unsupported
-=======
-    path: Union[str, List[str]] 
->>>>>>> 3f608db3 (Address feedback: add validate_nixl_path helper function and update NixlFilePool path handling)
-=======
-    path: Union[str, List[str]]
->>>>>>> d90e8f32 (Addresses PR feedback for documentation, unit tests, and formatting)
     path_sharding: str
 
     @staticmethod
@@ -160,8 +151,6 @@ class NixlStorageConfig:
                 len(endpoint_list),
             )
         path = extra_config.get("nixl_path")
-<<<<<<< HEAD
-<<<<<<< HEAD
         enable_prog_thread = extra_config.get("nixl_enable_prog_thread", True)
         sync_mode_str = extra_config.get("nixl_sync_mode", None)
         if sync_mode_str is not None and not _NIXL_SYNC_MODE_SUPPORTED:
@@ -181,12 +170,7 @@ class NixlStorageConfig:
                     f"in nixl_thread_sync_t."
                 )
             sync_mode = getattr(nixl_thread_sync_t, attr_name)
-=======
-        path_sharding = extra_config.get("nixl_path_sharding") # {by_gpu}
->>>>>>> a39143ef ([Core] Add multipath KV-cache offloading support in LMCache NIXL backend)
-=======
         path_sharding = extra_config.get("nixl_path_sharding", "by_gpu")
->>>>>>> 3f608db3 (Address feedback: add validate_nixl_path helper function and update NixlFilePool path handling)
 
         assert pool_size is not None
         assert backend is not None
@@ -944,28 +928,12 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         """
 
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
-            return NixlFilePool(size, path, use_direct_io, path_sharding)
-        elif backend in ("OBJ", "AZURE_BLOB"):
-=======
-            return NixlFilePool(
-                size, path, use_direct_io, path_sharding, worker_id
-            )
-=======
-            return NixlFilePool(size, path, use_direct_io, path_sharding, worker_id)
->>>>>>> e8ded938 (Fix code formatting (ruff format))
-=======
-=======
             if isinstance(path, list) and any("," in p for p in path):
                 logger.warning(
                     "nixl_path entries contain commas; joining for PathSharder may "
                     "cause unintended sharding. Consider paths without commas or a "
                     "single comma-separated string."
                 )
->>>>>>> aaf537ab (Add docstring and warning for nixl createPool path sharding)
             sharder = PathSharder(
                 raw_csv=path if isinstance(path, str) else ",".join(path),
                 strategy=path_sharding,
@@ -973,9 +941,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
                 create_dirs=True,
             )
             return NixlFilePool(size, sharder, use_direct_io)
->>>>>>> f3da3a27 (Rebase NIXL multipath support to use PathSharder)
-        elif backend in ("OBJ"):
->>>>>>> b93d0c09 (Use metadata.worker_id for path sharding instead of torch.cuda.current_device())
+        elif backend in ("OBJ", "AZURE_BLOB"):
             return NixlObjectPool(size)
         else:
             raise ValueError(f"Unsupported NIXL backend: {backend}")
