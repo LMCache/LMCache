@@ -285,9 +285,28 @@ class PageBufferShapeDesc:
     Mirrors the pybind ``def_readwrite`` attributes in ``csrc/pybind.cpp``
     so non-CUDA code paths can construct and inspect shape descriptors
     without the compiled extension.
+
+    ``block_stride_elems`` captures the *physical* per-block step in
+    element units (= ``tensor.stride(0)``). For a tightly-packed paged
+    buffer it equals ``bs * kv_size * nh * hs`` (non-MLA) /
+    ``bs * nh * hs`` (MLA); for a vLLM KV pool where a group's row is
+    padded to the pool's maximum row width (e.g. DeepSeek V4 compressor
+    / indexer caches), it is strictly larger. Downstream kernels must
+    use this value instead of recomputing a "tight" stride from the
+    logical shape, otherwise they'll skip into the next block's padding
+    region and read/write the wrong slots.
     """
 
-    __slots__ = ("kv_size", "nl", "nb", "bs", "nh", "hs", "element_size")
+    __slots__ = (
+        "kv_size",
+        "nl",
+        "nb",
+        "bs",
+        "nh",
+        "hs",
+        "element_size",
+        "block_stride_elems",
+    )
 
     def __init__(self) -> None:
         self.kv_size: int = 0
@@ -297,6 +316,9 @@ class PageBufferShapeDesc:
         self.nh: int = 0
         self.hs: int = 0
         self.element_size: int = 0
+        # 0 means "unset — fall back to tight stride"; any downstream
+        # consumer that needs exact addressing must check this.
+        self.block_stride_elems: int = 0
 
 
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
