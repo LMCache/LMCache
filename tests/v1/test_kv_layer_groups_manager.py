@@ -20,13 +20,13 @@ def _build_manager(
     tensors: list[torch.Tensor],
     *,
     num_blocks: int,
-    block_size: int,
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
     Tensors in these tests have shape ``[2, NB, BS, NH, HS]`` — the
     canonical vLLM flash-attention per-layer NHD layout matched by
-    ``GPUKVFormat.NL_X_TWO_NB_BS_NH_HS``.
+    ``GPUKVFormat.NL_X_TWO_NB_BS_NH_HS``. ``bs`` is discovered
+    per-layer from the tensor shapes, so callers no longer pass it.
     """
     # First Party
     import lmcache.c_ops as lmc_ops
@@ -35,7 +35,6 @@ def _build_manager(
         tensors,
         gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
-        block_size=block_size,
     )
 
 
@@ -43,12 +42,12 @@ class TestKVLayerGroupsManager:
     """Tests for KVLayerGroupsManager construction and lookups."""
 
     def test_build_empty(self):
-        manager = _build_manager([], num_blocks=32, block_size=256)
+        manager = _build_manager([], num_blocks=32)
         assert manager.kv_layer_groups == []
 
     def test_build_single_layer(self):
         tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
 
         assert len(manager.kv_layer_groups) == 1
         group = manager.kv_layer_groups[0]
@@ -66,7 +65,7 @@ class TestKVLayerGroupsManager:
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
 
         assert len(manager.kv_layer_groups) == 1
         group = manager.kv_layer_groups[0]
@@ -80,7 +79,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
         assert len(manager.kv_layer_groups) == 2
         group1, group2 = manager.kv_layer_groups
         assert group1.layer_indices == [0, 2]
@@ -94,7 +93,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float32),
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
         assert len(manager.kv_layer_groups) == 2
         group1, group2 = manager.kv_layer_groups
         assert group1.layer_indices == [0, 2]
@@ -110,7 +109,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),  # nh=8, f16
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float32),  # nh=16, f32
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
         assert len(manager.kv_layer_groups) == 4
 
         groups_by_key = {(g.shape_desc.nh, g.dtype): g for g in manager.kv_layer_groups}
@@ -124,7 +123,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
 
         sd0 = manager.get_shape_desc(0)
         assert sd0.nh == 8
