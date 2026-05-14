@@ -1095,6 +1095,13 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self.meta_fmt: Optional[MemoryFormat] = None
         self.init_chunk_meta(metadata)
 
+        # Monotonically increasing counter for OBJ device_id values.
+        # Each register/deregister cycle must use globally unique IDs to
+        # avoid a race where an async PUT deregister erases a concurrent
+        # GET registration in NIXL's devIdToObjKey_ map.
+        self._device_id_counter = 0
+        self._device_id_lock = threading.Lock()
+
         self.agent = NixlDynamicStorageAgent(
             self.memory_allocator,
             nixl_config.buffer_device,
@@ -1108,6 +1115,22 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """Configure a custom cache policy for key presence tracking."""
         if self.enable_presence_cache:
             self.key_presence_cache = cache
+
+    def _alloc_device_ids(self, count: int) -> list[int]:
+        """Allocate ``count`` globally unique OBJ device_id values.
+
+        The NIXL OBJ backend indexes registrations by device_id in a flat
+        unordered_map with no reference counting.  If two concurrent
+        operations (e.g. async PUT cleanup + sync GET) use the same
+        device_id sequence (0, 1, 2, ...), the PUT deregister can erase
+        the GET entry and cause ``prepXfer``/``postXfer`` to fail with
+        NIXL_ERR_INVALID_PARAM.  Using a monotonic counter ensures every
+        register/deregister cycle gets its own ID range.
+        """
+        with self._device_id_lock:
+            start = self._device_id_counter
+            self._device_id_counter += count
+        return list(range(start, start + count))
 
     def _cache_contains(self, chunk_hash: int) -> bool:
         if not self.enable_presence_cache or self.key_presence_cache is None:
@@ -1210,9 +1233,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             storage_indices.append(idx)
 
         if self.agent.mem_type == "OBJ":
+            device_ids = self._alloc_device_ids(len(keys))
             for idx in range(len(keys)):
                 object_key = self._format_object_key(keys[idx])
-                descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+                descs.append(NixlDesc(device_id=device_ids[idx], meta_info=object_key))
         else:
             # Already validated in validate_nixl_backend
             raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
@@ -1305,9 +1329,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         descs = []
 
         if self.agent.mem_type == "OBJ":
+            device_ids = self._alloc_device_ids(len(keys))
             for idx in range(len(keys)):
                 object_key = self._format_object_key(keys[idx])
-                descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+                descs.append(NixlDesc(device_id=device_ids[idx], meta_info=object_key))
         else:
             # Already validated in validate_nixl_backend
             raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
