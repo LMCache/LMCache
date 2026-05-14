@@ -12,11 +12,12 @@ import time
 import zmq
 
 # First Party
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import (
     EngineType,
     _lmcache_nvtx_annotate,
+    check_interprocess_event_support,
 )
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
@@ -322,12 +323,21 @@ class MPCacheEngine:
             torch_dev.device(gpu_context.device),
             torch_dev.stream(gpu_context.stream),
         ):
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
             # Wait for vLLM to finish
+            # Not all backends support IPC event handles (CUDA IPC specific)
+            if not hasattr(torch_dev.Event, "from_ipc_handle"):
+                raise RuntimeError(
+                    f"Backend '{torch_device_type}' does not support IPC event "
+                    "handles (Event.from_ipc_handle not available). "
+                    "Multiprocess IPC requires CUDA."
+                )
             vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
@@ -580,6 +590,8 @@ class MPCacheEngine:
             # Stage all block_ids to GPU once before the loop
             all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
 
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
             prefetched_keys: list[ObjectKey] = []
@@ -1176,7 +1188,14 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    torch_dev.init()
+    # Not all backends expose init(); some auto-initialize on first use
+    if not hasattr(torch_dev, "init"):
+        logger.warning(
+            "Backend '%s' does not support init(), skipping device init",
+            torch_device_type,
+        )
+    else:
+        torch_dev.init()
     server.start()
 
     logger.info("LMCache cache server is running...")
