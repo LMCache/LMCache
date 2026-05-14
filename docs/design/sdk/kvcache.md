@@ -21,11 +21,6 @@ lmc_sdk.store(
     "http://localhost:8080",
     tokens=[4, 5, 6],
 )
-lmc_sdk.lookup(
-    "http://localhost:8080",
-    model_name="meta-llama/Llama-3.1-8B-Instruct",
-    tokens=[1, 2, 3],
-)
 ```
 
 This PR intentionally does not add a CLI. A future CLI should call these
@@ -70,12 +65,9 @@ Retrieve flow:
    tensor-parallel hidden-dimension slice.
 5. Return the assembled package in memory.
 
-Lookup sends the same JSON request as retrieve and returns the metadata
-JSON directly as a typed result.
-
 ## Error Handling
 
-All public SDK functions raise `KVCacheSDKError` for invalid packages,
+All public SDK calls raise `KVCacheSDKError` for invalid packages,
 invalid server JSON, protocol failures, and non-2xx HTTP responses. The
 SDK does not retry writes; callers that need retry semantics should do so
 at the workflow layer because repeated store calls can partially overwrite

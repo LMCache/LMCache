@@ -69,16 +69,6 @@ class RetrieveResult:
     package: KVCachePackage
 
 
-@dataclass(frozen=True)
-class LookupResult:
-    """Result returned by :func:`lookup`."""
-
-    total_tokens: int
-    total_chunks: int
-    hit_tokens: int
-    hit_chunks: int
-
-
 def store(
     package: KVCachePackage,
     url: str,
@@ -230,51 +220,6 @@ def retrieve(
         hit_tokens=manifest.hit_tokens,
         hit_chunks=manifest.hit_chunks,
         package=package,
-    )
-
-
-def lookup(
-    url: str,
-    *,
-    model_name: str,
-    tokens: Sequence[int],
-    cache_salt: str = "",
-    timeout: float = 30.0,
-) -> LookupResult:
-    """Look up cached-prefix metadata without downloading KV bytes.
-
-    Args:
-        url: Base URL of the LMCache MP HTTP server.
-        model_name: Registered model name to look up.
-        tokens: Token sequence to probe.
-        cache_salt: Optional per-namespace isolation salt.
-        timeout: HTTP timeout in seconds.
-
-    Returns:
-        Cached-prefix metadata reported by the server.
-
-    Raises:
-        KVCacheSDKError: If the HTTP request fails or returns invalid JSON.
-    """
-    request = RetrieveRequest(
-        model_name=model_name,
-        tokens=list(tokens),
-        cache_salt=cache_salt,
-        protocol_version=PROTOCOL_VERSION,
-    )
-    response = httpx.post(
-        f"{_normalize_url(url)}/api/kv/lookup",
-        content=encode_retrieve_request(request),
-        headers={"Content-Type": "application/json"},
-        timeout=timeout,
-    )
-    _raise_for_status(response)
-    body = _json_object(response)
-    return LookupResult(
-        total_tokens=_json_int(body, "total_tokens"),
-        total_chunks=_json_int(body, "total_chunks"),
-        hit_tokens=_json_int(body, "hit_tokens"),
-        hit_chunks=_json_int(body, "hit_chunks"),
     )
 
 

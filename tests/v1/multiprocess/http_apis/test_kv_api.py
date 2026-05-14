@@ -509,8 +509,7 @@ def http_client(
 class TestKVApiHTTP:
     """HTTP-level tests against a FastAPI ``TestClient`` mounted with kv_api."""
 
-    @pytest.mark.parametrize("path", ["/api/kv/retrieve", "/api/kv/lookup"])
-    def test_read_does_not_block_unrelated_request(self, path: str) -> None:
+    def test_read_does_not_block_unrelated_request(self) -> None:
         """A slow KV read request does not block another HTTP request."""
 
         async def run() -> None:
@@ -531,7 +530,7 @@ class TestKVApiHTTP:
                 try:
                     blocked_request = asyncio.create_task(
                         client.post(
-                            path,
+                            "/api/kv/retrieve",
                             json={
                                 "model_name": "m",
                                 "tokens": list(range(CHUNK_SIZE)),
@@ -596,21 +595,6 @@ class TestKVApiHTTP:
         assert hit_tokens == 0
         assert hit_chunks == 0
         assert retrieved.numel() == 0
-
-    def test_lookup_returns_hit_metadata(self, http_client: TestClient) -> None:
-        tokens = _tokens_for(num_chunks=2, seed=20)
-        tensor = _make_tensor(num_chunks=2, world_size=1, seed=20)
-        http_client.post(
-            "/api/kv/store",
-            content=_store_stream("m", tokens, tensor),
-            headers={"Content-Type": STREAM_MEDIA_TYPE},
-        )
-        lookup = http_client.post(
-            "/api/kv/lookup",
-            json={"model_name": "m", "tokens": tokens},
-        )
-        assert lookup.status_code == 200
-        assert lookup.json()["hit_chunks"] == 2
 
     def test_store_reports_only_leading_complete_chunks(
         self,
@@ -741,14 +725,12 @@ class TestKVApiHTTP:
         )
         assert retrieve.status_code == 400
 
-    @pytest.mark.parametrize("path", ["/api/kv/retrieve", "/api/kv/lookup"])
     def test_invalid_cache_salt_returns_400(
         self,
         http_client: TestClient,
-        path: str,
     ) -> None:
         r = http_client.post(
-            path,
+            "/api/kv/retrieve",
             json={
                 "model_name": "m",
                 "tokens": _tokens_for(1),

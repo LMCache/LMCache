@@ -87,9 +87,6 @@ compatibility with the vLLM-embedded API server.
    * - POST
      - ``/api/kv/retrieve``
      - Retrieve KV cache bytes for a token sequence's longest cached prefix.
-   * - POST
-     - ``/api/kv/lookup``
-     - Probe the cached-prefix length for a token sequence (no payload).
    * - GET
      - ``/api/quota``
      - List every registered ``cache_salt`` quota with live usage.
@@ -353,8 +350,7 @@ client assembles retrieve shards into the full
    * **Homogeneous attention** — exactly one KV layer group per model.
      **Hybrid attention is not supported in v1.** Models that publish
      multiple KV layer groups (e.g. sliding-window mixed with full
-     attention) will reject ``store`` / ``retrieve`` / ``lookup`` with
-     ``HTTP 400``.
+     attention) will reject ``store`` / ``retrieve`` with ``HTTP 400``.
    * **KV_2LTD layout** — the per-shard tensor must be a 4-D
      ``[2, num_layers, num_tokens, hidden_dim]`` arrangement. Other
      layouts (e.g. ``KV_T2D``, ``KV_MLA_FMT``) are not exposed by these
@@ -442,24 +438,6 @@ payloads. A miss still returns ``200 OK``; the manifest reports
 ``retrieve_manifest`` fields include ``total_tokens``, ``total_chunks``,
 ``hit_tokens``, ``hit_chunks``, ``chunk_size``, ``world_size``, full hit
 ``shape``, per-worker ``shard_shape``, and ``dtype``.
-
-``POST /api/kv/lookup``
-^^^^^^^^^^^^^^^^^^^^^^^
-
-Probe the cached-prefix length without moving payload bytes. The request
-body is the same JSON object used by retrieve.
-
-**Response** (``200 OK``):
-
-.. code-block:: json
-
-    {
-      "protocol_version": 1,
-      "total_tokens": 768,
-      "total_chunks": 3,
-      "hit_tokens": 512,
-      "hit_chunks": 2
-    }
 
 All ``/api/kv/*`` endpoints return ``400`` for unknown models or invalid
 metadata and ``503`` when the engine is not initialized.

@@ -55,7 +55,7 @@ class StoreManifest:
 
 @dataclass(frozen=True)
 class RetrieveRequest:
-    """JSON request body for retrieve and lookup endpoints."""
+    """JSON request body for the retrieve endpoint."""
 
     model_name: str
     tokens: list[int]
@@ -203,7 +203,7 @@ def decode_store_chunk(frame: KVFrame) -> tuple[int, bytes]:
 
 
 def encode_retrieve_request(request: RetrieveRequest) -> bytes:
-    """Encode a retrieve or lookup JSON request body."""
+    """Encode a retrieve JSON request body."""
     body = {
         "model_name": request.model_name,
         "tokens": request.tokens,

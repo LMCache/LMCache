@@ -7,7 +7,7 @@ import asyncio
 
 # Third Party
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 import torch
 
@@ -32,8 +32,8 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
-class _LookupOrRetrieveBody(BaseModel):
-    """JSON body for ``/api/kv/retrieve`` and ``/api/kv/lookup``."""
+class _RetrieveBody(BaseModel):
+    """JSON body for ``/api/kv/retrieve``."""
 
     model_name: str = Field(..., description="Registered model name.")
     tokens: list[int] = Field(..., description="Token sequence to address.")
@@ -191,7 +191,7 @@ async def store(request: Request) -> dict[str, int | str]:
 
 
 @router.post("/api/kv/retrieve")
-async def retrieve(body: _LookupOrRetrieveBody, request: Request) -> StreamingResponse:
+async def retrieve(body: _RetrieveBody, request: Request) -> StreamingResponse:
     """Retrieve KV cache bytes as a versioned shard stream."""
     _check_protocol_version(body.protocol_version)
     engine = _engine_or_503(request)
@@ -213,41 +213,4 @@ async def retrieve(body: _LookupOrRetrieveBody, request: Request) -> StreamingRe
     return StreamingResponse(
         _retrieve_stream(body.model_name, result, engine.chunk_size),
         media_type=STREAM_MEDIA_TYPE,
-    )
-
-
-@router.post("/api/kv/lookup")
-async def lookup(body: _LookupOrRetrieveBody, request: Request) -> JSONResponse:
-    """Probe how much of ``tokens`` is currently cached, without moving bytes."""
-    _check_protocol_version(body.protocol_version)
-    engine = _engine_or_503(request)
-    result: RetrieveBytesResult | None = None
-    try:
-        result = await asyncio.to_thread(
-            engine.retrieve_kv_bytes_by_tokens,
-            body.model_name,
-            body.tokens,
-            cache_salt=body.cache_salt,
-        )
-    except KeyError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"model_name {body.model_name!r} is not registered with this engine",
-        ) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    finally:
-        if result is not None:
-            result.close()
-
-    if result is None:
-        raise HTTPException(status_code=500, detail="lookup result unavailable")
-    return JSONResponse(
-        {
-            "protocol_version": body.protocol_version,
-            "total_tokens": result.total_tokens,
-            "total_chunks": result.total_chunks,
-            "hit_tokens": result.hit_tokens,
-            "hit_chunks": result.hit_chunks,
-        }
     )

@@ -5,9 +5,9 @@
 
 ## Goal
 
-Expose three HTTP endpoints - `POST /api/kv/store`,
-`POST /api/kv/retrieve`, and `POST /api/kv/lookup` - on the LMCache MP
-server so an external client can store, retrieve, and inspect KV cache
+Expose two HTTP endpoints - `POST /api/kv/store` and
+`POST /api/kv/retrieve` - on the LMCache MP server so an external client
+can store and retrieve KV cache
 bytes keyed by a token sequence.
 
 V1 keeps the server transport as HTTP. The client-facing interface added
@@ -20,11 +20,6 @@ The HTTP API uses two bytes-level `MPCacheEngine` methods:
 
 - `store_kv_bytes_by_tokens(...) -> StoreBytesResult`
 - `retrieve_kv_bytes_by_tokens(...) -> RetrieveBytesResult`
-
-There is no separate engine lookup method. The HTTP lookup endpoint calls
-`retrieve_kv_bytes_by_tokens`, reads only the prefix metadata, and closes
-the lazy result immediately. This keeps the new `MPCacheEngine` surface
-minimal while preserving a cheap public lookup route.
 
 The storage implementation lives in `lmcache/v1/multiprocess/kv_bytes.py`
 and the `MPCacheEngine` methods are thin wrappers. This keeps the server
@@ -80,12 +75,6 @@ Retrieve is non-destructive and ignores the engine's
 `remove_after_retrieve` setting. Callers must consume the shard iterator
 or call `RetrieveBytesResult.close()` so storage read locks are released.
 
-### Lookup
-
-Lookup returns the same prefix metadata as retrieve but no payload. It is
-implemented by immediately closing the retrieve result after reading
-`total_tokens`, `total_chunks`, `hit_tokens`, and `hit_chunks`.
-
 ## 3. Versioned Wire Protocol
 
 The wire protocol is isolated in
@@ -129,7 +118,7 @@ helpers rather than open-coding frame JSON.
 
 ## 4. HTTP Surface
 
-Three POST endpoints are served from
+Two POST endpoints are served from
 `lmcache/v1/multiprocess/http_apis/kv_api.py`. POST is used because token
 sequences are too large for URL parameters.
 
@@ -166,19 +155,6 @@ It returns `Content-Type: application/x-lmcache-kv-stream; v=1` with one
 `retrieve_manifest` frame followed by zero or more `retrieve_shard` frames.
 A miss still returns `200 OK`; the manifest reports `hit_chunks: 0` and an
 empty full shape.
-
-`POST /api/kv/lookup` consumes the same JSON body as retrieve and returns
-JSON metadata without payload bytes:
-
-```json
-{
-  "protocol_version": 1,
-  "total_tokens": 768,
-  "total_chunks": 3,
-  "hit_tokens": 512,
-  "hit_chunks": 2
-}
-```
 
 All endpoints return `400` for unknown models, unsupported protocol
 versions, invalid metadata, or unsupported registered layouts, and `503`

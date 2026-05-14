@@ -235,13 +235,6 @@ def run(args: argparse.Namespace) -> None:
             "source and target prompts must share the cache-covered trailing tokens"
         )
 
-    target_lookup_before = lmc_sdk.lookup(
-        args.lmcache_url,
-        model_name=lmcache_model_name,
-        tokens=target_tokens,
-        timeout=args.timeout,
-    )
-
     print("== Step 3: store source KV under different target token IDs ==")
     store_result = lmc_sdk.store(
         retrieve_result.package,
@@ -250,22 +243,10 @@ def run(args: argparse.Namespace) -> None:
         tokens=target_prefix_tokens,
         timeout=args.timeout,
     )
-
-    target_lookup_after = lmc_sdk.lookup(
-        args.lmcache_url,
-        model_name=lmcache_model_name,
-        tokens=target_tokens,
-        timeout=args.timeout,
-    )
     if store_result.stored_tokens < retrieve_result.hit_tokens:
         raise RuntimeError(
             "remap store wrote fewer tokens than were retrieved: "
             f"{store_result.stored_tokens} < {retrieve_result.hit_tokens}"
-        )
-    if target_lookup_after.hit_tokens < retrieve_result.hit_tokens:
-        raise RuntimeError(
-            "target lookup did not hit the remapped prefix: "
-            f"{target_lookup_after.hit_tokens} < {retrieve_result.hit_tokens}"
         )
 
     print("== Step 4: target inference reuses the remapped token IDs ==")
@@ -287,8 +268,6 @@ def run(args: argparse.Namespace) -> None:
         "target_prompt_tokens": len(target_tokens),
         "retrieved_hit_tokens": retrieve_result.hit_tokens,
         "retrieved_hit_chunks": retrieve_result.hit_chunks,
-        "target_lookup_before_hit_tokens": target_lookup_before.hit_tokens,
-        "target_lookup_after_hit_tokens": target_lookup_after.hit_tokens,
         "source_target_same_length": len(source_tokens) == len(target_tokens),
         "source_target_last_hit_tokens_match": source_tokens[
             -retrieve_result.hit_tokens :
@@ -304,7 +283,6 @@ def run(args: argparse.Namespace) -> None:
             "hit_tokens": retrieve_result.hit_tokens,
             "hit_chunks": retrieve_result.hit_chunks,
         },
-        "target_lookup_after_remap": target_lookup_after.__dict__,
         "source_latency_seconds": source_completion.elapsed_seconds,
         "target_latency_seconds": target_completion.elapsed_seconds,
         "source_output_preview": _short_text(source_completion.text),

@@ -1,6 +1,6 @@
 # KV Cache SDK Examples
 
-These examples show how to use the Python SDK to store, look up, and retrieve
+These examples show how to use the Python SDK to store and retrieve
 KV cache tensors through the LMCache MP HTTP API. The SDK path is memory-first:
 applications can retrieve a tensor package, edit its metadata, and store it
 again without writing the tensor through a local storage format.
@@ -18,8 +18,8 @@ end-to-end KV remapping experiment:
    tokens.
 4. Store the source KV under the target prefix with `lmcache.sdk.store`.
 5. Send the target token IDs to vLLM so the target prefix hits the remapped KV.
-6. Print retrieve and lookup counts, latencies, response previews, and whether
-   the source and target outputs match.
+6. Print retrieve counts, latencies, response previews, and whether the source
+   and target outputs match.
 
 The target prompt starts with different token IDs, so it does not rely on a
 serving-engine local prefix match. Because the prompts have identical trailing
@@ -86,15 +86,6 @@ python examples/kvcache_sdk/store_retrieve.py store-generated \
   --num-layers 32 \
   --hidden-dim 4096 \
   --dtype bfloat16
-```
-
-Probe the cached prefix:
-
-```bash
-python examples/kvcache_sdk/store_retrieve.py lookup \
-  --url http://localhost:8080 \
-  --model-name meta-llama/Llama-3.1-8B-Instruct \
-  --num-tokens 256
 ```
 
 Retrieve the hit prefix into memory and print only metadata about the returned

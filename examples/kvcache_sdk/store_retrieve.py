@@ -55,18 +55,6 @@ def _store_generated(args: argparse.Namespace) -> None:
     print(json.dumps(result.__dict__, indent=2, default=str))
 
 
-def _lookup(args: argparse.Namespace) -> None:
-    """Look up a cached prefix through the SDK."""
-    result = lmc_sdk.lookup(
-        args.url,
-        model_name=args.model_name,
-        tokens=_tokens(args.token_start, args.num_tokens),
-        cache_salt=args.cache_salt,
-        timeout=args.timeout,
-    )
-    print(json.dumps(result.__dict__, indent=2))
-
-
 def _retrieve(args: argparse.Namespace) -> None:
     """Retrieve a cached prefix into memory through the SDK."""
     result = lmc_sdk.retrieve(
@@ -120,18 +108,13 @@ def _add_package_args(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser for the example script."""
     parser = argparse.ArgumentParser(
-        description="Store, look up, and retrieve KV cache tensors via lmcache.sdk."
+        description="Store and retrieve KV cache tensors via lmcache.sdk."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     store_generated = subparsers.add_parser("store-generated")
     _add_common_http_args(store_generated)
     _add_package_args(store_generated)
-
-    lookup = subparsers.add_parser("lookup")
-    _add_common_http_args(lookup)
-    _add_token_args(lookup)
-    lookup.add_argument("--model-name", required=True)
 
     retrieve = subparsers.add_parser("retrieve")
     _add_common_http_args(retrieve)
@@ -146,8 +129,6 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.command == "store-generated":
         _store_generated(args)
-    elif args.command == "lookup":
-        _lookup(args)
     elif args.command == "retrieve":
         _retrieve(args)
     else:

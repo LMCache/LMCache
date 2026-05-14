@@ -244,37 +244,6 @@ def test_retrieve_rejects_missing_shard(
         )
 
 
-def test_lookup_returns_server_metadata(monkeypatch) -> None:
-    """``lmc_sdk.lookup`` returns hit metadata from the server JSON body."""
-
-    def fake_post(
-        url: str,
-        content: bytes,
-        headers: dict[str, str],
-        timeout: float,
-    ) -> httpx.Response:
-        return _response(
-            "POST",
-            url,
-            json_body={
-                "protocol_version": 1,
-                "total_tokens": 32,
-                "total_chunks": 2,
-                "hit_tokens": 16,
-                "hit_chunks": 1,
-            },
-        )
-
-    monkeypatch.setattr(httpx, "post", fake_post)
-    result = lmc_sdk.lookup(
-        "localhost:8080",
-        model_name="m",
-        tokens=list(range(32)),
-    )
-    assert result.total_chunks == 2
-    assert result.hit_chunks == 1
-
-
 def _chunk_payload(tensor: torch.Tensor, chunk_index: int) -> bytes:
     start = chunk_index * CHUNK_SIZE
     end = start + CHUNK_SIZE
