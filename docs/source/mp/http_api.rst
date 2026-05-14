@@ -82,6 +82,18 @@ compatibility with the vLLM-embedded API server.
      - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
+     - ``/dax/status``
+     - Report runtime-manageable Device-DAX L2 adapters and devices.
+   * - POST
+     - ``/dax/add``
+     - Add an existing Device-DAX path to a hotplug-enabled DAX adapter.
+   * - POST
+     - ``/dax/remove``
+     - Migrate, evict, or drain one Device-DAX path from a DAX adapter.
+   * - POST
+     - ``/dax/resize``
+     - Grow or shrink one Device-DAX mapping.
+   * - GET
      - ``/quota``
      - List every registered ``cache_salt`` quota with live usage.
    * - PUT
@@ -298,6 +310,23 @@ The request body is ignored.
 .. code-block:: bash
 
     curl -s -X POST http://localhost:8080/clear-cache
+
+.. _mp-http-dax-api:
+
+``/dax/*`` — Device-DAX runtime hotplug
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These endpoints are available when the server has a hotplug-enabled
+``dax`` L2 adapter. They only change LMCache runtime mappings; the DAX
+device paths must already exist and be readable and writable by the server.
+
+Use JSON request bodies because DAX paths contain slashes. ``add`` and
+``resize`` accept ``size`` as an integer byte count or a string such as
+``"100GiB"``. ``remove`` supports ``migrate``, ``evict``, and ``drain``;
+``resize`` supports ``migrate`` and ``evict``.
+
+See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
+mode semantics, and validation guidance.
 
 .. _mp-http-quota-api:
 

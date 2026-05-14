@@ -4,6 +4,7 @@ Tests for the DAX MP L2 adapter.
 """
 
 # Standard
+from typing import cast
 import select
 import threading
 import time
@@ -23,14 +24,17 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_registered_l2_adapter_types,
 )
 from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
+    DaxDeviceConfig,
     DaxL2Adapter,
     DaxL2AdapterConfig,
 )
+from lmcache.v1.distributed.l2_adapters.hotplug import L2HotplugError
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
@@ -120,14 +124,43 @@ def make_adapter(
         fout.truncate(arena_bytes)
 
     config = DaxL2AdapterConfig(
-        device_path=str(device_path),
-        max_dax_size_gb=arena_bytes / (1024**3),
+        devices=[
+            DaxDeviceConfig(
+                device_path=str(device_path),
+                max_dax_size_gb=arena_bytes / (1024**3),
+            )
+        ],
         slot_bytes=slot_bytes,
         num_store_workers=num_store_workers,
         num_lookup_workers=num_lookup_workers,
         num_load_workers=num_load_workers,
     )
     return DaxL2Adapter(config), config
+
+
+def make_hotplug_adapter(tmp_path, *, slot_bytes: int = 2048) -> DaxL2Adapter:
+    devices = []
+    for i in range(2):
+        device_path = tmp_path / f"dax_hotplug_{i}.bin"
+        with open(device_path, "wb") as fout:
+            fout.truncate(slot_bytes * 2)
+        devices.append(
+            DaxDeviceConfig(
+                device_path=str(device_path),
+                max_dax_size_gb=(slot_bytes * 2) / (1024**3),
+            )
+        )
+
+    return DaxL2Adapter(
+        DaxL2AdapterConfig(
+            devices=devices,
+            hotplug_enabled=True,
+            slot_bytes=slot_bytes,
+            num_store_workers=1,
+            num_lookup_workers=1,
+            num_load_workers=1,
+        )
+    )
 
 
 def store_and_wait(adapter: DaxL2Adapter, key: ObjectKey, obj: MemoryObj) -> None:
@@ -141,6 +174,26 @@ def bitmap_to_bools(bitmap: Bitmap, size: int) -> list[bool]:
     return [bitmap.test(i) for i in range(size)]
 
 
+def lookup_and_wait(adapter: DaxL2Adapter, keys: list[ObjectKey]) -> list[bool]:
+    task_id = adapter.submit_lookup_and_lock_task(keys)
+    assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
+    bitmap = adapter.query_lookup_and_lock_result(task_id)
+    assert bitmap is not None
+    return bitmap_to_bools(bitmap, len(keys))
+
+
+def load_and_wait(
+    adapter: DaxL2Adapter,
+    keys: list[ObjectKey],
+    objs: list[MemoryObj],
+) -> list[bool]:
+    task_id = adapter.submit_load_task(keys, objs)
+    assert wait_for_event_fd(adapter.get_load_event_fd())
+    bitmap = adapter.query_load_result(task_id)
+    assert bitmap is not None
+    return bitmap_to_bools(bitmap, len(keys))
+
+
 def test_dax_adapter_registers_and_has_distinct_eventfds(tmp_path):
     adapter, _ = make_adapter(tmp_path)
     try:
@@ -151,6 +204,173 @@ def test_dax_adapter_registers_and_has_distinct_eventfds(tmp_path):
         assert len({store_fd, lookup_fd, load_fd}) == 3
     finally:
         adapter.close()
+
+
+def test_dax_hotplug_remove_migrate_preserves_loadability(tmp_path):
+    adapter = make_hotplug_adapter(tmp_path)
+    listener = _RecordingListener()
+    adapter.register_listener(listener)
+    obj = create_memory_obj(fill_value=9)
+    target = create_memory_obj(fill_value=0)
+    try:
+        key = create_object_key(80)
+        store_and_wait(adapter, key, obj)
+        source_path = adapter.hotplug_status()["devices"][0]["device_path"]
+
+        result = adapter.hotplug_remove_device(source_path, "migrate")
+
+        assert result["state"] == "removed"
+        assert result["moved_keys"] == 1
+        assert result["deleted_keys"] == 0
+        assert result["source_slots_freed"] == 1
+        assert listener.deleted == []
+        assert lookup_and_wait(adapter, [key]) == [True]
+        assert load_and_wait(adapter, [key], [target]) == [True]
+        assert target.tensor is not None
+        assert torch.all(target.tensor == 9)
+        adapter.submit_unlock([key])
+    finally:
+        obj.ref_count_down()
+        target.ref_count_down()
+        adapter.close()
+
+
+def test_dax_hotplug_drain_stops_new_writes_to_source_device(tmp_path):
+    adapter = make_hotplug_adapter(tmp_path)
+    obj0 = create_memory_obj(fill_value=1)
+    obj1 = create_memory_obj(fill_value=2)
+    try:
+        store_and_wait(adapter, create_object_key(81), obj0)
+        devices_before = adapter.hotplug_status()["devices"]
+        source_path = devices_before[0]["device_path"]
+        source_live_slots = devices_before[0]["live_slot_count"]
+
+        result = adapter.hotplug_remove_device(source_path, "drain")
+
+        assert result["status"] == "ok"
+        assert result["state"] == "draining"
+        store_and_wait(adapter, create_object_key(82), obj1)
+        devices = adapter.hotplug_status()["devices"]
+        assert devices[0]["live_slot_count"] == source_live_slots
+        assert devices[1]["live_slot_count"] == 1
+    finally:
+        obj0.ref_count_down()
+        obj1.ref_count_down()
+        adapter.close()
+
+
+def test_dax_hotplug_remove_blocked_restores_active_state(tmp_path):
+    adapter = make_hotplug_adapter(tmp_path)
+    obj = create_memory_obj(fill_value=5)
+    try:
+        key = create_object_key(84)
+        store_and_wait(adapter, key, obj)
+        source_path = adapter.hotplug_status()["devices"][0]["device_path"]
+        assert lookup_and_wait(adapter, [key]) == [True]
+
+        with pytest.raises(L2HotplugError) as exc_info:
+            adapter.hotplug_remove_device(source_path, "migrate")
+
+        assert exc_info.value.status_code == 409
+        assert adapter.hotplug_status()["devices"][0]["state"] == "active"
+        adapter.submit_unlock([key])
+    finally:
+        obj.ref_count_down()
+        adapter.close()
+
+
+def test_dax_hotplug_remove_migrate_rejects_duplicate_destination_key(tmp_path):
+    adapter = make_hotplug_adapter(tmp_path)
+    source_obj = create_memory_obj(fill_value=1)
+    duplicate_obj = create_memory_obj(fill_value=9)
+    target = create_memory_obj(fill_value=0)
+    try:
+        key = create_object_key(83)
+        store_and_wait(adapter, key, source_obj)
+        source_path = adapter.hotplug_status()["devices"][0]["device_path"]
+        destination = adapter._devices[1]
+        assert destination.core.put_many([key], [duplicate_obj]) == [True]
+
+        with pytest.raises(L2HotplugError) as exc_info:
+            adapter.hotplug_remove_device(source_path, "migrate")
+
+        assert exc_info.value.status_code == 409
+        assert adapter.hotplug_status()["devices"][0]["state"] == "active"
+        assert lookup_and_wait(adapter, [key]) == [True]
+        assert load_and_wait(adapter, [key], [target]) == [True]
+        assert target.tensor is not None
+        assert torch.all(target.tensor == 1)
+        adapter.submit_unlock([key])
+    finally:
+        source_obj.ref_count_down()
+        duplicate_obj.ref_count_down()
+        target.ref_count_down()
+        adapter.close()
+
+
+def test_dax_hotplug_remove_evict_notifies_logical_delete(tmp_path):
+    adapter = make_hotplug_adapter(tmp_path)
+    listener = _RecordingListener()
+    adapter.register_listener(listener)
+    obj = create_memory_obj(fill_value=1)
+    try:
+        key = create_object_key(85)
+        store_and_wait(adapter, key, obj)
+        source_path = adapter.hotplug_status()["devices"][0]["device_path"]
+
+        result = adapter.hotplug_remove_device(source_path, "evict")
+
+        assert result["deleted_keys"] == 1
+        assert result["source_slots_freed"] == 1
+        assert listener.deleted == [[key]]
+    finally:
+        obj.ref_count_down()
+        adapter.close()
+
+
+def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path):
+    adapter = DaxL2Adapter(
+        DaxL2AdapterConfig(
+            devices=[],
+            hotplug_enabled=True,
+            slot_bytes=2048,
+            num_store_workers=1,
+            num_lookup_workers=1,
+            num_load_workers=1,
+        )
+    )
+    missing_path = str(tmp_path / "missing_dax.bin")
+    try:
+        with pytest.raises(L2HotplugError) as exc_info:
+            adapter.hotplug_add_device(missing_path, 2048)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.payload == {"error": "failed to map DAX device"}
+        assert missing_path not in str(exc_info.value.payload)
+    finally:
+        adapter.close()
+
+
+class _FakeHotplugAdapter:
+    def hotplug_status(self) -> dict:
+        return {"hotplug_enabled": True, "devices": []}
+
+
+class _SerdeLikeWrapper:
+    def __init__(self, inner_adapter: _FakeHotplugAdapter) -> None:
+        self.inner_adapter = inner_adapter
+
+
+def test_storage_manager_finds_serde_wrapped_hotplug_adapter():
+    sm = StorageManager.__new__(StorageManager)
+    sm._l2_adapters = [
+        cast(L2AdapterInterface, _SerdeLikeWrapper(_FakeHotplugAdapter()))
+    ]
+
+    status = sm.dax_hotplug_status()
+
+    assert status["enabled"] is True
+    assert status["num_dax_adapters"] == 1
 
 
 def test_dax_adapter_store_lookup_load_and_one_shot_results(tmp_path):
@@ -440,8 +660,12 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         l2_adapter_config=L2AdaptersConfig(
             [
                 DaxL2AdapterConfig(
-                    device_path=str(device_path),
-                    max_dax_size_gb=(slot_bytes * 4) / (1024**3),
+                    devices=[
+                        DaxDeviceConfig(
+                            device_path=str(device_path),
+                            max_dax_size_gb=(slot_bytes * 4) / (1024**3),
+                        )
+                    ],
                     slot_bytes=slot_bytes,
                 )
             ]
@@ -464,8 +688,10 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         sm.finish_write([key])
 
         assert wait_for_condition(
-            lambda: sm.report_status()["l1_manager"]["total_object_count"] == 0
-            and adapter.get_usage().usage_fraction > 0,
+            lambda: (
+                sm.report_status()["l1_manager"]["total_object_count"] == 0
+                and adapter.get_usage().usage_fraction > 0
+            ),
             timeout=5.0,
         )
 
@@ -515,8 +741,12 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
         fout.truncate(slot_bytes * 2)
 
     dax_config = DaxL2AdapterConfig(
-        device_path=str(device_path),
-        max_dax_size_gb=(slot_bytes * 2) / (1024**3),
+        devices=[
+            DaxDeviceConfig(
+                device_path=str(device_path),
+                max_dax_size_gb=(slot_bytes * 2) / (1024**3),
+            )
+        ],
         slot_bytes=slot_bytes,
     )
     dax_config.eviction_config = EvictionConfig(
@@ -562,8 +792,9 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
             reserved[key].tensor.fill_(fill_value)
             sm.finish_write([key])
             assert wait_for_condition(
-                lambda: adapter.get_usage().usage_fraction
-                == pytest.approx(usage_fraction),
+                lambda: (
+                    adapter.get_usage().usage_fraction == pytest.approx(usage_fraction)
+                ),
                 timeout=5.0,
             )
 
