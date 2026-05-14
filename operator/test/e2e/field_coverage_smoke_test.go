@@ -35,18 +35,17 @@ import (
 	"github.com/LMCache/LMCache/test/utils"
 )
 
-// TMOP-21: field coverage smoke checks that non-default spec fields
-// flow through to the reconciled K8s objects.
+// Field coverage smoke checks that non-default spec fields flow
+// through to the reconciled K8s objects.
 //
-//	S-3 ServiceMonitor:    enabling prometheus.serviceMonitor produces
-//	                       a ServiceMonitor CR with the configured
-//	                       labels. Auto-skipped when the Prometheus
-//	                       Operator CRDs are absent.
-//	S-4 extraArgs:         the user's --max-workers 4 wins over the
-//	                       operator's auto-generated --max-workers 1
-//	                       (extraArgs are appended LAST by contract).
-//	S-5 resourceOverrides: an explicit resourceOverrides block fully
-//	                       replaces the auto-computed memory request.
+//   - ServiceMonitor:    enabling prometheus.serviceMonitor produces a
+//     ServiceMonitor CR with the configured labels. Auto-skipped when
+//     the Prometheus Operator CRDs are absent.
+//   - extraArgs:         the user's --max-workers 4 wins over the
+//     operator's auto-generated --max-workers 1 (extraArgs are
+//     appended LAST by contract).
+//   - resourceOverrides: an explicit resourceOverrides block fully
+//     replaces the auto-computed memory request.
 var _ = Describe("LMCacheEngine field coverage smoke (no-GPU)", Ordered, func() {
 	var (
 		ctx    context.Context
@@ -62,9 +61,9 @@ var _ = Describe("LMCacheEngine field coverage smoke (no-GPU)", Ordered, func() 
 		recordOnFailure(nsName)
 	})
 
-	It("(S-3) creates a ServiceMonitor with the configured labels", func() {
+	It("creates a ServiceMonitor with the configured labels", func() {
 		if !serviceMonitorCRDInstalled() {
-			Skip("monitoring.coreos.com ServiceMonitor CRD not installed; skipping S-3")
+			Skip("monitoring.coreos.com ServiceMonitor CRD not installed; skipping ServiceMonitor spec")
 		}
 
 		lmc, err := utils.NewLMCFromFixture("lmc_servicemonitor.yaml", nsName, "")
@@ -85,7 +84,7 @@ var _ = Describe("LMCacheEngine field coverage smoke (no-GPU)", Ordered, func() 
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	It("(S-4) lets spec.extraArgs override the auto-generated --max-workers", func() {
+	It("lets spec.extraArgs override the auto-generated --max-workers", func() {
 		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "fields-extraargs")
 		Expect(err).NotTo(HaveOccurred())
 		lmc.Spec.ExtraArgs = []string{"--max-workers", "4"}
@@ -107,7 +106,7 @@ var _ = Describe("LMCacheEngine field coverage smoke (no-GPU)", Ordered, func() 
 		}, 30*time.Second, time.Second).Should(Succeed())
 	})
 
-	It("(S-5) lets spec.resourceOverrides replace the auto-computed memory", func() {
+	It("lets spec.resourceOverrides replace the auto-computed memory", func() {
 		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "fields-resourceoverride")
 		Expect(err).NotTo(HaveOccurred())
 		lmc.Spec.ResourceOverrides = &corev1.ResourceRequirements{

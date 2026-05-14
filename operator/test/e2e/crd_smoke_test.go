@@ -36,16 +36,16 @@ import (
 	"github.com/LMCache/LMCache/test/utils"
 )
 
-// TMOP-19 / S-1 + S-2: validate that applying an LMCacheEngine produces
-// the documented K8s objects with the documented shape. Two fixtures
-// exercise the same assertions: lmc_minimal (defaults) and lmc_custom_port
-// (port=6555, chunkSize=128). The minimal fixture additionally diffs the
-// connection ConfigMap against a checked-in golden file so schema drift
-// in kv-transfer-config.json fails loudly.
+// Validate that applying an LMCacheEngine produces the documented K8s
+// objects with the documented shape. Two fixtures exercise the same
+// assertions: lmc_minimal (defaults) and lmc_custom_port (port=6555,
+// chunkSize=128). The minimal fixture additionally diffs the connection
+// ConfigMap against a checked-in golden file so schema drift in
+// kv-transfer-config.json fails loudly.
 //
-// The first It block in this file is the TMOP-18 harness sanity check —
-// kept intentionally cheap so a broken helper fails before the richer
-// reconciliation specs run.
+// The first It block is a harness sanity check — kept intentionally
+// cheap so a broken helper fails before the richer reconciliation
+// specs run.
 var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 	var (
 		ctx    context.Context
@@ -61,7 +61,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 		recordOnFailure(nsName)
 	})
 
-	It("reconciles a minimal CR and cleans up on delete (TMOP-18 harness check)", func() {
+	It("reconciles a minimal CR and cleans up on delete (harness check)", func() {
 		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "smoke-harness")
 		Expect(err).NotTo(HaveOccurred())
 
@@ -86,7 +86,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 		)).To(Succeed())
 	})
 
-	It("(S-1) reconciles a minimal CR into the documented K8s artifacts", func() {
+	It("reconciles a minimal CR into the documented K8s artifacts", func() {
 		// Use the fixture's own metadata.name so the golden file's
 		// hostname matches verbatim ("smoke-minimal.<ns>.svc...").
 		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "")
@@ -124,7 +124,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 		assertGoldenKvTransferConfig(ctx, key, "kv_transfer_config_minimal.json", nsName)
 	})
 
-	It("(S-2) propagates server.port and server.chunkSize into args, Service, and ConfigMap", func() {
+	It("propagates server.port and server.chunkSize into args, Service, and ConfigMap", func() {
 		lmc, err := utils.NewLMCFromFixture("lmc_custom_port.yaml", nsName, "")
 		Expect(err).NotTo(HaveOccurred())
 

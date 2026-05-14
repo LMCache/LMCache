@@ -144,8 +144,8 @@ func GetConnectionConfig(ctx context.Context, c client.Client, key types.Namespa
 
 // PatchLMCSpec re-fetches the CR, applies mutate to the spec, and submits
 // a merge patch. The mutate callback receives a pointer to the spec and
-// must mutate in place. Use this for tests like S-6 (port update) that
-// need to model "user kubectl-patches the spec."
+// must mutate in place. Use this for tests like the port-update spec
+// that need to model "user kubectl-patches the spec."
 func PatchLMCSpec(
 	ctx context.Context,
 	c client.Client,

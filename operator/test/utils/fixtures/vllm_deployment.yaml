@@ -115,7 +115,7 @@ spec:
           configMap:
             # __ENGINE_NAME__-connection is owned by the LMCacheEngine
             # so its lifecycle is tied to the CR — the test asserts on
-            # GC of this same ConfigMap in lifecycle_smoke_test.go S-7.
+            # GC of this same ConfigMap in lifecycle_smoke_test.go.
             name: __ENGINE_NAME__-connection
             items:
               - key: kv-transfer-config.json

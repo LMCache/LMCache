@@ -35,7 +35,7 @@ import (
 	"github.com/LMCache/LMCache/test/utils"
 )
 
-// TMOP-22 / S-9: cross-namespace authSecretRef.
+// Cross-namespace authSecretRef.
 //
 // The operator mirrors a Secret referenced by spec.l2Backend.resp.
 // authSecretRef into the LMCacheEngine's namespace, then injects
@@ -69,7 +69,7 @@ var _ = Describe("LMCacheEngine cross-namespace auth smoke (no-GPU)", Ordered, f
 		recordOnFailure(nsName)
 	})
 
-	It("(S-9) mirrors a cross-namespace authSecretRef and uses env-var injection", func() {
+	It("mirrors a cross-namespace authSecretRef and uses env-var injection", func() {
 		By("creating the source Secret in the upstream namespace")
 		src := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{

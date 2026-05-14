@@ -35,16 +35,16 @@ import (
 	"github.com/LMCache/LMCache/test/utils"
 )
 
-// TMOP-20: lifecycle smoke covers the three CR-edit scenarios:
+// Lifecycle smoke covers the three CR-edit scenarios:
 //
-//	S-6 update propagation: patching spec.server.port flows into the
-//	                        ConfigMap data and DaemonSet container args.
-//	S-7 finalizer cleanup:  deleting the CR removes every owned object
-//	                        within 60s; anything longer signals a stuck
-//	                        finalizer (a real bug we want to catch).
-//	S-10 invalid spec:      l1.sizeGB=-1 is rejected by the API server
-//	                        at admission time; the controller never
-//	                        sees it and no DaemonSet/Service is created.
+//   - Update propagation: patching spec.server.port flows into the
+//     ConfigMap data and DaemonSet container args.
+//   - Finalizer cleanup:  deleting the CR removes every owned object
+//     within 60s; anything longer signals a stuck finalizer (a real
+//     bug we want to catch).
+//   - Invalid spec:       l1.sizeGB=-1 is rejected by the API server
+//     at admission time; the controller never sees it and no
+//     DaemonSet/Service is created.
 var _ = Describe("LMCacheEngine lifecycle smoke (no-GPU)", Ordered, func() {
 	var (
 		ctx    context.Context
@@ -60,7 +60,7 @@ var _ = Describe("LMCacheEngine lifecycle smoke (no-GPU)", Ordered, func() {
 		recordOnFailure(nsName)
 	})
 
-	It("(S-6) patches spec.server.port and the new value flows to ConfigMap and DaemonSet", func() {
+	It("patches spec.server.port and the new value flows to ConfigMap and DaemonSet", func() {
 		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "lifecycle-update")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(utils.ApplyLMC(ctx, k8sClient, lmc)).To(Succeed())
@@ -99,7 +99,7 @@ var _ = Describe("LMCacheEngine lifecycle smoke (no-GPU)", Ordered, func() {
 		}, 60*time.Second, time.Second).Should(Succeed())
 	})
 
-	It("(S-7) deleting the CR garbage-collects DaemonSet, Service, and ConfigMap within 60s", func() {
+	It("deletes the CR and garbage-collects DaemonSet, Service, and ConfigMap within 60s", func() {
 		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "lifecycle-delete")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(utils.ApplyLMC(ctx, k8sClient, lmc)).To(Succeed())
@@ -119,7 +119,7 @@ var _ = Describe("LMCacheEngine lifecycle smoke (no-GPU)", Ordered, func() {
 		Expect(utils.DeleteLMCAndWaitGC(ctx, k8sClient, types.NamespacedName(key), 60*time.Second)).To(Succeed())
 	})
 
-	It("(S-10) rejects l1.sizeGB=-1 at admission and creates no owned objects", func() {
+	It("rejects l1.sizeGB=-1 at admission and creates no owned objects", func() {
 		lmc, err := utils.NewLMCFromFixture("lmc_minimal.yaml", nsName, "lifecycle-invalid")
 		Expect(err).NotTo(HaveOccurred())
 		lmc.Spec.L1.SizeGB = -1

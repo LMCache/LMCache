@@ -1,4 +1,4 @@
-# ServiceMonitor smoke fixture (TMOP-21 / S-3).
+# ServiceMonitor smoke fixture.
 #
 # Enabling prometheus.serviceMonitor.enabled is the only way the operator
 # creates a monitoring.coreos.com/v1 ServiceMonitor. We pin a release

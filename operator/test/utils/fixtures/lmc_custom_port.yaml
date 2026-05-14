@@ -1,4 +1,4 @@
-# Custom-port LMCacheEngine fixture for smoke S-2.
+# Custom-port LMCacheEngine fixture for the custom-port smoke spec.
 #
 # Exercises the non-default code paths in BuildContainerArgs and
 # BuildLookupService: the controller must propagate spec.server.port

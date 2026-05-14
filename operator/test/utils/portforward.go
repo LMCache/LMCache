@@ -45,10 +45,9 @@ type PortForwardSpec struct {
 //     Safe to call multiple times.
 //   - localBase: "http://127.0.0.1:<localport>" using the first port mapping.
 //
-// Deviation from the TMOP-18 sketch: namespace is passed via the spec
-// struct rather than encoded into target, because kubectl requires
-// namespace as a separate -n flag and silently ignores prefixes embedded
-// in the target string.
+// Namespace is passed via the spec struct rather than encoded into
+// target because kubectl requires namespace as a separate -n flag
+// and silently ignores prefixes embedded in the target string.
 func PortForward(spec PortForwardSpec, ports ...string) (func(), string, error) {
 	if len(ports) == 0 {
 		return nil, "", fmt.Errorf("PortForward: at least one port mapping is required")

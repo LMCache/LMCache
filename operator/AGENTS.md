@@ -103,10 +103,10 @@ Both names point at the same image; only the hostnames differ.
 
 | Spec file | Coverage |
 |---|---|
-| `crd_smoke_test.go` | TMOP-18 harness sanity check + TMOP-19 / S-1 (minimal CR shape) + S-2 (custom port) |
-| `lifecycle_smoke_test.go` | TMOP-20 / S-6 (port update propagation), S-7 (delete + ownerRef GC), S-10 (invalid sizeGB rejection) |
-| `field_coverage_smoke_test.go` | TMOP-21 / S-3 (ServiceMonitor — auto-skipped if CRD absent), S-4 (extraArgs override), S-5 (resourceOverrides) |
-| `auth_smoke_test.go` | TMOP-22 / S-9 (cross-namespace authSecretRef mirroring + env-var injection) |
+| `crd_smoke_test.go` | harness sanity check + minimal-CR shape + custom-port propagation |
+| `lifecycle_smoke_test.go` | port update propagation, delete + ownerRef GC, invalid `sizeGB` rejection |
+| `field_coverage_smoke_test.go` | ServiceMonitor (auto-skipped if CRD absent), `extraArgs` override, `resourceOverrides` |
+| `auth_smoke_test.go` | cross-namespace `authSecretRef` mirroring + env-var injection |
 
 ### Specs included in M2 (GPU, build tag `e2e_gpu`)
 

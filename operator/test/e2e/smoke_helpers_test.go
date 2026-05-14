@@ -42,8 +42,8 @@ import (
 // nsCounter is a process-wide monotonic counter appended to every
 // generated namespace name. CurrentSpecReport().StartTime alone is not
 // enough — specs that call createTestNamespace twice in a single
-// BeforeEach (e.g. TMOP-22 / S-9, which needs both an engine namespace
-// and a source-Secret namespace) would otherwise compute the same name
+// BeforeEach (e.g. the cross-namespace auth spec, which needs both an
+// engine namespace and a source-Secret namespace) would otherwise compute the same name
 // twice and collide on AlreadyExists.
 var nsCounter atomic.Int64
 
@@ -239,7 +239,7 @@ func argValueLast(args []string, flag string) string {
 
 // serviceMonitorCRDInstalled reports whether the Prometheus Operator's
 // ServiceMonitor CRD is registered on the target cluster. Specs that
-// only make sense in that environment (TMOP-21 / S-3) call this in
+// only make sense in that environment (the ServiceMonitor spec) call this in
 // BeforeEach and Skip() when it returns false, so the same suite can
 // run unchanged on bare Kind clusters and on clusters with the
 // kube-prometheus-stack pre-installed. Errors other than NoMatch
