@@ -51,7 +51,7 @@ const metricsRoleBindingName = "operator-metrics-binding"
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
-	// Suite-level BeforeSuite (in e2e_suite_test.go) handles building/loading
+	// Suite-level BeforeSuite (in integration_suite_test.go) handles building/loading
 	// the manager image, installing CRDs, deploying the controller, and
 	// labeling the operator namespace. This Describe block focuses on the
 	// metrics-endpoint contract; per-test setup runs in AfterEach.

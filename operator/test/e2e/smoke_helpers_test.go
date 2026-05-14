@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -134,6 +135,33 @@ func dumpNamespace(ns string) {
 	} {
 		out, _ := exec.Command("kubectl", args...).CombinedOutput()
 		_, _ = fmt.Fprintf(GinkgoWriter, "$ kubectl %v\n%s\n", args, string(out))
+	}
+
+	// Per-pod logs (last 200 lines). The vLLM and LMCache pods produce
+	// most of the diagnostic signal on failure; without their logs,
+	// `describe pod` only tells us readiness flapped, not why. The
+	// `--previous` fetches the prior-instantiation logs when the
+	// container has crashed and restarted — that's where mid-inference
+	// CUDA / Python tracebacks live.
+	podNames := exec.Command("kubectl", "get", "pods", "-n", ns,
+		"-o", "jsonpath={range .items[*]}{.metadata.name} {end}")
+	out, err := podNames.Output()
+	if err != nil {
+		return
+	}
+	for _, podName := range strings.Fields(string(out)) {
+		for _, args := range [][]string{
+			{"logs", "-n", ns, podName, "--tail=200", "--all-containers"},
+			{"logs", "-n", ns, podName, "--tail=200", "--all-containers", "--previous"},
+		} {
+			cmd := exec.Command("kubectl", args...)
+			cmd.Stderr = nil // mute "previous terminated container not found" noise
+			out, _ := cmd.Output()
+			if len(out) == 0 {
+				continue
+			}
+			_, _ = fmt.Fprintf(GinkgoWriter, "$ kubectl %v\n%s\n", args, string(out))
+		}
 	}
 }
 
