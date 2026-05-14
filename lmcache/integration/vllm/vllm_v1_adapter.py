@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+import hashlib
 import math
 import os
 
@@ -93,6 +96,23 @@ class DisaggSpec:
 tmp_disagg_tracker: dict[str, DisaggSpec] = {}
 
 
+@dataclass(frozen=True)
+class HybridStateGroupSpec:
+    """Metadata for an opaque vLLM hybrid state KV cache group."""
+
+    group_id: int
+    layer_names: tuple[str, ...]
+    block_size: int
+    page_size_bytes: int
+
+
+HybridStateKey = tuple[int, str]
+HybridStatePayload = dict[tuple[int, str, int], torch.Tensor]
+_HYBRID_STATE_CACHE: OrderedDict[HybridStateKey, HybridStatePayload] = OrderedDict()
+_HYBRID_STATE_CACHE_BYTES = 0
+_HYBRID_STATE_CACHE_LOCK = Lock()
+
+
 def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
     request_configs = None
     if sampling_params and sampling_params.extra_args is not None:
@@ -103,6 +123,252 @@ def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
                         request_configs = {}
                     request_configs[k] = v
     return request_configs
+
+
+def _select_block_ids_for_group(
+    all_block_ids: Optional[tuple[list[int], ...]],
+    kv_cache_group_id: int,
+) -> list[int]:
+    """Select one KV cache group's block ids from a vLLM block-id payload."""
+    if all_block_ids is None:
+        return []
+
+    if kv_cache_group_id >= len(all_block_ids):
+        raise ValueError(
+            f"KV cache group id {kv_cache_group_id} is out of range "
+            f"for {len(all_block_ids)} block-id group(s)"
+        )
+    return all_block_ids[kv_cache_group_id].copy()
+
+
+def _normalize_all_block_ids(
+    block_ids: Union[Optional[tuple[list[int], ...]], list[int]],
+) -> Optional[tuple[list[int], ...]]:
+    """Normalize vLLM block-id payloads to one list per KV cache group."""
+    if not block_ids:
+        return None
+
+    if isinstance(block_ids, tuple):
+        return tuple(group.copy() for group in block_ids)
+
+    if isinstance(block_ids, list):
+        if all(isinstance(elem, list) for elem in block_ids):
+            return tuple(elem.copy() for elem in block_ids)
+        return (
+            [
+                i
+                for elem in block_ids
+                for i in (elem if isinstance(elem, list) else [elem])
+            ],
+        )
+
+    raise ValueError(f"Unsupported block_ids type {type(block_ids)}")
+
+
+_ATTENTION_KV_CACHE_KINDS = {
+    "chunked_local_attention",
+    "full_attention",
+    "mla_attention",
+    "sink_full_attention",
+    "sliding_window",
+    "sliding_window_mla",
+}
+_NON_RECURRENT_KV_CACHE_KINDS = _ATTENTION_KV_CACHE_KINDS | {
+    "cross_attention",
+    "encoder_only_attention",
+}
+_KV_CACHE_SPEC_KIND_BY_NAME = {
+    "ChunkedLocalAttentionSpec": "chunked_local_attention",
+    "CrossAttentionSpec": "cross_attention",
+    "EncoderOnlyAttentionSpec": "encoder_only_attention",
+    "FullAttentionSpec": "full_attention",
+    "MLAAttentionSpec": "mla_attention",
+    "MambaSpec": "mamba",
+    "SinkFullAttentionSpec": "sink_full_attention",
+    "SlidingWindowMLASpec": "sliding_window_mla",
+    "SlidingWindowSpec": "sliding_window",
+    "TQFullAttentionSpec": "full_attention",
+}
+
+
+def _kv_cache_spec_kind(kv_cache_spec: Any) -> str:
+    """Return vLLM's KV cache spec kind as a stable string."""
+    try:
+        # Third Party
+        from vllm.v1.kv_cache_interface import get_kv_cache_spec_kind
+
+        return str(get_kv_cache_spec_kind(kv_cache_spec).value)
+    except ImportError:
+        spec_name = kv_cache_spec.__class__.__name__
+        if spec_name == "UniformTypeKVCacheSpecs":
+            inner_kinds = {
+                _kv_cache_spec_kind(spec)
+                for spec in getattr(kv_cache_spec, "kv_cache_specs", {}).values()
+            }
+            return inner_kinds.pop() if len(inner_kinds) == 1 else "unknown"
+        return _KV_CACHE_SPEC_KIND_BY_NAME.get(spec_name, "unknown")
+
+
+def _is_hybrid_state_kv_cache_spec(kv_cache_spec: Any) -> bool:
+    """Return whether a vLLM KV cache spec stores opaque recurrent state."""
+    kind = _kv_cache_spec_kind(kv_cache_spec)
+    if kind != "unknown":
+        return kind not in _NON_RECURRENT_KV_CACHE_KINDS
+
+    spec_name = kv_cache_spec.__class__.__name__
+    if spec_name == "UniformTypeKVCacheSpecs":
+        specs = getattr(kv_cache_spec, "kv_cache_specs", {})
+        return bool(specs) and all(
+            _is_hybrid_state_kv_cache_spec(spec) for spec in specs.values()
+        )
+    return spec_name.endswith("Spec")
+
+
+def _get_parent_kv_cache_config(parent: KVConnectorBase_V1) -> Optional[Any]:
+    """Get vLLM's KV cache config from connector parents that expose it."""
+    get_kv_cache_config = getattr(parent, "get_lmcache_kv_cache_config", None)
+    if callable(get_kv_cache_config):
+        return get_kv_cache_config()
+    return None
+
+
+def _select_lmcache_kv_cache_group(
+    kv_cache_config: Optional[Any],
+) -> tuple[int, Optional[tuple[str, ...]], Optional[int]]:
+    """Select the vLLM KV cache group LMCache can store and retrieve."""
+    kv_cache_groups = getattr(kv_cache_config, "kv_cache_groups", None)
+    if not kv_cache_groups:
+        return 0, None, None
+
+    candidate_group_id: Optional[int] = None
+    for group_id, group in enumerate(kv_cache_groups):
+        kind = _kv_cache_spec_kind(group.kv_cache_spec)
+        if kind == "full_attention":
+            candidate_group_id = group_id
+            break
+        if candidate_group_id is None and kind in _ATTENTION_KV_CACHE_KINDS:
+            candidate_group_id = group_id
+
+    if candidate_group_id is None:
+        logger.warning(
+            "LMCache could not find a paged attention KV cache group; "
+            "falling back to group 0"
+        )
+        candidate_group_id = 0
+
+    group = kv_cache_groups[candidate_group_id]
+    layer_names = tuple(group.layer_names)
+    block_size = getattr(group.kv_cache_spec, "block_size", None)
+    logger.info(
+        "LMCache selected vLLM KV cache group %d (%s) with %d layer(s), block_size=%s",
+        candidate_group_id,
+        group.kv_cache_spec.__class__.__name__,
+        len(layer_names),
+        block_size,
+    )
+    return candidate_group_id, layer_names, block_size
+
+
+def _select_hybrid_state_kv_cache_groups(
+    kv_cache_config: Optional[Any],
+) -> tuple[HybridStateGroupSpec, ...]:
+    """Select vLLM KV groups whose opaque state must accompany attention KV."""
+    kv_cache_groups = getattr(kv_cache_config, "kv_cache_groups", None)
+    if not kv_cache_groups:
+        return ()
+
+    hybrid_groups = tuple(
+        HybridStateGroupSpec(
+            group_id=group_id,
+            layer_names=tuple(group.layer_names),
+            block_size=int(group.kv_cache_spec.block_size),
+            page_size_bytes=int(group.kv_cache_spec.page_size_bytes),
+        )
+        for group_id, group in enumerate(kv_cache_groups)
+        if _is_hybrid_state_kv_cache_spec(group.kv_cache_spec)
+        and getattr(group.kv_cache_spec, "block_size", None) is not None
+        and getattr(group.kv_cache_spec, "page_size_bytes", None) is not None
+    )
+
+    if hybrid_groups:
+        logger.info(
+            "LMCache detected %d hybrid state KV cache group(s): %s",
+            len(hybrid_groups),
+            [
+                (group.group_id, len(group.layer_names), group.block_size)
+                for group in hybrid_groups
+            ],
+        )
+    return hybrid_groups
+
+
+def _lmcache_loads_cover_all_kv_cache_groups(kv_cache_config: Optional[Any]) -> bool:
+    """Return whether one LMCache block-id stream covers vLLM's KV groups."""
+    kv_cache_groups = getattr(kv_cache_config, "kv_cache_groups", None)
+    return not kv_cache_groups or len(kv_cache_groups) <= 1
+
+
+def _hybrid_state_key(
+    token_ids: list[int],
+    num_tokens: int,
+) -> HybridStateKey:
+    """Build a stable key for a cached hybrid state prefix."""
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(num_tokens.to_bytes(8, "little", signed=False))
+    for token_id in token_ids[:num_tokens]:
+        digest.update(int(token_id).to_bytes(8, "little", signed=True))
+    return num_tokens, digest.hexdigest()
+
+
+def _hybrid_state_payload_nbytes(payload: HybridStatePayload) -> int:
+    """Return the CPU memory used by a cached hybrid-state payload."""
+    return sum(tensor.numel() * tensor.element_size() for tensor in payload.values())
+
+
+def _get_hybrid_state_payload(
+    key: HybridStateKey,
+) -> Optional[HybridStatePayload]:
+    """Return a cached hybrid-state payload and mark it recently used."""
+    with _HYBRID_STATE_CACHE_LOCK:
+        payload = _HYBRID_STATE_CACHE.get(key)
+        if payload is not None:
+            _HYBRID_STATE_CACHE.move_to_end(key)
+        return payload
+
+
+def _put_hybrid_state_payload(
+    key: HybridStateKey,
+    payload: HybridStatePayload,
+    max_bytes: int,
+) -> int:
+    """Store a hybrid-state payload and evict least-recently-used entries."""
+    global _HYBRID_STATE_CACHE_BYTES
+
+    payload_nbytes = _hybrid_state_payload_nbytes(payload)
+    with _HYBRID_STATE_CACHE_LOCK:
+        old_payload = _HYBRID_STATE_CACHE.pop(key, None)
+        if old_payload is not None:
+            _HYBRID_STATE_CACHE_BYTES -= _hybrid_state_payload_nbytes(old_payload)
+
+        _HYBRID_STATE_CACHE[key] = payload
+        _HYBRID_STATE_CACHE_BYTES += payload_nbytes
+
+        evicted = 0
+        while len(_HYBRID_STATE_CACHE) > 1 and (
+            max_bytes > 0 and _HYBRID_STATE_CACHE_BYTES > max_bytes
+        ):
+            _, evicted_payload = _HYBRID_STATE_CACHE.popitem(last=False)
+            _HYBRID_STATE_CACHE_BYTES -= _hybrid_state_payload_nbytes(evicted_payload)
+            evicted += 1
+
+        return evicted
+
+
+def _largest_aligned_token_count(num_tokens: int, alignment: int) -> int:
+    """Round a token count down to the next hybrid-state boundary."""
+    if alignment <= 0:
+        return num_tokens
+    return num_tokens // alignment * alignment
 
 
 @dataclass
@@ -119,6 +385,9 @@ class RequestTracker:
     # The block ids that has been allocated so far
     # NOTE: allocated blocks could be more than the number of tokens
     allocated_block_ids: list[int]
+
+    # All allocated block ids, grouped by vLLM KV cache group.
+    all_allocated_block_ids: Optional[tuple[list[int], ...]] = None
 
     # The number of tokens that has been saved
     num_saved_tokens: int = 0
@@ -150,6 +419,7 @@ class RequestTracker:
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
         skip_save: bool,
+        kv_cache_group_id: int = 0,
     ) -> "RequestTracker":
         """Create the request tracker from a new request.
 
@@ -164,24 +434,10 @@ class RequestTracker:
             request_priority (int): the priority of the request
             skip_save (bool): whether the request cache should be saved
         """
-        # vLLM 0.9.0 update: request.block_ids changed from list[int] to
-        # tuple[list[int]]
-        # Need to check the type of request.block_ids
-
-        unfolded_block_ids = []
-
-        if not isinstance(new_request.block_ids[0], list):
-            unfolded_block_ids = new_request.block_ids.copy()
-        else:
-            # According to the vLLM code
-            # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
-            # sched/scheduler.py#L943),
-            # only one KVCacheGroup is supported in connector for now.
-
-            # TODO: Please support multiple KVCacheGroup in connector.
-            # NOTE: Also, `update` method in RequestTracker should be
-            # updated accordingly.
-            unfolded_block_ids = new_request.block_ids[0].copy()
+        all_block_ids = _normalize_all_block_ids(new_request.block_ids)
+        unfolded_block_ids = _select_block_ids_for_group(
+            all_block_ids, kv_cache_group_id
+        )
 
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
@@ -195,6 +451,7 @@ class RequestTracker:
             prompt_len=len(new_request.prompt_token_ids),
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
             allocated_block_ids=unfolded_block_ids,
+            all_allocated_block_ids=all_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
             mm_hashes=mm_hashes,
@@ -212,6 +469,7 @@ class RequestTracker:
         lmcache_cached_tokens: int = 0,
         vllm_cached_tokens: int = 0,
         all_token_ids: Optional[list[int]] = None,
+        kv_cache_group_id: int = 0,
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
@@ -222,25 +480,10 @@ class RequestTracker:
         restore token_ids for preempted requests to ensure chunk keys match
         """
 
-        if new_block_ids is None:
-            # https://github.com/vllm-project/vllm/commit/
-            # b029de9902aa3ac58806c8c17776c7074175b6db#
-            # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94
-            new_block_ids = []
-        elif len(new_block_ids) == 0:
-            new_block_ids = []
-        elif isinstance(new_block_ids, tuple):
-            new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list):
-            # If input is a list, flatten it to handle potential nesting.
-            # This also correctly processes already-flat lists.
-            new_block_ids = [
-                i
-                for elem in new_block_ids
-                for i in (elem if isinstance(elem, list) else [elem])
-            ]
-        else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
+        all_new_block_ids = _normalize_all_block_ids(new_block_ids)
+        new_block_ids = _select_block_ids_for_group(
+            all_new_block_ids, kv_cache_group_id
+        )
 
         if preempted:
             assert all_token_ids is not None, (
@@ -248,6 +491,7 @@ class RequestTracker:
             )
             # the block ids will change after preemption
             self.allocated_block_ids = new_block_ids
+            self.all_allocated_block_ids = all_new_block_ids
             # reset the number of saved tokens
             self.num_saved_tokens = lmcache_cached_tokens
             num_computed_tokens = max(lmcache_cached_tokens, vllm_cached_tokens)
@@ -263,6 +507,18 @@ class RequestTracker:
             self.token_ids = all_token_ids[:num_tokens_needed]
         else:
             self.allocated_block_ids.extend(new_block_ids)
+            if all_new_block_ids is not None:
+                if self.all_allocated_block_ids is None or len(
+                    self.all_allocated_block_ids
+                ) != len(all_new_block_ids):
+                    self.all_allocated_block_ids = all_new_block_ids
+                else:
+                    for group_block_ids, new_group_block_ids in zip(
+                        self.all_allocated_block_ids,
+                        all_new_block_ids,
+                        strict=True,
+                    ):
+                        group_block_ids.extend(new_group_block_ids)
             self.token_ids.extend(new_token_ids)
 
         # When a request is scheduled again, and the number of new tokens
@@ -292,6 +548,8 @@ class ReqMeta:
     disagg_spec: Optional[DisaggSpec] = None
     # the configs of the request
     request_configs: Optional[dict] = None
+    # All vLLM block ids grouped by KV cache group.
+    all_block_ids: Optional[tuple[list[int], ...]] = None
 
     @staticmethod
     def from_request_tracker(
@@ -431,6 +689,11 @@ class ReqMeta:
             load_spec=load_spec,
             disagg_spec=tracker.disagg_spec,
             request_configs=tracker.request_configs,
+            all_block_ids=(
+                tuple(group.copy() for group in tracker.all_allocated_block_ids)
+                if tracker.all_allocated_block_ids is not None
+                else None
+            ),
         )
 
 
@@ -469,8 +732,58 @@ class LMCacheConnectorV1Impl:
         )
         self._apply_extra_config(config, vllm_config)
         self.config = config
+        parent_kv_cache_config = _get_parent_kv_cache_config(parent)
+        (
+            self._lmcache_kv_cache_group_id,
+            self._lmcache_kv_cache_layer_names,
+            self._lmcache_kv_cache_block_size,
+        ) = _select_lmcache_kv_cache_group(parent_kv_cache_config)
+        self._hybrid_state_kv_cache_groups = _select_hybrid_state_kv_cache_groups(
+            parent_kv_cache_config
+        )
+        self._hybrid_state_alignment_tokens = (
+            math.lcm(
+                config.chunk_size,
+                *(group.block_size for group in self._hybrid_state_kv_cache_groups),
+            )
+            if self._hybrid_state_kv_cache_groups
+            else 0
+        )
+        self._loads_cover_all_kv_cache_groups = (
+            _lmcache_loads_cover_all_kv_cache_groups(parent_kv_cache_config)
+        )
+        self._hybrid_state_cache_max_bytes = max(
+            0, int(config.max_local_cpu_size * (1 << 30))
+        )
+        if (
+            not self._loads_cover_all_kv_cache_groups
+            and self._hybrid_state_kv_cache_groups
+        ):
+            logger.info(
+                "LMCache will report external cache hits for hybrid models only "
+                "when matching local hybrid state is available. Hybrid state "
+                "byte limit: %d.",
+                self._hybrid_state_cache_max_bytes,
+            )
+        elif not self._loads_cover_all_kv_cache_groups:
+            logger.warning(
+                "LMCache detected multiple vLLM KV cache groups and will not "
+                "report external cache hits as loadable. The current adapter "
+                "registers one KV group for transfer, so loading it alone would "
+                "leave the other groups' recurrent/attention state missing."
+            )
 
-        service_factory = VllmServiceFactory(config, vllm_config, role.name.lower())
+        kv_cache_layer_count = (
+            len(self._lmcache_kv_cache_layer_names)
+            if self._lmcache_kv_cache_layer_names is not None
+            else None
+        )
+        service_factory = VllmServiceFactory(
+            config,
+            vllm_config,
+            role.name.lower(),
+            kv_cache_layer_count=kv_cache_layer_count,
+        )
         self._manager = LMCacheManager(config, service_factory, connector=self)
 
         # Start services managed by LMCacheManager
@@ -546,8 +859,11 @@ class LMCacheConnectorV1Impl:
         # Legacy compatibility check
         self._check_legacy_register_kv_caches()
 
-        self.kv_caches: dict[str, torch.Tensor] = {}
-        self._block_size = vllm_config.cache_config.block_size
+        self.kv_caches: dict[str, Any] = {}
+        self._all_kv_caches: dict[str, Any] = {}
+        self._block_size = (
+            self._lmcache_kv_cache_block_size or vllm_config.cache_config.block_size
+        )
         self.load_specs: dict[str, LoadSpec] = {}
         self.kv_cache_manager: Optional["KVCacheManager"] = None
         self._request_trackers: dict[str, RequestTracker] = {}
@@ -568,6 +884,8 @@ class LMCacheConnectorV1Impl:
         self.num_layers = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
+        if self._lmcache_kv_cache_layer_names is not None:
+            self.num_layers = len(self._lmcache_kv_cache_layer_names)
         self.current_layer = 0
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
@@ -617,6 +935,15 @@ class LMCacheConnectorV1Impl:
     def lookup_server(self):
         """Get the lookup server from manager."""
         return self._manager.lookup_server
+
+    def get_lmcache_kv_cache_group_id(self) -> int:
+        """Return the vLLM KV cache group id selected for LMCache transfers."""
+        return self._lmcache_kv_cache_group_id
+
+    @property
+    def supports_mamba_external_kv(self) -> bool:
+        """Return whether this connector can restore external hybrid state."""
+        return bool(getattr(self, "_hybrid_state_kv_cache_groups", ()))
 
     def _setup_metrics(self):
         """Setup metrics for monitoring data structures in the connector."""
@@ -731,8 +1058,237 @@ class LMCacheConnectorV1Impl:
         # TODO(chunxiaozheng): `_init_kv_caches_from_forward_context` is
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
-        self.kv_caches = kv_caches
+        self._all_kv_caches = kv_caches
+        selected_layer_names = self._lmcache_kv_cache_layer_names
+        if selected_layer_names is not None:
+            missing_layer_names = [
+                layer_name
+                for layer_name in selected_layer_names
+                if layer_name not in kv_caches
+            ]
+            if missing_layer_names:
+                raise ValueError(
+                    "LMCache selected KV cache group "
+                    f"{self._lmcache_kv_cache_group_id}, but vLLM did not "
+                    f"register KV caches for layers {missing_layer_names}"
+                )
+            self.kv_caches = {
+                layer_name: kv_caches[layer_name] for layer_name in selected_layer_names
+            }
+            logger.info(
+                "Registered %d LMCache KV cache layer(s) from vLLM group %d "
+                "(received %d total layer cache entries)",
+                len(self.kv_caches),
+                self._lmcache_kv_cache_group_id,
+                len(kv_caches),
+            )
+        else:
+            self.kv_caches = kv_caches
         self._manager.post_init()
+
+    def _get_hybrid_state_block_id(
+        self,
+        request: ReqMeta,
+        group: HybridStateGroupSpec,
+        num_tokens: int,
+    ) -> Optional[int]:
+        """Return the vLLM block id that stores a hybrid state prefix."""
+        if (
+            num_tokens <= 0
+            or num_tokens % group.block_size != 0
+            or request.all_block_ids is None
+        ):
+            return None
+
+        block_index = num_tokens // group.block_size - 1
+        try:
+            block_id = request.all_block_ids[group.group_id][block_index]
+        except IndexError:
+            return None
+
+        return block_id if block_id > 0 else None
+
+    def _get_hybrid_state_page_tensors(
+        self,
+        layer_name: str,
+    ) -> Optional[tuple[torch.Tensor, ...]]:
+        """Return raw page tensor views for a vLLM hybrid state layer."""
+        state_tensors = self._all_kv_caches.get(layer_name)
+        if not isinstance(state_tensors, (list, tuple)) or not state_tensors:
+            return None
+
+        page_tensors: list[torch.Tensor] = []
+        try:
+            for state_tensor in state_tensors:
+                if not isinstance(state_tensor, torch.Tensor):
+                    return None
+                page_size_bytes = state_tensor[0].numel() * state_tensor.element_size()
+                storage_offset_bytes = (
+                    state_tensor.storage_offset() * state_tensor.element_size()
+                )
+                page_tensors.append(
+                    torch.tensor([], dtype=torch.int8, device=state_tensor.device).set_(
+                        state_tensor.untyped_storage(),
+                        storage_offset_bytes,
+                        (state_tensor.shape[0], page_size_bytes),
+                    )
+                )
+        except RuntimeError:
+            return None
+
+        return tuple(page_tensors)
+
+    def _store_hybrid_state(self, request: ReqMeta) -> None:
+        """Store opaque hybrid state pages for a completed aligned prefix."""
+        if not self.supports_mamba_external_kv:
+            return
+
+        aligned_tokens = _largest_aligned_token_count(
+            len(request.token_ids),
+            self._hybrid_state_alignment_tokens,
+        )
+        if aligned_tokens <= 0:
+            return
+
+        key = _hybrid_state_key(request.token_ids, aligned_tokens)
+        if _get_hybrid_state_payload(key) is not None:
+            return
+
+        payload: HybridStatePayload = {}
+        for group in self._hybrid_state_kv_cache_groups:
+            block_id = self._get_hybrid_state_block_id(request, group, aligned_tokens)
+            if block_id is None:
+                return
+
+            for layer_name in group.layer_names:
+                page_tensors = self._get_hybrid_state_page_tensors(layer_name)
+                if page_tensors is None or any(
+                    block_id >= page_tensor.shape[0] for page_tensor in page_tensors
+                ):
+                    logger.warning(
+                        "Request %s cannot store hybrid state for group %d, "
+                        "layer %s, block %d",
+                        request.req_id,
+                        group.group_id,
+                        layer_name,
+                        block_id,
+                    )
+                    return
+                for state_index, page_tensor in enumerate(page_tensors):
+                    payload[(group.group_id, layer_name, state_index)] = (
+                        page_tensor[block_id].detach().to(device="cpu", copy=True)
+                    )
+
+        evicted = _put_hybrid_state_payload(
+            key,
+            payload,
+            self._hybrid_state_cache_max_bytes,
+        )
+        logger.info(
+            "Stored hybrid state for request %s at %d token(s) across %d "
+            "tensor page(s); evicted %d stale entries",
+            request.req_id,
+            aligned_tokens,
+            len(payload),
+            evicted,
+        )
+
+    def _load_hybrid_state(self, request: ReqMeta) -> bool:
+        """Load cached opaque hybrid state pages into vLLM state blocks."""
+        if not self.supports_mamba_external_kv:
+            return True
+
+        if request.load_spec is None:
+            return True
+
+        num_tokens = request.load_spec.lmcache_cached_tokens
+        key = _hybrid_state_key(request.token_ids, num_tokens)
+        payload = _get_hybrid_state_payload(key)
+        if payload is None:
+            logger.error(
+                "Request %s has no cached hybrid state for %d token(s)",
+                request.req_id,
+                num_tokens,
+            )
+            return False
+
+        for group in self._hybrid_state_kv_cache_groups:
+            block_id = self._get_hybrid_state_block_id(request, group, num_tokens)
+            if block_id is None:
+                return False
+
+            for layer_name in group.layer_names:
+                page_tensors = self._get_hybrid_state_page_tensors(layer_name)
+                if page_tensors is None or any(
+                    block_id >= page_tensor.shape[0] for page_tensor in page_tensors
+                ):
+                    logger.error(
+                        "Request %s cannot load hybrid state for group %d, "
+                        "layer %s, block %d",
+                        request.req_id,
+                        group.group_id,
+                        layer_name,
+                        block_id,
+                    )
+                    return False
+                for state_index, page_tensor in enumerate(page_tensors):
+                    source_page = payload.get((group.group_id, layer_name, state_index))
+                    if source_page is None:
+                        logger.error(
+                            "Request %s missing hybrid state for group %d, "
+                            "layer %s, tensor %d",
+                            request.req_id,
+                            group.group_id,
+                            layer_name,
+                            state_index,
+                        )
+                        return False
+                    page_tensor[block_id].copy_(
+                        source_page.to(device=page_tensor.device)
+                    )
+
+        logger.info(
+            "Loaded hybrid state for request %s at %d token(s)",
+            request.req_id,
+            num_tokens,
+        )
+        return True
+
+    def _record_hybrid_load_failure(self, request: ReqMeta) -> None:
+        """Mark attention blocks invalid if hybrid state loading failed."""
+        if request.load_spec is None:
+            return
+
+        slot_mapping = request.slot_mapping[: request.load_spec.lmcache_cached_tokens]
+        if slot_mapping.numel() == 0:
+            return
+
+        failed_blocks = {
+            int(block.item())
+            for block in torch.unique(slot_mapping.to("cpu") // self._block_size)
+        }
+        self._invalid_block_ids.update(failed_blocks)
+
+    def _get_hybrid_state_loadable_tokens(
+        self,
+        token_ids: list[int],
+        num_external_hit_tokens: int,
+    ) -> int:
+        """Return the largest LMCache hit prefix with matching hybrid state."""
+        if not self.supports_mamba_external_kv:
+            return num_external_hit_tokens
+
+        aligned_tokens = _largest_aligned_token_count(
+            num_external_hit_tokens,
+            self._hybrid_state_alignment_tokens,
+        )
+        while aligned_tokens > 0:
+            key = _hybrid_state_key(token_ids, aligned_tokens)
+            if _get_hybrid_state_payload(key) is not None:
+                return aligned_tokens
+            aligned_tokens -= self._hybrid_state_alignment_tokens
+
+        return 0
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -799,6 +1355,10 @@ class LMCacheConnectorV1Impl:
             token_mask[:masked_token_count] = False
 
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            if not self._load_hybrid_state(request):
+                self._record_hybrid_load_failure(request)
+                continue
+
             if self.use_layerwise:
                 if idx == last_idx:
                     sync = True
@@ -1095,6 +1655,7 @@ class LMCacheConnectorV1Impl:
                 )
                 if layerwise_storer is not None:
                     next(layerwise_storer)
+                self._store_hybrid_state(request)
                 # unpin the kv caches according to req_id
                 self.lmcache_engine.lookup_unpin(request.req_id)
             return
@@ -1189,6 +1750,7 @@ class LMCacheConnectorV1Impl:
                 request_configs=request.request_configs,
                 req_id=request.req_id,
             )
+            self._store_hybrid_state(request)
 
             # Probe decoder cache after store
             if (
@@ -1345,6 +1907,7 @@ class LMCacheConnectorV1Impl:
             return 0
 
         req_id = request.request_id
+        token_ids_for_hybrid = list(request.all_token_ids)
 
         # lookup_client is always initialized for scheduler role
         assert self.lookup_client is not None
@@ -1364,7 +1927,7 @@ class LMCacheConnectorV1Impl:
 
             # token_ids = request.prompt_token_ids
             # all token ids covers the preemption case
-            token_ids = request.all_token_ids
+            token_ids = token_ids_for_hybrid
 
             # If the request has multimodal hashes, apply them to the token ids
             mm_hashes, mm_positions = extract_mm_features(request)
@@ -1393,6 +1956,21 @@ class LMCacheConnectorV1Impl:
                 num_computed_tokens,
             )
             return None
+
+        if num_external_hit_tokens > 0 and self.supports_mamba_external_kv:
+            loadable_hit_tokens = self._get_hybrid_state_loadable_tokens(
+                token_ids_for_hybrid,
+                num_external_hit_tokens,
+            )
+            if loadable_hit_tokens < num_external_hit_tokens:
+                logger.info(
+                    "Reqid: %s has %d LMCache hit tokens, but only %d token(s) "
+                    "have matching hybrid state.",
+                    req_id,
+                    num_external_hit_tokens,
+                    loadable_hit_tokens,
+                )
+            num_external_hit_tokens = loadable_hit_tokens
 
         # When prompt length is divisible by the block size and all
         # blocks are cached, we need to recompute the last token.
@@ -1438,6 +2016,21 @@ class LMCacheConnectorV1Impl:
             lmcache_cached_tokens=num_external_hit_tokens,
             can_load=False,
         )
+
+        if (
+            need_to_allocate > 0
+            and not self._loads_cover_all_kv_cache_groups
+            and not self.supports_mamba_external_kv
+        ):
+            logger.info(
+                "Reqid: %s has %d LMCache hit tokens, but external load is "
+                "disabled because vLLM exposed multiple KV cache groups and "
+                "LMCache registered group %d only.",
+                req_id,
+                num_external_hit_tokens,
+                self._lmcache_kv_cache_group_id,
+            )
+            return 0
 
         if below_min_retrieve or need_to_allocate <= 0:
             return 0
@@ -1574,6 +2167,7 @@ class LMCacheConnectorV1Impl:
                 num_tokens_to_compute,
                 lmcache_cached_tokens,
                 skip_save,
+                self._lmcache_kv_cache_group_id,
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -1621,6 +2215,7 @@ class LMCacheConnectorV1Impl:
                     lmcache_cached_tokens=lmcache_cached_tokens,
                     vllm_cached_tokens=vllm_cached_tokens,
                     all_token_ids=all_token_ids,
+                    kv_cache_group_id=self._lmcache_kv_cache_group_id,
                 )
 
                 req_meta = ReqMeta.from_request_tracker(
@@ -1744,6 +2339,7 @@ class LMCacheConnectorV1Impl:
                 lmcache_cached_tokens=lmcache_cached_tokens,
                 vllm_cached_tokens=vllm_cached_tokens,
                 all_token_ids=all_token_ids,
+                kv_cache_group_id=self._lmcache_kv_cache_group_id,
             )
 
             req_meta = ReqMeta.from_request_tracker(

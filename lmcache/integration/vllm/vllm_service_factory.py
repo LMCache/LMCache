@@ -51,10 +51,12 @@ class VllmServiceFactory(BaseServiceFactory):
         lmcache_config: LMCacheEngineConfig,
         vllm_config: "VllmConfig",
         role: str,
+        kv_cache_layer_count: Optional[int] = None,
     ):
         self.lmcache_config = lmcache_config
         self.vllm_config = vllm_config
         self.role = role
+        self.kv_cache_layer_count = kv_cache_layer_count
         self.metadata: Optional[LMCacheMetadata] = None
         self.lmcache_engine: Optional[LMCacheEngine] = None
 
@@ -97,6 +99,8 @@ class VllmServiceFactory(BaseServiceFactory):
         num_layer = model_config.get_num_layers(parallel_config)
         num_draft_layers = calculate_draft_layers(self.vllm_config)
         num_layer += num_draft_layers
+        if self.kv_cache_layer_count is not None:
+            num_layer = self.kv_cache_layer_count
         chunk_size = self.lmcache_config.chunk_size
         num_kv_head = model_config.get_num_kv_heads(parallel_config)
         head_size = model_config.get_head_size()
