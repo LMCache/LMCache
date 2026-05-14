@@ -37,14 +37,14 @@ import (
 
 // TMOP-20: lifecycle smoke covers the three CR-edit scenarios:
 //
-//   S-6 update propagation: patching spec.server.port flows into the
-//                           ConfigMap data and DaemonSet container args.
-//   S-7 finalizer cleanup:  deleting the CR removes every owned object
-//                           within 60s; anything longer signals a stuck
-//                           finalizer (a real bug we want to catch).
-//   S-10 invalid spec:      l1.sizeGB=-1 is rejected by the API server
-//                           at admission time; the controller never
-//                           sees it and no DaemonSet/Service is created.
+//	S-6 update propagation: patching spec.server.port flows into the
+//	                        ConfigMap data and DaemonSet container args.
+//	S-7 finalizer cleanup:  deleting the CR removes every owned object
+//	                        within 60s; anything longer signals a stuck
+//	                        finalizer (a real bug we want to catch).
+//	S-10 invalid spec:      l1.sizeGB=-1 is rejected by the API server
+//	                        at admission time; the controller never
+//	                        sees it and no DaemonSet/Service is created.
 var _ = Describe("LMCacheEngine lifecycle smoke (no-GPU)", Ordered, func() {
 	var (
 		ctx    context.Context

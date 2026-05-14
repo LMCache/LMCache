@@ -247,4 +247,3 @@ func canonicalJSON(s string) string {
 	out, _ := json.MarshalIndent(v, "", "  ")
 	return string(out)
 }
-

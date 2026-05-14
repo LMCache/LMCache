@@ -42,19 +42,19 @@ import (
 // LMCACHE_RESP_USERNAME / LMCACHE_RESP_PASSWORD into the DaemonSet
 // container as env vars (NOT as CLI args). This spec asserts:
 //
-//   1. A managed copy of the source Secret appears in the engine's
-//      namespace at <engine-name>-resp-auth.
-//   2. The pod template references the local copy via env-var
-//      SecretKeyRef — never via container args.
-//   3. The literal Secret values never leak into container args
-//      (i.e. they wouldn't show up in `kubectl describe pod`).
+//  1. A managed copy of the source Secret appears in the engine's
+//     namespace at <engine-name>-resp-auth.
+//  2. The pod template references the local copy via env-var
+//     SecretKeyRef — never via container args.
+//  3. The literal Secret values never leak into container args
+//     (i.e. they wouldn't show up in `kubectl describe pod`).
 var _ = Describe("LMCacheEngine cross-namespace auth smoke (no-GPU)", Ordered, func() {
 	var (
-		ctx           context.Context
-		nsName        string
-		sourceNSName  string
-		expectedUser  = "tm-test-user"
-		expectedPass  = "tm-test-password" // pragma: allowlist secret
+		ctx          context.Context
+		nsName       string
+		sourceNSName string
+		expectedUser = "tm-test-user"
+		expectedPass = "tm-test-password" // pragma: allowlist secret
 	)
 
 	BeforeEach(func() {

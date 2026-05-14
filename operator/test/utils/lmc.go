@@ -96,7 +96,13 @@ func WaitLMCReconciled(ctx context.Context, c client.Client, key types.Namespace
 // WaitLMCPhase polls until status.phase equals the requested phase value
 // (e.g. "Running", "Pending"). Use WaitLMCReconciled instead when the
 // observation contract is "controller saw the spec," not "pods are up."
-func WaitLMCPhase(ctx context.Context, c client.Client, key types.NamespacedName, phase string, timeout time.Duration) error {
+func WaitLMCPhase(
+	ctx context.Context,
+	c client.Client,
+	key types.NamespacedName,
+	phase string,
+	timeout time.Duration,
+) error {
 	return wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
 		lmc := &lmcachev1alpha1.LMCacheEngine{}
 		if err := c.Get(ctx, key, lmc); err != nil {
@@ -140,7 +146,12 @@ func GetConnectionConfig(ctx context.Context, c client.Client, key types.Namespa
 // a merge patch. The mutate callback receives a pointer to the spec and
 // must mutate in place. Use this for tests like S-6 (port update) that
 // need to model "user kubectl-patches the spec."
-func PatchLMCSpec(ctx context.Context, c client.Client, key types.NamespacedName, mutate func(*lmcachev1alpha1.LMCacheEngineSpec)) error {
+func PatchLMCSpec(
+	ctx context.Context,
+	c client.Client,
+	key types.NamespacedName,
+	mutate func(*lmcachev1alpha1.LMCacheEngineSpec),
+) error {
 	lmc := &lmcachev1alpha1.LMCacheEngine{}
 	if err := c.Get(ctx, key, lmc); err != nil {
 		return fmt.Errorf("get LMCacheEngine %s: %w", key, err)
