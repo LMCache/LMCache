@@ -26,8 +26,12 @@ func (e *LMCacheEngine) SetDefaults() {
 		spec.LogLevel = &info
 	}
 
-	// Default nodeSelector to GPU nodes if unset.
-	if spec.NodeSelector == nil {
+	if spec.GPUVendor == nil {
+		v := GPUVendorNvidia
+		spec.GPUVendor = &v
+	}
+
+	if spec.NodeSelector == nil && *spec.GPUVendor == GPUVendorNvidia {
 		spec.NodeSelector = map[string]string{
 			"nvidia.com/gpu.present": "true",
 		}

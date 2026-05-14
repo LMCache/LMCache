@@ -159,7 +159,15 @@ def _create_fs_native_l2_adapter(
         config.read_ahead_size,
     )
     return NativeConnectorL2Adapter(
-        native_client, max_capacity_gb=config.max_capacity_gb
+        native_client,
+        max_capacity_gb=config.max_capacity_gb,
+        type_name="FSNativeL2Adapter",
+        extra_status={
+            "base_path": config.base_path,
+            "use_odirect": config.use_odirect,
+            "num_workers": config.num_workers,
+            "read_ahead_size": config.read_ahead_size,
+        },
     )
 
 

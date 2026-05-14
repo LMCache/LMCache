@@ -57,3 +57,10 @@ steps:
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
+
+      - label: ":compression: restart_recovery"
+        command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]

@@ -402,9 +402,18 @@ class GdsBackend(AllocatorBackendInterface):
                             self._read_metadata(key, fentry.path, l1_dir + l2_dir)
                         except UnsupportedMetadataVersion:
                             logger.error(
-                                "Unsupported metadata version for "
-                                f"{fentry.path}, ignoring"
+                                "Unsupported metadata version for %s; "
+                                "ignoring during GDS start",
+                                fentry.path,
                             )
+                        except Exception:
+                            logger.error(
+                                "Failed to read metadata file %s during GDS start; "
+                                "raising the error to fail startup",
+                                fentry.path,
+                                exc_info=True,
+                            )
+                            raise
 
     def _read_metadata_info(self, filename: str):
         # Use O_NOATIME to prevent updating access time and improve performance
@@ -445,7 +454,7 @@ class GdsBackend(AllocatorBackendInterface):
     ):
         shape, dtype, size, fmt, extra_metadata = self._read_metadata_info(filename)
         if extra_metadata["lmcache_version"] != str(_METADATA_VERSION):
-            raise RuntimeError("unhandled lmcache metadata")
+            raise UnsupportedMetadataVersion("unhandled lmcache metadata")
         logger.debug(
             f"Read metadata for {key} from {filename}: "
             f"shape={shape}, dtype={dtype}, size={size}, fmt={fmt}, "
@@ -1193,6 +1202,25 @@ class GdsBackend(AllocatorBackendInterface):
                 f"Exception while waiting for metadata scan: {e}",
                 exc_info=True,
             )
+        # Wait for pending metadata write tasks to finish before tearing down
+        # the allocator and thread pool..
+        if self.save_metadata_tasks:
+
+            async def _drain_tasks() -> None:
+                await asyncio.gather(*self.save_metadata_tasks, return_exceptions=True)
+                self.save_metadata_tasks.clear()
+
+            try:
+                drain: Future = asyncio.run_coroutine_threadsafe(
+                    _drain_tasks(),
+                    self.loop,
+                )
+                drain.result(timeout=30)
+            except Exception as e:
+                logger.warning(
+                    f"Exception while draining metadata write tasks: {e}",
+                    exc_info=True,
+                )
         self.memory_allocator.close()
         if self._thread_pool is not None:
             self._thread_pool.shutdown(wait=True)

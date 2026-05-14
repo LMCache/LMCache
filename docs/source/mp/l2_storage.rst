@@ -44,7 +44,7 @@ high-performance storage I/O.
 **Required fields:**
 
 - ``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``,
-  ``HF3FS``, ``OBJ``.
+  ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
 - ``pool_size``: Number of storage descriptors to pre-allocate (must be > 0).
 
 **Backend-specific parameters (``backend_params``):**
@@ -54,7 +54,7 @@ File-based backends (``GDS``, ``GDS_MT``, ``POSIX``, ``HF3FS``) require:
 - ``file_path``: Directory path for storing L2 data.
 - ``use_direct_io``: ``"true"`` or ``"false"`` -- whether to use direct I/O.
 
-The ``OBJ`` backend (object store) does not require ``file_path``.
+The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require ``file_path``.
 
 **Backend descriptions:**
 
@@ -75,6 +75,8 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
      - Shared file system backend (e.g., for distributed/networked storage).
    * - ``OBJ``
      - Object store backend.  No local file path required.
+   * - ``AZURE_BLOB``
+     - Object store backend for Azure Blob Storage.  No local file path required.
 
 **Configuration examples:**
 
@@ -95,6 +97,9 @@ The ``OBJ`` backend (object store) does not require ``file_path``.
     # OBJ backend
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
 
+    # AZURE_BLOB backend
+    --l2-adapter '{"type": "nixl_store", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}, "pool_size": 32}'
+
 ``nixl_store_dynamic`` -- NIXL-based dynamic storage with persist/recover
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -108,7 +113,7 @@ per-operation instead of pre-allocating them at init. This enables:
 .. note::
 
    Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``,
-   ``HF3FS``). The ``OBJ`` backend is not supported yet.
+   ``HF3FS``). The ``OBJ`` and ``AZURE_BLOB`` backends are not supported yet.
 
 **Required fields:**
 
@@ -188,6 +193,62 @@ object is stored as a raw ``.data`` file whose name encodes the full
     # With O_DIRECT for bypassing page cache
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "use_odirect": true}'
 
+``dax`` -- Device-DAX fixed-slot storage
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter that maps a single Device-DAX path, such as ``/dev/dax1.0``,
+and stores KV cache objects in fixed-size slots.  This adapter is intended for
+byte-addressable memory devices such as persistent memory or CXL memory.
+
+The MP ``dax`` adapter is volatile in this release.  It keeps the key index in
+server memory and rebuilds an empty index on restart.  Old bytes may remain on
+the DAX device, but they are unreachable after the LMCache server restarts.
+
+**Required fields:**
+
+- ``device_path``: Path to the mmap-able DAX device or test file.
+- ``max_dax_size_gb``: Number of GiB to map from ``device_path``.
+- ``slot_bytes``: Fixed slot size in bytes. This must be large enough for one
+  full LMCache chunk because MP memory descriptors do not expose the
+  non-MP full-chunk size.
+
+**Optional fields:**
+
+- ``num_store_workers`` (int, default ``1``): Store worker threads.
+- ``num_lookup_workers`` (int, default ``1``): Lookup worker threads.
+- ``num_load_workers`` (int, default ``min(4, os.cpu_count())``): Load worker
+  threads.
+- ``persist_enabled`` (bool): Accepted by common L2 config parsing but has no
+  effect for ``dax`` because restart recovery is not implemented.
+
+**Configuration example:**
+
+.. code-block:: bash
+
+    --l2-adapter '{
+      "type": "dax",
+      "device_path": "/dev/dax1.0",
+      "max_dax_size_gb": 100,
+      "slot_bytes": 268435456,
+      "num_store_workers": 1,
+      "num_lookup_workers": 1,
+      "num_load_workers": 4,
+      "eviction": {
+        "eviction_policy": "LRU",
+        "trigger_watermark": 0.9,
+        "eviction_ratio": 0.1
+      }
+    }'
+
+**Current limits:**
+
+- Uses one server-owned mapped DAX path. Per-TP partitions and multi-device
+  striping are not implemented.
+- Only single-buffer objects are supported. Multi-tensor objects are rejected.
+- Capacity is slot-based, not payload-byte-based. L2 eviction and usage
+  metrics count occupied slots.
+- Lookups acquire DAX-side external locks. ``submit_unlock`` releases those
+  locks after load/retrieve completes, making entries evictable again.
 ``fs_native`` -- Native C++ file-system connector
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -372,32 +433,59 @@ If the Mooncake headers are not installed in the system include path
 
 **LMCache-specific fields:**
 
-- ``num_workers``: Number of C++ worker threads (default ``4``, must
-  be > 0).
+- ``num_workers``: Number of C++ worker threads for the shared pool
+  (default ``4``, must be > 0).  
+
+- ``per_op_workers`` (``dict[str, int]``, optional): A dict mapping lane keys
+  to dedicated worker thread counts.  Supported keys:
+
+  - ``"lookup"`` — threads for ``EXISTS`` operations.
+  - ``"retrieve"`` — threads for ``GET`` / load operations.
+  - ``"store"`` — threads for ``SET`` / put operations.
+  - ``"delete"`` — threads for ``DELETE`` operations.
+
+  Operations whose lane key is **not** present in the dict use the
+  shared ``num_workers`` pool.  There is no requirement to set all
+  keys — you can configure only the lanes that need dedicated pools.
 
 **Mooncake fields:**
 
 All other keys in the JSON config (except ``type``, ``num_workers``,
-and ``eviction``) are forwarded **as-is** to Mooncake's
+``per_op_workers``, and ``eviction``) are forwarded **as-is** to Mooncake's
 ``setup_internal(ConfigDict)``.  Refer to the
 `Mooncake documentation <https://github.com/kvcache-ai/Mooncake>`_
 for available setup keys (e.g., ``local_hostname``,
-``metadata_server``, ``master_server_address``, ``protocol``,
-``device_name``, ``global_segment_size``).
+``metadata_server``, ``master_server_addr``, ``protocol``,
+``rdma_devices``, ``global_segment_size``).
 
 **Configuration example:**
 
 .. code-block:: bash
 
+    # Shared pool (default)
     --l2-adapter '{
       "type": "mooncake_store",
       "num_workers": 4,
       "local_hostname": "node01",
       "metadata_server": "http://localhost:8080/metadata",
-      "master_server_address": "localhost:50051",
+      "master_server_addr": "localhost:50051",
       "protocol": "tcp",
-      "local_buffer_size": "3221225472"
+      "local_buffer_size": "3221225472",
       "global_segment_size": "3221225472"
+    }'
+
+    # Per-operation pools (GET-heavy workload)
+    --l2-adapter '{
+      "type": "mooncake_store",
+      "per_op_workers": {
+        "lookup": 2,
+        "retrieve": 16,
+        "store": 4
+      },
+      "local_hostname": "node01",
+      "metadata_server": "http://localhost:8080/metadata",
+      "master_server_addr": "localhost:50051",
+      "protocol": "tcp"
     }'
 
 For full Mooncake setup instructions (master service, metadata server,
@@ -689,6 +777,10 @@ drops by ``eviction_ratio``.
        when ``max_capacity_gb`` is ``0`` (disabled); set a non-zero
        ``max_capacity_gb`` to enable the watermark-triggered eviction
        controller.
+   * - ``dax``
+     - Full support. ``delete`` removes unlocked keys from the in-memory
+       index immediately and recycles fixed slots once active read borrows
+       drain. Usage is slot-based.
    * - ``mooncake_store``
      - No eviction support (native connector adapter).
    * - ``fs``

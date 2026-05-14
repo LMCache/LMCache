@@ -18,6 +18,13 @@ class BlendMetricsSubscriber(EventSubscriber):
 
     Metrics:
     - ``lmcache_blend.lookup_requests``              — total CB lookup calls
+    - ``lmcache_blend.lookup_requested_tokens``      — chunk-aligned tokens
+      submitted for CB lookup (denominator of the blend token-level hit
+      rate).  Sub-chunk trailing tokens are excluded because they cannot
+      hit by design.
+    - ``lmcache_blend.lookup_hit_tokens``            — tokens served by
+      blend during the lookup (numerator of the blend token-level hit
+      rate).  Equal to ``storage_hits * chunk_size``.
     - ``lmcache_blend.lookup_fingerprint_hits``      — fingerprint table hits
     - ``lmcache_blend.lookup_storage_hits``          — chunks confirmed in storage
     - ``lmcache_blend.lookup_stale_chunks``          — fingerprint hits evicted as stale
@@ -41,6 +48,24 @@ class BlendMetricsSubscriber(EventSubscriber):
         self._lookup_requests = meter.create_counter(
             "lmcache_blend.lookup_requests",
             description="Total CB lookup requests",
+        )
+        self._lookup_requested_tokens = meter.create_counter(
+            "lmcache_blend.lookup_requested_tokens",
+            description=(
+                "Total tokens submitted for CB lookup (denominator of the "
+                "blend token-level hit rate). Only chunk-aligned tokens "
+                "are counted."
+            ),
+            unit="tokens",
+        )
+        self._lookup_hit_tokens = meter.create_counter(
+            "lmcache_blend.lookup_hit_tokens",
+            description=(
+                "Total tokens served by blend during lookup (numerator of "
+                "the blend token-level hit rate). Equal to "
+                "storage_hits * chunk_size."
+            ),
+            unit="tokens",
         )
         self._lookup_fingerprint_hits = meter.create_counter(
             "lmcache_blend.lookup_fingerprint_hits",
@@ -122,6 +147,8 @@ class BlendMetricsSubscriber(EventSubscriber):
         self._lookup_requests.add(1)
 
     def _on_lookup_end(self, event: Event) -> None:
+        self._lookup_requested_tokens.add(event.metadata["requested_tokens"])
+        self._lookup_hit_tokens.add(event.metadata["hit_tokens"])
         self._lookup_fingerprint_hits.add(event.metadata["fingerprint_hits"])
         self._lookup_storage_hits.add(event.metadata["storage_hits"])
         self._lookup_stale_chunks.add(event.metadata["stale_chunks"])
