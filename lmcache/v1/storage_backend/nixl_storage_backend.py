@@ -49,6 +49,7 @@ from nixl._api import (
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -69,6 +70,9 @@ from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
 
 logger = init_logger(__name__)
 
+# Max concurrency for parallel S3 HEAD requests in batched_contains().
+_CONTAINS_BATCH_SIZE = 16
+
 
 @dataclass
 class NixlStorageConfig:
@@ -87,15 +91,17 @@ class NixlStorageConfig:
 
     @staticmethod
     def validate_nixl_backend(dynamic_storage: bool, backend: str, device: str):
-        if dynamic_storage:  # For now only supports OBJ backend
+        if dynamic_storage:  # For now only supports OBJ and AZURE_BLOB backend
             if backend in ("OBJ",):
                 return device == "cpu" or device == "cuda"
+            elif backend in ("AZURE_BLOB",):
+                return device == "cpu"
             else:
                 return False
         else:
             if backend in ("GDS", "GDS_MT", "OBJ"):
                 return device == "cpu" or device == "cuda"
-            elif backend in ("POSIX", "HF3FS"):
+            elif backend in ("POSIX", "HF3FS", "AZURE_BLOB"):
                 return device == "cpu"
             else:
                 return False
@@ -339,7 +345,7 @@ class NixlStorageAgent(ABC):
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
         self.nixl_agent.create_backend(backend, backend_params)
 
-        device_id = torch.cuda.current_device()
+        device_id = torch_dev.current_device()
         self.init_mem_handlers(device, buffer_ptr, buffer_size, page_size, device_id)
 
     def init_mem_handlers(self, device, buffer_ptr, buffer_size, page_size, device_id):
@@ -509,7 +515,7 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             allocator, device, backend, backend_params, enable_prog_thread, sync_mode
         )
 
-        if backend == "OBJ":
+        if backend in ("OBJ", "AZURE_BLOB"):
             self.mem_type = "OBJ"
         else:
             # Already validated in validate_nixl_backend
@@ -553,6 +559,40 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
         except Exception as exc:
             logger.warning(f"NIXL Desc {meta_info} query failed: {exc}")
             return False
+
+    def batched_nixl_desc_exists(
+        self, reg_list: List[tuple[int, int, int, str]]
+    ) -> int:
+        """Check if multiple descriptors exist via a single ``query_memory`` call.
+
+        :param reg_list: List of tuples ``(0, 0, 0, meta_info)`` where
+            *meta_info* is the formatted object-key string.
+        :return: Number of consecutive descriptors that exist from the
+            start of the list.
+        :raises: No exceptions are raised. Errors from the underlying
+            ``query_memory`` call are caught internally and logged as
+            warnings; the method returns ``0`` in that case.
+        """
+        if not reg_list:
+            return 0
+
+        try:
+            resp = self.nixl_agent.query_memory(
+                reg_list, self.backend, mem_type=self.mem_type
+            )
+            # nixl api query_memory returns a list of nixlRegDesc
+            # Count consecutive descriptors that exist (resp[i] is not None)
+            consecutive_count = 0
+            for reg_desc in resp:
+                if reg_desc is not None:
+                    consecutive_count += 1
+                else:
+                    break
+
+            return consecutive_count
+        except Exception as exc:
+            logger.warning(f"NIXL batched query failed: {exc}")
+            return 0
 
     def close(self):
         self.nixl_agent.release_dlist_handle(self.mem_xfer_handler)
@@ -612,7 +652,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
             base_buffer, self.buffer = _allocate_gpu_memory(
                 config.nixl_buffer_size, corrected_device
             )
-            torch.cuda.set_device(corrected_device)
+            torch_dev.set_device(corrected_device)
             self.base_buffer = base_buffer  # Prevents early GC of the aligned tensor.
             self.free_pinned_buffer = False
 
@@ -761,7 +801,7 @@ class NixlStaticStorageBackend(NixlStorageBackend):
     def createPool(backend: str, size: int, path: str, use_direct_io: bool):
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
             return NixlFilePool(size, path, use_direct_io)
-        elif backend in ("OBJ"):
+        elif backend in ("OBJ", "AZURE_BLOB"):
             return NixlObjectPool(size)
         else:
             raise ValueError(f"Unsupported NIXL backend: {backend}")
@@ -1320,6 +1360,29 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         with self.progress_lock:
             return key in self.progress_set
 
+    def _exists_in_put_tasks_or_cache(self, key: CacheEngineKey) -> tuple[bool, bool]:
+        """Check whether key exists in put tasks or presence cache.
+
+        This method only checks the local data structures and does not
+        call the expensive key_exists operation.
+
+        :param key: The key to check
+        :return: Tuple of (found, result) where:
+                - found: True if we determined the result locally
+                - result: True if key exists, False if key doesn't exist
+                  (in put tasks)
+        """
+        # Check if already in progress
+        if self.exists_in_put_tasks(key):
+            logger.debug(f"Key {key.chunk_hash:x} is in put tasks")
+            return True, False
+
+        # Check presence cache before hitting remote storage if not prefetching
+        if self._cache_contains(key.chunk_hash):
+            return True, True
+
+        return False, False
+
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """
         Check whether key is in the storage backend.
@@ -1333,20 +1396,69 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         :return: True if the key exists, False otherwise
         """
-        # Check if already in progress
-        if self.exists_in_put_tasks(key):
-            logger.debug(f"Key {key.chunk_hash:x} is in put tasks")
-            return False
-
-        # Check presence cache before hitting remote storage if not prefetching
-        if self._cache_contains(key.chunk_hash):
-            return True
+        # Check local data structures first
+        found, local_result = self._exists_in_put_tasks_or_cache(key)
+        if found:
+            return local_result
 
         xfer_state = self.key_exists(key)
         if xfer_state:
             self._cache_add(key.chunk_hash)
 
         return xfer_state
+
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        """Check whether the keys are in the storage backend.
+
+        Overrides the sequential base-class implementation to issue a
+        single batched ``query_memory`` call for the keys that cannot
+        be resolved from local data structures (put-task set and
+        presence cache).
+
+        :param List[CacheEngineKey] keys: The keys of the MemoryObj.
+        :param bool pin: Whether to pin the key (not implemented).
+        :return: Number of contiguous hit chunks from the start of *keys*.
+        :raises: No exceptions are raised. Errors from the underlying
+            NIXL batched query are caught internally and logged as
+            warnings.
+        """
+        if not keys:
+            return 0
+
+        # First, do fast sequential check of local data structures
+        true_count = 0
+        for key in keys:
+            found, result = self._exists_in_put_tasks_or_cache(key)
+            if found:
+                if result:
+                    true_count += 1
+                else:
+                    # Found in put tasks (False), stop the loop
+                    return true_count
+            else:
+                # Not found locally, break to do expensive checks
+                break
+
+        # If we checked all keys locally, return the count
+        if true_count == len(keys):
+            return true_count
+
+        # For remaining keys, use the new batched_nixl_desc_exists method
+        remaining_keys = keys[true_count:]
+        reg_list = [(0, 0, 0, self._format_object_key(key)) for key in remaining_keys]
+
+        # Use the agent's batched_nixl_desc_exists method
+        consecutive_hits = self.agent.batched_nixl_desc_exists(reg_list)
+
+        # Update cache for the hits and return total count
+        for i in range(consecutive_hits):
+            self._cache_add(remaining_keys[i].chunk_hash)
+
+        return true_count + consecutive_hits
 
     async def batched_async_contains(
         self,
@@ -1365,7 +1477,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """
         n = len(keys)
         idx = 0
-        batch_size = 16
+        batch_size = _CONTAINS_BATCH_SIZE
 
         while idx < n:
             batch = keys[idx : idx + batch_size]

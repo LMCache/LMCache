@@ -101,8 +101,13 @@ datapoints and are orthogonal to these Resource attributes.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l1_evicted_keys` | `lmcache_mp_l1_evicted_keys_total` | Counter | `L1_KEYS_EVICTED` | `+len(keys)` |
+| `lmcache_mp.l1_eviction_loop_ticks` | `lmcache_mp_l1_eviction_loop_ticks_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 per loop iteration |
+| `lmcache_mp.l1_eviction_loop_triggered` | `lmcache_mp_l1_eviction_loop_triggered_total` | Counter | `L1_EVICTION_LOOP_TICK` | +1 when `triggered=True` |
+| `lmcache_mp.l1_usage_ratio` | `lmcache_mp_l1_usage_ratio` | Observable Gauge | (callback on `L1Manager`) | `used / total` at scrape time |
 
-**What it answers:** How aggressively is the eviction controller clearing L1? A high eviction rate relative to writes signals memory pressure.
+**What it answers:** How aggressively is the eviction controller clearing L1?  Is the eviction loop alive but staying below the watermark, or actively firing?  What is the current L1 fullness?
+
+The two loop counters distinguish "loop is alive" from "eviction fired" — important when debugging short-lived benchmarks (a workload that completes in <1 s never gives the 1Hz polling loop a chance to fire even when usage exceeds the watermark).  `l1_usage_ratio` is registered via :func:`register_gauge` against `L1Manager`, so its value reflects current state at scrape time, not a per-tick sample.
 
 ---
 
@@ -260,9 +265,10 @@ per-instance and per-model Prometheus metric slicing (e.g.
 
 ## L0 ↔ L1 Throughput Histograms
 
-Sampled (default 1%) per-request throughput of GPU↔CPU copies via
+Per-request throughput of GPU↔CPU copies via
 `L0L1ThroughputSubscriber`. Correlates `MP_{STORE,RETRIEVE}_START` → `MP_{STORE,RETRIEVE}_END`
 pairs by `session_id`, computes `total_bytes / (end_ts - start_ts)` in GB/s.
+Every request contributes one sample (no sampling).
 START/END events fire on the GPU cupy stream (`publish_on_stream`), so
 timestamps reflect true GPU-stream copy time — not Python/lock overhead.
 
@@ -273,8 +279,8 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l0_l1_store_throughput_gbs` | `lmcache_mp_l0_l1_store_throughput_gbs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
-| `lmcache_mp.l0_l1_load_throughput_gbs` | `lmcache_mp_l0_l1_load_throughput_gbs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per sampled request |
+| `lmcache_mp.l0_l1_store_throughput_gbs` | `lmcache_mp_l0_l1_store_throughput_gbs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_load_throughput_gbs` | `lmcache_mp_l0_l1_load_throughput_gbs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
@@ -284,13 +290,14 @@ Are some workers or GPUs underperforming?
 
 ## L1 ↔ L2 Throughput Histograms
 
-Sampled (default 1%) per-task throughput of L1↔L2 transfers via
+Per-task throughput of L1↔L2 transfers via
 `L2ThroughputSubscriber`. The store path correlates `L2_STORE_SUBMITTED` →
 `L2_STORE_COMPLETED` by `(adapter_index, task_id)`. The load path
 correlates the new per-adapter `L2_LOAD_TASK_SUBMITTED` →
 `L2_LOAD_TASK_COMPLETED` events by `(request_id, adapter_index)`; the
 pre-existing request-level `L2_PREFETCH_LOAD_*` events aggregate across
 adapters and cannot attribute throughput to a specific `l2_name`.
+Every task contributes one sample (no sampling).
 
 Unlike the L0↔L1 histograms, these timestamps span **submit → complete**,
 so `(end_ts - start_ts)` includes adapter queue, network, and disk I/O
@@ -305,8 +312,8 @@ registered adapter type (e.g. `"fs"`, `"nixl_store"`, `"mooncake_store"`)
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l2_store_throughput_gbs` | `lmcache_mp_l2_store_throughput_gbs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per sampled task |
-| `lmcache_mp.l2_load_throughput_gbs` | `lmcache_mp_l2_load_throughput_gbs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per sampled (request, adapter) pair |
+| `lmcache_mp.l2_store_throughput_gbs` | `lmcache_mp_l2_store_throughput_gbs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per task |
+| `lmcache_mp.l2_load_throughput_gbs` | `lmcache_mp_l2_load_throughput_gbs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair |
 
 **What it answers:** What end-to-end throughput is each L2 adapter
 delivering? Which backends are keeping up with demand, and which are
@@ -448,12 +455,21 @@ MP mode `lmcache_mp.` namespace).  On Prometheus, `.` becomes `_` and counters g
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_blend.lookup_requests` | `lmcache_blend_lookup_requests_total` | Counter | `CB_LOOKUP_START` | +1 per event |
+| `lmcache_blend.lookup_requested_tokens` | `lmcache_blend_lookup_requested_tokens_total` | Counter | `CB_LOOKUP_END` | `+requested_tokens` |
+| `lmcache_blend.lookup_hit_tokens` | `lmcache_blend_lookup_hit_tokens_total` | Counter | `CB_LOOKUP_END` | `+hit_tokens` |
 | `lmcache_blend.lookup_fingerprint_hits` | `lmcache_blend_lookup_fingerprint_hits_total` | Counter | `CB_LOOKUP_END` | `+fingerprint_hits` |
 | `lmcache_blend.lookup_storage_hits` | `lmcache_blend_lookup_storage_hits_total` | Counter | `CB_LOOKUP_END` | `+storage_hits` |
 | `lmcache_blend.lookup_stale_chunks` | `lmcache_blend_lookup_stale_chunks_total` | Counter | `CB_LOOKUP_END` | `+stale_chunks` |
 | `lmcache_blend.lookup_no_gpu_context_errors` | `lmcache_blend_lookup_no_gpu_context_errors_total` | Counter | `CB_LOOKUP_END` | +1 when `no_gpu_context=True` |
 
-**What it answers:** How often does the CB server receive lookup requests? What fraction hit the fingerprint table? What fraction are confirmed in storage? How many stale evictions occur?
+**What it answers:** How often does the CB server receive lookup requests? What fraction of requested tokens are served by blend (token-level hit rate)? What fraction hit the fingerprint table? What fraction are confirmed in storage? How many stale evictions occur?
+
+**Blend token-level hit rate** (numerator and denominator co-emit on the same `CB_LOOKUP_END` event so the ratio is meaningful even under partial-failure paths):
+
+```
+rate(lmcache_blend_lookup_hit_tokens_total[5m])
+/ rate(lmcache_blend_lookup_requested_tokens_total[5m])
+```
 
 ### CB Retrieve Metrics
 
@@ -496,4 +512,9 @@ MP mode `lmcache_mp.` namespace).  On Prometheus, `.` becomes `_` and counters g
 
 ---
 
-For event metadata contracts (what keys each `EventType` carries), see [EVENTS.md](EVENTS.md).
+For derivations of L1-only / L2-only / blend hit rates from these
+counters, and a "what to send when reporting" checklist, see
+[DEBUG.md](DEBUG.md).
+
+For event metadata contracts (what keys each `EventType` carries), see
+[EVENTS.md](EVENTS.md).

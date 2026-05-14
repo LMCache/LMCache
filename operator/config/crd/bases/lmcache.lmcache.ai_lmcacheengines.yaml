@@ -1151,6 +1151,16 @@ spec:
                 items:
                   type: string
                 type: array
+              gpuVendor:
+                default: nvidia
+                description: |-
+                  gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
+                  GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
+                  runtime with privileged: true.
+                enum:
+                - nvidia
+                - amd
+                type: string
               image:
                 description: image defines the container image to use.
                 properties:
