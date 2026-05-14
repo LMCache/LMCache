@@ -717,7 +717,8 @@ class DaxL2Adapter(L2AdapterInterface):
                     size_bytes=size_bytes,
                 )
             except ValueError as exc:
-                raise L2HotplugError(400, str(exc)) from exc
+                logger.exception("Invalid DAX hotplug add request")
+                raise L2HotplugError(400, "invalid DAX hotplug add request") from exc
             except RuntimeError as exc:
                 logger.exception("Failed to map DAX hotplug device")
                 raise L2HotplugError(400, "failed to map DAX device") from exc
@@ -883,7 +884,8 @@ class DaxL2Adapter(L2AdapterInterface):
                 raise
             except ValueError as exc:
                 entry.state = old_state
-                raise L2HotplugError(409, str(exc)) from exc
+                logger.exception("Invalid DAX hotplug resize request")
+                raise L2HotplugError(409, "invalid DAX hotplug resize request") from exc
             except RuntimeError as exc:
                 entry.state = old_state
                 logger.exception("Failed to remap DAX hotplug device")
