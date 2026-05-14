@@ -292,9 +292,7 @@ class TestL0EvictionDetection:
         assert count_after == count_before + 1
 
     def test_eviction_records_idle_time(self, bus, subscriber):
-        idle_before = _get_histogram_count(
-            "lmcache_mp.l0_block_idle_before_evict"
-        )
+        idle_before = _get_histogram_count("lmcache_mp.l0_block_idle_before_evict")
         bus.start()
 
         bus.publish(
@@ -308,9 +306,7 @@ class TestL0EvictionDetection:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        idle_after = _get_histogram_count(
-            "lmcache_mp.l0_block_idle_before_evict"
-        )
+        idle_after = _get_histogram_count("lmcache_mp.l0_block_idle_before_evict")
         assert idle_after == idle_before + 1
 
     def test_eviction_clears_old_owners(self, bus, subscriber):

@@ -279,9 +279,7 @@ class TestLookupAttributeLabels:
             ("cache_salt", "tenant-A"),
             ("model_name", "llama-3.1-8b"),
         )
-        before_req = before.get("lmcache_mp.lookup_requested", {}).get(
-            attr_key, 0
-        )
+        before_req = before.get("lmcache_mp.lookup_requested", {}).get(attr_key, 0)
         before_hit = before.get("lmcache_mp.lookup_hit", {}).get(attr_key, 0)
         after_req = after.get("lmcache_mp.lookup_requested", {}).get(attr_key, 0)
         after_hit = after.get("lmcache_mp.lookup_hit", {}).get(attr_key, 0)

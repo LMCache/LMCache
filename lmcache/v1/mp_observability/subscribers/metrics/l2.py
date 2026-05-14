@@ -30,18 +30,18 @@ class L2MetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L2 store and prefetch operations.
 
     Metrics:
-    - ``lmcache_mp.l2_store_submitted``        — store requests submitted to L2
+    - ``lmcache_mp.l2_store_submitted`` — store requests submitted to L2
     - ``lmcache_mp.l2_store_submitted_volume`` — chunks submitted for L2 store
-    - ``lmcache_mp.l2_store_completed``        — store requests completed (attr: ``l2_name``)
+    - ``lmcache_mp.l2_store_completed`` — store requests completed (attr: ``l2_name``)
     - ``lmcache_mp.l2_store_completed_volume`` — chunks successfully stored to L2
-    - ``lmcache_mp.l2_load_completed``         — per-adapter load tasks completed
+    - ``lmcache_mp.l2_load_completed`` — per-adapter load tasks completed
       (attr: ``l2_name``)
-    - ``lmcache_mp.l2_prefetch_lookup``                — prefetch lookup requests
-    - ``lmcache_mp.l2_prefetch_lookup_volume``         — chunks submitted for lookup
-    - ``lmcache_mp.l2_prefetch_hit``                   — prefix chunks found in L2
-    - ``lmcache_mp.l2_prefetch_load_submitted``        — load tasks submitted
+    - ``lmcache_mp.l2_prefetch_lookup`` — prefetch lookup requests
+    - ``lmcache_mp.l2_prefetch_lookup_volume`` — chunks submitted for lookup
+    - ``lmcache_mp.l2_prefetch_hit`` — prefix chunks found in L2
+    - ``lmcache_mp.l2_prefetch_load_submitted`` — load tasks submitted
     - ``lmcache_mp.l2_prefetch_load_submitted_volume`` — chunks submitted for load
-    - ``lmcache_mp.l2_prefetch_load_completed``        — chunks successfully loaded from L2
+    - ``lmcache_mp.l2_prefetch_load_completed`` — chunks successfully loaded from L2
 
     The ``l2_name``-labeled counters (``l2_store_completed``, ``l2_load_completed``)
     let dashboards compute per-backend IOPS via

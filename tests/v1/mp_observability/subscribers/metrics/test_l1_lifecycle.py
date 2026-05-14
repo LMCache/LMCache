@@ -107,9 +107,7 @@ class TestL1Lifecycle:
         assert count_after == count_before + 1
 
     def test_eviction_records_idle(self, bus, subscriber):
-        count_before = _get_histogram_count(
-            "lmcache_mp.l1_chunk_idle_before_evict"
-        )
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_idle_before_evict")
         keys = ["idle-1"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -117,9 +115,7 @@ class TestL1Lifecycle:
         bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count(
-            "lmcache_mp.l1_chunk_idle_before_evict"
-        )
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_idle_before_evict")
         assert count_after == count_before + 1
 
     def test_eviction_removes_from_shadow(self, bus, subscriber):
@@ -188,9 +184,7 @@ class TestL1ReuseGap:
 
 class TestL1EvictReuseGap:
     def test_rewrite_after_eviction_records_gap(self, bus, subscriber):
-        count_before = _get_histogram_count(
-            "lmcache_mp.l1_chunk_evict_reuse_gap"
-        )
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_evict_reuse_gap")
         keys = ["erg-1"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -200,9 +194,7 @@ class TestL1EvictReuseGap:
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count(
-            "lmcache_mp.l1_chunk_evict_reuse_gap"
-        )
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_evict_reuse_gap")
         assert count_after == count_before + 1
 
     def test_evicted_key_tracked_in_evicted_at(self, bus, subscriber):
