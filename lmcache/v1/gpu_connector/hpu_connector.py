@@ -237,6 +237,11 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         kv_size = 1 if self.use_mla else 2
         return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
 
+    def initialize_kvcaches_ptr(self, **kwargs):
+        """Initialize the kvcaches pointers if not already initialized."""
+        if "kvcaches" in kwargs:
+            self.kvcaches = kwargs["kvcaches"]
+
     def _validate_memory_format(self, memory_obj: MemoryObj) -> None:
         """Validate that the memory object has the expected format.
 
@@ -264,7 +269,11 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         if self._attributes_initialized:
             return
 
-        self.device = kv_caches[0].device
+        first = kv_caches[0]
+        if isinstance(first, torch.Tensor):
+            self.device = first.device
+        else:
+            self.device = first[0].device
         assert self.device.type == "hpu", "The device should be HPU."
 
         # HPU vLLM provides kv_caches as List[TensorTuple(k_tensor, v_tensor)],
