@@ -237,7 +237,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
         kv_size = 1 if self.use_mla else 2
         return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
 
-    def initialize_kvcaches_ptr(self, **kwargs):
+    def initialize_kvcaches_ptr(self, **kwargs) -> None:
         """Initialize the kvcaches pointers if not already initialized."""
         if "kvcaches" in kwargs:
             self.kvcaches = kwargs["kvcaches"]
@@ -266,7 +266,7 @@ class VLLMPagedMemHPUConnectorV2(GPUConnectorInterface):
                 )
 
     def _initialize_attributes(self, kv_caches: List[torch.Tensor]):
-        if self._attributes_initialized:
+        if self._attributes_initialized or not kv_caches:
             return
 
         first = kv_caches[0]
