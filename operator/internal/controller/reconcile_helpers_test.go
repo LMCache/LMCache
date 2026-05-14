@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -531,5 +532,210 @@ var _ = Describe("reconcileServiceMonitor", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: nsName}, engine)).To(Succeed())
 
 		Expect(r.reconcileServiceMonitor(ctx, engine)).To(Succeed())
+	})
+})
+
+// ----- resource-reconcile helpers (Create + Patch) -----------------
+//
+// All four functions (reconcileDaemonSet / reconcileLookupService /
+// reconcileMetricsService / reconcileConnectionConfigMap) share the
+// same shape:
+//
+//   1. Build desired via resources.BuildX(engine).
+//   2. r.Get the existing — if NotFound, Create with ownerRef.
+//   3. Otherwise Patch the subset of fields the helper owns.
+//
+// Each Describe below pairs a "create on first reconcile" spec with
+// a "patch on second reconcile after a spec change" spec — that pair
+// covers both branches and proves the diff actually propagates to
+// the child resource (the helper isn't a no-op patch).
+
+var _ = Describe("reconcileDaemonSet", func() {
+	var (
+		r      *LMCacheEngineReconciler
+		nsName string
+	)
+
+	BeforeEach(func() {
+		r = newReconciler()
+		nsName = mustCreateNS(uniqueNS("ds"))
+	})
+
+	It("creates a DaemonSet on first reconcile", func() {
+		engine := newEngine(nsName, "ds-create")
+		Expect(r.reconcileDaemonSet(ctx, engine)).To(Succeed())
+
+		got := &appsv1.DaemonSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: nsName}, got)).To(Succeed())
+		Expect(metav1.IsControlledBy(got, engine)).To(BeTrue(), "DaemonSet must be owned by the engine")
+		Expect(got.Spec.Template.Spec.Containers).To(HaveLen(1))
+		// Default port flows through to the container args.
+		Expect(got.Spec.Template.Spec.Containers[0].Args).To(ContainElements("--port", "5555"))
+	})
+
+	It("patches the DaemonSet when spec.server.port changes", func() {
+		engine := newEngine(nsName, "ds-patch")
+		Expect(r.reconcileDaemonSet(ctx, engine)).To(Succeed())
+
+		// Mutate the local engine — reconcileDaemonSet works off the
+		// passed-in object, no need to round-trip through Update.
+		newPort := int32(6555)
+		engine.Spec.Server = &lmcachev1alpha1.ServerSpec{Port: &newPort}
+		Expect(r.reconcileDaemonSet(ctx, engine)).To(Succeed())
+
+		got := &appsv1.DaemonSet{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: nsName}, got)).To(Succeed())
+		Expect(got.Spec.Template.Spec.Containers[0].Args).To(ContainElements("--port", "6555"))
+		// Existing object's selector is preserved across the patch
+		// (DaemonSet selectors are immutable; reconcileDaemonSet
+		// copies it onto desired before patching).
+		Expect(got.Spec.Selector).NotTo(BeNil())
+	})
+})
+
+var _ = Describe("reconcileLookupService", func() {
+	var (
+		r      *LMCacheEngineReconciler
+		nsName string
+	)
+
+	BeforeEach(func() {
+		r = newReconciler()
+		nsName = mustCreateNS(uniqueNS("svc-lookup"))
+	})
+
+	It("creates the lookup Service on first reconcile", func() {
+		engine := newEngine(nsName, "svc-create")
+		Expect(r.reconcileLookupService(ctx, engine)).To(Succeed())
+
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: nsName}, got)).To(Succeed())
+		Expect(metav1.IsControlledBy(got, engine)).To(BeTrue())
+		Expect(got.Spec.InternalTrafficPolicy).NotTo(BeNil())
+		Expect(*got.Spec.InternalTrafficPolicy).To(Equal(corev1.ServiceInternalTrafficPolicyLocal))
+		// Default port is exposed under a port named "server".
+		hasServerPort := false
+		for _, p := range got.Spec.Ports {
+			if p.Name == "server" && p.Port == 5555 {
+				hasServerPort = true
+			}
+		}
+		Expect(hasServerPort).To(BeTrue(), "expected a 'server' port at 5555, got %+v", got.Spec.Ports)
+	})
+
+	It("patches the lookup Service when spec.server.port changes", func() {
+		engine := newEngine(nsName, "svc-patch")
+		Expect(r.reconcileLookupService(ctx, engine)).To(Succeed())
+
+		newPort := int32(7777)
+		engine.Spec.Server = &lmcachev1alpha1.ServerSpec{Port: &newPort}
+		Expect(r.reconcileLookupService(ctx, engine)).To(Succeed())
+
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: engine.Name, Namespace: nsName}, got)).To(Succeed())
+		hasNewPort := false
+		for _, p := range got.Spec.Ports {
+			if p.Name == "server" && p.Port == newPort {
+				hasNewPort = true
+			}
+		}
+		Expect(hasNewPort).To(BeTrue(), "expected 'server' port to reflect the new value, got %+v", got.Spec.Ports)
+	})
+})
+
+var _ = Describe("reconcileMetricsService", func() {
+	var (
+		r      *LMCacheEngineReconciler
+		nsName string
+	)
+
+	BeforeEach(func() {
+		r = newReconciler()
+		nsName = mustCreateNS(uniqueNS("svc-metrics"))
+	})
+
+	It("creates the metrics Service on first reconcile", func() {
+		engine := newEngine(nsName, "metrics-create")
+		Expect(r.reconcileMetricsService(ctx, engine)).To(Succeed())
+
+		// resources.BuildMetricsService names the service
+		// "<engine>-metrics" (see internal/resources/service.go).
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      engine.Name + "-metrics",
+			Namespace: nsName,
+		}, got)).To(Succeed())
+		Expect(metav1.IsControlledBy(got, engine)).To(BeTrue())
+		hasMetricsPort := false
+		for _, p := range got.Spec.Ports {
+			if p.Port == 9090 {
+				hasMetricsPort = true
+			}
+		}
+		Expect(hasMetricsPort).To(BeTrue(), "expected port 9090, got %+v", got.Spec.Ports)
+	})
+
+	It("patches the metrics Service when spec.prometheus.port changes", func() {
+		engine := newEngine(nsName, "metrics-patch")
+		Expect(r.reconcileMetricsService(ctx, engine)).To(Succeed())
+
+		newPort := int32(9191)
+		engine.Spec.Prometheus = &lmcachev1alpha1.PrometheusSpec{Port: &newPort}
+		Expect(r.reconcileMetricsService(ctx, engine)).To(Succeed())
+
+		got := &corev1.Service{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: engine.Name + "-metrics", Namespace: nsName}, got)).To(Succeed())
+		hasNewPort := false
+		for _, p := range got.Spec.Ports {
+			if p.Port == newPort {
+				hasNewPort = true
+			}
+		}
+		Expect(hasNewPort).To(BeTrue(), "expected port %d, got %+v", newPort, got.Spec.Ports)
+	})
+})
+
+var _ = Describe("reconcileConnectionConfigMap", func() {
+	var (
+		r      *LMCacheEngineReconciler
+		nsName string
+	)
+
+	BeforeEach(func() {
+		r = newReconciler()
+		nsName = mustCreateNS(uniqueNS("cm"))
+	})
+
+	It("creates the connection ConfigMap on first reconcile", func() {
+		engine := newEngine(nsName, "cm-create")
+		Expect(r.reconcileConnectionConfigMap(ctx, engine)).To(Succeed())
+
+		got := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      engine.Name + "-connection",
+			Namespace: nsName,
+		}, got)).To(Succeed())
+		Expect(metav1.IsControlledBy(got, engine)).To(BeTrue())
+		Expect(got.Data).To(HaveKey("kv-transfer-config.json"))
+		// Default port (5555) shows up in the JSON blob.
+		Expect(got.Data["kv-transfer-config.json"]).To(ContainSubstring("5555"))
+	})
+
+	It("patches the ConfigMap when spec.server.port changes", func() {
+		engine := newEngine(nsName, "cm-patch")
+		Expect(r.reconcileConnectionConfigMap(ctx, engine)).To(Succeed())
+
+		newPort := int32(6555)
+		engine.Spec.Server = &lmcachev1alpha1.ServerSpec{Port: &newPort}
+		Expect(r.reconcileConnectionConfigMap(ctx, engine)).To(Succeed())
+
+		got := &corev1.ConfigMap{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name:      engine.Name + "-connection",
+			Namespace: nsName,
+		}, got)).To(Succeed())
+		Expect(got.Data["kv-transfer-config.json"]).To(ContainSubstring("6555"))
+		Expect(got.Data["kv-transfer-config.json"]).NotTo(ContainSubstring("\"5555\""),
+			"old port should be replaced, not appended")
 	})
 })
