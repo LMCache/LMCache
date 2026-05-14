@@ -189,6 +189,22 @@ approach used by the vLLM TurboQuant PR. The integration target is different:
 In LMCache, TurboQuant is a storage transform only: it compresses objects before
 L2 store and reconstructs objects after L2 load / prefetch.
 
+## Performance Snapshot
+
+The following numbers are from a local H20 serde microbenchmark. They are
+intended as a sanity check for compression ratio, latency, and reconstruction
+error rather than full serving benchmark results.
+
+### Serde microbenchmark
+
+| Serde | Preset | Raw MB | Serialized MB | Compression ratio | Encode ms | Decode ms | Corr | Mean abs err | Max abs err |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fp8 | `float8_e4m3fn` | 8.00 | 4.00 | 2.00 | 0.024 | 0.040 | 0.999645 | 0.017948 | 0.250000 |
+| turboquant | `turboquant_k8v4` | 8.00 | 3.06 | 2.61 | 0.375 | 0.523 | 0.997342 | 0.051538 | 0.273438 |
+| turboquant | `turboquant_4bit_nc` | 8.00 | 2.09 | 3.82 | 0.554 | 0.642 | 0.995225 | 0.080693 | 0.505249 |
+| turboquant | `turboquant_k3v4_nc` | 8.00 | 1.84 | 4.34 | 0.555 | 0.642 | 0.989075 | 0.115782 | 0.970703 |
+| turboquant | `turboquant_3bit_nc` | 8.00 | 1.59 | 5.02 | 0.557 | 0.643 | 0.980405 | 0.164546 | 0.970703 |
+
 ## Limitations
 
 This backend currently focuses on correctness and LMCache L2 integration.
