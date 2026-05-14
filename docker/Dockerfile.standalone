@@ -80,6 +80,7 @@ WORKDIR /workspace/LMCache
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
+    export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache
 

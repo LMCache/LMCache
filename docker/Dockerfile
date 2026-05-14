@@ -79,6 +79,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
         uv pip install --prerelease=allow \
             'vllm[runai,tensorizer,flashinfer]' \

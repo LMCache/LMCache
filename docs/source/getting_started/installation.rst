@@ -88,7 +88,7 @@ Install LMCache
 
                 .. tab-set::
 
-                    .. tab-item:: CUDA
+                    .. tab-item:: CUDA 13.0
 
                         .. code-block:: bash
 
@@ -99,8 +99,29 @@ Install LMCache
                             source .venv/bin/activate
 
                             uv pip install -r requirements/build.txt
-                            uv pip install vllm  # pulls in required torch version
+                            uv pip install vllm  # pulls in required torch version (cu13)
                             uv pip install -e . --no-build-isolation
+
+                    .. tab-item:: CUDA 12.9
+
+                        .. code-block:: bash
+
+                            git clone https://github.com/LMCache/LMCache.git
+                            cd LMCache
+
+                            uv venv --python 3.12
+                            source .venv/bin/activate
+
+                            uv pip install -r requirements/build.txt
+                            # Pin vLLM (and torch) to the cu12.9 wheel index so the local
+                            # CUDA 12 toolchain matches what the extensions are built against.
+                            uv pip install vllm \
+                                --extra-index-url https://download.pytorch.org/whl/cu129 \
+                                --index-strategy unsafe-best-match
+                            # LMCACHE_CUDA_MAJOR=12 makes setup.py pick cupy-cuda12x / nixl-cu12
+                            # for install_requires instead of the cu13 defaults.
+                            LMCACHE_CUDA_MAJOR=12 \
+                                uv pip install -e . --no-build-isolation
 
                     .. tab-item:: ROCm
 
