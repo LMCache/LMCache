@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 import asyncio
 import math
+import time
 
 # Third Party
 import torch
@@ -400,7 +401,7 @@ def _wait_prefetch(storage_manager: StorageManager, handle: PrefetchHandle) -> i
         status = storage_manager.query_prefetch_status(handle)
         if status is not None:
             return status
-        storage_manager.wait_for_prefetch_completion(handle)
+        time.sleep(0.01)
 
 
 def _store_chunk_payload(

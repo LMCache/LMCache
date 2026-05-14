@@ -39,7 +39,6 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.platform import (
-    EventNotifier,
     consume_fd,
     create_event_notifier,
 )
@@ -244,7 +243,6 @@ class PrefetchController(StorageControllerInterface):
         # Thread-safe prefetch results (background -> external)
         self._prefetch_results_lock = threading.Lock()
         self._completed_results: dict[PrefetchRequestId, int] = {}
-        self._result_notifiers: dict[PrefetchRequestId, EventNotifier] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -323,12 +321,9 @@ class PrefetchController(StorageControllerInterface):
         Returns:
             A request ID for tracking via query_prefetch_result.
         """
-        result_notifier = create_event_notifier()
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
-            with self._prefetch_results_lock:
-                self._result_notifiers[request_id] = result_notifier
             self._submission_queue.append((request_id, keys, layout_desc, extra_count))
         self._submission_efd.notify()
         return request_id
@@ -379,53 +374,10 @@ class PrefetchController(StorageControllerInterface):
         """
         with self._prefetch_results_lock:
             result = self._completed_results.pop(request_id, None)
-            result_notifier = (
-                self._result_notifiers.pop(request_id, None)
-                if result is not None
-                else None
-            )
-        if result_notifier is not None:
-            result_notifier.close()
         if result is not None:
             with self._lookup_results_lock:
                 self._completed_lookups.pop(request_id, None)
         return result
-
-    def wait_for_prefetch_result(
-        self,
-        request_id: PrefetchRequestId,
-        timeout: float | None = None,
-    ) -> bool:
-        """
-        Wait until a prefetch request has a result available.
-
-        This call is thread-safe and does not consume the result. Callers must
-        still use :meth:`query_prefetch_result` to retrieve and clean up the
-        completed result.
-
-        Args:
-            request_id: The request ID from :meth:`submit_prefetch_request`.
-            timeout: Maximum seconds to wait. ``None`` waits indefinitely.
-
-        Returns:
-            ``True`` if the request has completed or is no longer tracked,
-            ``False`` if ``timeout`` elapsed before a completion notification.
-        """
-        with self._prefetch_results_lock:
-            if request_id in self._completed_results:
-                return True
-            result_notifier = self._result_notifiers.get(request_id)
-
-        if result_notifier is None:
-            return True
-
-        poller = select.poll()
-        try:
-            poller.register(result_notifier.fileno(), select.POLLIN)
-            timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
-            return bool(poller.poll(timeout_ms))
-        except (OSError, ValueError):
-            return True
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
@@ -514,7 +466,6 @@ class PrefetchController(StorageControllerInterface):
         self._thread.join()
         self._cleanup_in_flight_requests()
         self._submission_efd.close()
-        self._close_result_notifiers()
 
     # =========================================================================
     # Background loop
@@ -1018,9 +969,6 @@ class PrefetchController(StorageControllerInterface):
         """Store the result and remove from in-flight tracking."""
         with self._prefetch_results_lock:
             self._completed_results[request_id] = prefix_hits
-            result_notifier = self._result_notifiers.get(request_id)
-            if result_notifier is not None:
-                result_notifier.notify()
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1
@@ -1051,11 +999,3 @@ class PrefetchController(StorageControllerInterface):
                 len(request.keys),
             )
         self._in_flight_requests.clear()
-
-    def _close_result_notifiers(self) -> None:
-        """Close all outstanding result notifiers during shutdown."""
-        with self._prefetch_results_lock:
-            notifiers = list(self._result_notifiers.values())
-            self._result_notifiers.clear()
-        for notifier in notifiers:
-            notifier.close()

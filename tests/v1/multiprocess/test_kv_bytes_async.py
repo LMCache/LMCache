@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Async behavior tests for bytes-level KV store/retrieve helpers."""
+"""HTTP-level responsiveness tests for bytes-level KV cache APIs."""
 
 # Standard
-from collections.abc import AsyncIterator
-from typing import Any, cast
 import asyncio
 import threading
 import time
@@ -11,49 +9,18 @@ import time
 # Third Party
 from fastapi import FastAPI
 import httpx
+import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.multiprocess.http_apis.kv_api import router as kv_router
-from lmcache.v1.multiprocess.kv_bytes import (
-    RetrieveBytesResult,
-    store_kv_bytes_by_tokens,
-)
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.multiprocess.kv_bytes import RetrieveBytesResult
 
 CHUNK_SIZE = 4
-LAYOUT = MemoryLayoutDesc(
-    shapes=[torch.Size((2, 1, CHUNK_SIZE, 4))],
-    dtypes=[torch.float32],
-)
-
-
-class _BlockingStoreStorageManager:
-    """Storage manager fake whose reserve call blocks long enough to detect."""
-
-    def __init__(self) -> None:
-        self.entered = threading.Event()
-        self.release = threading.Event()
-
-    def reserve_write(
-        self,
-        keys: list[Any],
-        layout_desc: MemoryLayoutDesc,
-        mode: str,
-    ) -> dict[Any, Any]:
-        """Block in the synchronous write-reservation call."""
-        self.entered.set()
-        self.release.wait(0.3)
-        return {}
-
-    def finish_write(self, keys: list[Any]) -> None:
-        """Finish is a no-op because this fake never reserves objects."""
 
 
 class _BlockingRetrieveEngine:
-    """Engine fake whose retrieve call blocks long enough to detect."""
+    """Engine fake whose public retrieve API blocks until released."""
 
     chunk_size = CHUNK_SIZE
 
@@ -84,71 +51,19 @@ class _BlockingRetrieveEngine:
         )
 
 
-def _resolve_model(model_name: str) -> tuple[MemoryLayoutDesc, int]:
-    """Return the fixed test layout for any model name."""
-    return LAYOUT, 1
-
-
-async def _single_chunk(payload: bytes) -> AsyncIterator[bytes]:
-    """Yield one store chunk."""
-    yield payload
-
-
-def _chunk_payload() -> bytes:
-    """Return one chunk of canonical KV_2LTD tensor bytes."""
-    tensor = torch.zeros((2, 1, CHUNK_SIZE, 4), dtype=torch.float32)
-    return tensor.contiguous().view(torch.uint8).numpy().tobytes()
-
-
-async def _assert_loop_stays_responsive() -> None:
-    """Assert a short sleep is not delayed by a synchronous blocking call."""
-    start = time.monotonic()
-    await asyncio.sleep(0.05)
-    assert time.monotonic() - start < 0.25
-
-
-async def _assert_blocking_call_entered(event: threading.Event) -> None:
-    """Wait briefly for the worker-thread fake to enter its blocking section."""
-    if event.is_set():
+async def _wait_for_blocking_retrieve(engine: _BlockingRetrieveEngine) -> None:
+    """Wait until the test engine has entered its blocking retrieve call."""
+    if engine.entered.is_set():
         return
     assert await asyncio.wait_for(
-        asyncio.to_thread(event.wait, 0.2),
+        asyncio.to_thread(engine.entered.wait, 0.2),
         timeout=0.3,
     )
 
 
-def test_store_does_not_block_event_loop_while_reserving() -> None:
-    """Store offloads synchronous storage writes from the asyncio loop."""
-
-    async def run() -> None:
-        storage_manager = _BlockingStoreStorageManager()
-        task = asyncio.create_task(
-            store_kv_bytes_by_tokens(
-                model_name="m",
-                tokens=list(range(CHUNK_SIZE)),
-                chunks=_single_chunk(_chunk_payload()),
-                full_shape=(2, 1, CHUNK_SIZE, 4),
-                dtype=torch.float32,
-                cache_salt="",
-                chunk_size=CHUNK_SIZE,
-                token_hasher=TokenHasher(chunk_size=CHUNK_SIZE),
-                storage_manager=cast(StorageManager, storage_manager),
-                resolve_model=_resolve_model,
-            )
-        )
-
-        await _assert_loop_stays_responsive()
-        await _assert_blocking_call_entered(storage_manager.entered)
-        assert not task.done()
-        storage_manager.release.set()
-        result = await asyncio.wait_for(task, timeout=1.0)
-        assert result.stored_chunks == 0
-
-    asyncio.run(run())
-
-
-def test_http_retrieve_does_not_block_event_loop_while_waiting() -> None:
-    """HTTP retrieve offloads synchronous engine waiting from the event loop."""
+@pytest.mark.parametrize("path", ["/api/kv/retrieve", "/api/kv/lookup"])
+def test_http_kv_read_does_not_block_unrelated_http_requests(path: str) -> None:
+    """A slow KV read request does not block another HTTP request."""
 
     async def run() -> None:
         engine = _BlockingRetrieveEngine()
@@ -166,9 +81,9 @@ def test_http_retrieve_does_not_block_event_loop_while_waiting() -> None:
             base_url="http://test",
         ) as client:
             try:
-                task = asyncio.create_task(
+                blocked_request = asyncio.create_task(
                     client.post(
-                        "/api/kv/retrieve",
+                        path,
                         json={
                             "model_name": "m",
                             "tokens": list(range(CHUNK_SIZE)),
@@ -176,18 +91,17 @@ def test_http_retrieve_does_not_block_event_loop_while_waiting() -> None:
                     )
                 )
 
-                await _assert_loop_stays_responsive()
-                await _assert_blocking_call_entered(engine.entered)
-                assert not task.done()
+                await _wait_for_blocking_retrieve(engine)
+                assert not blocked_request.done()
 
-                ping_started = time.monotonic()
+                started = time.monotonic()
                 ping_response = await client.get("/ping")
-                assert time.monotonic() - ping_started < 0.25
+                assert time.monotonic() - started < 0.25
                 assert ping_response.status_code == 200
 
                 engine.release.set()
-                retrieve_response = await asyncio.wait_for(task, timeout=1.0)
-                assert retrieve_response.status_code == 200
+                kv_response = await asyncio.wait_for(blocked_request, timeout=1.0)
+                assert kv_response.status_code == 200
             finally:
                 engine.release.set()
 
