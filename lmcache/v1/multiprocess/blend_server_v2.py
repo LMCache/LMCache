@@ -334,21 +334,6 @@ class BlendTokenRangeMatcher:
         with self._lock:
             return token_hash in self._token_hash_to_compact_id
 
-    def clear(self) -> int:
-        """Drop every registered chunk and reset compact-ID allocation.
-
-        Returns:
-            Number of live (non-evicted) chunks removed.
-        """
-        with self._lock:
-            num_live = len(self._token_hash_to_compact_id)
-            self._table_id.fill(-1)
-            self._compact_id_to_slot.fill(-1)
-            self._chunk_token_hash = []
-            self._token_hash_to_start = {}
-            self._token_hash_to_compact_id = {}
-            return num_live
-
 
 def _unique_token_coverage(results: list[CBMatchResult]) -> int:
     """Return the number of unique query tokens covered by a set of CBMatchResults.
@@ -425,24 +410,6 @@ class BlendEngineV2(MPCacheEngine):
             instance_id,
             gpu_context.num_layers,
         )
-
-    def clear(self) -> None:
-        """Clear the CB fingerprint table, then storage.
-
-        Matcher is cleared first so any concurrent CB store that completes
-        between the two steps leaves a stale matcher entry (self-healed by
-        the lazy-eviction path in cb_lookup_pre_computed) rather than an
-        orphaned chunk in storage.
-        """
-        num_dropped = self._token_range_matcher.clear()
-        super().clear()
-        if num_dropped:
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_CHUNKS_EVICTED,
-                    metadata={"num_chunks": num_dropped},
-                )
-            )
 
     def cb_unregister_kv_cache(self, instance_id: int) -> None:
         """

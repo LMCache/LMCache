@@ -348,41 +348,6 @@ class TestBlendTokenRangeMatcher:
         matcher.remove_chunks([token_hash])
         assert matcher.has_chunk(token_hash) is False
 
-    def test_clear_returns_live_chunk_count_and_drops_matches(self):
-        """clear() drops every registered chunk and reports the live count."""
-        matcher = BlendTokenRangeMatcher(chunk_size=4)
-        hash_a = ObjectKey.IntHash2Bytes(7001)
-        hash_b = ObjectKey.IntHash2Bytes(7002)
-        matcher.on_new_token_hashes([1, 2, 3, 4, 5, 6, 7, 8], [hash_a, hash_b])
-
-        # Evict one before clear() so the count reflects only live entries.
-        matcher.remove_chunks([hash_a])
-        assert matcher.clear() == 1
-
-        assert matcher.match_sub_sequence([1, 2, 3, 4, 5, 6, 7, 8]) == []
-        assert matcher.has_chunk(hash_a) is False
-        assert matcher.has_chunk(hash_b) is False
-
-    def test_clear_then_register_works(self):
-        """After clear(), new registrations behave like a fresh matcher."""
-        matcher = BlendTokenRangeMatcher(chunk_size=4)
-        hash_a = ObjectKey.IntHash2Bytes(7101)
-        hash_b = ObjectKey.IntHash2Bytes(7102)
-
-        matcher.on_new_token_hashes([1, 2, 3, 4], [hash_a])
-        matcher.clear()
-
-        matcher.on_new_token_hashes([10, 20, 30, 40], [hash_b])
-        assert matcher.match_sub_sequence([1, 2, 3, 4]) == []
-        results = matcher.match_sub_sequence([10, 20, 30, 40])
-        assert len(results) == 1
-        assert results[0].hash == hash_b
-
-    def test_clear_on_empty_matcher_returns_zero(self):
-        """clear() on a never-populated matcher is a no-op returning 0."""
-        matcher = BlendTokenRangeMatcher(chunk_size=4)
-        assert matcher.clear() == 0
-
 
 class TestUniqueTokenCoverage:
     """Unit tests for _unique_token_coverage — the interval-merge helper that
