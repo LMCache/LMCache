@@ -374,7 +374,7 @@ class BenchCommand(BaseCommand):
                 f"  Original import error: {_TEST_CACHE_IMPORT_ERROR}",
                 file=sys.stderr,
             )
-            sys.exit(2)
+            sys.exit(1)
         self._kvcache_delegate.execute(args)
 
     def execute(self, args: argparse.Namespace) -> None:
