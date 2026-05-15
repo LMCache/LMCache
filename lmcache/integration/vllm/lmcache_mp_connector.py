@@ -183,8 +183,8 @@ def create_worker_adapter(
 
     # Node routing: worker connects only to its local server.
     # Ranks are assigned to nodes in contiguous blocks:
-    # node 0 -> ranks [0, ranks_per_node),
-    # node 1 -> [ranks_per_node, 2*ranks_per_node), ...
+    # node 0 → ranks [0, ranks_per_node),
+    # node 1 → [ranks_per_node, 2*ranks_per_node), ...
     ranks_per_node = actual_world_size // n_servers
     local_server_url = server_urls[actual_rank // ranks_per_node]
 
