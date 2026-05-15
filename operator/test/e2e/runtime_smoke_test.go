@@ -37,14 +37,11 @@ import (
 // regression that, say, swallows --chunk-size in arg-parsing is caught
 // even when the DaemonSet container args look correct.
 //
-// We probe `/api/status` rather than `/conf`. /conf would give us the
-// full merged dataclasses (port, max_workers, http_port too), but it
-// hasn't shipped in lmcache/vllm-openai yet — only `/api/healthcheck`,
-// `/api/clear-cache`, and `/api/status` are in the released image.
-// /api/status still exposes is_healthy, chunk_size, and hash_algorithm,
-// which is enough to catch arg-parsing regressions on those fields.
-// The other CR fields (port, max_workers, http_port) remain covered by
-// the M1 K8s-side specs that diff the DaemonSet container args.
+// We probe `/status` because it returns is_healthy, chunk_size, and
+// hash_algorithm in one payload — enough to catch arg-parsing
+// regressions on those fields. The other CR fields (port, max_workers,
+// http_port) remain covered by the M1 K8s-side specs that diff the
+// DaemonSet container args.
 var _ = Describe("LMCacheEngine runtime smoke (GPU)", Ordered, func() {
 	var (
 		ctx    context.Context
@@ -60,11 +57,11 @@ var _ = Describe("LMCacheEngine runtime smoke (GPU)", Ordered, func() {
 		recordOnFailure(nsName)
 	})
 
-	It("GET /api/status reflects the CR's chunk_size + hash_algorithm end-to-end", func() {
+	It("GET /status reflects the CR's chunk_size + hash_algorithm end-to-end", func() {
 		lmc, err := utils.NewLMCFromFixture("lmc_runtime.yaml", nsName, "")
 		Expect(err).NotTo(HaveOccurred())
 
-		// Capture the spec values we'll assert against /api/status below.
+		// Capture the spec values we'll assert against /status below.
 		// Reading via derefInt32-style accessors keeps the assertion
 		// independent of the operator's defaulting logic — we test
 		// "what the CR + defaults imply" vs "what the live server reports."
@@ -92,13 +89,13 @@ var _ = Describe("LMCacheEngine runtime smoke (GPU)", Ordered, func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer closer()
 
-		By("waiting for /api/healthcheck to return 200")
-		Expect(utils.WaitHTTP200(ctx, baseURL+"/api/healthcheck", 2*time.Minute)).To(Succeed(),
+		By("waiting for /healthcheck to return 200")
+		Expect(utils.WaitHTTP200(ctx, baseURL+"/healthcheck", 2*time.Minute)).To(Succeed(),
 			"LMCache HTTP frontend did not become healthy")
 
-		By("fetching /api/status and asserting CR fields propagated to the live server")
+		By("fetching /status and asserting CR fields propagated to the live server")
 		status := &statusPayload{}
-		Expect(utils.HTTPGetJSON(ctx, baseURL+"/api/status", status)).To(Succeed())
+		Expect(utils.HTTPGetJSON(ctx, baseURL+"/status", status)).To(Succeed())
 		Expect(status.IsHealthy).To(BeTrue(),
 			"status.is_healthy must be true — engine did not initialize cleanly")
 		Expect(status.ChunkSize).To(Equal(expectedChunkSize),
@@ -108,7 +105,7 @@ var _ = Describe("LMCacheEngine runtime smoke (GPU)", Ordered, func() {
 	})
 })
 
-// statusPayload is the strict subset of /api/status that the runtime
+// statusPayload is the strict subset of /status that the runtime
 // spec asserts against. Fields we don't assert on are intentionally
 // omitted — the server adds operational fields (registered_gpu_ids,
 // active_sessions, storage_manager) that change every run and would
