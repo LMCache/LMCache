@@ -6,7 +6,7 @@ steps:
     key: "operator_test_e2e_gpu_kind"
     timeout_in_minutes: 90
     command: |
-      echo $PWD # for debugging
+      echo $$PWD # for debugging
 
       cd operator
       make test-e2e-gpu-kind
@@ -24,7 +24,7 @@ steps:
     depends_on: "operator_cleanup_kind"
     allow_dependency_failure: true
     command: |
-      export TARGET="$PWD"
-      echo "Deleting current workspace $TARGET"
+      export TARGET="$$PWD"
+      echo "Deleting current workspace $$TARGET"
       cd /
-      sudo rm -rf "$TARGET"
+      sudo rm -rf "$$TARGET"

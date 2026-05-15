@@ -7,22 +7,22 @@ steps:
       BASE_REF="origin/dev"
 
       if ! git fetch --quiet origin dev 2>/dev/null; then
-        echo "WARN: could not fetch $BASE_REF; running tests defensively."
+        echo "WARN: could not fetch $$BASE_REF; running tests defensively."
         buildkite-agent pipeline upload .buildkite/operator/integration/tests.yaml
         exit 0
       fi
 
-      if ! CHANGED=$(git diff --name-only "$BASE_REF...HEAD" -- operator/ .buildkite/operator/ 2>/dev/null); then
+      if ! CHANGED=$(git diff --name-only "$$BASE_REF...HEAD" -- operator/ .buildkite/operator/ 2>/dev/null); then
         echo "WARN: git diff failed; running tests defensively."
         buildkite-agent pipeline upload .buildkite/operator/integration/tests.yaml
         exit 0
       fi
 
-      if [ -z "$CHANGED" ]; then
-        echo "No operator or operator-pipeline changes vs $BASE_REF; skipping integration tests."
+      if [ -z "$$CHANGED" ]; then
+        echo "No operator or operator-pipeline changes vs $$BASE_REF; skipping integration tests."
         exit 0
       fi
 
       echo "Operator changes detected:"
-      echo "$CHANGED"
+      echo "$$CHANGED"
       buildkite-agent pipeline upload .buildkite/operator/integration/tests.yaml
