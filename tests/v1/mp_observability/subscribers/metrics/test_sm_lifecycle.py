@@ -128,7 +128,9 @@ class TestReadEmitsGap:
         bus.stop()
 
         time_d = _delta(before_t, _totals_by_salt("lmcache_mp.real_reuse_gap"))
-        chunks_d = _delta(before_c, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
+        chunks_d = _delta(
+            before_c, _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
+        )
         assert time_d.get("t-a", (0.0, 0))[1] == 1
         assert chunks_d.get("t-a", (0.0, 0)) == (1.0, 1)
 
