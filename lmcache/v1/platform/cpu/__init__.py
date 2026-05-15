@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.platform._registry import (
     DEFAULT_BACKEND,
     Platform,
@@ -22,13 +23,16 @@ from lmcache.v1.platform._registry import (
 )
 from lmcache.v1.platform.cpu.stream import MockExternalStream
 
+logger = init_logger(__name__)
+
 
 class CpuPlatform(Platform):
     """CPU fallback platform — always available, never declines."""
 
     device_type = DEFAULT_BACKEND  # "cpu"
 
-    def make_external_stream(self, raw_ptr: int, device_index: int) -> Optional[Any]:  # noqa: ARG002
+    def make_external_stream(self, raw_ptr: int, _device_index: int) -> Optional[Any]:
+        logger.info("make_external_stream: MockExternalStream %s", raw_ptr)
         return MockExternalStream(raw_ptr)
 
 
