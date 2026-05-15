@@ -507,7 +507,7 @@ def _emit_l2_adapter_metrics(
         "Data / round (MB)",
         round(data_per_round_mb, 2),
     )
-    cfg_section.add("rounds", "Measurement rounds", args.rounds)
+    cfg_section.add("measurement_rounds", "Measurement rounds", args.rounds)
     cfg_section.add("warmup_rounds", "Warmup rounds", args.warmup_rounds)
     # Only meaningful when lookup is actually executed; matches the
     # original banner log behaviour.
