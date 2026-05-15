@@ -5,9 +5,9 @@ message-queue round-trip, server handler, and client-side adapter API.
 """
 
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey

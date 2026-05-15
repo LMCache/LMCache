@@ -64,8 +64,8 @@ def fake_adapter(monkeypatch):
         tp_size=1,
         pp_size=1,
         kv_world_size_per_node=1,
-        tp_size_per_node=1,        
-        n_servers=1,               
+        tp_size_per_node=1,
+        n_servers=1,
     )
     adapter = LMCacheMPWorkerAdapter(
         server_url="tcp://127.0.0.1:0",
