@@ -18,6 +18,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
+    RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
@@ -149,17 +150,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
+        # Register non-GPU KV cache context
+        # Payload:
+        #   - RegisterNonGpuContextPayload - all metadata fields in one struct
+        # Returns: None
         "REGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
-            payload_classes=[
-                int,
-                str,
-                int,
-                int,
-                int,
-                int,
-                str,
-                bool,
-            ],
+            payload_classes=[RegisterNonGpuContextPayload],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

@@ -13,6 +13,7 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import is_mla
+from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.non_gpu_context import (
@@ -287,14 +288,16 @@ class NonCudaTransferContext(TransferContext):
             mq_client,
             RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT,
             [
-                instance_id,
-                model_name,
-                world_size,
-                block_size,
-                num_layers,
-                hidden_dim_size,
-                dtype_str,
-                use_mla_flag,
+                RegisterNonGpuContextPayload(
+                    instance_id=instance_id,
+                    model_name=model_name,
+                    world_size=world_size,
+                    block_size=block_size,
+                    num_layers=num_layers,
+                    hidden_dim_size=hidden_dim_size,
+                    dtype_str=dtype_str,
+                    use_mla=use_mla_flag,
+                )
             ],
         )
 

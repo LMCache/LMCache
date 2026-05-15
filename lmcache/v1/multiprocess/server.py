@@ -57,6 +57,7 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheEngineKey,
     KVCache,
+    RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
@@ -331,59 +332,49 @@ class MPCacheEngine:
 
     def register_kv_cache_non_gpu_context(
         self,
-        instance_id: int,
-        model_name: str,
-        world_size: int,
-        block_size: int,
-        num_layers: int,
-        hidden_dim_size: int,
-        dtype_str: str,
-        use_mla: bool,
+        payload: RegisterNonGpuContextPayload,
     ) -> None:
         """Register non-CUDA KV layout metadata for non-GPU context mode.
 
         Args:
-            instance_id: Worker instance identifier (typically PID).
-            model_name: Model name associated with this worker.
-            world_size: Worker world size used in cache keys.
-            block_size: Tokens per paged block.
-            num_layers: Number of model layers.
-            hidden_dim_size: Flattened hidden dimension per token.
-            dtype_str: Torch dtype name (for example ``"float16"``).
-            use_mla: Whether the worker KV format is MLA.
+            payload: Struct containing all registration fields
+                (instance_id, model_name, world_size, block_size,
+                num_layers, hidden_dim_size, dtype_str, use_mla).
 
         Raises:
-            ValueError: If ``dtype_str`` is not a valid torch dtype name.
+            ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
         """
-        if instance_id in self.contexts:
+        if payload.instance_id in self.contexts:
             logger.warning(
                 "Instance %s's KV cache is already registered, "
                 "skipping the new registration",
-                instance_id,
+                payload.instance_id,
             )
             return
 
-        dtype = getattr(torch, dtype_str, None)
+        dtype = getattr(torch, payload.dtype_str, None)
         if dtype is None or not isinstance(dtype, torch.dtype):
             raise ValueError(
-                f"Invalid dtype_str '{dtype_str}': must be a valid torch dtype "
+                f"Invalid dtype_str '{payload.dtype_str}': must be a valid torch dtype "
                 "attribute name (e.g. 'float16' for torch.float16, "
                 "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
             )
 
         shape = (
-            torch.Size([num_layers, self.chunk_size, hidden_dim_size])
-            if use_mla
-            else torch.Size([2, num_layers, self.chunk_size, hidden_dim_size])
+            torch.Size([payload.num_layers, self.chunk_size, payload.hidden_dim_size])
+            if payload.use_mla
+            else torch.Size(
+                [2, payload.num_layers, self.chunk_size, payload.hidden_dim_size]
+            )
         )
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
-        self.contexts[instance_id] = RegisteredContext(
-            model_name=model_name,
-            world_size=world_size,
+        self.contexts[payload.instance_id] = RegisteredContext(
+            model_name=payload.model_name,
+            world_size=payload.world_size,
             non_cuda_metadata=NonGpuContextMetadata(
                 layout_desc=layout_desc,
-                block_size=block_size,
-                use_mla=use_mla,
+                block_size=payload.block_size,
+                use_mla=payload.use_mla,
             ),
         )
 

@@ -356,6 +356,7 @@ def test_server_register_and_find_non_cuda_context_layout(
 ) -> None:
     """Ensure non-CUDA registration stores metadata and lookup finds layout."""
     # First Party
+    from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
     from lmcache.v1.multiprocess.server import MPCacheEngine
 
     with (
@@ -366,14 +367,16 @@ def test_server_register_and_find_non_cuda_context_layout(
     ):
         engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=16)
     engine.register_kv_cache_non_gpu_context(
-        instance_id=1,
-        model_name="m",
-        world_size=1,
-        block_size=4,
-        num_layers=2,
-        hidden_dim_size=16,
-        dtype_str="float32",
-        use_mla=False,
+        RegisterNonGpuContextPayload(
+            instance_id=1,
+            model_name="m",
+            world_size=1,
+            block_size=4,
+            num_layers=2,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            use_mla=False,
+        )
     )
 
     layout = engine._find_layout_desc("m", 1)
@@ -384,7 +387,10 @@ def test_server_register_and_find_non_cuda_context_layout(
 def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> None:
     """Validate mocked server-side CPU chunk store and retrieve behavior."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+    from lmcache.v1.multiprocess.custom_types import (
+        IPCCacheEngineKey,
+        RegisterNonGpuContextPayload,
+    )
     from lmcache.v1.multiprocess.server import MPCacheEngine
 
     mock_storage = MagicMock()
@@ -417,14 +423,16 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
         engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=8)
 
     engine.register_kv_cache_non_gpu_context(
-        instance_id=2,
-        model_name="m",
-        world_size=1,
-        block_size=4,
-        num_layers=2,
-        hidden_dim_size=16,
-        dtype_str="float32",
-        use_mla=False,
+        RegisterNonGpuContextPayload(
+            instance_id=2,
+            model_name="m",
+            world_size=1,
+            block_size=4,
+            num_layers=2,
+            hidden_dim_size=16,
+            dtype_str="float32",
+            use_mla=False,
+        )
     )
     payload = torch.ones(2, 2, 8, 16)
     key = IPCCacheEngineKey.from_token_ids(
