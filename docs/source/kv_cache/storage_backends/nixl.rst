@@ -111,6 +111,36 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using Azure Bl
         account_url: https://<your_azure_storage_account_name>.blob.core.windows.net
         container_name: <your_container_name>
 
+Per-Worker Endpoint Distribution
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When using the OBJ backend with multiple tensor-parallel (TP) workers, you can
+distribute workers across multiple object-storage endpoints by providing a list of
+endpoints via ``nixl_endpoint_list``. Each worker selects an endpoint in
+round-robin order based on its ``local_worker_id`` (the worker ID within its host).
+
+.. code-block:: yaml
+
+    extra_config:
+      enable_nixl_storage: true
+      nixl_backend: OBJ
+      nixl_pool_size: 64
+      nixl_path: /mnt/nixl/cache/
+      nixl_endpoint_list:
+        - https://node-0.object-storage:9021
+        - https://node-1.object-storage:9021
+        - https://node-2.object-storage:9021
+      nixl_backend_params:
+        access_key: <your_access_key>
+        secret_key: <your_secret_key>
+        bucket: <your_bucket>
+        region: <your_region>
+
+.. note::
+
+    When ``nixl_endpoint_list`` is set, any ``endpoint_override`` value in
+    ``nixl_backend_params`` is ignored (a warning is logged).
+
 Dynamic Mode
 ~~~~~~~~~~~~~
 

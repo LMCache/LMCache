@@ -121,6 +121,9 @@ lmcache/experimental/tests
 /csrc/*_hip.cuh
 /csrc/*_hip.cpp
 
+# SYCL build artifacts
+/build_sycl/
+
 # Ignore all log files
 *.log
 
@@ -139,3 +142,4 @@ operator/dist/
 operator/cover.out
 operator/coverage.html
 operator/Dockerfile.cross
+*.spv
