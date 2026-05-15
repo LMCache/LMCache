@@ -12,7 +12,7 @@ import torch
 from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.gpu_connector.utils import is_mla
+from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
 from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -59,7 +59,7 @@ class TransferContext(ABC):
         mq_client: MessageQueueClient,
         mq_timeout: float,
         send_request: SendRequest,
-        vllm_logical_block_size: int = 0,
+        layout_hints: LayoutHints | None = None,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -72,8 +72,7 @@ class TransferContext(ABC):
             mq_client: Message queue client used to communicate with server.
             mq_timeout: Timeout in seconds for synchronous request wait.
             send_request: Request sender callable used to issue MQ requests.
-            vllm_logical_block_size: vLLM logical block size used to derive
-                per-layer-group compression ratios on the server side.
+            layout_hints: Optional inference-engine-provided layout hints.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -163,16 +162,13 @@ class CudaTransferContext(TransferContext):
         mq_client: MessageQueueClient,
         mq_timeout: float,
         send_request: SendRequest,
-        vllm_logical_block_size: int = 0,
+        layout_hints: LayoutHints | None = None,
     ) -> None:
         # First Party
-        from lmcache.integration.vllm.utils import vllm_layout_hints
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
 
         self._mq_client = mq_client
         self._send_request = send_request
-        layout_hints = vllm_layout_hints()
-        layout_hints["inference_engine_logical_block_size"] = vllm_logical_block_size
         future = send_request(
             mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -240,7 +236,7 @@ class NonCudaTransferContext(TransferContext):
 
     def __init__(self) -> None:
         self._non_gpu_context: NonGpuContext | None = None
-        self._layout_hints: Any = None
+        self._layout_hints: LayoutHints | None = None
         self._gpu_kv_format: Any = None
 
     def register(
@@ -253,16 +249,11 @@ class NonCudaTransferContext(TransferContext):
         mq_client: MessageQueueClient,
         mq_timeout: float,
         send_request: SendRequest,
-        vllm_logical_block_size: int = 0,
+        layout_hints: LayoutHints | None = None,
     ) -> None:
-        # First Party
-        from lmcache.integration.vllm.utils import vllm_layout_hints
-
-        layout_hints = vllm_layout_hints()
-
-        # TODO: inference_engine_logical_block_size is used by deepseek v4
-        # which is implemented in cuda path, non cuda path is to be implemented
-        layout_hints["inference_engine_logical_block_size"] = vllm_logical_block_size
+        # TODO: inference_engine_logical_block_size is currently used by
+        # DeepSeek V4 on the CUDA path. The non-CUDA path is yet to be
+        # implemented.
         (
             block_size,
             num_layers,

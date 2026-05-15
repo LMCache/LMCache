@@ -12,6 +12,7 @@ import zmq
 
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
+from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -852,6 +853,10 @@ class LMCacheMPWorkerAdapter:
         """
         self.kv_caches = kv_caches
         self.transfer_ctx = create_transfer_context(kv_caches)
+        layout_hints = vllm_layout_hints()
+        layout_hints["inference_engine_logical_block_size"] = (
+            self.vllm_logical_block_size
+        )
         try:
             self.transfer_ctx.register(
                 self.instance_id,
@@ -862,7 +867,7 @@ class LMCacheMPWorkerAdapter:
                 self.mq_client,
                 self._mq_timeout,
                 send_request=send_lmcache_request,
-                vllm_logical_block_size=self.vllm_logical_block_size,
+                layout_hints=layout_hints,
             )
         except TimeoutError:
             raise ConnectionError(
