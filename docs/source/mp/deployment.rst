@@ -159,19 +159,19 @@ Health Checking (HTTP Server)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For Kubernetes liveness/readiness probes, deploy the HTTP server variant
-instead.  Use the ``/api/healthcheck`` endpoint:
+instead.  Use the ``/healthcheck`` endpoint:
 
 .. code-block:: yaml
 
     livenessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 10
       periodSeconds: 30
     readinessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 5
       periodSeconds: 10

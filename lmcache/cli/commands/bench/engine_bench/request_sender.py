@@ -111,6 +111,7 @@ class RequestSender:
         """
         submit_time = time.time()
         first_token_time = 0.0
+        first_chunk_time = 0.0
         tokens: list[str] = []
         num_input_tokens = 0
         num_output_tokens = 0
@@ -119,6 +120,9 @@ class RequestSender:
             response = await self._create_stream(messages, max_tokens)
 
             async for chunk in response:
+                if not first_chunk_time:
+                    first_chunk_time = time.time()
+
                 # Extract usage from final chunk
                 usage = getattr(chunk, "usage", None)
                 if usage is not None:
@@ -136,6 +140,11 @@ class RequestSender:
                     tokens.append(content)
 
             finish_time = time.time()
+            if first_token_time == 0.0 and num_output_tokens > 0:
+                # Empty-content stream (common with max_tokens=1, e.g. the
+                # single token is EOS): use first chunk arrival as TTFT —
+                # closer to engine prefill completion than finish_time.
+                first_token_time = first_chunk_time or finish_time
             successful = first_token_time > 0.0
             ttft = (first_token_time - submit_time) if successful else -1.0
             request_latency = finish_time - submit_time

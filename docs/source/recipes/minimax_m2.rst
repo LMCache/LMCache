@@ -7,6 +7,8 @@ Validated models
 ----------------
 
 - `MiniMaxAI/MiniMax-M2 <https://huggingface.co/MiniMaxAI/MiniMax-M2>`_
+- `MiniMaxAI/MiniMax-M2.5 <https://huggingface.co/MiniMaxAI/MiniMax-M2.5>`_
+- `MiniMaxAI/MiniMax-M2.7 <https://huggingface.co/MiniMaxAI/MiniMax-M2.7>`_
 
 .. tab-set::
    :sync-group: engine
@@ -26,7 +28,11 @@ Validated models
 
          lmcache server --l1-size-gb 100 --eviction-policy LRU
 
+      |
+
       Start vLLM with the LMCache MP connector:
+
+      **MiniMax-M2** (8 GPUs):
 
       .. code-block:: bash
 
@@ -36,9 +42,45 @@ Validated models
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
+      |
+
+      **MiniMax-M2.5** (4 GPUs):
+
+      .. code-block:: bash
+
+         vllm serve MiniMaxAI/MiniMax-M2.5 \
+             --tensor-parallel-size 4 \
+             --trust-remote-code \
+             --enable-auto-tool-choice \
+             --tool-call-parser minimax_m2 \
+             --reasoning-parser minimax_m2 \
+             --kv-transfer-config \
+             '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+      |
+
+      **MiniMax-M2.7** (4 GPUs):
+
+      .. code-block:: bash
+
+         vllm serve MiniMaxAI/MiniMax-M2.7 \
+             --tensor-parallel-size 4 \
+             --trust-remote-code \
+             --enable-auto-tool-choice \
+             --tool-call-parser minimax_m2 \
+             --reasoning-parser minimax_m2 \
+             --kv-transfer-config \
+             '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+      |
+
       Adjust ``--tensor-parallel-size`` to match your hardware. For the
       generic LMCache + vLLM wiring (ports, remote hosts, in-process mode),
       see :doc:`../mp/quickstart`.
+
+      If there are any issues with vLLM setup, please refer to the
+      `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_
+      for more details.
 
    .. tab-item:: SGLang
 

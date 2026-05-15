@@ -122,6 +122,7 @@ class RawBlockCoreConfig:
     meta_idle_quiet_ms: int
     meta_enable_periodic: bool
     meta_verify_on_load: bool
+    load_checkpoint_on_init: bool = True
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
 
@@ -192,6 +193,7 @@ class RawBlockCore:
         self.meta_checkpoint_interval_sec = int(config.meta_checkpoint_interval_sec)
         self.meta_idle_quiet_ms = int(config.meta_idle_quiet_ms)
         self.meta_enable_periodic = bool(config.meta_enable_periodic)
+        self.load_checkpoint_on_init = bool(config.load_checkpoint_on_init)
         self.meta_verify_on_load = bool(config.meta_verify_on_load)
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
@@ -259,7 +261,10 @@ class RawBlockCore:
 
         try:
             self._ensure_capacity_and_layout()
-            self._load_checkpoint_from_device()
+            if self.load_checkpoint_on_init:
+                self._load_checkpoint_from_device()
+            else:
+                logger.info("RawBlockCore: skipping on-device metadata checkpoint load")
 
             if self.meta_enable_periodic:
                 self._meta_thread = threading.Thread(

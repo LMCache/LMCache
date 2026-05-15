@@ -38,16 +38,18 @@ Workflow (example: chunk_size = 3)
 """
 
 # Standard
+from typing import Any
 import threading
 import time
 
 # Third Party
 import numpy as np
-import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
+from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -426,6 +428,43 @@ class BlendEngineV2(MPCacheEngine):
                 instance_id,
             )
 
+    def report_status(self) -> dict:
+        """Return a status dict for the entire cache engine.
+
+        Extends the base dict with ``registered_cb_gpu_ids`` and
+        ``cb_gpu_context_meta`` so CB-only deployments are distinguishable
+        from "no engine connected" to ``/api/status`` clients.
+        """
+        status = super().report_status()
+
+        cb_gpu_context_meta: dict[str, dict] = {}
+        for gpu_id, meta in self._cb_gpu_context_meta.items():
+            model_name, world_size = meta
+            entry: dict = {
+                "model_name": model_name,
+                "world_size": world_size,
+            }
+            ctx = self._cb_gpu_contexts.get(gpu_id)
+            if ctx is not None:
+                # bytes per token = 2 (K+V) * num_layers * hidden_dim_size *
+                # itemsize; num_tokens is the cache capacity, not a per-token
+                # cost.
+                cache_size_per_token = (
+                    2 * ctx.num_layers * ctx.hidden_dim_size * ctx.dtype.itemsize
+                )
+                entry["kv_cache_layout"] = {
+                    "num_layers": ctx.num_layers,
+                    "num_tokens": ctx.num_tokens,
+                    "hidden_dim_size": ctx.hidden_dim_size,
+                    "dtype": str(ctx.dtype),
+                    "cache_size_per_token": cache_size_per_token,
+                }
+            cb_gpu_context_meta[str(gpu_id)] = entry
+
+        status["registered_cb_gpu_ids"] = list(self._cb_gpu_contexts.keys())
+        status["cb_gpu_context_meta"] = cb_gpu_context_meta
+        return status
+
     def cb_lookup_pre_computed(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
         """
         Lookup the pre-computed chunks in the underlying storage.
@@ -493,8 +532,21 @@ class BlendEngineV2(MPCacheEngine):
             )
             return []
 
-        # Sort by query position and group consecutive matched chunks
+        # Sort by query position
         cb_match_result.sort(key=lambda r: r.cur_st)
+
+        # The sliding-window probe returns O(table_size) overlapping matches.
+        # Greedy leftmost-first picks one chunk per slot; lossless when matches
+        # are chunk-aligned (the CB case).
+        deduped: list[CBMatchResult] = []
+        covered_end = -1
+        for r in cb_match_result:
+            if r.cur_st >= covered_end:
+                deduped.append(r)
+                covered_end = r.cur_ed
+        cb_match_result = deduped
+
+        # Group consecutive matched chunks
         groups: list[list[CBMatchResult]] = []
         for result in cb_match_result:
             if groups and groups[-1][-1].cur_ed == result.cur_st:
@@ -648,7 +700,7 @@ class BlendEngineV2(MPCacheEngine):
         offset: int,
         event_ipc_handle: bytes,
         start_event: Event | None = None,
-    ) -> tuple[torch.cuda.Event, dict]:
+    ) -> tuple[Any, dict]:
         """
         Helper function to perform GPU-to-CPU copy operations for storing chunks.
 
@@ -656,23 +708,32 @@ class BlendEngineV2(MPCacheEngine):
             obj_keys: List of object keys to store.
             gpu_context: GPU context for the blend engine instance.
             offset: The starting offset in the CB KV cache buffer.
-            event_ipc_handle: The IPC handle for the CUDA event that signals the
+            event_ipc_handle: The IPC handle for the GPU event that signals the
                 completion of LLM inference.
             start_event: Optional event to publish on the stream after waiting for
                 the vLLM GPU event, marking the true start of the store operation.
 
         Returns:
-            A tuple of (event, reserved_dict) where event is the CUDA event and
+            A tuple of (event, reserved_dict) where event is the GPU event and
             reserved_dict is the dictionary of reserved memory objects.
         """
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
-            event = torch.cuda.Event(interprocess=True)
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            check_interprocess_event_support()
+            event = torch_dev.Event(interprocess=True)
 
             # Wait for vLLM event to finish
-            vllm_event = torch.cuda.Event.from_ipc_handle(
+            # Not all backends support IPC event handles (CUDA IPC specific)
+            if not hasattr(torch_dev.Event, "from_ipc_handle"):
+                raise RuntimeError(
+                    f"Backend '{torch_device_type}' does not support IPC event "
+                    "handles (Event.from_ipc_handle not available). "
+                    "Multiprocess IPC requires CUDA."
+                )
+            vllm_event = torch_dev.Event.from_ipc_handle(
                 gpu_context.device, event_ipc_handle
             )
             vllm_event.wait(stream=gpu_context.stream)
@@ -897,10 +958,12 @@ class BlendEngineV2(MPCacheEngine):
         logger.debug("DEBUG object keys to retrieve: %s", all_obj_keys)
 
         with (
-            torch.cuda.device(gpu_context.device),
-            torch.cuda.stream(gpu_context.stream),
+            torch_dev.device(gpu_context.device),
+            torch_dev.stream(gpu_context.stream),
         ):
-            event = torch.cuda.Event(interprocess=True)
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            check_interprocess_event_support()
+            event = torch_dev.Event(interprocess=True)
 
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -1245,7 +1308,14 @@ def run_cache_server(
         mp_config.port,
     )
     # Start the ZMQ server
-    torch.cuda.init()
+    # Not all backends expose init(); some auto-initialize on first use
+    if not hasattr(torch_dev, "init"):
+        logger.warning(
+            "Backend '%s' does not support init(), skipping device init",
+            torch_device_type,
+        )
+    else:
+        torch_dev.init()
     server.start()
 
     logger.info("LMCache cache blend v2 server is running...")
