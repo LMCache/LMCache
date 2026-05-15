@@ -117,7 +117,7 @@ contribute to histograms; counters above always count all events.
 | `lmcache_mp.l1_chunk_reuse_gap` | `lmcache_mp_l1_chunk_reuse_gap_seconds` | Histogram | `L1_READ_FINISHED`, `L1_WRITE_FINISHED`, `L1_WRITE_FINISHED_AND_READ_RESERVED` | Time gap between consecutive touches of the same chunk |
 | `lmcache_mp.l1_chunk_evict_reuse_gap` | `lmcache_mp_l1_chunk_evict_reuse_gap_seconds` | Histogram | `L1_KEYS_EVICTED` → `L1_WRITE_FINISHED` | Time from eviction to next reuse (capped at 300 s) |
 | `lmcache_mp.real_reuse_gap` | `lmcache_mp_real_reuse_gap_seconds` | Histogram (tagged `cache_salt`) | `SM_READ_PREFETCHED_FINISHED`, `SM_WRITE_FINISHED` | Time gap between a chunk's last access (read or write) and the next read.  Captures **storage cost**.  Emitted only on read events. |
-| `lmcache_mp.real_reuse_gap_volume` | `lmcache_mp_real_reuse_gap_volume_chunks` | Histogram (tagged `cache_salt`) | `SM_READ_PREFETCHED_FINISHED`, `SM_WRITE_FINISHED` | Per-`cache_salt` access-counter gap between two reads of the same chunk.  Counter bumps on every read and write of every chunk; histogram emitted only on read events for sampled chunks.  Captures **storage volume**. |
+| `lmcache_mp.real_reuse_gap_objects` | `lmcache_mp_real_reuse_gap_objects_chunks` | Histogram (tagged `cache_salt`) | `SM_READ_PREFETCHED_FINISHED`, `SM_WRITE_FINISHED` | Per-`cache_salt` access-counter gap between two reads of the same chunk.  Counter bumps on every read and write of every chunk; histogram emitted only on read events for sampled chunks.  Captures **storage volume**. |
 
 **What it answers:** How long do L1 chunks live? How idle are they before eviction? How quickly are evicted chunks reused?
 
@@ -129,9 +129,9 @@ contribute to histograms; counters above always count all events.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_store_submitted` | `lmcache_mp_l2_store_submitted_requests_total` | Counter | `L2_STORE_SUBMITTED` | +1 per event |
-| `lmcache_mp.l2_store_submitted_volume` | `lmcache_mp_l2_store_submitted_volume_chunks_total` | Counter | `L2_STORE_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_store_submitted_objects` | `lmcache_mp_l2_store_submitted_objects_chunks_total` | Counter | `L2_STORE_SUBMITTED` | `+key_count` |
 | `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_requests_total` | Counter (attr: `l2_name`) | `L2_STORE_COMPLETED` | +1 per event |
-| `lmcache_mp.l2_store_completed_volume` | `lmcache_mp_l2_store_completed_volume_chunks_total` | Counter | `L2_STORE_COMPLETED` | `+succeeded_count` |
+| `lmcache_mp.l2_store_completed_objects` | `lmcache_mp_l2_store_completed_objects_chunks_total` | Counter | `L2_STORE_COMPLETED` | `+succeeded_count` |
 
 **What it answers:** How many chunks are being pushed to L2? What fraction fail?
 
@@ -142,10 +142,10 @@ contribute to histograms; counters above always count all events.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_prefetch_lookup` | `lmcache_mp_l2_prefetch_lookup_submitted_requests_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | +1 per event |
-| `lmcache_mp.l2_prefetch_lookup_volume` | `lmcache_mp_l2_prefetch_lookup_submitted_volume_chunks_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_lookup_objects` | `lmcache_mp_l2_prefetch_lookup_submitted_objects_chunks_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+key_count` |
 | `lmcache_mp.l2_prefetch_hit` | `lmcache_mp_l2_prefetch_lookup_hit_chunks_total` | Counter | `L2_PREFETCH_LOOKUP_COMPLETED` | `+prefix_hit_count` |
 | `lmcache_mp.l2_prefetch_load_submitted` | `lmcache_mp_l2_prefetch_load_submitted_requests_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+adapter_count` (per-adapter task count) |
-| `lmcache_mp.l2_prefetch_load_submitted_volume` | `lmcache_mp_l2_prefetch_load_submitted_volume_chunks_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+key_count` |
+| `lmcache_mp.l2_prefetch_load_submitted_objects` | `lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+key_count` |
 | `lmcache_mp.l2_prefetch_load_completed` | `lmcache_mp_l2_prefetch_load_completed_chunks_total` | Counter | `L2_PREFETCH_LOAD_COMPLETED` | `+loaded_count` |
 | `lmcache_mp.l2_load_completed` | `lmcache_mp_l2_load_completed_requests_total` | Counter (attr: `l2_name`) | `L2_LOAD_TASK_COMPLETED` | +1 per event |
 

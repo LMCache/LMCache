@@ -596,13 +596,13 @@
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_submitted_volume_chunks_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_store_submitted_objects_chunks_total[$__rate_interval])",
           "legendFormat": "keys submitted/s",
           "refId": "C"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_completed_volume_chunks_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_store_completed_objects_chunks_total[$__rate_interval])",
           "legendFormat": "succeeded keys/s",
           "refId": "D"
         }
@@ -716,7 +716,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_lookup_volume_chunks_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_prefetch_lookup_objects_chunks_total[$__rate_interval])",
           "legendFormat": "lookup keys/s",
           "refId": "B"
         },
@@ -734,7 +734,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_load_submitted_volume_chunks_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total[$__rate_interval])",
           "legendFormat": "load keys submitted/s",
           "refId": "E"
         },
@@ -2062,7 +2062,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_real_reuse_gap_volume_chunks_sum[$__rate_interval]) / rate(lmcache_mp_real_reuse_gap_volume_chunks_count[$__rate_interval])",
+          "expr": "rate(lmcache_mp_real_reuse_gap_objects_chunks_sum[$__rate_interval]) / rate(lmcache_mp_real_reuse_gap_objects_chunks_count[$__rate_interval])",
           "legendFormat": "avg reuse gap chunks ({{cache_salt}})",
           "refId": "B"
         }

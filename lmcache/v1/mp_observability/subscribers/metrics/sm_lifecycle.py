@@ -76,7 +76,7 @@ class SMLifecycleSubscriber(EventSubscriber):
             unit="s",
         )
         self._real_reuse_gap_chunks_hist = meter.create_histogram(
-            "lmcache_mp.real_reuse_gap_volume",
+            "lmcache_mp.real_reuse_gap_objects",
             description=(
                 "Per-cache_salt access-counter gap between two reads of "
                 "the same chunk.  Storage volume.  Tagged with cache_salt."

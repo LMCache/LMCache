@@ -132,7 +132,7 @@ class TestL2StoreMetrics:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_store_submitted"] == 2
-        assert delta["lmcache_mp.l2_store_submitted_volume"] == 15
+        assert delta["lmcache_mp.l2_store_submitted_objects"] == 15
 
     def test_store_completed_success(self, bus, subscriber, snapshot):
         bus.start()
@@ -147,7 +147,7 @@ class TestL2StoreMetrics:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_store_completed"] == 1
-        assert delta["lmcache_mp.l2_store_completed_volume"] == 8
+        assert delta["lmcache_mp.l2_store_completed_objects"] == 8
 
     def test_store_completed_with_failures(self, bus, subscriber, snapshot):
         bus.start()
@@ -162,7 +162,7 @@ class TestL2StoreMetrics:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_store_completed"] == 1
-        assert delta["lmcache_mp.l2_store_completed_volume"] == 3
+        assert delta["lmcache_mp.l2_store_completed_objects"] == 3
 
     def test_store_full_lifecycle(self, bus, subscriber, snapshot):
         """Simulate warmup: submit 20 keys, all succeed."""
@@ -184,9 +184,9 @@ class TestL2StoreMetrics:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_store_submitted"] == 1
-        assert delta["lmcache_mp.l2_store_submitted_volume"] == 20
+        assert delta["lmcache_mp.l2_store_submitted_objects"] == 20
         assert delta["lmcache_mp.l2_store_completed"] == 1
-        assert delta["lmcache_mp.l2_store_completed_volume"] == 20
+        assert delta["lmcache_mp.l2_store_completed_objects"] == 20
 
 
 # ---------------------------------------------------------------------------
@@ -208,7 +208,7 @@ class TestL2PrefetchMetrics:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_prefetch_lookup"] == 1
-        assert delta["lmcache_mp.l2_prefetch_lookup_volume"] == 12
+        assert delta["lmcache_mp.l2_prefetch_lookup_objects"] == 12
 
     def test_lookup_completed_counts_hits(self, bus, subscriber, snapshot):
         bus.start()
@@ -237,7 +237,7 @@ class TestL2PrefetchMetrics:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_prefetch_load_submitted"] == 2
-        assert delta["lmcache_mp.l2_prefetch_load_submitted_volume"] == 10
+        assert delta["lmcache_mp.l2_prefetch_load_submitted_objects"] == 10
 
     def test_load_completed_counts(self, bus, subscriber, snapshot):
         bus.start()
@@ -285,10 +285,10 @@ class TestL2PrefetchMetrics:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_prefetch_lookup"] == 1
-        assert delta["lmcache_mp.l2_prefetch_lookup_volume"] == 20
+        assert delta["lmcache_mp.l2_prefetch_lookup_objects"] == 20
         assert delta["lmcache_mp.l2_prefetch_hit"] == 18
         assert delta["lmcache_mp.l2_prefetch_load_submitted"] == 1
-        assert delta["lmcache_mp.l2_prefetch_load_submitted_volume"] == 18
+        assert delta["lmcache_mp.l2_prefetch_load_submitted_objects"] == 18
         assert delta["lmcache_mp.l2_prefetch_load_completed"] == 18
 
 
@@ -431,9 +431,9 @@ class TestL2MetricsAccumulation:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_store_submitted"] == 5
-        assert delta["lmcache_mp.l2_store_submitted_volume"] == 15
+        assert delta["lmcache_mp.l2_store_submitted_objects"] == 15
         assert delta["lmcache_mp.l2_store_completed"] == 5
-        assert delta["lmcache_mp.l2_store_completed_volume"] == 15
+        assert delta["lmcache_mp.l2_store_completed_objects"] == 15
 
     def test_multiple_prefetch_events_accumulate(self, bus, subscriber, snapshot):
         bus.start()
@@ -467,8 +467,8 @@ class TestL2MetricsAccumulation:
 
         delta = snapshot()
         assert delta["lmcache_mp.l2_prefetch_lookup"] == 3
-        assert delta["lmcache_mp.l2_prefetch_lookup_volume"] == 30
+        assert delta["lmcache_mp.l2_prefetch_lookup_objects"] == 30
         assert delta["lmcache_mp.l2_prefetch_hit"] == 24
         assert delta["lmcache_mp.l2_prefetch_load_submitted"] == 3
-        assert delta["lmcache_mp.l2_prefetch_load_submitted_volume"] == 24
+        assert delta["lmcache_mp.l2_prefetch_load_submitted_objects"] == 24
         assert delta["lmcache_mp.l2_prefetch_load_completed"] == 21

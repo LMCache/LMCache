@@ -31,16 +31,16 @@ class L2MetricsSubscriber(EventSubscriber):
 
     Metrics:
     - ``lmcache_mp.l2_store_submitted`` — store requests submitted to L2
-    - ``lmcache_mp.l2_store_submitted_volume`` — chunks submitted for L2 store
+    - ``lmcache_mp.l2_store_submitted_objects`` — chunks submitted for L2 store
     - ``lmcache_mp.l2_store_completed`` — store requests completed (attr: ``l2_name``)
-    - ``lmcache_mp.l2_store_completed_volume`` — chunks successfully stored to L2
+    - ``lmcache_mp.l2_store_completed_objects`` — chunks successfully stored to L2
     - ``lmcache_mp.l2_load_completed`` — per-adapter load tasks completed
       (attr: ``l2_name``)
     - ``lmcache_mp.l2_prefetch_lookup`` — prefetch lookup requests
-    - ``lmcache_mp.l2_prefetch_lookup_volume`` — chunks submitted for lookup
+    - ``lmcache_mp.l2_prefetch_lookup_objects`` — chunks submitted for lookup
     - ``lmcache_mp.l2_prefetch_hit`` — prefix chunks found in L2
     - ``lmcache_mp.l2_prefetch_load_submitted`` — load tasks submitted
-    - ``lmcache_mp.l2_prefetch_load_submitted_volume`` — chunks submitted for load
+    - ``lmcache_mp.l2_prefetch_load_submitted_objects`` — chunks submitted for load
     - ``lmcache_mp.l2_prefetch_load_completed`` — chunks successfully loaded from L2
 
     The ``l2_name``-labeled counters (``l2_store_completed``, ``l2_load_completed``)
@@ -57,8 +57,8 @@ class L2MetricsSubscriber(EventSubscriber):
             description="Total L2 store requests submitted",
             unit="requests",
         )
-        self._store_submitted_volume = meter.create_counter(
-            "lmcache_mp.l2_store_submitted_volume",
+        self._store_submitted_objects = meter.create_counter(
+            "lmcache_mp.l2_store_submitted_objects",
             description="Total chunks submitted for L2 store",
             unit="chunks",
         )
@@ -67,8 +67,8 @@ class L2MetricsSubscriber(EventSubscriber):
             description="Total L2 store requests completed",
             unit="requests",
         )
-        self._store_completed_volume = meter.create_counter(
-            "lmcache_mp.l2_store_completed_volume",
+        self._store_completed_objects = meter.create_counter(
+            "lmcache_mp.l2_store_completed_objects",
             description="Total chunks successfully stored to L2",
             unit="chunks",
         )
@@ -87,8 +87,8 @@ class L2MetricsSubscriber(EventSubscriber):
             description="Total L2 prefetch lookup requests submitted",
             unit="requests",
         )
-        self._prefetch_lookup_submitted_volume = meter.create_counter(
-            "lmcache_mp.l2_prefetch_lookup_volume",
+        self._prefetch_lookup_submitted_objects = meter.create_counter(
+            "lmcache_mp.l2_prefetch_lookup_objects",
             description="Total chunks submitted for L2 prefetch lookup",
             unit="chunks",
         )
@@ -104,8 +104,8 @@ class L2MetricsSubscriber(EventSubscriber):
             description="Total L2 prefetch load requests submitted (per-adapter)",
             unit="requests",
         )
-        self._prefetch_load_submitted_volume = meter.create_counter(
-            "lmcache_mp.l2_prefetch_load_submitted_volume",
+        self._prefetch_load_submitted_objects = meter.create_counter(
+            "lmcache_mp.l2_prefetch_load_submitted_objects",
             description="Total chunks submitted for L2 load",
             unit="chunks",
         )
@@ -128,26 +128,26 @@ class L2MetricsSubscriber(EventSubscriber):
 
     def _on_store_submitted(self, event: Event) -> None:
         self._store_submitted.add(1)
-        self._store_submitted_volume.add(event.metadata["key_count"])
+        self._store_submitted_objects.add(event.metadata["key_count"])
 
     def _on_store_completed(self, event: Event) -> None:
         attrs = _l2_name_attrs(event)
         self._store_completed.add(1, attributes=attrs)
-        self._store_completed_volume.add(event.metadata["succeeded_count"])
+        self._store_completed_objects.add(event.metadata["succeeded_count"])
 
     def _on_load_task_completed(self, event: Event) -> None:
         self._load_completed.add(1, attributes=_l2_name_attrs(event))
 
     def _on_lookup_submitted(self, event: Event) -> None:
         self._prefetch_lookup_submitted.add(1)
-        self._prefetch_lookup_submitted_volume.add(event.metadata["key_count"])
+        self._prefetch_lookup_submitted_objects.add(event.metadata["key_count"])
 
     def _on_lookup_completed(self, event: Event) -> None:
         self._prefetch_lookup_hit.add(event.metadata["prefix_hit_count"])
 
     def _on_load_submitted(self, event: Event) -> None:
         self._prefetch_load_submitted.add(event.metadata["adapter_count"])
-        self._prefetch_load_submitted_volume.add(event.metadata["key_count"])
+        self._prefetch_load_submitted_objects.add(event.metadata["key_count"])
 
     def _on_load_completed(self, event: Event) -> None:
         self._prefetch_load_completed.add(event.metadata["loaded_count"])
