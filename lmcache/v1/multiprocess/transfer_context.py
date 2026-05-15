@@ -258,6 +258,9 @@ class NonCudaTransferContext(TransferContext):
         from lmcache.integration.vllm.utils import vllm_layout_hints
 
         layout_hints = vllm_layout_hints()
+
+        # TODO: inference_engine_logical_block_size is used by deepseek v4
+        # which is implemented in cuda path, non cuda path is to be implemented
         layout_hints["inference_engine_logical_block_size"] = vllm_logical_block_size
         (
             block_size,
