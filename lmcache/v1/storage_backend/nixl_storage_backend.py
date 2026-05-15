@@ -119,10 +119,38 @@ class NixlStorageConfig:
 
         enable_presence_cache = extra_config.get("nixl_presence_cache", False)
         enable_async_put = extra_config.get("nixl_async_put", False)
-        backend_params = extra_config.get("nixl_backend_params", {})
+        backend_params = dict(extra_config.get("nixl_backend_params", {}))
         use_direct_io = extra_config.get("use_direct_io", False)
         pool_size = extra_config.get("nixl_pool_size")
+
         backend = extra_config.get("nixl_backend")
+
+        # Per-worker endpoint distribution: if nixl_endpoint_list is set,
+        # override endpoint_override so each TP worker targets a different
+        # object-storage endpoint (round-robin by local_worker_id).
+        endpoint_list = extra_config.get("nixl_endpoint_list")
+        if endpoint_list is not None and len(endpoint_list) == 0:
+            raise ValueError("nixl_endpoint_list is set but empty")
+        if backend == "OBJ" and endpoint_list:
+            if "endpoint_override" in backend_params:
+                logger.warning(
+                    "nixl_endpoint_list is set; ignoring "
+                    "nixl_backend_params.endpoint_override (%s)",
+                    backend_params["endpoint_override"],
+                )
+            ep = endpoint_list[metadata.local_worker_id % len(endpoint_list)]
+            if not ep.startswith(("http://", "https://")):
+                raise ValueError(
+                    f"nixl_endpoint_list entry {ep!r} is not a valid URL "
+                    "(must start with 'http://' or 'https://')"
+                )
+            backend_params["endpoint_override"] = ep
+            logger.info(
+                "Worker %d using endpoint %s (from %d endpoints)",
+                metadata.local_worker_id,
+                ep,
+                len(endpoint_list),
+            )
         path = extra_config.get("nixl_path")
         enable_prog_thread = extra_config.get("nixl_enable_prog_thread", True)
         sync_mode_str = extra_config.get("nixl_sync_mode", None)
@@ -1095,6 +1123,13 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self.meta_fmt: Optional[MemoryFormat] = None
         self.init_chunk_meta(metadata)
 
+        # Monotonically increasing counter for OBJ device_id values.
+        # Each register/deregister cycle must use globally unique IDs to
+        # avoid a race where an async PUT deregister erases a concurrent
+        # GET registration in NIXL's devIdToObjKey_ map.
+        self._device_id_counter = 0
+        self._device_id_lock = threading.Lock()
+
         self.agent = NixlDynamicStorageAgent(
             self.memory_allocator,
             nixl_config.buffer_device,
@@ -1108,6 +1143,22 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """Configure a custom cache policy for key presence tracking."""
         if self.enable_presence_cache:
             self.key_presence_cache = cache
+
+    def _alloc_device_ids(self, count: int) -> list[int]:
+        """Allocate ``count`` globally unique OBJ device_id values.
+
+        The NIXL OBJ backend indexes registrations by device_id in a flat
+        unordered_map with no reference counting.  If two concurrent
+        operations (e.g. async PUT cleanup + sync GET) use the same
+        device_id sequence (0, 1, 2, ...), the PUT deregister can erase
+        the GET entry and cause ``prepXfer``/``postXfer`` to fail with
+        NIXL_ERR_INVALID_PARAM.  Using a monotonic counter ensures every
+        register/deregister cycle gets its own ID range.
+        """
+        with self._device_id_lock:
+            start = self._device_id_counter
+            self._device_id_counter += count
+        return list(range(start, start + count))
 
     def _cache_contains(self, chunk_hash: int) -> bool:
         if not self.enable_presence_cache or self.key_presence_cache is None:
@@ -1210,9 +1261,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             storage_indices.append(idx)
 
         if self.agent.mem_type == "OBJ":
+            device_ids = self._alloc_device_ids(len(keys))
             for idx in range(len(keys)):
                 object_key = self._format_object_key(keys[idx])
-                descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+                descs.append(NixlDesc(device_id=device_ids[idx], meta_info=object_key))
         else:
             # Already validated in validate_nixl_backend
             raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")
@@ -1305,9 +1357,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         descs = []
 
         if self.agent.mem_type == "OBJ":
+            device_ids = self._alloc_device_ids(len(keys))
             for idx in range(len(keys)):
                 object_key = self._format_object_key(keys[idx])
-                descs.append(NixlDesc(device_id=idx, meta_info=object_key))
+                descs.append(NixlDesc(device_id=device_ids[idx], meta_info=object_key))
         else:
             # Already validated in validate_nixl_backend
             raise ValueError(f"unexpected mem_type: {self.agent.mem_type}")

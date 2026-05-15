@@ -88,7 +88,9 @@ PYBIND11_MODULE(c_ops, m) {
       .def_readwrite("bs", &PageBufferShapeDesc::bs)
       .def_readwrite("nh", &PageBufferShapeDesc::nh)
       .def_readwrite("hs", &PageBufferShapeDesc::hs)
-      .def_readwrite("element_size", &PageBufferShapeDesc::element_size);
+      .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
+      .def_readwrite("block_stride_elems",
+                     &PageBufferShapeDesc::block_stride_elems);
   m.def("record_event_on_stream", &record_event_on_stream,
         py::arg("cuda_stream_ptr"), py::arg("event_type_name"),
         py::arg("session_id"), py::arg("str_metadata"), py::arg("int_metadata"),

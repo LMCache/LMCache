@@ -419,7 +419,15 @@ if __name__ == "__main__":
     elif BUILD_WITH_SYCL:
         core_file = "xpu_core.txt"
     else:
-        core_file = "cuda_core.txt"
+        # CUDA major selects between cu12 and cu13 vendor pins (cupy, nixl).
+        # Defaults to cu13 (the PyPI build); cu12.9 wheel builds set
+        # LMCACHE_CUDA_MAJOR=12 to pull cu12 wheels of those deps.
+        cuda_major = os.environ.get("LMCACHE_CUDA_MAJOR", "13")
+        if cuda_major not in ("12", "13"):
+            raise ValueError(
+                f"LMCACHE_CUDA_MAJOR must be '12' or '13', got '{cuda_major}'"
+            )
+        core_file = f"cuda{cuda_major}_core.txt"
     install_requires += _read_requirements(ROOT_DIR / "requirements" / core_file)
 
     setup(

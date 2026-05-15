@@ -33,7 +33,22 @@ DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
-    logger.info("KV caches keys are %s", list(kv_caches.keys()))
+    # Emit a per-layer (name, shape, dtype) summary so the operator can
+    # verify the exact layer set & tensor geometry being shipped to the
+    # LMCache server, then the low-noise count of handles being wrapped.
+    kept_summary = [
+        (name, tuple(tensor.shape), str(tensor.dtype))
+        for name, tensor in kv_caches.items()
+    ]
+    logger.debug(
+        "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",
+        len(kept_summary),
+        "\n".join(
+            f"  [{i}] {name}  shape={shape}  dtype={dtype}"
+            for i, (name, shape, dtype) in enumerate(kept_summary)
+        ),
+    )
+    logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
     return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
 
 
@@ -729,6 +744,14 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
+        # Retain the vLLM logical block size so we can ship it to the
+        # LMCache server in ``register_kv_caches`` — the server uses it
+        # (as ``layout_hints["inference_engine_logical_block_size"]``)
+        # to derive per-group compression ratios when some KV layer
+        # groups compress multiple logical tokens into a single physical
+        # slot (``shape_desc.bs <
+        # inference_engine_logical_block_size``).
+        self.vllm_logical_block_size = vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -824,6 +847,9 @@ class LMCacheMPWorkerAdapter:
         from lmcache.integration.vllm.utils import vllm_layout_hints
 
         layout_hints = vllm_layout_hints()
+        layout_hints["inference_engine_logical_block_size"] = (
+            self.vllm_logical_block_size
+        )
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
