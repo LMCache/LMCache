@@ -47,7 +47,7 @@ try:
         )
 except ImportError:
     # Third Party
-    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (  # type: ignore[no-redef]
+    from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (  # type: ignore[no-redef]  # noqa: E501
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
+
 
 # Helper functions
 def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
@@ -130,7 +131,9 @@ def create_scheduler_adapter(
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     sub_world_size = actual_world_size // n_servers
     tp_size_per_node = tp_size // n_servers
-    assert tp_size % n_servers == 0, f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
+    assert tp_size % n_servers == 0, (
+        f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
+    )
 
     kv_world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -141,9 +144,9 @@ def create_scheduler_adapter(
         mla_enabled(vllm_config.model_config),
         kv_world_size,
         kv_rank,
-        actual_world_size,   
-        actual_rank,         
-        tp_size,            
+        actual_world_size,
+        actual_rank,
+        tp_size,
         vllm_config.parallel_config.pipeline_parallel_size,
         sub_world_size,
         tp_size_per_node,
@@ -180,13 +183,16 @@ def create_worker_adapter(
 
     # Node routing: worker connects only to its local server.
     # Ranks are assigned to nodes in contiguous blocks:
-    # node 0 → ranks [0, ranks_per_node), node 1 → [ranks_per_node, 2*ranks_per_node), ...
+    # node 0 -> ranks [0, ranks_per_node),
+    # node 1 -> [ranks_per_node, 2*ranks_per_node), ...
     ranks_per_node = actual_world_size // n_servers
     local_server_url = server_urls[actual_rank // ranks_per_node]
-    
+
     sub_world_size = actual_world_size // n_servers
     tp_size_per_node = tp_size // n_servers
-    assert tp_size % n_servers == 0, f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
+    assert tp_size % n_servers == 0, (
+        f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
+    )
     parallel_strategy = ParallelStrategy(
         mla_enabled(vllm_config.model_config),
         kv_world_size,
@@ -517,6 +523,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
     """
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -546,7 +553,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             if isinstance(server_urls_cfg, list):
                 server_urls = [u.strip() for u in server_urls_cfg if u.strip()]
             else:
-                server_urls = [u.strip() for u in server_urls_cfg.split(",") if u.strip()]
+                server_urls = [
+                    u.strip() for u in server_urls_cfg.split(",") if u.strip()
+                ]
         else:
             # Legacy single-server fallback.
             server_host = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -574,6 +583,23 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             f"world_size ({vllm_config.parallel_config.world_size}) must be "
             f"divisible by n_servers ({n_servers})"
         )
+
+        # Multi-server is currently TP-only. DP/PP support requires a custom
+        # rank-to-group mapping API and will land in a follow-up PR.
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        dp_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+        if n_servers > 1 and (pp_size > 1 or dp_size > 1):
+            raise ValueError(
+                "LMCacheMPConnector multi-server mode (n_servers > 1) currently "
+                f"only supports tensor parallelism; got pp_size={pp_size}, "
+                f"dp_size={dp_size}. PP/DP across multiple LMCache servers will "
+                "be supported in a follow-up PR with a custom rank-grouping API."
+            )
+        if n_servers > 1:
+            logger.warning(
+                "LMCacheMPConnector multi-server mode is TP-only for now; "
+                "PP/DP support is tracked for a follow-up PR."
+            )
 
         zmq_context = zmq.Context.instance()
 
