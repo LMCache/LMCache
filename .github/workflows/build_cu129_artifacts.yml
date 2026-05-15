@@ -1,10 +1,10 @@
-name: Build cu130 Artifacts
+name: Build cu129 Artifacts
 
-# Reusable workflow that builds the cu130 CUDA 13.0 wheel via cibuildwheel
-# against the pytorch manylinux cu13 base image.
-# Uploaded as the `release-cu130-artifacts` GHA artifact.
-# The cu13 wheel carries no local version suffix and is published to a
-# dedicated v{tag}-cu13 GitHub Release (not PyPI).
+# Reusable workflow that builds the cu129 CUDA 12.9 wheel via cibuildwheel
+# against the pytorch manylinux cu12.9 base image.
+# Uploaded as the `release-cu129-artifacts` GHA artifact.
+# The cu12.9 wheel carries no local version suffix and is published to a
+# dedicated v{tag}-cu12 GitHub Release (not PyPI).
 
 on:
     workflow_call:
@@ -20,8 +20,8 @@ permissions:
     contents: read
 
 jobs:
-    build-cu130-artifacts:
-        name: Build cu130 artifacts
+    build-cu129-artifacts:
+        name: Build cu129 artifacts
         runs-on: ubuntu-latest
         steps:
             - name: "Harden Runner"
@@ -84,15 +84,15 @@ jobs:
               run: |
                 rm -rf dist/
 
-            - name: Get base version for cu13 wheel
+            - name: Get base version for cu12.9 wheel
               run: |
                 BASE=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0.dev")
-                echo "CU130_VERSION=${BASE}" >> "$GITHUB_ENV"
+                echo "CU129_VERSION=${BASE}" >> "$GITHUB_ENV"
 
-            - name: Build cu130 CUDA wheels with cibuildwheel
+            - name: Build cu12.9 CUDA wheels with cibuildwheel
               env:
-                CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda13.0
-                CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0" ENABLE_CXX11_ABI=1 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU130_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130'
+                CIBW_MANYLINUX_X86_64_IMAGE: docker.io/pytorch/manylinux2_28-builder:cuda12.9
+                CIBW_ENVIRONMENT: 'TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0;10.0" ENABLE_CXX11_ABI=1 LMCACHE_CUDA_MAJOR=12 SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.CU129_VERSION }} PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu129'
                 CIBW_REPAIR_WHEEL_COMMAND_LINUX: >-
                   auditwheel repair
                   --plat manylinux_2_28_x86_64
@@ -102,14 +102,14 @@ jobs:
                   --exclude libtorch_cpu.so
                   --exclude libc10.so
                   --exclude libc10_cuda.so
-                  --exclude libcudart.so.13
+                  --exclude libcudart.so.12
                   -w {dest_dir} {wheel}
                 CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
               run: |
                 python -m cibuildwheel --output-dir dist
 
-            - name: Upload cu130 release artifacts to GHA
+            - name: Upload cu12.9 release artifacts to GHA
               uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
               with:
-                name: release-cu130-artifacts
+                name: release-cu129-artifacts
                 path: dist/
