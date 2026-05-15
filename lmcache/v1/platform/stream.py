@@ -18,8 +18,9 @@ each backend is loaded lazily inside the factory so CPU-only hosts
 never touch ``cuda/`` (and vice-versa).
 
 Routing strategy: :func:`make_external_stream` consults the registry
-populated by ``platform/<device>/__init__.py`` keyed by
-``lmcache.torch_device_type``; backends that report
+populated by ``platform/<device>/__init__.py`` (one
+:class:`~lmcache.v1.platform._registry.Platform` instance per device
+type, keyed by ``lmcache.torch_device_type``); platforms that report
 ``is_available() == False`` are transparently skipped so callers
 fall through to the CPU mock.
 """
@@ -35,7 +36,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.platform._registry import get_stream_factory
+from lmcache.v1.platform._registry import get_platform
 
 logger = init_logger(__name__)
 
@@ -77,18 +78,20 @@ def make_external_stream(
 
     Dispatch:
 
-    1. Look up the active backend factory in :mod:`_registry` keyed by
-       ``lmcache.torch_device_type``; backends that report themselves
-       unavailable at runtime fall through to the CPU default.
-    2. If a CUDA-class factory returns ``None`` (typical when ``cupy``
-       is missing) we still drop through to the CPU mock so the caller
-       always gets a usable object.
+    1. Look up the active :class:`Platform` in :mod:`_registry` keyed
+       by ``lmcache.torch_device_type``; platforms that report
+       themselves unavailable at runtime fall through to the CPU
+       default automatically inside :func:`get_platform`.
+    2. If the chosen platform's ``make_external_stream`` returns
+       ``None`` (typical when ``cupy`` is missing on a CUDA host) we
+       drop through to the CPU mock so the caller always gets a
+       usable object.
     """
     raw_ptr = _extract_raw_ptr(torch_stream)
 
-    factory = get_stream_factory(_torch_dev_type())
-    if factory is not None:
-        stream = factory(raw_ptr, device_index)
+    platform = get_platform(_torch_dev_type())
+    if platform is not None:
+        stream = platform.make_external_stream(raw_ptr, device_index)
         if stream is not None:
             return stream
 

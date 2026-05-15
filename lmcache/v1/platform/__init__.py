@@ -18,6 +18,9 @@ sub-package next to ``cuda/`` and ``cpu/``.
 """
 
 # First Party
+from lmcache.v1.platform._registry import Platform as Platform
+from lmcache.v1.platform._registry import get_platform as get_platform
+from lmcache.v1.platform._registry import register_platform as register_platform
 from lmcache.v1.platform.event_notifier import HAS_EVENTFD as HAS_EVENTFD
 from lmcache.v1.platform.event_notifier import EventfdNotifier as EventfdNotifier
 from lmcache.v1.platform.event_notifier import EventNotifier as EventNotifier
