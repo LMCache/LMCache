@@ -16,6 +16,15 @@ import argparse
 import os
 import sys
 
+# First Party
+# Reuse the common helper that wires up ``--format / --output /
+# --quiet`` onto a subparser. ``BenchCommand.register`` is overridden
+# and creates inner subparsers manually, bypassing the auto-wiring
+# that ``BaseCommand.register`` normally performs, so we attach those
+# common flags ourselves only on the L2 subparser. The ``engine`` and
+# ``kvcache`` subparsers intentionally stay untouched.
+from lmcache.cli.commands.base import _add_output_args
+
 if TYPE_CHECKING:
     # First Party
     from lmcache.cli.commands.base import BaseCommand
@@ -134,6 +143,11 @@ def register_l2_parser(
         default=None,
         help="Run only the specified operation (default: run all).",
     )
+
+    # Common ``--format / --output / --quiet`` flags. Attached only
+    # to the L2 subparser; the ``engine`` and ``kvcache`` subparsers
+    # intentionally keep their existing arguments unchanged.
+    _add_output_args(parser)
 
     parser.set_defaults(func=dispatch_func)
     return parser
