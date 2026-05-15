@@ -42,5 +42,5 @@ For a comprehensive guide with examples, see :doc:`/getting_started/cli`.
 
    bench
    bench_kvcache
-   bench_l2_adapter
+   bench_l2
    kvcache

@@ -188,7 +188,7 @@ See also
 
 * :doc:`bench` -- ``lmcache bench engine`` for engine-side workload
   benchmarks.
-* :doc:`bench_l2_adapter` -- ``lmcache bench l2-adapter`` for
+* :doc:`bench_l2` -- ``lmcache bench l2`` for
   store / lookup / load throughput benchmarks against an L2 cache
   adapter.
 * :doc:`kvcache` -- ``lmcache kvcache`` for managing KV cache state on a

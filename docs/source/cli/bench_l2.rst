@@ -1,9 +1,9 @@
-.. _lmcache-bench-l2-adapter:
+.. _lmcache-bench-l2:
 
-lmcache bench l2-adapter
-========================
+lmcache bench l2
+================
 
-The ``lmcache bench l2-adapter`` command benchmarks an L2 cache adapter
+The ``lmcache bench l2`` command benchmarks an L2 cache adapter
 (e.g. the local-filesystem adapter) end-to-end through the same
 ``parse_args_to_l2_adapters_config`` + ``create_l2_adapter`` pipeline that
 LMCache uses in production. Any registered adapter type can be tested
@@ -12,7 +12,7 @@ and pick the operations to exercise.
 
 .. code-block:: bash
 
-   lmcache bench l2-adapter [options]
+   lmcache bench l2 [options]
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command
 does **not** require an inference engine or an LMCache MP server. It
@@ -60,11 +60,11 @@ support a clean store -> load round-trip.
    separately with ``--only`` and drop the OS caches in between, for
    example::
 
-      lmcache bench l2-adapter --l2-adapter '...' --only store
+      lmcache bench l2 --l2-adapter '...' --only store
       sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
-      lmcache bench l2-adapter --l2-adapter '...' --only lookup
+      lmcache bench l2 --l2-adapter '...' --only lookup
       sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
-      lmcache bench l2-adapter --l2-adapter '...' --only load
+      lmcache bench l2 --l2-adapter '...' --only load
 
    For adapters that bypass the page cache (e.g. ``fs`` with
    ``"use_odirect": true``) or that talk to a remote service without
@@ -75,7 +75,7 @@ Benchmark the local filesystem adapter with default parameters:
 
 .. code-block:: bash
 
-   lmcache bench l2-adapter \
+   lmcache bench l2 \
        --l2-adapter '{"type":"fs","base_path":"/tmp/lmcache-bench"}'
 
 This runs all three operations (store, lookup, load) with one warmup
@@ -85,7 +85,7 @@ Stress the adapter with more in-flight submits and larger payloads:
 
 .. code-block:: bash
 
-   lmcache bench l2-adapter \
+   lmcache bench l2 \
        --l2-adapter '{"type":"fs","base_path":"/data/lmcache-bench","relative_tmp_dir":"tmp"}' \
        --num-keys 32 --in-flight 4 \
        --data-size-kb 512 \
@@ -95,7 +95,7 @@ Run only one operation (useful to isolate store vs. load throughput):
 
 .. code-block:: bash
 
-   lmcache bench l2-adapter \
+   lmcache bench l2 \
        --l2-adapter '{"type":"fs","base_path":"/tmp/lmcache-bench"}' \
        --only store
 
@@ -105,7 +105,7 @@ range):
 
 .. code-block:: bash
 
-   lmcache bench l2-adapter \
+   lmcache bench l2 \
        --l2-adapter '{"type":"fs","base_path":"/tmp/lmcache-bench"}' \
        --only lookup --lookup-max-hit-rate 0.5
 
@@ -114,7 +114,7 @@ measured round:
 
 .. code-block:: bash
 
-   lmcache bench l2-adapter \
+   lmcache bench l2 \
        --l2-adapter '{"type":"fs","base_path":"/tmp/lmcache-bench"}' \
        --no-skip-verify
 
@@ -125,7 +125,7 @@ If you prefer to keep the JSON spec out of the command line, set the
 .. code-block:: bash
 
    export L2_ADAPTER_JSON='{"type":"fs","base_path":"/tmp/lmcache-bench"}'
-   lmcache bench l2-adapter --num-keys 32 --in-flight 2
+   lmcache bench l2 --num-keys 32 --in-flight 2
 
 
 Options
