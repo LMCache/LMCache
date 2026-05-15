@@ -27,4 +27,4 @@ steps:
       export TARGET="$$PWD"
       echo "Deleting current workspace $$TARGET"
       cd /
-      sudo rm -rf "$$TARGET"
+      rm -rf "$$TARGET" || true
