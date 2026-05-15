@@ -4,6 +4,7 @@
 MODEL="${MODEL:-Qwen/Qwen2.5-7B-Instruct}"
 DAEMON_PORT="${DAEMON_PORT:-6200}"
 DAEMON_HTTP_PORT="${DAEMON_HTTP_PORT:-7200}"
+LMC_CONFIG_FILE="${LMC_CONFIG_FILE:-/tmp/lmcache_mp_ci.yaml}"
 
 DAEMON_PID=""
 SGLANG_PID=""
@@ -26,6 +27,10 @@ cleanup_all() {
 
 launch_daemon() {
     local log_file="$1"
+    cat > "${LMC_CONFIG_FILE}" <<EOF
+mp_host: 127.0.0.1
+mp_port: ${DAEMON_PORT}
+EOF
     lmcache server \
         --host 127.0.0.1 --port "${DAEMON_PORT}" --http-port "${DAEMON_HTTP_PORT}" \
         --chunk-size 256 --l1-size-gb 4 --eviction-policy LRU \
@@ -46,16 +51,14 @@ launch_daemon() {
 # Launch SGLang. $1=port, $2=log file, $3="lmcache" or "no-lmcache".
 launch_sglang() {
     local port="$1" log_file="$2" mode="$3"
-    local lmcache_args=()
+    local lmcache_args=() env_prefix=()
     if [[ "${mode}" == "lmcache" ]]; then
-        lmcache_args=(
-            --enable-lmcache
-            --lmcache-mp-host 127.0.0.1
-            --lmcache-mp-port "${DAEMON_PORT}"
-        )
+        # MP host/port are read from the YAML written by launch_daemon.
+        lmcache_args=(--enable-lmcache)
+        env_prefix=(env "LMCACHE_CONFIG_FILE=${LMC_CONFIG_FILE}")
     fi
     # Blackwell SM 12 workarounds — drop on other hardware.
-    python -m sglang.launch_server \
+    "${env_prefix[@]}" python -m sglang.launch_server \
         --model-path "${MODEL}" \
         --host 127.0.0.1 --port "${port}" \
         --max-total-tokens 4096 \
