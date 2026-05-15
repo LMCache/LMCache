@@ -10,6 +10,7 @@ To add a new command:
 # First Party
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.conf import ConfCommand
 from lmcache.cli.commands.describe import DescribeCommand
 from lmcache.cli.commands.kvcache import KVCacheCommand
 from lmcache.cli.commands.mock import MockCommand
@@ -27,6 +28,7 @@ ALL_COMMANDS: list[BaseCommand] = [
     QueryCommand(),
     ServerCommand(),
     BenchCommand(),
+    ConfCommand(),
     ToolCommand(),
     TraceCommand(),
 ]
