@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pickle-based CPUContext implementation for multiprocess mode."""
+"""Pickle-based NonGpuContext implementation for multiprocess mode."""
 
 # Standard
 from typing import Any
@@ -9,12 +9,15 @@ import pickle
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.cpu_context import CPUContext, CPUContextMetadata
+from lmcache.v1.multiprocess.non_gpu_context import (
+    NonGpuContext,
+    NonGpuContextMetadata,
+)
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 
 
-class CPUContextPickle(CPUContext):
-    """Pickle-based implementation of :class:`CPUContext`.
+class NonGpuContextPickle(NonGpuContext):
+    """Pickle-based implementation of :class:`NonGpuContext`.
 
     Transport mechanism:
     - **Store**: ``prepare_store`` serialises chunks with ``pickle.dumps``; \
@@ -25,14 +28,14 @@ message, waits for the response, and deserialises the returned bytes with \
 ``pickle.loads``; ``commit_retrieve`` is a no-op (no locks to release).
 
     Args:
-        metadata: Layout metadata for the CPU context.
+        metadata: Layout metadata for the non-GPU context.
         mq_client: Message-queue client for server communication.
         mq_timeout: Timeout in seconds for blocking MQ requests.
     """
 
     def __init__(
         self,
-        metadata: CPUContextMetadata,
+        metadata: NonGpuContextMetadata,
         mq_client: Any,
         mq_timeout: float,
     ) -> None:

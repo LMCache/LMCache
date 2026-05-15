@@ -53,7 +53,6 @@ from lmcache.v1.multiprocess.config import (
     add_mp_server_args,
     parse_args_to_mp_server_config,
 )
-from lmcache.v1.multiprocess.cpu_context import CPUContextMetadata
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheEngineKey,
@@ -63,6 +62,7 @@ from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueServer
+from lmcache.v1.multiprocess.non_gpu_context import NonGpuContextMetadata
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
@@ -192,8 +192,8 @@ class MPCacheEngine:
         # We assume that if the (model name, world size) is the same, then
         # the layout desc returned by the gpu context is the same.
         self.gpu_context_meta: dict[int, tuple[str, int]] = {}
-        self.cpu_contexts: dict[int, CPUContextMetadata] = {}
-        self.cpu_context_meta: dict[int, tuple[str, int]] = {}
+        self.non_cuda_contexts: dict[int, NonGpuContextMetadata] = {}
+        self.non_cuda_context_meta: dict[int, tuple[str, int]] = {}
 
         # chunk size
         self.chunk_size = chunk_size
@@ -278,14 +278,14 @@ class MPCacheEngine:
             del self.gpu_context_meta[instance_id]
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
             torch_dev.empty_cache()
-        elif instance_id in self.cpu_contexts:
-            del self.cpu_contexts[instance_id]
-            del self.cpu_context_meta[instance_id]
-            logger.info("Unregistered CPU context for instance ID %d", instance_id)
+        elif instance_id in self.non_cuda_contexts:
+            del self.non_cuda_contexts[instance_id]
+            del self.non_cuda_context_meta[instance_id]
+            logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
         else:
             logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
 
-    def register_kv_cache_cpu_context(
+    def register_kv_cache_non_gpu_context(
         self,
         instance_id: int,
         model_name: str,
@@ -296,7 +296,7 @@ class MPCacheEngine:
         dtype_str: str,
         use_mla: bool,
     ) -> None:
-        """Register non-CUDA KV layout metadata for CPU context mode.
+        """Register non-CUDA KV layout metadata for non-GPU context mode.
 
         Args:
             instance_id: Worker instance identifier (typically PID).
@@ -325,12 +325,12 @@ class MPCacheEngine:
             else torch.Size([2, num_layers, self.chunk_size, hidden_dim_size])
         )
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
-        self.cpu_contexts[instance_id] = CPUContextMetadata(
+        self.non_cuda_contexts[instance_id] = NonGpuContextMetadata(
             layout_desc=layout_desc,
             block_size=block_size,
             use_mla=use_mla,
         )
-        self.cpu_context_meta[instance_id] = (model_name, world_size)
+        self.non_cuda_context_meta[instance_id] = (model_name, world_size)
 
     def _resolve_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
         """Resolve object keys from an IPC cache key.
@@ -375,11 +375,11 @@ class MPCacheEngine:
         """
         obj_keys = self._resolve_obj_keys(key)
 
-        if instance_id not in self.cpu_contexts:
+        if instance_id not in self.non_cuda_contexts:
             raise ValueError(
-                f"CPU context not registered for instance ID {instance_id}"
+                f"non-CUDA context not registered for instance ID {instance_id}"
             )
-        ctx = self.cpu_contexts[instance_id]
+        ctx = self.non_cuda_contexts[instance_id]
         chunks: list[torch.Tensor] = pickle.loads(cpu_data)
         reserved_dict = self.storage_manager.reserve_write(
             obj_keys, ctx.layout_desc, "new"
@@ -426,9 +426,9 @@ class MPCacheEngine:
         """
         obj_keys = self._resolve_obj_keys(key)
 
-        if instance_id not in self.cpu_contexts:
+        if instance_id not in self.non_cuda_contexts:
             raise ValueError(
-                f"CPU context not registered for instance ID {instance_id}"
+                f"non-CUDA context not registered for instance ID {instance_id}"
             )
 
         prefetched_keys: list[ObjectKey] = []
@@ -843,9 +843,9 @@ class MPCacheEngine:
                     self.gpu_contexts[gpu_id],
                     self.chunk_size,
                 )
-        for instance_id, (m, w) in self.cpu_context_meta.items():
+        for instance_id, (m, w) in self.non_cuda_context_meta.items():
             if m == model_name and w == world_size:
-                return self.cpu_contexts[instance_id].layout_desc
+                return self.non_cuda_contexts[instance_id].layout_desc
         return None
 
     def lookup(
@@ -1194,16 +1194,16 @@ class MPCacheEngine:
             "hash_algorithm": self.token_hasher.hash_algorithm_name,
             "registered_gpu_ids": list(self.gpu_contexts.keys()),
             "gpu_context_meta": gpu_context_meta,
-            "registered_cpu_instance_ids": list(self.cpu_contexts.keys()),
-            "cpu_context_meta": {
+            "registered_non_cuda_instance_ids": list(self.non_cuda_contexts.keys()),
+            "non_cuda_context_meta": {
                 str(instance_id): {
                     "model_name": model_name,
                     "world_size": world_size,
-                    "block_size": self.cpu_contexts[instance_id].block_size,
-                    "use_mla": self.cpu_contexts[instance_id].use_mla,
+                    "block_size": self.non_cuda_contexts[instance_id].block_size,
+                    "use_mla": self.non_cuda_contexts[instance_id].use_mla,
                 }
                 for instance_id, (model_name, world_size) in (
-                    self.cpu_context_meta.items()
+                    self.non_cuda_context_meta.items()
                 )
             },
             "active_sessions": self.session_manager.active_count(),
@@ -1343,8 +1343,8 @@ def run_cache_server(
     add_handler_helper(server, RequestType.STORE, engine.store)
     add_handler_helper(
         server,
-        RequestType.REGISTER_KV_CACHE_CPU_CONTEXT,
-        engine.register_kv_cache_cpu_context,
+        RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT,
+        engine.register_kv_cache_non_gpu_context,
     )
     add_handler_helper(server, RequestType.STORE_CPU_CHUNKS, engine.store_cpu_chunks)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)

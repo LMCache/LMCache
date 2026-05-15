@@ -1,4 +1,4 @@
-# CPU Context Design (MP mode, non-CUDA)
+# Non-GPU Context Design (MP mode, non-CUDA)
 
 ## 1. Motivation
 
@@ -19,7 +19,7 @@ This design is fundamentally tied to the CUDA programming model:
 For non-CUDA accelerators — **CPU, Intel XPU, Habana HPU**, or any future
 device — none of these primitives are available.
 
-The **CPU context** path introduces a device-agnostic KV transfer mechanism:
+The **non-GPU context** path introduces a device-agnostic KV transfer mechanism:
 
 1. Workers **gather** paged KV blocks into contiguous CPU chunk tensors.
 2. CPU chunks are **transported** to the server through a pluggable
@@ -64,18 +64,18 @@ polymorphic `TransferContext` abstraction.
 vllm_multi_process_adapter.py    ← Engine adapter, device-agnostic
   └── TransferContext             ← Worker-side transport abstraction (§3)
         ├── CudaTransferContext    ← CUDA IPC + MQ future path
-        └── CPUTransferContext     ← Synchronous gather/scatter path
-              └── CPUContext        ← Serialisation abstraction (§4.2)
-                    ├── CPUContextPickle   ← pickle.dumps/loads (§4.3)
-                    └── CPUContextShm      ← shared memory (§4.4, TODO)
+        └── NonCudaTransferContext     ← Synchronous gather/scatter path
+              └── NonGpuContext        ← Serialisation abstraction (§4.2)
+                    ├── NonGpuContextPickle   ← pickle.dumps/loads (§4.3)
+                    └── NonGpuContextShm      ← shared memory (§4.4, TODO)
 ```
 
 Two layers of abstraction serve different purposes:
 
 - **TransferContext** (§3) — decides **CUDA vs non-CUDA** routing at the
   worker adapter level.
-- **CPUContext** (§4.2) — decides **how** CPU chunk data is serialised and
-  transported (pickle vs SHM). Only used inside `CPUTransferContext`.
+- **NonGpuContext** (§4.2) — decides **how** CPU chunk data is serialised and
+  transported (pickle vs SHM). Only used inside `NonCudaTransferContext`.
 
 ### 2.2 State machine (worker ↔ server)
 
@@ -91,10 +91,10 @@ Two layers of abstraction serve different purposes:
               [device == cuda]                 [device != cuda]
                      |                                 |
                      v                                 v
-      CudaTransferContext.register()     CPUTransferContext.register()
-      → REGISTER_KV_CACHE               → REGISTER_KV_CACHE_CPU_CONTEXT
+      CudaTransferContext.register()     NonCudaTransferContext.register()
+      → REGISTER_KV_CACHE               → REGISTER_KV_CACHE_NON_GPU_CONTEXT
         (CUDA IPC handles)                 (scalar metadata fields)
-                     |                         + create_cpu_context()
+                     |                         + create_non_gpu_context()
                      +----------------+----------------+
                                       |
                                       v
@@ -107,8 +107,8 @@ Two layers of abstraction serve different purposes:
                      |                                 |
                      v                                 v
            STORE (GPU → L1)            gather_paged_kv_to_cpu()
-           [async MQ future]           + _cpu_context.prepare_store()
-                     |                 + _cpu_context.commit_store() [sync]
+           [async MQ future]           + _non_gpu_context.prepare_store()
+                     |                 + _non_gpu_context.commit_store() [sync]
                      v                         _store_done[id] = ok
                  [READY]                               |
                      +----------------+----------------+
@@ -119,9 +119,9 @@ Two layers of abstraction serve different purposes:
                      +----------------+----------------+
                      |                                 |
                      v                                 v
-          RETRIEVE (L1 → GPU)     _cpu_context.prepare_retrieve() [sync]
+          RETRIEVE (L1 → GPU)     _non_gpu_context.prepare_retrieve() [sync]
           [async MQ future]       + scatter_cpu_to_paged_kv()
-                     |            + _cpu_context.commit_retrieve()
+                     |            + _non_gpu_context.commit_retrieve()
                      v            _retrieve_done[id] = (ok, block_ids)
                      +----------------+----------------+
                                       |
@@ -140,7 +140,7 @@ Two layers of abstraction serve different purposes:
 ### 3.1 Problem
 
 Before this refactoring, `vllm_multi_process_adapter.py` contained
-`if self._use_cpu_context:` branches in every method — `register_kv_caches`,
+non-CUDA-specific branching in every method — `register_kv_caches`,
 `submit_store_request`, `submit_retrieve_request`, `get_finished`, and the
 unhealthy drain path. Adding a third transport would require touching every
 branch.
@@ -155,7 +155,7 @@ no `if/else` anywhere.
 ### 3.3 `create_transfer_context()` factory
 
 Inspects device types of all KV cache tensors **exactly once**. CUDA →
-`CudaTransferContext`; otherwise → `CPUTransferContext`. Mixed device types
+`CudaTransferContext`; otherwise → `NonCudaTransferContext`. Mixed device types
 are rejected.
 
 ### 3.4 `CudaTransferContext`
@@ -165,20 +165,20 @@ Wraps the original CUDA IPC path. Sends `REGISTER_KV_CACHE` / `STORE` /
 `poll_finished` queries futures; `drain_all` marks all pending as finished
 for unhealthy shutdown. Semantics identical to pre-refactoring.
 
-### 3.5 `CPUTransferContext`
+### 3.5 `NonCudaTransferContext`
 
-Holds a `CPUContext` instance internally. Sends
-`REGISTER_KV_CACHE_CPU_CONTEXT` with scalar metadata. Store and retrieve
+Holds a `NonGpuContext` instance internally. Sends
+`REGISTER_KV_CACHE_NON_GPU_CONTEXT` with scalar metadata. Store and retrieve
 are **synchronous**: gather → prepare/commit, then record result in
 `_store_done` / `_retrieve_done`. `poll_finished` simply drains these dicts.
 
-## 4. Server-side: CPU Context Protocol
+## 4. Server-side: Non-GPU Context Protocol
 
-### 4.1 Why GPU context and CPU context need different protocols
+### 4.1 Why GPU context and non-GPU context need different protocols
 
-| | GPU context | CPU context |
+| | GPU context | non-GPU context |
 |---|---|---|
-| Registration | `REGISTER_KV_CACHE` — IPC handles | `REGISTER_KV_CACHE_CPU_CONTEXT` — scalar fields |
+| Registration | `REGISTER_KV_CACHE` — IPC handles | `REGISTER_KV_CACHE_NON_GPU_CONTEXT` — scalar fields |
 | Store | `STORE` — event handle + block IDs, server reads GPU directly | `STORE_CPU_CHUNKS` — serialised CPU tensors |
 | Retrieve | `RETRIEVE` — event handle + block IDs, server writes GPU directly | `RETRIEVE_CPU_CHUNKS` — key lookup, returns CPU tensors |
 
@@ -187,10 +187,10 @@ Registration uses **scalar fields** (`block_size`, `num_layers`,
 to avoid cross-process pickle security and compatibility concerns. The
 server reconstructs `MemoryLayoutDesc` from the scalars internally.
 
-### 4.2 `CPUContext` ABC: two-phase prepare/commit
+### 4.2 `NonGpuContext` ABC: two-phase prepare/commit
 
-The serialisation layer is abstracted behind `CPUContext` so that pickle
-and SHM can be swapped without touching `CPUTransferContext` or the server.
+The serialisation layer is abstracted behind `NonGpuContext` so that pickle
+and SHM can be swapped without touching `NonCudaTransferContext` or the server.
 
 The ABC defines: `prepare_store`, `commit_store`, `prepare_retrieve`,
 `commit_retrieve`, `close`.
@@ -207,7 +207,7 @@ accommodates both without forcing unnecessary round-trips on pickle.
 | `prepare_retrieve` | MQ `RETRIEVE_CPU_CHUNKS` → `pickle.loads` | MQ `PREPARE_RETRIEVE` → server writes to SHM → map tensor views |
 | `commit_retrieve` | no-op | MQ `FINISH_READ` → release SHM read lock |
 
-`create_cpu_context()` factory currently always returns `CPUContextPickle`.
+`create_non_gpu_context()` factory currently always returns `NonGpuContextPickle`.
 Future: probe `/dev/shm` availability and capacity, fall back to pickle if
 insufficient.
 
@@ -246,5 +246,5 @@ rather than per-token `index_select` / `index_copy_`. For HND layouts, a
 
 - No change to existing CUDA IPC path semantics.
 - No CPU-specific logic added to shared `gpu_connector/utils.py`.
-- No wire-protocol incompatibility between CUDA and CPU context workers in
+- No wire-protocol incompatibility between CUDA and non-GPU context workers in
   the same cluster.

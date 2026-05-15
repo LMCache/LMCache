@@ -48,7 +48,7 @@ class RequestType(enum.Enum):
     QUERY_PREFETCH_LOOKUP_HITS = enum.auto()
     FREE_LOOKUP_LOCKS = enum.auto()
     END_SESSION = enum.auto()
-    REGISTER_KV_CACHE_CPU_CONTEXT = enum.auto()
+    REGISTER_KV_CACHE_NON_GPU_CONTEXT = enum.auto()
     STORE_CPU_CHUNKS = enum.auto()
     RETRIEVE_CPU_CHUNKS = enum.auto()
 

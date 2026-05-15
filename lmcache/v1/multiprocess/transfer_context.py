@@ -13,16 +13,16 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import is_mla
-from lmcache.v1.multiprocess.cpu_context import (
-    CPUContext,
-    CPUContextMetadata,
+from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.multiprocess.non_gpu_context import (
+    NonGpuContext,
+    NonGpuContextMetadata,
     compute_kv_layout,
-    create_cpu_context,
+    create_non_gpu_context,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 
 logger = init_logger(__name__)
@@ -234,11 +234,11 @@ class CudaTransferContext(TransferContext):
         self._send_request = None
 
 
-class CPUTransferContext(TransferContext):
-    """CPU context transport for non-CUDA workers."""
+class NonCudaTransferContext(TransferContext):
+    """Non-CUDA context transport for non-CUDA workers."""
 
     def __init__(self) -> None:
-        self._cpu_context: CPUContext | None = None
+        self._non_gpu_context: NonGpuContext | None = None
         self._layout_hints: Any = None
         self._gpu_kv_format: Any = None
 
@@ -282,7 +282,7 @@ class CPUTransferContext(TransferContext):
 
         future = send_request(
             mq_client,
-            RequestType.REGISTER_KV_CACHE_CPU_CONTEXT,
+            RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT,
             [
                 instance_id,
                 model_name,
@@ -295,12 +295,12 @@ class CPUTransferContext(TransferContext):
             ],
         )
 
-        metadata = CPUContextMetadata(
+        metadata = NonGpuContextMetadata(
             layout_desc=layout_desc,
             block_size=block_size,
             use_mla=use_mla_flag,
         )
-        self._cpu_context = create_cpu_context(metadata, mq_client, mq_timeout)
+        self._non_gpu_context = create_non_gpu_context(metadata, mq_client, mq_timeout)
         future.result(timeout=mq_timeout)
 
     def submit_store(
@@ -313,9 +313,9 @@ class CPUTransferContext(TransferContext):
         _event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
-        if self._cpu_context is None:
+        if self._non_gpu_context is None:
             raise RuntimeError(
-                "CPU transfer context is not registered. "
+                "Non-CUDA transfer context is not registered. "
                 "Call register() before submit_store()."
             )
 
@@ -327,8 +327,8 @@ class CPUTransferContext(TransferContext):
             layout_hints=self._layout_hints,
             gpu_kv_format=self._gpu_kv_format,
         )
-        handle = self._cpu_context.prepare_store(key, instance_id, cpu_chunks)
-        ok = self._cpu_context.commit_store(handle)
+        handle = self._non_gpu_context.prepare_store(key, instance_id, cpu_chunks)
+        ok = self._non_gpu_context.commit_store(handle)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
@@ -345,13 +345,13 @@ class CPUTransferContext(TransferContext):
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
-        if self._cpu_context is None:
+        if self._non_gpu_context is None:
             raise RuntimeError(
-                "CPU transfer context is not registered. "
+                "Non-CUDA transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
 
-        handle, chunks = self._cpu_context.prepare_retrieve(key, instance_id)
+        handle, chunks = self._non_gpu_context.prepare_retrieve(key, instance_id)
         ok = chunks is not None
         if chunks is not None:
             try:
@@ -367,16 +367,16 @@ class CPUTransferContext(TransferContext):
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
-        self._cpu_context.commit_retrieve(handle)
+        self._non_gpu_context.commit_retrieve(handle)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
         return future
 
     def close(self) -> None:
-        if self._cpu_context is not None:
-            self._cpu_context.close()
-            self._cpu_context = None
+        if self._non_gpu_context is not None:
+            self._non_gpu_context.close()
+            self._non_gpu_context = None
 
 
 def create_transfer_context(
@@ -408,4 +408,4 @@ def create_transfer_context(
     logger.info("Creating transfer context (device_type=%s)", device_type)
     if device_type == "cuda":
         return CudaTransferContext()
-    return CPUTransferContext()
+    return NonCudaTransferContext()

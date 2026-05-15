@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU context abstractions and utilities for multiprocess mode.
+"""Non-GPU context abstractions and utilities for multiprocess mode.
 
 This module provides:
-- ``CPUContextMetadata``: layout metadata dataclass for non-CUDA workers.
-- ``CPUContext``: abstract base class with a two-phase prepare/commit interface
-  for CPU-side KV data transfer.  Concrete implementations (e.g.
-  ``CPUContextPickle``) each decide *how* data is serialised and transported.
-- ``create_cpu_context()``: factory that returns the appropriate
-  ``CPUContext`` subclass (currently always ``CPUContextPickle``).
+- ``NonGpuContextMetadata``: layout metadata dataclass for non-CUDA workers.
+- ``NonGpuContext``: abstract base class with a two-phase prepare/commit
+  interface for CPU-side KV data transfer. Concrete implementations (e.g.
+  ``NonGpuContextPickle``) each decide *how* data is serialised and transported.
+- ``create_non_gpu_context()``: factory that returns the appropriate
+  ``NonGpuContext`` subclass (currently always ``NonGpuContextPickle``).
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
   shared gather/scatter utilities used by all concrete implementations.
 """
@@ -26,8 +26,8 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 
 
 @dataclass
-class CPUContextMetadata:
-    """CPU context layout metadata for non-CUDA workers.
+class NonGpuContextMetadata:
+    """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
         layout_desc: Memory layout descriptor used to interpret chunk payloads.
@@ -40,7 +40,7 @@ class CPUContextMetadata:
     use_mla: bool
 
 
-class CPUContext(ABC):
+class NonGpuContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
 
     All concrete implementations share a common message-queue client and
@@ -55,7 +55,7 @@ class CPUContext(ABC):
 
     def __init__(
         self,
-        metadata: CPUContextMetadata,
+        metadata: NonGpuContextMetadata,
         mq_client: Any,
         mq_timeout: float,
     ) -> None:
@@ -107,8 +107,8 @@ class CPUContext(ABC):
             instance_id: Worker instance identifier.
 
         Returns:
-            A ``(handle, chunks)`` pair.  ``chunks`` is a list of CPU tensors
-            on cache hit, or ``None`` on cache miss.  The handle must be
+            A ``(handle, chunks)`` pair. ``chunks`` is a list of CPU tensors
+            on cache hit, or ``None`` on cache miss. The handle must be
             passed to :meth:`commit_retrieve`.
         """
         ...
@@ -128,29 +128,29 @@ class CPUContext(ABC):
         ...
 
 
-def create_cpu_context(
-    metadata: CPUContextMetadata,
+def create_non_gpu_context(
+    metadata: NonGpuContextMetadata,
     mq_client: Any,
     mq_timeout: float,
-) -> CPUContext:
-    """Factory that returns the appropriate :class:`CPUContext` implementation.
+) -> NonGpuContext:
+    """Factory that returns the appropriate :class:`NonGpuContext` implementation.
 
-    Currently always returns a :class:`~lmcache.v1.multiprocess.\
-cpu_context_pickle.CPUContextPickle` instance.  A future SHM-capable PR
+    Currently always returns a pickle-based implementation
+    (``NonGpuContextPickle``). A future SHM-capable PR
     may probe for shared-memory availability and fall back to pickle.
 
     Args:
-        metadata: Layout metadata for the CPU context.
+        metadata: Layout metadata for the non-GPU context.
         mq_client: Message-queue client for server communication.
         mq_timeout: Timeout in seconds for blocking MQ requests.
 
     Returns:
-        A concrete :class:`CPUContext` instance.
+        A concrete :class:`NonGpuContext` instance.
     """
     # Local
-    from .cpu_context_pickle import CPUContextPickle
+    from .non_gpu_context_pickle import NonGpuContextPickle
 
-    return CPUContextPickle(metadata, mq_client, mq_timeout)
+    return NonGpuContextPickle(metadata, mq_client, mq_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -214,9 +214,9 @@ def gather_paged_kv_to_cpu(
         gpu_kv_format: Optional pre-detected KV format.
 
     Returns:
-        List of CPU tensors, one per chunk.  For non-MLA each chunk has shape
+        List of CPU tensors, one per chunk. For non-MLA each chunk has shape
         ``[2, num_layers, chunk_tokens, hidden_dim]`` where dimension ``0``
-        stores ``(K, V)``.  For MLA (multi-head latent attention) each chunk
+        stores ``(K, V)``. For MLA (multi-head latent attention) each chunk
         has shape ``[num_layers, chunk_tokens, hidden_dim]``.
     """
     # First Party
@@ -243,7 +243,7 @@ def gather_paged_kv_to_cpu(
     num_chunks = len(block_ids) // blocks_per_chunk
 
     # After normalization the structure is always a list of per-layer
-    # tensors.  Cast once so all downstream indexing is typed correctly.
+    # tensors. Cast once so all downstream indexing is typed correctly.
     layer_tensors = cast(list[torch.Tensor], normalized)
 
     chunks: list[torch.Tensor] = []
@@ -362,7 +362,7 @@ def scatter_cpu_to_paged_kv(
     )
 
     # After normalization the structure is always a list of per-layer
-    # tensors.  Cast once so all downstream indexing is typed correctly.
+    # tensors. Cast once so all downstream indexing is typed correctly.
     layer_tensors = cast(list[torch.Tensor], normalized)
 
     for chunk_idx, chunk_cpu in enumerate(chunks):
