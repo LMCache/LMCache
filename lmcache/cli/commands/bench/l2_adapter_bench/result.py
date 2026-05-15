@@ -73,7 +73,7 @@ class BenchResult:
         return sum(self.success_counts)
 
     # ------------------------------------------------------------------
-    # Duration stats (seconds in storage, ms via summary)
+    # Duration stats (seconds)
     # ------------------------------------------------------------------
 
     @property
@@ -172,43 +172,3 @@ class BenchResult:
         if self.total_keys <= 0:
             return 0.0
         return self.total_success / self.total_keys
-
-    def summary(self) -> str:
-        n = len(self.round_durations)
-        if n == 0:
-            return f"[{self.operation}] No results collected."
-
-        lines = [
-            f"=== {self.operation} Benchmark Results ===",
-            f"  Rounds              : {n}",
-            f"  In-flight / round   : {self.in_flight}",
-            f"  Keys / submit       : {self.num_keys}",
-            f"  Keys / round        : {self.keys_per_round}",
-            f"  Total keys          : {self.total_keys}",
-            f"  Data size / key     : {self.data_size_bytes / _KB:.1f} KB",
-            f"  Total data          : {self.total_data_bytes / _MB:.2f} MB",
-            (f"  Success / total     : {self.total_success}/{self.total_keys}"),
-            f"  Duration avg (ms)   : {self.avg_duration * 1000:.2f}",
-            f"  Duration min (ms)   : {self.min_duration * 1000:.2f}",
-            f"  Duration max (ms)   : {self.max_duration * 1000:.2f}",
-            f"  Duration p50 (ms)   : {self.p50_duration * 1000:.2f}",
-            f"  Duration p99 (ms)   : {self.p99_duration * 1000:.2f}",
-            f"  Duration std (ms)   : {self.std_duration * 1000:.2f}",
-            f"  Throughput avg (MB/s): {self.avg_throughput_mbps:.2f}",
-            f"  Throughput min (MB/s): {self.min_throughput_mbps:.2f}",
-            f"  Throughput max (MB/s): {self.max_throughput_mbps:.2f}",
-            f"  Avg ops/s           : {self.avg_ops_per_sec:.2f}",
-            f"  Avg latency / key   : {self.avg_latency_per_key_ms:.3f} ms",
-        ]
-        if self.expected_max_hit_rate > 0 or self.expected_hit_count > 0:
-            lines.extend(
-                [
-                    (f"  Expected max hit    : {self.expected_max_hit_rate:.2%}"),
-                    (
-                        f"  Expected hit keys   : "
-                        f"{self.expected_hit_count}/{self.total_keys}"
-                    ),
-                    f"  Actual hit rate     : {self.actual_hit_rate:.2%}",
-                ]
-            )
-        return "\n".join(lines)
