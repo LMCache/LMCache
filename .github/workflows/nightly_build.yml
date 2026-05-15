@@ -25,6 +25,7 @@ jobs:
             uploads.github.com:443
             github.com:443
             registry-1.docker.io:443
+            index.docker.io:443
             production.cloudflare.docker.com:443
             auth.docker.io:443
             azure.archive.ubuntu.com:80
