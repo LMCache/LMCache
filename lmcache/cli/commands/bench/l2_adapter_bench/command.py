@@ -238,22 +238,6 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Use the first adapter config for benchmarking
     adapter_cfg = l2_cfg.adapters[0]
-    adapter_type_name = type(adapter_cfg).__name__
-
-    log("=" * 60)
-    log("L2 Adapter Benchmark")
-    log("=" * 60)
-    log(f"  Adapter config         : {adapter_type_name}")
-    log(f"  L2 adapter JSON        : {l2_adapter_specs[0]}")
-    log(f"  Keys / submit          : {num_keys}")
-    log(f"  In-flight / round      : {in_flight}")
-    log(f"  Keys / round           : {keys_per_round}")
-    log(f"  Data size / key        : {args.data_size_kb} KB")
-    log(f"  Data / round           : {(keys_per_round * data_size) / mb:.2f} MB")
-    log(f"  Rounds                 : {rounds} (+ {warmup} warmup)")
-    if args.only is None or args.only == "lookup":
-        log(f"  Lookup max hit rate    : {max_hit_rate:.2%}")
-    log("=" * 60)
 
     # Backing L1 memory buffer for adapters that need an L1 desc.
     # Sized for one in-flight wave of store + load buffers.
@@ -449,7 +433,14 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             log("")
 
         # ---- Summary via metrics system ----
-        _emit_l2_adapter_metrics(command, args, adapter_type_name, results)
+        _emit_l2_adapter_metrics(
+            command=command,
+            args=args,
+            l2_adapter_json=l2_adapter_specs[0],
+            keys_per_round=keys_per_round,
+            data_per_round_mb=(keys_per_round * data_size) / mb,
+            results=results,
+        )
     finally:
         log("[Cleanup] Closing adapter...")
         try:
@@ -492,29 +483,40 @@ def _strip_warmup(result: "BenchResult", warmup: int) -> "BenchResult":
 def _emit_l2_adapter_metrics(
     command: "BaseCommand",
     args: argparse.Namespace,
-    adapter_type_name: str,
+    l2_adapter_json: str,
+    keys_per_round: int,
+    data_per_round_mb: float,
     results: list,
 ) -> None:
     """Emit L2 adapter benchmark summary using the CLI metrics system."""
-    title = f"L2 Adapter Benchmark Result ({adapter_type_name})"
+    title = "L2 Adapter Benchmark Result"
     metrics = command.create_metrics(title, args, width=64)
 
     cfg_section = metrics.add_section("config", "Configuration")
-    cfg_section.add("adapter", "Adapter", adapter_type_name)
+    cfg_section.add("l2_adapter_json", "L2 adapter JSON", l2_adapter_json)
     cfg_section.add("num_keys", "Keys / submit", args.num_keys)
     cfg_section.add("in_flight", "In-flight / round", args.in_flight)
+    cfg_section.add("keys_per_round", "Keys / round", keys_per_round)
     cfg_section.add(
         "data_size_kb",
         "Data size / key (KB)",
         args.data_size_kb,
     )
+    cfg_section.add(
+        "data_per_round_mb",
+        "Data / round (MB)",
+        round(data_per_round_mb, 2),
+    )
     cfg_section.add("rounds", "Measurement rounds", args.rounds)
     cfg_section.add("warmup_rounds", "Warmup rounds", args.warmup_rounds)
-    cfg_section.add(
-        "lookup_max_hit_rate",
-        "Lookup max hit rate",
-        round(args.lookup_max_hit_rate, 4),
-    )
+    # Only meaningful when lookup is actually executed; matches the
+    # original banner log behaviour.
+    if args.only is None or args.only == "lookup":
+        cfg_section.add(
+            "lookup_max_hit_rate",
+            "Lookup max hit rate",
+            round(args.lookup_max_hit_rate, 4),
+        )
 
     for idx, r in enumerate(results):
         section_id = f"op_{idx}"
