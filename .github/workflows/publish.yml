@@ -341,6 +341,7 @@ jobs:
                 allowed-endpoints: >
                   github.com:443
                   registry-1.docker.io:443
+                  index.docker.io:443
                   production.cloudflare.docker.com:443
                   auth.docker.io:443
                   azure.archive.ubuntu.com:80
@@ -350,6 +351,7 @@ jobs:
                   releases.astral.sh:443
                   objects.githubusercontent.com:443
                   pypi.org:443
+                  pypi.nvidia.com:443
                   files.pythonhosted.org:443
                   release-assets.githubusercontent.com:443
                   wrapdb.mesonbuild.com:443
