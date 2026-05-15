@@ -46,7 +46,6 @@ import urllib.request
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.utils import check_interprocess_event_support
 
 # ``lmcache bench kvcache`` allocates real CUDA tensors and talks to
 # the MP server via ZMQ, both of which are absent from the thin
@@ -62,7 +61,11 @@ try:
     import zmq
 
     # First Party
-    from lmcache.utils import EngineType, compress_slot_mapping
+    from lmcache.utils import (
+        EngineType,
+        check_interprocess_event_support,
+        compress_slot_mapping,
+    )
     from lmcache.v1.kv_layer_groups import (
         DTYPE_MAP,
         KVLayerGroupInfo,
