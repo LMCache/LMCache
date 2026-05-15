@@ -535,8 +535,9 @@ def normalize_kv_and_discover_format(
     elif serving_engine == EngineType.VLLM:
         kv_layout = layout_hints.get("kv_layout")
         # NOTE: vLLM's CPU attention backend stores KV cache in HND layout.
-        # get_kv_cache_layout() is unavailable in MP mode and defaults
-        # to NHD even when reachable, so we override unconditionally.
+        # however, get_kv_cache_layout from vllm.v1.attention.backends.utils
+        # does not return the right layout for CPU attention.
+        # Right fix should come from vllm side, but hardcode here as safeguard.
         if torch_device_type == "cpu":
             kv_layout = "HND"
             logger.info("CPU backend detected, using HND KV cache layout")
