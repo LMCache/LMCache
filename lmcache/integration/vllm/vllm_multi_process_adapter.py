@@ -862,6 +862,7 @@ class LMCacheMPWorkerAdapter:
                 self.mq_client,
                 self._mq_timeout,
                 send_request=send_lmcache_request,
+                vllm_logical_block_size=self.vllm_logical_block_size,
             )
         except TimeoutError:
             raise ConnectionError(

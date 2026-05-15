@@ -58,6 +58,7 @@ class TransferContext(ABC):
         mq_client: MessageQueueClient,
         mq_timeout: float,
         send_request: SendRequest,
+        vllm_logical_block_size: int = 0,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -70,6 +71,8 @@ class TransferContext(ABC):
             mq_client: Message queue client used to communicate with server.
             mq_timeout: Timeout in seconds for synchronous request wait.
             send_request: Request sender callable used to issue MQ requests.
+            vllm_logical_block_size: vLLM logical block size used to derive
+                per-layer-group compression ratios on the server side.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -159,6 +162,7 @@ class CudaTransferContext(TransferContext):
         mq_client: MessageQueueClient,
         mq_timeout: float,
         send_request: SendRequest,
+        vllm_logical_block_size: int = 0,
     ) -> None:
         # First Party
         from lmcache.integration.vllm.utils import vllm_layout_hints
@@ -167,6 +171,7 @@ class CudaTransferContext(TransferContext):
         self._mq_client = mq_client
         self._send_request = send_request
         layout_hints = vllm_layout_hints()
+        layout_hints["inference_engine_logical_block_size"] = vllm_logical_block_size
         future = send_request(
             mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -247,11 +252,13 @@ class CPUTransferContext(TransferContext):
         mq_client: MessageQueueClient,
         mq_timeout: float,
         send_request: SendRequest,
+        vllm_logical_block_size: int = 0,
     ) -> None:
         # First Party
         from lmcache.integration.vllm.utils import vllm_layout_hints
 
         layout_hints = vllm_layout_hints()
+        layout_hints["inference_engine_logical_block_size"] = vllm_logical_block_size
         (
             block_size,
             num_layers,
