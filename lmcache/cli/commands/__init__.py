@@ -15,13 +15,22 @@ from lmcache.v1.utils.subclass_discovery import discover_subclasses
 def _discover_commands() -> list[BaseCommand]:
     """Scan direct submodules of this package and collect all concrete
     :class:`BaseCommand` subclasses, returning one instance per class.
+
+    Import errors are intentionally re-raised: a broken CLI command
+    module should fail loudly rather than silently disappear from the
+    CLI.
     """
+
+    def _raise(module_name: str, exc: Exception) -> None:
+        raise exc
+
     return [
         cls()
         for cls in discover_subclasses(
             __name__,
             BaseCommand,  # type: ignore[type-abstract]
             module_filter=lambda name: name != "base",
+            on_import_error=_raise,
         )
     ]
 
