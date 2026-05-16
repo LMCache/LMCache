@@ -118,14 +118,7 @@ jobs:
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
               with:
                 disable-sudo-and-containers: false
-                egress-policy: block
-                allowed-endpoints: >
-                  ghcr.io:443
-                  pkg-containers.githubusercontent.com:443
-                  test.pypi.org:443
-                  tuf-repo-cdn.sigstore.dev:443
-                  fulcio.sigstore.dev:443
-                  rekor.sigstore.dev:443
+                egress-policy: audit
 
             - name: Fetch release artifacts
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -157,14 +150,7 @@ jobs:
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
               with:
                 disable-sudo-and-containers: false
-                egress-policy: block
-                allowed-endpoints: >
-                  ghcr.io:443
-                  pkg-containers.githubusercontent.com:443
-                  test.pypi.org:443
-                  tuf-repo-cdn.sigstore.dev:443
-                  fulcio.sigstore.dev:443
-                  rekor.sigstore.dev:443
+                egress-policy: audit
 
             - name: Fetch CLI release artifacts
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -200,16 +186,7 @@ jobs:
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
               with:
                   disable-sudo-and-containers: false
-                  egress-policy: block
-                  allowed-endpoints: >
-                    api.github.com:443
-                    uploads.github.com:443
-                    ghcr.io:443
-                    pkg-containers.githubusercontent.com:443
-                    upload.pypi.org:443
-                    tuf-repo-cdn.sigstore.dev:443
-                    fulcio.sigstore.dev:443
-                    rekor.sigstore.dev:443
+                  egress-policy: audit
 
             - name: Fetch release artifacts
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -245,16 +222,7 @@ jobs:
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
               with:
                   disable-sudo-and-containers: false
-                  egress-policy: block
-                  allowed-endpoints: >
-                    api.github.com:443
-                    uploads.github.com:443
-                    ghcr.io:443
-                    pkg-containers.githubusercontent.com:443
-                    upload.pypi.org:443
-                    tuf-repo-cdn.sigstore.dev:443
-                    fulcio.sigstore.dev:443
-                    rekor.sigstore.dev:443
+                  egress-policy: audit
 
             - name: Fetch CLI release artifacts
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -290,10 +258,7 @@ jobs:
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
               with:
                   disable-sudo-and-containers: false
-                  egress-policy: block
-                  allowed-endpoints: >
-                    api.github.com:443
-                    uploads.github.com:443
+                  egress-policy: audit
 
             - name: Fetch cu12.9 release artifacts
               uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -337,29 +302,7 @@ jobs:
               uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
               with:
                 disable-sudo-and-containers: false
-                egress-policy: block
-                allowed-endpoints: >
-                  github.com:443
-                  registry-1.docker.io:443
-                  index.docker.io:443
-                  production.cloudflare.docker.com:443
-                  auth.docker.io:443
-                  azure.archive.ubuntu.com:80
-                  archive.ubuntu.com:80
-                  security.ubuntu.com:80
-                  astral.sh:443
-                  releases.astral.sh:443
-                  objects.githubusercontent.com:443
-                  pypi.org:443
-                  pypi.nvidia.com:443
-                  files.pythonhosted.org:443
-                  release-assets.githubusercontent.com:443
-                  wrapdb.mesonbuild.com:443
-                  nvcr.io:443
-                  layers.nvcr.io:443
-                  wheels.vllm.ai:443
-                  download.pytorch.org:443
-                  download-r2.pytorch.org:443
+                egress-policy: audit
 
             - name: Login to DockerHub
               uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0

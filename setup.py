@@ -15,13 +15,17 @@ HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
 # will run python setup.py sdist --dist-dir dist
 BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1"
 
-# New environment variable to choose between CUDA and HIP
+# New environment variable to choose between CUDA, HIP, and SYCL
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
+BUILD_WITH_SYCL = os.environ.get("BUILD_WITH_SYCL", "0") == "1"
 
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 
 
 def _read_requirements(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+
     reqs: list[str] = []
     for raw in path.read_text().splitlines():
         line = raw.strip()
@@ -293,14 +297,115 @@ def rocm_extension() -> tuple[list, dict]:
     return ext_modules, cmdclass
 
 
+def sycl_extension() -> tuple[list, dict]:
+    # Third Party
+    from torch.utils import cpp_extension  # Import here
+
+    print("Building SYCL/XPU extensions")
+
+    # Standard
+    import shutil
+
+    if shutil.which("icpx") is None:
+        sys.exit("icpx not found. Please source oneAPI setvars.sh at first")
+    os.environ["CXX"] = "icpx"
+    oneapi_root = os.environ.get("ONEAPI_ROOT", "/opt/intel/oneapi")
+    include_dirs = [f"{oneapi_root}/include"]
+    library_dirs = [f"{oneapi_root}/lib"]
+
+    sycl_sources = [
+        "csrc/sycl/pybind_sycl.cpp",
+        "csrc/sycl/mem_kernels_sycl.cpp",
+    ]
+    storage_manager_sources = [
+        "csrc/storage_manager/bitmap.cpp",
+        "csrc/storage_manager/pybind.cpp",
+        "csrc/storage_manager/ttl_lock.cpp",
+        "csrc/storage_manager/utils.cpp",
+    ]
+    redis_sources = [
+        "csrc/storage_backends/redis/pybind.cpp",
+        "csrc/storage_backends/redis/connector.cpp",
+    ]
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
+    ]
+    # Use CppExtension with DPC++ compiler (set CXX=icpx before invoking).
+    # The -fsycl flag enables SYCL compilation and linking.
+    # Intel XPU optimizations:
+    #   -ftarget-register-alloc-mode=pvc:auto
+    #       Register allocation tuned for Ponte Vecchio / Data Center GPU Max.
+    #   -fno-sycl-id-queries-fit-in-int
+    #       Allow 64-bit index arithmetic in SYCL kernels.
+    #   -ffast-math
+    #       Aggressive FP opts (safe for current implementation: kernels
+    #       only copy data, no FP arithmetic.  Review if FP math is added).
+    #   -funroll-loops
+    #       Unroll inner copy loops for better instruction packing.
+    ext_modules = [
+        cpp_extension.SyclExtension(
+            "lmcache.xpu_ops",
+            sources=sycl_sources,
+            include_dirs=include_dirs,
+            library_dirs=library_dirs,
+            extra_compile_args={
+                "cxx": [
+                    "-std=c++17",
+                    "-D_GLIBCXX_USE_CXX11_ABI=1",
+                    "-O3",
+                    "-fsycl",
+                    "-fno-sycl-id-queries-fit-in-int",
+                    "-ffast-math",
+                    "-funroll-loops",
+                    # Suppress deprecation warnings from SYCL standard
+                    # headers (sycl/accessor.hpp references the deprecated
+                    # 'host_buffer' internally; our code uses USM only).
+                    "-Wno-deprecated-declarations",
+                    "-Wno-nan-infinity-disabled",
+                ],
+            },
+            extra_link_args=["-fsycl"],
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.native_storage_ops",
+            sources=storage_manager_sources,
+            include_dirs=["csrc/storage_manager"],
+            extra_compile_args={
+                "cxx": ["-D_GLIBCXX_USE_CXX11_ABI=1", "-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_redis",
+            sources=redis_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
+            extra_compile_args={
+                "cxx": ["-D_GLIBCXX_USE_CXX11_ABI=1", "-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": ["-O3", "-std=c++17"],
+            },
+        ),
+    ]
+    cmdclass = {"build_ext": cpp_extension.BuildExtension}
+    return ext_modules, cmdclass
+
+
 def source_dist_extension() -> tuple[list, dict]:
-    print("Not building CUDA/HIP extensions for sdist")
+    print("Not building CUDA/HIP/SYCL extensions for sdist")
     return [], {}
 
 
 if __name__ == "__main__":
     if BUILDING_SDIST:
         get_extension = source_dist_extension
+    elif BUILD_WITH_SYCL:
+        get_extension = sycl_extension
     elif BUILD_WITH_HIP:
         get_extension = rocm_extension
     else:
@@ -311,6 +416,8 @@ if __name__ == "__main__":
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     if BUILD_WITH_HIP:
         core_file = "rocm_core.txt"
+    elif BUILD_WITH_SYCL:
+        core_file = "xpu_core.txt"
     else:
         # CUDA major selects between cu12 and cu13 vendor pins (cupy, nixl).
         # Defaults to cu13 (the PyPI build); cu12.9 wheel builds set
