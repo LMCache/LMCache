@@ -701,22 +701,45 @@ class LMCacheMPSchedulerAdapter:
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
         """
-        if not self.is_healthy:
-            return
+        per_server = self._per_server_hits.get(request_id)
+        if per_server is None:
+            targets = {
+                url: (end - start) // self.chunk_size for url in self._server_urls
+            }
+        else:
+            targets = dict(per_server)
 
-        key = self._create_key(
-            token_ids,
-            start=start,
-            end=end,
-            request_id=request_id,
-            cache_salt=cache_salt,
-        ).no_worker_id_version()
-        for url in self.healthy_urls():
-            send_lmcache_request(
-                self.mq_clients[url],
-                RequestType.FREE_LOOKUP_LOCKS,
-                [key, self.tp_size],
-            )
+        for url, hit_chunks in targets.items():
+            if hit_chunks <= 0:
+                continue
+            per_server_end = start + hit_chunks * self.chunk_size
+            per_server_end = min(per_server_end, len(token_ids))
+
+            key = self._create_key(
+                token_ids=token_ids,
+                start=start,
+                end=per_server_end,
+                request_id=request_id,
+                cache_salt=cache_salt,
+            ).no_worker_id_version()
+
+            client = self.mq_clients.get(url)
+            if client is None:
+                continue
+            try:
+                send_lmcache_request(
+                    client,
+                    RequestType.FREE_LOOKUP_LOCKS,
+                    [key, self.tp_size],
+                )
+            except Exception as e:
+                logger.warning(
+                    "[req=%s] FREE_LOOKUP_LOCKS to %s failed: %s "
+                    "(rely on server-side GC for any residual lock)",
+                    request_id,
+                    url,
+                    e,
+                )
 
     def end_session(self, request_id: str) -> None:
         """
