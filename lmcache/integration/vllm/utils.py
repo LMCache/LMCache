@@ -17,7 +17,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
 
 if TYPE_CHECKING:
@@ -102,6 +102,10 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                         "the environment variable: LMCACHE_CONFIG_FILE"
                     )
                     _config_instance = LMCacheEngineConfig.from_env()
+                    # from_env() doesn't call validate(); the file path
+                    # gets it via update_config_from_env() below, but the
+                    # env-only path needs an explicit call.
+                    _config_instance.validate()
                 else:
                     config_file = os.environ["LMCACHE_CONFIG_FILE"]
                     logger.info(f"Loading LMCache config file {config_file}")
@@ -132,9 +136,14 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
     return _config_instance
 
 
+def create_lmcache_ec_config() -> LMCacheEngineConfig:
+    """Create EC config from LMCache config plus EC-specific overrides."""
+    return load_ec_engine_config(base_config=lmcache_get_or_create_config())
+
+
 def hex_hash_to_int64(s: str) -> int:
     """
-    Convert a hash identifier into a 64-bit integer.
+    Convert a hash identifier into a signed-int64-safe integer.
 
     Historically, LMCache expected multimodal identifiers to be hex strings.
     In practice (e.g., OpenAI-style multimodal requests), identifiers may be
@@ -143,10 +152,8 @@ def hex_hash_to_int64(s: str) -> int:
       - Falls back to a stable string hash (SHA-256) when the input is not hex.
 
     The result is masked to 63 bits so it fits in a torch.long (signed int64)
-    tensor without overflow.
-    Previous versions truncated to 16 bits (2^16 = 65 536 values), which made
-    birthday-paradox collisions likely after only ~300 distinct images and
-    could cause KV-cache poisoning across unrelated requests.
+    tensor without overflow. Previous versions truncated to 16 bits, which made
+    birthday-paradox collisions likely after only a few hundred distinct images.
     """
     # Be defensive: vLLM may pass non-string identifiers.
     s = "" if s is None else str(s)
@@ -163,19 +170,22 @@ def hex_hash_to_int64(s: str) -> int:
 
     # Fallback: stable 63-bit value derived from the full identifier string.
     digest = hashlib.sha256(s_stripped.encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], byteorder="big", signed=False) & 0x7FFFFFFFFFFFFFFF
+    return (
+        int.from_bytes(digest[:8], byteorder="big", signed=False)
+        & 0x7FFFFFFFFFFFFFFF
+    )
 
 
 def hex_hash_to_int16(s: str) -> int:
     """Deprecated: use ``hex_hash_to_int64`` instead.
 
-    This wrapper exists solely for backward compatibility. It now returns a
-    63-bit (signed-int64-safe) value, **not** a 16-bit value. The old 16-bit
-    truncation caused KV-cache poisoning via hash collisions.
+    This wrapper exists for backward compatibility. It now returns the
+    signed-int64-safe value from ``hex_hash_to_int64`` rather than truncating
+    multimodal identifiers to 16 bits.
     """
     warnings.warn(
-        "hex_hash_to_int16 is deprecated and now returns a 63-bit value. "
-        "Use hex_hash_to_int64 instead.",
+        "hex_hash_to_int16 is deprecated and now returns a signed-int64-safe "
+        "value. Use hex_hash_to_int64 instead.",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -353,31 +363,6 @@ def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     )
 
 
-def get_vllm_torch_dev():
-    """
-    Returns the torch device and device name for the vLLM engine.
-    e.g. (torch.cuda, "cuda") or (torch.xpu, "xpu")
-    """
-    # Third Party
-    from vllm.platforms import current_platform
-
-    if current_platform.is_cuda_alike():
-        logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-        torch_dev = torch.cuda
-        dev_name = "cuda"
-    elif current_platform.is_xpu():
-        logger.info("XPU device is available. Using XPU for LMCache engine.")
-        torch_dev = torch.xpu
-        dev_name = "xpu"
-    elif hasattr(torch, "hpu") and torch.hpu.is_available():
-        logger.info("HPU device is available. Using HPU for LMCache engine.")
-        torch_dev = torch.hpu
-        dev_name = "hpu"
-    else:
-        raise RuntimeError("Unsupported device platform for LMCache engine.")
-    return torch_dev, dev_name
-
-
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
     """
     Calculate the local worker id and local world size.
@@ -389,10 +374,12 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     Returns:
         Tuple[int, int]: (local_worker_id, local_world_size)
     """
+    # First Party
+    from lmcache import torch_dev
+
     parallel_config = vllm_config.parallel_config
     global_rank = parallel_config.rank
     global_world_size = parallel_config.world_size
-    torch_dev, dev_name = get_vllm_torch_dev()
     num_gpus = torch_dev.device_count()
     if global_world_size <= num_gpus:
         # single node case

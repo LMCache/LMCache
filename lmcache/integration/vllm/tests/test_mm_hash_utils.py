@@ -3,15 +3,17 @@
 import dataclasses
 
 # Third Party
+import pytest
 import torch
 
 # First Party
 from lmcache.integration.vllm.utils import (
     apply_mm_hashes_to_token_ids,
+    hex_hash_to_int16,
     hex_hash_to_int64,
 )
 
-INT64_MAX = 0x7FFFFFFFFFFFFFFF  # signed int64 max (torch.long)
+INT64_MAX = 0x7FFFFFFFFFFFFFFF
 
 
 @dataclasses.dataclass(frozen=True)
@@ -41,11 +43,9 @@ def test_hex_hash_to_int64_hex_variants_whitespace_and_truncation() -> None:
     assert hex_hash_to_int64(" FfFf ") == 0xFFFF
     assert hex_hash_to_int64("\n0x00aB\t") == 0x00AB
 
-    # Long hex should be truncated to 63 bits via masking (signed int64 safe).
+    # Long hex should be masked to signed int64 range.
     assert hex_hash_to_int64("123456") == 0x123456
-    # Values that exceed 63 bits should be masked.
-    big_hex = "1" + "0" * 16  # 2^64, exceeds signed int64 range
-    assert hex_hash_to_int64(big_hex) == int(big_hex, 16) & INT64_MAX
+    assert hex_hash_to_int64("0xFFFFFFFFFFFFFFFF") == INT64_MAX
 
 
 def test_hex_hash_to_int64_empty_and_invalid_hex_are_safe_and_deterministic() -> None:
@@ -76,22 +76,18 @@ def test_hex_hash_to_int64_non_string_inputs_are_safe() -> None:
         assert v1 == v2
 
 
-def test_hex_hash_to_int64_fits_in_signed_int64() -> None:
-    """Ensure the hash value never exceeds signed int64 max (torch.long safe)."""
-    for i in range(1_000):
-        h = hex_hash_to_int64(f"chatcmpl-overflow-test-{i}-image-0")
-        assert 0 <= h <= INT64_MAX, f"Hash {h:#x} overflows signed int64"
-    # Explicit large hex input.
-    assert hex_hash_to_int64("0xFFFFFFFFFFFFFFFF") == INT64_MAX
+def test_hex_hash_to_int16_deprecated_alias_matches_int64() -> None:
+    s = "chatcmpl-a2a48871c4aad192-image-0"
+    with pytest.deprecated_call(match="hex_hash_to_int16 is deprecated"):
+        legacy_value = hex_hash_to_int16(s)
+    assert legacy_value == hex_hash_to_int64(s)
 
 
-def test_hex_hash_to_int64_different_inputs_no_collision() -> None:
-    """With 64-bit output, distinct OpenAI-style identifiers should not collide
-    across a realistic working set."""
+def test_hex_hash_to_int64_different_inputs_do_not_collide_in_working_set() -> None:
     seen: set[int] = set()
     for i in range(10_000):
         h = hex_hash_to_int64(f"chatcmpl-test-{i:05d}-image-0")
-        assert h not in seen, f"Unexpected collision at i={i}"
+        assert h not in seen
         seen.add(h)
 
 
