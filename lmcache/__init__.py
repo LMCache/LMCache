@@ -48,7 +48,7 @@ def _detect_device() -> tuple[Any, str]:
         return torch.cuda, "cuda"
     else:
         # First Party
-        from lmcache.platform.cpu.stub_cpu_device import StubCPUDevice
+        from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
 
         # Fallback: always return torch, cpu as stub
         return StubCPUDevice("cpu"), "cpu"
