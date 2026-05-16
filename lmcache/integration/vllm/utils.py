@@ -141,9 +141,24 @@ def create_lmcache_ec_config() -> LMCacheEngineConfig:
     return load_ec_engine_config(base_config=lmcache_get_or_create_config())
 
 
-def hex_hash_to_int64(s: str) -> int:
+def hex_hash_to_int16(s: str) -> int:
+    """Deprecated: use ``hex_hash_to_int64`` instead.
+
+    This wrapper exists for backward compatibility. It now returns the
+    signed-int64-safe value from ``hex_hash_to_int64`` rather than truncating
+    multimodal identifiers to 16 bits.
     """
-    Convert a hash identifier into a signed-int64-safe integer.
+    warnings.warn(
+        "hex_hash_to_int16 is deprecated and now returns a signed-int64-safe "
+        "value. Use hex_hash_to_int64 instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return hex_hash_to_int64(s)
+
+
+def hex_hash_to_int64(s: str) -> int:
+    """Convert a hash identifier into a signed-int64-safe integer.
 
     Historically, LMCache expected multimodal identifiers to be hex strings.
     In practice (e.g., OpenAI-style multimodal requests), identifiers may be
@@ -174,22 +189,6 @@ def hex_hash_to_int64(s: str) -> int:
         int.from_bytes(digest[:8], byteorder="big", signed=False)
         & 0x7FFFFFFFFFFFFFFF
     )
-
-
-def hex_hash_to_int16(s: str) -> int:
-    """Deprecated: use ``hex_hash_to_int64`` instead.
-
-    This wrapper exists for backward compatibility. It now returns the
-    signed-int64-safe value from ``hex_hash_to_int64`` rather than truncating
-    multimodal identifiers to 16 bits.
-    """
-    warnings.warn(
-        "hex_hash_to_int16 is deprecated and now returns a signed-int64-safe "
-        "value. Use hex_hash_to_int64 instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return hex_hash_to_int64(s)
 
 
 def apply_mm_hashes_to_token_ids(
