@@ -36,5 +36,5 @@ from lmcache.v1.platform.stream import make_external_stream as make_external_str
 # (``cpu``) backend must register first so accelerator backends can
 # transparently fall back to it.  Both imports are kept side-effect-only
 # so callers never need to know which sub-package is active.
-import lmcache.v1.platform.cpu  # noqa: F401,E402  pylint: disable=wrong-import-position
-import lmcache.v1.platform.cuda  # noqa: F401,E402  pylint: disable=wrong-import-position
+import lmcache.v1.platform.cpu  # noqa: F401,E402
+import lmcache.v1.platform.cuda  # noqa: F401,E402
