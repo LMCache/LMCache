@@ -94,6 +94,8 @@ echo "--- :python: Installing LMCache from source"
 # Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
 # (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+# Select cu12 nixl wheel
+export LMCACHE_CUDA_MAJOR=12
 "${UV_BIN}" pip install -p "${DEFAULT_VENV_BIN}/python" -e . --no-build-isolation
 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -e . --no-build-isolation
 # Work around openai_harmony vocab download/load issues for GPT-OSS (vLLM recipes troubleshooting).
