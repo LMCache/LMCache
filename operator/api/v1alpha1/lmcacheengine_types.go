@@ -97,6 +97,11 @@ type ServerSpec struct {
 // L1BackendSpec defines the L1 memory cache configuration.
 type L1BackendSpec struct {
 	// sizeGB is the L1 cache size in gigabytes. Required, must be > 0.
+	// The CRD-level constraint (exclusiveMinimum=0) rejects invalid values
+	// at admission time so the controller never sees them; the in-Go
+	// ValidateSpec keeps the same rule for defense in depth.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:ExclusiveMinimum=true
 	SizeGB float64 `json:"sizeGB"`
 }
 

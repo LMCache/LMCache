@@ -146,6 +146,23 @@ Install LMCache
                             BUILD_WITH_HIP=1 \
                             uv pip install -e . --no-build-isolation
 
+                    .. tab-item:: Intel XPU
+
+                        .. code-block:: bash
+
+                            git clone https://github.com/LMCache/LMCache.git
+                            cd LMCache
+
+                            uv venv --python 3.12
+                            source .venv/bin/activate
+
+                            # Need to install these packages manually to avoid build isolation
+                            uv pip install -r requirements/build.txt
+
+                            # Build LMCache with SYCL backend.
+                            BUILD_WITH_SYCL=1 uv pip install --no-build-isolation -e .
+
+
     .. tab-item:: Docker
 
         .. tab-set::
@@ -188,6 +205,12 @@ Install LMCache
 
                     docker pull rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620
 
+            .. tab-item:: Intel XPU
+
+                .. code-block:: bash
+
+                    docker pull docker pull intel/vllm:0.17.0-xpu
+
         See :ref:`docker_deployment` for running the container and ROCm images.
 
     .. tab-item:: CLI Only  
@@ -214,7 +237,7 @@ Verify Installation
 Compatibility Matrix
 ~~~~~~~~~~~~~~~~~~~~
 
-✅ compatible · ❌ API incompatible · 🕯️ torch mismatch (use ``--no-build-isolation``)
+✅ compatible · ❌ API incompatible · 🕯 torch mismatch (use ``--no-build-isolation``)
 
 
 .. container:: compat-table-scroll
