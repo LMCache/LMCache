@@ -43,7 +43,7 @@ In addition of LMCache's capability in storing KV cache on GPU, CPU, local stora
 - **KV cache transformation** through techniques such as compression, token dropping, and future optimization methods
 - **Pluggable backend support** for storage and transfer backends such as NIXL, GDS, local storage, Redis, S3-compatible object storage, and more
 
-LMCache is used, integrated, or referenced across a growing ecosystem of LLM serving platforms, infrastructure providers, and open-source projects:
+LMCache is becoming a shared infrastructure layer across the LLM inference ecosystem, connecting serving platforms, hardware vendors, storage systems, infrastructure providers, and open-source projects:
 
 <p align="center">
   <picture>
@@ -72,7 +72,7 @@ For more setup options and examples, see:
 We welcome and value any contributions and collaborations. Join us in improving LMCache. Check out the [Contributing Guide](https://docs.lmcache.ai/developer_guide/contributing.html) to get started.
 
 ## Adoption and Partnerships
-LMCache is used, integrated, and referenced across the LLM inference ecosystem, including serving platforms, cloud providers, hardware vendors, storage systems, and open-source projects.
+LMCache is developed with a growing community of researchers, engineers, infrastructure teams, and industry partners building the next generation of efficient LLM inference systems.
 
 <p align="center">
   <picture>
