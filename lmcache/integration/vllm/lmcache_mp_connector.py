@@ -125,32 +125,40 @@ def create_scheduler_adapter(
     mq_timeout: float,
     heartbeat_interval: float,
 ) -> LMCacheMPSchedulerAdapter:
+    # `vllm_config.parallel_config.world_size` and `.rank` are vLLM's GLOBAL
+    # view across every worker process (ranks 0 .. world_size - 1). We use
+    # explicit `global_` / `local_` prefixes here so that downstream readers
+    # do not have to guess the scope of each variable.
     n_servers = len(server_urls)
-    actual_world_size = vllm_config.parallel_config.world_size
-    actual_rank = vllm_config.parallel_config.rank
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
-    sub_world_size = actual_world_size // n_servers
-    tp_size_per_node = tp_size // n_servers
-    assert tp_size % n_servers == 0, (
-        f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
+    global_world_size = vllm_config.parallel_config.world_size
+    global_rank = vllm_config.parallel_config.rank
+    global_tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+    # Per-node (local) derivations: each node hosts one LMCache server.
+    local_world_size = global_world_size // n_servers
+    local_tp_size = global_tp_size // n_servers
+    assert global_tp_size % n_servers == 0, (
+        f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
     )
 
+    # `extract_world_size_and_kv_rank` expects the GLOBAL world_size / rank
+    # and returns the kv-side world_size and kv_rank (excluding TP for MLA).
     kv_world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
+        global_world_size,
+        global_rank,
         vllm_config,
     )
     parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        kv_world_size,
-        kv_rank,
-        actual_world_size,
-        actual_rank,
-        tp_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-        sub_world_size,
-        tp_size_per_node,
-        n_servers,
+        use_mla=mla_enabled(vllm_config.model_config),
+        kv_world_size=kv_world_size,
+        kv_worker_id=kv_rank,
+        global_world_size=global_world_size,
+        global_rank=global_rank,
+        tp_size=global_tp_size,
+        pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+        kv_local_world_size=local_world_size,
+        local_tp_size=local_tp_size,
+        n_servers=n_servers,
     )
 
     return LMCacheMPSchedulerAdapter(
@@ -171,39 +179,43 @@ def create_worker_adapter(
     mq_timeout: float,
     heartbeat_interval: float,
 ) -> LMCacheMPWorkerAdapter:
+    # See `create_scheduler_adapter` for the global_/local_ naming rationale.
     n_servers = len(server_urls)
+    global_world_size = vllm_config.parallel_config.world_size
+    global_rank = vllm_config.parallel_config.rank
+    global_tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+    # `extract_world_size_and_kv_rank` expects the GLOBAL world_size / rank
+    # and returns the kv-side world_size and kv_rank (excluding TP for MLA).
     kv_world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
+        global_world_size,
+        global_rank,
         vllm_config,
     )
-    actual_world_size = vllm_config.parallel_config.world_size
-    actual_rank = vllm_config.parallel_config.rank
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    # Node routing: worker connects only to its local server.
-    # Ranks are assigned to nodes in contiguous blocks:
-    # node 0 → ranks [0, ranks_per_node),
-    # node 1 → [ranks_per_node, 2*ranks_per_node), ...
-    ranks_per_node = actual_world_size // n_servers
-    local_server_url = server_urls[actual_rank // ranks_per_node]
+    # Node routing: a worker connects only to its local LMCache server.
+    # Global ranks are assigned to nodes in contiguous blocks:
+    #   node 0 → ranks [0, ranks_per_node),
+    #   node 1 → [ranks_per_node, 2 * ranks_per_node), ...
+    ranks_per_node = global_world_size // n_servers
+    local_server_url = server_urls[global_rank // ranks_per_node]
 
-    sub_world_size = actual_world_size // n_servers
-    tp_size_per_node = tp_size // n_servers
-    assert tp_size % n_servers == 0, (
-        f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
+    local_world_size = global_world_size // n_servers
+    local_tp_size = global_tp_size // n_servers
+    assert global_tp_size % n_servers == 0, (
+        f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
     )
     parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        kv_world_size,
-        kv_rank,
-        actual_world_size,
-        actual_rank,
-        tp_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-        sub_world_size,
-        tp_size_per_node,
-        n_servers,
+        use_mla=mla_enabled(vllm_config.model_config),
+        kv_world_size=kv_world_size,
+        kv_worker_id=kv_rank,
+        global_world_size=global_world_size,
+        global_rank=global_rank,
+        tp_size=global_tp_size,
+        pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+        kv_local_world_size=local_world_size,
+        local_tp_size=local_tp_size,
+        n_servers=n_servers,
     )
 
     return LMCacheMPWorkerAdapter(

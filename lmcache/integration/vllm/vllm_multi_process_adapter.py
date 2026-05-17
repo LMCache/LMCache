@@ -119,39 +119,40 @@ class ParallelStrategy:
 
     kv_world_size: int
     """
-    The kv world size, kv_world_size may not be equal to the actual_world_size,
-    in the case of mla, it will 'exclude' the effect of TP, the value is
-    calculated by `extract_world_size_and_kv_rank` in `lmcache_mp_connector.py`.
+    The kv world size. May differ from ``global_world_size``: in MLA mode it
+    'excludes' the effect of TP. Computed by ``extract_world_size_and_kv_rank``
+    in ``lmcache_mp_connector.py``.
     """
 
     kv_worker_id: int
     """
-    The kv worker id of the sub-process, kv_worker_id may not be equal to the
-    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP,
-    the value is calculated by `extract_world_size_and_kv_rank` in
-    `lmcache_mp_connector.py`.
+    The kv worker id of the sub-process. May differ from ``global_rank``: in
+    MLA mode it 'excludes' the effect of TP. Computed by
+    ``extract_world_size_and_kv_rank`` in ``lmcache_mp_connector.py``.
     """
 
-    actual_world_size: int
-    """The actual world size."""
+    global_world_size: int
+    """The GLOBAL (cross-node) world size — total number of vLLM worker
+    processes across all nodes. Mirrors ``parallel_config.world_size``."""
 
-    actual_worker_id: int
-    """The actual worker id of the sub-process."""
+    global_rank: int
+    """The GLOBAL rank of this worker process
+    (0 .. global_world_size - 1). Mirrors ``parallel_config.rank``."""
 
     tp_size: int
-    """The tensor parallel size."""
+    """The (global) tensor parallel size."""
 
     pp_size: int
     """The pipeline parallel size."""
 
-    kv_world_size_per_node: int
-    """The kv world size per node."""
+    kv_local_world_size: int
+    """The kv world size per node (one LMCache server per node)."""
 
-    tp_size_per_node: int
-    """The tensor parallel size per node."""
+    local_tp_size: int
+    """The tensor parallel size per node (one LMCache server per node)."""
 
     n_servers: int
-    """The number of lmcache servers."""
+    """The number of LMCache servers."""
 
 
 def _normalize_adapter_init_args(
@@ -192,12 +193,12 @@ def _normalize_adapter_init_args(
         use_mla=False,
         kv_world_size=kv_world_size,
         kv_worker_id=kv_worker_id,
-        actual_world_size=kv_world_size,
-        actual_worker_id=kv_worker_id,
+        global_world_size=kv_world_size,
+        global_rank=kv_worker_id,
         tp_size=kv_world_size,
         pp_size=1,
-        kv_world_size_per_node=kv_world_size,
-        tp_size_per_node=kv_world_size,
+        kv_local_world_size=kv_world_size,
+        local_tp_size=kv_world_size,
         n_servers=1,
     )
     return int(legacy_block_size), strategy, mq_timeout
@@ -381,7 +382,6 @@ class LMCacheMPSchedulerAdapter:
         # replacement for the original single-server lookup.
 
         # One worker thread per server so all lookups can be fired off at once.
-        # Standard
 
         self._executor = ThreadPoolExecutor(
             max_workers=len(self._server_urls),
@@ -440,13 +440,13 @@ class LMCacheMPSchedulerAdapter:
     @property
     def world_size(self) -> int:
         if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
-            return self.parallel_strategy.kv_world_size_per_node
+            return self.parallel_strategy.kv_local_world_size
         return self.parallel_strategy.kv_world_size
 
     @property
     def tp_size(self) -> int:
         if self.parallel_strategy.n_servers > 1:
-            return self.parallel_strategy.tp_size_per_node
+            return self.parallel_strategy.local_tp_size
         return self.parallel_strategy.tp_size
 
     @property
@@ -944,15 +944,15 @@ class LMCacheMPWorkerAdapter:
     @property
     def world_size(self) -> int:
         if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
-            return self.parallel_strategy.kv_world_size_per_node
+            return self.parallel_strategy.kv_local_world_size
         return self.parallel_strategy.kv_world_size
 
     @property
     def worker_id(self) -> int:
         if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
             return (
-                self.parallel_strategy.actual_worker_id
-                % self.parallel_strategy.kv_world_size_per_node
+                self.parallel_strategy.global_rank
+                % self.parallel_strategy.kv_local_world_size
             )
         return self.parallel_strategy.kv_worker_id
 
@@ -968,10 +968,7 @@ class LMCacheMPWorkerAdapter:
         In multi-server MLA deployments, this only identifies the global
         rank-0 worker.  Use ``is_first_rank_of_node`` for per-node STORE gating.
         """
-        return (
-            self.parallel_strategy.actual_worker_id % self.parallel_strategy.tp_size
-            == 0
-        )
+        return self.parallel_strategy.global_rank % self.parallel_strategy.tp_size == 0
 
     @property
     def is_first_rank_of_node(self) -> bool:
@@ -985,8 +982,8 @@ class LMCacheMPWorkerAdapter:
         n_servers = self.parallel_strategy.n_servers
         if n_servers <= 1:
             return self.is_first_rank_of_pp_group
-        ranks_per_node = self.parallel_strategy.actual_world_size // n_servers
-        return self.parallel_strategy.actual_worker_id % ranks_per_node == 0
+        ranks_per_node = self.parallel_strategy.global_world_size // n_servers
+        return self.parallel_strategy.global_rank % ranks_per_node == 0
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """

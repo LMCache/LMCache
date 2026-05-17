@@ -59,12 +59,12 @@ def fake_adapter(monkeypatch):
         use_mla=False,
         kv_world_size=1,
         kv_worker_id=0,
-        actual_world_size=1,
-        actual_worker_id=0,
+        global_world_size=1,
+        global_rank=0,
         tp_size=1,
         pp_size=1,
-        kv_world_size_per_node=1,
-        tp_size_per_node=1,
+        kv_local_world_size=1,
+        local_tp_size=1,
         n_servers=1,
     )
     adapter = LMCacheMPWorkerAdapter(
