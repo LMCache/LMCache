@@ -2,6 +2,7 @@
 # Standard
 from pathlib import Path
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -49,6 +50,34 @@ def test_gds_backend_metadata():
                 assert size == tensor.size()
                 assert dtype == tensor.dtype
                 assert expected_nbytes == nbytes
+
+
+def test_gds_metadata_cached_positions_roundtrip():
+    # cached_positions can be successfully restored
+    # after a pack/unpack round trip so that
+    # position-dependent reuse
+    # (e.g. CacheBlend RoPE re-positioning) works.
+    tensor = torch.randn(2, 8)
+    positions = torch.arange(5, 13, dtype=torch.long)
+    packed = pack_metadata(
+        tensor,
+        fmt=MemoryFormat.KV_2LTD,
+        cached_positions=positions,
+        lmcache_version="1",
+    )
+    _, _, _, _, extra = unpack_metadata(packed)
+    assert "cached_positions" in extra
+    decoded = torch.tensor(json.loads(extra["cached_positions"]), dtype=torch.long)
+    assert torch.equal(decoded, positions)
+
+
+def test_gds_metadata_without_cached_positions_is_backward_compatible():
+    # Files written before cached_positions existed simply omit the key;
+    # they must still pack/unpack and decode to "no positions".
+    tensor = torch.randn(2, 8)
+    packed = pack_metadata(tensor, fmt=MemoryFormat.KV_2LTD, lmcache_version="1")
+    _, _, _, _, extra = unpack_metadata(packed)
+    assert "cached_positions" not in extra
 
 
 @pytest.mark.skip(reason="We need to add this test back after implementing prefetch")

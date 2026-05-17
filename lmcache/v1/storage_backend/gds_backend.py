@@ -90,9 +90,22 @@ def get_fstype(path):
     return best_fstype
 
 
-def pack_metadata(tensor, fmt: MemoryFormat, **extra_metadata) -> bytes:
+def pack_metadata(
+    tensor,
+    fmt: MemoryFormat,
+    cached_positions: Optional[torch.Tensor] = None,
+    **extra_metadata,
+) -> bytes:
     if tensor.dtype not in torch_dtypes:
         raise RuntimeError(f"unhandled dtype {tensor.dtype}")
+
+    # cached_positions: 1-D int tensor of per-token original positions
+    # (len == chunk token count). Stored as a JSON string since the
+    # safetensors-compatible "__metadata__" must be str->str; its size is
+    # bounded by the fixed metadata block (enforced by the check below).
+    meta_extra = dict(extra_metadata)
+    if cached_positions is not None:
+        meta_extra["cached_positions"] = json.dumps(cached_positions.tolist())
 
     # Metadata
     data_size = tensor.numel() * tensor.element_size()
@@ -101,12 +114,27 @@ def pack_metadata(tensor, fmt: MemoryFormat, **extra_metadata) -> bytes:
         "shape": list(tensor.size()),
         "data_offsets": [0, data_size],
         "fmt": fmt.value,
-        "__metadata__": extra_metadata,
+        "__metadata__": meta_extra,
     }
     meta = {"kvcache": tensor_meta}
     str_meta = json.dumps(meta).encode("utf-8")
     meta_len = len(str_meta)
-    assert meta_len <= _METADATA_MAX_SIZE - 8
+    # cached_positions impacts header size. Serialized it is roughly
+    #   bytes ~= num_tokens * (digits_per_position + 2)
+    # where num_tokens is this chunk's token count (<= chunk_size).
+    # Against the ~3800B left in the fixed 4096B block, this overflows only for a
+    # large configured chunk_size (default 256 fits even ~1M-scale positions).
+    # Quick recovery: lower chunk_size so fewer tokens land per chunk.
+    # Proper fix when error actually happened:
+    # positions are near-always a contiguous arange, so store
+    # them compactly as (start, length) instead of the full list.
+    if meta_len > _METADATA_MAX_SIZE - 8:
+        raise ValueError(
+            f"Packed GDS metadata is {meta_len} bytes, which exceeds the "
+            f"{_METADATA_MAX_SIZE - 8} byte limit. This usually means the "
+            f"chunk's cached_positions is too large to fit in the fixed-size "
+            f"GDS metadata block."
+        )
 
     # Align to _METADATA_MAX_SIZE - 8
     str_meta += b" " * (_METADATA_MAX_SIZE - 8 - meta_len)
@@ -460,15 +488,18 @@ class GdsBackend(AllocatorBackendInterface):
             f"shape={shape}, dtype={dtype}, size={size}, fmt={fmt}, "
             f"extra_metadata={extra_metadata}"
         )
-        # TODO(extra_metadata)
-        # TODO(Jiayi): need to support `cached_positions`.
-        # Currently we just fill it as None.
+        cached_positions_json = extra_metadata.get("cached_positions")
+        cached_positions = (
+            torch.tensor(json.loads(cached_positions_json), dtype=torch.long)
+            if cached_positions_json is not None
+            else None
+        )
         metadata = DiskCacheMetadata(
             filename.removesuffix(_METADATA_FILE_SUFFIX),
             size,
             shape,
             dtype,
-            None,
+            cached_positions,
             fmt,
         )
         with self.hot_lock:
@@ -628,6 +659,7 @@ class GdsBackend(AllocatorBackendInterface):
                     fmt,
                     self.gds_base_pointer,
                     memory_obj.metadata.address,
+                    memory_obj.metadata.cached_positions,
                 )
             except Exception as e:
                 logger.error(
@@ -710,9 +742,11 @@ class GdsBackend(AllocatorBackendInterface):
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
+        cached_positions = memory_obj.metadata.cached_positions
         with self.hot_lock:
-            # TODO(Jiayi): need to support `cached_positions`.
-            self.hot_cache[key] = DiskCacheMetadata(path, size, shape, dtype, None, fmt)
+            self.hot_cache[key] = DiskCacheMetadata(
+                path, size, shape, dtype, cached_positions, fmt
+            )
 
     def submit_prefetch_task(
         self,
@@ -855,6 +889,14 @@ class GdsBackend(AllocatorBackendInterface):
                 )
             memory_obj.ref_count_down()
             return None
+
+        # Re-attach cached_positions (used e.g. for CacheBlend RoPE
+        # re-positioning) from the index, mirroring the other persistent
+        # backends. Entries from older files carry None.
+        with self.hot_lock:
+            entry = self.hot_cache.get(key)
+        if entry is not None:
+            memory_obj.metadata.cached_positions = entry.cached_positions
         return memory_obj
 
     def get_non_blocking(
@@ -938,6 +980,7 @@ class GdsBackend(AllocatorBackendInterface):
         fmt: MemoryFormat,
         base_pointer: int,
         device_offset: int,
+        cached_positions: Optional[torch.Tensor] = None,
     ):
         if base_pointer is None:
             addr = ctypes.c_void_p(kv_chunk.data_ptr())
@@ -950,7 +993,10 @@ class GdsBackend(AllocatorBackendInterface):
         # TODO: We can add the chunk's metadata here, e.g. Tensor parallelism shard
         # and pipeline parallelism index.
         metadata = pack_metadata(
-            kv_chunk, fmt=fmt, lmcache_version=str(_METADATA_VERSION)
+            kv_chunk,
+            fmt=fmt,
+            cached_positions=cached_positions,
+            lmcache_version=str(_METADATA_VERSION),
         )
         try:
             with open(tmp_path, "wb") as f:

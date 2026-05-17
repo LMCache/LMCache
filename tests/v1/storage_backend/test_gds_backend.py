@@ -98,12 +98,15 @@ def async_loop():
 def gds_backend(temp_gds_path, async_loop):
     config = create_test_config(temp_gds_path)
     metadata = create_test_metadata()
-    return GdsBackend(
+    backend = GdsBackend(
         config=config,
         loop=async_loop,
         metadata=metadata,
         dst_device="cuda:0",
     )
+    yield backend
+    # close() drains in-flight tasks.
+    backend.close()
 
 
 @pytest.mark.skipif(
