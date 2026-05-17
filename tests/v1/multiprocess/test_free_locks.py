@@ -181,6 +181,8 @@ def test_adapter_free_lookup_locks_sends_request():
     mock_client.submit_request.return_value = mock_future
     adapter.mq_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
+    adapter._per_server_hits = {}
+    adapter._finished_lookup_results = {}
 
     token_ids = list(range(512))
     adapter.free_lookup_locks(
@@ -237,6 +239,8 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_client.submit_request.return_value = mock_future
     adapter.mq_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
+    adapter._per_server_hits = {}
+    adapter._finished_lookup_results = {}
 
     token_ids = list(range(512))
 
