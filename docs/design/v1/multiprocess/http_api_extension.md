@@ -36,9 +36,9 @@ modules:
 | Module | Endpoint | Method | Description |
 |---|---|---|---|
 | `root_api.py` | `/` | GET | Basic liveness check |
-| `healthcheck_api.py` | `/api/healthcheck` | GET | K8s probe endpoint |
-| `cache_api.py` | `/api/clear-cache` | POST | Force-clear L1 cache |
-| `status_api.py` | `/api/status` | GET | Internal status report |
+| `healthcheck_api.py` | `/healthcheck` | GET | K8s probe endpoint |
+| `cache_api.py` | `/clear-cache` | POST | Force-clear L1 cache |
+| `status_api.py` | `/status` | GET | Internal status report |
 
 ### `http_server.py`
 
@@ -100,7 +100,7 @@ from fastapi.responses import JSONResponse
 router = APIRouter()
 
 
-@router.get("/api/metrics")
+@router.get("/metrics")
 async def metrics(request: Request):
     """Return cache hit/miss metrics."""
     engine = getattr(request.app.state, "engine", None)
@@ -158,7 +158,7 @@ server lifecycle and all endpoint handlers. Available attributes
 Access these via the `Request` object in your handler:
 
 ```python
-@router.get("/api/my-endpoint")
+@router.get("/my-endpoint")
 async def my_endpoint(request: Request):
     engine = request.app.state.engine
     # ... use engine ...

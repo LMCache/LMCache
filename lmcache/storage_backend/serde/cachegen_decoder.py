@@ -6,6 +6,7 @@ from typing import List, Optional
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenConfig,
@@ -131,13 +132,13 @@ class CacheGenDeserializer(Deserializer):
         ret = torch.zeros(config.nlayers)
         for spec in config.kspecs:
             ret[spec.start_layer : spec.end_layer] = spec.bins
-        return ret.cuda()
+        return ret.to(torch_device_type)
 
     def make_value_bins(self, config: CacheGenConfig) -> torch.Tensor:
         ret = torch.zeros(config.nlayers)
         for spec in config.vspecs:
             ret[spec.start_layer : spec.end_layer] = spec.bins
-        return ret.cuda()
+        return ret.to(torch_device_type)
 
     def get_output_buffer(self, nlayers: int, nchannels: int, ntokens: int):
         if (
@@ -146,14 +147,18 @@ class CacheGenDeserializer(Deserializer):
         ):
             self.output_buffer = torch.zeros(
                 (self.chunk_size, 2 * nlayers * nchannels), dtype=torch.uint8
-            ).cuda()
+            ).to(torch_device_type)
         return self.output_buffer[:ntokens, :]
 
     @_lmcache_nvtx_annotate
     def from_bytes(self, bs: bytes) -> torch.Tensor:
         encoder_output = CacheGenGPUEncoderOutput.from_bytes(bs)
-        encoder_output.max_tensors_key = encoder_output.max_tensors_key.cuda()
-        encoder_output.max_tensors_value = encoder_output.max_tensors_value.cuda()
+        encoder_output.max_tensors_key = encoder_output.max_tensors_key.to(
+            torch_device_type
+        )
+        encoder_output.max_tensors_value = encoder_output.max_tensors_value.to(
+            torch_device_type
+        )
 
         ntokens = encoder_output.max_tensors_key.shape[1]
         layers_in_key = encoder_output.max_tensors_key.shape[0]
@@ -181,7 +186,7 @@ class CacheGenDeserializer(Deserializer):
             self.key_bins = self.key_bins.to(key.device)
 
         if self.value_bins.device != value.device:
-            self.value_bins = self.value_bins.cuda()
+            self.value_bins = self.value_bins.to(value.device)
 
         key = do_dequantize(key, self.key_bins, encoder_output.max_tensors_key)
         value = do_dequantize(value, self.value_bins, encoder_output.max_tensors_value)

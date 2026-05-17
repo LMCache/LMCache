@@ -1,6 +1,6 @@
 name: PR Full Build
 
-# Build all release artifacts (sdist + CUDA wheel, CLI wheel, cu130 wheel)
+# Build all release artifacts (sdist + CUDA wheel, CLI wheel, cu129 wheel)
 # on PRs carrying the `full` label. The `full` label is added automatically
 # by automerge-labeler.yml when auto-merge is enabled on a code-change PR,
 # so this acts as a pre-merge sanity check that wheels still build.
@@ -38,10 +38,10 @@ jobs:
         if: contains(github.event.pull_request.labels.*.name, 'full')
         uses: ./.github/workflows/build_cli_artifacts.yml
 
-    build-cu130:
-        name: Build cu130
+    build-cu129:
+        name: Build cu129
         if: contains(github.event.pull_request.labels.*.name, 'full')
-        uses: ./.github/workflows/build_cu130_artifacts.yml
+        uses: ./.github/workflows/build_cu129_artifacts.yml
         # Fork PRs won't expose DOCKERHUB_TOKEN even with `inherit`; the login
-        # step in build_cu130_artifacts.yml guards on the token being non-empty.
+        # step in build_cu129_artifacts.yml guards on the token being non-empty.
         secrets: inherit

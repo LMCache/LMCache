@@ -27,7 +27,8 @@ Available Commands
    * - ``ping``
      - Liveness check for LMCache or vLLM servers.
    * - ``bench``
-     - Run sustained performance benchmarks against an inference engine.
+     - Run sustained performance benchmarks against an inference engine,
+       or an end-to-end sanity test against an LMCache MP server.
    * - ``kvcache``
      - Manage KV cache state (e.g. clear L1 cache).
    * - ``server``
@@ -39,4 +40,5 @@ For a comprehensive guide with examples, see :doc:`/getting_started/cli`.
    :maxdepth: 2
 
    bench
+   bench_kvcache
    kvcache

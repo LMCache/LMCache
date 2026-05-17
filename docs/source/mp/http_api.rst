@@ -56,10 +56,10 @@ All examples below assume the server is reachable at
 Endpoints
 ---------
 
-The table below groups the routes by purpose. Paths under ``/api/`` are
-the operational surface (health, status, cache control). Routes without
-the ``/api/`` prefix are inherited from the shared
-``internal_api_server`` package and kept at their original paths for
+The table below groups the routes by purpose. The operational surface
+(health, status, cache control) is exposed at top-level paths. Routes
+inherited from the shared
+``internal_api_server`` package are kept at their original paths for
 compatibility with the vLLM-embedded API server.
 
 .. list-table::
@@ -73,25 +73,25 @@ compatibility with the vLLM-embedded API server.
      - ``/``
      - Basic liveness ping.
    * - GET
-     - ``/api/healthcheck``
+     - ``/healthcheck``
      - K8s liveness/readiness probe.
    * - GET
-     - ``/api/status``
+     - ``/status``
      - Detailed engine status for inspection and debugging.
    * - POST
-     - ``/api/clear-cache``
+     - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
-     - ``/api/quota``
+     - ``/quota``
      - List every registered ``cache_salt`` quota with live usage.
    * - PUT
-     - ``/api/quota/{cache_salt}``
+     - ``/quota/{cache_salt}``
      - Set or update the quota (in GB) for a ``cache_salt``.
    * - GET
-     - ``/api/quota/{cache_salt}``
+     - ``/quota/{cache_salt}``
      - Read the quota and live usage for a single ``cache_salt``.
    * - DELETE
-     - ``/api/quota/{cache_salt}``
+     - ``/quota/{cache_salt}``
      - Remove a ``cache_salt``'s quota entry (its data is evicted next
        cycle).
    * - GET
@@ -136,7 +136,7 @@ compatibility with the vLLM-embedded API server.
 ~~~~~~~~~
 
 Basic liveness check. Returns a static payload indicating the HTTP server
-is running. Use ``/api/healthcheck`` instead for probes that also verify
+is running. Use ``/healthcheck`` instead for probes that also verify
 the cache engine is initialized.
 
 **Response** (``200 OK``):
@@ -154,8 +154,8 @@ the cache engine is initialized.
 
     curl -s http://localhost:8080/
 
-``GET /api/healthcheck``
-~~~~~~~~~~~~~~~~~~~~~~~~
+``GET /healthcheck``
+~~~~~~~~~~~~~~~~~~~~
 
 Health check endpoint suitable for Kubernetes liveness and readiness
 probes. A ``200`` response implies the HTTP server is alive **and** the
@@ -183,7 +183,7 @@ is not yet ready (still initializing, or failed to initialize).
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/api/healthcheck
+    curl -s http://localhost:8080/healthcheck
 
 **Kubernetes probe snippet:**
 
@@ -191,19 +191,19 @@ is not yet ready (still initializing, or failed to initialize).
 
     livenessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 10
       periodSeconds: 10
     readinessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 5
       periodSeconds: 5
 
-``GET /api/status``
-~~~~~~~~~~~~~~~~~~~
+``GET /status``
+~~~~~~~~~~~~~~~
 
 Returns a detailed snapshot of the MP engine's internal state: L1 cache,
 L2 adapters, registered GPU contexts, active sessions, and in-flight
@@ -261,10 +261,10 @@ been initialized:
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/api/status | jq
+    curl -s http://localhost:8080/status | jq
 
-``POST /api/clear-cache``
-~~~~~~~~~~~~~~~~~~~~~~~~~
+``POST /clear-cache``
+~~~~~~~~~~~~~~~~~~~~~
 
 Force-clears **all** KV cache data currently held in L1 (CPU) memory.
 
@@ -297,11 +297,11 @@ The request body is ignored.
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/api/clear-cache
+    curl -s -X POST http://localhost:8080/clear-cache
 
 .. _mp-http-quota-api:
 
-``/api/quota`` — per-``cache_salt`` quota management
+``/quota`` — per-``cache_salt`` quota management
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 These endpoints manage the per-``cache_salt`` storage budgets consumed by
@@ -318,13 +318,13 @@ present, but the LRU policy ignores the registered quotas.
 
 **URL escaping for the empty salt.** ``cache_salt=""`` (un-salted /
 anonymous traffic) cannot appear in a URL path parameter, so the API
-accepts the sentinel ``_default`` in its place. ``PUT /api/quota/_default``
+accepts the sentinel ``_default`` in its place. ``PUT /quota/_default``
 sets the quota for ``cache_salt=""``. A user that legitimately stores
 data with ``cache_salt="_default"`` cannot be managed via this HTTP API
 distinctly from anonymous traffic — both map to the same path parameter;
 pick any other value (e.g. ``"default"``) to disambiguate.
 
-``PUT /api/quota/{cache_salt}``
+``PUT /quota/{cache_salt}``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Create or update a quota.
@@ -345,11 +345,11 @@ engine is not initialized.
 
 .. code-block:: bash
 
-    curl -s -X PUT http://localhost:8080/api/quota/alice \
+    curl -s -X PUT http://localhost:8080/quota/alice \
         -H 'Content-Type: application/json' \
         -d '{"limit_gb": 10.0}'
 
-``GET /api/quota/{cache_salt}``
+``GET /quota/{cache_salt}``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Read the current quota and live usage for one ``cache_salt``.
@@ -370,7 +370,7 @@ Read the current quota and live usage for one ``cache_salt``.
 reflects whatever bytes are currently cached for that salt — those bytes
 will evict next cycle under ``IsolatedLRU``).
 
-``DELETE /api/quota/{cache_salt}``
+``DELETE /quota/{cache_salt}``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Remove a ``cache_salt``'s quota entry. Any bytes still cached under this
@@ -386,7 +386,7 @@ limit drops to ``0``) and will be evicted.
 When no quota was registered for the given ``cache_salt``, the response
 is ``{"cache_salt": "...", "status": "not_found"}`` (still ``200 OK``).
 
-``GET /api/quota``
+``GET /quota``
 ^^^^^^^^^^^^^^^^^^
 
 List every registered quota alongside its live usage.

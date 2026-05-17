@@ -13,6 +13,7 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
@@ -296,8 +297,8 @@ class PDBackend(AllocatorBackendInterface):
         self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         if self.corrected_device != "cpu":
-            logger.info(f"Setting cuda device to {self.corrected_device} ")
-            torch.cuda.set_device(self.corrected_device)
+            logger.info(f"Setting device to {self.corrected_device} ")
+            torch_dev.set_device(self.corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
 
