@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 import os
@@ -381,7 +382,6 @@ class LMCacheMPSchedulerAdapter:
 
         # One worker thread per server so all lookups can be fired off at once.
         # Standard
-        from concurrent.futures import ThreadPoolExecutor
 
         self._executor = ThreadPoolExecutor(
             max_workers=len(self._server_urls),
