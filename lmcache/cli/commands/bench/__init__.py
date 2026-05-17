@@ -8,6 +8,7 @@ import os
 import sys
 
 # First Party
+from lmcache.cli.commands import test_cache as _test_cache_mod
 from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
@@ -37,10 +38,10 @@ class BenchCommand(BaseCommand):
 
     def __init__(self) -> None:
         super().__init__()
-        # Stateless delegate for the ``kvcache`` sub-target.
-        # Cached once to avoid redundant instantiation across
-        # ``help()``, ``add_arguments()`` and ``execute()``.
-        self._kvcache_delegate = TestCacheCommand()
+        # None on slim install; _register_kvcache registers a stub instead.
+        self._kvcache_delegate = (
+            TestCacheCommand() if _test_cache_mod._IMPORT_ERROR is None else None
+        )
 
     def name(self) -> str:
         return "bench"
@@ -329,13 +330,21 @@ class BenchCommand(BaseCommand):
         self,
         subparsers: argparse._SubParsersAction,
     ) -> None:
-        """Register ``lmcache bench kvcache`` subcommand.
-
-        Arguments and execution are delegated to
-        :class:`~lmcache.cli.commands.test_cache.TestCacheCommand` so
-        the per-chunk store/retrieve/checksum logic lives in a single
-        place.
+        """Register ``lmcache bench kvcache``. Delegates to
+        :class:`TestCacheCommand`, or registers a stub on slim install.
         """
+        if _test_cache_mod._IMPORT_ERROR is not None:
+            subparsers.add_parser(
+                "kvcache",
+                help="(requires full lmcache install)",
+                description=(
+                    "End-to-end sanity test for the LMCache MP cache server. "
+                    "Requires the full `lmcache` package; not available in "
+                    "the `lmcache-cli` install."
+                ),
+            ).set_defaults(func=self.execute)
+            return
+        assert self._kvcache_delegate is not None
         parser = subparsers.add_parser(
             "kvcache",
             help=self._kvcache_delegate.help(),
@@ -345,11 +354,24 @@ class BenchCommand(BaseCommand):
                 "and verifies KV cache checksums."
             ),
         )
+        assert self._kvcache_delegate is not None
         self._kvcache_delegate.add_arguments(parser)
         parser.set_defaults(func=self.execute)
 
     def _bench_kvcache(self, args: argparse.Namespace) -> None:
         """Dispatch ``lmcache bench kvcache`` to ``TestCacheCommand``."""
+        if _test_cache_mod._IMPORT_ERROR is not None:
+            print(
+                "ERROR: `lmcache bench kvcache` needs the full LMCache "
+                "package (torch, zmq, MP runtime), but only the "
+                "`lmcache-cli` shell appears to be installed.\n"
+                "  Install the full package with `pip install lmcache` "
+                "and try again.\n"
+                f"  Original import error: {_test_cache_mod._IMPORT_ERROR}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        assert self._kvcache_delegate is not None
         self._kvcache_delegate.execute(args)
 
     def execute(self, args: argparse.Namespace) -> None:

@@ -1,7 +1,9 @@
 # Common project dependencies
 -r common.txt
-# Vendor-specific runtime deps (cupy, nixl) baked into install_requires
--r cuda_core.txt
+# Vendor-specific runtime deps (cupy, nixl) baked into install_requires.
+# Defaults to the cu13 list; the cu12.9 build path overrides via setup.py
+# (LMCACHE_CUDA_MAJOR=12) and does not consume cuda.txt directly.
+-r cuda13_core.txt
 
 # Dependencies for NVIDIA GPUs
 ray >= 2.9
