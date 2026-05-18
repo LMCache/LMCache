@@ -125,15 +125,27 @@ class GPUCacheContext:
         # Byte size of one chunk entry (= one chunk across all groups).
         # tmp_chunk_group_offsets_[g] is the byte offset of group g within
         # a single chunk; tmp_chunk_group_offsets_[num_groups] ==
-        # tmp_chunk_bytes_.
+        # tmp_chunk_bytes_. For SWA groups (``sliding_window > 0``) the
+        # per-chunk byte budget is truncated to the trailing
+        # ``ceil(window / logical_bs)`` blocks, so we size the tmp slot
+        # to that truncated count rather than the full chunk's logical
+        # token count.
         self.tmp_chunk_group_offsets_: list[int] = [0]
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
             # ``get_kv_buffer_shape`` takes *logical* tokens; for
             # compressed groups it folds ``compress_ratio`` logical
-            # tokens into one physical slot internally.
-            shape = self.get_kv_buffer_shape(lmcache_logical_chunk_size, group_idx)
+            # tokens into one physical slot internally. For SWA
+            # groups the truncated logical-token count is
+            # ``blocks_per_chunk(g) * logical_block_size``.
+            if group.sliding_window > 0:
+                logical_tokens_g = (
+                    self.blocks_per_chunk(group_idx) * group.logical_block_size
+                )
+            else:
+                logical_tokens_g = lmcache_logical_chunk_size
+            shape = self.get_kv_buffer_shape(logical_tokens_g, group_idx)
             byte_size = shape.numel() * group.dtype.itemsize
             self.tmp_chunk_group_offsets_.append(
                 self.tmp_chunk_group_offsets_[-1] + byte_size
@@ -259,13 +271,25 @@ class GPUCacheContext:
         return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
 
     def get_physical_chunk_size(self, group_idx: int) -> int:
-        """Returns the per-chunk physical slot count for the given group.
+        """Returns the per-chunk physical slot count for the given group,
+        adjusted for SWA-suffix truncation when applicable.
 
-        Equal to ``lmcache_logical_chunk_size // compress_ratio``; for
-        non-compressed groups this is just ``lmcache_logical_chunk_size``.
-        This is the value the block-level transfer kernel must be told.
+        For non-SWA groups (``sliding_window == 0``) this is
+        ``lmcache_logical_chunk_size // compress_ratio`` —
+        i.e. the full untruncated chunk's physical slot count.
+
+        For SWA groups (``sliding_window > 0``), the per-chunk payload
+        is truncated to the *last* ``ceil(sliding_window /
+        logical_block_size)`` blocks of each chunk; the kernel chunk
+        token count therefore shrinks to ``blocks_per_chunk(g) *
+        physical_block_size_g``. The kernel-side constraint
+        ``num_blocks_per_object * shape_desc.bs == kernel_chunk_tokens``
+        still holds because both sides scale with the truncation.
         """
-        return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        if group.sliding_window <= 0:
+            return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
+        return self.blocks_per_chunk(group_idx) * group.shape_desc.bs
 
     def blocks_per_chunk_full(self, group_idx: int) -> int:
         """Returns the per-chunk count of inference-engine *logical* blocks
@@ -275,10 +299,17 @@ class GPUCacheContext:
 
         This is the count of block IDs the engine hands out for one
         LMCache chunk's worth of logical tokens in this group's
-        scheduler namespace. Per-group rather than global because, with
-        vLLM's hybrid KV cache manager active, different
-        ``KVCacheGroupSpec``s use different scheduler block sizes (e.g.
-        DeepSeek-V4: gid 0 = 256, gid 1/2 = 64, gid 3 = 4, gid 4 = 8).
+        scheduler namespace, BEFORE any SWA-suffix truncation. For
+        full-attention groups this equals :meth:`blocks_per_chunk`;
+        for SWA groups :meth:`blocks_per_chunk` returns a smaller
+        truncated count, but ``blocks_per_chunk_full`` always
+        returns the full pre-truncation value (used by callers that
+        need to address the full chunk's worth of engine block IDs).
+
+        Per-group rather than global because, with vLLM's hybrid KV
+        cache manager active, different ``KVCacheGroupSpec``s use
+        different scheduler block sizes (e.g. DeepSeek-V4: gid 0 =
+        256, gid 1/2 = 64, gid 3 = 4, gid 4 = 8).
 
         Args:
             group_idx: 0-based group index.
@@ -300,13 +331,25 @@ class GPUCacheContext:
     def blocks_per_chunk(self, group_idx: int) -> int:
         """Returns the per-chunk count of inference-engine *logical*
         blocks the server will iterate when staging block IDs for this
-        group. Currently identical to :meth:`blocks_per_chunk_full`;
-        kept as a separate accessor so the SWA-suffix-only optimization
-        (Step 4 of the V4 hybrid-on migration) can return a smaller
-        truncated count for groups with ``sliding_window > 0`` without
-        renaming every call site.
+        group.
+
+        For full-attention groups (``sliding_window == 0``) this is
+        identical to :meth:`blocks_per_chunk_full`. For SWA groups,
+        this returns ``ceil(sliding_window / logical_block_size_g)``
+        — the count of trailing blocks per chunk that the
+        SWA-suffix-only optimization stores and retrieves. Capped at
+        ``blocks_per_chunk_full`` so the count never exceeds the
+        full chunk's block count when ``sliding_window`` is larger
+        than ``lmcache_chunk_size``.
         """
-        return self.blocks_per_chunk_full(group_idx)
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        if group.sliding_window <= 0:
+            return self.blocks_per_chunk_full(group_idx)
+        # ceil(sliding_window / logical_block_size)
+        suffix_blocks = (
+            group.sliding_window + group.logical_block_size - 1
+        ) // group.logical_block_size
+        return min(suffix_blocks, self.blocks_per_chunk_full(group_idx))
 
     @property
     def kv_layer_groups_manager(self) -> KVLayerGroupsManager:

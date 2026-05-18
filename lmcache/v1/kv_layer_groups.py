@@ -35,11 +35,12 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 }
 
 
-# The 7-tuple that uniquely identifies a set of kernel-equivalent layers:
+# The 8-tuple that uniquely identifies a set of kernel-equivalent layers:
 # ``(kv_size, num_heads, head_size, block_size, logical_block_size,
-# kv_cache_group_id, dtype)``. Two layers share a transfer-kernel
-# launch iff they share this identity — see the grouping loop in
-# :meth:`KVLayerGroupsManager.__init__` for the derivation.
+# kv_cache_group_id, sliding_window, dtype)``. Two layers share a
+# transfer-kernel launch iff they share this identity — see the
+# grouping loop in :meth:`KVLayerGroupsManager.__init__` for the
+# derivation.
 #
 # The fifth slot (``logical_block_size``) is the *scheduler-side*
 # block size — i.e. the granularity at which the serving engine hands
@@ -69,10 +70,21 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 # Without this slot they merge into one LMCache group and a STORE op
 # carrying gid 1's block IDs would silently mis-index gid 2's layers.
 #
-# When neither hint is provided, every layer's logical block size
-# defaults to its physical ``bs`` and every layer's namespace defaults
-# to 0, so the 7-tuple collapses to the prior 5-tuple grouping.
-LayerGroupIdentity = tuple[int, int, int, int, int, int, torch.dtype]
+# The seventh slot (``sliding_window``) is the SWA window size in
+# tokens, or 0 for full-attention layers. It comes from
+# :data:`~lmcache.v1.gpu_connector.utils.LayoutHints.per_layer_sliding_window`.
+# When non-zero, the SWA-suffix-only optimization kicks in for that
+# group (store/retrieve the last ``ceil(window/logical_bs)`` blocks
+# per chunk instead of all). Layers with different windows have
+# different per-chunk byte budgets and so cannot share a transfer
+# group. When absent, every layer is treated as ``sliding_window = 0``
+# and the 8-tuple collapses to the prior 7-tuple identity.
+#
+# When neither hint set is provided, every layer's logical block size
+# defaults to its physical ``bs``, every layer's namespace defaults to
+# 0, and every layer's sliding_window defaults to 0, so the 8-tuple
+# collapses to the prior 5-tuple grouping (kv_size, nh, hs, bs, dtype).
+LayerGroupIdentity = tuple[int, int, int, int, int, int, int, torch.dtype]
 
 
 @dataclass
@@ -159,6 +171,18 @@ class KVLayerGroupInfo:
     Defaults to 0 when the engine does not provide the hint, in which
     case all layers share namespace 0 and grouping behaves identically
     to the prior 6-tuple identity."""
+    sliding_window: int = 0
+    """Sliding-window attention window size in tokens, or ``0`` for
+    full-attention groups. When non-zero, the SWA-suffix-only
+    optimization activates for this group: store/retrieve only the
+    last ``ceil(sliding_window / logical_block_size)`` blocks per
+    chunk instead of all ``lmcache_chunk_size // logical_block_size``
+    blocks. Stamped from
+    :data:`~lmcache.v1.gpu_connector.utils.LayoutHints.per_layer_sliding_window`
+    at registration. Two groups with different ``sliding_window``
+    values cannot share a transfer-kernel launch (their per-chunk
+    byte budgets differ); the field is the 7th component of
+    :data:`LayerGroupIdentity`."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -177,7 +201,8 @@ class KVLayerGroupInfo:
             f"compress_ratio={self.compress_ratio}, "
             f"physical_chunk_size={self.physical_chunk_size}, "
             f"logical_bs={self.logical_block_size}, "
-            f"kv_cache_group_id={self.kv_cache_group_id})"
+            f"kv_cache_group_id={self.kv_cache_group_id}, "
+            f"sliding_window={self.sliding_window})"
         )
 
     @property
@@ -196,10 +221,10 @@ class KVLayerGroupsManager:
 
     At construction time, every layer in ``kv_caches`` is bucketed by its
     :data:`LayerGroupIdentity` (``(kv_size, num_heads, head_size,
-    block_size, logical_block_size, kv_cache_group_id, dtype)``). Each
-    bucket becomes one :class:`KVLayerGroupInfo` holding the layer
-    indices, a shared :class:`PageBufferShapeDesc`, and the group's
-    torch dtype.
+    block_size, logical_block_size, kv_cache_group_id, sliding_window,
+    dtype)``). Each bucket becomes one :class:`KVLayerGroupInfo`
+    holding the layer indices, a shared :class:`PageBufferShapeDesc`,
+    and the group's torch dtype.
 
     Downstream consumers (``VLLMPagedMemGPUConnectorV3``,
     ``GPUCacheContext``, the multiprocess server) iterate
@@ -266,11 +291,18 @@ class KVLayerGroupsManager:
                   disjoint engine-side namespaces (e.g.
                   DeepSeek-V4's vLLM gids 1 and 2: even+MTP vs odd
                   SWA layers) end up in different LMCache groups.
+                * ``per_layer_sliding_window`` (optional list of
+                  length ``num_layers``). When present, each layer's
+                  SWA window size joins the identity tuple, so
+                  layers with different windows end up in different
+                  LMCache groups. Non-zero entries activate the
+                  SWA-suffix-only optimization for that group.
 
                 ``None`` (or a hints dict without any of the above)
                 means every group is treated as non-compressed
                 (``compress_ratio == 1``, ``logical_block_size ==
-                shape_desc.bs``, ``kv_cache_group_id == 0``).
+                shape_desc.bs``, ``kv_cache_group_id == 0``,
+                ``sliding_window == 0``).
             lmcache_logical_chunk_size: Logical tokens per LMCache chunk
                 (one logical token = one inference-engine token).
                 Together with ``compress_ratio`` it determines each
@@ -316,6 +348,7 @@ class KVLayerGroupsManager:
         # groups (DeepSeek-V4 hybrid manager active).
         per_layer_logical_bs: "list[int] | None" = None
         per_layer_namespace: "list[int] | None" = None
+        per_layer_sliding_window: "list[int] | None" = None
         if layout_hints is not None:
             logical_hint = layout_hints.get("per_layer_logical_block_size")
             if logical_hint is not None:
@@ -357,18 +390,48 @@ class KVLayerGroupsManager:
                     )
                 per_layer_namespace = list(ns_hint)
 
+            sw_hint = layout_hints.get("per_layer_sliding_window")
+            if sw_hint is not None:
+                if len(sw_hint) != num_layers:
+                    raise ValueError(
+                        "per_layer_sliding_window length "
+                        f"({len(sw_hint)}) does not match num_layers "
+                        f"({num_layers}); each registered layer must "
+                        "have exactly one sliding-window entry"
+                    )
+                bad = [i for i, sw in enumerate(sw_hint) if sw < 0]
+                if bad:
+                    raise ValueError(
+                        "per_layer_sliding_window has invalid "
+                        f"(negative) entries at positions {bad[:8]}"
+                        + ("..." if len(bad) > 8 else "")
+                        + "; sliding windows must be non-negative "
+                        "(0 = full attention)"
+                    )
+                per_layer_sliding_window = list(sw_hint)
+
         groups_dict = self._group_layers_by_identity(
             kv_caches,
             gpu_kv_format,
             num_layers,
             per_layer_logical_bs,
             per_layer_namespace,
+            per_layer_sliding_window,
         )
 
         # Emit groups in order of their first-appearing layer so that group
         # indices remain deterministic across runs.
         for group_idx, (
-            (_, _, _, bs, group_logical_bs, group_namespace, dt),
+            (
+                _,
+                _,
+                _,
+                bs,
+                group_logical_bs,
+                group_namespace,
+                group_sliding_window,
+                dt,
+            ),
             indices,
         ) in enumerate(sorted(groups_dict.items(), key=lambda kv: kv[1][0])):
             block_stride_elems = resolve_block_stride_and_log_layout(
@@ -404,6 +467,7 @@ class KVLayerGroupsManager:
                     physical_chunk_size=physical_chunk_size,
                     logical_block_size=group_logical_bs,
                     kv_cache_group_id=group_namespace,
+                    sliding_window=group_sliding_window,
                 )
             )
 
@@ -504,21 +568,25 @@ class KVLayerGroupsManager:
         num_layers: int,
         per_layer_logical_bs: "list[int] | None" = None,
         per_layer_namespace: "list[int] | None" = None,
+        per_layer_sliding_window: "list[int] | None" = None,
     ) -> dict[LayerGroupIdentity, list[int]]:
         """Partition layer indices by :data:`LayerGroupIdentity`.
 
         Linear single pass over ``kv_caches``; layers sharing the same
         ``(kv_size, num_heads, head_size, block_size,
-        logical_block_size, kv_cache_group_id, dtype)`` signature land
-        in the same bucket. When ``per_layer_logical_bs`` is None, each
-        layer's ``logical_block_size`` defaults to its physical block
-        size; when ``per_layer_namespace`` is None, each layer's
-        namespace defaults to 0. With both defaults, the 7-tuple is
-        effectively a 5-tuple (preserving prior grouping behavior on
-        engines without these hints). The returned dict's value lists
-        are later passed by reference into :class:`KVLayerGroupInfo`
-        instances, so the dict itself is garbage-collected after
-        ``__init__`` returns while the lists stay alive on each group.
+        logical_block_size, kv_cache_group_id, sliding_window, dtype)``
+        signature land in the same bucket. When ``per_layer_logical_bs``
+        is None, each layer's ``logical_block_size`` defaults to its
+        physical block size; when ``per_layer_namespace`` is None,
+        each layer's namespace defaults to 0; when
+        ``per_layer_sliding_window`` is None, every layer is treated
+        as ``sliding_window = 0`` (full attention). With all three
+        defaults, the 8-tuple is effectively a 5-tuple (preserving
+        prior grouping behavior on engines without these hints). The
+        returned dict's value lists are later passed by reference into
+        :class:`KVLayerGroupInfo` instances, so the dict itself is
+        garbage-collected after ``__init__`` returns while the lists
+        stay alive on each group.
         """
         # First Party
         from lmcache.v1.gpu_connector.utils import (
@@ -547,8 +615,13 @@ class KVLayerGroupsManager:
                 if per_layer_namespace is not None
                 else 0
             )
+            sliding_window = (
+                per_layer_sliding_window[idx]
+                if per_layer_sliding_window is not None
+                else 0
+            )
             groups_dict[
-                (kv_size, nh, hs, bs, logical_bs, namespace, dt)
+                (kv_size, nh, hs, bs, logical_bs, namespace, sliding_window, dt)
             ].append(idx)
         return groups_dict
 

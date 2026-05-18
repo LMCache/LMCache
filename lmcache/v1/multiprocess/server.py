@@ -125,6 +125,11 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     """Get the memory layout description for a given GPU context and number of tokens.
 
     Supports multiple KV layer groups with different shapes and dtypes.
+    For SWA groups (``sliding_window > 0``), the per-group token
+    dimension shrinks to the SWA-suffix-only payload's logical token
+    count when ``num_tokens == lmcache_chunk_size`` (the chunked
+    store/retrieve hot path); other call sites that pass arbitrary
+    token counts get the un-truncated layout.
 
     Args:
         gpu_context: The GPU cache context containing the KV cache information.
@@ -134,14 +139,23 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
         MemoryLayoutDesc: The memory layout description containing shapes and dtypes.
     """
     num_groups = gpu_context.kv_layer_groups_manager.num_groups
-    shapes = [
-        gpu_context.get_kv_buffer_shape(num_tokens, group_idx)
-        for group_idx in range(num_groups)
-    ]
-    dtypes = [
-        gpu_context.kv_layer_groups_manager.kv_layer_groups[group_idx].dtype
-        for group_idx in range(num_groups)
-    ]
+    groups = gpu_context.kv_layer_groups_manager.kv_layer_groups
+    shapes: list[torch.Size] = []
+    for group_idx in range(num_groups):
+        group = groups[group_idx]
+        if (
+            group.sliding_window > 0
+            and num_tokens == gpu_context.lmcache_logical_chunk_size
+        ):
+            # SWA-suffix path: the MemoryObj for this chunk holds only
+            # the trailing ``bpc_g * logical_bs_g`` logical tokens.
+            logical_tokens_g = (
+                gpu_context.blocks_per_chunk(group_idx) * group.logical_block_size
+            )
+            shapes.append(gpu_context.get_kv_buffer_shape(logical_tokens_g, group_idx))
+        else:
+            shapes.append(gpu_context.get_kv_buffer_shape(num_tokens, group_idx))
+    dtypes = [groups[group_idx].dtype for group_idx in range(num_groups)]
     return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
 
 
@@ -652,28 +666,41 @@ class MPCacheEngine:
                         continue
 
                     # Per-LMCache-group dispatch. Each group selects:
-                    #   * its own ``blocks_per_chunk_g`` (= chunk_size //
-                    #     logical_block_size_g) — the engine block-ID
-                    #     count this group consumes per chunk;
-                    #   * its own physical kernel chunk size
-                    #     (= ``get_physical_chunk_size(g)``), fed to the
-                    #     kernel so the constraint
+                    #   * its own ``blocks_per_chunk_g``: full
+                    #     (chunk_size // logical_block_size_g) for
+                    #     full-attention groups, or the SWA-suffix
+                    #     count (ceil(window / logical_bs)) for SWA
+                    #     groups. ``blocks_per_chunk_full(g)`` always
+                    #     returns the un-truncated count (used to step
+                    #     between chunks in the engine's namespace),
+                    #     while ``blocks_per_chunk(g)`` returns the
+                    #     possibly-truncated count actually consumed.
+                    #   * its own physical kernel chunk size (=
+                    #     ``get_physical_chunk_size(g)``), fed to the
+                    #     kernel; for SWA groups this is the truncated
+                    #     ``bpc_g * physical_bs_g`` so the kernel
+                    #     constraint
                     #     ``num_blocks_per_object * shape_desc.bs ==
-                    #     kernel_chunk`` holds for any (logical,
-                    #     physical) combination;
+                    #     kernel_chunk`` holds.
                     #   * its block-ID slice from the staged tensor for
-                    #     ``group.kv_cache_group_id``.
+                    #     ``group.kv_cache_group_id``. For SWA groups
+                    #     we slice the *last* ``bpc_g`` of each
+                    #     ``bpc_full_g``-sized chunk.
                     for group_idx, group in enumerate(groups):
                         bpc_g = gpu_context.blocks_per_chunk(group_idx)
+                        bpc_full_g = gpu_context.blocks_per_chunk_full(group_idx)
                         kernel_chunk_tokens = (
                             gpu_context.get_physical_chunk_size(group_idx)
                         )
                         ns_block_ids_gpu = staged_block_ids_per_namespace[
                             group.kv_cache_group_id
                         ]
-                        chunk_block_ids_gpu = ns_block_ids_gpu[
-                            idx * bpc_g : (idx + 1) * bpc_g
-                        ]
+                        # For non-SWA: slice [idx*bpc_g, (idx+1)*bpc_g)
+                        # For SWA: slice [idx*bpc_full_g + (bpc_full_g - bpc_g),
+                        #                 idx*bpc_full_g + bpc_full_g)
+                        chunk_start = idx * bpc_full_g + (bpc_full_g - bpc_g)
+                        chunk_end = chunk_start + bpc_g
+                        chunk_block_ids_gpu = ns_block_ids_gpu[chunk_start:chunk_end]
                         if chunk_block_ids_gpu.shape[0] != bpc_g:
                             logger.error(
                                 "STORE chunk_block_ids_gpu underflow: "
@@ -681,7 +708,8 @@ class MPCacheEngine:
                                 "blocks_per_chunk=%d got=%d "
                                 "ns_block_ids_len=%d "
                                 "logical_bs=%d physical_bs=%d "
-                                "lmcache_chunk_size=%d slice=[%d:%d]",
+                                "lmcache_chunk_size=%d slice=[%d:%d] "
+                                "sliding_window=%d bpc_full=%d",
                                 group_idx,
                                 group.kv_cache_group_id,
                                 idx,
@@ -691,8 +719,10 @@ class MPCacheEngine:
                                 group.logical_block_size,
                                 group.shape_desc.bs,
                                 self.chunk_size,
-                                idx * bpc_g,
-                                (idx + 1) * bpc_g,
+                                chunk_start,
+                                chunk_end,
+                                group.sliding_window,
+                                bpc_full_g,
                             )
 
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
@@ -877,15 +907,40 @@ class MPCacheEngine:
                     )
                 for group_idx, group in enumerate(groups):
                     bpc_g = gpu_context.blocks_per_chunk(group_idx)
+                    bpc_full_g = gpu_context.blocks_per_chunk_full(group_idx)
                     kernel_chunk_tokens = (
                         gpu_context.get_physical_chunk_size(group_idx)
                     )
                     ns_block_ids_gpu = staged_block_ids_per_namespace[
                         group.kv_cache_group_id
                     ]
-                    chunk_block_ids_gpu = ns_block_ids_gpu[
-                        start_chunk_id * bpc_g : end_chunk_id * bpc_g
-                    ]
+                    if group.sliding_window > 0 and bpc_g != bpc_full_g:
+                        # SWA-suffix: pick the trailing ``bpc_g`` block IDs
+                        # from each ``bpc_full_g``-sized chunk slot in
+                        # ``ns_block_ids_gpu``. Build a flat gather index
+                        # ``[batch_len * bpc_g]`` once per kernel call.
+                        chunk_offsets = (
+                            torch.arange(
+                                batch_len,
+                                device=ns_block_ids_gpu.device,
+                                dtype=torch.long,
+                            )
+                            * bpc_full_g
+                            + (start_chunk_id * bpc_full_g + (bpc_full_g - bpc_g))
+                        )
+                        within_chunk = torch.arange(
+                            bpc_g,
+                            device=ns_block_ids_gpu.device,
+                            dtype=torch.long,
+                        )
+                        gather_idx = (
+                            chunk_offsets[:, None] + within_chunk[None, :]
+                        ).reshape(-1)
+                        chunk_block_ids_gpu = ns_block_ids_gpu[gather_idx]
+                    else:
+                        chunk_block_ids_gpu = ns_block_ids_gpu[
+                            start_chunk_id * bpc_g : end_chunk_id * bpc_g
+                        ]
                     if chunk_block_ids_gpu.shape[0] != batch_len * bpc_g:
                         logger.error(
                             "RETRIEVE chunk_block_ids_gpu underflow: "
@@ -893,7 +948,8 @@ class MPCacheEngine:
                             "blocks_per_chunk=%d batch_len=%d got=%d "
                             "ns_block_ids_len=%d "
                             "logical_bs=%d physical_bs=%d "
-                            "lmcache_chunk_size=%d slice=[%d:%d]",
+                            "lmcache_chunk_size=%d "
+                            "sliding_window=%d bpc_full=%d",
                             group_idx,
                             group.kv_cache_group_id,
                             batch_idx,
@@ -904,8 +960,8 @@ class MPCacheEngine:
                             group.logical_block_size,
                             group.shape_desc.bs,
                             self.chunk_size,
-                            start_chunk_id * bpc_g,
-                            end_chunk_id * bpc_g,
+                            group.sliding_window,
+                            bpc_full_g,
                         )
                     # Per-group skip math: convert the global token-units
                     # skip into this group's logical block units.

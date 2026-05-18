@@ -322,6 +322,67 @@ class TestPerLayerKvCacheGroupId:
             )
 
 
+class TestPerLayerSlidingWindow:
+    """Tests for the ``per_layer_sliding_window`` LayoutHints field.
+
+    The hint adds the SWA window size to LayerGroupIdentity so layers
+    with different windows end up in distinct LMCache groups, and
+    activates the SWA-suffix-only optimization for groups with
+    non-zero windows.
+    """
+
+    def test_hint_absent_collapses_to_full(self):
+        """No hint = legacy behavior: all layers treated as full-attention
+        (sliding_window=0)."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        manager = _build_manager(tensors, num_blocks=32)
+        assert len(manager.kv_layer_groups) == 1
+        assert manager.kv_layer_groups[0].sliding_window == 0
+
+    def test_hint_splits_layers_by_window(self):
+        """Two sets of identical-shape layers with different windows
+        end up in distinct groups."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        layout_hints = {
+            "per_layer_sliding_window": [128, 128, 0, 0],
+        }
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            layout_hints=layout_hints,
+        )
+        assert len(manager.kv_layer_groups) == 2
+        groups_by_window = {g.sliding_window: g for g in manager.kv_layer_groups}
+        assert groups_by_window[128].layer_indices == [0, 1]
+        assert groups_by_window[0].layer_indices == [2, 3]
+
+    def test_window_length_mismatch_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="length"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_sliding_window": [128]},
+            )
+
+    def test_window_negative_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="negative"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_sliding_window": [128, -1]},
+            )
+
+
 class TestParseKvcacheShapeSpec:
     """Test cases for parse_kvcache_shape_spec function."""
 

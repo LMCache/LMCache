@@ -118,6 +118,32 @@ class LayoutHints(TypedDict, total=False):
             gids). Each entry must be a non-negative int. When absent,
             every layer is treated as namespace 0 (preserving
             behavior on engines without hybrid KV cache groupings).
+        per_layer_sliding_window: Optional per-layer sliding-window
+            attention size in tokens, or ``0`` for full-attention
+            layers. When non-zero for a group, LMCache stores and
+            retrieves only the *last*
+            ``ceil(sliding_window / logical_block_size)`` blocks of
+            each chunk for that group, instead of all
+            ``lmcache_chunk_size // logical_block_size`` blocks. The
+            kernel-time SWA mask in the serving engine never reads
+            positions older than ``sliding_window`` from the current
+            decode position, so the truncated payload is sufficient:
+            a full hit's last cached chunk holds positions ``[L -
+            last_chunk_size + 1, L]`` of which only the last
+            ``window`` are ever accessed; a partial hit only reads
+            the cached SWA tail for the first ``window`` recompute
+            steps before the window slides into recomputed positions.
+            On DeepSeek-V4 (``chunk_size=1024``,
+            ``window in {8, 128, 256}``), this collapses gid 3's
+            per-chunk SWA payload from ~236 MiB to ~1.85 MiB.
+            Two layers with the same other fields but different
+            ``sliding_window`` values cannot share an LMCache group
+            because their per-chunk byte budgets differ — the value
+            joins :data:`LayerGroupIdentity` as an extra component.
+            The list length MUST equal the number of layers; entry
+            ``i`` is the window for the i-th positional layer. When
+            absent, every layer is treated as ``sliding_window = 0``
+            and behavior is identical to the prior 7-tuple grouping.
     """
 
     kv_layout: Literal["NHD", "HND"]
@@ -127,6 +153,7 @@ class LayoutHints(TypedDict, total=False):
     inference_engine_logical_block_size: int
     per_layer_logical_block_size: list[int]
     per_layer_kv_cache_group_id: list[int]
+    per_layer_sliding_window: list[int]
 
 
 def attempt_permute_to_contiguous_view(
