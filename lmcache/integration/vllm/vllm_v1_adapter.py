@@ -226,10 +226,7 @@ def _is_hybrid_state_kv_cache_spec(kv_cache_spec: Any) -> bool:
 
 def _get_parent_kv_cache_config(parent: KVConnectorBase_V1) -> Optional[Any]:
     """Get vLLM's KV cache config from connector parents that expose it."""
-    get_kv_cache_config = getattr(parent, "get_lmcache_kv_cache_config", None)
-    if callable(get_kv_cache_config):
-        return get_kv_cache_config()
-    return None
+    return getattr(parent, "kv_cache_config", None)
 
 
 def _select_lmcache_kv_cache_group(
