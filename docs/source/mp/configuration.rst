@@ -185,7 +185,7 @@ Source: ``lmcache/v1/distributed/config.py``
        write buffer (data is deleted from L1 after L2 store).
        ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
        and requires per-``cache_salt`` quotas to be configured at
-       runtime via the ``/api/quota`` HTTP endpoints
+       runtime via the ``/quota`` HTTP endpoints
        (see :ref:`mp-http-quota-api`); a ``cache_salt`` with no
        registered quota has an effective limit of ``0`` bytes,
        so its data is evicted at the next eviction cycle
@@ -243,7 +243,7 @@ The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
 ``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
-``native_plugin``.
+``native_plugin``, ``raw_block``, ``dax``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

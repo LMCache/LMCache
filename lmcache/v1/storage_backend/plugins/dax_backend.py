@@ -25,13 +25,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import StoragePluginInterface
 from lmcache.v1.storage_backend.dax.core import DaxCore
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-
-if torch.cuda.is_available():
-    # First Party
-    import lmcache.c_ops as lmc_ops
-else:
-    # First Party
-    import lmcache.non_cuda_equivalents as lmc_ops
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

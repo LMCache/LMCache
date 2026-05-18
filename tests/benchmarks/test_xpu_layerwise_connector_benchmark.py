@@ -72,7 +72,7 @@ def _create_connector(
     hidden_dim: int,
     num_layers: int,
     *,
-    use_xpu: bool,
+    use_gpu: bool,
     chunk_size: int,
     dtype: torch.dtype,
     use_mla: bool = False,
@@ -80,7 +80,7 @@ def _create_connector(
     return VLLMPagedMemLayerwiseXPUConnector(
         hidden_dim,
         num_layers,
-        use_xpu=use_xpu,
+        use_gpu=use_gpu,
         chunk_size=chunk_size,
         dtype=dtype,
         device=device,
@@ -296,13 +296,13 @@ def _build_engine(
 @pytest.mark.benchmark(group="store")
 @pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", ["cpu", "disk"])
-@pytest.mark.parametrize("use_xpu", [False, True])
+@pytest.mark.parametrize("use_gpu", [True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_store_1GB(
     benchmark,
     device_type,
     backend,
-    use_xpu,
+    use_gpu,
     save_unfull_chunk,
     create_config,
     autorelease_v1,
@@ -339,7 +339,7 @@ def test_store_1GB(
         device,
         hidden_dim=num_heads * head_dim,
         num_layers=num_layers,
-        use_xpu=use_xpu,
+        use_gpu=use_gpu,
         chunk_size=chunk_size,
         dtype=dtype,
         use_mla=False,
@@ -411,13 +411,13 @@ def test_store_1GB(
 @pytest.mark.benchmark(group="retrieve")
 @pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("use_xpu", [False, True])
+@pytest.mark.parametrize("use_gpu", [True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_retrieve_1GB_allhit(
     benchmark,
     device_type,
     backend,
-    use_xpu,
+    use_gpu,
     save_unfull_chunk,
     create_config,
     autorelease_v1,
@@ -442,7 +442,7 @@ def test_retrieve_1GB_allhit(
         device,
         hidden_dim=num_heads * head_dim,
         num_layers=num_layers,
-        use_xpu=use_xpu,
+        use_gpu=use_gpu,
         chunk_size=chunk_size,
         dtype=dtype,
         use_mla=False,
@@ -514,13 +514,13 @@ def test_retrieve_1GB_allhit(
 @pytest.mark.benchmark(group="lookup")
 @pytest.mark.parametrize("device_type", DEVICE_PARAMS)
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("use_xpu", [False, True])
+@pytest.mark.parametrize("use_gpu", [True])
 @pytest.mark.parametrize("save_unfull_chunk", [False, True])
 def test_lookup_20K_tokens(
     benchmark,
     device_type,
     backend,
-    use_xpu,
+    use_gpu,
     save_unfull_chunk,
     create_config,
     autorelease_v1,
@@ -538,16 +538,16 @@ def test_lookup_20K_tokens(
     block_size = 16
     chunk_size = 256
 
-    # use_xpu=True stages per-request chunks on XPU during layerwise store.
+    # use_gpu=True stages per-request chunks on XPU during layerwise store.
     # Keeping 10 requests can exceed the default staging pool in pre-population.
-    num_requests = 8 if use_xpu else 10
+    num_requests = 8 if use_gpu else 10
     num_repeats = 10
 
     connector = _create_connector(
         device,
         hidden_dim=num_heads * head_dim,
         num_layers=num_layers,
-        use_xpu=use_xpu,
+        use_gpu=use_gpu,
         chunk_size=chunk_size,
         dtype=dtype,
         use_mla=False,

@@ -188,6 +188,17 @@ L1 Metrics
    * - ``lmcache_mp.l1_evicted_keys``
      - Counter
      - Number of keys evicted by the EvictionController.
+   * - ``lmcache_mp.l1_eviction_loop_ticks``
+     - Counter
+     - L1 eviction-loop iterations (every cycle, regardless of whether
+       the watermark was crossed). Driven by ``L1_EVICTION_LOOP_TICK``.
+   * - ``lmcache_mp.l1_eviction_loop_triggered``
+     - Counter
+     - L1 eviction-loop iterations where ``usage >= watermark`` and the
+       eviction policy actually ran. The two counters distinguish "loop
+       is alive" from "eviction fired" — important when debugging
+       short-lived benchmarks that complete faster than the 1 Hz
+       polling cycle.
 
 L1 Chunk Lifecycle Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -436,12 +447,13 @@ in Prometheus (e.g.
 L0 ↔ L1 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sampled (default 1%) per-request throughput of GPU↔CPU copies via
-``L0L1ThroughputSubscriber``. Each sampled request contributes one sample
-to the appropriate histogram: ``total_bytes / (end_ts - start_ts)`` in
-GB/s. Timestamps come from ``MP_{STORE,RETRIEVE}_{START,END}`` events
-published on the GPU cupy stream, so they reflect true GPU-stream copy
-time — not Python/lock overhead.
+Per-request throughput of GPU↔CPU copies via
+``L0L1ThroughputSubscriber``. Every store/retrieve request contributes
+one sample to the appropriate histogram:
+``total_bytes / (end_ts - start_ts)`` in GB/s. Timestamps come from
+``MP_{STORE,RETRIEVE}_{START,END}`` events published on the GPU cupy
+stream, so they reflect true GPU-stream copy time — not Python/lock
+overhead.
 
 All throughput histograms are emitted with ``engine_id`` (vLLM worker
 instance id), ``device`` (e.g. ``"cuda:3"``), and ``model_name`` OTel
@@ -458,15 +470,15 @@ Prometheus (e.g.
      - Description
    * - ``lmcache_mp.l0_l1_store_throughput_gbs``
      - Histogram
-     - GPU→CPU (L0→L1) store throughput in GB/s per sampled request.
+     - GPU→CPU (L0→L1) store throughput in GB/s per request.
    * - ``lmcache_mp.l0_l1_load_throughput_gbs``
      - Histogram
-     - CPU→GPU (L1→L0) load throughput in GB/s per sampled request.
+     - CPU→GPU (L1→L0) load throughput in GB/s per request.
 
 L1 ↔ L2 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Sampled (default 1%) per-task throughput of L1↔L2 transfers via
+Per-task throughput of L1↔L2 transfers via
 ``L2ThroughputSubscriber``. The store path correlates
 ``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED`` by
 ``(adapter_index, task_id)``. The load path correlates the per-adapter
@@ -495,10 +507,10 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
      - Description
    * - ``lmcache_mp.l2_store_throughput_gbs``
      - Histogram
-     - L1→L2 store throughput in GB/s per sampled task.
+     - L1→L2 store throughput in GB/s per task.
    * - ``lmcache_mp.l2_load_throughput_gbs``
      - Histogram
-     - L2→L1 load throughput in GB/s per sampled (request, adapter) pair.
+     - L2→L1 load throughput in GB/s per (request, adapter) pair.
 
 Engine Counters
 ~~~~~~~~~~~~~~~
@@ -555,6 +567,14 @@ Adapters with no in-flight work emit no datapoint for that scrape.
      - Bytes currently held in L1.  Rising without plateauing typically
        indicates a leak; saturating at the configured ``--l1-size-gb``
        indicates working set exceeds capacity.
+   * - ``lmcache_mp.l1_usage_ratio``
+     - ObservableGauge
+     - L1 used/total ratio (``0.0``–``1.0``), sampled at scrape time
+       from ``L1Manager.get_memory_usage()``. Returns ``0.0`` when the
+       gauge target is not yet wired up or ``total_bytes`` is zero, so
+       the callback never raises during a scrape. Compare against the
+       eviction watermark (default ``0.8``) to read whether the
+       eviction loop is below or above its trigger threshold.
    * - ``lmcache_mp.num_inflight_l2_stores``
      - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
      - L2 store tasks currently executing, per adapter.  Sustained

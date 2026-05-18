@@ -1205,8 +1205,13 @@ spec:
                 description: l1 defines the L1 memory cache configuration.
                 properties:
                   sizeGB:
-                    description: sizeGB is the L1 cache size in gigabytes. Required,
-                      must be > 0.
+                    description: |-
+                      sizeGB is the L1 cache size in gigabytes. Required, must be > 0.
+                      The CRD-level constraint (exclusiveMinimum=0) rejects invalid values
+                      at admission time so the controller never sees them; the in-Go
+                      ValidateSpec keeps the same rule for defense in depth.
+                    exclusiveMinimum: true
+                    minimum: 0
                     type: number
                 required:
                 - sizeGB

@@ -20,7 +20,7 @@ from lmcache.cli.commands.describe import (
 )
 
 # ---------------------------------------------------------------------------
-# Sample /api/status payload
+# Sample /status payload
 # ---------------------------------------------------------------------------
 
 SAMPLE_STATUS = {
@@ -132,7 +132,7 @@ class TestSafeGet:
 
 class TestDescribeKvcacheFields:
     """Test that ``_describe_kvcache`` extracts fields correctly from a
-    sample ``/api/status`` response."""
+    sample ``/status`` response."""
 
     def test_field_extraction(self):
         """Verify metrics are populated from the sample status dict."""
@@ -333,7 +333,7 @@ class TestFetchJson:
         t = Thread(target=server.handle_request, daemon=True)
         t.start()
         try:
-            result = fetch_json(f"http://127.0.0.1:{port}/api/status")
+            result = fetch_json(f"http://127.0.0.1:{port}/status")
             assert result == {"ok": True}
         finally:
             server.server_close()
@@ -355,6 +355,6 @@ class TestFetchJson:
         t.start()
         try:
             with pytest.raises(DescribeError, match="Server unhealthy"):
-                fetch_json(f"http://127.0.0.1:{port}/api/status")
+                fetch_json(f"http://127.0.0.1:{port}/status")
         finally:
             server.server_close()
