@@ -1,0 +1,1272 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/l2_storage.rst:2
+msgid "L2 Storage (Persistent Cache)"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:4
+msgid "LMCache multiprocess mode supports a two-tier storage architecture:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:6
+msgid ""
+"**L1 (in-memory)** -- Fast CPU memory managed by the L1 Manager.  All KV "
+"cache chunks live here during active use."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:8
+msgid ""
+"**L2 (persistent)** -- Durable storage backends (NIXL-based or plain "
+"file-system/raw-block).  The StoreController asynchronously pushes data "
+"from L1 to L2, and the PrefetchController loads data from L2 back into L1"
+" on cache misses."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:18
+msgid "Data Flow"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:20
+msgid "**Write path (L1 -> L2):**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:22
+msgid "vLLM stores KV cache chunks into L1 via the ``STORE`` RPC."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:23
+msgid ""
+"The ``StoreController`` detects new objects (via eventfd) and "
+"asynchronously submits store tasks to each configured L2 adapter."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:25
+msgid "The L2 adapter writes the data to its backend (e.g., local SSD via GDS)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:27
+msgid "**Read path (L2 -> L1):**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:29
+msgid "A ``LOOKUP`` RPC checks L1 for prefix hits."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:30
+msgid ""
+"For keys not found in L1, the ``PrefetchController`` submits lookup "
+"requests to L2 adapters."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:32
+msgid ""
+"If found in L2, the data is loaded back into L1 and read-locked for the "
+"pending ``RETRIEVE`` RPC."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:36
+msgid "Adapter Types"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:39
+msgid "``nixl_store`` -- NIXL-based persistent storage"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:41
+msgid ""
+"The primary production adapter.  Uses NIXL (NVIDIA Interconnect Library) "
+"for high-performance storage I/O."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:44 ../../source/mp/l2_storage.rst:118
+#: ../../source/mp/l2_storage.rst:170 ../../source/mp/l2_storage.rst:207
+#: ../../source/mp/l2_storage.rst:260 ../../source/mp/l2_storage.rst:343
+#: ../../source/mp/l2_storage.rst:512
+msgid "**Required fields:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:46
+msgid ""
+"``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``, "
+"``HF3FS``, ``OBJ``, ``AZURE_BLOB``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:48
+msgid ""
+"``pool_size``: Number of storage descriptors to pre-allocate (must be > "
+"0)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:50 ../../source/mp/l2_storage.rst:123
+msgid "**Backend-specific parameters (``backend_params``):**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:52
+msgid "File-based backends (``GDS``, ``GDS_MT``, ``POSIX``, ``HF3FS``) require:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:54
+msgid "``file_path``: Directory path for storing L2 data."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:55
+msgid ""
+"``use_direct_io``: ``\"true\"`` or ``\"false\"`` -- whether to use direct"
+" I/O."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:57
+msgid ""
+"The ``OBJ`` and ``AZURE_BLOB`` backends (object stores) do not require "
+"``file_path``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:59
+msgid "**Backend descriptions:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:65
+msgid "Backend"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:66 ../../source/mp/l2_storage.rst:632
+#: ../../source/mp/l2_storage.rst:686 ../../source/mp/l2_storage.rst:726
+msgid "Description"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:67
+msgid "``POSIX``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:68
+msgid "Standard POSIX file I/O.  Works on any file system.  No direct I/O."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:69
+msgid "``GDS``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:70
+msgid ""
+"NVIDIA GPU Direct Storage.  Enables direct GPU-to-storage transfers "
+"bypassing the CPU.  Requires NVMe SSDs with GDS support."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:72
+msgid "``GDS_MT``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:73
+msgid "Multi-threaded variant of GDS for higher throughput."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:74
+msgid "``HF3FS``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:75
+msgid "Shared file system backend (e.g., for distributed/networked storage)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:76
+msgid "``OBJ``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:77
+msgid "Object store backend.  No local file path required."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:78
+msgid "``AZURE_BLOB``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:79
+msgid "Object store backend for Azure Blob Storage.  No local file path required."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:81 ../../source/mp/l2_storage.rst:140
+#: ../../source/mp/l2_storage.rst:183 ../../source/mp/l2_storage.rst:308
+#: ../../source/mp/l2_storage.rst:383 ../../source/mp/l2_storage.rst:533
+msgid "**Configuration examples:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:104
+msgid "``nixl_store_dynamic`` -- NIXL-based dynamic storage with persist/recover"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:106
+msgid ""
+"A dynamic variant of the NIXL adapter that opens and registers files per-"
+"operation instead of pre-allocating them at init. This enables:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:109
+msgid "**Persist/recover** -- cached KV metadata survives restarts."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:110
+msgid ""
+"**No fd limits** -- files are opened and closed per transfer, so the "
+"cache can grow beyond OS open-file-descriptor limits."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:115
+msgid ""
+"Only file-based backends are supported (``POSIX``, ``GDS``, ``GDS_MT``, "
+"``HF3FS``). The ``OBJ`` and ``AZURE_BLOB`` backends are not supported "
+"yet."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:120
+msgid ""
+"``backend``: Storage backend -- one of ``POSIX``, ``GDS``, ``GDS_MT``, "
+"``HF3FS``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:125
+msgid "``file_path``: Directory path for storing L2 data files."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:126
+msgid "``use_direct_io``: ``\"true\"`` or ``\"false\"``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:127
+msgid ""
+"``max_capacity_gb``: Maximum storage capacity in GB. The adapter rejects "
+"stores when this limit is reached. Required for the eviction controller "
+"to compute usage."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:131
+msgid "**Optional fields (for persist):**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:133
+msgid ""
+"``persist_enabled`` (bool, default ``true``): If ``true``, data files are"
+" kept on disk at shutdown. If ``false``, all data files are deleted on "
+"shutdown."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:137
+msgid ""
+"Lookup always checks secondary storage (disk) on miss and lazily "
+"populates the in-memory index when a file is found."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:153
+msgid "**Persist / secondary lookup behaviour:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:155
+msgid ""
+"On **shutdown**, the adapter keeps data files on disk by default "
+"(``persist_enabled`` defaults to ``true``). If explicitly set to "
+"``false``, all data files are deleted to avoid orphaned storage."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:158
+msgid ""
+"On **startup**, the in-memory index is empty. Every lookup miss falls "
+"through to a secondary lookup on disk: if the deterministic file exists, "
+"it is treated as a hit and the in-memory index is populated lazily from "
+"the file size."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:164
+msgid "``fs`` -- File-system backed storage"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:166
+msgid ""
+"A pure file-system L2 adapter using async I/O (``aiofiles``).  Each KV "
+"cache object is stored as a raw ``.data`` file whose name encodes the "
+"full ``ObjectKey``.  Does **not** require NIXL -- works on any POSIX file"
+" system."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:172 ../../source/mp/l2_storage.rst:262
+msgid "``base_path``: Directory for storing KV cache files."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:174 ../../source/mp/l2_storage.rst:215
+#: ../../source/mp/l2_storage.rst:264 ../../source/mp/l2_storage.rst:348
+#: ../../source/mp/l2_storage.rst:518
+msgid "**Optional fields:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:176
+msgid ""
+"``relative_tmp_dir``: Relative sub-directory for temporary files during "
+"writes (atomic rename on completion)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:178
+msgid ""
+"``read_ahead_size``: Trigger file-system read-ahead by reading this many "
+"bytes first (positive integer, optional)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:180
+msgid ""
+"``use_odirect``: ``true`` or ``false`` (default ``false``) -- bypass the "
+"page cache via ``O_DIRECT``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:197
+msgid "``dax`` -- Device-DAX fixed-slot storage"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:199
+msgid ""
+"An L2 adapter that maps a single Device-DAX path, such as "
+"``/dev/dax1.0``, and stores KV cache objects in fixed-size slots.  This "
+"adapter is intended for byte-addressable memory devices such as "
+"persistent memory or CXL memory."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:203
+msgid ""
+"The MP ``dax`` adapter is volatile in this release.  It keeps the key "
+"index in server memory and rebuilds an empty index on restart.  Old bytes"
+" may remain on the DAX device, but they are unreachable after the LMCache"
+" server restarts."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:209
+msgid "``device_path``: Path to the mmap-able DAX device or test file."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:210
+msgid "``max_dax_size_gb``: Number of GiB to map from ``device_path``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:211
+msgid ""
+"``slot_bytes``: Fixed slot size in bytes. This must be large enough for "
+"one full LMCache chunk because MP memory descriptors do not expose the "
+"non-MP full-chunk size."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:217
+msgid "``num_store_workers`` (int, default ``1``): Store worker threads."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:218
+msgid "``num_lookup_workers`` (int, default ``1``): Lookup worker threads."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:219
+msgid ""
+"``num_load_workers`` (int, default ``min(4, os.cpu_count())``): Load "
+"worker threads."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:221
+msgid ""
+"``persist_enabled`` (bool): Accepted by common L2 config parsing but has "
+"no effect for ``dax`` because restart recovery is not implemented."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:224 ../../source/mp/l2_storage.rst:461
+msgid "**Configuration example:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:243
+msgid "**Current limits:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:245
+msgid ""
+"Uses one server-owned mapped DAX path. Per-TP partitions and multi-device"
+" striping are not implemented."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:247
+msgid ""
+"Only single-buffer objects are supported. Multi-tensor objects are "
+"rejected."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:248
+msgid ""
+"Capacity is slot-based, not payload-byte-based. L2 eviction and usage "
+"metrics count occupied slots."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:250
+msgid ""
+"Lookups acquire DAX-side external locks. ``submit_unlock`` releases those"
+" locks after load/retrieve completes, making entries evictable again."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:253
+msgid "``fs_native`` -- Native C++ file-system connector"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:255
+msgid ""
+"A file-system L2 adapter backed by the native C++ ``LMCacheFSClient`` "
+"wrapped with ``NativeConnectorL2Adapter``.  I/O is dispatched through a "
+"C++ worker-thread pool with eventfd-driven completions, giving a true I/O"
+" queue depth on a single Python thread."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:266
+msgid ""
+"``num_workers`` (int, default ``4``, > 0): Number of C++ worker threads "
+"inside the connector.  This is the real I/O queue depth -- raise to push "
+"throughput on filesystems whose aggregate BW exceeds per-stream BW."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:270
+msgid ""
+"``relative_tmp_dir`` (str, default ``\"\"``): Relative sub-directory for "
+"temporary files during writes (atomic rename on completion)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:272
+msgid ""
+"``use_odirect`` (bool, default ``false``): Bypass the page cache via "
+"``O_DIRECT``.  Required to measure real disk bandwidth.  See alignment "
+"caveat below."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:275
+msgid ""
+"``read_ahead_size`` (int, optional): Trigger filesystem readahead by "
+"issuing a warm-up read of this many bytes at open time."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:277
+msgid ""
+"``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB for"
+" client-side usage tracking.  Default ``0`` disables tracking."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:282
+msgid "``O_DIRECT`` has two independent alignment requirements:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:284
+#, python-format
+msgid ""
+"**Length alignment.**  The transfer length must be a multiple of the "
+"filesystem's block size.  The connector queries the disk block size at "
+"construction time and, on each operation, checks ``len % "
+"disk_block_size``.  If the length is **not** a multiple, the connector "
+"silently falls back to a buffered open (no ``O_DIRECT``) for that "
+"operation -- correctness is preserved but you do not get true direct I/O."
+"  To ensure ``O_DIRECT`` is actually used, choose ``--chunk-size`` so "
+"that the resulting per-chunk byte size is a multiple of the FS block "
+"size.  GPFS and similar parallel filesystems often use large blocks (e.g."
+" several MiB)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:296
+msgid ""
+"**Memory-buffer alignment.**  The I/O buffer pointer itself must also be "
+"aligned (typically to 4096 bytes on local disks, or to the FS block size "
+"on parallel filesystems).  This is controlled by ``--l1-align-bytes`` "
+"(default ``4096``) -- raise it to match the FS block size when running on"
+" a filesystem with larger blocks.  If the buffer is misaligned, the "
+"underlying ``read``/``write`` syscall returns ``EINVAL`` (this is **not**"
+" caught by the length-fallback path above and will surface as a runtime "
+"error)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:305
+msgid ""
+"If unsure, start with ``use_odirect: false`` and confirm correctness "
+"before enabling ``O_DIRECT``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:321
+msgid ""
+"**Buffer-only mode example.**  L1 acts as a pure write buffer that "
+"absorbs the peak burst of in-flight chunks while the C++ worker pool "
+"drains them to disk; nothing is retained in L1 once a store completes:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:336
+msgid "``raw_block`` -- Raw block device backed persistent storage"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:338
+msgid ""
+"A built-in L2 adapter that stores KV objects in fixed-size slots on a raw"
+" block device or pre-sized file using the Rust raw-device I/O bindings. "
+"It reuses the existing raw-block metadata checkpoint model and writes "
+"directly into the caller-provided load buffers during prefetch."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:345
+msgid "``device_path``: Raw device path or pre-sized file path."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:346
+msgid ""
+"``slot_bytes``: Fixed slot size in bytes. Must be aligned to "
+"``block_align``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:350
+msgid ""
+"``capacity_bytes``: Optional cap on the usable device bytes. Default "
+"``0`` means use the full device/file size."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:352
+msgid "``use_odirect``: ``true`` or ``false`` (default ``true``)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:353
+msgid "``block_align``: Device alignment in bytes (default ``4096``)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:354
+msgid "``header_bytes``: Per-slot header reservation (default ``4096``)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:355
+msgid ""
+"``meta_total_bytes``: Reserved metadata checkpoint region (default "
+"``256MiB``)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:356
+msgid ""
+"``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version "
+"knobs."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:357
+msgid ""
+"``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / "
+"``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and "
+"recovery controls carried over from the legacy raw-block backend."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:360
+msgid ""
+"``load_checkpoint_on_init``: Load an existing on-device metadata "
+"checkpoint during startup (default ``true``). Set to ``false`` to start "
+"with an empty in-memory index instead."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:363
+msgid "``enable_zero_copy``: Try aligned direct-buffer I/O when possible."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:364
+msgid ""
+"``io_engine``: Rust raw-block I/O engine. Valid values are ``\"posix\"`` "
+"(default synchronous ``pread``/``pwrite`` path), ``\"io_uring\"`` (direct"
+" Rust io_uring syscall path)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:367
+msgid "``iouring_queue_depth``: Queue depth for ``io_engine=\"io_uring\"``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:368
+msgid ""
+"``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``: "
+"Worker-thread counts for each operation type."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:371
+msgid "**Notes:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:373
+msgid ""
+"``raw_block`` is a server-owned MP adapter. It does **not** support per-"
+"TP device-path mappings in MP mode."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:375
+msgid ""
+"``raw_block`` remains ``\"type\": \"raw_block\"`` for both supported "
+"engines."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:376
+msgid ""
+"``raw_block`` owns on-device slot allocation, checkpointing, and recovery"
+" through ``RawBlockCore``. Slot reclamation is driven by the "
+"shared/global L2 eviction controller or explicit ``delete()`` calls."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:379
+msgid ""
+"If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should "
+"be at least ``block_align``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:381
+msgid "``persist_enabled`` must remain ``true`` for this adapter."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:394
+msgid "``mooncake_store`` -- Mooncake Store native connector"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:396
+msgid ""
+"An L2 adapter backed by the native C++ Mooncake Store connector.  Uses "
+"`Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance"
+" distributed KV cache storage with RDMA support."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:400
+msgid ""
+"When Mooncake is configured with ``\"protocol\": \"rdma\"``, LMCache must"
+" also have a valid contiguous L1 memory region available.  The "
+"distributed storage manager passes this L1 memory descriptor to the "
+"adapter factory automatically in MP mode.  If the descriptor is missing "
+"or invalid, adapter creation fails with ``ValueError`` instead of "
+"silently falling back to a non-RDMA path."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:406
+msgid "**Prerequisites -- Building with Mooncake support:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:408
+msgid ""
+"The Mooncake extension is **not** built by default.  You must explicitly "
+"enable it:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:415
+msgid "The ``BUILD_MOONCAKE`` environment variable controls compilation:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:417
+msgid "``BUILD_MOONCAKE=1``: Enable the Mooncake C++ extension."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:418
+msgid ""
+"``BUILD_MOONCAKE=0``: Force disable (highest priority), even if "
+"``MOONCAKE_INCLUDE_DIR`` is set."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:420
+msgid ""
+"**Not set**: Falls back to checking ``MOONCAKE_INCLUDE_DIR`` for backward"
+" compatibility.  If ``MOONCAKE_INCLUDE_DIR`` is also unset, the extension"
+" is skipped."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:424
+msgid ""
+"If the Mooncake headers are not installed in the system include path "
+"(e.g., ``/usr/local/include``), you must point to them explicitly:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:434
+msgid "**LMCache-specific fields:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:436
+msgid ""
+"``num_workers``: Number of C++ worker threads for the shared pool "
+"(default ``4``, must be > 0)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:439
+msgid ""
+"``per_op_workers`` (``dict[str, int]``, optional): A dict mapping lane "
+"keys to dedicated worker thread counts.  Supported keys:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:442
+msgid "``\"lookup\"`` — threads for ``EXISTS`` operations."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:443
+msgid "``\"retrieve\"`` — threads for ``GET`` / load operations."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:444
+msgid "``\"store\"`` — threads for ``SET`` / put operations."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:445
+msgid "``\"delete\"`` — threads for ``DELETE`` operations."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:447
+msgid ""
+"Operations whose lane key is **not** present in the dict use the shared "
+"``num_workers`` pool.  There is no requirement to set all keys — you can "
+"configure only the lanes that need dedicated pools."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:451
+msgid "**Mooncake fields:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:453
+msgid ""
+"All other keys in the JSON config (except ``type``, ``num_workers``, "
+"``per_op_workers``, and ``eviction``) are forwarded **as-is** to "
+"Mooncake's ``setup_internal(ConfigDict)``.  Refer to the `Mooncake "
+"documentation <https://github.com/kvcache-ai/Mooncake>`_ for available "
+"setup keys (e.g., ``local_hostname``, ``metadata_server``, "
+"``master_server_addr``, ``protocol``, ``rdma_devices``, "
+"``global_segment_size``)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:491
+msgid ""
+"For full Mooncake setup instructions (master service, metadata server, "
+"etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ ."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:494
+msgid "**RDMA notes:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:496
+msgid "``protocol: \"rdma\"`` requires a valid LMCache L1 memory descriptor."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:497
+msgid ""
+"When using ``protocol: \"rdma\"``, it is recommended to disable lazy L1 "
+"allocation with ``--no-l1-use-lazy`` so the L1 buffer is fully allocated "
+"before Mooncake registers it."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:500
+msgid "``protocol: \"tcp\"`` does not require L1 preregistration."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:501
+msgid ""
+"If Mooncake RDMA initialization fails at adapter creation time, verify "
+"that LMCache L1 memory is enabled and that the descriptor has a non-zero "
+"pointer and size."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:506
+msgid "``s3`` -- S3-compatible object store"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:508
+msgid ""
+"An L2 adapter that stores KV cache objects as S3 objects using the AWS "
+"Common Runtime (CRT).  Works with AWS S3, S3 Express One Zone, and any "
+"S3-compatible endpoint (MinIO, Ceph RGW, etc.)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:514
+msgid ""
+"``s3_endpoint``: Bucket URL -- either ``\"s3://<bucket>\"`` or the bare "
+"host form (used for non-AWS endpoints)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:516
+msgid "``s3_region``: AWS region string (e.g. ``\"us-west-2\"``)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:520
+msgid "``s3_num_io_threads`` (int, default ``64``): Number of CRT I/O threads."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:521
+msgid "``s3_prefer_http2`` (bool, default ``true``): Negotiate HTTP/2 via ALPN."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:522
+msgid ""
+"``s3_enable_s3express`` (bool, default ``false``): Enable S3 Express "
+"signing for S3 Express One Zone buckets."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:524
+msgid ""
+"``disable_tls`` (bool, default ``false``): Bypass TLS when pointing at a "
+"plain-HTTP endpoint (e.g. a local MinIO)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:526
+msgid ""
+"``aws_access_key_id`` / ``aws_secret_access_key`` (string): Static "
+"credentials; omit both to use the AWS default credential provider chain "
+"(environment, EC2 instance profile, etc.)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:529
+msgid ""
+"``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by "
+"``get_usage()``.  A value of ``0`` disables aggregate eviction "
+"(``usage_fraction == -1.0``)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:547
+msgid "``mock`` -- Mock adapter for testing"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:549
+msgid ""
+"Simulates L2 storage with configurable size and bandwidth.  Useful for "
+"testing the L2 pipeline without real storage hardware."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:552
+msgid "**Fields:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:554
+msgid "``max_size_gb``: Maximum size in GB (> 0)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:555
+msgid "``mock_bandwidth_gb``: Simulated bandwidth in GB/sec (> 0)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:562
+msgid "Multiple Adapters (Cascade)"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:564
+msgid ""
+"You can configure multiple L2 adapters by repeating the ``--l2-adapter`` "
+"argument.  Adapters are used in the order they are specified.  The "
+"``StoreController`` pushes data to all configured adapters, and the "
+"``PrefetchController`` queries adapters in order during lookups."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:576
+msgid "Store and Prefetch Policies"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:578
+msgid ""
+"The **store policy** controls how keys flow from L1 to L2: which adapters"
+" receive each key and whether keys are deleted from L1 after a successful"
+" L2 store.  The **prefetch policy** controls how keys flow from L2 back "
+"to L1: when multiple adapters have the same key, the policy decides which"
+" adapter loads it."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:584
+msgid "Select policies via CLI:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:591
+msgid "**Built-in policies:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:597 ../../source/mp/l2_storage.rst:630
+#: ../../source/mp/l2_storage.rst:684
+msgid "Flag"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:598
+msgid "Name"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:599
+msgid "Behaviour"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:600 ../../source/mp/l2_storage.rst:603
+msgid "``--l2-store-policy``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:601 ../../source/mp/l2_storage.rst:609
+msgid "``default``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:602
+msgid "Store all keys to all adapters.  Never delete from L1."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:604
+msgid "``skip_l1``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:605
+msgid ""
+"Buffer-only mode.  Store all keys to all adapters, then **delete them "
+"from L1** immediately.  Pair with ``--eviction-policy noop`` to avoid "
+"useless LRU overhead."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:608 ../../source/mp/l2_storage.rst:612
+msgid "``--l2-prefetch-policy``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:610
+msgid ""
+"For each key, pick the first (lowest-indexed) adapter that has it. "
+"Prefetched keys are **temporary** (deleted after the reader finishes)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:613
+msgid "``retain``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:614
+msgid ""
+"Same load plan as ``default``, but prefetched keys are **retained** "
+"permanently in L1.  Useful when prefetched data is likely reused by "
+"subsequent requests (e.g. shared system-prompt chunks)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:619
+msgid "Prefetch Concurrency"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:621
+msgid ""
+"The ``--l2-prefetch-max-in-flight`` flag limits the number of concurrent "
+"prefetch requests that the ``PrefetchController`` can have in flight at "
+"any time.  A higher value increases L2-to-L1 throughput but also "
+"increases L1 memory pressure from in-flight data."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:631 ../../source/mp/l2_storage.rst:685
+#: ../../source/mp/l2_storage.rst:725
+msgid "Default"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:633
+msgid "``--l2-prefetch-max-in-flight``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:634
+msgid "``8``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:635
+msgid "Maximum number of concurrent prefetch requests."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:638
+msgid "Buffer-Only Mode"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:640
+msgid ""
+"When L1 is used purely as a write buffer (all data lives in L2), use "
+"``--l2-store-policy skip_l1`` together with ``--eviction-policy noop``. "
+"This combination deletes keys from L1 as soon as they are stored to L2 "
+"and disables the LRU eviction tracker entirely, reducing memory and CPU "
+"overhead."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:652
+msgid ""
+"Policies are extensible -- new policies can be added by creating a file "
+"in ``storage_controllers/`` and calling ``register_store_policy()`` or "
+"``register_prefetch_policy()`` at import time.  See the design doc "
+"``l2_adapters/design_docs/overall.md`` for details."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:658
+msgid "Serde (compression / quantization)"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:660
+msgid ""
+"Each adapter can optionally run a **serde** (serializer / deserializer) "
+"that transforms data on the way in and out of L2 — e.g. fp8 quantization "
+"for disk backends, or encryption for remote adapters. See :doc:`serde` "
+"for details and configuration."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:666
+msgid "Eviction"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:668
+msgid ""
+"LMCache supports eviction at both storage tiers so that each tier can "
+"operate within a fixed capacity budget."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:672
+msgid "L1 Eviction"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:674
+msgid ""
+"L1 eviction runs a single background thread that monitors overall L1 "
+"memory usage. When usage exceeds ``trigger_watermark``, the eviction "
+"policy evicts a fraction of the least-recently-used keys."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:678
+msgid "**CLI flags:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:687
+msgid "``--eviction-policy``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:688 ../../source/mp/l2_storage.rst:728
+msgid "*(required)*"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:689
+msgid "Policy name: ``LRU`` or ``noop``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:690
+msgid "``--eviction-trigger-watermark``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:691 ../../source/mp/l2_storage.rst:731
+msgid "``0.8``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:692
+msgid "L1 usage fraction [0, 1] above which eviction is triggered."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:693
+msgid "``--eviction-ratio``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:694 ../../source/mp/l2_storage.rst:734
+msgid "``0.2``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:695
+msgid "Fraction of currently allocated L1 memory to evict per cycle."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:697
+msgid "**Example:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:706
+msgid "L2 Eviction"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:708
+msgid ""
+"L2 eviction is **per-adapter** and **opt-in**. Each adapter can "
+"independently declare an eviction policy by adding an ``\"eviction\"`` "
+"sub-object to its ``--l2-adapter`` JSON spec. Adapters without an "
+"``\"eviction\"`` key have no eviction controller."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:713
+msgid ""
+"When L2 eviction is enabled for an adapter, a dedicated background thread"
+" monitors that adapter's ``get_usage()`` value. Once usage exceeds "
+"``trigger_watermark``, the policy evicts keys until usage drops by "
+"``eviction_ratio``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:718
+msgid "**``\"eviction\"`` sub-object fields:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:724
+msgid "Field"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:727
+msgid "``eviction_policy``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:729
+msgid "Policy name: ``\"LRU\"`` or ``\"noop\"``."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:730
+msgid "``trigger_watermark``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:732
+msgid "Adapter usage fraction [0, 1] above which eviction is triggered."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:733
+msgid "``eviction_ratio``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:735
+msgid "Fraction of used capacity to evict per cycle."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:737
+msgid "**Example — nixl_store with LRU eviction:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:753
+msgid "**Adapter support:**"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:759
+msgid "Adapter"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:760
+msgid "L2 Eviction Support"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:761
+msgid "``nixl_store``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:762
+msgid ""
+"Full support. ``delete`` frees pool slots; pinned keys (in-flight loads) "
+"are skipped and retried on the next cycle."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:764
+msgid "``nixl_store_dynamic``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:765
+msgid ""
+"Full support. ``delete`` removes data files from disk; pinned keys are "
+"skipped. ``get_usage`` is byte-based (``_total_bytes / "
+"max_capacity_bytes``)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:768
+msgid "``mock``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:769
+msgid ""
+"Full support. Useful for testing eviction behaviour without real storage "
+"hardware."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:771
+msgid "``raw_block``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:772
+msgid ""
+"Full shared/global eviction support. ``delete`` recycles raw-block slots;"
+" locked entries are skipped and retried on the next cycle."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:774
+msgid "``s3``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:775
+msgid ""
+"``delete`` removes objects from the bucket and frees aggregate byte "
+"accounting. ``get_usage`` reports ``usage_fraction == -1.0`` when "
+"``max_capacity_gb`` is ``0`` (disabled); set a non-zero "
+"``max_capacity_gb`` to enable the watermark-triggered eviction "
+"controller."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:780
+msgid "``dax``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:781
+msgid ""
+"Full support. ``delete`` removes unlocked keys from the in-memory index "
+"immediately and recycles fixed slots once active read borrows drain. "
+"Usage is slot-based."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:784
+msgid "``mooncake_store``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:785
+msgid "No eviction support (native connector adapter)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:786
+msgid "``fs``"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:787
+msgid "No eviction support (``delete`` and ``get_usage`` are no-ops)."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:788
+msgid "native connectors"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:789
+msgid "No eviction support."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:793
+msgid ""
+"Each L2 adapter instance gets its own independent eviction controller and"
+" policy.  Two adapters of the same type can have different watermarks or "
+"policies."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:798
+msgid "Combined L1 + L2 Eviction Example"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:818
+msgid "In this setup:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:820
+#, python-format
+msgid ""
+"L1 evicts from memory when it is 80 % full, reclaiming 20 % of allocated "
+"memory per cycle."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:822
+#, python-format
+msgid ""
+"L2 (NIXL/GDS) evicts from the storage pool when 90 % of pool slots are "
+"occupied, reclaiming 10 % per cycle."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:824
+msgid ""
+"Both tiers use independent LRU policies, so each evicts its own least-"
+"recently-used keys."
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:828
+msgid "Verifying L2 Storage"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:830
+msgid "Set ``LMCACHE_LOG_LEVEL=DEBUG`` to see L2 activity in the server logs:"
+msgstr ""
+
+#: ../../source/mp/l2_storage.rst:838
+msgid "Expected log messages when L2 is active:"
+msgstr ""
+

@@ -1,0 +1,363 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:2
+msgid "Local storage"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:9
+msgid ""
+"CPU RAM and Local Storage are the two ways of offloading KV cache onto "
+"non-GPU memory of the same machine that is running inference."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:14
+msgid "Two ways to configure LMCache Disk Offloading:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:17
+msgid "**1. Environment Variables:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:35
+msgid "**2. Configuration File**:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:37
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:54
+msgid "Multi-Path (Multi-Device) Disk Offloading"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:56
+msgid ""
+"If you have **multiple NVMe devices** (or any independent mount points), "
+"you can assign each GPU its own disk path so that each device writes to a"
+" dedicated drive."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:59
+msgid ""
+"Specify a **comma-separated list** of paths in ``local_disk``. Each path "
+"can optionally use the ``file://`` prefix.  The "
+"``local_disk_path_sharding`` option controls how each GPU worker selects "
+"its path.  Currently only ``\"by_gpu\"`` is supported (the default), "
+"which selects a path based on the device index (``device_id % "
+"num_paths``), so all KV cache files from a given GPU land on the same "
+"NVMe.  This is especially useful when GPUs and NVMe devices share a PCIe "
+"switch or NUMA node."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:67
+msgid "For example, with two GPUs and two paths:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:69
+msgid "``cuda:0`` → ``/mnt/nvme0/kvcache/``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:70
+msgid "``cuda:1`` → ``/mnt/nvme1/kvcache/``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:72
+msgid "``max_local_disk_size`` is the **total budget** shared across all paths."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:74
+msgid "**Environment variable example:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:82
+msgid "**YAML example:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:92
+msgid ""
+"Each GPU worker uses only its assigned path, so O_DIRECT alignment is "
+"determined by that path's filesystem block size.  Different devices may "
+"have different block sizes without issue."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:98
+msgid ""
+"If you are able to use kernel-level RAID 0 (e.g. ``mdadm --level=0``) you"
+" will get true block-level striping (even a single large file can use "
+"bandwidth from both devices simultaneously).  The multi-path feature is "
+"most useful when you cannot or do not want to reconfigure the block "
+"devices — for example, when they already have other data."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:105
+msgid "Local Storage Explanation:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:107
+msgid ""
+"Unlike CPU RAM offloading, disk offloading is *disabled* by default "
+"(``local_disk`` is set to ``None``) and the max local disk size is set to"
+" 0GB instead of 5GB like the default max local cpu size since the disk "
+"space is not strictly necessary for LMCache to function."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:111
+msgid ""
+"Furthermore, instead of greedily allocating the max space up front like "
+"the pinned CPU RAM, the disk backend will create one file per KV cache "
+"chunk as they are stored, evicting if capacity is exceeded (LRU "
+"currently)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:114
+msgid ""
+"The disk and remote (see :doc:`Redis <./redis>`, :doc:`Mooncake "
+"<./mooncake>`, :doc:`Valkey <./valkey>`, :doc:`InfiniStore "
+"<./infinistore>`) backends have asynchronous put() operations so that the"
+" IO latency will not slow down inference in addition to blocking get() "
+"operations. The local disk backend also has a prefetch() operation that "
+"will preemptively move KV caches from the disk to CPU RAM offloading "
+"storage (i.e. ``LMCACHE_LOCAL_CPU=True`` should be set, see :doc:`CPU RAM"
+" <./cpu_ram>`) for specified tokens (these KV caches are also still kept "
+"in the disk)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:121
+msgid "Architecture Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:123
+msgid ""
+"The following diagram shows the overall architecture of the Local Disk "
+"Backend:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:171
+msgid "**Key Components:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:173
+msgid ""
+"**Metadata Dictionary**: Maps each ``CacheEngineKey`` to its disk "
+"metadata (file path, size, shape, dtype, pin status)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:174
+msgid ""
+"**Cache Policy**: Configurable eviction policy (LRU, LFU, FIFO, or MRU) "
+"that tracks access patterns and decides which entries to evict when space"
+" is needed"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:175
+msgid ""
+"**LocalDiskWorker**: Async task executor with priority queue - prefetch "
+"tasks run first (priority 0), then deletes (priority 1), then saves "
+"(priority 2)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:176
+msgid ""
+"**Local Disk**: Filesystem where KV cache chunks are stored as individual"
+" ``.pt`` files"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:180
+msgid "Save Flow (PUT)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:199
+msgid "Load Flow (GET)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:221
+msgid "Online Inference Example"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:223
+msgid ""
+"This example is almost identical to the :doc:`CPU RAM <./cpu_ram>` "
+"example."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:225
+msgid "Let's feel the TTFT (time to first token) differential!"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:229
+msgid "**Prerequisites:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:231
+msgid ""
+"A Machine with at least one GPU. Adjust the max model length of your vllm"
+" instance depending on your GPU memory and the long context you want to "
+"use."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:233
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:235
+msgid "Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:241
+msgid "A few packages:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:249
+msgid "**Step 0. Set up a directory for this example:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:256
+msgid "**Step 1. Prepare a long context!**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:258
+msgid ""
+"We want a context long enough that vllm's prefix caching will not be able"
+" to hold the KV caches in GPU memory and LMCache is necessary to keep KV "
+"caches in non-GPU memory:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:266
+msgid "**Step 2. Start a vLLM server with Disk offloading enabled:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:268
+msgid ""
+"*Generally, it is not recommended but we will disable CPU offloading to "
+"feel just the disk offloading latency.*"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:270
+msgid "Create a an lmcache configuration file called: ``disk-offload.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:272
+msgid "Example ``config.yaml``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:282
+msgid ""
+"If you don't want to use a config file, uncomment the first five "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:299
+msgid ""
+"``--kv-transfer-config``: This is the parameter that actually tells vLLM "
+"to use LMCache for KV cache offloading."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:300
+msgid "``kv_connector``: Specifies the LMCache connector for vLLM V1"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:301
+msgid ""
+"``kv_role``: Set to \"kv_both\" for both storing and loading KV cache "
+"(important because we will run two queries and the first will "
+"produce/store a KV cache while the second will consume/load that KV "
+"cache)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:304
+msgid "**Step 3. Query TTFT improvements with LMCache:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:306
+msgid ""
+"Once the Open AI compatible server is running on default vllm port 8000, "
+"let's query it twice with the same long context!"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:308
+msgid "Create a script called ``query-twice.py`` and paste the following code:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:374
+msgid "Then run:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:380
+msgid ""
+"Since we're in streaming mode, you'll be able to feel the TTFT "
+"differential in real time!"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:383
+msgid ""
+"Note that if we were to enable ``LMCACHE_LOCAL_CPU=True``, we would just "
+"be using the same example from :doc:`CPU RAM <./cpu_ram>` since the CPU "
+"RAM is checked before the disk by LMCache. In practice, the disk will be "
+"capable of storing a larger quantity of KV caches so the CPU RAM "
+"offloading will only be able to store a subset of the disk's KV caches."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:389
+msgid "**Example Output:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:415
+msgid "TTFT Improvement: 6.166 seconds     (42.6x faster)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:417
+msgid ""
+"If you look at the logs of your vLLM server, you should see (the logs are"
+" truncated for cleanliness):"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:442
+msgid "Check out your KV Cache in your SSD:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:451
+msgid "Tips:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:453
+msgid ""
+"If you want to run the ``query-twice.py`` script multiple times, you'll "
+"need to either restart the vLLM LMCache server or change the prefix of "
+"the context you pass in since you've already warmed LMCache."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/local_storage.rst:455
+msgid ""
+"The max model length here was decided by running an L4 with only 23GB of "
+"GPU memory. If you have more memory, you can increase the max model "
+"length and modify ``query-twice.py`` to use more of the long context. "
+"LMCache TTFT improvement becomes more pronounced as the context length "
+"increases!"
+msgstr ""
+

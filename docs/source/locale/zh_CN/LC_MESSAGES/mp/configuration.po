@@ -1,0 +1,788 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/configuration.rst:2
+msgid "Configuration Reference"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:4
+msgid ""
+"This page documents every CLI argument accepted by the LMCache "
+"multiprocess server.  Arguments are grouped by the config module that "
+"defines them."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:12
+msgid "MP Server"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:14 ../../source/mp/configuration.rst:104
+msgid "Source: ``lmcache/v1/multiprocess/config.py``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:20 ../../source/mp/configuration.rst:82
+#: ../../source/mp/configuration.rst:112 ../../source/mp/configuration.rst:131
+#: ../../source/mp/configuration.rst:158 ../../source/mp/configuration.rst:177
+#: ../../source/mp/configuration.rst:209 ../../source/mp/configuration.rst:368
+msgid "Argument"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:21 ../../source/mp/configuration.rst:83
+#: ../../source/mp/configuration.rst:113 ../../source/mp/configuration.rst:132
+#: ../../source/mp/configuration.rst:159 ../../source/mp/configuration.rst:178
+#: ../../source/mp/configuration.rst:210 ../../source/mp/configuration.rst:369
+msgid "Default"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:22 ../../source/mp/configuration.rst:84
+#: ../../source/mp/configuration.rst:114 ../../source/mp/configuration.rst:133
+#: ../../source/mp/configuration.rst:160 ../../source/mp/configuration.rst:179
+#: ../../source/mp/configuration.rst:211 ../../source/mp/configuration.rst:370
+#: ../../source/mp/configuration.rst:419
+msgid "Description"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:23
+msgid "``--host``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:24
+msgid "``localhost``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:25
+msgid "Host address to bind the ZMQ server."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:26
+msgid "``--port``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:27
+msgid "``5555``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:28
+msgid "Port to bind the ZMQ server."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:29
+msgid "``--chunk-size``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:30
+msgid "``256``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:31
+msgid "Chunk size for KV cache operations (in tokens)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:32
+msgid "``--max-workers``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:33
+msgid "``1``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:34
+msgid ""
+"Base number of worker threads. Sets the default for both the GPU "
+"(affinity) pool and the CPU (normal) pool. Can be overridden per-pool "
+"with ``--max-gpu-workers`` and ``--max-cpu-workers``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:37
+msgid "``--max-gpu-workers``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:38 ../../source/mp/configuration.rst:43
+msgid "(inherits ``--max-workers``)"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:39
+msgid ""
+"Worker threads for the GPU affinity pool (STORE/RETRIEVE). Requests from "
+"the same vLLM instance are always dispatched to the same thread, "
+"eliminating GPU transfer lock contention."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:42
+msgid "``--max-cpu-workers``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:44
+msgid "Worker threads for the normal CPU pool (LOOKUP, etc.)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:45
+msgid "``--hash-algorithm``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:46
+msgid "``blake3``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:47
+msgid ""
+"Hash algorithm for token-based operations. Choices: ``builtin``, "
+"``sha256_cbor``, ``blake3``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:49
+msgid "``--engine-type``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:50 ../../source/mp/configuration.rst:213
+#: ../../source/mp/configuration.rst:221
+msgid "``default``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:51
+msgid ""
+"Cache engine backend type. ``default`` uses MPCacheEngine; ``blend`` uses"
+" BlendEngineV2 for cross-request KV reuse. Choices: ``default``, "
+"``blend``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:55
+msgid "``--runtime-plugin-locations``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:56
+msgid "``[]``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:57
+msgid ""
+"Zero or more paths to runtime plugin scripts or directories to launch "
+"alongside the server. Plugins are spawned by ``MPRuntimePluginLauncher`` "
+"and receive the full server config via the "
+"``LMCACHE_RUNTIME_PLUGIN_CONFIG`` environment variable."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:61
+msgid "``--runtime-plugin-config``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:62
+#, python-brace-format
+msgid "``\"{}\"``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:63
+#, python-brace-format
+msgid ""
+"JSON string of extra key-value config forwarded to runtime plugins via "
+"``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example: "
+"``'{\"plugin.frontend.heartbeat_url\": "
+"\"http://localhost:5000/heartbeat\"}'``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:68
+msgid "Lookup Hash Logging"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:70
+msgid "Source: ``lmcache/v1/mp_observability/subscribers/logging/lookup_hash.py``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:72
+msgid ""
+"When enabled, the server publishes chunk hashes computed during "
+"``lookup()`` as ``MP_LOOKUP`` events on the EventBus.  The "
+"``LookupHashLoggingSubscriber`` writes these to rotating JSONL files for "
+"offline analysis.  Disabled by default.  These arguments are part of the "
+"Observability group."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:85
+msgid "``--lookup-hash-log-dir``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:86
+msgid "``\"\"`` (disabled)"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:87
+msgid ""
+"Directory to write lookup hash JSONL files. An empty string disables "
+"logging."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:89
+msgid "``--lookup-hash-log-rotation-interval``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:90
+msgid "``21600`` (6 h)"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:91
+msgid "Time interval in seconds before rotating to a new log file."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:92
+msgid "``--lookup-hash-log-rotation-max-size``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:93
+msgid "``104857600`` (100 MB)"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:94
+msgid ""
+"Max file size in bytes before rotating even if the time interval has not "
+"elapsed."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:96
+msgid "``--lookup-hash-log-max-files``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:97
+msgid "``100``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:98
+msgid ""
+"Max number of log files to keep.  Oldest files are deleted when this "
+"limit is exceeded."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:102
+msgid "HTTP Frontend"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:106
+msgid "The HTTP frontend is included when running ``lmcache server``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:115
+msgid "``--http-host``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:116
+msgid "``0.0.0.0``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:117
+msgid "Host to bind the HTTP (FastAPI/uvicorn) server."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:118
+msgid "``--http-port``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:119
+msgid "``8080``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:120
+msgid "Port to bind the HTTP server."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:123
+msgid "L1 Memory Manager"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:125 ../../source/mp/configuration.rst:152
+#: ../../source/mp/configuration.rst:171 ../../source/mp/configuration.rst:203
+msgid "Source: ``lmcache/v1/distributed/config.py``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:134
+msgid "``--l1-size-gb``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:135 ../../source/mp/configuration.rst:181
+msgid "*required*"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:136
+msgid "Size of L1 memory in GB."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:137
+msgid "``--l1-use-lazy`` / ``--no-l1-use-lazy``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:138
+msgid "``True``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:139
+msgid ""
+"Enable or disable lazy allocation for L1 memory. Pass ``--l1-use-lazy`` "
+"to enable (default) or ``--no-l1-use-lazy`` to explicitly disable."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:142
+msgid "``--l1-init-size-gb``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:143
+msgid "``20``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:144
+msgid "Initial allocation size (GB) when using lazy allocation."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:145
+msgid "``--l1-align-bytes``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:146
+msgid "``4096``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:147
+msgid "Alignment size in bytes (default 4 KB)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:150
+msgid "L1 Manager TTLs"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:161
+msgid "``--l1-write-ttl-seconds``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:162
+msgid "``600``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:163
+msgid "Time-to-live for each object's write lock (seconds)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:164
+msgid "``--l1-read-ttl-seconds``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:165
+msgid "``300``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:166
+msgid "Time-to-live for each object's read lock (seconds)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:169
+msgid "Eviction Policy"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:180
+msgid "``--eviction-policy``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:182
+msgid ""
+"Eviction policy. Choices: ``LRU``, ``IsolatedLRU``, ``noop``. Use "
+"``noop`` for buffer-only mode where L1 acts as a pure write buffer (data "
+"is deleted from L1 after L2 store). ``IsolatedLRU`` maintains one LRU "
+"list per ``cache_salt`` and requires per-``cache_salt`` quotas to be "
+"configured at runtime via the ``/quota`` HTTP endpoints (see :ref:`mp-"
+"http-quota-api`); a ``cache_salt`` with no registered quota has an "
+"effective limit of ``0`` bytes, so its data is evicted at the next "
+"eviction cycle (allowlist semantics)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:193
+msgid "``--eviction-trigger-watermark``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:194
+msgid "``0.8``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:195
+msgid "Memory usage ratio (0.0--1.0) that triggers eviction."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:196
+msgid "``--eviction-ratio``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:197
+msgid "``0.2``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:198
+msgid "Fraction of allocated memory to evict when triggered (0.0--1.0)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:201
+msgid "L2 Policies"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:212
+msgid "``--l2-store-policy``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:214
+msgid ""
+"L2 store policy.  Determines which adapters receive each key and whether "
+"keys are deleted from L1 after L2 store. The ``default`` policy stores "
+"all keys to all adapters and keeps L1. The ``skip_l1`` policy stores all "
+"keys to all adapters and then deletes them from L1 (buffer-only mode). "
+"Choices: ``default``, ``skip_l1``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:220
+msgid "``--l2-prefetch-policy``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:222
+msgid ""
+"L2 prefetch policy.  Determines which adapter loads each key when "
+"multiple adapters have it. The ``default`` policy picks the first adapter"
+" (lowest index). Prefetched keys are temporary (deleted after the reader "
+"finishes). The ``retain`` policy uses the same load plan but keeps "
+"prefetched keys permanently in L1. Choices: ``default``, ``retain``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:229
+msgid "``--l2-prefetch-max-in-flight``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:230
+msgid "``8``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:231
+msgid ""
+"Maximum number of concurrent prefetch (L2 load) requests. Limits how many"
+" in-flight loads the PrefetchController may issue at once, preventing "
+"excessive L1 memory pressure."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:236
+msgid "L2 Adapters"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:238
+msgid "Source: ``lmcache/v1/distributed/l2_adapters/config.py``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:240
+msgid ""
+"L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` "
+"arguments. Each JSON object must include a ``\"type\"`` field that "
+"selects the adapter type. The order of ``--l2-adapter`` arguments "
+"determines the adapter order (cascade)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:244
+msgid ""
+"Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,"
+" ``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, "
+"``plugin``, ``native_plugin``, ``raw_block``, ``dax``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:249
+msgid "``nixl_store`` -- NIXL-based persistent storage"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:251 ../../source/mp/configuration.rst:287
+#: ../../source/mp/configuration.rst:307 ../../source/mp/configuration.rst:325
+msgid "Fields:"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:253
+msgid ""
+"``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, "
+"``HF3FS``, ``OBJ``, ``AZURE_BLOB``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:254
+msgid ""
+"``backend_params`` *(required for file-based backends)*: Dict of string "
+"key-value pairs.  File-based backends (``GDS``, ``GDS_MT``, ``POSIX``, "
+"``HF3FS``) require ``file_path`` and ``use_direct_io``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:257
+msgid ""
+"``pool_size`` *(required)*: Number of storage descriptors to pre-allocate"
+" (> 0)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:259 ../../source/mp/configuration.rst:294
+msgid "Examples:"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:283
+msgid "``fs`` -- File-system backed storage"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:285
+msgid "A pure file-system L2 adapter using async I/O."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:289
+msgid "``base_path`` *(required)*: Directory for storing KV cache files."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:290
+msgid "``relative_tmp_dir`` *(optional)*: Relative sub-dir for temp files."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:291
+msgid ""
+"``read_ahead_size`` *(optional)*: Trigger read-ahead by reading this many"
+" bytes first."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:292
+msgid ""
+"``use_odirect`` *(optional)*: Bypass page cache via ``O_DIRECT`` (default"
+" ``false``)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:305
+msgid "``mock`` -- Mock adapter for testing"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:309
+msgid "``max_size_gb`` *(required)*: Maximum size of the adapter in GB (> 0)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:310
+msgid "``mock_bandwidth_gb`` *(required)*: Simulated bandwidth in GB/sec (> 0)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:312 ../../source/mp/configuration.rst:340
+msgid "Example:"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:319
+msgid "``s3`` -- S3-compatible object store"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:321
+msgid ""
+"S3-backed L2 adapter using the AWS CRT (Common Runtime) for high-"
+"throughput transfers to AWS S3 or any S3-compatible endpoint. See "
+":doc:`l2_storage` for details."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:327
+msgid ""
+"``s3_endpoint`` *(required)*: Bucket URL, either ``\"s3://<bucket>\"`` or"
+" the bare host form."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:329
+msgid "``s3_region`` *(required)*: AWS region string."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:330
+msgid "``s3_num_io_threads`` *(optional, default ``64``)*: CRT I/O threads."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:331
+msgid ""
+"``s3_prefer_http2`` *(optional, default ``true``)*: Negotiate HTTP/2 via "
+"ALPN."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:332
+msgid ""
+"``s3_enable_s3express`` *(optional, default ``false``)*: Enable S3 "
+"Express signing."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:333
+msgid ""
+"``disable_tls`` *(optional, default ``false``)*: Bypass TLS (for non-AWS "
+"HTTP endpoints)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:335
+msgid ""
+"``aws_access_key_id`` / ``aws_secret_access_key`` *(optional)*: Static "
+"credentials; omit to use the default credential provider chain."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:337
+msgid ""
+"``max_capacity_gb`` *(optional, default ``0.0``)*: Aggregate capacity "
+"used by ``get_usage()``. A value of ``0`` disables aggregate eviction."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:347
+msgid "Multiple adapters (cascade)"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:349
+msgid ""
+"Pass ``--l2-adapter`` multiple times.  Adapters are used in the order "
+"given:"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:357
+msgid "Observability"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:359
+msgid "Source: ``lmcache/v1/mp_observability/config.py``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:361
+msgid ""
+"See :doc:`observability` for full details on the three modes (metrics, "
+"logging, tracing)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:371
+msgid "``--disable-observability``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:372 ../../source/mp/configuration.rst:375
+#: ../../source/mp/configuration.rst:378 ../../source/mp/configuration.rst:381
+msgid "off"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:373
+msgid "Master switch: disable the EventBus entirely."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:374
+msgid "``--disable-metrics``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:376
+msgid "Skip metrics subscribers (no Prometheus endpoint)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:377
+msgid "``--disable-logging``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:379
+msgid "Skip logging subscribers."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:380
+msgid "``--enable-tracing``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:382
+msgid "Register tracing subscribers. Requires ``--otlp-endpoint``."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:383
+msgid "``--event-bus-queue-size``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:384
+msgid "``10000``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:385
+msgid "Max events in the EventBus queue before tail-drop."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:386
+msgid "``--otlp-endpoint``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:387
+msgid "*(none)*"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:388
+msgid "OTLP gRPC endpoint for exporting metrics and traces."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:389
+msgid "``--prometheus-port``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:390
+msgid "``9090``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:391
+msgid "Port for the Prometheus ``/metrics`` endpoint."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:392
+msgid "``--service-instance-id``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:393
+msgid "*(unset, default UUID v4)*"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:394
+msgid ""
+"Identifier for this MP server instance, attached as the OTel Resource "
+"attribute ``service.instance.id`` on every metric and span. When the flag"
+" is not passed, defaults to a random UUID v4. Pass ``--service-instance-"
+"id=\"\"`` to force an empty value."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:400
+msgid "vLLM Client Configuration"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:402
+msgid ""
+"On the vLLM side, specify the LMCache server host and port via the "
+"``kv_connector_extra_config`` parameter:"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:412
+msgid "Environment Variables"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:418
+msgid "Variable"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:420
+msgid "``LMCACHE_LOG_LEVEL``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:421
+msgid ""
+"Log level for LMCache (``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``). Set "
+"to ``DEBUG`` to see L2 store activity, prefetch results, etc."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:423
+msgid "``PYTHONHASHSEED``"
+msgstr ""
+
+#: ../../source/mp/configuration.rst:424
+msgid ""
+"Set to a fixed value for reproducible hashing across processes (relevant "
+"when using ``--hash-algorithm builtin``)."
+msgstr ""
+
+#: ../../source/mp/configuration.rst:428
+msgid "Full Example"
+msgstr ""
+
