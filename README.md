@@ -28,6 +28,35 @@
 
 LMCache is a **KV cache management layer** for LLM inference. It turns KV cache from temporary state into reusable AI-native knowledge that can be stored, moved, transformed, and reused across different servings. LMCache is designed to work with existing inference engines to **reduce TTFT** and **improve throughput**, especially for long-context, multi-turn, and RAG workloads.
 
+### Key features
+
+- **KV cache reuse** across requests, sessions, and inference engine instances, including **non-prefix reuse** for repeated text anywhere in the prompt.
+- **Distributed KV cache store** shared across multiple inference engines and nodes — enabling cluster-wide cache reuse and multi-node PD disaggregation.
+- **PD disaggregation and KV transfer**: move KV cache from prefill workers to
+  decode workers over NVLink, RDMA, or TCP via transport layers such as NIXL —
+  so decoding can continue without recomputing prompt KV.
+- **KV cache reuse** across requests, sessions, and inference engine instances.
+- **Non-prefix KV reuse**: go beyond prefix caching by reusing cached KV blocks
+  for repeated text that may appear anywhere in the prompt.
+- **Pluggable transformation algorithms**: compression, token dropping, and
+  custom (de)serialization via the SERDE interface — bring your own KV
+  transformation logic without forking LMCache.
+- **Pluggable storage and transport backends**: NIXL, GDS, local disk, Redis,
+  S3-compatible object storage, and more.
+
+KV cache transformation through techniques such as compression, token dropping, and future optimization methods
+Pluggable backend support for storage and transfer backends such as NIXL, GDS, local storage, Redis, S3-compatible object storage, and more
+
+### Deployment modes
+
+- **Multi-process mode** *(recommended mode to implement)*: LMCache runs as a
+  standalone server; inference engines connect to it through connectors over
+  ZMQ. A single LMCache server can serve multiple engine instances, share cache
+  across them, and expose management and observability endpoints.
+- **In-process mode**: LMCache runs inside the inference engine process
+  through connectors this mode is limited by python GILs.
+
+
 LMCache supports three deployment patterns:
 
 - **In-process mode**: LMCache runs inside the inference engine process through connectors. This is the simplest setup for local experiments and single-process serving.
@@ -127,32 +156,7 @@ LMCache builds on research in KV cache management, including cache reuse, offloa
 
 </details>
 
-<!-- ## Socials
-
-Follow LMCache for updates, community news, and technical content:
-
-  <!-- <p align="center">
-  <a href="https://www.linkedin.com/company/lmcache-lab/">
-    <img src="https://img.shields.io/badge/LinkedIn-LMCache-blue?logo=linkedin&logoColor=white" alt="LinkedIn">
-  </a>
-  <a href="https://x.com/lmcache">
-    <img src="https://img.shields.io/badge/X-@lmcache-black?logo=x&logoColor=white" alt="X">
-  </a>
-  <a href="https://www.youtube.com/@LMCacheTeam">
-    <img src="https://img.shields.io/badge/YouTube-LMCacheTeam-red?logo=youtube&logoColor=white" alt="YouTube">
-  </a>
-  <a href="qrcodeforwechatinvite_placeholder">
-    <img src="https://img.shields.io/badge/WeChat-LMCache-green?logo=wechat&logoColor=white" alt="WeChat">
-  </a>
-  </p> -->
 
 ## License
 
 The LMCache codebase is licensed under Apache License 2.0. See the [LICENSE](LICENSE) file for details.
-
-<!-- <p align="center">
-  <sub>Sponsored by</sub><br>
-  <a href="https://www.businesswire.com/news/home/20251023590544/en/Tensormesh-Emerges-From-Stealth-to-Slash-AI-Inference-Costs-and-Latency-by-up-to-10x">
-    <img src="asset/Tensormesh.jpg" alt="Tensormesh" height="36">
-  </a>
-</p> -->
