@@ -12,7 +12,6 @@ from typing import Any
 import array
 
 # Third Party
-# import cupy
 import torch
 
 # First Party
