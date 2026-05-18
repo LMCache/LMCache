@@ -6,7 +6,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Literal, Optional, cast
 import ctypes
 import json
 import struct
@@ -16,6 +16,7 @@ import zlib
 
 # Third Party
 import torch
+import xxhash
 
 # First Party
 from lmcache.logging import init_logger
@@ -38,8 +39,12 @@ logger = init_logger(__name__)
 _DEFAULT_META_MAGIC = b"LMCIDX01"
 _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
+_SLOT_HEADER_MAGIC_V1 = b"LMCBLK01"
+_SLOT_HEADER_MAGIC_V2 = b"LMCBLK02"
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
+RAW_BLOCK_CONSISTENCY_LEVELS = frozenset({"default", "payload_checksum"})
+RawBlockConsistencyLevel = Literal["default", "payload_checksum"]
 
 
 def round_up(x: int, align: int) -> int:
@@ -104,6 +109,19 @@ def validate_raw_block_io_options(
         raise ValueError("iouring_queue_depth must be > 0")
 
 
+def normalize_raw_block_consistency_level(
+    level: Any = None,
+) -> RawBlockConsistencyLevel:
+    """Normalize the raw-block slot consistency level."""
+    if level is None or level == "":
+        return "default"
+    normalized = str(level).lower()
+    if normalized not in RAW_BLOCK_CONSISTENCY_LEVELS:
+        allowed = ", ".join(sorted(RAW_BLOCK_CONSISTENCY_LEVELS))
+        raise ValueError(f"consistency_level must be one of: {allowed}")
+    return cast(RawBlockConsistencyLevel, normalized)
+
+
 @dataclass(frozen=True)
 class RawBlockCoreConfig:
     """Configuration for RawBlockCore device layout, I/O, and checkpoints."""
@@ -122,6 +140,7 @@ class RawBlockCoreConfig:
     meta_idle_quiet_ms: int
     meta_enable_periodic: bool
     meta_verify_on_load: bool
+    consistency_level: RawBlockConsistencyLevel = "default"
     load_checkpoint_on_init: bool = True
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
@@ -132,6 +151,8 @@ class _Entry:
     offset: int
     size: int
     meta: DiskCacheMetadata
+    payload_checksum: Optional[int] = None
+    checksum_verified: bool = True
 
 
 @dataclass
@@ -147,6 +168,17 @@ class RawBlockPutManyResult:
 
     results: list[bool]
     stored_keys: list[str]
+
+
+@dataclass(frozen=True)
+class _PreparedWrite:
+    """Prepared raw-block payload and header for one slot write."""
+
+    header: bytes
+    buf: Any
+    payload_len: int
+    total_len: int
+    payload_checksum: Optional[int]
 
 
 class RawBlockCore:
@@ -195,16 +227,28 @@ class RawBlockCore:
         self.meta_enable_periodic = bool(config.meta_enable_periodic)
         self.load_checkpoint_on_init = bool(config.load_checkpoint_on_init)
         self.meta_verify_on_load = bool(config.meta_verify_on_load)
+        self.consistency_level = normalize_raw_block_consistency_level(
+            config.consistency_level
+        )
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.key_namespace = key_namespace
 
         if not self.device_path:
             raise ValueError("RawBlockCore requires a non-empty device_path")
+        if (
+            self.consistency_level == "payload_checksum"
+            and not self.meta_verify_on_load
+        ):
+            raise ValueError(
+                "meta_verify_on_load must be true when consistency_level is "
+                '"payload_checksum"'
+            )
         if self.block_align <= 0:
             raise ValueError("block_align must be > 0")
-        if self.header_bytes < 24:
-            raise ValueError("header_bytes must be >= 24")
+        min_header_bytes = 32 if self.consistency_level == "payload_checksum" else 24
+        if self.header_bytes < min_header_bytes:
+            raise ValueError(f"header_bytes must be >= {min_header_bytes}")
         if self.header_bytes % self.block_align != 0:
             raise ValueError("header_bytes must be a multiple of block_align")
         if self.slot_bytes < self.header_bytes + 1:
@@ -491,14 +535,14 @@ class RawBlockCore:
                 )
                 self._inflight[key.encoded] = _Inflight(offset=offset, meta=meta)
 
-            success = self._write_one(key, obj, offset)
+            prepared = self._write_one(key, obj, offset)
 
             with self._lock:
                 inflight = self._inflight.pop(key.encoded, None)
                 if inflight is None:
                     results[i] = False
                     continue
-                if inflight.canceled or not success:
+                if inflight.canceled or prepared is None:
                     self._append_free_slot_locked(
                         self._offset_to_slot(int(inflight.offset))
                     )
@@ -510,6 +554,8 @@ class RawBlockCore:
                     offset=inflight.offset,
                     size=inflight.meta.size,
                     meta=inflight.meta,
+                    payload_checksum=prepared.payload_checksum,
+                    checksum_verified=True,
                 )
                 self._meta_dirty_total += 1
                 results[i] = True
@@ -578,15 +624,15 @@ class RawBlockCore:
 
         with self._lock:
             items = [
-                (encoded_key, self._index.get(encoded_key))
-                for encoded_key in encoded_keys
+                (i, encoded_key, self._index.get(encoded_key))
+                for i, encoded_key in enumerate(encoded_keys)
             ]
             self._inflight_io_count += 1
 
         results = [False] * len(encoded_keys)
         try:
             raw_dev = self._rawdev()
-            for i, (encoded_key, entry) in enumerate(items):
+            for i, encoded_key, entry in items:
                 if entry is None:
                     continue
                 try:
@@ -596,33 +642,49 @@ class RawBlockCore:
                         if self.use_odirect
                         else payload_len
                     )
-                    buf = memoryview(objs[i].byte_array)
-                    try:
-                        buf = buf.cast("B")
-                    except Exception:
-                        pass
-
-                    direct_view = self._build_direct_odirect_view(
-                        memory_obj=objs[i],
-                        payload_len=payload_len,
-                        total_len=total_len,
-                        buffer_len=len(buf),
-                        zero_tail=False,
-                    )
-                    if direct_view is not None:
-                        raw_dev.pread_into(
-                            entry.offset + self.header_bytes,
-                            direct_view,
-                            total_len if len(direct_view) >= total_len else payload_len,
-                            total_len,
-                        )
-                    else:
-                        raw_dev.pread_into(
-                            entry.offset + self.header_bytes,
-                            buf,
+                    if (
+                        self.consistency_level == "payload_checksum"
+                        and not entry.checksum_verified
+                    ):
+                        if not self._load_with_checksum_verification(
+                            raw_dev,
+                            encoded_key,
+                            entry,
+                            objs[i],
                             payload_len,
                             total_len,
+                        ):
+                            continue
+                    else:
+                        buf = memoryview(objs[i].byte_array)
+                        try:
+                            buf = buf.cast("B")
+                        except Exception:
+                            pass
+
+                        direct_view = self._build_direct_odirect_view(
+                            memory_obj=objs[i],
+                            payload_len=payload_len,
+                            total_len=total_len,
+                            buffer_len=len(buf),
+                            zero_tail=False,
                         )
+                        if direct_view is not None:
+                            raw_dev.pread_into(
+                                entry.offset + self.header_bytes,
+                                direct_view,
+                                total_len
+                                if len(direct_view) >= total_len
+                                else payload_len,
+                                total_len,
+                            )
+                        else:
+                            raw_dev.pread_into(
+                                entry.offset + self.header_bytes,
+                                buf,
+                                payload_len,
+                                total_len,
+                            )
                     objs[i].metadata.cached_positions = entry.meta.cached_positions
                     results[i] = True
                 except Exception as e:
@@ -895,9 +957,31 @@ class RawBlockCore:
                 buf = direct_view
         return buf, payload_len, total_len
 
+    def _prepare_write(
+        self,
+        slot_identity: int,
+        buf: Any,
+        payload_len: int,
+        total_len: int,
+    ) -> _PreparedWrite:
+        """Prepare header metadata for one raw-block write around a payload buffer."""
+        payload_checksum = self._compute_payload_checksum_for_header(buf, payload_len)
+        header = self._encode_header(
+            slot_identity,
+            payload_len,
+            payload_checksum,
+        )
+        return _PreparedWrite(
+            header=header,
+            buf=buf,
+            payload_len=payload_len,
+            total_len=total_len,
+            payload_checksum=payload_checksum,
+        )
+
     def _write_one(
         self, key: RawBlockKeySpec, memory_obj: MemoryObj, offset: int
-    ) -> bool:
+    ) -> Optional[_PreparedWrite]:
         """Write one object header and payload into a raw-block slot.
 
         Args:
@@ -906,58 +990,97 @@ class RawBlockCore:
             offset: Slot byte offset on the raw device.
 
         Returns:
-            True when both header and payload writes complete; false otherwise.
+            Prepared write metadata when both header and payload writes complete;
+            otherwise None.
         """
         try:
-            header = self._encode_header(key.slot_identity, len(memory_obj.byte_array))
             buf, payload_len, total_len = self._prepare_write_payload(memory_obj)
+            prepared = self._prepare_write(
+                key.slot_identity,
+                buf,
+                payload_len,
+                total_len,
+            )
 
             with self._lock:
                 self._inflight_io_count += 1
             try:
                 raw_dev = self._rawdev()
                 hdr_total = (
-                    round_up(len(header), self.block_align)
+                    round_up(len(prepared.header), self.block_align)
                     if self.use_odirect
-                    else len(header)
+                    else len(prepared.header)
                 )
-                raw_dev.pwrite_from_buffer(offset, header, len(header), hdr_total)
+                raw_dev.pwrite_from_buffer(
+                    offset,
+                    prepared.header,
+                    len(prepared.header),
+                    hdr_total,
+                )
                 raw_dev.pwrite_from_buffer(
                     offset + self.header_bytes,
-                    buf,
-                    payload_len,
-                    total_len,
+                    prepared.buf,
+                    prepared.payload_len,
+                    prepared.total_len,
                 )
             finally:
                 with self._lock:
                     self._inflight_io_count -= 1
                     self._last_io_ts = time.monotonic()
-            return True
+            return prepared
         except Exception as e:
             logger.error("RawBlockCore write failed for %s: %s", key.encoded, e)
-            return False
+            return None
 
-    def _encode_header(self, slot_identity: int, payload_len: int) -> bytes:
+    def _encode_header(
+        self,
+        slot_identity: int,
+        payload_len: int,
+        payload_checksum: Optional[int],
+    ) -> bytes:
         """Encode a fixed-size raw-block slot header."""
         hdr = bytearray(self.header_bytes)
-        hdr[0:8] = b"LMCBLK01"
+        if self.consistency_level == "payload_checksum":
+            hdr[0:8] = _SLOT_HEADER_MAGIC_V2
+        else:
+            hdr[0:8] = _SLOT_HEADER_MAGIC_V1
         hdr[8:16] = int(slot_identity & ((1 << 64) - 1)).to_bytes(
             8,
             "little",
             signed=False,
         )
         hdr[16:24] = int(payload_len).to_bytes(8, "little", signed=False)
+        if payload_checksum is not None:
+            hdr[24:32] = int(payload_checksum & ((1 << 64) - 1)).to_bytes(
+                8,
+                "little",
+                signed=False,
+            )
         return bytes(hdr)
 
-    def _decode_slot_header(self, hdr: bytes) -> Optional[tuple[int, int]]:
-        """Decode a raw-block slot header into identity and payload length."""
-        if len(hdr) < 24 or hdr[0:8] != b"LMCBLK01":
+    def _decode_slot_header(
+        self, hdr: bytes
+    ) -> Optional[tuple[int, int, Optional[int]]]:
+        """Decode a raw-block slot header into identity,
+        payload length, and checksum.
+        """
+        if len(hdr) < 24:
+            return None
+        magic = hdr[0:8]
+        if magic not in (_SLOT_HEADER_MAGIC_V1, _SLOT_HEADER_MAGIC_V2):
             return None
         slot_identity = int.from_bytes(hdr[8:16], "little", signed=False)
         payload_len = int.from_bytes(hdr[16:24], "little", signed=False)
-        return slot_identity, payload_len
+        if magic == _SLOT_HEADER_MAGIC_V1:
+            return slot_identity, payload_len, None
+        if len(hdr) < 32:
+            return None
+        payload_checksum = int.from_bytes(hdr[24:32], "little", signed=False)
+        return slot_identity, payload_len, payload_checksum
 
-    def _read_slot_header(self, offset: int) -> Optional[tuple[int, int]]:
+    def _read_slot_header(
+        self, offset: int
+    ) -> Optional[tuple[int, int, Optional[int]]]:
         """Read and decode the slot header at a raw-device offset."""
         buf = bytearray(self.header_bytes)
         try:
@@ -971,6 +1094,81 @@ class RawBlockCore:
             with self._lock:
                 self._inflight_io_count -= 1
                 self._last_io_ts = time.monotonic()
+
+    def _load_with_checksum_verification(
+        self,
+        raw_dev: Any,
+        encoded_key: str,
+        entry: _Entry,
+        dst_obj: MemoryObj,
+        payload_len: int,
+        total_len: int,
+    ) -> bool:
+        """
+        Load a recovered payload directly into the destination
+        and verify checksum.
+        """
+        if entry.payload_checksum is None:
+            self._drop_entry_after_checksum_mismatch(encoded_key, entry.offset)
+            return False
+
+        buf = memoryview(dst_obj.byte_array)
+        try:
+            buf = buf.cast("B")
+        except Exception:
+            pass
+
+        direct_view = self._build_direct_odirect_view(
+            memory_obj=dst_obj,
+            payload_len=payload_len,
+            total_len=total_len,
+            buffer_len=len(buf),
+            zero_tail=False,
+        )
+        checksum_view = direct_view if direct_view is not None else buf
+        raw_dev.pread_into(
+            entry.offset + self.header_bytes,
+            checksum_view,
+            total_len if len(checksum_view) >= total_len else payload_len,
+            total_len,
+        )
+        actual_checksum = xxhash.xxh3_64(
+            memoryview(checksum_view)[:payload_len]
+        ).intdigest()
+        if int(actual_checksum) != int(entry.payload_checksum):
+            logger.warning(
+                "RawBlockCore checksum mismatch for %s; dropping recovered entry",
+                encoded_key,
+            )
+            self._drop_entry_after_checksum_mismatch(encoded_key, entry.offset)
+            return False
+
+        with self._lock:
+            current_entry = self._index.get(encoded_key)
+            if current_entry is not None and int(current_entry.offset) == int(
+                entry.offset
+            ):
+                current_entry.checksum_verified = True
+        return True
+
+    def _drop_entry_after_checksum_mismatch(
+        self, encoded_key: str, offset: int
+    ) -> None:
+        """Remove one invalid recovered entry and return its slot to the free list."""
+        with self._lock:
+            removed_entry = self._index.pop(encoded_key, None)
+            self._lock_refcnt.pop(encoded_key, None)
+            if removed_entry is not None:
+                self._append_free_slot_locked(self._offset_to_slot(int(offset)))
+                self._meta_dirty_total += 1
+
+    def _compute_payload_checksum_for_header(
+        self, buf: Any, payload_len: int
+    ) -> Optional[int]:
+        """Return the payload checksum only when the consistency level requires it."""
+        if self.consistency_level != "payload_checksum":
+            return None
+        return xxhash.xxh3_64(memoryview(buf)[:payload_len]).intdigest()
 
     def _ensure_capacity_and_layout(self) -> None:
         """Open the device if needed and compute metadata/data layout."""
@@ -1113,6 +1311,7 @@ class RawBlockCore:
                 "meta_total_bytes": self.meta_total_bytes,
                 "meta_magic": self.meta_magic_text,
                 "meta_version": self.meta_version,
+                "consistency_level": self.consistency_level,
                 "data_base_offset": self._data_base_offset,
                 "next_slot": self._next_slot,
                 "free_slots": list(self._free_slots),
@@ -1253,6 +1452,17 @@ class RawBlockCore:
             return False
         if int(data.get("meta_version", self.meta_version)) != self.meta_version:
             logger.warning("Device metadata meta_version mismatch; ignoring metadata")
+            return False
+        checkpoint_consistency_level = normalize_raw_block_consistency_level(
+            data.get("consistency_level")
+        )
+        if checkpoint_consistency_level != self.consistency_level:
+            logger.warning(
+                "Device metadata consistency_level mismatch; "
+                "checkpoint=%s current=%s; ignoring metadata",
+                checkpoint_consistency_level,
+                self.consistency_level,
+            )
             return False
 
         try:
@@ -1415,6 +1625,7 @@ class RawBlockCore:
             if slot_hdr is None:
                 to_drop.append(encoded_key)
                 continue
+            slot_identity, payload_len, payload_checksum = slot_hdr
             try:
                 expected_identity = slot_identity_from_encoded_key(
                     encoded_key,
@@ -1423,12 +1634,27 @@ class RawBlockCore:
             except Exception:
                 to_drop.append(encoded_key)
                 continue
-            slot_identity, payload_len = slot_hdr
             if int(slot_identity) != int(expected_identity):
                 to_drop.append(encoded_key)
                 continue
             if int(payload_len) != int(entry.size):
                 to_drop.append(encoded_key)
+                continue
+            if (
+                self.consistency_level == "payload_checksum"
+                and payload_checksum is None
+            ):
+                to_drop.append(encoded_key)
+                continue
+            with self._lock:
+                current_entry = self._index.get(encoded_key)
+                if current_entry is not None and int(current_entry.offset) == int(
+                    entry.offset
+                ):
+                    current_entry.payload_checksum = payload_checksum
+                    current_entry.checksum_verified = (
+                        self.consistency_level != "payload_checksum"
+                    )
 
         if not to_drop:
             return

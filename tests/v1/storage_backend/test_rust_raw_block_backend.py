@@ -22,6 +22,7 @@ import torch
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
     MemoryFormat,
@@ -36,9 +37,11 @@ from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
     RustRawBlockBackend,
 )
 from lmcache.v1.storage_backend.raw_block import (
+    RawBlockConsistencyLevel,
     RawBlockCore,
     RawBlockCoreConfig,
     RawBlockKeySpec,
+    encode_object_key,
 )
 
 
@@ -84,7 +87,11 @@ def _install_fake_raw_block_device(monkeypatch, *, size_bytes: int = 64 * 1024):
     )
 
 
-def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
+def _make_raw_block_core(
+    *,
+    use_odirect: bool = False,
+    consistency_level: RawBlockConsistencyLevel = "default",
+) -> RawBlockCore:
     return RawBlockCore(
         RawBlockCoreConfig(
             device_path="/tmp/raw-block-boundary-test",
@@ -100,12 +107,24 @@ def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
             meta_checkpoint_interval_sec=60,
             meta_idle_quiet_ms=100,
             meta_enable_periodic=False,
+            consistency_level=consistency_level,
             load_checkpoint_on_init=True,
             meta_verify_on_load=True,
             io_engine="posix",
             iouring_queue_depth=256,
         ),
         key_namespace="object",
+    )
+
+
+def _make_object_key_spec(seed: int) -> RawBlockKeySpec:
+    return encode_object_key(
+        ObjectKey(
+            chunk_hash=bytes([seed]) * 32,
+            model_name="raw-block-test",
+            kv_rank=0,
+            cache_salt="",
+        )
     )
 
 
@@ -227,6 +246,182 @@ def test_raw_block_core_odirect_prepare_payload_boundaries(monkeypatch):
 
         with pytest.raises(RuntimeError, match="slot capacity"):
             core._prepare_write_payload(_make_byte_obj(payload_capacity + 1))
+    finally:
+        core.close()
+
+
+def test_raw_block_core_payload_checksum_consistency_stores_checksum(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False, consistency_level="payload_checksum")
+    try:
+        key = _make_object_key_spec(11)
+        payload = _make_byte_obj(64)
+        payload.tensor.fill_(7)
+
+        result = core.put_many([key], [payload])
+        assert result.results == [True]
+
+        entry = core._index[key.encoded]
+        slot_hdr = core._read_slot_header(int(entry.offset))
+        assert slot_hdr is not None
+        _, payload_len, payload_checksum = slot_hdr
+        assert payload_len == 64
+        assert payload_checksum is not None
+    finally:
+        core.close()
+
+
+def test_raw_block_core_payload_checksum_validation_accepts_matching_payload(
+    monkeypatch,
+):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False, consistency_level="payload_checksum")
+    try:
+        key = _make_object_key_spec(14)
+        payload = _make_byte_obj(64)
+        payload.tensor.fill_(5)
+
+        result = core.put_many([key], [payload])
+        assert result.results == [True]
+        assert core.contains_key(key.encoded) is True
+
+        core._validate_loaded_entries()
+
+        dst = _make_byte_obj(64)
+        loaded = core.load_many_into([key.encoded], [dst])
+        assert loaded == [True]
+        assert core.contains_key(key.encoded) is True
+    finally:
+        core.close()
+
+
+def test_raw_block_core_payload_checksum_drops_mismatch_on_first_read(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False, consistency_level="payload_checksum")
+    try:
+        key = _make_object_key_spec(15)
+        payload = _make_byte_obj(64)
+        payload.tensor.fill_(9)
+
+        result = core.put_many([key], [payload])
+        assert result.results == [True]
+
+        core._validate_loaded_entries()
+        entry = core._index[key.encoded]
+        raw = core._rawdev()
+        raw.pwrite_from_buffer(entry.offset + core.header_bytes, b"\xaa" * 64, 64, 64)
+
+        dst = _make_byte_obj(64)
+        loaded = core.load_many_into([key.encoded], [dst])
+        assert loaded == [False]
+        assert core.contains_key(key.encoded) is False
+    finally:
+        core.close()
+
+
+def test_raw_block_core_payload_checksum_requires_32_byte_header(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    with pytest.raises(ValueError, match="header_bytes must be >= 32"):
+        RawBlockCore(
+            RawBlockCoreConfig(
+                device_path="/tmp/raw-block-boundary-test",
+                capacity_bytes=64 * 1024,
+                block_align=8,
+                header_bytes=24,
+                slot_bytes=4096,
+                use_odirect=False,
+                enable_zero_copy=True,
+                meta_total_bytes=16 * 1024,
+                meta_magic=b"LMCIDX01",
+                meta_version=1,
+                meta_checkpoint_interval_sec=60,
+                meta_idle_quiet_ms=100,
+                meta_enable_periodic=False,
+                consistency_level="payload_checksum",
+                load_checkpoint_on_init=True,
+                meta_verify_on_load=True,
+                io_engine="posix",
+                iouring_queue_depth=256,
+            ),
+            key_namespace="object",
+        )
+
+
+def test_raw_block_core_payload_checksum_requires_meta_verify_on_load(
+    monkeypatch,
+):
+    _install_fake_raw_block_device(monkeypatch)
+    with pytest.raises(ValueError, match="meta_verify_on_load must be true"):
+        RawBlockCore(
+            RawBlockCoreConfig(
+                device_path="/tmp/raw-block-boundary-test",
+                capacity_bytes=64 * 1024,
+                block_align=4096,
+                header_bytes=4096,
+                slot_bytes=8192,
+                use_odirect=False,
+                enable_zero_copy=True,
+                meta_total_bytes=16 * 1024,
+                meta_magic=b"LMCIDX01",
+                meta_version=1,
+                meta_checkpoint_interval_sec=60,
+                meta_idle_quiet_ms=100,
+                meta_enable_periodic=False,
+                consistency_level="payload_checksum",
+                load_checkpoint_on_init=True,
+                meta_verify_on_load=False,
+                io_engine="posix",
+                iouring_queue_depth=256,
+            ),
+            key_namespace="object",
+        )
+
+
+def test_raw_block_core_validate_loaded_entries_accepts_legacy_slot_header(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False)
+    try:
+        key = _make_object_key_spec(12)
+        payload = _make_byte_obj(64)
+        payload.tensor.fill_(3)
+
+        result = core.put_many([key], [payload])
+        assert result.results == [True]
+        assert core.contains_key(key.encoded) is True
+
+        entry = core._index[key.encoded]
+        legacy_header = bytearray(core.header_bytes)
+        legacy_header[0:8] = b"LMCBLK01"
+        legacy_header[8:16] = int(key.slot_identity).to_bytes(8, "little", signed=False)
+        legacy_header[16:24] = int(entry.size).to_bytes(8, "little", signed=False)
+        raw = core._rawdev()
+        raw.pwrite_from_buffer(
+            entry.offset, legacy_header, len(legacy_header), len(legacy_header)
+        )
+        raw.pwrite_from_buffer(entry.offset + core.header_bytes, b"\xbb" * 64, 64, 64)
+
+        core._validate_loaded_entries()
+
+        assert core.contains_key(key.encoded) is True
+    finally:
+        core.close()
+
+
+def test_raw_block_core_default_consistency_uses_legacy_slot_header(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False, consistency_level="default")
+    try:
+        key = _make_object_key_spec(13)
+        payload = _make_byte_obj(64)
+
+        result = core.put_many([key], [payload])
+        assert result.results == [True]
+
+        entry = core._index[key.encoded]
+        slot_hdr = core._read_slot_header(int(entry.offset))
+        assert slot_hdr is not None
+        _, _, payload_checksum = slot_hdr
+        assert payload_checksum is None
     finally:
         core.close()
 
@@ -1552,6 +1747,34 @@ def test_rust_raw_block_backend_recovers_legacy_key_dtype(
             assert loaded[0].metadata.dtype is torch.bfloat16
         finally:
             backend.close()
+
+
+def test_raw_block_core_rejects_checkpoint_consistency_level_mismatch(monkeypatch):
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False, consistency_level="payload_checksum")
+    try:
+        applied = core.apply_loaded_state(
+            {
+                "version": 1,
+                "device_path": core.device_path,
+                "capacity_bytes": core.capacity_bytes,
+                "block_align": core.block_align,
+                "header_bytes": core.header_bytes,
+                "slot_bytes": core.slot_bytes,
+                "meta_total_bytes": core.meta_total_bytes,
+                "meta_magic": core.meta_magic_text,
+                "meta_version": core.meta_version,
+                "consistency_level": "default",
+                "data_base_offset": core.data_base_offset,
+                "next_slot": 0,
+                "free_slots": [],
+                "entries": {},
+            }
+        )
+
+        assert applied is False
+    finally:
+        core.close()
 
 
 @pytest.mark.skipif(

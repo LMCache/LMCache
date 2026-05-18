@@ -40,4 +40,5 @@ sortedcontainers
 torch
 transformers >= 5.4
 uvicorn
+xxhash
 httptools

@@ -4,9 +4,11 @@
 from lmcache.v1.storage_backend.raw_block.core import (
     DEFAULT_IOURING_QUEUE_DEPTH,
     RAW_BLOCK_IO_ENGINES,
+    RawBlockConsistencyLevel,
     RawBlockCore,
     RawBlockCoreConfig,
     RawBlockPutManyResult,
+    normalize_raw_block_consistency_level,
     normalize_raw_block_io_engine,
     round_up,
     validate_raw_block_io_options,
@@ -25,6 +27,7 @@ from lmcache.v1.storage_backend.raw_block.key_codec import (
 __all__ = [
     "RawBlockCore",
     "RawBlockCoreConfig",
+    "RawBlockConsistencyLevel",
     "RAW_BLOCK_IO_ENGINES",
     "DEFAULT_IOURING_QUEUE_DEPTH",
     "RawBlockKeyNamespace",
@@ -35,6 +38,7 @@ __all__ = [
     "encode_legacy_key",
     "encode_object_key",
     "object_key_to_string",
+    "normalize_raw_block_consistency_level",
     "normalize_raw_block_io_engine",
     "round_up",
     "slot_identity_from_encoded_key",

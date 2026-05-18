@@ -42,6 +42,7 @@ from lmcache.v1.storage_backend.raw_block import (
     RawBlockCoreConfig,
     decode_object_key,
     encode_object_key,
+    normalize_raw_block_consistency_level,
     normalize_raw_block_io_engine,
     validate_raw_block_io_options,
 )
@@ -82,6 +83,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         meta_enable_periodic: bool = True,
         load_checkpoint_on_init: bool = True,
         meta_verify_on_load: bool = True,
+        consistency_level: str = "default",
         enable_zero_copy: bool = True,
         io_engine: str = "posix",
         iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH,
@@ -106,6 +108,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_enable_periodic: Whether to run the checkpoint thread.
             load_checkpoint_on_init: Whether to load existing checkpoint metadata.
             meta_verify_on_load: Whether recovery verifies slot headers.
+            consistency_level: Slot validation level: ``"default"`` or
+                ``"payload_checksum"``.
             enable_zero_copy: Whether to use aligned direct-buffer I/O.
             io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
             iouring_queue_depth: Queue depth for the Rust io_uring engine.
@@ -128,6 +132,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.meta_enable_periodic = bool(meta_enable_periodic)
         self.load_checkpoint_on_init = bool(load_checkpoint_on_init)
         self.meta_verify_on_load = bool(meta_verify_on_load)
+        self.consistency_level = normalize_raw_block_consistency_level(
+            consistency_level
+        )
         self.enable_zero_copy = bool(enable_zero_copy)
         self.io_engine = normalize_raw_block_io_engine(io_engine)
         self.iouring_queue_depth = int(iouring_queue_depth)
@@ -163,6 +170,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             d.get("io_engine"),
             use_iouring=d.get("use_iouring"),
             use_uring=d.get("use_uring"),
+        )
+        consistency_level = normalize_raw_block_consistency_level(
+            d.get("consistency_level")
         )
         iouring_queue_depth = int(
             d.get("iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
@@ -211,6 +221,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_enable_periodic=bool(d.get("meta_enable_periodic", True)),
             load_checkpoint_on_init=bool(d.get("load_checkpoint_on_init", True)),
             meta_verify_on_load=bool(d.get("meta_verify_on_load", True)),
+            consistency_level=consistency_level,
             enable_zero_copy=bool(d.get("enable_zero_copy", True)),
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
@@ -245,6 +256,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "on startup (default true)\n"
             "- meta_verify_on_load (bool): validate slot headers on recovery "
             "(default true)\n"
+            '- consistency_level (str): "default" or "payload_checksum" slot '
+            "validation on recovery (default default)\n"
             "- enable_zero_copy (bool): use aligned direct buffers when possible "
             "(default true)\n"
             "- io_engine (str): posix or io_uring (default posix)\n"
@@ -273,6 +286,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_enable_periodic=self.meta_enable_periodic,
             load_checkpoint_on_init=self.load_checkpoint_on_init,
             meta_verify_on_load=self.meta_verify_on_load,
+            consistency_level=self.consistency_level,
             io_engine=self.io_engine,
             iouring_queue_depth=self.iouring_queue_depth,
         )

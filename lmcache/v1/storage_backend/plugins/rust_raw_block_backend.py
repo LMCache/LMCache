@@ -26,6 +26,7 @@ from lmcache.v1.storage_backend.raw_block import (
     RawBlockKeySpec,
     decode_legacy_key,
     encode_legacy_key,
+    normalize_raw_block_consistency_level,
     normalize_raw_block_io_engine,
     round_up,
     validate_raw_block_io_options,
@@ -227,6 +228,9 @@ class RustRawBlockBackend(StoragePluginInterface):
         iouring_queue_depth = int(
             extra.get("rust_raw_block.iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
         )
+        consistency_level = normalize_raw_block_consistency_level(
+            extra.get("rust_raw_block.consistency_level")
+        )
         validate_raw_block_io_options(
             iouring_queue_depth=iouring_queue_depth,
         )
@@ -285,6 +289,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             meta_verify_on_load=bool(
                 extra.get("rust_raw_block.meta_verify_on_load", True)
             ),
+            consistency_level=consistency_level,
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
         )
