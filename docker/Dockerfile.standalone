@@ -1,9 +1,9 @@
 # The LMCache Standalone Dockerfile is used to build a LMCache image
 # without vLLM integration.
 
-ARG CUDA_VERSION=12.9
+ARG CUDA_VERSION=13.0
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.05
+ARG NGC_VERSION=25.09
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
@@ -42,7 +42,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install ray nvidia-ml-py
 
 # CUDA arch list used by torch
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### LMCache Build ##########################
@@ -80,6 +80,7 @@ WORKDIR /workspace/LMCache
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
+    export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache
 

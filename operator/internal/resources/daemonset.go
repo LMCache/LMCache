@@ -34,7 +34,12 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	podLabels := MergeLabels(StandardLabels(engine.Name), spec.PodLabels)
 	podAnnotations := spec.PodAnnotations
 
-	nvidiaRuntime := "nvidia"
+	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
+	var runtimeClassName *string
+	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
+		rc := "nvidia"
+		runtimeClassName = &rc
+	}
 	privileged := true
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
@@ -55,23 +60,27 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	}
 
 	// Build env vars
-	envVars := make([]corev1.EnvVar, 0, 2+len(spec.Env))
+	envVars := make([]corev1.EnvVar, 0, 5+len(spec.Env))
 	envVars = append(envVars,
 		corev1.EnvVar{
 			Name:  "LMCACHE_LOG_LEVEL",
 			Value: derefString(spec.LogLevel, "INFO"),
 		},
-		corev1.EnvVar{
-			// Expose all GPUs without consuming device plugin resources.
-			// LMCache needs GPU visibility for CUDA IPC, not compute ownership.
-			Name:  "NVIDIA_VISIBLE_DEVICES",
-			Value: "all",
-		},
-		corev1.EnvVar{
-			Name:  "NVIDIA_DRIVER_CAPABILITIES",
-			Value: "all",
-		},
 	)
+	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
+		// Expose all GPUs without consuming device plugin resources.
+		// LMCache needs GPU visibility for CUDA IPC, not compute ownership.
+		envVars = append(envVars,
+			corev1.EnvVar{
+				Name:  "NVIDIA_VISIBLE_DEVICES",
+				Value: "all",
+			},
+			corev1.EnvVar{
+				Name:  "NVIDIA_DRIVER_CAPABILITIES",
+				Value: "all",
+			},
+		)
+	}
 	// Inject RESP auth credentials from Secret as env vars so they
 	// don't appear in container args or kubectl describe output.
 	// The DaemonSet references the local (same-namespace) managed copy
@@ -195,7 +204,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 				},
 				Spec: corev1.PodSpec{
 					HostIPC:            true,
-					RuntimeClassName:   &nvidiaRuntime,
+					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
 					NodeSelector:       spec.NodeSelector,

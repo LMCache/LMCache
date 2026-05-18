@@ -104,7 +104,7 @@ LMCACHE_PID=$!
 echo "lmcache server PID=$LMCACHE_PID"
 
 echo "Waiting for lmcache HTTP health..."
-wait_for_url "http://localhost:${LMCACHE_HTTP_PORT}/api/healthcheck" 60 || {
+wait_for_url "http://localhost:${LMCACHE_HTTP_PORT}/healthcheck" 60 || {
     echo "lmcache failed to start. Last 50 lines of log:"
     tail -50 "$TMP_DIR/lmcache.log" || true
     exit 1
@@ -200,7 +200,7 @@ echo ""
 echo "============================================"
 echo "=== Step 4: Force-clearing L1 (CPU) cache ==="
 echo "============================================"
-curl -s -X POST "http://localhost:${LMCACHE_HTTP_PORT}/api/clear-cache" | python3 -m json.tool
+curl -s -X POST "http://localhost:${LMCACHE_HTTP_PORT}/clear-cache" | python3 -m json.tool
 echo "L1 cleared. Next request will miss L1 and trigger L2 prefetch."
 
 # ---------------------------------------------------------------------------
@@ -229,7 +229,7 @@ echo ""
 echo "============================================"
 echo "=== Step 6: LMCache status ==="
 echo "============================================"
-curl -s "http://localhost:${LMCACHE_HTTP_PORT}/api/status" \
+curl -s "http://localhost:${LMCACHE_HTTP_PORT}/status" \
     | python3 -m json.tool | head -80
 
 echo ""

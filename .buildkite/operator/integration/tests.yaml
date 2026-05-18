@@ -1,0 +1,30 @@
+env:
+  GPU_KIND_CLUSTER: "operator-test-e2e-gpu-${BUILDKITE_BUILD_NUMBER}"
+
+steps:
+  - label: "Operator Integration: test-e2e-gpu-kind"
+    key: "operator_test_e2e_gpu_kind"
+    timeout_in_minutes: 90
+    command: |
+      echo $$PWD # for debugging
+
+      cd operator
+      make test-e2e-gpu-kind
+
+  - label: "Cleanup Kind cluster"
+    key: "operator_cleanup_kind"
+    depends_on: "operator_test_e2e_gpu_kind"
+    allow_dependency_failure: true
+    timeout_in_minutes: 10
+    command: |
+      cd operator
+      make cleanup-test-e2e-gpu-kind
+
+  - label: "Cleanup workspace"
+    depends_on: "operator_cleanup_kind"
+    allow_dependency_failure: true
+    command: |
+      export TARGET="$$PWD"
+      echo "Deleting current workspace $$TARGET"
+      cd /
+      rm -rf "$$TARGET" || true

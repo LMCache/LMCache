@@ -18,7 +18,10 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PagedTensorMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
-from lmcache.v1.storage_backend.nixl_storage_backend import NixlStorageBackend
+from lmcache.v1.storage_backend.nixl_storage_backend import (
+    NixlStorageBackend,
+    NixlStorageConfig,
+)
 
 
 def create_key(chunk_hash: str):
@@ -109,7 +112,12 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert returned_memory_obj.get_shape() == obj.get_shape()
             assert returned_memory_obj.get_dtype() == obj.get_dtype()
             assert returned_memory_obj.metadata.address != obj.metadata.address
-            assert torch.equal(returned_memory_obj.tensor, obj.tensor)
+
+            returned_tensor = returned_memory_obj.tensor
+            obj_tensor = obj.tensor
+            assert returned_tensor is not None
+            assert obj_tensor is not None
+            assert torch.equal(returned_tensor, obj_tensor)
 
         obj_list = asyncio.run(
             nixl_backend.batched_get_non_blocking(lookup_id="test", keys=first_keys)
@@ -122,7 +130,12 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert returned_memory_obj.get_shape() == obj.get_shape()
             assert returned_memory_obj.get_dtype() == obj.get_dtype()
             assert returned_memory_obj.metadata.address != obj.metadata.address
-            assert torch.equal(returned_memory_obj.tensor, obj.tensor)
+
+            returned_tensor = returned_memory_obj.tensor
+            obj_tensor = obj.tensor
+            assert returned_tensor is not None
+            assert obj_tensor is not None
+            assert torch.equal(returned_tensor, obj_tensor)
 
         def test_eviction(new_idx, old_idx):
             nixl_backend.batched_submit_put_task([keys[new_idx]], [objs[new_idx]])
@@ -246,6 +259,49 @@ def test_nixl_gds_cpu_backend():
     config.extra_config["enable_cuda"] = False
 
     run(config, shape, dtype)
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_endpoint_list_empty_raises():
+    """nixl_endpoint_list=[] should raise ValueError before any nixl ops."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_endpoint_list"] = []
+
+    metadata = LMCacheMetadata(
+        model_name="Llama-3.1-70B-Instruct",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=[2048, 2048],
+    )
+
+    with pytest.raises(ValueError, match="nixl_endpoint_list is set but empty"):
+        NixlStorageConfig.from_cache_engine_config(config, metadata)
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_endpoint_list_malformed_url_raises():
+    """A non-http(s) entry in nixl_endpoint_list should raise ValueError."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_endpoint_list"] = ["htps://typo.example.com"]
+    config.extra_config["nixl_backend"] = "OBJ"
+
+    metadata = LMCacheMetadata(
+        model_name="Llama-3.1-70B-Instruct",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=[2048, 2048],
+    )
+
+    with pytest.raises(ValueError, match="is not a valid URL"):
+        NixlStorageConfig.from_cache_engine_config(config, metadata)
 
 
 @pytest.mark.no_shared_allocator

@@ -7,6 +7,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rop
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 import lmcache.c_ops as lmc_ops
 
@@ -110,9 +111,13 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
     hidden_dim = head_size * 8
     num_tokens = 10
 
-    dumb_q = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
-    dumb_k = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
-    positions = torch.arange(num_tokens, device="cuda")
+    dumb_q = torch.rand(
+        (num_tokens, hidden_dim), device=torch_device_type, dtype=torch.bfloat16
+    )
+    dumb_k = torch.rand(
+        (num_tokens, hidden_dim), device=torch_device_type, dtype=torch.bfloat16
+    )
+    positions = torch.arange(num_tokens, device=torch_device_type)
 
     q1 = dumb_q.clone()
     k1 = dumb_k.clone()
@@ -127,7 +132,7 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
 
     q_no_pos = dumb_q.clone()
     k_no_pos = dumb_k.clone()
-    positions2 = torch.arange(100, 100 + num_tokens, device="cuda")
+    positions2 = torch.arange(100, 100 + num_tokens, device=torch_device_type)
     _, k_pos2 = rope(positions2, q_no_pos, k_no_pos)
 
     k_no_pos = dumb_k.clone()

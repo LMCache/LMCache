@@ -118,10 +118,14 @@ types:
        --lmcache-url http://localhost:8080 \
        --no-interactive
 
-Three workloads are available:
+Five workloads are available:
 
 - **long-doc-qa** -- repeated Q&A over long documents (tests KV cache reuse).
 - **multi-round-chat** -- multi-turn chat with stateful sessions.
+- **long-doc-permutator** -- permutations of context documents (blended
+  cache reuse stress test).
+- **prefix-suffix-tuner** -- two-pass sequential workload demonstrating
+  tiered KV-cache reuse (L0/L1/L2).
 - **random-prefill** -- prefill-only requests fired simultaneously.
 
 See :doc:`/cli/bench` for full documentation including all workload options,

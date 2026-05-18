@@ -493,9 +493,11 @@ class PrefetchHandle:
 ### Pure-Python Adapters
 
 Implement `L2AdapterInterface` directly. See `mock_l2_adapter.py` for a
-reference implementation. **No existing files need to be modified.** Create a
-new module (e.g., `my_l2_adapter.py`) in the `l2_adapters/` package and
-self-register at module level:
+reference implementation for an in-memory adapter, or
+[`raw_block.md`](raw_block.md) for a durable local-device adapter.
+**No existing files need to be modified.** Create a new module
+(e.g., `my_l2_adapter.py`) in the `l2_adapters/` package and self-register at
+module level:
 
 ```python
 # At the bottom of your module:
