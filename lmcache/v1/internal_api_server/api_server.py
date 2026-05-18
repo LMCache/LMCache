@@ -21,11 +21,20 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-app = FastAPI()
 
-# Automatically register common, vllm, and controller APIs
-registry = APIRegistry(app)
-registry.register_all_apis(categories=["common", "vllm", "controller"])
+def _build_app() -> FastAPI:
+    """Create a fresh FastAPI app with all internal API routes registered."""
+    new_app = FastAPI()
+    APIRegistry(new_app).register_all_apis()
+    return new_app
+
+
+# Module-level app kept for backward compatibility with existing tests that
+# import `app` directly. Production code no longer relies on this shared
+# singleton; each InternalAPIServer owns its own FastAPI app so that
+# multiple instances in the same process (e.g. scheduler + worker in TP=1
+# non-MP mode) do not overwrite each other's app.state.lmcache_adapter.
+app = _build_app()
 
 
 class InternalAPIServer:
@@ -64,8 +73,10 @@ class InternalAPIServer:
             self.enable = False
             return
 
+        self.app = _build_app()
+
         uvicorn_config = {
-            "app": app,
+            "app": self.app,
             "host": config.internal_api_server_host,
             "loop": "uvloop",
             "http": "httptools",
@@ -92,7 +103,7 @@ class InternalAPIServer:
             uvicorn_config["port"] = self.port
 
         self.server = uvicorn.Server(uvicorn.Config(**uvicorn_config))
-        app.state.lmcache_adapter = lmcache_manager
+        self.app.state.lmcache_adapter = lmcache_manager
 
     async def run(self):
         logger.info(f"Running LMCache internal API server on {self.server_log_info}")

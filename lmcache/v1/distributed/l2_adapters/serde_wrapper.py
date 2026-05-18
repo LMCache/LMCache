@@ -132,6 +132,10 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
         # User-visible completion queues (drained by controller polls).
         self._completed_store: dict[L2TaskId, bool] = {}
+        # Bytes actually transferred per completed store task, forwarded
+        # from the inner adapter so wrapped fast-path adapters still
+        # expose accurate throughput data.
+        self._completed_store_bytes: dict[L2TaskId, int] = {}
         self._completed_load: dict[L2TaskId, Bitmap] = {}
 
         self._stop_flag = threading.Event()
@@ -217,6 +221,12 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         with self._lock:
             result = self._completed_store
             self._completed_store = {}
+        return result
+
+    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
+        with self._lock:
+            result = self._completed_store_bytes
+            self._completed_store_bytes = {}
         return result
 
     # ------------------------------------------------------------------
@@ -457,6 +467,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         """Drain inner store completions; release temp read locks (auto-
         delete) and finalize the wrapped tasks."""
         completed = self._inner.pop_completed_store_tasks()
+        inner_bytes = self._inner.pop_completed_store_task_bytes()
         for inner_id, success in completed.items():
             with self._lock:
                 wrapped_id = self._inner_to_store.pop(inner_id, None)
@@ -473,7 +484,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 continue
             if state is not None:
                 self._l1_manager.finish_read(state.temp_keys)
-            self._finalize_store(wrapped_id, success)
+            self._finalize_store(wrapped_id, success, inner_bytes.get(inner_id))
 
     def _drain_inner_load(self) -> None:
         """Drain inner load completions; on per-key success submit
@@ -607,10 +618,22 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         except Exception:
             logger.exception("Serde wrapper: failed releasing write-locked temps")
 
-    def _finalize_store(self, wrapped_id: L2TaskId, success: bool) -> None:
+    def _finalize_store(
+        self,
+        wrapped_id: L2TaskId,
+        success: bool,
+        bytes_transferred: int | None = None,
+    ) -> None:
         with self._lock:
             self._store_tasks.pop(wrapped_id, None)
             self._completed_store[wrapped_id] = success
+            # Only record bytes when the inner adapter reported them.
+            # Absence in the dict signals "unknown" to the controller,
+            # which then falls back to submitted-bytes accounting.  A 0
+            # here means "transferred nothing" -- the subscriber drops
+            # those samples.
+            if bytes_transferred is not None:
+                self._completed_store_bytes[wrapped_id] = bytes_transferred
         try:
             self._store_efd.notify()
         except OSError:

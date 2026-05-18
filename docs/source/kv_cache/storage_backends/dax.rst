@@ -38,6 +38,54 @@ Configuration
      dax.retrieve_staging_slab_bytes: 268435456
 
 
+Multiprocess Mode
+-----------------
+
+In LMCache multiprocess mode, Device-DAX is configured as a built-in L2
+adapter named ``dax``.  The MP adapter uses the normal L2 adapter
+``submit -> event fd -> query`` contract; no vLLM connector protocol changes
+are required.
+
+.. code-block:: bash
+
+   lmcache server \
+     --l1-size-gb 80 \
+     --eviction-policy LRU \
+     --l2-adapter '{
+       "type": "dax",
+       "device_path": "/dev/dax1.0",
+       "max_dax_size_gb": 100,
+       "slot_bytes": 268435456,
+       "num_store_workers": 1,
+       "num_lookup_workers": 1,
+       "num_load_workers": 4
+     }'
+
+The ``--l2-adapter`` JSON accepts these fields:
+
+- ``device_path``: required path to a readable and writable DAX device.
+- ``max_dax_size_gb``: required mapped size in GiB. The value must fit within
+  the device capacity when capacity can be determined with ``fstat``.
+- ``slot_bytes``: required fixed slot size in bytes. It must be large enough
+  for one full LMCache chunk.
+- ``num_store_workers``: optional store worker count, default ``1``.
+- ``num_lookup_workers``: optional lookup worker count, default ``1``.
+- ``num_load_workers``: optional load worker count, default
+  ``min(4, os.cpu_count())``.
+- ``persist_enabled``: accepted by common MP L2 parsing but ignored by
+  ``dax`` in this release.
+
+MP DAX stores opaque ``ObjectKey`` values in memory and is volatile-only in
+this release.  Closing and reopening the server on the same DAX path starts
+with an empty index, so previously written bytes are not discoverable after
+restart.
+
+MP DAX uses one mapped device path per LMCache server.  It does not add
+per-TP DAX partitions, multi-device striping, on-device metadata, or restart
+recovery.  Capacity accounting and eviction are slot-based: a stored object
+occupies one slot even if its payload is smaller than ``slot_bytes``.
+
+
 Using The Batched Restore Path
 ------------------------------
 

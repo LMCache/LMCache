@@ -25,6 +25,7 @@ class EventType(Enum):
     L1_WRITE_FINISHED = "l1.write.finished"
     L1_WRITE_FINISHED_AND_READ_RESERVED = "l1.write_finished_and_read_reserved"
     L1_KEYS_EVICTED = "l1.keys.evicted"
+    L1_EVICTION_LOOP_TICK = "l1.eviction.loop_tick"
 
     # L1 failure events (LM-291 health monitoring)
     L1_ALLOCATION_FAILED = "l1.allocation.failed"

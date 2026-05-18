@@ -1087,3 +1087,54 @@ func assertNoArg(t *testing.T, args []string, flag string) {
 		}
 	}
 }
+
+// --- GPUVendor tests ---
+
+func TestBuildDaemonSet_GPUVendorNvidiaDefault(t *testing.T) {
+	engine := minimalEngine()
+	engine.SetDefaults()
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != "nvidia" {
+		t.Fatalf("expected RuntimeClassName=nvidia, got %v", podSpec.RuntimeClassName)
+	}
+
+	c := podSpec.Containers[0]
+	if !hasEnv(c.Env, "NVIDIA_VISIBLE_DEVICES", "all") {
+		t.Fatal("missing NVIDIA_VISIBLE_DEVICES=all on default (nvidia) vendor")
+	}
+	if !hasEnv(c.Env, "NVIDIA_DRIVER_CAPABILITIES", "all") {
+		t.Fatal("missing NVIDIA_DRIVER_CAPABILITIES=all on default (nvidia) vendor")
+	}
+}
+
+func TestBuildDaemonSet_GPUVendorAMD(t *testing.T) {
+	engine := minimalEngine()
+	engine.Spec.GPUVendor = ptr(lmcachev1alpha1.GPUVendorAMD)
+	engine.SetDefaults()
+
+	ds := BuildDaemonSet(engine)
+	podSpec := ds.Spec.Template.Spec
+
+	if podSpec.RuntimeClassName != nil {
+		t.Fatalf("expected nil RuntimeClassName for AMD, got %q", *podSpec.RuntimeClassName)
+	}
+
+	c := podSpec.Containers[0]
+	for _, e := range c.Env {
+		if e.Name == "NVIDIA_VISIBLE_DEVICES" || e.Name == "NVIDIA_DRIVER_CAPABILITIES" {
+			t.Fatalf("unexpected NVIDIA env var on AMD vendor: %s=%s", e.Name, e.Value)
+		}
+	}
+}
+
+func hasEnv(envs []corev1.EnvVar, name, value string) bool {
+	for _, e := range envs {
+		if e.Name == name && e.Value == value {
+			return true
+		}
+	}
+	return false
+}

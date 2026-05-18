@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 router = APIRouter()
 
 
-@router.get("/api/status")
+@router.get("/status")
 async def status(request: Request) -> Any:
     """
     Detailed status endpoint for inspecting internal state

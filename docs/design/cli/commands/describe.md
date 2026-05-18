@@ -133,17 +133,17 @@ Uses a positional `target` argument with `choices=["kvcache"]` (extend to
 ### 2. `--url` points to the HTTP endpoint
 
 The original design doc example shows `--url localhost:5555` (ZMQ port), but also
-states that `describe kvcache` "gathers data from ... `/api/status` (HTTP)". The
-HTTP `/api/status` endpoint already exposes **all** data needed (engine type, chunk
+states that `describe kvcache` "gathers data from ... `/status` (HTTP)". The
+HTTP `/status` endpoint already exposes **all** data needed (engine type, chunk
 size, L1 memory, eviction policy, cached objects, health, sessions, etc.). Using
 HTTP as the sole data source keeps the CLI simple — no ZMQ client needed.
 
 `--url` accepts the HTTP base URL (e.g., `http://localhost:8000`). The command
-normalizes it (adds `http://` if missing) and appends `/api/status`.
+normalizes it (adds `http://` if missing) and appends `/status`.
 
-### 3. Output fields mapped from `/api/status`
+### 3. Output fields mapped from `/status`
 
-| Display label | Machine key | Source in `/api/status` response |
+| Display label | Machine key | Source in `/status` response |
 |---|---|---|
 | Health | `health` | `is_healthy` → `"OK"` / `"UNHEALTHY"` |
 | ZMQ endpoint | `zmq_endpoint` | `zmq_endpoint` **(new — see Server-Side Changes)** |
@@ -175,7 +175,7 @@ existing `lmcache/tools/mp_status_viewer/__main__.py`.
 ## Server-Side Changes
 
 Three fields in the design doc's `describe kvcache` output are **not currently
-available** from `/api/status`. The following changes surface them.
+available** from `/status`. The following changes surface them.
 
 ### 1. Add `start_time` to `MPCacheEngine` → expose `uptime_seconds`
 
@@ -300,7 +300,7 @@ class DescribeCommand(BaseCommand):
 
     _describe_kvcache(args):
         1. Normalize URL (ensure http:// prefix)
-        2. Fetch JSON from {url}/api/status (timeout=10s)
+        2. Fetch JSON from {url}/status (timeout=10s)
         3. On error: print to stderr, sys.exit(1)
         4. Extract fields from nested response dict
         5. Format uptime_seconds → "Xh Ym Zs"
@@ -351,7 +351,7 @@ ALL_COMMANDS: list[BaseCommand] = [
 ## Verification
 
 1. **Unit test:** Test `_normalize_url()`, `_fmt_uptime()`, `_fmt_used_gb()`, and
-   field extraction logic with a synthetic `/api/status` response dict (no live
+   field extraction logic with a synthetic `/status` response dict (no live
    server needed).
 2. **Manual test against running server:**
    ```bash
