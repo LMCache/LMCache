@@ -334,10 +334,14 @@ class CuFileHandleCache:
                 entry[1] += 1
                 return entry[0]
             # Cache miss: open under the lock to keep races simple.
-            # cuFile open is fast (no I/O), so the lock hold is short.
+            # ``CuFile.__init__`` only stores the path; the file is not
+            # actually opened (and the handle not registered with cuFile)
+            # until ``.open()`` is called — the wrapper raises "File is
+            # not open." on read/write otherwise.
             file_obj = self._gds_module.CuFile(
                 disk_path, mode, use_direct_io=self._use_direct_io
             )
+            file_obj.open()
             self._entries[cache_key] = [file_obj, 1]
             self._evict_idle_if_full_locked()
             return file_obj

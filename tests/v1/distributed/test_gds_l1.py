@@ -240,12 +240,14 @@ def _mock_gds_module_with_counter() -> tuple[mock.Mock, dict]:
     counter = {"opens": 0, "closes": 0}
 
     def _make_handle(path, mode, use_direct_io=False):
-        counter["opens"] += 1
+        def _open():
+            counter["opens"] += 1
 
         def _close():
             counter["closes"] += 1
 
-        handle = mock.Mock(spec=["close", "read", "write"])
+        handle = mock.Mock(spec=["open", "close", "read", "write"])
+        handle.open = mock.Mock(side_effect=_open)
         handle.close = mock.Mock(side_effect=_close)
         return handle
 
