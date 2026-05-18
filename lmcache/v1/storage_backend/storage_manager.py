@@ -628,6 +628,11 @@ class StorageManager:
             expected_chunks = tier_expected_chunks[tier_idx]
             total_retrieved_chunks += actual_chunks
 
+            # Release the tail rounded off by actual_chunks; else staging buffer leaks.
+            tail_start = actual_chunks * keys_per_chunk
+            for _, mem_obj in tier_result[tail_start:]:
+                mem_obj.ref_count_down()
+
             # If a tier retrieved fewer chunks than expected, we stop counting
             # because subsequent chunks are not contiguous
             if actual_chunks < expected_chunks:
