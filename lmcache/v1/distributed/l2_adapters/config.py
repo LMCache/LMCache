@@ -14,16 +14,36 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 import argparse
 import json
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.config import EvictionConfig
+
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.serde import SerdeConfig
 
 logger = init_logger(__name__)
 
 T = TypeVar("T", bound="L2AdapterConfigBase")
+
+
+@dataclass(frozen=True)
+class PersistConfig:
+    """
+    Configuration for persist on an L2 adapter.
+
+    When enabled, data files are kept on disk at shutdown instead of
+    deleted. Lookup always checks secondary storage (disk) on miss
+    regardless of this setting.
+    """
+
+    persist_enabled: bool = True
+    """ If True, data files are kept on disk at shutdown instead of deleted. """
+
 
 # -----------------------------------------------------------------------------
 # Registry: adapter type name -> config class
@@ -48,13 +68,38 @@ def register_l2_adapter_type(
             via ``from_dict()``.
     """
     if name in _L2_ADAPTER_CONFIG_REGISTRY:
-        raise ValueError(f"L2 adapter type already registered: {name!r}")
+        raise ValueError("L2 adapter type already registered: %s" % repr(name))
     _L2_ADAPTER_CONFIG_REGISTRY[name] = config_cls
 
 
+def _ensure_config_loaded(name: str) -> None:
+    """Trigger lazy import for *name* if it is not
+    yet in the config registry.
+
+    Raises:
+        ImportError: If the adapter module cannot be
+            imported (missing dependency).
+    """
+    if name in _L2_ADAPTER_CONFIG_REGISTRY:
+        return
+    # Lazy import lives in factory to avoid circular deps
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: PLC0415
+        ensure_adapter_loaded,
+    )
+
+    ensure_adapter_loaded(name)
+
+
 def get_registered_l2_adapter_types() -> list[str]:
-    """Return the list of registered adapter type names."""
-    return list(_L2_ADAPTER_CONFIG_REGISTRY)
+    """Return all known adapter type names (eager
+    and lazy)."""
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.factory import (  # noqa: PLC0415
+        get_all_registered_names,
+    )
+
+    return get_all_registered_names()
 
 
 def get_type_name_for_config(
@@ -76,7 +121,7 @@ def get_type_name_for_config(
     for name, cls in _L2_ADAPTER_CONFIG_REGISTRY.items():
         if type(config) is cls:
             return name
-    raise ValueError(f"Unregistered L2 adapter config type: {type(config).__name__}")
+    raise ValueError("Unregistered L2 adapter config type: %s" % type(config).__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -92,7 +137,178 @@ class L2AdapterConfigBase(ABC):
     - Subclasses this base.
     - Implements from_dict() to parse a dict (from JSON) into an instance.
     - Is registered via register_l2_adapter_type("type_name", ConfigClass).
+
+    An optional ``"eviction"`` key in the JSON dict enables per-adapter L2
+    eviction. When present it is parsed by ``_parse_eviction_config()`` and
+    stored on ``eviction_config``; the L2EvictionController is then created
+    for this adapter in the StorageManager.
     """
+
+    #: Populated by ``_parse_eviction_config`` after ``from_dict``; ``None``
+    #: means L2 eviction is disabled for this adapter.
+    eviction_config: EvictionConfig | None = None
+
+    #: Populated by ``_parse_persist_config`` after ``from_dict``.
+    #: Defaults to ``PersistConfig()`` (persist enabled).
+    persist_config: PersistConfig = PersistConfig()
+
+    #: Populated by ``_parse_serde_config`` after ``from_dict``; ``None``
+    #: means serde is disabled for this adapter. When set,
+    #: ``StorageManager`` wraps the adapter with
+    #: ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
+    #: and serde runs transparently around store / load.
+    #:
+    #: JSON schema::
+    #:
+    #:     {
+    #:         "type": "<registered_serde_name>",
+    #:         ...type_specific_keys (forwarded to the factory)
+    #:     }
+    #:
+    #: Built-in types and their kwargs:
+    #:   - ``"fp8"`` — see :class:`Fp8QuantizationSerializer`.
+    #:     Accepts ``fp8_dtype`` (torch dtype name, default
+    #:     ``"float8_e4m3fn"``) and ``max_workers`` (thread-pool size
+    #:     for async (de)serialize, default ``1``).
+    serde_config: SerdeConfig | None = None
+
+    @staticmethod
+    def _parse_serde_config(d: dict[str, object]) -> SerdeConfig | None:
+        """Parse an optional ``"serde"`` sub-dict from an adapter JSON spec.
+
+        Expected format::
+
+            {
+                "type": "fs",
+                ...,
+                "serde": {"type": "fp8", "fp8_dtype": "float8_e4m3fn"}
+            }
+
+        Returns ``None`` when the key is absent (serde disabled).
+        """
+        serde_dict = d.get("serde")
+        if serde_dict is None:
+            return None
+        if not isinstance(serde_dict, dict):
+            raise ValueError(f"'serde' must be a dict, got {type(serde_dict).__name__}")
+        serde_type = serde_dict.get("type")
+        if not isinstance(serde_type, str):
+            raise ValueError("'serde' dict must include a 'type' field")
+        # Forward all keys except "type" as type-specific kwargs.
+        kwargs = {k: v for k, v in serde_dict.items() if k != "type"}
+        return SerdeConfig(type=serde_type, kwargs=kwargs)
+
+    @staticmethod
+    def _parse_eviction_config(d: dict) -> EvictionConfig | None:
+        """
+        Parse an optional ``"eviction"`` sub-dict from an adapter JSON spec.
+
+        Expected format::
+
+            {
+                "type": "mock",
+                ...
+                "eviction": {
+                    "eviction_policy": "LRU",
+                    "trigger_watermark": 0.8,
+                    "eviction_ratio": 0.2
+                }
+            }
+
+        Returns ``None`` when the key is absent (eviction disabled).
+        """
+        eviction_dict = d.get("eviction")
+        if eviction_dict is None:
+            return None
+
+        # Lazy import to avoid circular dependency:
+        # l2_adapters/config.py <- config.py <- l2_adapters/config.py
+        # First Party
+        from lmcache.v1.distributed.config import EvictionConfig  # noqa: PLC0415
+
+        policy = eviction_dict.get("eviction_policy")
+        if policy not in ("LRU", "IsolatedLRU", "noop"):
+            raise ValueError(
+                "eviction.eviction_policy must be 'LRU', 'IsolatedLRU', or "
+                f"'noop', got {policy!r}"
+            )
+        return EvictionConfig(
+            eviction_policy=policy,
+            trigger_watermark=float(eviction_dict.get("trigger_watermark", 0.8)),
+            eviction_ratio=float(eviction_dict.get("eviction_ratio", 0.2)),
+        )
+
+    @staticmethod
+    def _parse_persist_config(d: dict) -> PersistConfig:
+        """
+        Parse optional ``"persist_enabled"`` key from an adapter JSON spec.
+
+        Defaults to ``True``.
+
+        Expected format::
+
+            {
+                "type": "nixl_store_dynamic",
+                ...
+                "persist_enabled": true
+            }
+        """
+        persist_enabled = bool(d.get("persist_enabled", True))
+        return PersistConfig(persist_enabled=persist_enabled)
+
+    @staticmethod
+    def _validate_num_workers(raw: object) -> int:
+        """Validate and return a positive integer worker count.
+
+        Raises:
+            ValueError: If ``raw`` is not a positive integer.
+        """
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            raise ValueError("num_workers must be a positive integer")
+        return raw
+
+    @staticmethod
+    def _validate_per_op_workers(
+        per_op_workers: dict[str, int] | None,
+    ) -> dict[str, int] | None:
+        """Validate per-operation worker counts (``None`` is a no-op).
+
+        Raises:
+            ValueError: If any worker count is not a positive integer.
+        """
+        if per_op_workers is None:
+            return None
+        for key, value in per_op_workers.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"per_op_workers[{key!r}] must be a positive integer, got {value!r}"
+                )
+        return per_op_workers
+
+    @staticmethod
+    def _parse_per_op_workers_from_dict(
+        d: dict[str, object],
+    ) -> dict[str, int] | None:
+        """Parse ``per_op_workers`` from a raw configuration dict.
+
+        Returns ``None`` if the key is absent.
+
+        Raises:
+            ValueError: If the value is not a dict of integers.
+        """
+        raw = d.get("per_op_workers")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("per_op_workers must be a dict")
+        per_op_workers: dict[str, int] = {}
+        for k, v in raw.items():
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError(
+                    f"per_op_workers[{k!r}] must be an integer, got {type(v).__name__}"
+                )
+            per_op_workers[str(k)] = v
+        return per_op_workers
 
     @classmethod
     @abstractmethod
@@ -233,7 +449,11 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
 
         type_name = d.get("type")
         if type_name is None:
-            raise ValueError(f"--l2-adapter #{i + 1}: missing 'type' field")
+            raise ValueError("--l2-adapter #%d: missing 'type' field" % (i + 1))
+
+        # Trigger lazy import for this adapter type
+        _ensure_config_loaded(type_name)
+
         if type_name not in _L2_ADAPTER_CONFIG_REGISTRY:
             known = ", ".join(sorted(_L2_ADAPTER_CONFIG_REGISTRY)) or "(none)"
             raise ValueError(
@@ -243,7 +463,11 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
 
         config_cls = _L2_ADAPTER_CONFIG_REGISTRY[type_name]
         try:
-            adapter_configs.append(config_cls.from_dict(d))
+            adapter_cfg = config_cls.from_dict(d)
+            adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
+            adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)
+            adapter_cfg.serde_config = L2AdapterConfigBase._parse_serde_config(d)
+            adapter_configs.append(adapter_cfg)
         except (TypeError, ValueError) as e:
             logger.error(
                 "Error parsing --l2-adapter #%d (type %r): %s",

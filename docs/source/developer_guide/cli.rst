@@ -35,8 +35,15 @@ File Layout
    └── commands/
        ├── __init__.py      # ALL_COMMANDS registry
        ├── base.py          # BaseCommand ABC
-       └── mock.py          # Example command
-
+       ├── describe.py      # lmcache describe
+       ├── kvcache.py       # lmcache kvcache
+       ├── mock.py          # Example command
+       ├── ping.py          # lmcache ping
+       ├── query/           # lmcache query
+       │   ├── __init__.py  # QueryCommand
+       │   ├── prompt.py    # Prompt placeholder expansion
+       │   └── request.py   # OpenAI-compatible HTTP requests
+       └── server.py        # lmcache server
 
 Step-by-Step: Adding a New Command
 -----------------------------------
@@ -77,7 +84,11 @@ Step-by-Step: Adding a New Command
 
    ALL_COMMANDS: list[BaseCommand] = [
        MockCommand(),
+       KVCacheCommand(),
        DescribeCommand(),   # add here
+       PingCommand(),
+       QueryCommand(),
+       ServerCommand(),
    ]
 
 That's it --- ``lmcache describe --url http://localhost:8000`` is now available.

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Literal, Optional, Tuple
 import hashlib
 import os
 import string
@@ -16,8 +16,12 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, fetch_remote_config
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.utils import LayoutHints
 
 logger = init_logger(__name__)
 ENGINE_NAME = "vllm-instance"
@@ -30,6 +34,42 @@ _config_lock = threading.Lock()
 def is_false(value: str) -> bool:
     """Check if the given string value is equivalent to 'false'."""
     return value.lower() in ("false", "0", "no", "n", "off")
+
+
+def vllm_layout_hints() -> "LayoutHints":
+    """Build layout_hints dict by querying vLLM at runtime."""
+    hints: dict[str, str] = {}
+    kv_layout = try_get_vllm_kv_cache_layout()
+    if kv_layout is not None:
+        hints["kv_layout"] = kv_layout
+    return hints  # type: ignore[return-value]
+
+
+def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:
+    """Try to query the KV cache layout from vLLM at runtime.
+
+    Returns ``"NHD"`` or ``"HND"`` if vLLM is available and the layout
+    has been configured, otherwise ``None``.
+
+    Please only call this where vllm is available (i.e. not in the MP server)
+    We will print an error if we try to get vllm kv layout where vllm
+    is not available.
+    """
+
+    # Third Party
+    try:
+        # Third Party
+        from vllm.v1.attention.backends.utils import (  # type: ignore[import-untyped]
+            get_kv_cache_layout,
+        )
+
+        return get_kv_cache_layout()
+    except Exception:
+        logger.error(
+            "vLLM is not available but tried to query kv cache "
+            "layout information, cannot get KV cache layout"
+        )
+        return None
 
 
 def lmcache_get_or_create_config() -> LMCacheEngineConfig:
@@ -61,6 +101,10 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                         "the environment variable: LMCACHE_CONFIG_FILE"
                     )
                     _config_instance = LMCacheEngineConfig.from_env()
+                    # from_env() doesn't call validate(); the file path
+                    # gets it via update_config_from_env() below, but the
+                    # env-only path needs an explicit call.
+                    _config_instance.validate()
                 else:
                     config_file = os.environ["LMCACHE_CONFIG_FILE"]
                     logger.info(f"Loading LMCache config file {config_file}")
@@ -89,6 +133,11 @@ def lmcache_get_or_create_config() -> LMCacheEngineConfig:
                             remote_config_url,
                         )
     return _config_instance
+
+
+def create_lmcache_ec_config() -> LMCacheEngineConfig:
+    """Create EC config from LMCache config plus EC-specific overrides."""
+    return load_ec_engine_config(base_config=lmcache_get_or_create_config())
 
 
 def hex_hash_to_int16(s: str) -> int:
@@ -290,27 +339,6 @@ def get_size_bytes(shapes: list[torch.Size], kv_dtypes: list[torch.dtype]):
     )
 
 
-def get_vllm_torch_dev():
-    """
-    Returns the torch device and device name for the vLLM engine.
-    e.g. (torch.cuda, "cuda") or (torch.xpu, "xpu")
-    """
-    # Third Party
-    from vllm.platforms import current_platform
-
-    if current_platform.is_cuda_alike():
-        logger.info("CUDA device is available. Using CUDA for LMCache engine.")
-        torch_dev = torch.cuda
-        dev_name = "cuda"
-    elif current_platform.is_xpu():
-        logger.info("XPU device is available. Using XPU for LMCache engine.")
-        torch_dev = torch.xpu
-        dev_name = "xpu"
-    else:
-        raise RuntimeError("Unsupported device platform for LMCache engine.")
-    return torch_dev, dev_name
-
-
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
     """
     Calculate the local worker id and local world size.
@@ -322,10 +350,12 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     Returns:
         Tuple[int, int]: (local_worker_id, local_world_size)
     """
+    # First Party
+    from lmcache import torch_dev
+
     parallel_config = vllm_config.parallel_config
     global_rank = parallel_config.rank
     global_world_size = parallel_config.world_size
-    torch_dev, dev_name = get_vllm_torch_dev()
     num_gpus = torch_dev.device_count()
     if global_world_size <= num_gpus:
         # single node case

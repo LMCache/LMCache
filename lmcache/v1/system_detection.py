@@ -6,17 +6,16 @@ import platform
 
 # Third Party
 import psutil
-import torch
 
-if torch.cuda.is_available():
-    try:
-        # First Party
-        from lmcache.c_ops import get_gpu_pci_bus_id
-    except ImportError:
-        # Fallback if c_ops is not available
-        get_gpu_pci_bus_id = None
+try:
+    # First Party
+    from lmcache.c_ops import get_gpu_pci_bus_id
+except ImportError:
+    # Fallback if c_ops is not available
+    get_gpu_pci_bus_id = None
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -98,7 +97,7 @@ class NUMADetector:
         """
 
         try:
-            device_index = torch.cuda.current_device()
+            device_index = torch_dev.current_device()
             pci_bus_id = get_gpu_pci_bus_id(device_index).lower()
 
             numa_node_file = f"/sys/bus/pci/devices/{pci_bus_id}/numa_node"

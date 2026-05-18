@@ -44,6 +44,7 @@ ZMQ-only.
 ```bash
 lmcache server \
     --engine-type blend --host 0.0.0.0 --port 5555 \
+    --max-gpu-workers 2 \
     --l1-size-gb 60 --eviction-policy LRU \
     --no-http  # opt out of HTTP frontend
 ```
@@ -81,7 +82,7 @@ Running requests:                        3
 ```
 
 `describe kvcache` gathers data from multiple ZMQ request types (`NOOP` for debug
-info, `GET_CHUNK_SIZE` for chunk size) and `/api/status` (HTTP) to build a
+info, `GET_CHUNK_SIZE` for chunk size) and `/status` (HTTP) to build a
 consolidated view.
 
 ### `lmcache ping`
@@ -89,9 +90,9 @@ consolidated view.
 Pure liveness check for both targets. Returns OK/FAIL with round-trip time,
 measuring only the network round-trip excluding local Python overhead.
 
-**`ping kvcache`** -- single `NOOP` round-trip over ZMQ:
+**`ping kvcache`** -- pings the LMCache server process via HTTP `/healthcheck`:
 ```bash
-$ lmcache ping kvcache --url localhost:5555
+$ lmcache ping kvcache --url http://localhost:8080
 
 ======= Ping KV Cache =======
 Status:                  OK
@@ -100,7 +101,7 @@ Round trip time (ms):    0.42
 
 ```
 
-**`ping engine`** -- single `/api/healthcheck` round-trip over HTTP:
+**`ping engine`** -- pings the vLLM server process via HTTP `/health`:
 ```bash
 $ lmcache ping engine --url http://localhost:8000
 
@@ -293,7 +294,7 @@ lmcache/cli/
 ### Other notes
 
 - **Entry point:** `lmcache = "lmcache.cli.main:main"` in `pyproject.toml`.
-- **`bench engine`:** Wraps `vllm.benchmarks`, then queries `/api/status` for
+- **`bench engine`:** Wraps `vllm.benchmarks`, then queries `/status` for
   cache metrics.
 - **`query kvcache`:** Tokenizes `--prompt` using the model's tokenizer, then
   performs a lookup over ZMQ to check which chunks are cached.
@@ -303,7 +304,7 @@ lmcache/cli/
 | Phase | Scope |
 |-------|-------|
 | **0** | CLI framework (explicit registration, `Metrics`), `mock` example command, entry point — see [framework-and-metrics.md](framework-and-metrics.md) |
-| **1** | `server`, `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
+| **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
 | **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench kvcache`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
 

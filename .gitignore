@@ -121,6 +121,9 @@ lmcache/experimental/tests
 /csrc/*_hip.cuh
 /csrc/*_hip.cpp
 
+# SYCL build artifacts
+/build_sycl/
+
 # Ignore all log files
 *.log
 
@@ -128,7 +131,6 @@ lmcache/experimental/tests
 uv.lock
 
 # Coding agent instructions
-CLAUDE.md
 GEMINI.md
 COPILOT.md
 CURSOR.md
@@ -140,3 +142,7 @@ operator/dist/
 operator/cover.out
 operator/coverage.html
 operator/Dockerfile.cross
+*.spv
+
+# Compiled gettext catalogs (built from .po at HTML build time)
+docs/source/locale/**/*.mo

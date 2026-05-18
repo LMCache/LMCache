@@ -58,12 +58,7 @@ class TestWorkerInfoAPI:
 
         yield controller_manager
 
-        if hasattr(controller_manager, "controller_pull_socket"):
-            controller_manager.controller_pull_socket.close()
-        if hasattr(controller_manager, "controller_reply_socket"):
-            controller_manager.controller_reply_socket.close()
-        if hasattr(controller_manager, "zmq_context"):
-            controller_manager.zmq_context.destroy()
+        controller_manager.close()
 
     @pytest.fixture
     def worker_socket(self, zmq_context, controller_urls):
@@ -106,12 +101,15 @@ class TestWorkerInfoAPI:
     @pytest.fixture
     def client_with_real_controller(self, real_controller_manager):
         app.state.lmcache_controller_manager = real_controller_manager
-        return TestClient(app)
+        with TestClient(app) as client:
+            yield client
 
     @pytest.fixture
     def client_without_controller(self):
         app.state.lmcache_controller_manager = None
-        return TestClient(app)
+        client = TestClient(app)
+        yield client
+        client.close()
 
     def _send_message(self, socket, msg_type, instance_id, worker_id, ip, port):
         """Send message to controller via ZMQ

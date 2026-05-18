@@ -23,6 +23,7 @@ import threading
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
@@ -55,7 +56,7 @@ logger = init_logger(__name__)
 
 
 # Helper function to get the class name of the backend
-def get_backend_cname(backend: StorageBackendInterface):
+def get_backend_cname(backend: StorageBackendInterface) -> str:
     return backend.__class__.__name__
 
 
@@ -64,7 +65,7 @@ def allocate_and_copy_objects(
     allocator_backend: AllocatorBackendInterface,
     keys: Sequence[CacheEngineKey],
     src_memory_objs: list[MemoryObj],
-    stream: torch.cuda.Stream,
+    stream: Any,
 ) -> tuple[Sequence[CacheEngineKey], list[MemoryObj]]:
     """
     Allocate the memory objects and copy the data from src_memory_objs to
@@ -75,7 +76,8 @@ def allocate_and_copy_objects(
           objects
         keys: the cache engine keys corresponding to the memory objects
         src_memory_objs: the memory objects to copy from
-        stream: the cuda stream to run the copy in
+        stream: the device-specific GPU stream to run the copy in
+            (e.g., torch_dev.Stream on CUDA or XPU)
 
     Returns:
         - list of cache engine keys that corresponds to the memory objects
@@ -107,7 +109,7 @@ def allocate_and_copy_objects(
             memory_obj.ref_count_down()
             break
 
-        with torch.cuda.stream(stream):
+        with torch_dev.stream(stream):
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
@@ -266,9 +268,9 @@ class StorageManager:
         )
         self.async_serializer: Optional[AsyncSerializer] = None
 
-        # The cuda stream for internal copies during put
+        # The GPU stream for internal copies during put
         if is_cuda_worker(metadata):
-            self.internal_copy_stream = torch.cuda.Stream()
+            self.internal_copy_stream = torch_dev.Stream()
         else:
             self.internal_copy_stream = None
 
@@ -286,7 +288,7 @@ class StorageManager:
 
         self._setup_metrics()
 
-    def _setup_metrics(self):
+    def _setup_metrics(self) -> None:
         prometheus_logger = PrometheusLogger.GetInstanceOrNone()
         if prometheus_logger is None:
             logger.warning(
@@ -314,6 +316,11 @@ class StorageManager:
     ) -> AllocatorBackendInterface:
         if self.enable_pd:
             allocator_backend = self.storage_backends["PDBackend"]
+        elif "MaruBackend" in self.storage_backends:
+            if "LocalCPUBackend" in self.storage_backends:
+                allocator_backend = self.storage_backends["LocalCPUBackend"]
+            else:
+                allocator_backend = self.storage_backends["MaruBackend"]
         else:
             allocator_backend = self.storage_backends["LocalCPUBackend"]
         assert isinstance(allocator_backend, AllocatorBackendInterface)
@@ -443,7 +450,7 @@ class StorageManager:
             memory_obj = backend.get_blocking(key)
             if memory_obj:
                 if (
-                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    backend_name not in ["LocalCPUBackend", "PDBackend", "MaruBackend"]
                     and "LocalCPUBackend" in self.storage_backends
                 ):
                     local_cpu_backend = self.storage_backends["LocalCPUBackend"]
@@ -487,7 +494,7 @@ class StorageManager:
                 # Align with single-key `get()` logic:
                 # auto-write remote data to local CPU cache
                 if (
-                    backend_name not in ["LocalCPUBackend", "PDBackend"]
+                    backend_name not in ["LocalCPUBackend", "PDBackend", "MaruBackend"]
                     and "LocalCPUBackend" in self.storage_backends
                     and None not in memory_objs
                 ):
@@ -977,7 +984,7 @@ class StorageManager:
             keys = keys[hit_chunks:]
         return block_mapping
 
-    def touch_cache(self):
+    def touch_cache(self) -> None:
         for backend_name, backend in self.storage_backends.items():
             if backend_name == "LocalCPUBackend" or backend_name == "LocalDiskBackend":
                 backend.touch_cache()
@@ -1220,7 +1227,9 @@ class StorageManager:
                 self.config,
                 self.metadata,
                 self.loop,
-                dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
+                dst_device=(
+                    torch_device_type if is_cuda_worker(self.metadata) else "cpu"
+                ),
                 lmcache_worker=self.lmcache_worker,
                 skip_backends=existing_names,
                 existing_backends=self.storage_backends,
@@ -1282,7 +1291,9 @@ class StorageManager:
                 self.config,
                 self.metadata,
                 self.loop,
-                dst_device=("cuda" if is_cuda_worker(self.metadata) else "cpu"),
+                dst_device=(
+                    torch_device_type if is_cuda_worker(self.metadata) else "cpu"
+                ),
                 lmcache_worker=self.lmcache_worker,
                 skip_backends=existing_names,
                 existing_backends=self.storage_backends,
@@ -1307,6 +1318,19 @@ class StorageManager:
                 self.local_cpu_backend = None
 
             return created
+
+    def cancel_request(self, req_id: str) -> None:
+        """
+        Cancel an in-flight or pending request.
+
+        Delegates to all storage backends. Backends that track per-request
+        state will cancel the request; others will no-op.
+
+        :param str req_id: The request identifier to cancel.
+        :return: None
+        """
+        for backend in self.storage_backends.values():
+            backend.cancel_request(req_id)
 
     def close(self):
         logger.info("Closing StorageManager...")

@@ -49,6 +49,58 @@ Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``
     # This should be turned on for better performance if most local CPU memory is used
     extra_config: {'use_odirect': True}
 
+
+Multi-Path (Multi-Device) Disk Offloading
+-----------------------------------------
+
+If you have **multiple NVMe devices** (or any independent mount points), you can
+assign each GPU its own disk path so that each device writes to a dedicated drive.
+
+Specify a **comma-separated list** of paths in ``local_disk``.
+Each path can optionally use the ``file://`` prefix.  The
+``local_disk_path_sharding`` option controls how each GPU worker selects its
+path.  Currently only ``"by_gpu"`` is supported (the default), which selects a
+path based on the device index (``device_id % num_paths``), so all KV cache
+files from a given GPU land on the same NVMe.  This is especially useful when
+GPUs and NVMe devices share a PCIe switch or NUMA node.
+
+For example, with two GPUs and two paths:
+
+- ``cuda:0`` → ``/mnt/nvme0/kvcache/``
+- ``cuda:1`` → ``/mnt/nvme1/kvcache/``
+
+``max_local_disk_size`` is the **total budget** shared across all paths.
+
+**Environment variable example:**
+
+.. code-block:: bash
+
+    export LMCACHE_LOCAL_DISK="file:///mnt/nvme0/kvcache/,file:///mnt/nvme1/kvcache/"
+    export LMCACHE_LOCAL_DISK_PATH_SHARDING="by_gpu"
+    export LMCACHE_MAX_LOCAL_DISK_SIZE=20.0   # combined budget (GB)
+
+**YAML example:**
+
+.. code-block:: yaml
+
+    local_disk: "/mnt/nvme0/kvcache/,/mnt/nvme1/kvcache/"
+    local_disk_path_sharding: "by_gpu"
+    max_local_disk_size: 20.0
+
+.. note::
+
+    Each GPU worker uses only its assigned path, so O_DIRECT alignment
+    is determined by that path's filesystem block size.  Different
+    devices may have different block sizes without issue.
+
+.. tip::
+
+    If you are able to use kernel-level RAID 0 (e.g. ``mdadm --level=0``)
+    you will get true block-level striping (even a single large file can
+    use bandwidth from both devices simultaneously).  The multi-path
+    feature is most useful when you cannot or do not want to reconfigure
+    the block devices — for example, when they already have other data.
+
 Local Storage Explanation:
 --------------------------
 

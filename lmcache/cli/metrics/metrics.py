@@ -88,6 +88,28 @@ class Metrics:
         self._section_map[key] = section
         return section
 
+    def add_list_section(self, group: str, key: str, label: str) -> Section:
+        """Add a section that belongs to a list group.
+
+        In terminal output, renders as a normal section with *label* as
+        the header. In JSON output, sections sharing the same *group*
+        are collected into a list: ``"group": [{...}, {...}]``.
+
+        Args:
+            group: The JSON key for the list (e.g., ``"models"``).
+            key: Unique machine key for this section instance.
+            label: Human-readable label (used in terminal output).
+
+        Returns:
+            The newly created ``Section``.
+        """
+        if key in self._section_map:
+            raise ValueError(f"Section {key!r} already exists")
+        section = Section(key, label, list_group=group)
+        self._sections.append(section)
+        self._section_map[key] = section
+        return section
+
     def __getitem__(self, key: str) -> Section:
         """Return the section registered under *key*.
 

@@ -95,14 +95,24 @@ spec:
   # If you don't use the Prometheus Operator, leave serviceMonitor.enabled=false
   # and use the pod annotations (prometheus.io/scrape, prometheus.io/port) instead.
 
-  # -- L2 storage backends (extensible, mirrors l2_adapters registry) --
-  # Note: the CLI expects a flat JSON with "type" as a peer key
-  # (e.g. --l2-adapter '{"type":"disk","path":"/data"}').
-  # The operator must merge {type} + config into a flat dict when
-  # serializing to container args.
-  l2Backends:
-    - type: string            # adapter type name (mock, disk, redis, s3, p2p)
-      config: map[string]any  # type-specific config as free-form map
+  # -- L2 storage backend (single adapter) --
+  # Currently only one L2 adapter is supported at a time.
+  # LMCache MP mode supports multiple adapters, but this is not yet
+  # fully tested. Once validated, the operator will support multiple.
+  # Exactly one of resp or raw must be set.
+  l2Backend:
+    # Option A: Native RESP (Redis/Valkey) adapter
+    resp:
+      host: string              # REQUIRED
+      port: int                 # REQUIRED, 1-65535
+      numWorkers: int           # default: 8
+      maxCapacityGB: float      # default: 0 (disabled)
+      authSecretRef:            # optional, Secret with "username"/"password" keys
+        name: string
+    # Option B: Raw escape hatch for other adapter types
+    raw:
+      type: string              # adapter type name (nixl_store, fs, mock, raw_block, etc.)
+      config: map[string]any    # type-specific config as free-form map
 
   # -- Resources (auto-computed, no user input needed) --
   # The operator derives resource requests/limits from l1.sizeGB:
@@ -144,11 +154,14 @@ spec:
 The operator always injects these into the pod spec:
 
 - **`hostIPC: true`** — **required for CUDA IPC between LMCache and vLLM.** LMCache uses `CudaIPCWrapper` which calls PyTorch's `_share_cuda_()` to get a GPU driver-level IPC handle. The handle is serialized and sent over ZMQ TCP. The receiving process reconstructs the tensor via `cudaIpcOpenMemHandle` at the driver level. This call requires both processes to share the same IPC namespace — without `hostIPC: true`, `cudaIpcOpenMemHandle` fails with `cudaErrorMapBufferObjectFailed`. **Both the LMCache pods and vLLM pods must have `hostIPC: true`.**
+- **`runtimeClassName: nvidia`** — uses the NVIDIA container runtime, which injects the host's NVIDIA driver libraries and device files into the container. This is required for CUDA to function inside the pod.
+- **`privileged: true`** (security context) — **required for GPU visibility without explicit GPU resource requests.** LMCache needs access to all GPUs on the node for CUDA IPC and custom data transfer kernels, but it must not claim any GPUs via `nvidia.com/gpu` resource requests (otherwise those GPUs would be unavailable to the serving engine). The combination of `runtimeClassName: nvidia` + `privileged: true` + `NVIDIA_VISIBLE_DEVICES=all` allows the container to see all GPUs without consuming device plugin resources. This means the serving engine (e.g., vLLM) can still request all GPUs on the node.
+- **`NVIDIA_VISIBLE_DEVICES=all`** and **`NVIDIA_DRIVER_CAPABILITIES=all`** — env vars that instruct the NVIDIA container runtime to expose all GPUs and all driver capabilities to the container.
 - **`--host 0.0.0.0`** — always passed as a container arg. The server defaults to `--host localhost` which only binds to loopback; the server must bind to all interfaces so the node-local Service can route traffic to it.
 - **No `hostNetwork`** — the operator does **not** use `hostNetwork`. Instead, it creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy ensures that traffic to the service is routed only to the LMCache pod on the same node. This avoids occupying host ports and reduces the privileged surface area.
 - **No `/dev/shm` emptyDir mount** — the operator intentionally does *not* mount an emptyDir at `/dev/shm`. With `hostIPC: true`, the container already sees the host's `/dev/shm`. Mounting an emptyDir would shadow the host's `/dev/shm` with a private tmpfs, breaking CUDA IPC (`cudaIpcOpenMemHandle` fails because IPC handles written by one pod are invisible to others). If your workload needs a larger `/dev/shm` for non-IPC purposes, add it via `spec.volumes` / `spec.volumeMounts`.
 
-> **Security implications of `hostIPC`:** This setting exposes the host's IPC namespace (System V IPC, POSIX message queues) to the container. This means any process in the container can interact with IPC resources from other processes on the same host. Only deploy in trusted environments. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace — the `baseline` and `restricted` profiles reject `hostIPC`.
+> **Security implications:** The LMCache pods run with `privileged: true` and `hostIPC: true`. This exposes the host's IPC namespace and grants full device access to the container. This is required for GPU visibility and CUDA IPC. Only deploy in trusted environments. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace — the `baseline` and `restricted` profiles reject these settings.
 
 ---
 
@@ -292,7 +305,7 @@ The ConfigMap uses the lookup Service's cluster DNS name. Because the Service ha
 In addition to the auto-managed pod settings above (`hostIPC`, `--host 0.0.0.0`),
 the operator injects:
 
-- Container command: `/opt/venv/bin/python3 -m lmcache.v1.multiprocess.server`
+- Container command: `/opt/venv/bin/lmcache server`
 - Container args: serialized from spec fields
 - Env: `LMCACHE_LOG_LEVEL` from `spec.logLevel`
 - Probes:
@@ -313,7 +326,7 @@ OnEvent(LMCacheEngine create/update/delete):
    - memoryLimit = ceil(memoryRequest * 1.5) Gi
    - containerArgs from all spec fields
 3. RECONCILE DaemonSet (CreateOrUpdate, ownerRef)
-   - Always inject: hostIPC, --host 0.0.0.0
+   - Always inject: hostIPC, runtimeClassName: nvidia, privileged: true, --host 0.0.0.0
 4. RECONCILE node-local lookup Service (internalTrafficPolicy=Local)
 5. RECONCILE headless Service for metrics
 6. RECONCILE connection ConfigMap
@@ -327,13 +340,25 @@ OnEvent(LMCacheEngine create/update/delete):
 
 **Secondary watches:** DaemonSet, Pods (readiness changes → update endpoints), Nodes (new GPU node → DaemonSet auto-schedules)
 
-**Finalizer** `lmcache.ai/cleanup`: on CR deletion, cascading delete of owned resources.
+**Deletion / cleanup**: every child resource the operator creates
+(DaemonSet, lookup Service, metrics Service, connection ConfigMap,
+managed RESP auth Secret, optional ServiceMonitor) carries an
+`ownerReference` to the LMCacheEngine, so Kubernetes garbage
+collection cascade-deletes them when the CR goes away. **No finalizer
+is used.** An earlier design added a `lmcache.ai/cleanup` finalizer
+to mirror that GC behavior, but it was a no-op that only created
+deadlocks when the controller pod was not running (e.g. during
+cluster issues or a single-step `kubectl delete -k config/default`).
+The reconciler now actively strips that legacy finalizer from any CR
+it sees, so migration from older operator versions is automatic.
+Finalizers will return when we need to clean up state K8s GC cannot
+reach (Redis L2 keys, federation deregistration, etc.).
 
 ---
 
 ## Future Extensibility
 
-- **L2 backends:** `l2Backends` uses free-form config maps matching the codebase's adapter registry pattern. New adapter types (disk, Redis, S3, P2P) need no CRD schema changes. The operator can create PVCs or inject Secret env vars based on type.
+- **L2 backends:** The RESP (Redis/Valkey) adapter is natively supported with typed CRD fields and Secret-based auth injection. Other adapter types (nixl_store, fs, mock, mooncake_store, raw_block) can be configured via the `raw` escape hatch. Currently only a single L2 adapter is supported at a time. LMCache MP mode is designed to support multiple adapters in cascade, but this is not yet fully tested — once validated, the operator will support multiple adapters.
 - **Blend mode:** Future `LMCacheEngine` field `blend.enabled` to switch entrypoint from `server.py` to `blend_server.py` (deferred from v1alpha1).
 - **Update strategy:** Future `spec.updateStrategy` field for `RollingUpdate`/`OnDelete` control on the DaemonSet.
 - **Additional CRDs:** `LMCacheKeyManager` (global key management), `LMCacheMonitor` (engine state monitoring), `LMCacheFederation` (cross-cluster P2P topology).
@@ -347,7 +372,7 @@ OnEvent(LMCacheEngine create/update/delete):
 | `lmcache/v1/distributed/config.py` | `L1MemoryManagerConfig`, `L1ManagerConfig`, `EvictionConfig`, `StorageManagerConfig`, argparse |
 | `lmcache/v1/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
 | `lmcache/v1/multiprocess/server.py` | `MPCacheEngine`, server CLI entry point, argparse (lines 629–653) |
-| `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/api/healthcheck` endpoint (FastAPI + ZMQ) |
+| `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/healthcheck` endpoint (FastAPI + ZMQ) |
 | `lmcache/v1/distributed/l2_adapters/config.py` | L2 adapter registry pattern, `L2AdapterConfigBase`, `L2AdaptersConfig` |
 | `examples/multi_process/lmcache-daemonset.yaml` | Reference DaemonSet manifest |
 | `examples/multi_process/vllm-deployment.yaml` | Reference vLLM deployment with kv-transfer-config |

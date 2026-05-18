@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import Any, cast
 import os
 
 # Third Party
 import pytest
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.config import LMCacheEngineConfig, load_ec_engine_config
 from lmcache.v1.config_base import apply_remote_configs, validate_and_set_config_value
 
 BASE_DIR = Path(__file__).parent
@@ -35,6 +36,58 @@ def check_extra_config(config: "LMCacheEngineConfig"):
     assert len(config.extra_config) == 2
     assert config.extra_config["key1"] == "value1"
     assert config.extra_config["key2"] == "value2"
+
+
+def test_load_ec_engine_config_prefixed_file_and_env_overrides(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config_path = tmp_path / "lmcache.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "chunk_size: 256",
+                "local_disk: /tmp/base-disk",
+                "max_local_disk_size: 2",
+                "ec_chunk_size: 1024",
+                "ec_local_disk: /tmp/ec-disk",
+                "ec_max_local_disk_size: 4",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("LMCACHE_CONFIG_FILE", str(config_path))
+    monkeypatch.setenv("LMCACHE_EC_CHUNK_SIZE", "1536")
+    monkeypatch.setenv("LMCACHE_EC_REMOTE_URL", "http://ec.example.com")
+
+    base_config = LMCacheEngineConfig.from_file(config_path)
+    ec_config = cast(Any, load_ec_engine_config(base_config=base_config))
+
+    assert base_config.chunk_size == 256
+    assert base_config.local_disk == "/tmp/base-disk"
+    assert base_config.max_local_disk_size == 2
+
+    assert ec_config.chunk_size == 1536
+    assert ec_config.local_disk == "/tmp/ec-disk"
+    assert ec_config.max_local_disk_size == 4
+    assert ec_config.remote_url == "http://ec.example.com"
+
+
+def test_load_ec_engine_config_applies_storage_defaults():
+    base_config = LMCacheEngineConfig.from_defaults(
+        enable_pd=False,
+        local_cpu=False,
+        max_local_cpu_size=0,
+        local_disk="/tmp/ec-disk",
+        max_local_disk_size=0,
+    )
+
+    ec_config = cast(Any, load_ec_engine_config(base_config=base_config))
+
+    assert ec_config.local_cpu is True
+    assert ec_config.max_local_cpu_size == 1
+    assert ec_config.max_local_disk_size == 64
 
 
 def test_update_config_from_env_basic():
@@ -683,6 +736,60 @@ class TestValidateAndSetConfigValueTypeConversion:
         assert result is False
 
 
+def test_lmcache_get_or_create_config_validates_pd_settings():
+    # First Party
+    from lmcache.integration.vllm.utils import lmcache_get_or_create_config
+    import lmcache.integration.vllm.utils as vllm_utils
+
+    os.environ["LMCACHE_ENABLE_PD"] = "true"
+    os.environ["LMCACHE_PD_ROLE"] = "sender"
+    os.environ["LMCACHE_PD_BUFFER_SIZE"] = "1024"
+    os.environ["LMCACHE_PD_BUFFER_DEVICE"] = "cpu"
+    os.environ.pop("LMCACHE_CONFIG_FILE", None)
+    os.environ.pop("LMCACHE_SAVE_UNFULL_CHUNK", None)
+
+    # Reset singleton so we get a fresh config
+    old_instance = vllm_utils._config_instance
+    vllm_utils._config_instance = None
+
+    try:
+        config = lmcache_get_or_create_config()
+        assert config.save_unfull_chunk is True, (
+            "validate() was not called — save_unfull_chunk should be "
+            "auto-set to True for P/D mode"
+        )
+    finally:
+        vllm_utils._config_instance = old_instance
+        del os.environ["LMCACHE_ENABLE_PD"]
+        del os.environ["LMCACHE_PD_ROLE"]
+        del os.environ["LMCACHE_PD_BUFFER_SIZE"]
+        del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
+
+
+def test_sglang_lmcache_get_config_validates_pd_settings():
+    # First Party
+    from lmcache.integration.sglang.utils import lmcache_get_config
+
+    os.environ["LMCACHE_ENABLE_PD"] = "true"
+    os.environ["LMCACHE_PD_ROLE"] = "sender"
+    os.environ["LMCACHE_PD_BUFFER_SIZE"] = "1024"
+    os.environ["LMCACHE_PD_BUFFER_DEVICE"] = "cpu"
+    os.environ.pop("LMCACHE_CONFIG_FILE", None)
+    os.environ.pop("LMCACHE_SAVE_UNFULL_CHUNK", None)
+
+    try:
+        config = lmcache_get_config()
+        assert config.save_unfull_chunk is True, (
+            "validate() was not called — save_unfull_chunk should be "
+            "auto-set to True for P/D mode"
+        )
+    finally:
+        del os.environ["LMCACHE_ENABLE_PD"]
+        del os.environ["LMCACHE_PD_ROLE"]
+        del os.environ["LMCACHE_PD_BUFFER_SIZE"]
+        del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
+
+
 def test_update_config_from_env_calls_validate():
     """Test that update_config_from_env() calls validate() method.
 
@@ -715,3 +822,64 @@ def test_update_config_from_env_calls_validate():
         del os.environ["LMCACHE_PD_BUFFER_SIZE"]
         del os.environ["LMCACHE_PD_BUFFER_DEVICE"]
         del os.environ["LMCACHE_SAVE_UNFULL_CHUNK"]
+
+
+class TestControllerConfigValidation:
+    """Test validation of required controller fields when enable_controller=True."""
+
+    def _make_controller_config(self, **overrides):
+        """Create a config with controller enabled and all required fields set.
+
+        Override specific fields to None to test individual validation checks.
+        Note: lmcache_instance_id is auto-generated in __post_init__ if None,
+        so we set it after construction to test the validation path.
+        """
+        defaults = dict(
+            enable_controller=True,
+            controller_pull_url="tcp://localhost:5555",
+            controller_reply_url="tcp://localhost:5556",
+            lmcache_worker_ports=[8000],
+        )
+        # lmcache_instance_id must be set after construction because
+        # __post_init__ auto-generates it when None
+        instance_id = overrides.pop("lmcache_instance_id", "instance-1")
+        defaults.update(overrides)
+        config = LMCacheEngineConfig.from_defaults(**defaults)
+        config.lmcache_instance_id = instance_id
+        return config
+
+    def test_controller_requires_lmcache_instance_id(self):
+        config = self._make_controller_config(lmcache_instance_id=None)
+        with pytest.raises(ValueError, match="lmcache_instance_id"):
+            config.validate()
+
+    def test_controller_requires_controller_pull_url(self):
+        config = self._make_controller_config(controller_pull_url=None)
+        with pytest.raises(ValueError, match="controller_pull_url"):
+            config.validate()
+
+    def test_controller_requires_controller_reply_url(self):
+        config = self._make_controller_config(controller_reply_url=None)
+        with pytest.raises(ValueError, match="controller_reply_url"):
+            config.validate()
+
+    def test_controller_requires_lmcache_worker_ports(self):
+        config = self._make_controller_config(lmcache_worker_ports=None)
+        with pytest.raises(ValueError, match="lmcache_worker_ports"):
+            config.validate()
+
+    def test_controller_rejects_empty_worker_ports(self):
+        config = self._make_controller_config(lmcache_worker_ports=[])
+        with pytest.raises(ValueError, match="cannot be empty"):
+            config.validate()
+
+    def test_controller_valid_config_no_error(self):
+        config = self._make_controller_config()
+        config.validate()  # Should not raise
+
+    def test_controller_disabled_no_error(self):
+        config = LMCacheEngineConfig.from_defaults(
+            enable_controller=False,
+        )
+        # All controller fields are None by default; should not raise
+        config.validate()

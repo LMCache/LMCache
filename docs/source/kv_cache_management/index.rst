@@ -18,7 +18,7 @@ The LMCache Worker is a thread within a rank process, which is responsible for t
 - send chunk information to the KV Controller, which include admit and evict message.
 - listens on a port to receive commands from the Cluster Executor and performs corresponding processing.
 
-.. image:: ../../assets/lmcache-controller.png
+.. image:: /assets/lmcache-controller.png
     :alt: LMCache Controller Architecture Diagram
 
 P2P Related

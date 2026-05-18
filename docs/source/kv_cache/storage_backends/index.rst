@@ -11,10 +11,13 @@ Supported Backends
 
    cpu_ram
    custom_backend
+   dax
    eic
    gds
+   hfbucket
    infinistore
    local_storage
+   maru
    mock
    mooncake
    nixl
@@ -24,6 +27,7 @@ Supported Backends
    sagemaker_hyperpod
    valkey
    weka
+   3fs
    
    
   

@@ -58,10 +58,10 @@ class L1ManagerConfig:
 @dataclass
 class EvictionConfig:
     """
-    The configuration for eviction policies.
+    The configuration for eviction policies (L1 and optionally L2).
     """
 
-    eviction_policy: Literal["LRU", "noop"]
+    eviction_policy: Literal["LRU", "IsolatedLRU", "noop"]
     """ The eviction policy to use. """
 
     trigger_watermark: float = field(default=0.8)
@@ -93,6 +93,9 @@ class StorageManagerConfig:
 
     prefetch_policy: str = "default"
     """ The L2 prefetch policy name. """
+
+    prefetch_max_in_flight: int = 8
+    """ Maximum number of concurrent prefetch requests. """
 
 
 def add_storage_manager_args(
@@ -173,9 +176,11 @@ def add_storage_manager_args(
     eviction_group.add_argument(
         "--eviction-policy",
         type=str,
-        choices=["LRU", "noop"],
+        choices=["LRU", "IsolatedLRU", "noop"],
         required=True,
-        help="The eviction policy to use ('LRU' or 'noop').",
+        help="The eviction policy to use ('LRU', 'IsolatedLRU', or 'noop'). "
+        "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
+        "quotas keyed by cache_salt to be configured via the HTTP API.",
     )
     eviction_group.add_argument(
         "--eviction-trigger-watermark",
@@ -226,6 +231,12 @@ def add_storage_manager_args(
         help="L2 prefetch policy. Determines which adapter loads each key "
         "when multiple adapters have it. "
         "Default is 'default' (pick the first adapter by index).",
+    )
+    policy_group.add_argument(
+        "--l2-prefetch-max-in-flight",
+        type=int,
+        default=8,
+        help="Maximum number of concurrent prefetch requests. Default is 8.",
     )
 
     # Adapter config
@@ -290,6 +301,7 @@ def parse_args_to_config(
         l2_adapter_config=l2_adapter_config,
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
+        prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
     )
 
 

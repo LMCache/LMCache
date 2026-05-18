@@ -16,7 +16,11 @@ import torch
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import CuFileMemoryAllocator, MemoryFormat
+from lmcache.v1.memory_management import (
+    CuFileMemoryAllocator,
+    HipFileMemoryAllocator,
+    MemoryFormat,
+)
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.gds_backend import pack_metadata, unpack_metadata
 
@@ -63,7 +67,7 @@ def test_gds_backend_sanity():
     try:
         os.makedirs(GDS_DIR, exist_ok=True)
         config_gds = LMCacheEngineConfig.from_file(BASE_DIR / "data/gds.yaml")
-        assert config_gds.cufile_buffer_size == 128
+        assert config_gds.gds_buffer_size == 128
 
         thread_loop = asyncio.new_event_loop()
         thread = threading.Thread(target=thread_loop.run_forever)
@@ -81,7 +85,10 @@ def test_gds_backend_sanity():
         gds_backend = backends[BACKEND_NAME]
         assert gds_backend is not None
         assert gds_backend.memory_allocator is not None
-        assert isinstance(gds_backend.memory_allocator, CuFileMemoryAllocator)
+        assert isinstance(
+            gds_backend.memory_allocator,
+            (CuFileMemoryAllocator, HipFileMemoryAllocator),
+        )
 
         assert not gds_backend.contains(TEST_KEY, False)
         assert not gds_backend.exists_in_put_tasks(TEST_KEY)

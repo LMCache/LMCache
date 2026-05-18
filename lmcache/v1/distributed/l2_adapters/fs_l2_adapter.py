@@ -42,10 +42,15 @@ from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
 _KEY_SEP = "@"
+# ``@`` in both ``model_name`` and ``cache_salt`` is rejected by
+# ObjectKey.__post_init__, so splitting on ``@`` is unambiguous.
+# Kept in sync with native_connector_l2_adapter.py and
+# csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
 
@@ -92,21 +97,27 @@ async def _async_readinto_full(
 def _object_key_to_filename(key: ObjectKey) -> str:
     """Build a reversible, filesystem-safe filename.
 
-    Format follows CacheEngineKey.to_string() convention::
+    Unsalted::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>.data
+        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+
+    Salted (trailing ``cache_salt``)::
+
+        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
+
+    The 3-field unsalted shape is bit-identical to the pre-cache_salt
+    format, so existing un-salted cache directories remain valid and
+    no migration is needed.
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
     is directly readable.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
-    return (
-        f"{safe_model}"
-        f"{_KEY_SEP}{key.kv_rank:#010x}"
-        f"{_KEY_SEP}{key.chunk_hash.hex()}"
-        f"{_FILE_EXT}"
-    )
+    base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    if key.cache_salt:
+        return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
+    return f"{base}{_FILE_EXT}"
 
 
 def _filename_to_object_key(
@@ -114,35 +125,40 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
-    Returns ``None`` when the filename cannot be parsed.
+    Accepts both the 3-field unsalted shape and the 4-field salted
+    shape (trailing ``cache_salt``). Returns ``None`` for anything
+    else. Since ``model_name`` is guaranteed not to contain ``@``,
+    plain ``split`` suffices — no marker, no rsplit.
     """
-    stem = filename
-    if stem.endswith(_FILE_EXT):
-        stem = stem[: -len(_FILE_EXT)]
+    if not filename.endswith(_FILE_EXT):
+        return None
+    stem = filename[: -len(_FILE_EXT)]
+    parts = stem.split(_KEY_SEP)
+    if len(parts) == 3:
+        safe_model, kv_rank_str, chunk_hash_hex = parts
+        cache_salt = ""
+    elif len(parts) == 4:
+        safe_model, kv_rank_str, chunk_hash_hex, cache_salt = parts
     else:
         return None
 
-    # Split by ``@``.  Layout:
-    #   <model_name> @ <kv_rank> @ <chunk_hash_hex>
-    # model_name itself may contain ``@``, so we split
-    # from the right to reliably isolate the last two
-    # fields (kv_rank and chunk_hash).
-    parts = stem.rsplit(_KEY_SEP, 2)
-    if len(parts) != 3:
-        return None
-
-    safe_model, kv_rank_str, chunk_hash_hex = parts
+    model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
     try:
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
+        # ObjectKey.__post_init__ raises ValueError when the decoded
+        # model_name / cache_salt violate the forbidden-char or length
+        # invariants (e.g. a stray file from another tool on disk).
+        # The contract here is to return None for anything unparsable,
+        # so keep the constructor inside the try block.
+        return ObjectKey(
+            chunk_hash=chunk_hash,
+            model_name=model_name,
+            kv_rank=kv_rank,
+            cache_salt=cache_salt,
+        )
     except ValueError:
         return None
-    model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
-    return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-    )
 
 
 class FSL2AdapterConfig(L2AdapterConfigBase):
@@ -235,6 +251,7 @@ class FSL2Adapter(L2AdapterInterface):
     """
 
     def __init__(self, config: FSL2AdapterConfig):
+        super().__init__()
         self._config = config
         base = config.base_path
         self._base_path = Path(base)
@@ -263,13 +280,18 @@ class FSL2Adapter(L2AdapterInterface):
             stat = os.statvfs(self._base_path)
             self._os_disk_bs = stat.f_bsize
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
         self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        # Bytes actually written per completed store task.  Excludes
+        # duplicate-key fast-paths (see ``_execute_store``).  Reported to
+        # the L2 throughput subscriber via ``pop_completed_store_task_bytes``
+        # so the histogram reflects real disk I/O, not skipped no-ops.
+        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -294,13 +316,13 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     # ------------------------------------------------------------------
     # Store Interface
@@ -327,6 +349,12 @@ class FSL2Adapter(L2AdapterInterface):
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
+
+    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
+        with self._lock:
+            completed_bytes = self._completed_store_task_bytes
+            self._completed_store_task_bytes = {}
+        return completed_bytes
 
     # ------------------------------------------------------------------
     # Lookup and Lock Interface
@@ -388,6 +416,20 @@ class FSL2Adapter(L2AdapterInterface):
         }
 
     # ------------------------------------------------------------------
+    # Eviction Interface
+    # ------------------------------------------------------------------
+
+    def delete(self, keys: list[ObjectKey]) -> None:
+        # Not implemented for the filesystem adapter.
+        pass
+
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The FS
+    # adapter declares no max capacity (default 0) so ``supports_global_eviction``
+    # returns ``False`` and ``usage_fraction == -1.0`` — the eviction
+    # controller treats this as "no eviction signal" and skips the
+    # adapter entirely.
+
+    # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
@@ -412,10 +454,11 @@ class FSL2Adapter(L2AdapterInterface):
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._loop_thread.join()
+        self._loop.close()
 
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
         logger.info("FSL2Adapter closed")
 
     # ------------------------------------------------------------------
@@ -536,6 +579,7 @@ class FSL2Adapter(L2AdapterInterface):
         task_id: L2TaskId,
     ) -> None:
         success = True
+        bytes_written = 0
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -574,6 +618,7 @@ class FSL2Adapter(L2AdapterInterface):
                             await f.write(buf)
 
                     await aiofiles.os.replace(tmp_path, file_path)
+                    bytes_written += size
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -596,7 +641,8 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = success
-        os.eventfd_write(self._store_efd, 1)
+            self._completed_store_task_bytes[task_id] = bytes_written
+        self._store_efd.notify()
 
     # ---- lookup ---------------------------------------------------------
 
@@ -613,7 +659,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
     # ---- load -----------------------------------------------------------
 
@@ -700,7 +746,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()
 
 
 # Self-register config type and adapter factory

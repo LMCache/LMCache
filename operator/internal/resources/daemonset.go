@@ -34,6 +34,14 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	podLabels := MergeLabels(StandardLabels(engine.Name), spec.PodLabels)
 	podAnnotations := spec.PodAnnotations
 
+	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
+	var runtimeClassName *string
+	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
+		rc := "nvidia"
+		runtimeClassName = &rc
+	}
+	privileged := true
+
 	serverPort := derefInt32(getServerPort(spec), 5555)
 	imgRepo := "lmcache/vllm-openai"
 	imgTag := "latest"
@@ -52,19 +60,58 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	}
 
 	// Build env vars
-	envVars := make([]corev1.EnvVar, 0, 2+len(spec.Env))
+	envVars := make([]corev1.EnvVar, 0, 5+len(spec.Env))
 	envVars = append(envVars,
 		corev1.EnvVar{
 			Name:  "LMCACHE_LOG_LEVEL",
 			Value: derefString(spec.LogLevel, "INFO"),
 		},
-		corev1.EnvVar{
-			// Expose all GPUs without consuming device plugin resources.
-			// LMCache needs GPU visibility for CUDA IPC, not compute ownership.
-			Name:  "NVIDIA_VISIBLE_DEVICES",
-			Value: "all",
-		},
 	)
+	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
+		// Expose all GPUs without consuming device plugin resources.
+		// LMCache needs GPU visibility for CUDA IPC, not compute ownership.
+		envVars = append(envVars,
+			corev1.EnvVar{
+				Name:  "NVIDIA_VISIBLE_DEVICES",
+				Value: "all",
+			},
+			corev1.EnvVar{
+				Name:  "NVIDIA_DRIVER_CAPABILITIES",
+				Value: "all",
+			},
+		)
+	}
+	// Inject RESP auth credentials from Secret as env vars so they
+	// don't appear in container args or kubectl describe output.
+	// The DaemonSet references the local (same-namespace) managed copy
+	// created by the controller via reconcileRESPAuthSecret.
+	if spec.L2Backend != nil && spec.L2Backend.RESP != nil && spec.L2Backend.RESP.AuthSecretRef != nil {
+		secretName := RESPAuthSecretName(engine.Name)
+		optional := true
+		envVars = append(envVars,
+			corev1.EnvVar{
+				Name: "LMCACHE_RESP_PASSWORD",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "password",
+					},
+				},
+			},
+			corev1.EnvVar{
+				// Optional: if the managed secret has no "username" key
+				// (password-only auth), this env var is simply not set.
+				Name: "LMCACHE_RESP_USERNAME",
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  "username",
+						Optional:             &optional,
+					},
+				},
+			},
+		)
+	}
 	envVars = append(envVars, spec.Env...)
 
 	// No emptyDir /dev/shm mount — hostIPC: true exposes the host's /dev/shm
@@ -73,7 +120,13 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	volumes := append([]corev1.Volume{}, spec.Volumes...)
 	volumeMounts := append([]corev1.VolumeMount{}, spec.VolumeMounts...)
 
-	// Build container args
+	// Build container args. Auth credentials are handled via env vars
+	// (LMCACHE_RESP_USERNAME / LMCACHE_RESP_PASSWORD) injected above,
+	// so no shell wrapper is needed.
+	containerCommand := []string{
+		"/opt/venv/bin/lmcache",
+		"server",
+	}
 	containerArgs := BuildContainerArgs(spec)
 
 	// Probes
@@ -105,10 +158,16 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	}
 
 	// Container ports
+	httpPort := getHTTPPort(spec)
 	containerPorts := []corev1.ContainerPort{
 		{
 			Name:          "server",
 			ContainerPort: serverPort,
+			Protocol:      corev1.ProtocolTCP,
+		},
+		{
+			Name:          "http",
+			ContainerPort: httpPort,
 			Protocol:      corev1.ProtocolTCP,
 		},
 	}
@@ -145,6 +204,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 				},
 				Spec: corev1.PodSpec{
 					HostIPC:            true,
+					RuntimeClassName:   runtimeClassName,
 					ServiceAccountName: spec.ServiceAccountName,
 					PriorityClassName:  spec.PriorityClassName,
 					NodeSelector:       spec.NodeSelector,
@@ -156,15 +216,18 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 							Name:            "lmcache",
 							Image:           fmt.Sprintf("%s:%s", imgRepo, imgTag),
 							ImagePullPolicy: imgPullPolicy,
-							Command:         []string{"/opt/venv/bin/python3", "-m", "lmcache.v1.multiprocess.server"},
+							Command:         containerCommand,
 							Args:            containerArgs,
 							Ports:           containerPorts,
 							Env:             envVars,
 							Resources:       ComputeResources(spec),
-							VolumeMounts:    volumeMounts,
-							StartupProbe:    startupProbe,
-							LivenessProbe:   livenessProbe,
-							ReadinessProbe:  readinessProbe,
+							SecurityContext: &corev1.SecurityContext{
+								Privileged: &privileged,
+							},
+							VolumeMounts:   volumeMounts,
+							StartupProbe:   startupProbe,
+							LivenessProbe:  livenessProbe,
+							ReadinessProbe: readinessProbe,
 						},
 					},
 					Volumes: volumes,
