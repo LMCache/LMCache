@@ -13,7 +13,7 @@
 │        └──────────────────┴──────────────────┘                  │
 │                           │                                     │
 │                     torch_dev (unified entry)                   │
-│                     torch_device_type ("cuda"/"xpu"/"hpu")      │
+│                  torch_device_type ("cuda"/"xpu"/"hpu"/"cpu")   │
 │                                                                 │
 │  [Monkey Patch Point]                                           │
 │  New hardware can be added by extending _detect_device()        │
@@ -93,7 +93,39 @@
 torch_device_type == "cuda"  -->  VLLMPagedMemGPUConnectorV2/V3
 torch_device_type == "xpu"   -->  VLLMPagedMemXPUConnectorV2
 torch_device_type == "hpu"   -->  VLLMPagedMemHPUConnector
+torch_device_type == "cpu"   -->  (no GPU connector; raises RuntimeError)
 ```
+
+## CPU-Only Stub Fallback
+
+`_detect_device()` also accepts a CPU-only environment where none of the
+supported accelerators (CUDA, XPU, HPU) is available. In that case
+`torch_device_type` is `"cpu"` and `torch_dev` is either:
+
+- `lmcache.v1.platform.cpu.stub_cpu_device.StubCPUDevice` — when `torch`
+  is importable but no GPU is detected. The stub implements the subset of
+  the `torch.cuda` / `torch.xpu` / `torch.hpu` surface used by the middle
+  layer (`Event`, `Stream`, `device`, `synchronize`, `set_device`,
+  `current_device`, `device_count`, `get_device_properties`,
+  `empty_cache`), as no-op or constant returns. `is_available()` is
+  `False`, so any `hasattr(torch_dev, 'xxx')` consumer that gates on the
+  real device's availability stays on the degraded path.
+- `None` — when `torch` itself is not importable (the `lmcache-cli`
+  slim install). The CLI surface (`lmcache ping`, `lmcache describe`,
+  `lmcache query`, `lmcache bench engine`) tolerates this; engine and
+  storage paths do not.
+
+The stub is intended for L1-adapter-only flows (e.g., end-to-end MP
+server smoke tests on a CPU-only host) and CLI loading without torch. It
+is **not** a CPU connector: there is no entry for `"cpu"` in
+`gpu_connector/__init__.py`, so calling `CreateGPUConnector` with
+`torch_device_type == "cpu"` raises `RuntimeError("No supported cpu
+connector found.")`.
+
+`normalize_kv_and_discover_format` also hardcodes `kv_layout = "HND"`
+when `torch_device_type == "cpu"`, because vLLM's
+`get_kv_cache_layout()` reports `NHD` for its CPU attention backend
+which is wrong for that backend's actual KV cache layout.
 
 ## Adding New Hardware
 
