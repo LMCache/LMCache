@@ -14,6 +14,7 @@ from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.gds_l1 import GdsL1Backend
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
@@ -179,12 +180,29 @@ class L1Manager:
     _gauge_registered: bool = False
     _gauge_target: "L1Manager | None" = None
 
-    def __init__(self, config: L1ManagerConfig):
+    def __init__(
+        self,
+        config: L1ManagerConfig,
+        gds_backend: GdsL1Backend | None = None,
+    ):
+        """Initialise the L1 manager.
+
+        Args:
+            config: L1 lock/TTL/memory configuration.
+            gds_backend: Optional GDS L1 backend. When provided,
+                ``reserve_read`` synthesises L1 entries from
+                ``gds_backend``'s hot index on miss (fill-on-miss),
+                ``get_memory_usage`` reports disk usage instead of
+                pinned-slab usage, and ``close`` shuts the backend
+                down too. When ``None`` (default), the CPU-pinned
+                path runs byte-for-byte unchanged.
+        """
         self._lock = threading.Lock()
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
         self._memory_manager = L1MemoryManager(config.memory_config)
+        self._gds_backend = gds_backend
 
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
@@ -255,8 +273,14 @@ class L1Manager:
         for key in keys:
             entry = self._objects.get(key, None)
             if entry is None:
-                ret[key] = (L1Error.KEY_NOT_EXIST, None)
-                continue
+                # GDS L1 fill-on-miss: if the key is durably resident
+                # on disk, synthesise an L1 entry for it. The cuFile
+                # read happens later via gpu_ops dispatch when the
+                # caller does the H2D copy, so no async fill is needed.
+                entry = self._try_gds_fill_on_miss_locked(key)
+                if entry is None:
+                    ret[key] = (L1Error.KEY_NOT_EXIST, None)
+                    continue
 
             if not entry.available_for_read():
                 ret[key] = (L1Error.KEY_NOT_READABLE, None)
@@ -768,6 +792,36 @@ class L1Manager:
             locked_count,
         )
 
+    def _try_gds_fill_on_miss_locked(self, key: ObjectKey) -> L1ObjectState | None:
+        """If GDS L1 has ``key`` resident on disk, synthesise an L1 entry.
+
+        Called from ``reserve_read`` under ``self._lock`` when an
+        in-memory miss occurs. Returns the newly inserted
+        ``L1ObjectState`` (with the read lock NOT yet acquired — the
+        caller does that), or ``None`` if ``key`` is not durably
+        resident.
+
+        The cuFile read is intentionally not performed here: the data
+        path itself (``lmcache_memcpy_async_h2d`` -> gpu_ops dispatch
+        -> ``cufile.read``) is the fill, so we just need to make the
+        ``GdsMemoryObj`` reachable through ``_objects`` so that the
+        scatter kernel that follows the H2D copy reads from the
+        correct staging slot.
+        """
+        if self._gds_backend is None:
+            return None
+        gds_obj = self._gds_backend.create_memory_obj_from_index(key)
+        if gds_obj is None:
+            return None
+        new_entry = L1ObjectState(
+            memory_obj=gds_obj,
+            write_lock=TTLLock(self._write_ttl_seconds),
+            read_lock=TTLLock(self._read_ttl_seconds),
+            is_temporary=False,
+        )
+        self._objects[key] = new_entry
+        return new_entry
+
     def is_key_evictable(self, key: ObjectKey) -> bool:
         """Check if a key is eligible for eviction (not locked).
 
@@ -791,16 +845,30 @@ class L1Manager:
         """Get the current memory usage of L1 cache.
 
         Returns:
-            A tuple of (used_memory_bytes, total_memory_bytes).
+            A tuple of (used_memory_bytes, total_memory_bytes). When a
+            GDS L1 backend is attached, this reports disk usage instead
+            of pinned-slab usage — the eviction controller already
+            consumes ``(used, total)`` agnostically, so swapping the
+            signal source is transparent to it.
 
         Note:
             In the future, we many want to make a "callback" based mechanism
             via "L1ManagerListener" to notify the memory usage changes.
         """
+        if self._gds_backend is not None:
+            return self._gds_backend.get_memory_usage()
         return self._memory_manager.get_memory_usage()
 
     def get_l1_memory_desc(self):
-        """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
+        """Return an L1MemoryDesc describing the underlying L1 memory buffer.
+
+        When a GDS L1 backend is attached, this still returns the
+        pinned-slab desc. NIXL co-tenancy with GDS L1 is an open
+        question (see gds_l1_backend.md §Open questions); until that
+        is resolved, callers that need a registered VRAM pointer for
+        external use should consult ``gds_backend.scratch_allocator``
+        directly rather than relying on this method.
+        """
         return self._memory_manager.get_l1_memory_desc()
 
     def close(self) -> None:
@@ -811,6 +879,8 @@ class L1Manager:
             self._objects.clear()
 
         self._memory_manager.close()
+        if self._gds_backend is not None:
+            self._gds_backend.close()
 
     # Status reporting
     @l1_mgr_synchronized

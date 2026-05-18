@@ -17,6 +17,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.distributed.gds_l1 import GdsScratchAllocator
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
@@ -70,6 +71,7 @@ class GPUCacheContext:
         lmcache_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
         engine_type: EngineType = EngineType.VLLM,
+        gds_scratch_allocator: GdsScratchAllocator | None = None,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         self.gpu_kv_format_, self.kv_caches_ = normalize_kv_and_discover_format(
@@ -140,6 +142,15 @@ class GPUCacheContext:
             dtype=torch.uint8,
             device=self.device_,
         )
+
+        # GDS L1: register tmp_gpu_buffer_ with cuFile so cuFile.read/write
+        # can DMA between disk and this staging buffer without a CPU bounce.
+        # The allocator hard-errors here if the buffer is not 4 KiB aligned;
+        # with the default lmcache_chunk_size=256 and typical model dims the
+        # constraint holds. Deregistration happens at GdsL1Backend.close().
+        self.gds_scratch_allocator_ = gds_scratch_allocator
+        if gds_scratch_allocator is not None:
+            gds_scratch_allocator.register_gpu_buffer(self.tmp_gpu_buffer_)
 
         # Cuda streams
         self.cuda_stream_ = torch.cuda.Stream(device=self.device_)
