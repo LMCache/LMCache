@@ -142,16 +142,11 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     groups = gpu_context.kv_layer_groups_manager.kv_layer_groups
     shapes: list[torch.Size] = []
     for group_idx in range(num_groups):
-        group = groups[group_idx]
-        if (
-            group.sliding_window > 0
-            and num_tokens == gpu_context.lmcache_logical_chunk_size
-        ):
-            # SWA-suffix path: the MemoryObj for this chunk holds only
-            # the trailing ``bpc_g * logical_bs_g`` logical tokens.
-            logical_tokens_g = (
-                gpu_context.blocks_per_chunk(group_idx) * group.logical_block_size
-            )
+        if num_tokens == gpu_context.lmcache_logical_chunk_size:
+            # Chunked store/retrieve hot path: use the per-group
+            # storage logical-token count, which is the SWA-truncated
+            # value for SWA groups and the full chunk otherwise.
+            logical_tokens_g = gpu_context.storage_logical_tokens_per_chunk(group_idx)
             shapes.append(gpu_context.get_kv_buffer_shape(logical_tokens_g, group_idx))
         else:
             shapes.append(gpu_context.get_kv_buffer_shape(num_tokens, group_idx))
