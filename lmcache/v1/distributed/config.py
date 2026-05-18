@@ -72,6 +72,41 @@ class EvictionConfig:
 
 
 @dataclass
+class GdsL1Config:
+    """Configuration for the GDS L1 backend.
+
+    Carried inside :class:`StorageManagerConfig` and consumed by
+    ``GdsL1Backend``. ``StorageManager`` constructs the backend only
+    when ``StorageManagerConfig.gds_l1_config`` is non-``None``; the
+    CPU-pinned L1 path runs unchanged otherwise.
+    """
+
+    gds_path: str
+    """Comma-separated root path(s) for the on-disk cache. Per-worker
+    sharding is applied by ``PathSharder``."""
+
+    gds_path_sharding: Literal["by_gpu"] = "by_gpu"
+    """Path-sharding strategy. ``by_gpu`` picks
+    ``paths[device_id % len(paths)]``."""
+
+    use_gds: bool = True
+    """If ``False``, fall back to POSIX (``mmap`` + ``cudaMemcpy``)."""
+
+    use_direct_io: bool = False
+    """Pass ``O_DIRECT`` through cuFile when opening files."""
+
+    io_threads: int = 4
+    """Thread pool size for cuFile read/write calls."""
+
+    handle_cache_size: int = 1024
+    """LRU capacity for the ``CuFileHandleCache``."""
+
+    disk_max_bytes: int = 0
+    """Advertised disk capacity for the L1 eviction signal. ``0`` means
+    "no global eviction" — disk grows unbounded until external cleanup."""
+
+
+@dataclass
 class StorageManagerConfig:
     """
     The configuration for the distributed storage manager.
@@ -96,6 +131,13 @@ class StorageManagerConfig:
 
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
+
+    gds_l1_config: GdsL1Config | None = None
+    """Optional GDS L1 backend. When set, ``StorageManager`` builds a
+    ``GdsL1Backend`` and attaches it to ``L1Manager`` as
+    ``gds_backend``; ``MPCacheEngine`` then routes ``GPUCacheContext``
+    construction through the backend's scratch allocator. When
+    ``None`` (default), the CPU-pinned L1 path runs unchanged."""
 
 
 def add_storage_manager_args(
@@ -239,6 +281,60 @@ def add_storage_manager_args(
         help="Maximum number of concurrent prefetch requests. Default is 8.",
     )
 
+    # GDS L1 backend (optional, opt-in via --gds-l1-path)
+    gds_l1_group = parser.add_argument_group(
+        "GDS L1 backend",
+        "Configuration for the GDS L1 backend. Setting --gds-l1-path "
+        "enables GDS L1: the L1 medium becomes NVMe disk via cuFile DMA "
+        "into the existing GPU staging buffer. Disable byte-array L2 "
+        "adapters when this is on.",
+    )
+    gds_l1_group.add_argument(
+        "--gds-l1-path",
+        type=str,
+        default=None,
+        help="Comma-separated NVMe path(s) for the GDS L1 disk layer. "
+        "Setting this enables GDS L1.",
+    )
+    gds_l1_group.add_argument(
+        "--gds-l1-path-sharding",
+        type=str,
+        choices=["by_gpu"],
+        default="by_gpu",
+        help="Path-sharding strategy across multiple gds-l1-path entries.",
+    )
+    gds_l1_group.add_argument(
+        "--gds-l1-use-gds",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If False, fall back to POSIX (mmap + cudaMemcpy).",
+    )
+    gds_l1_group.add_argument(
+        "--gds-l1-use-direct-io",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Open files with O_DIRECT via cuFile.",
+    )
+    gds_l1_group.add_argument(
+        "--gds-l1-io-threads",
+        type=int,
+        default=4,
+        help="Thread pool size for cuFile read/write calls. Default 4.",
+    )
+    gds_l1_group.add_argument(
+        "--gds-l1-handle-cache-size",
+        type=int,
+        default=1024,
+        help="LRU capacity for the cuFile handle cache. Default 1024.",
+    )
+    gds_l1_group.add_argument(
+        "--gds-l1-disk-max-bytes",
+        type=int,
+        default=0,
+        help="Advertised disk capacity for the L1 eviction signal in bytes. "
+        "0 means no global eviction (unbounded disk).",
+    )
+
     # Adapter config
     add_l2_adapters_args(parser)
     return parser
@@ -295,6 +391,18 @@ def parse_args_to_config(
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
+    gds_l1_config: GdsL1Config | None = None
+    if getattr(args, "gds_l1_path", None):
+        gds_l1_config = GdsL1Config(
+            gds_path=args.gds_l1_path,
+            gds_path_sharding=args.gds_l1_path_sharding,
+            use_gds=args.gds_l1_use_gds,
+            use_direct_io=args.gds_l1_use_direct_io,
+            io_threads=args.gds_l1_io_threads,
+            handle_cache_size=args.gds_l1_handle_cache_size,
+            disk_max_bytes=args.gds_l1_disk_max_bytes,
+        )
+
     return StorageManagerConfig(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
@@ -302,6 +410,7 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        gds_l1_config=gds_l1_config,
     )
 
 

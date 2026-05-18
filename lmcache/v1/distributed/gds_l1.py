@@ -51,8 +51,8 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.utils import DiskCacheMetadata
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -877,8 +877,8 @@ class GdsL1Backend:
     ``GdsBackend`` behaviour.
 
     Args:
-        config: The active :class:`LMCacheEngineConfig`. Must have
-            ``gds_path`` set.
+        config: :class:`GdsL1Config` with the GDS-specific knobs.
+            ``gds_path`` is required; everything else has defaults.
         loop: An asyncio event loop on which the metadata scan runs.
         dst_device: Target GPU device string (``"cuda:N"``); used by
             :class:`PathSharder` for multi-path sharding.
@@ -886,11 +886,11 @@ class GdsL1Backend:
 
     def __init__(
         self,
-        config: LMCacheEngineConfig,
+        config: GdsL1Config,
         loop: asyncio.AbstractEventLoop,
         dst_device: str = "cuda",
     ) -> None:
-        if config.gds_path is None:
+        if not config.gds_path:
             raise ValueError("GdsL1Backend requires gds_path to be set")
         if not dst_device.startswith("cuda"):
             raise ValueError(
@@ -917,10 +917,11 @@ class GdsL1Backend:
             len(self.gds_paths),
         )
 
-        # Resolve cuFile vs POSIX fallback. Mirrors GdsBackend's logic.
+        # Resolve cuFile vs POSIX fallback. Auto-disable cuFile on
+        # filesystems that don't support GDS (e.g. tmpfs, overlayfs)
+        # unless the user explicitly asked for cuFile.
         self.use_gds: bool = config.use_gds
-        user_set_keys = getattr(config, "_user_set_keys", set())
-        if self.fstype in ("tmpfs", "overlayfs") and "use_gds" not in user_set_keys:
+        if self.fstype in ("tmpfs", "overlayfs") and config.use_gds:
             logger.info("GdsL1Backend: auto-disabling cuFile on fstype=%r", self.fstype)
             self.use_gds = False
 
@@ -942,38 +943,26 @@ class GdsL1Backend:
             self.cudart = ctypes.CDLL("libcudart.so")
             logger.info("GdsL1Backend: cuFile disabled, using POSIX fallback")
 
-        self._use_direct_io = bool(
-            (config.extra_config or {}).get("use_direct_io", False)
-        )
-        handle_cache_size = int(
-            (config.extra_config or {}).get(
-                "gds_cufile_handle_cache_size", _DEFAULT_HANDLE_CACHE_SIZE
-            )
-        )
+        self._use_direct_io = config.use_direct_io
         self.handle_cache = CuFileHandleCache(
-            max_handles=handle_cache_size,
+            max_handles=config.handle_cache_size,
             gds_module=self.gds_module,
             use_direct_io=self._use_direct_io,
         )
 
-        thread_count = int(
-            (config.extra_config or {}).get("gds_io_threads", _DEFAULT_THREAD_COUNT)
-        )
         self._thread_pool = ThreadPoolExecutor(
-            max_workers=thread_count, thread_name_prefix="gds-l1-io"
+            max_workers=config.io_threads, thread_name_prefix="gds-l1-io"
         )
 
         self._hot_lock = threading.Lock()
         self._hot_cache: OrderedDict[ObjectKey, DiskCacheMetadata] = OrderedDict()
         self._metadata_dirs: set[str] = set()
 
-        # Maximum disk size for eviction signal. 0 → no capacity advertised.
-        self._max_bytes: int = int(
-            (config.extra_config or {}).get("gds_disk_max_bytes", 0)
-        )
+        self._max_bytes: int = config.disk_max_bytes
         self._disk_bytes: int = 0
 
-        # Public allocator (used by L1Manager via the hook in PR 2).
+        # Public allocator: used by L1Manager via the gds_backend hook
+        # and by gpu_ops via ``isinstance(memory_obj.parent(), ...)``.
         self.scratch_allocator = GdsScratchAllocator(self)
 
         # Kick off the async metadata scan. Misses during the scan

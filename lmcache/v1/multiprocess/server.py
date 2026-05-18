@@ -247,11 +247,19 @@ class MPCacheEngine:
             )
             return
 
+        # When the storage manager has a GDS L1 backend attached, pass
+        # its scratch allocator so GPUCacheContext registers
+        # tmp_gpu_buffer_ with cuFile at construction time. Returns
+        # None on the CPU-pinned L1 path so the existing call shape is
+        # preserved.
+        gds_scratch_allocator = self.storage_manager.get_gds_scratch_allocator()
+
         gpu_context = GPUCacheContext(
             kv_caches,
             self.chunk_size,
             layout_hints=layout_hints or None,
             engine_type=engine_type,
+            gds_scratch_allocator=gds_scratch_allocator,
         )
         self.gpu_contexts[instance_id] = gpu_context
         self.gpu_context_meta[instance_id] = (model_name, world_size)

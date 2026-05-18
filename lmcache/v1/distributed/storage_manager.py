@@ -6,6 +6,8 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from typing import Iterator, Literal
+import asyncio
+import threading
 import time
 
 # First Party
@@ -17,6 +19,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
+from lmcache.v1.distributed.gds_l1 import GdsL1Backend, GdsScratchAllocator
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
@@ -49,9 +52,51 @@ from lmcache.v1.mp_observability.trace.decorator import (
 logger = init_logger(__name__)
 
 
+def _start_background_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread]:
+    """Spin up an asyncio loop in a background daemon thread.
+
+    Used by ``StorageManager`` to host the ``GdsL1Backend``'s startup
+    metadata scan without coupling to the MP server's threading model.
+    The thread is daemon so an unclean shutdown does not block process
+    exit, but ``close()`` still stops the loop and joins explicitly so
+    a clean shutdown drains pending tasks first.
+    """
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(
+        target=loop.run_forever,
+        name="gds-l1-asyncio",
+        daemon=True,
+    )
+    thread.start()
+    return loop, thread
+
+
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
-        self._l1_manager = L1Manager(config.l1_manager_config)
+        # Optional GDS L1 backend. Constructed before L1Manager so the
+        # manager can take it via its optional hook. The async metadata
+        # scan needs a running event loop; we own a small background
+        # one for the lifetime of the storage manager — torn down in
+        # ``close()``. CPU-pinned L1 path is unchanged when
+        # ``gds_l1_config is None``.
+        self._gds_backend: GdsL1Backend | None = None
+        self._gds_loop: asyncio.AbstractEventLoop | None = None
+        self._gds_loop_thread: threading.Thread | None = None
+        if config.gds_l1_config is not None:
+            self._gds_loop, self._gds_loop_thread = _start_background_loop()
+            self._gds_backend = GdsL1Backend(
+                config=config.gds_l1_config,
+                loop=self._gds_loop,
+            )
+            logger.info(
+                "StorageManager: GDS L1 backend enabled (gds_path=%r)",
+                config.gds_l1_config.gds_path,
+            )
+
+        self._l1_manager = L1Manager(
+            config.l1_manager_config,
+            gds_backend=self._gds_backend,
+        )
         self._event_bus = get_event_bus()
 
         # L1 eviction controller
@@ -596,6 +641,19 @@ class StorageManager:
         """
         self._l1_manager.clear(force=force)
 
+    def get_gds_scratch_allocator(self) -> GdsScratchAllocator | None:
+        """Return the GDS scratch allocator, if a GDS L1 backend is attached.
+
+        ``MPCacheEngine.register_kv_cache`` passes this to
+        ``GPUCacheContext`` so the context registers its
+        ``tmp_gpu_buffer_`` with cuFile at construction time. Returns
+        ``None`` for the CPU-pinned L1 path so callers can keep the
+        same code shape regardless of backend.
+        """
+        if self._gds_backend is None:
+            return None
+        return self._gds_backend.scratch_allocator
+
     def close(self):
         """
         Close the storage manager and release all resources.
@@ -609,6 +667,16 @@ class StorageManager:
             adapter.close()
 
         self._l1_manager.close()
+
+        # Tear down the GDS L1 asyncio loop after the L1 manager (which
+        # calls into the backend on close()). Order matters: backend
+        # closes during _l1_manager.close(); only then is it safe to
+        # stop the loop and join the thread.
+        if self._gds_loop is not None:
+            self._gds_loop.call_soon_threadsafe(self._gds_loop.stop)
+            if self._gds_loop_thread is not None:
+                self._gds_loop_thread.join(timeout=5.0)
+            self._gds_loop.close()
 
     def report_status(self) -> dict:
         """Return a status dict aggregating all sub-component statuses."""

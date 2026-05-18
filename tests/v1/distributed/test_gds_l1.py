@@ -20,8 +20,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.gds_l1 import (
     _METADATA_MAX_SIZE,
     CuFileHandleCache,
@@ -62,16 +62,17 @@ def loop():
     new_loop.close()
 
 
-def _make_config(gds_path: str) -> LMCacheEngineConfig:
-    """Construct a minimal :class:`LMCacheEngineConfig` for GDS L1 tests."""
-    return LMCacheEngineConfig.from_defaults(
-        chunk_size=256,
+def _make_config(gds_path: str) -> GdsL1Config:
+    """Construct a minimal :class:`GdsL1Config` for GDS L1 tests.
+
+    Forces ``use_gds=False`` so tests run through the POSIX fallback
+    (mmap + cudaMemcpy), which doesn't require a working cuFile driver.
+    """
+    return GdsL1Config(
         gds_path=gds_path,
         gds_path_sharding="by_gpu",
-        lmcache_instance_id="test_gds_l1",
-        gds_buffer_size=256,
-        use_gds=False,  # force POSIX fallback so tests don't need cuFile
-        extra_config={"use_direct_io": False},
+        use_gds=False,
+        use_direct_io=False,
     )
 
 

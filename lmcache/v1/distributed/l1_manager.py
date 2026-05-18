@@ -502,9 +502,21 @@ class L1Manager:
                 ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
             return ret
 
-        err, allocated_objs = self._memory_manager.allocate(
-            layout_desc, len(need_to_allocate)
-        )
+        # GDS L1 path: mint disk-anchored GdsMemoryObj instances per
+        # key directly via the backend. The CPU pinned memory manager
+        # is unused on this path; the disk file is created later when
+        # the caller does ``lmcache_memcpy_async_d2h`` which dispatches
+        # to ``cufile_write_from``.
+        if self._gds_backend is not None:
+            allocated_objs = [
+                self._gds_backend.create_memory_obj(key, layout_desc)
+                for key, _ in need_to_allocate
+            ]
+            err = L1Error.SUCCESS
+        else:
+            err, allocated_objs = self._memory_manager.allocate(
+                layout_desc, len(need_to_allocate)
+            )
 
         if err != L1Error.SUCCESS:
             for key, _ in need_to_allocate:
