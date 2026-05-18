@@ -193,6 +193,7 @@ def _common_cpp_extensions(
             },
         ),
     ]
+    # Mooncake extension is optional.
     ext_modules.extend(
         _mooncake_extension(cpp_extension, mooncake_sources, extra_cxx_flags)
     )
