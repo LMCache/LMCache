@@ -68,6 +68,7 @@ jobs:
           branch: automation/update-chinese-docs
           base: dev
           delete-branch: true
+          signoff: true
           add-paths: |
             docs/source/locale/zh_CN/LC_MESSAGES/**/*.po
           commit-message: "Update Chinese documentation translations"
