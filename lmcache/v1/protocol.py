@@ -92,7 +92,11 @@ def init_remote_metadata_info(num_groups: int):
 
 def get_remote_metadata_bytes():
     global REMOTE_METADATA_BYTES
-    assert REMOTE_METADATA_BYTES is not None
+    if REMOTE_METADATA_BYTES is None:
+        raise RuntimeError(
+            "REMOTE_METADATA_BYTES is not initialized. "
+            "Call init_remote_metadata_info() first."
+        )
     return REMOTE_METADATA_BYTES
 
 

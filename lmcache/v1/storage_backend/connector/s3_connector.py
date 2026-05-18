@@ -189,7 +189,7 @@ class S3Connector(RemoteConnector):
                 if name.lower() == "content-length":
                     try:
                         got["len"] = int(value)
-                    except Exception:
+                    except (ValueError, TypeError):
                         pass
 
         def on_done(error=None, **kwargs):
@@ -239,7 +239,7 @@ class S3Connector(RemoteConnector):
                 if name.lower() == "content-length":
                     try:
                         got["len"] = int(value)
-                    except Exception:
+                    except (ValueError, TypeError):
                         pass
 
         def on_done(error=None, **kwargs):

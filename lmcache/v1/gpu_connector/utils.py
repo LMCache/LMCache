@@ -265,10 +265,7 @@ def need_gpu_interm_buffer(lmcache_config: LMCacheEngineConfig):
     Check if the GPU Connector needs to create an intermediate
     buffer on the GPU
     """
-    if lmcache_config.enable_pd:
-        return False
-    else:
-        return True
+    return not lmcache_config.enable_pd
 
 
 def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
