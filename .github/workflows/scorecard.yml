@@ -37,20 +37,7 @@ jobs:
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
         with:
           disable-sudo-and-containers: false
-          egress-policy: block
-          allowed-endpoints: >
-            github.com:443
-            api.github.com:443
-            index.docker.io:443
-            www.bestpractices.dev:443
-            oss-fuzz-build-logs.storage.googleapis.com:443
-            api.osv.dev:443
-            api.deps.dev:443
-            fulcio.sigstore.dev:443
-            tuf-repo-cdn.sigstore.dev:443
-            rekor.sigstore.dev:443
-            auth.docker.io:443
-            api.scorecard.dev:443
+          egress-policy: audit
 
       - name: "Checkout code"
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1

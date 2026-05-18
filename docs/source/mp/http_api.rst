@@ -82,16 +82,16 @@ compatibility with the vLLM-embedded API server.
      - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
-     - ``/api/quota``
+     - ``/quota``
      - List every registered ``cache_salt`` quota with live usage.
    * - PUT
-     - ``/api/quota/{cache_salt}``
+     - ``/quota/{cache_salt}``
      - Set or update the quota (in GB) for a ``cache_salt``.
    * - GET
-     - ``/api/quota/{cache_salt}``
+     - ``/quota/{cache_salt}``
      - Read the quota and live usage for a single ``cache_salt``.
    * - DELETE
-     - ``/api/quota/{cache_salt}``
+     - ``/quota/{cache_salt}``
      - Remove a ``cache_salt``'s quota entry (its data is evicted next
        cycle).
    * - GET
@@ -301,7 +301,7 @@ The request body is ignored.
 
 .. _mp-http-quota-api:
 
-``/api/quota`` — per-``cache_salt`` quota management
+``/quota`` — per-``cache_salt`` quota management
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 These endpoints manage the per-``cache_salt`` storage budgets consumed by
@@ -318,13 +318,13 @@ present, but the LRU policy ignores the registered quotas.
 
 **URL escaping for the empty salt.** ``cache_salt=""`` (un-salted /
 anonymous traffic) cannot appear in a URL path parameter, so the API
-accepts the sentinel ``_default`` in its place. ``PUT /api/quota/_default``
+accepts the sentinel ``_default`` in its place. ``PUT /quota/_default``
 sets the quota for ``cache_salt=""``. A user that legitimately stores
 data with ``cache_salt="_default"`` cannot be managed via this HTTP API
 distinctly from anonymous traffic — both map to the same path parameter;
 pick any other value (e.g. ``"default"``) to disambiguate.
 
-``PUT /api/quota/{cache_salt}``
+``PUT /quota/{cache_salt}``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Create or update a quota.
@@ -345,11 +345,11 @@ engine is not initialized.
 
 .. code-block:: bash
 
-    curl -s -X PUT http://localhost:8080/api/quota/alice \
+    curl -s -X PUT http://localhost:8080/quota/alice \
         -H 'Content-Type: application/json' \
         -d '{"limit_gb": 10.0}'
 
-``GET /api/quota/{cache_salt}``
+``GET /quota/{cache_salt}``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Read the current quota and live usage for one ``cache_salt``.
@@ -370,7 +370,7 @@ Read the current quota and live usage for one ``cache_salt``.
 reflects whatever bytes are currently cached for that salt — those bytes
 will evict next cycle under ``IsolatedLRU``).
 
-``DELETE /api/quota/{cache_salt}``
+``DELETE /quota/{cache_salt}``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Remove a ``cache_salt``'s quota entry. Any bytes still cached under this
@@ -386,7 +386,7 @@ limit drops to ``0``) and will be evicted.
 When no quota was registered for the given ``cache_salt``, the response
 is ``{"cache_salt": "...", "status": "not_found"}`` (still ``200 OK``).
 
-``GET /api/quota``
+``GET /quota``
 ^^^^^^^^^^^^^^^^^^
 
 List every registered quota alongside its live usage.

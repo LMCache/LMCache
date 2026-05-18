@@ -128,6 +128,7 @@ jobs:
           branch: automation/sync-torch-version
           base: dev
           delete-branch: true
+          signoff: true
           add-paths: |
             pyproject.toml
           commit-message: "[Build] sync torch version with vLLM (${{

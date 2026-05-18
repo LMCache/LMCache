@@ -8,6 +8,7 @@ This module provides GPU-side KV cache management functionality, including:
 """
 
 # Standard
+from typing import Any
 import array
 
 # Third Party
@@ -15,13 +16,13 @@ import cupy
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.gds_l1 import GdsScratchAllocator
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
-    get_block_size,
     get_concrete_gpu_kv_shape,
     get_device,
     get_dtype,
@@ -68,7 +69,7 @@ class GPUCacheContext:
     def __init__(
         self,
         kv_caches: KVCache,
-        lmcache_chunk_size: int = 256,
+        lmcache_logical_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
         engine_type: EngineType = EngineType.VLLM,
         gds_scratch_allocator: GdsScratchAllocator | None = None,
@@ -83,16 +84,14 @@ class GPUCacheContext:
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
-        self.block_size_ = get_block_size(self.kv_caches_, self.gpu_kv_format_)
+        self.lmcache_logical_chunk_size = lmcache_logical_chunk_size
 
-        # Build per-layer KV groups. The manager owns each group's
-        # PageBufferShapeDesc (kernel-facing shape); this context only
-        # retains per-group GPU resources (pointer tensors, tmp buffers).
         self.kv_layer_groups_manager_ = KVLayerGroupsManager(
             self.kv_caches_,
             gpu_kv_format=self.gpu_kv_format_,
             num_blocks=self.num_blocks_,
-            block_size=self.block_size_,
+            layout_hints=layout_hints,
+            lmcache_logical_chunk_size=lmcache_logical_chunk_size,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
@@ -122,7 +121,6 @@ class GPUCacheContext:
         # single memcpy, without needing to know the per-group layout.
         # max_batch_size is the max number of chunks processed concurrently.
         self.max_batch_size = 4
-        self.lmcache_chunk_size = lmcache_chunk_size
         # Byte size of one chunk entry (= one chunk across all groups).
         # tmp_chunk_group_offsets_[g] is the byte offset of group g within
         # a single chunk; tmp_chunk_group_offsets_[num_groups] ==
@@ -131,7 +129,10 @@ class GPUCacheContext:
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            shape = self.get_kv_buffer_shape(lmcache_chunk_size, group_idx)
+            # ``get_kv_buffer_shape`` takes *logical* tokens; for
+            # compressed groups it folds ``compress_ratio`` logical
+            # tokens into one physical slot internally.
+            shape = self.get_kv_buffer_shape(lmcache_logical_chunk_size, group_idx)
             byte_size = shape.numel() * group.dtype.itemsize
             self.tmp_chunk_group_offsets_.append(
                 self.tmp_chunk_group_offsets_[-1] + byte_size
@@ -146,20 +147,20 @@ class GPUCacheContext:
         # GDS L1: register tmp_gpu_buffer_ with cuFile so cuFile.read/write
         # can DMA between disk and this staging buffer without a CPU bounce.
         # The allocator hard-errors here if the buffer is not 4 KiB aligned;
-        # with the default lmcache_chunk_size=256 and typical model dims the
-        # constraint holds. Deregistration happens at GdsL1Backend.close().
+        # with the default lmcache_logical_chunk_size=256 and typical model dims
+        # the constraint holds. Deregistration happens at GdsL1Backend.close().
         self.gds_scratch_allocator_ = gds_scratch_allocator
         if gds_scratch_allocator is not None:
             gds_scratch_allocator.register_gpu_buffer(self.tmp_gpu_buffer_)
 
-        # Cuda streams
-        self.cuda_stream_ = torch.cuda.Stream(device=self.device_)
+        # GPU streams
+        self.cuda_stream_ = torch_dev.Stream(device=self.device_)
         self.cupy_stream_ = cupy.cuda.ExternalStream(
             self.cuda_stream_.cuda_stream, self.device_.index
         )
 
-        _, high_priority = torch.cuda.Stream.priority_range()
-        self.high_priority_cuda_stream_ = torch.cuda.Stream(
+        _, high_priority = torch_dev.Stream.priority_range()
+        self.high_priority_cuda_stream_ = torch_dev.Stream(
             device=self.device_, priority=high_priority
         )
         self.high_priority_cupy_stream_ = cupy.cuda.ExternalStream(
@@ -187,9 +188,9 @@ class GPUCacheContext:
         return self.kv_caches_
 
     @property
-    def stream(self) -> torch.cuda.Stream:
+    def stream(self) -> Any:
         """
-        Returns the CUDA stream for KV cache operations
+        Returns the GPU stream for KV cache operations
         """
         return self.cuda_stream_
 
@@ -198,7 +199,7 @@ class GPUCacheContext:
         return self.cupy_stream_
 
     @property
-    def high_priority_stream(self) -> torch.cuda.Stream:
+    def high_priority_stream(self) -> Any:
         return self.high_priority_cuda_stream_
 
     @property
@@ -206,11 +207,28 @@ class GPUCacheContext:
         return self.high_priority_cupy_stream_
 
     @property
-    def block_size(self) -> int:
+    def group_physical_block_sizes(self) -> list[int]:
+        """Per-group physical slot count (``shape_desc.bs``) in group
+        order. For non-compressed groups this equals
+        ``inference_engine_logical_block_size``; for compressed groups
+        it equals
+        ``inference_engine_logical_block_size // compress_ratio``.
         """
-        Returns the block size (number of tokens per block)
+        return [
+            group.shape_desc.bs
+            for group in self.kv_layer_groups_manager_.kv_layer_groups
+        ]
+
+    @property
+    def group_compress_ratios(self) -> list[int]:
+        """Per-group compression ratio
+        (= ``inference_engine_logical_block_size // shape_desc.bs``)
+        in group order. ``1`` for non-compressed groups.
         """
-        return self.block_size_
+        return [
+            group.compress_ratio
+            for group in self.kv_layer_groups_manager_.kv_layer_groups
+        ]
 
     @property
     def num_layers(self) -> int:
@@ -244,6 +262,15 @@ class GPUCacheContext:
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given KV layer group."""
         return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
+
+    def get_physical_chunk_size(self, group_idx: int) -> int:
+        """Returns the per-chunk physical slot count for the given group.
+
+        Equal to ``lmcache_logical_chunk_size // compress_ratio``; for
+        non-compressed groups this is just ``lmcache_logical_chunk_size``.
+        This is the value the block-level transfer kernel must be told.
+        """
+        return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
 
     @property
     def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
@@ -296,13 +323,16 @@ class GPUCacheContext:
     def get_tmp_chunk_gpu_buffer(self, group_idx: int = 0) -> torch.Tensor:
         """
         Returns a view of the temporary GPU buffer for the given group,
-        sized for a single chunk of ``lmcache_chunk_size`` tokens.
+        sized for a single chunk. The chunk holds
+        ``lmcache_logical_chunk_size`` logical tokens which, for a
+        compressed group, correspond to ``group.physical_chunk_size``
+        physical slots.
 
         Args:
             group_idx: Index of the KV layer group (default 0).
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        shape = self.get_kv_buffer_shape(self.lmcache_chunk_size, group_idx)
+        shape = self.get_kv_buffer_shape(self.lmcache_logical_chunk_size, group_idx)
         start = self.tmp_chunk_group_offsets_[group_idx]
         end = self.tmp_chunk_group_offsets_[group_idx + 1]
         return self.tmp_gpu_buffer_[start:end].view(group.dtype).view(shape)
@@ -313,7 +343,7 @@ class GPUCacheContext:
         """
         Returns a list of ``batch_size`` non-overlapping views into the
         pre-allocated temporary GPU buffer for the given group, each
-        sized for ``lmcache_chunk_size`` tokens.
+        sized for ``lmcache_logical_chunk_size`` tokens.
 
         Args:
             batch_size: Number of concurrent requests (must be <= max_batch_size).
@@ -324,7 +354,7 @@ class GPUCacheContext:
                 f"batch_size {batch_size} exceeds max_batch_size {self.max_batch_size}"
             )
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        shape = self.get_kv_buffer_shape(self.lmcache_chunk_size, group_idx)
+        shape = self.get_kv_buffer_shape(self.lmcache_logical_chunk_size, group_idx)
         g_start = self.tmp_chunk_group_offsets_[group_idx]
         g_end = self.tmp_chunk_group_offsets_[group_idx + 1]
         chunk = self.tmp_chunk_bytes_
@@ -352,30 +382,62 @@ class GPUCacheContext:
         buf.copy_(cpu_tensor, non_blocking=True)
         return buf
 
-    def get_kv_buffer_shape(self, num_tokens: int, group_idx: int = 0) -> torch.Size:
+    def get_kv_buffer_shape(
+        self, logical_num_tokens: int, group_idx: int = 0
+    ) -> torch.Size:
         """
-        Returns the shape of the KV buffer for the given number of tokens.
+        Returns the shape of the KV buffer for the given number of
+        *logical* tokens.
+
+        For a compressed group (``compress_ratio > 1``) every
+        ``compress_ratio`` logical tokens are packed into a single
+        physical slot, so the returned shape's token dimension is
+        ``num_tokens // compress_ratio``. Callers therefore always
+        pass logical-token counts and never need to know per-group
+        compression ratios.
 
         Args:
-            num_tokens: Number of tokens.
+            logical_num_tokens: Number of *logical* tokens. Must be a multiple
+                of the group's ``compress_ratio``.
             group_idx: Index of the KV layer group (default 0).
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        compress_ratio = group.compress_ratio
+        if logical_num_tokens % compress_ratio != 0:
+            raise ValueError(
+                f"logical_num_tokens ({logical_num_tokens}) is not a multiple of "
+                f"compress_ratio ({compress_ratio}) for group {group_idx}"
+            )
+        num_slots = logical_num_tokens // compress_ratio
         sd = group.shape_desc
         return torch.Size(
-            (sd.kv_size, group.num_layers, num_tokens, group.hidden_dim_size)
+            (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
 
     def cache_size_per_token(self) -> int:
         """
-        Returns the cache size per token (in bytes), summed across all groups.
+        Returns the cache size per *logical* token (in bytes), summed
+        across all groups. For a compressed group, one physical slot
+        stores ``compress_ratio`` logical tokens, so the per-logical-token
+        contribution is ``physical_slot_bytes // compress_ratio``.
+
+        Reporting-only metric (surfaced via the ``/api/status`` HTTP
+        endpoint and the ``lmcache describe`` CLI); sub-byte truncation
+        from integer division is acceptable.
         """
         total = 0
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            numels = self.get_kv_buffer_shape(1, group_idx).numel()
-            total += numels * group.dtype.itemsize
+            # ``get_kv_buffer_shape`` now takes *logical* tokens, so
+            # query ``compress_ratio`` logical tokens (= 1 physical
+            # slot) and then divide the resulting bytes back by
+            # ``compress_ratio`` to recover the per-logical-token
+            # contribution. Equivalent to the old
+            # ``physical_slot_bytes // compress_ratio`` formulation.
+            numels = self.get_kv_buffer_shape(group.compress_ratio, group_idx).numel()
+            slot_bytes = numels * group.dtype.itemsize
+            total += slot_bytes // group.compress_ratio
         return total
 
 
@@ -407,14 +469,14 @@ class PlainGPUCacheContext:
             tmp_buffer_shape, dtype=self.dtype, device=self.device
         )
 
-        # Cuda streams
-        self._cuda_stream = torch.cuda.Stream(device=self._device)
+        # GPU streams
+        self._cuda_stream = torch_dev.Stream(device=self._device)
         self._cupy_stream = cupy.cuda.ExternalStream(
             self._cuda_stream.cuda_stream, self._device.index
         )
 
-        _, high_priority = torch.cuda.Stream.priority_range()
-        self._high_priority_cuda_stream = torch.cuda.Stream(
+        _, high_priority = torch_dev.Stream.priority_range()
+        self._high_priority_cuda_stream = torch_dev.Stream(
             device=self._device, priority=high_priority
         )
         self._high_priority_cupy_stream = cupy.cuda.ExternalStream(
@@ -456,7 +518,8 @@ class PlainGPUCacheContext:
         return self._device
 
     @property
-    def stream(self) -> torch.cuda.Stream:
+    def stream(self) -> Any:
+        """Returns the device-specific GPU stream (e.g., torch_dev.Stream)."""
         return self._cuda_stream
 
     @property
@@ -464,7 +527,7 @@ class PlainGPUCacheContext:
         return self._cupy_stream
 
     @property
-    def high_priority_stream(self) -> torch.cuda.Stream:
+    def high_priority_stream(self) -> Any:
         return self._high_priority_cuda_stream
 
     @property

@@ -7,6 +7,7 @@ from torch import nn
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.v1.compute.attention.utils import infer_attn_backend_from_vllm
 from lmcache.v1.compute.positional_encoding import get_fused_rope
 
@@ -68,7 +69,7 @@ class LMCBaseModel(nn.Module, ABC):
         self,
         input_ids: torch.Tensor,
     ):
-        input_ids = input_ids.cuda()
+        input_ids = input_ids.to(torch_device_type)
         # Compatible with both old vLLM (get_input_embeddings) and
         # new vLLM 0.18+ (embed_input_ids / model.embed_tokens)
         if hasattr(self.vllm_model, "get_input_embeddings"):
