@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Generic, Optional, TypeVar
+from typing import Any, Generic, Optional, TypeVar
 import threading
 
-# Third Party
-import torch
+# First Party
+from lmcache import torch_dev, torch_device_type
 
 T = TypeVar("T")
 
@@ -69,7 +69,7 @@ class MessagingFuture(Generic[T]):
 
     def to_cuda_future(
         self,
-        device: torch.cuda.device | None = None,
+        device: Any | None = None,
     ) -> "CUDAMessagingFuture":
         # TODO: need extra type checking for the future type
         return CUDAMessagingFuture.FromMessagingFuture(self, device)  # type: ignore
@@ -87,13 +87,13 @@ class CUDAMessagingFuture(MessagingFuture[T]):
     def __init__(
         self,
         raw_future: MessagingFuture[tuple[bytes, T]],
-        device: torch.cuda.device | None = None,
+        device: Any | None = None,
     ) -> None:
         super().__init__()
         self.raw_future_ = raw_future
-        self.event_: torch.cuda.Event | None = None
+        self.event_: Any | None = None
         self.result_: T | None = None
-        self.device_ = device if device is not None else torch.cuda.current_device()
+        self.device_ = device if device is not None else torch_dev.current_device()
 
     def _on_raw_future_complete(self):
         """
@@ -102,8 +102,16 @@ class CUDAMessagingFuture(MessagingFuture[T]):
         event_bytes, result = self.raw_future_.result()
         self.result_ = result
 
-        # Deserialize the CUDA event
-        self.event_ = torch.cuda.Event.from_ipc_handle(self.device_, event_bytes)
+        # Not all backends support interprocess Events (CUDA IPC specific)
+        if not hasattr(torch_dev, "Event") or not hasattr(
+            torch_dev.Event, "from_ipc_handle"
+        ):
+            raise RuntimeError(
+                f"Backend '{torch_device_type}' does not support interprocess "
+                "Events (Event.from_ipc_handle not available). "
+                "Multiprocess IPC requires CUDA."
+            )
+        self.event_ = torch_dev.Event.from_ipc_handle(self.device_, event_bytes)
 
     def wait(self, timeout: Optional[float] = None) -> bool:
         """
@@ -189,6 +197,6 @@ class CUDAMessagingFuture(MessagingFuture[T]):
     @staticmethod
     def FromMessagingFuture(
         raw_future: MessagingFuture[tuple[bytes, T]],
-        device: torch.cuda.device | None = None,
+        device: Any | None = None,
     ) -> "CUDAMessagingFuture[T]":
         return CUDAMessagingFuture(raw_future, device)

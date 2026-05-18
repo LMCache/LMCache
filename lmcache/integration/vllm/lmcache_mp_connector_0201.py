@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
+from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.utils import check_interprocess_event_support
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -480,6 +482,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
+        # fast-fail if interprocess is not supported
+        check_interprocess_event_support()
+
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.host", "tcp://localhost"
@@ -587,8 +592,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
+        with torch_dev.stream(torch_dev.current_stream()):
+            event = torch_dev.Event(interprocess=True)
             event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(
@@ -661,8 +666,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
+        with torch_dev.stream(torch_dev.current_stream()):
+            event = torch_dev.Event(interprocess=True)
             event.record()
 
         self.worker_adapter.batched_submit_store_requests(

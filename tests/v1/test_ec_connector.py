@@ -109,8 +109,8 @@ def test_ec_roundtrip_save_then_load():
             # round-trip itself, not vLLM's device discovery.
             encoder_cache2 = {}
             with patch(
-                "lmcache.integration.vllm.vllm_ec_adapter.get_vllm_device_type",
-                return_value="cpu",
+                "lmcache.integration.vllm.vllm_ec_adapter.torch_device_type",
+                new="cpu",
             ):
                 conn.start_load_caches(encoder_cache2)
 

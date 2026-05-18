@@ -64,7 +64,7 @@ def _get_storage_manager(request: Request) -> Any:
     return engine.storage_manager
 
 
-@router.put("/api/quota/{cache_salt}")
+@router.put("/quota/{cache_salt}")
 async def set_quota(cache_salt: str, request: Request) -> Any:
     """Create or update a quota for the given ``cache_salt``.
 
@@ -116,7 +116,7 @@ async def set_quota(cache_salt: str, request: Request) -> Any:
     }
 
 
-@router.get("/api/quota/{cache_salt}")
+@router.get("/quota/{cache_salt}")
 async def get_quota(cache_salt: str, request: Request) -> Any:
     """Read the current quota + live usage for a single salt."""
     sm = _get_storage_manager(request)
@@ -135,7 +135,7 @@ async def get_quota(cache_salt: str, request: Request) -> Any:
     }
 
 
-@router.delete("/api/quota/{cache_salt}")
+@router.delete("/quota/{cache_salt}")
 async def delete_quota(cache_salt: str, request: Request) -> Any:
     """Remove a salt's quota entry.
 
@@ -155,7 +155,7 @@ async def delete_quota(cache_salt: str, request: Request) -> Any:
     }
 
 
-@router.get("/api/quota")
+@router.get("/quota")
 async def list_quotas(request: Request) -> Any:
     """List every registered quota alongside its live usage."""
     sm = _get_storage_manager(request)

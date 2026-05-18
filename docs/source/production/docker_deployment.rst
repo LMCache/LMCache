@@ -51,3 +51,21 @@ Validated environment: ``rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620``, MI3
         --name lmcache_rocm \
         rocm/vllm-dev:nightly_0624_rc2_0624_rc2_20250620 \
         bash
+
+XPU (Intel)
+-----------
+
+The `Intel vLLM XPU hub<https://hub.docker.com/r/intel/vllm>`__ offers a prebuilt, optimized docker image designed for validating inference performance on the Intel GPU accelerators like ARC770, B60/B70, and future products.
+
+Validated environment: ``intel/vllm:0.17.0-xpu``, Intel B60 GPU, vLLM V1.
+
+.. code-block:: bash
+
+    docker run --privileged \
+        -it --rm --name vllm-xpu \
+        -u root \
+        --ipc=host --net=host \
+        --cap-add=ALL \
+        --device /dev/dri:/dev/dri \
+        -v /dev/dri/by-path:/dev/dri/by-path \
+        --entrypoint /bin/bash intel/vllm:0.17.0-xpu

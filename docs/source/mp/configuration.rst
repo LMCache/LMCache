@@ -185,7 +185,7 @@ Source: ``lmcache/v1/distributed/config.py``
        write buffer (data is deleted from L1 after L2 store).
        ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
        and requires per-``cache_salt`` quotas to be configured at
-       runtime via the ``/api/quota`` HTTP endpoints
+       runtime via the ``/quota`` HTTP endpoints
        (see :ref:`mp-http-quota-api`); a ``cache_salt`` with no
        registered quota has an effective limit of ``0`` bytes,
        so its data is evicted at the next eviction cycle

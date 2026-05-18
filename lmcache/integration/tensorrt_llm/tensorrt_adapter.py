@@ -30,6 +30,7 @@ from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.integration.tensorrt_llm.utils import (
     ENGINE_NAME,
     create_trtllm_metadata,
@@ -275,8 +276,8 @@ class LMCacheKvConnectorWorker(KvCacheConnectorWorker):
         self._block_size: int = self._llm_args.kv_cache_config.tokens_per_block
         # Cached after register_kv_caches to avoid per-call singleton lookup.
         self._engine: Optional[LMCacheEngine] = None
-        self._load_stream: Optional[torch.cuda.Stream] = None
-        self._store_stream: Optional[torch.cuda.Stream] = None
+        self._load_stream: Optional[torch_dev.Stream] = None
+        self._store_stream: Optional[torch_dev.Stream] = None
 
     @property
     def _meta(self) -> Optional[LMCacheConnectorMetadata]:
@@ -298,7 +299,7 @@ class LMCacheKvConnectorWorker(KvCacheConnectorWorker):
             self._load_stream = gpu_conn.load_stream  # type: ignore[attr-defined]
             self._store_stream = gpu_conn.store_stream  # type: ignore[attr-defined]
 
-    def start_load_kv(self, stream: torch.cuda.Stream) -> None:
+    def start_load_kv(self, stream: torch_dev.Stream) -> None:
         """Load KV blocks from LMCache into the GPU paged cache.
 
         Retrieves all pending blocks on the load stream, then syncs the
@@ -324,15 +325,15 @@ class LMCacheKvConnectorWorker(KvCacheConnectorWorker):
             len(meta.loads),
         )
 
-    def wait_for_layer_load(self, layer_idx: int, stream: torch.cuda.Stream) -> None:
+    def wait_for_layer_load(self, layer_idx: int, stream: torch_dev.Stream) -> None:
         """No-op — cross-layer loads complete in :meth:`start_load_kv`."""
         pass
 
-    def save_kv_layer(self, layer_idx: int, stream: torch.cuda.Stream) -> None:
+    def save_kv_layer(self, layer_idx: int, stream: torch_dev.Stream) -> None:
         """No-op — saves are batched in :meth:`wait_for_save`."""
         pass
 
-    def wait_for_save(self, stream: torch.cuda.Stream) -> None:
+    def wait_for_save(self, stream: torch_dev.Stream) -> None:
         """Store newly computed KV blocks from GPU to LMCache's CPU cache.
 
         Waits on the forward-pass stream, runs ``engine.store`` for each
