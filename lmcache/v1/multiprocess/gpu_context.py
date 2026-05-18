@@ -418,6 +418,62 @@ class GPUCacheContext:
         buf.copy_(cpu_tensor, non_blocking=True)
         return buf
 
+    def stage_block_ids_per_namespace(
+        self, per_gid_block_ids: list[list[int]]
+    ) -> list[torch.Tensor]:
+        """Copy each engine namespace's block IDs into non-overlapping
+        slots of the shared GPU buffer and return one staged tensor per
+        namespace.
+
+        The outer list of ``per_gid_block_ids`` is indexed by
+        engine-side ``kv_cache_group_id`` (gid). Inner lists are
+        concatenated into the shared buffer at successive offsets, so
+        each gid's staged tensor is a non-overlapping view of the same
+        underlying allocation. This matches the wire format of
+        :class:`~lmcache.integration.vllm.vllm_multi_process_adapter.LoadStoreOp.block_ids`
+        — outer index = gid, inner = block IDs for that gid in chunk
+        order.
+
+        For non-hybrid engines the outer list has length 1 and this
+        reduces to a single staged tensor — equivalent to
+        :meth:`stage_block_ids` on the single inner list.
+
+        Args:
+            per_gid_block_ids: Per-namespace block IDs, indexed by
+                engine-side ``kv_cache_group_id``.
+
+        Returns:
+            A list parallel to *per_gid_block_ids* of int64 GPU tensor
+            views into the pre-allocated buffer. Each view is a slice
+            ``self.block_ids_buffer_[offset : offset+len_g]`` and shares
+            storage with the buffer.
+
+        Raises:
+            ValueError: If the total block count exceeds the
+                pre-allocated buffer.
+        """
+        # Pack everything into one CPU array, then copy once. This is
+        # cheaper than per-gid memcpy because each namespace can be
+        # short (V4 hybrid-on: gid 4 has only ~32 blocks per chunk).
+        offsets: list[int] = [0]
+        flat: array.array = array.array("l")
+        for group_block_ids in per_gid_block_ids:
+            flat.extend(group_block_ids)
+            offsets.append(len(flat))
+        total = offsets[-1]
+        if total > self.block_ids_buffer_.shape[0]:
+            raise ValueError(
+                f"per-namespace block ID total {total} exceeds the "
+                f"pre-allocated buffer size {self.block_ids_buffer_.shape[0]}"
+            )
+        buf = self.block_ids_buffer_[:total]
+        cpu_tensor = torch.frombuffer(flat, dtype=torch.long)
+        buf.copy_(cpu_tensor, non_blocking=True)
+        return [
+            self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
+            for i in range(len(per_gid_block_ids))
+        ]
+
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0
     ) -> torch.Size:

@@ -537,7 +537,7 @@ class MPCacheEngine:
         self,
         key: IPCCacheEngineKey,
         instance_id: int,
-        gpu_block_ids: list[int],
+        gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
         """
@@ -547,7 +547,17 @@ class MPCacheEngine:
             key (IPCCacheEngineKey): The IPC key for the KV cache blocks.
                 Must have worker_id != None (worker store operation).
             instance_id (int): The GPU instance ID (such as PID).
-            gpu_block_ids (list[int]): The GPU block IDs to store.
+            gpu_block_ids (list[list[int]]): GPU block IDs to store,
+                grouped by engine-side ``kv_cache_group_id``. The outer
+                list is indexed by gid in registration order. For
+                non-hybrid models this is a list of length 1 whose
+                inner list mirrors the prior flat ``list[int]``
+                semantics. For hybrid models (e.g. DeepSeek-V4 with
+                the hybrid manager active) the outer list has one
+                entry per ``kv_cache_group`` with the gid's own
+                scheduler-block-size granularity. Each LMCache group
+                fetches its block IDs from
+                ``gpu_block_ids[group.kv_cache_group_id]``.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
 
         Returns:
@@ -568,23 +578,6 @@ class MPCacheEngine:
         gpu_context = context.gpu_context
         model_name = context.model_name
 
-        # ``blocks_per_chunk`` is counted in inference-engine-side
-        # blocks (each block addresses
-        # ``inference_engine_logical_block_size`` *logical* tokens).
-        # The block-id indexing is shared with the engine, so we use
-        # the global engine block size here for slicing the flat
-        # ``gpu_block_ids`` list. Per-group ``logical_block_size``
-        # variation (e.g. vLLM hybrid KV cache manager active on
-        # DeepSeek-V4) is plumbed through ``compress_ratio`` and
-        # ``physical_chunk_size`` per group, but the wire format is
-        # still a single flat block-id list keyed on the engine's
-        # global block size — fixing this is the per-gid LoadStoreOp
-        # wire-format change (Step 3 of the V4 hybrid-on migration).
-        blocks_per_chunk = (
-            self.chunk_size
-            // gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
-
         with (
             torch_dev.device(gpu_context.device),
             torch_dev.stream(gpu_context.stream),
@@ -593,8 +586,15 @@ class MPCacheEngine:
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            # Stage all block_ids to GPU once before the loop
-            all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
+            # Stage block IDs per engine-side namespace once before the
+            # loop. Each LMCache group's ``kv_cache_group_id`` indexes
+            # into this list. For non-hybrid engines there is a single
+            # namespace and a single staged tensor; for V4 hybrid-on
+            # there are 5 namespaces and 5 staged tensors with
+            # heterogeneous lengths.
+            staged_block_ids_per_namespace = (
+                gpu_context.stage_block_ids_per_namespace(gpu_block_ids)
+            )
 
             # Wait for vLLM to finish
             # Not all backends support IPC event handles (CUDA IPC specific)
@@ -644,27 +644,59 @@ class MPCacheEngine:
                 # skipped (not in reserved_dict), making block_ids
                 # non-contiguous. Batching would require torch.cat to
                 # reassemble block_ids, negating the benefit.
-                num_groups = gpu_context.kv_layer_groups_manager.num_groups
+                groups = gpu_context.kv_layer_groups_manager.kv_layer_groups
                 for idx, obj_key in enumerate(obj_keys):
                     if obj_key in reserved_dict:
                         memory_obj = reserved_dict[obj_key]
                     else:
                         continue
 
-                    chunk_block_ids_gpu = all_block_ids_gpu[
-                        idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
-                    ]
+                    # Per-LMCache-group dispatch. Each group selects:
+                    #   * its own ``blocks_per_chunk_g`` (= chunk_size //
+                    #     logical_block_size_g) — the engine block-ID
+                    #     count this group consumes per chunk;
+                    #   * its own physical kernel chunk size
+                    #     (= ``get_physical_chunk_size(g)``), fed to the
+                    #     kernel so the constraint
+                    #     ``num_blocks_per_object * shape_desc.bs ==
+                    #     kernel_chunk`` holds for any (logical,
+                    #     physical) combination;
+                    #   * its block-ID slice from the staged tensor for
+                    #     ``group.kv_cache_group_id``.
+                    for group_idx, group in enumerate(groups):
+                        bpc_g = gpu_context.blocks_per_chunk(group_idx)
+                        kernel_chunk_tokens = (
+                            gpu_context.get_physical_chunk_size(group_idx)
+                        )
+                        ns_block_ids_gpu = staged_block_ids_per_namespace[
+                            group.kv_cache_group_id
+                        ]
+                        chunk_block_ids_gpu = ns_block_ids_gpu[
+                            idx * bpc_g : (idx + 1) * bpc_g
+                        ]
+                        if chunk_block_ids_gpu.shape[0] != bpc_g:
+                            logger.error(
+                                "STORE chunk_block_ids_gpu underflow: "
+                                "group_idx=%d gid=%d idx=%d "
+                                "blocks_per_chunk=%d got=%d "
+                                "ns_block_ids_len=%d "
+                                "logical_bs=%d physical_bs=%d "
+                                "lmcache_chunk_size=%d slice=[%d:%d]",
+                                group_idx,
+                                group.kv_cache_group_id,
+                                idx,
+                                bpc_g,
+                                chunk_block_ids_gpu.shape[0],
+                                ns_block_ids_gpu.shape[0],
+                                group.logical_block_size,
+                                group.shape_desc.bs,
+                                self.chunk_size,
+                                idx * bpc_g,
+                                (idx + 1) * bpc_g,
+                            )
 
-                    # Copy from GPU paged buffer to tmp buffer, then to CPU — per group
-                    for group_idx in range(num_groups):
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
                         group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                        # Kernel contract: ``group_lmcache_chunk_size`` here is the
-                        # number of *physical* slots per chunk for this group
-                        # (= logical chunk_size // compress_ratio).
-                        group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
-                            group_idx
-                        )
                         lmc_ops.multi_layer_block_kv_transfer(
                             group_kv_pointers,
                             [tmp_buffer.data_ptr()],
@@ -672,7 +704,7 @@ class MPCacheEngine:
                             gpu_context.device,
                             lmc_ops.TransferDirection.D2H,
                             gpu_context.get_shape_desc(group_idx),
-                            group_lmcache_chunk_size,
+                            kernel_chunk_tokens,
                             gpu_context.gpu_kv_format_,
                             0,
                         )
@@ -725,7 +757,7 @@ class MPCacheEngine:
         self,
         key: IPCCacheEngineKey,
         instance_id: int,
-        gpu_block_ids: list[int],
+        gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
     ) -> tuple[bytes, bool]:
@@ -736,7 +768,9 @@ class MPCacheEngine:
             key (IPCCacheEngineKey): The IPC key for the KV cache blocks.
                 Must have worker_id != None (worker retrieve operation).
             instance_id (int): The GPU instance ID (such as PID).
-            gpu_block_ids (list[int]): The GPU block IDs to retrieve into.
+            gpu_block_ids (list[list[int]]): GPU block IDs to retrieve
+                into, grouped by engine-side ``kv_cache_group_id``. See
+                :meth:`store` for the full layout description.
             event_ipc_handle (bytes): The IPC handle of the event to wait on.
             skip_first_n_tokens (int): Number of tokens to skip writing at
                 the start of the retrieve range. This avoids overwriting
@@ -788,15 +822,19 @@ class MPCacheEngine:
         # ``skip_*_in_chunk`` is expressed in engine-block units
         # (logical tokens), which is what the kernel's
         # ``skip_blocks_in_chunk`` argument expects regardless
-        # of per-group compression.
+        # of per-group compression. Per-group ``logical_block_size``
+        # may differ on V4 hybrid-on (e.g. SWA gids use 64 vs dense
+        # gid 0's 256), but ``skip_first_n_tokens`` is itself
+        # token-aligned to the *coarsest* group's block size, so we
+        # use the global ``ie_logical_block_size`` for the skip math
+        # and validate per-group divisibility inside the loop.
         ie_logical_block_size = (
             gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
         )
-        blocks_per_chunk = self.chunk_size // ie_logical_block_size
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             _BATCH_SIZE = gpu_context.max_batch_size
-            num_groups = gpu_context.kv_layer_groups_manager.num_groups
+            groups = gpu_context.kv_layer_groups_manager.kv_layer_groups
             for batch_idx, memory_obj_batch in enumerate(
                 batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
             ):
@@ -826,13 +864,9 @@ class MPCacheEngine:
                         skip_tokens_in_chunk,
                         skip_tokens_in_chunk // ie_logical_block_size,
                     )
-                skip_blocks_in_chunk = skip_tokens_in_chunk // ie_logical_block_size
 
                 start_chunk_id = batch_idx * _BATCH_SIZE
                 end_chunk_id = start_chunk_id + batch_len
-                chunk_block_ids_gpu = all_block_ids_gpu[
-                    start_chunk_id * blocks_per_chunk : end_chunk_id * blocks_per_chunk
-                ]
 
                 # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
                 # H2D copy: each memory_obj maps to its own batch slot
@@ -841,14 +875,56 @@ class MPCacheEngine:
                         memory_obj,
                         gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
                     )
-                for group_idx in range(num_groups):
+                for group_idx, group in enumerate(groups):
+                    bpc_g = gpu_context.blocks_per_chunk(group_idx)
+                    kernel_chunk_tokens = (
+                        gpu_context.get_physical_chunk_size(group_idx)
+                    )
+                    ns_block_ids_gpu = staged_block_ids_per_namespace[
+                        group.kv_cache_group_id
+                    ]
+                    chunk_block_ids_gpu = ns_block_ids_gpu[
+                        start_chunk_id * bpc_g : end_chunk_id * bpc_g
+                    ]
+                    if chunk_block_ids_gpu.shape[0] != batch_len * bpc_g:
+                        logger.error(
+                            "RETRIEVE chunk_block_ids_gpu underflow: "
+                            "group_idx=%d gid=%d batch_idx=%d "
+                            "blocks_per_chunk=%d batch_len=%d got=%d "
+                            "ns_block_ids_len=%d "
+                            "logical_bs=%d physical_bs=%d "
+                            "lmcache_chunk_size=%d slice=[%d:%d]",
+                            group_idx,
+                            group.kv_cache_group_id,
+                            batch_idx,
+                            bpc_g,
+                            batch_len,
+                            chunk_block_ids_gpu.shape[0],
+                            ns_block_ids_gpu.shape[0],
+                            group.logical_block_size,
+                            group.shape_desc.bs,
+                            self.chunk_size,
+                            start_chunk_id * bpc_g,
+                            end_chunk_id * bpc_g,
+                        )
+                    # Per-group skip math: convert the global token-units
+                    # skip into this group's logical block units.
+                    if skip_tokens_in_chunk % group.logical_block_size != 0:
+                        logger.error(
+                            "skip_first_n_tokens (%d) is not aligned to "
+                            "group %d logical_block_size (%d); rounding down",
+                            skip_first_n_tokens,
+                            group_idx,
+                            group.logical_block_size,
+                        )
+                    skip_blocks_in_chunk_g = (
+                        skip_tokens_in_chunk // group.logical_block_size
+                    )
+
                     tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
                         batch_len, group_idx
                     )
                     group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                    group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
-                        group_idx
-                    )
 
                     lmc_ops.multi_layer_block_kv_transfer(
                         group_kv_pointers,
@@ -857,17 +933,22 @@ class MPCacheEngine:
                         gpu_context.device,
                         lmc_ops.TransferDirection.H2D,
                         gpu_context.get_shape_desc(group_idx),
-                        group_lmcache_chunk_size,
+                        kernel_chunk_tokens,
                         gpu_context.gpu_kv_format_,
-                        skip_blocks_in_chunk,
+                        skip_blocks_in_chunk_g,
                     )
 
         with (
             torch_dev.device(gpu_context.device),
             torch_dev.stream(gpu_context.stream),
         ):
-            # Stage all block_ids to GPU once before the loop
-            all_block_ids_gpu = gpu_context.stage_block_ids(gpu_block_ids)
+            # Stage block IDs per namespace once before the loop. See
+            # ``store`` for the same pattern. The closure-captured
+            # ``staged_block_ids_per_namespace`` is consumed inside
+            # ``_retrieve_loop``.
+            staged_block_ids_per_namespace = (
+                gpu_context.stage_block_ids_per_namespace(gpu_block_ids)
+            )
 
             # Not all backends support interprocess Events (CUDA IPC specific)
             check_interprocess_event_support()

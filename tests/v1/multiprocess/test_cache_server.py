@@ -193,7 +193,9 @@ def store_keys(
     for i, key in enumerate(keys):
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
-        block_ids = gpu_block_ids[start:end]
+        # ``store`` now expects a per-namespace nested list; non-hybrid
+        # tests use a single namespace so wrap in a length-1 outer list.
+        block_ids = [gpu_block_ids[start:end]]
         future = client.submit_request(
             RequestType.STORE,
             [key, instance_id, block_ids, event.ipc_handle()],
@@ -216,7 +218,8 @@ def retrieve_keys(
     for i, key in enumerate(keys):
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
-        block_ids = gpu_block_ids[start:end]
+        # Same nested-list shape as ``store`` above.
+        block_ids = [gpu_block_ids[start:end]]
         future = client.submit_request(
             RequestType.RETRIEVE,
             [key, instance_id, block_ids, event.ipc_handle(), 0],

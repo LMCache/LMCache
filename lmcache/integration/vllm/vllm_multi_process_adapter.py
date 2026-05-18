@@ -395,8 +395,24 @@ class LoadStoreOp:
     token_ids: list[int]
     """Token IDs for the load/store operation"""
 
-    block_ids: list[int]
-    """Block ids for the load/store operation"""
+    block_ids: list[list[int]]
+    """Block IDs for the load/store operation, grouped by engine-side
+    ``kv_cache_group_id``.
+
+    The outer list is indexed by gid (``block_ids[gid]``) and matches
+    the order the engine reported the gids in at registration time
+    (i.e. the same order as
+    :data:`~lmcache.v1.gpu_connector.utils.LayoutHints.per_layer_kv_cache_group_id`
+    enumerates them). Each inner list contains the block IDs vLLM
+    allocated for that gid over the chunk range ``[start, end)``.
+
+    For non-hybrid models the engine has a single namespace and this
+    is a length-1 outer list whose inner list mirrors the prior flat
+    ``list[int]`` semantics. For hybrid models (vLLM with
+    ``--no-disable-hybrid-kv-cache-manager`` on DeepSeek-V4) the
+    outer list has one entry per ``KVCacheGroupSpec`` with that
+    gid's own scheduler-block-size granularity.
+    """
 
     start: int = 0
     """Start token index"""
@@ -408,7 +424,28 @@ class LoadStoreOp:
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
+    @property
+    def total_block_count(self) -> int:
+        """Sum of block counts across all engine namespaces.
+
+        Equal to ``sum(len(group_blocks) for group_blocks in
+        self.block_ids)``. Note this is the count of engine block
+        IDs across gids, not the number of LMCache transfer-kernel
+        groups (which can differ when several gids share a
+        scheduler block size). For non-hybrid models this equals
+        ``len(self.block_ids[0])``.
+        """
+        return sum(len(group_blocks) for group_blocks in self.block_ids)
+
     def __len__(self) -> int:
+        """Number of engine-side ``kv_cache_group``s present in this op.
+
+        Returns 1 for non-hybrid models and equals the engine's
+        kv_cache_group count for hybrid models. Note this is a change
+        in semantics from prior versions where ``__len__`` returned
+        the total block count; see :attr:`total_block_count` for
+        that quantity.
+        """
         return len(self.block_ids)
 
 
@@ -1141,7 +1178,15 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            self.error_block_ids.update(op.block_ids)
+            # ``op.block_ids`` is now a list[list[int]] grouped by gid;
+            # ``self.error_block_ids`` is a flat set[int]. Flatten on
+            # update — error reporting back to vLLM is namespace-blind
+            # under the current API, so the flat union is the best we
+            # can do at this layer. (A future revision could thread the
+            # gid through the error channel; for now it matches the
+            # prior single-gid behavior for non-hybrid models.)
+            for group_block_ids in op.block_ids:
+                self.error_block_ids.update(group_block_ids)
             return
 
         assert op.token_ids is not None
@@ -1167,7 +1212,15 @@ class LMCacheMPWorkerAdapter:
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
-        self.retrieve_futures[request_id] = (future, list(op.block_ids))
+        # Stash a flattened block-id list for error reporting; the wire
+        # carries the per-gid structure verbatim. See the unhealthy
+        # branch above for rationale on flattening at this layer.
+        flat_block_ids: list[int] = [
+            block_id
+            for group_block_ids in op.block_ids
+            for block_id in group_block_ids
+        ]
+        self.retrieve_futures[request_id] = (future, flat_block_ids)
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(

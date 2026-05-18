@@ -1266,7 +1266,7 @@ def test_cb_lookup_v2_cannot_find_normal_store(
     store_key = create_cache_key(token_ids, request_id="isolation-normal-v2")
     client.submit_request(
         RequestType.STORE,
-        [store_key, registered_instance, list(range(16)), event.ipc_handle()],
+        [store_key, registered_instance, [list(range(16))], event.ipc_handle()],
         get_response_class(RequestType.STORE),
     ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
 
@@ -1937,7 +1937,8 @@ def test_cb_store_final_v2_then_normal_lookup(
     # Normal RETRIEVE
     retrieve_key = create_cb_cache_key(token_ids, request_id="final-norm-retrieve-v2")
     pages_per_chunk = 16
-    gpu_block_ids = list(range(pages_per_chunk))
+    # Per-namespace nested-list block IDs (single namespace for non-hybrid).
+    gpu_block_ids = [list(range(pages_per_chunk))]
     event2 = torch.cuda.Event(interprocess=True)
     event2.record()
 

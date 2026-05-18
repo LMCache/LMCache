@@ -109,7 +109,7 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 
 
 def store_handler(
-    key: KeyType, gpu_id: int, gpu_block_ids: list[int], ipc_handle: bytes
+    key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]], ipc_handle: bytes
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for STORE requests.
@@ -117,7 +117,7 @@ def store_handler(
     Args:
         key: Cache key to store
         gpu_id: GPU device ID
-        gpu_block_ids: List of GPU block IDs
+        gpu_block_ids: Per-namespace list of GPU block IDs
         ipc_handle: CUDA event IPC handle
 
     Returns:
@@ -142,7 +142,7 @@ def store_handler(
 def retrieve_handler(
     key: KeyType,
     gpu_id: int,
-    gpu_block_ids: list[int],
+    gpu_block_ids: list[list[int]],
     event_handler: bytes,
     skip_first_n_tokens: int = 0,
 ) -> tuple[bytes, bool]:
@@ -152,7 +152,7 @@ def retrieve_handler(
     Args:
         key: Cache key to retrieve
         gpu_id: GPU device ID
-        gpu_block_ids: List of GPU block IDs
+        gpu_block_ids: Per-namespace list of GPU block IDs
         event_handler: CUDA event IPC handle
         skip_first_n_tokens: Number of tokens to skip at retrieve start
 
