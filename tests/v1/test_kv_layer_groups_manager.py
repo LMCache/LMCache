@@ -20,6 +20,8 @@ def _build_manager(
     tensors: list[torch.Tensor],
     *,
     num_blocks: int,
+    layout_hints: dict | None = None,
+    lmcache_logical_chunk_size: int = 256,
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
@@ -35,6 +37,8 @@ def _build_manager(
         tensors,
         gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
+        layout_hints=layout_hints,
+        lmcache_logical_chunk_size=lmcache_logical_chunk_size,
     )
 
 
@@ -133,6 +137,97 @@ class TestKVLayerGroupsManager:
         sd1 = manager.get_shape_desc(1)
         assert sd1.nh == 16
         assert sd1.hs == 64
+
+
+class TestPerLayerLogicalBlockSize:
+    """Tests for the ``per_layer_logical_block_size`` LayoutHints field.
+
+    The hint extends LayerGroupIdentity with the engine's scheduler-side
+    block size: layers with the same physical shape but different
+    scheduler block sizes (e.g. vLLM's hybrid KV cache manager handing
+    different ``KVCacheGroupSpec.block_size`` values to different
+    layers) end up in distinct LMCache groups.
+    """
+
+    def test_hint_absent_collapses_to_5tuple(self):
+        """No hint = legacy behavior: layers with matching physical
+        identity collapse to a single group."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        manager = _build_manager(tensors, num_blocks=32)
+        assert len(manager.kv_layer_groups) == 1
+        group = manager.kv_layer_groups[0]
+        assert group.layer_indices == [0, 1, 2, 3]
+        # logical_block_size defaults to physical bs when no hint
+        assert group.logical_block_size == 64
+        assert group.shape_desc.bs == 64
+        assert group.compress_ratio == 1
+
+    def test_hint_splits_layers_by_logical_bs(self):
+        """Two layers with same physical shape but different logical
+        block sizes split into distinct groups."""
+        # 4 layers all with physical bs=64. Hint says first 2 layers
+        # use scheduler block size 256 (i.e. compressed: 4 logical
+        # tokens per physical slot) and the other 2 use 64 (uncompressed).
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        layout_hints = {
+            "per_layer_logical_block_size": [256, 256, 64, 64],
+        }
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            layout_hints=layout_hints,
+            lmcache_logical_chunk_size=1024,
+        )
+        assert len(manager.kv_layer_groups) == 2
+        groups_by_logical_bs = {
+            g.logical_block_size: g for g in manager.kv_layer_groups
+        }
+        compressed = groups_by_logical_bs[256]
+        uncompressed = groups_by_logical_bs[64]
+        assert compressed.layer_indices == [0, 1]
+        assert compressed.compress_ratio == 4
+        assert compressed.physical_chunk_size == 256
+        assert uncompressed.layer_indices == [2, 3]
+        assert uncompressed.compress_ratio == 1
+        assert uncompressed.physical_chunk_size == 1024
+
+    def test_hint_length_mismatch_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="length"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_logical_block_size": [64]},
+            )
+
+    def test_hint_non_positive_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="non-positive"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_logical_block_size": [64, 0]},
+            )
+
+    def test_logical_bs_not_multiple_of_physical_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(1)
+        ]
+        with pytest.raises(ValueError, match="multiple"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_logical_block_size": [100]},
+                lmcache_logical_chunk_size=400,
+            )
 
 
 class TestParseKvcacheShapeSpec:

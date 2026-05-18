@@ -267,6 +267,47 @@ class GPUCacheContext:
         """
         return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
 
+    def blocks_per_chunk_full(self, group_idx: int) -> int:
+        """Returns the per-chunk count of inference-engine *logical* blocks
+        for the given group, computed against this group's
+        ``logical_block_size``: ``lmcache_logical_chunk_size //
+        logical_block_size_g``.
+
+        This is the count of block IDs the engine hands out for one
+        LMCache chunk's worth of logical tokens in this group's
+        scheduler namespace. Per-group rather than global because, with
+        vLLM's hybrid KV cache manager active, different
+        ``KVCacheGroupSpec``s use different scheduler block sizes (e.g.
+        DeepSeek-V4: gid 0 = 256, gid 1/2 = 64, gid 3 = 4, gid 4 = 8).
+
+        Args:
+            group_idx: 0-based group index.
+
+        Raises:
+            IndexError: If *group_idx* is out of range.
+            ValueError: If the per-group ``logical_block_size`` is
+                non-positive (programmer error from registration).
+        """
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        if group.logical_block_size <= 0:
+            raise ValueError(
+                f"group {group_idx} has invalid logical_block_size "
+                f"{group.logical_block_size}; expected a positive int "
+                "set at construction time"
+            )
+        return self.lmcache_logical_chunk_size // group.logical_block_size
+
+    def blocks_per_chunk(self, group_idx: int) -> int:
+        """Returns the per-chunk count of inference-engine *logical*
+        blocks the server will iterate when staging block IDs for this
+        group. Currently identical to :meth:`blocks_per_chunk_full`;
+        kept as a separate accessor so the SWA-suffix-only optimization
+        (Step 4 of the V4 hybrid-on migration) can return a smaller
+        truncated count for groups with ``sliding_window > 0`` without
+        renaming every call site.
+        """
+        return self.blocks_per_chunk_full(group_idx)
+
     @property
     def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
         """Returns the KV layer groups manager."""

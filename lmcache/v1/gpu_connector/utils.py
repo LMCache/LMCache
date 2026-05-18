@@ -81,6 +81,29 @@ class LayoutHints(TypedDict, total=False):
             KV layer groups compress multiple logical tokens into a
             single physical slot
             (``shape_desc.bs < inference_engine_logical_block_size``).
+            Single global value: every group derives compression
+            against this same ``ie_logical_block_size``. Adequate for
+            engines where every KV layer group shares one scheduler
+            block size (e.g. vLLM with hybrid KV cache manager
+            disabled). When a single global value cannot describe the
+            engine's per-layer scheduler block sizes (vLLM HMA=on, where
+            different ``KVCacheGroupSpec``s use different
+            ``block_size`` values), use ``per_layer_logical_block_size``
+            instead. When both are set, ``per_layer_logical_block_size``
+            takes precedence for grouping and chunking.
+        per_layer_logical_block_size: Optional list of length
+            ``num_layers`` carrying the *scheduler-side* tokens-per-block
+            of each layer (vLLM: each layer's
+            ``KVCacheGroupSpec.kv_cache_spec.block_size``). When
+            present, the LMCache server keys layer grouping on a
+            per-layer logical block size instead of one global value,
+            and chunking math (``blocks_per_chunk_g = lmcache_chunk_size
+            // logical_bs_g``) becomes per-group. Required when the
+            engine has KV layer groups with mixed scheduler block sizes
+            (DeepSeek-V4 with vLLM hybrid KV cache manager active).
+            Each entry must be a positive int. Layers with the same
+            ``logical_block_size`` and identical other identity fields
+            are grouped together.
     """
 
     kv_layout: Literal["NHD", "HND"]
@@ -88,6 +111,7 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     head_dim: int
     inference_engine_logical_block_size: int
+    per_layer_logical_block_size: list[int]
 
 
 def attempt_permute_to_contiguous_view(

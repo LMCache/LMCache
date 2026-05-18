@@ -571,9 +571,15 @@ class MPCacheEngine:
         # ``blocks_per_chunk`` is counted in inference-engine-side
         # blocks (each block addresses
         # ``inference_engine_logical_block_size`` *logical* tokens).
-        # For compressed groups the per-group physical slot count
-        # differs, but the block-id indexing is shared with the engine
-        # and therefore uses the engine logical block size here.
+        # The block-id indexing is shared with the engine, so we use
+        # the global engine block size here for slicing the flat
+        # ``gpu_block_ids`` list. Per-group ``logical_block_size``
+        # variation (e.g. vLLM hybrid KV cache manager active on
+        # DeepSeek-V4) is plumbed through ``compress_ratio`` and
+        # ``physical_chunk_size`` per group, but the wire format is
+        # still a single flat block-id list keyed on the engine's
+        # global block size — fixing this is the per-gid LoadStoreOp
+        # wire-format change (Step 3 of the V4 hybrid-on migration).
         blocks_per_chunk = (
             self.chunk_size
             // gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size

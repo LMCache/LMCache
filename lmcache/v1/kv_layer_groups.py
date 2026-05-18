@@ -35,11 +35,28 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 }
 
 
-# The 4-tuple that uniquely identifies a set of kernel-equivalent layers:
-# ``(kv_size, num_heads, head_size, block_size, dtype)``. Two layers share a transfer-
-# kernel launch iff they share this identity — see the grouping loop in
+# The 5-tuple that uniquely identifies a set of kernel-equivalent layers:
+# ``(kv_size, num_heads, head_size, block_size, logical_block_size,
+# dtype)``. Two layers share a transfer-kernel launch iff they share
+# this identity — see the grouping loop in
 # :meth:`KVLayerGroupsManager.__init__` for the derivation.
-LayerGroupIdentity = tuple[int, int, int, int, torch.dtype]
+#
+# The fifth slot (``logical_block_size``) is the *scheduler-side*
+# block size — i.e. the granularity at which the serving engine hands
+# out block IDs for this layer. It comes from
+# :data:`~lmcache.v1.gpu_connector.utils.LayoutHints.per_layer_logical_block_size`
+# when the engine supplies it, otherwise it defaults to the physical
+# block size (``bs``). On DeepSeek-V4 with vLLM's *hybrid manager
+# active*, several physical-equivalent layer sets receive block IDs at
+# different scheduler grids (e.g. dense-MLA layers use a 256-token
+# grid while the SWA layers use a 64-token grid). Two layers with the
+# same physical layout but different scheduler grids are
+# kernel-incompatible — one ``LoadStoreOp`` cannot index both — so the
+# logical block size must participate in the identity tuple. When the
+# hint is absent, every layer's logical block size defaults to its
+# physical ``bs`` and the 6-tuple collapses to the prior 5-tuple
+# behavior.
+LayerGroupIdentity = tuple[int, int, int, int, int, torch.dtype]
 
 
 @dataclass
@@ -73,7 +90,11 @@ class KVLayerGroupInfo:
     shape_desc: "lmc_ops.PageBufferShapeDesc"
     """Kernel-facing shape descriptor shared by every layer in the group.
     All eight fields (``kv_size, nl, nb, bs, nh, hs, element_size,
-    block_stride_elems``) are stamped once at construction."""
+    block_stride_elems``) are stamped once at construction. Note that
+    ``shape_desc.bs`` carries the **physical** block size (the on-GPU
+    tensor's per-block slot count); the *logical* (scheduler) block
+    size lives on :attr:`logical_block_size` and is used by chunking
+    arithmetic, which runs upstream of the kernel."""
     dtype: torch.dtype
     """Torch dtype of the KV cache tensors for this group. Used for
     kernel template instantiation; see class docstring for why we keep
@@ -83,9 +104,10 @@ class KVLayerGroupInfo:
     non-compressed groups (one logical token per physical slot);
     greater than ``1`` for compressed groups where each physical slot
     packs ``compress_ratio`` logical tokens (e.g. DeepSeek V4
-    compressor / indexer caches). Derived from
-    ``inference_engine_logical_block_size`` carried in ``layout_hints``
-    at :class:`KVLayerGroupsManager` construction time."""
+    compressor / indexer caches). Derived from this group's
+    :attr:`logical_block_size` and ``shape_desc.bs`` at
+    :class:`KVLayerGroupsManager` construction time:
+    ``compress_ratio = logical_block_size // shape_desc.bs``."""
     physical_chunk_size: int = 0
     """Number of *physical* slots in one LMCache chunk for this group
     (= ``lmcache_logical_chunk_size // compress_ratio``). This is what
@@ -94,6 +116,21 @@ class KVLayerGroupInfo:
     means the field has not been populated yet; ``GPUCacheContext``
     fills it in after construction once ``lmcache_logical_chunk_size``
     is known."""
+    logical_block_size: int = 0
+    """Scheduler-side tokens-per-block for this group, i.e. the
+    granularity at which the serving engine hands out block IDs for
+    these layers. Equals ``shape_desc.bs`` (physical) when the engine
+    does not provide a per-layer hint via
+    :data:`~lmcache.v1.gpu_connector.utils.LayoutHints.per_layer_logical_block_size`,
+    so existing single-group call sites are unaffected. When the hint
+    is present, this field carries the engine's per-layer
+    ``KVCacheSpec.block_size`` for the represented layer — which is
+    what chunking math (``blocks_per_chunk_g = lmcache_chunk_size //
+    logical_block_size``) must use, and what the connector's
+    ``LoadStoreOp.block_ids`` are stride-compatible with. ``0``
+    indicates the field has not been populated yet (left in for
+    backwards compatibility with no-arg constructors); the manager
+    always sets a positive value at construction."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -110,7 +147,8 @@ class KVLayerGroupInfo:
             f"block_stride_elems={sd.block_stride_elems}), "
             f"dtype={self.dtype}, "
             f"compress_ratio={self.compress_ratio}, "
-            f"physical_chunk_size={self.physical_chunk_size})"
+            f"physical_chunk_size={self.physical_chunk_size}, "
+            f"logical_bs={self.logical_block_size})"
         )
 
     @property
@@ -129,9 +167,9 @@ class KVLayerGroupsManager:
 
     At construction time, every layer in ``kv_caches`` is bucketed by its
     :data:`LayerGroupIdentity` (``(kv_size, num_heads, head_size,
-    dtype)``). Each bucket becomes one :class:`KVLayerGroupInfo` holding
-    the layer indices, a shared :class:`PageBufferShapeDesc`, and the
-    group's torch dtype.
+    block_size, logical_block_size, dtype)``). Each bucket becomes one
+    :class:`KVLayerGroupInfo` holding the layer indices, a shared
+    :class:`PageBufferShapeDesc`, and the group's torch dtype.
 
     Downstream consumers (``VLLMPagedMemGPUConnectorV3``,
     ``GPUCacheContext``, the multiprocess server) iterate
@@ -173,14 +211,28 @@ class KVLayerGroupsManager:
                 ``shape_desc.nb``. Each group's ``shape_desc.bs`` is
                 discovered per-layer via :func:`get_block_size`, so
                 compressed and non-compressed groups can coexist.
-            layout_hints: Engine-provided hints. The manager only reads
-                ``inference_engine_logical_block_size`` (logical tokens
-                per inference-engine block) from it to derive each
-                group's ``compress_ratio`` and ``physical_chunk_size``.
-                ``None`` (or a hints dict without that key — e.g.
-                non-vLLM engines, or vLLM deployments with no mixed
-                compression) means every group is treated as
-                non-compressed (``compress_ratio == 1``).
+            layout_hints: Engine-provided hints. The manager reads:
+
+                * ``inference_engine_logical_block_size`` (single
+                  global value, used as the *fallback* per-layer
+                  logical block size when the per-layer hint is
+                  absent and as the legacy single-source-of-truth
+                  for non-hybrid engines).
+                * ``per_layer_logical_block_size`` (optional list of
+                  length ``num_layers``). When present, each
+                  layer's scheduler-side block size is used to key
+                  layer grouping (so layers with same physical
+                  shape but different scheduler grids end up in
+                  separate groups) and to derive that group's
+                  ``compress_ratio = logical_bs_g // physical_bs_g``.
+                  Required when the engine has KV layer groups with
+                  mixed scheduler block sizes (vLLM hybrid manager
+                  active on DeepSeek-V4).
+
+                ``None`` (or a hints dict without either key) means
+                every group is treated as non-compressed
+                (``compress_ratio == 1``, ``logical_block_size ==
+                shape_desc.bs``).
             lmcache_logical_chunk_size: Logical tokens per LMCache chunk
                 (one logical token = one inference-engine token).
                 Together with ``compress_ratio`` it determines each
@@ -216,15 +268,47 @@ class KVLayerGroupsManager:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
 
+        # Resolve the per-layer logical block size hint, if present.
+        # When absent, every layer's logical block size will default to
+        # its physical ``bs`` (effectively reproducing the prior
+        # 5-tuple grouping behavior on engines that don't supply the
+        # hint). When present, the per-layer values participate in
+        # :data:`LayerGroupIdentity` so layers with same physical
+        # shape but different scheduler grids land in distinct LMCache
+        # groups (DeepSeek-V4 hybrid manager active).
+        per_layer_logical_bs: "list[int] | None" = None
+        if layout_hints is not None:
+            logical_hint = layout_hints.get("per_layer_logical_block_size")
+            if logical_hint is not None:
+                if len(logical_hint) != num_layers:
+                    raise ValueError(
+                        "per_layer_logical_block_size length "
+                        f"({len(logical_hint)}) does not match "
+                        f"num_layers ({num_layers}); each registered "
+                        "layer must have exactly one logical block "
+                        "size entry"
+                    )
+                bad = [i for i, bs in enumerate(logical_hint) if bs <= 0]
+                if bad:
+                    raise ValueError(
+                        "per_layer_logical_block_size has invalid "
+                        f"(non-positive) entries at positions {bad[:8]}"
+                        + ("..." if len(bad) > 8 else "")
+                        + "; every registered layer must be covered by "
+                        "exactly one engine-side block size"
+                    )
+                per_layer_logical_bs = list(logical_hint)
+
         groups_dict = self._group_layers_by_identity(
-            kv_caches, gpu_kv_format, num_layers
+            kv_caches, gpu_kv_format, num_layers, per_layer_logical_bs
         )
 
         # Emit groups in order of their first-appearing layer so that group
         # indices remain deterministic across runs.
-        for group_idx, ((_, _, _, bs, dt), indices) in enumerate(
-            sorted(groups_dict.items(), key=lambda kv: kv[1][0])
-        ):
+        for group_idx, (
+            (_, _, _, bs, group_logical_bs, dt),
+            indices,
+        ) in enumerate(sorted(groups_dict.items(), key=lambda kv: kv[1][0])):
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 gpu_kv_format,
@@ -244,6 +328,7 @@ class KVLayerGroupsManager:
             compress_ratio, physical_chunk_size = self._derive_compression_metadata(
                 group_idx=group_idx,
                 bs=bs,
+                logical_block_size=group_logical_bs,
                 ie_logical_block_size=self.inference_engine_logical_block_size_,
                 lmcache_logical_chunk_size=lmcache_logical_chunk_size,
             )
@@ -255,6 +340,7 @@ class KVLayerGroupsManager:
                     dtype=dt,
                     compress_ratio=compress_ratio,
                     physical_chunk_size=physical_chunk_size,
+                    logical_block_size=group_logical_bs,
                 )
             )
 
@@ -269,29 +355,65 @@ class KVLayerGroupsManager:
     def _derive_compression_metadata(
         group_idx: int,
         bs: int,
+        logical_block_size: int,
         ie_logical_block_size: "int | None",
         lmcache_logical_chunk_size: int,
     ) -> tuple[int, int]:
         """Resolve ``(compress_ratio, physical_chunk_size)`` for one group.
 
-        ``compress_ratio`` falls back to ``1`` when
-        ``ie_logical_block_size`` is absent (no compression info
-        available); otherwise it equals
-        ``ie_logical_block_size // bs`` and the divisibility invariants
-        are enforced loudly. ``physical_chunk_size`` is then
+        ``compress_ratio`` is per-group:
+        ``compress_ratio_g = logical_block_size // bs``. Each layer
+        group has its own ``logical_block_size`` (carried by the
+        identity tuple); when ``per_layer_logical_block_size`` is not
+        provided the manager defaults each group's
+        ``logical_block_size`` to its physical ``bs``, so
+        ``compress_ratio == 1`` and the per-group formula is identical
+        to the prior global formula.
+
+        ``ie_logical_block_size`` is consulted only when its presence
+        differs from the per-layer hint's: if the engine provides
+        neither the per-layer hint nor a global value (i.e. a
+        non-vLLM engine), ``compress_ratio`` falls back to 1 even
+        when ``logical_block_size > bs`` — preserving the old
+        non-compressed default for tools and tests that don't
+        provide hints.
+
+        ``physical_chunk_size`` is then
         ``lmcache_logical_chunk_size // compress_ratio``, the per-chunk
         physical slot count fed to the block-level transfer kernel.
+
+        Args:
+            group_idx: Group index (used in error messages and logs).
+            bs: This group's physical block size (``shape_desc.bs``).
+            logical_block_size: This group's logical (scheduler-side)
+                block size.
+            ie_logical_block_size: Optional global hint — if both this
+                and the per-layer hint are absent, the group falls
+                back to ``compress_ratio == 1``.
+            lmcache_logical_chunk_size: Logical tokens per LMCache
+                chunk (one logical token = one engine token).
+
+        Returns:
+            ``(compress_ratio, physical_chunk_size)`` tuple.
+
+        Raises:
+            ValueError: If ``logical_block_size`` is not a multiple of
+                ``bs``, or if ``lmcache_logical_chunk_size`` is not a
+                multiple of the resulting ``compress_ratio``.
         """
-        if ie_logical_block_size is None:
+        if ie_logical_block_size is None and logical_block_size == bs:
+            # Neither the global nor the per-layer hint was supplied
+            # for this group's layers (per-layer defaults to physical
+            # bs when no hint is provided): treat as non-compressed.
             compress_ratio = 1
         else:
-            if ie_logical_block_size % bs != 0:
+            if logical_block_size % bs != 0:
                 raise ValueError(
-                    f"inference engine logical block size "
-                    f"{ie_logical_block_size} must be a multiple of "
-                    f"group {group_idx} physical slot count {bs}"
+                    f"group {group_idx}: logical block size "
+                    f"{logical_block_size} must be a multiple of "
+                    f"physical slot count {bs}"
                 )
-            compress_ratio = ie_logical_block_size // bs
+            compress_ratio = logical_block_size // bs
         if lmcache_logical_chunk_size % compress_ratio != 0:
             raise ValueError(
                 f"lmcache_logical_chunk_size {lmcache_logical_chunk_size} "
@@ -302,10 +424,10 @@ class KVLayerGroupsManager:
         if compress_ratio != 1:
             logger.info(
                 "group %d: compressed "
-                "(inference_engine_logical_block_size=%d -> "
-                "slots=%d, compress_ratio=%d, physical_chunk_size=%d)",
+                "(logical_block_size=%d -> physical_bs=%d, "
+                "compress_ratio=%d, physical_chunk_size=%d)",
                 group_idx,
-                ie_logical_block_size,
+                logical_block_size,
                 bs,
                 compress_ratio,
                 physical_chunk_size,
@@ -317,15 +439,21 @@ class KVLayerGroupsManager:
         kv_caches: "DiscoverableKVCache",
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_layers: int,
+        per_layer_logical_bs: "list[int] | None" = None,
     ) -> dict[LayerGroupIdentity, list[int]]:
         """Partition layer indices by :data:`LayerGroupIdentity`.
 
         Linear single pass over ``kv_caches``; layers sharing the same
-        ``(kv_size, num_heads, head_size, block_size, dtype)`` signature
-        land in the same bucket. The returned dict's value lists are
-        later passed by reference into :class:`KVLayerGroupInfo`
-        instances, so the dict itself is garbage-collected after
-        ``__init__`` returns while the lists stay alive on each group.
+        ``(kv_size, num_heads, head_size, block_size,
+        logical_block_size, dtype)`` signature land in the same bucket.
+        When ``per_layer_logical_bs`` is None, each layer's
+        ``logical_block_size`` defaults to its physical block size,
+        making the 6-tuple effectively a 5-tuple (preserving prior
+        grouping behavior on engines without the hint). The returned
+        dict's value lists are later passed by reference into
+        :class:`KVLayerGroupInfo` instances, so the dict itself is
+        garbage-collected after ``__init__`` returns while the lists
+        stay alive on each group.
         """
         # First Party
         from lmcache.v1.gpu_connector.utils import (
@@ -344,7 +472,12 @@ class KVLayerGroupsManager:
             hs = get_head_size(kv_caches, gpu_kv_format, idx)
             dt = get_dtype(kv_caches, gpu_kv_format, idx)
             bs = get_block_size(kv_caches, gpu_kv_format, idx)
-            groups_dict[(kv_size, nh, hs, bs, dt)].append(idx)
+            logical_bs = (
+                per_layer_logical_bs[idx]
+                if per_layer_logical_bs is not None
+                else bs
+            )
+            groups_dict[(kv_size, nh, hs, bs, logical_bs, dt)].append(idx)
         return groups_dict
 
     @property
@@ -518,6 +651,7 @@ def parse_kvcache_shape_spec(
                 layer_indices=indices,
                 shape_desc=shape_desc,
                 dtype=dtype,
+                logical_block_size=bs,
             )
         )
         layer_offset += layer_count
