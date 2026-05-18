@@ -205,6 +205,7 @@ class StorageBackendBenchmark(ABC):
         write_bench: bool,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         verify_integrity: bool = False,
+        use_uring: bool = False,
     ):
         op = "write_" if write_bench else "read_"
         self._backend_name = op + name
@@ -215,6 +216,7 @@ class StorageBackendBenchmark(ABC):
         self.write_bench = write_bench
         self.chunk_size = chunk_size
         self.verify_integrity = verify_integrity
+        self.use_uring = use_uring
 
         # Runtime state
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -377,12 +379,19 @@ class StorageBackendBenchmark(ABC):
         config = self._setup_config(config)
 
         # Create local CPU backend (common to all backends)
-        self._local_cpu = LocalCPUBackend(
-            config=config,
-            metadata=metadata,
-            dst_device="cpu",
-            memory_allocator=AdHocMemoryAllocator(device="cpu"),
-        )
+        if self.use_uring and rust_raw:
+            self._local_cpu = LocalCPUBackend(
+                config=config,
+                metadata=metadata,
+                dst_device="cpu",
+            )
+        else:
+            self._local_cpu = LocalCPUBackend(
+                config=config,
+                metadata=metadata,
+                dst_device="cpu",
+                memory_allocator=AdHocMemoryAllocator(device="cpu"),
+            )
         logger.info(f"Creating {self.backend_name} ...")
         # Create the specific backend
         self._backend = self._create_backend(
@@ -391,18 +400,13 @@ class StorageBackendBenchmark(ABC):
 
         # Prepare test data
         self._keys = _make_keys(self.num_ops)
-        # shape = [
-        #    DEFAULT_SHAPE_LIST[0],
-        #    DEFAULT_SHAPE_LIST[1],
-        #    self.chunk_size,
-        #    DEFAULT_SHAPE_LIST[3],
-        # ]
         shapes = metadata.get_shapes()
         self._objs = _make_memory_objs(
             self.num_ops,
             self.use_odirect,
             self.alignment,
             self._keepalive,
+            memory_allocator=self._local_cpu.memory_allocator,
             shapes=shapes,  # [torch.Size(shape)]
         )
 
@@ -488,7 +492,7 @@ class StorageBackendBenchmark(ABC):
         """
         # Store original data for integrity verification
         original_data: dict[CacheEngineKey, torch.Tensor] = {}
-        if hasattr(self, "verify_integrity") and self.verify_integrity:
+        if self.verify_integrity:
             for key, obj in zip(self._keys, self._objs, strict=False):
                 assert obj.tensor is not None
                 original_data[key] = obj.tensor.clone()
@@ -622,7 +626,7 @@ class LocalDiskBackendBenchmark(StorageBackendBenchmark):
         use_odirect: bool,
         alignment: int,
         write_bench: bool,
-        chunk_size: int,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
         verify_integrity: bool = False,
     ):
         super().__init__(
@@ -663,10 +667,7 @@ class LocalDiskBackendBenchmark(StorageBackendBenchmark):
         )
 
     def _close_backend(self) -> None:
-        if hasattr(self._backend, "disk_worker"):
-            self._backend.disk_worker.close()
-        else:
-            self._backend.close()
+        self._backend.close()
 
 
 # ============================================================================
@@ -704,6 +705,7 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
             write_bench,
             chunk_size,
             verify_integrity,
+            use_uring,
         )
         self.raw_device = raw_device
         self.raw_device_size_gb = raw_device_size_gb
@@ -866,11 +868,11 @@ class RemoteBackendBenchmark(StorageBackendBenchmark):
 
     def _create_backend(
         self,
-        config,
-        metadata,
-        loop,
-        local_cpu_backend,
-    ):
+        config: LMCacheEngineConfig,
+        metadata: LMCacheMetadata,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+    ) -> RemoteBackend:
         return RemoteBackend(
             config=config,
             metadata=metadata,
@@ -991,6 +993,11 @@ def main() -> None:
         type=str,
         default="True",
         help="Perform write benchmark (default: True). False for read benchmark.",
+    )
+    parser.add_argument(
+        "--use_uring",
+        action="store_true",
+        help="Enable io_uring for raw block backend",
     )
     parser.add_argument(
         "--verify-integrity",
