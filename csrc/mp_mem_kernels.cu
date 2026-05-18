@@ -33,12 +33,16 @@ __device__ inline size_t calculate_engine_global_offset(
            layer_idx * shape_desc.kv_size * scalars_per_block +
            engine_block_idx * shape_desc.kv_size * scalars_per_block *
                shape_desc.nl;
-  } else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS) {
+  } else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_BS_NH_HS ||
+                       format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS) {
     // Normal: L tensors [2, NB, BS, NH, HS]
+    // HND: L tensors [2, NB, NH, BS, HS]
     return engine_block_idx * scalars_per_block +
            k_or_v * shape_desc.nb * scalars_per_block;
-  } else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS) {
+  } else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS ||
+                       format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS) {
     // Flash Infer: L tensors [NB, 2, BS, NH, HS]
+    // HND Flash Infer: L tensors [NB, 2, NH, BS, HS]
     return engine_block_idx * shape_desc.kv_size * scalars_per_block +
            k_or_v * scalars_per_block;
   } else if constexpr (format == GPUKVFormat::NL_X_NB_BS_HS) {
@@ -70,7 +74,9 @@ __device__ inline size_t calculate_engine_local_offset(
     const PageBufferShapeDesc shape_desc) {
   size_t scalars_per_head = shape_desc.scalars_per_head<ScalarType>();
   size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  if constexpr (format == GPUKVFormat::NB_NL_TWO_NH_BS_HS) {
+  if constexpr (format == GPUKVFormat::NB_NL_TWO_NH_BS_HS ||
+                format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS ||
+                format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS) {
     // HND: [NH, BS, HS] — heads are outermost within a block
     size_t scalars_per_head_block =
         shape_desc.bs * scalars_per_head;  // BS * HS
@@ -253,6 +259,12 @@ __global__ void multi_layer_block_transfer_kernel(
       break;                                                        \
     case GPUKVFormat::NL_X_NB_BS_HS:                                \
       LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_BS_HS);         \
+      break;                                                        \
+    case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:                         \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_TWO_NB_NH_BS_HS);  \
+      break;                                                        \
+    case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:                         \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);  \
       break;                                                        \
     case GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS:                        \
       LAUNCH_KERNEL(DIRECTION, GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS); \

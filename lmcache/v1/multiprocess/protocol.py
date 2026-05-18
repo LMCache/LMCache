@@ -24,9 +24,66 @@ from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 # This loads all protocol definitions and validates them against the RequestType enum
 _PROTOCOL_DEFINITIONS = initialize_protocols()
 
+LMCACHE_MP_PROTOCOL_VERSION = 1
+"""Version of the ZMQ/msgpack LMCache MP protocol envelope.
+
+Version 1 is the existing unversioned wire format:
+``[request_uid, request_type, *payloads]`` from DEALER clients and
+``[identity, request_uid, request_type, *payloads]`` on the ROUTER server.
+The constant is additive and does not add a required wire frame.
+"""
+
 # Type aliases for backwards compatibility
 InstanceID = int
 KeyType = IPCCacheEngineKey
+
+
+def _type_name(cls: Any) -> str:
+    if cls is None:
+        return "None"
+    if isinstance(cls, type):
+        return cls.__name__
+    return str(cls).replace("typing.", "")
+
+
+def get_protocol_schema() -> dict[str, Any]:
+    """Return a JSON-serializable schema view of the current MP protocol."""
+    return {
+        "protocol_version": LMCACHE_MP_PROTOCOL_VERSION,
+        "serialization_format": "msgpack via msgspec",
+        "request_envelope": [
+            "request_uid:uint",
+            "request_type:RequestType",
+            "payloads:list[msgpack]",
+        ],
+        "response_envelope": [
+            "request_uid:uint",
+            "request_type:RequestType",
+            "response?:msgpack",
+        ],
+        "error_schema": (
+            "Handlers log exceptions and may omit a response in the current "
+            "protocol; there is no typed wire error frame in version 1."
+        ),
+        "backward_compatibility": (
+            "Protocol version 1 preserves the existing unversioned envelope. "
+            "New fields in msgspec structs must remain backward-compatible "
+            "through defaults or new request types."
+        ),
+        "request_types": {
+            req_type.name: {
+                "value": req_type.value,
+                "payload_schema": [
+                    _type_name(cls) for cls in definition.payload_classes
+                ],
+                "response_schema": _type_name(definition.response_class),
+                "handler_type": definition.handler_type.name,
+            }
+            for req_type, definition in sorted(
+                _PROTOCOL_DEFINITIONS.items(), key=lambda item: item[0].value
+            )
+        },
+    }
 
 
 def get_payload_classes(req_type: RequestType) -> list[Any]:

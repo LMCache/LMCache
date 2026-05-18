@@ -268,3 +268,43 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
     assert lookup_key.token_ids == free_key.token_ids
+
+
+def test_adapter_lookup_with_result_caches_lookup_result():
+    """The optional native lookup-with-result path should avoid status polling."""
+    # First Party
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        LMCacheMPSchedulerAdapter,
+        ParallelStrategy,
+    )
+
+    adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
+    adapter.model_name = "test_model"
+    adapter.chunk_size = 256
+    adapter.blocks_in_chunk = 16
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
+    adapter._health_event = threading.Event()
+    adapter._health_event.set()
+    adapter._mq_timeout = 30.0
+    adapter._heartbeat = None
+    adapter._heartbeat_lock = threading.Lock()
+    adapter._heartbeat_interval = 5.0
+    adapter._lookup_with_result = True
+    adapter._pending_lookups = set()
+    adapter._finished_lookup_results = {}
+
+    mock_client = MagicMock(spec=MessageQueueClient)
+    mock_future = MagicMock()
+    mock_future.result.return_value = 2
+    mock_client.submit_request.return_value = mock_future
+    adapter.mq_client = mock_client
+
+    with patch.object(adapter, "_ensure_heartbeat_started"):
+        adapter.maybe_submit_lookup_request("req-lookup-result", list(range(512)))
+
+    mock_client.submit_request.assert_called_once()
+    call_args = mock_client.submit_request.call_args
+    assert call_args[0][0] == RequestType.LOOKUP_WITH_RESULT
+    assert adapter._pending_lookups == {"req-lookup-result"}
+    assert adapter.check_lookup_result("req-lookup-result") == 512
+    mock_client.submit_request.assert_called_once()

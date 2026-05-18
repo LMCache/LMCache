@@ -2,7 +2,9 @@
 # Standard
 from multiprocessing.synchronize import Event as EventClass
 from typing import Any, Callable
+import json
 import multiprocessing as mp
+import socket
 import sys
 import time
 
@@ -53,6 +55,12 @@ def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
         end=chunk_size,
         request_id=f"test_request_{index}",
     )
+
+
+def _free_tcp_url() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return f"tcp://127.0.0.1:{sock.getsockname()[1]}"
 
 
 def _server_process(
@@ -321,6 +329,41 @@ def test_mq_noop_request():
         expected_response="NOOP_OK",
         num_requests=1,
     )
+
+
+def test_mq_client_writes_metadata_trace(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    server_url = _free_tcp_url()
+    context = zmq.Context()
+    server = MessageQueueServer(server_url, context)
+    server.add_handler(
+        RequestType.NOOP,
+        get_payload_classes(RequestType.NOOP),
+        get_handler_type(RequestType.NOOP),
+        test_mq_handler_helpers.noop_handler,
+    )
+    server.start()
+
+    trace_path = tmp_path / "mq-trace.jsonl"
+    monkeypatch.setenv("LMCACHE_MP_TRACE_FILE", str(trace_path))
+    monkeypatch.setenv("LMCACHE_MP_TRACE_LABEL", "unit-client")
+
+    client = MessageQueueClient(server_url, context)
+    try:
+        result: Any = client.submit_request(RequestType.NOOP, []).result(timeout=5)
+        assert result == "NOOP_OK"
+    finally:
+        client.close()
+        server.close()
+        context.destroy(linger=0)
+
+    rows = [
+        json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["phase"] for row in rows] == ["submit", "response"]
+    assert [row["request_type"] for row in rows] == ["NOOP", "NOOP"]
+    assert [row["worker_label"] for row in rows] == ["unit-client", "unit-client"]
+    assert rows[0]["payloads"] == []
+    assert rows[1]["response"] == "NOOP_OK"
 
 
 def test_mq_noop_multiple_requests():

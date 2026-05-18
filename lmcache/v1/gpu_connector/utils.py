@@ -80,6 +80,10 @@ class LayoutHints(TypedDict, total=False):
             KV layer groups compress multiple logical tokens into a
             single physical slot
             (``shape_desc.bs < inference_engine_logical_block_size``).
+        use_layerwise: Whether the serving engine is using layerwise KV
+            load/save lifecycle hooks. Native MP uses this as an explicit
+            compatibility hint while keeping the wire schema backward
+            compatible for non-layerwise registrations.
     """
 
     kv_layout: Literal["NHD", "HND"]
@@ -87,6 +91,7 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     head_dim: int
     inference_engine_logical_block_size: int
+    use_layerwise: bool
 
 
 def attempt_permute_to_contiguous_view(
@@ -540,9 +545,22 @@ def normalize_kv_and_discover_format(
             kv_layout = "NHD"
         logger.info("vLLM KV cache layout: %s", kv_layout)
         is_hnd = kv_layout == "HND"
-        if list_depth == 0:
-            # vllm cross layer
-            detected_format = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
+        if list_depth == 0 and tensor_dim == 6:
+            # vLLM cross-layer tensor passed directly.
+            detected_format = (
+                lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS
+                if is_hnd
+                else lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
+            )
+        elif list_depth == 1 and len(kv_caches) == 1 and tensor_dim == 6:
+            # MP registration unwraps IPC handles into a one-element list; keep
+            # cross-layer handling equivalent to the direct tensor case.
+            kv_caches = cast(list[torch.Tensor], kv_caches)[0]
+            detected_format = (
+                lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS
+                if is_hnd
+                else lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
+            )
         elif list_depth == 1:
             if tensor_dim == 5:
                 if probe.shape[0] == 2:
@@ -557,6 +575,11 @@ def normalize_kv_and_discover_format(
                         detected_format = lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS
                     else:
                         detected_format = lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
+            elif tensor_dim == 4:
+                if probe.shape[0] == 2 and not is_hnd:
+                    # vLLM compact NHD: [2, num_blocks, block_size, hidden_dim].
+                    # Treat it as NHD with a synthetic single head.
+                    detected_format = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
             elif tensor_dim == 3:
                 # vllm MLA
                 detected_format = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
@@ -736,6 +759,8 @@ def get_num_heads(
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ):
         # NHD: [..., BS, NH, HS] — num_heads at shape[3]
+        if kv_caches[layer_idx].ndim == 4:
+            return 1
         return kv_caches[layer_idx].shape[3]
     elif gpu_kv_format in (
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
@@ -772,6 +797,8 @@ def get_hidden_dim_size(
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
     ):
         # NHD: [..., NH, HS] — hidden_dim = shape[3] * shape[4]
+        if kv_caches[layer_idx].ndim == 4:
+            return kv_caches[layer_idx].shape[3]
         return kv_caches[layer_idx].shape[3] * kv_caches[layer_idx].shape[4]
     elif gpu_kv_format in (
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
@@ -809,6 +836,8 @@ def get_head_size(
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
     ):
         # Both NHD [..., NH, HS] and HND [..., BS, HS] have head_size last
+        if kv_caches[layer_idx].ndim == 4:
+            return kv_caches[layer_idx].shape[3]
         return kv_caches[layer_idx].shape[4]
     elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS:
         return kv_caches[layer_idx].shape[2]

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 import os
 import threading
+import time
 
 # Third Party
 import torch
@@ -18,6 +19,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    RawCudaIPCWrapper,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -30,9 +32,23 @@ logger = init_logger(__name__)
 DEFAULT_MQ_TIMEOUT: float = 300.0
 # Interval (seconds) between periodic heartbeat pings to the server.
 DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
+_MP_CONNECTOR_TIMING_ENV = "LMCACHE_MP_CONNECTOR_TIMING"
+_MP_LOOKUP_WITH_RESULT_ENV = "LMCACHE_MP_LOOKUP_WITH_RESULT"
 
 
-def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
+def _env_flag_enabled(name: str) -> bool:
+    return os.getenv(name, "").lower() in {"1", "true", "yes", "on"}
+
+
+def _mp_connector_timing_enabled() -> bool:
+    return _env_flag_enabled(_MP_CONNECTOR_TIMING_ENV)
+
+
+def wrap_kv_caches(
+    kv_caches: dict[str, torch.Tensor],
+    *,
+    use_raw_cuda_ipc: bool = False,
+) -> KVCache:
     # Emit a per-layer (name, shape, dtype) summary so the operator can
     # verify the exact layer set & tensor geometry being shipped to the
     # LMCache server, then the low-noise count of handles being wrapped.
@@ -48,8 +64,16 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
             for i, (name, shape, dtype) in enumerate(kept_summary)
         ),
     )
-    logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
-    return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
+    wrapper_cls: type[CudaIPCWrapper] = (
+        RawCudaIPCWrapper if use_raw_cuda_ipc else CudaIPCWrapper
+    )
+    wrapper_name = "raw CUDA IPC" if use_raw_cuda_ipc else "PyTorch CUDA IPC"
+    logger.info(
+        "Wrapping %d KV cache tensors for %s",
+        len(kv_caches),
+        wrapper_name,
+    )
+    return [wrapper_cls(tensor) for tensor in kv_caches.values()]
 
 
 def send_lmcache_request(
@@ -322,6 +346,7 @@ class LMCacheMPSchedulerAdapter:
         *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        lookup_with_result: bool | None = None,
     ):
         """
         Args:
@@ -346,6 +371,11 @@ class LMCacheMPSchedulerAdapter:
         )
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
+        self._lookup_with_result = (
+            _env_flag_enabled(_MP_LOOKUP_WITH_RESULT_ENV)
+            if lookup_with_result is None
+            else lookup_with_result
+        )
 
         # Lookup state tracking:
         # - _pending_lookups: request_ids submitted but not yet resolved
@@ -462,20 +492,38 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         ).no_worker_id_version()
 
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.LOOKUP,
-            [key, self.tp_size],
+        timing_enabled = _mp_connector_timing_enabled()
+        lookup_start_ns = time.perf_counter_ns() if timing_enabled else 0
+        request_type = (
+            RequestType.LOOKUP_WITH_RESULT
+            if getattr(self, "_lookup_with_result", False)
+            else RequestType.LOOKUP
         )
+        future = send_lmcache_request(self.mq_client, request_type, [key, self.tp_size])
         try:
-            future.result(timeout=self._mq_timeout)
+            result = future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
-                "LOOKUP request timed out after %ss. Marking server as unhealthy.",
+                "%s request timed out after %ss. Marking server as unhealthy.",
+                request_type.name,
                 self._mq_timeout,
             )
             self._health_event.clear()
             return
+        if getattr(self, "_lookup_with_result", False) and result is not None:
+            self._finished_lookup_results[request_id] = result * self.chunk_size
+        if timing_enabled:
+            lookup_us = (time.perf_counter_ns() - lookup_start_ns) // 1000
+            logger.info(
+                "LMCache MP lookup submit request_id=%s request_type=%s "
+                "lookup_us=%d tokens=%d aligned_tokens=%d result=%s",
+                request_id,
+                request_type.name,
+                lookup_us,
+                len(token_ids),
+                aligned_end,
+                result,
+            )
         self._pending_lookups.add(request_id)
 
     @_lmcache_nvtx_annotate
@@ -509,6 +557,8 @@ class LMCacheMPSchedulerAdapter:
             # Return cached result if the job is already finished
             return self._finished_lookup_results[request_id]
 
+        timing_enabled = _mp_connector_timing_enabled()
+        status_start_ns = time.perf_counter_ns() if timing_enabled else 0
         try:
             result = send_lmcache_request(
                 self.mq_client,
@@ -523,6 +573,16 @@ class LMCacheMPSchedulerAdapter:
             )
             self._health_event.clear()
             return 0
+
+        if timing_enabled:
+            status_us = (time.perf_counter_ns() - status_start_ns) // 1000
+            logger.info(
+                "LMCache MP lookup status request_id=%s status_us=%d "
+                "result=%s",
+                request_id,
+                status_us,
+                result,
+            )
 
         if result is None:
             return None
@@ -675,6 +735,7 @@ class LMCacheMPWorkerAdapter:
         *,
         mq_timeout: float = DEFAULT_MQ_TIMEOUT,
         heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        use_raw_cuda_ipc: bool = False,
     ):
         """Initialize the worker adapter for current or legacy vLLM callers.
 
@@ -690,6 +751,10 @@ class LMCacheMPWorkerAdapter:
                 older vLLM connectors.
             mq_timeout: Timeout in seconds for message queue requests.
             heartbeat_interval: Interval in seconds between heartbeat pings.
+            use_raw_cuda_ipc: Use raw CUDA IPC handles for KV cache
+                registration. This is intended for native C++ CUDA transfer
+                paths; the default PyTorch IPC wrapper remains the Python MP
+                behavior.
 
         Raises:
             TypeError: If the connector argument shape is unsupported.
@@ -702,6 +767,11 @@ class LMCacheMPWorkerAdapter:
         )
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
+        self._use_raw_cuda_ipc = (
+            use_raw_cuda_ipc
+            or _env_flag_enabled("LMCACHE_MP_RAW_CUDA_IPC")
+            or _env_flag_enabled("LMCACHE_MP_NATIVE_RAW_CUDA_IPC")
+        )
 
         # Instance id for GPU worker
         self.instance_id = os.getpid()
@@ -855,7 +925,10 @@ class LMCacheMPWorkerAdapter:
             RequestType.REGISTER_KV_CACHE,
             [
                 self.instance_id,
-                wrap_kv_caches(kv_caches),
+                wrap_kv_caches(
+                    kv_caches,
+                    use_raw_cuda_ipc=self._use_raw_cuda_ipc,
+                ),
                 self.model_name,
                 self.world_size,
                 EngineType.VLLM,
@@ -1140,12 +1213,29 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, (r_future, _) in self.retrieve_futures.items():
-            if not r_future.query():
+        timing_enabled = _mp_connector_timing_enabled()
+        for request_id, (r_future, r_block_ids) in self.retrieve_futures.items():
+            query_start_ns = time.perf_counter_ns() if timing_enabled else 0
+            is_ready = r_future.query()
+            query_us = (time.perf_counter_ns() - query_start_ns) // 1000
+            if not is_ready:
                 continue
 
+            result_start_ns = time.perf_counter_ns() if timing_enabled else 0
             r_result = r_future.result()
+            result_us = (time.perf_counter_ns() - result_start_ns) // 1000
             finished_retrieves.add(request_id)
+
+            if timing_enabled:
+                logger.info(
+                    "LMCache MP retrieve completion request_id=%s "
+                    "query_us=%d result_us=%d blocks=%d result=%s",
+                    request_id,
+                    query_us,
+                    result_us,
+                    len(r_block_ids),
+                    r_result,
+                )
 
             if not r_result:
                 logger.error(

@@ -17,6 +17,7 @@ import pytest
 
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
+from lmcache.integration.vllm.utils import normalize_world_size_and_kv_rank_for_mla
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LMCacheMPWorkerAdapter,
     ParallelStrategy,
@@ -44,7 +45,11 @@ def fake_adapter(monkeypatch):
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_mock)
 
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
-    monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
+    monkeypatch.setattr(
+        adapter_mod,
+        "wrap_kv_caches",
+        lambda kv, use_raw_cuda_ipc=False: list(kv.values()),
+    )
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
     # runtime); the production path performs item assignment on it
     # (``layout_hints["inference_engine_logical_block_size"] = ...``), so
@@ -52,7 +57,7 @@ def fake_adapter(monkeypatch):
     # ``TypeError: 'str' object does not support item assignment``.
     monkeypatch.setattr(
         "lmcache.integration.vllm.utils.vllm_layout_hints",
-        lambda: {},
+        lambda: {"use_layerwise": True},
     )
 
     parallel_strategy = ParallelStrategy(
@@ -89,6 +94,9 @@ def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
     assert send_mock.call_count == 1
     args, _kwargs = send_mock.call_args
     assert args[1] == RequestType.REGISTER_KV_CACHE
+    payload = args[2]
+    assert payload[5]["inference_engine_logical_block_size"] == 16
+    assert payload[5]["use_layerwise"] is True
 
 
 def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
@@ -98,3 +106,22 @@ def test_register_kv_caches_raises_connection_error_on_timeout(fake_adapter):
 
     with pytest.raises(ConnectionError, match="did not respond"):
         adapter.register_kv_caches({"layer.0": object()})
+
+
+@pytest.mark.parametrize(
+    ("use_mla", "expected"),
+    [
+        (False, (8, 5)),
+        (True, (2, 1)),
+    ],
+)
+def test_mla_rank_normalization_for_mp_cache_keys(use_mla, expected):
+    assert (
+        normalize_world_size_and_kv_rank_for_mla(
+            world_size=8,
+            rank=5,
+            tensor_parallel_size=4,
+            use_mla=use_mla,
+        )
+        == expected
+    )

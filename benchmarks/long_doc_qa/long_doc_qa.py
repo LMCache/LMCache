@@ -36,6 +36,11 @@ Commandline arguments:
     --sleep-time-after-warmup: Sleep time after warm up iteration.
                               (Optional, default: 0.0 seconds)
 
+    --exact-shape-query-warmup-rounds: Run this many unmeasured query-shaped
+                                      rounds after the cache-populating warmup
+                                      and before the measured query round.
+                                      (Optional, default: 0)
+
     --output: Filename to write all responses to. If omitted, writes to stdout.
 
     --expected-ttft-gain: Expected minimum speed-up in time-to-first-token
@@ -531,6 +536,20 @@ async def main(args):
         max_inflight_requests=args.max_inflight_requests,
     )
     warmup_end_time = time.time()
+
+    for round_index in range(args.exact_shape_query_warmup_rounds):
+        write_resp(
+            "------exact-shape query warmup round "
+            f"{round_index + 1}/{args.exact_shape_query_warmup_rounds}------\n"
+        )
+        await test_long_document_qa(
+            client=client,
+            model=model,
+            prompts=prompts,
+            output_len=args.output_len,
+            max_inflight_requests=args.max_inflight_requests,
+        )
+
     write_resp("------query round------\n")
 
     sleep_time_after_warmup = args.sleep_time_after_warmup
@@ -694,6 +713,16 @@ def create_argument_parser():
         type=float,
         default=0.0,
         help="Sleep time after warm up iteration",
+    )
+
+    parser.add_argument(
+        "--exact-shape-query-warmup-rounds",
+        type=int,
+        default=0,
+        help=(
+            "Run this many unmeasured query-shaped rounds after the "
+            "cache-populating warmup and before the measured query round."
+        ),
     )
 
     parser.add_argument(

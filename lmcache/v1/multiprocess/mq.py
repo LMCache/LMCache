@@ -4,8 +4,11 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Generic, Optional, TypeVar, get_type_hints
 import inspect
+import json
+import os
 import queue
 import threading
+import time
 import uuid
 
 # Third Party
@@ -104,6 +107,140 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
         _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
         return decoder.decode(b_obj)
     return msgspec.msgpack.decode(b_obj, type=cls)
+
+
+def _is_trace_enabled() -> bool:
+    return bool(os.getenv("LMCACHE_MP_TRACE_FILE"))
+
+
+def _trace_file_path() -> str:
+    return os.environ["LMCACHE_MP_TRACE_FILE"]
+
+
+def _trace_worker_label() -> str:
+    return os.getenv("LMCACHE_MP_TRACE_LABEL", "worker")
+
+
+def _is_ipc_cache_engine_key(value: Any) -> bool:
+    return all(
+        hasattr(value, attr)
+        for attr in (
+            "model_name",
+            "world_size",
+            "worker_id",
+            "token_ids",
+            "start",
+            "end",
+            "request_id",
+            "cache_salt",
+        )
+    )
+
+
+def _is_cuda_ipc_wrapper(value: Any) -> bool:
+    return all(
+        hasattr(value, attr)
+        for attr in ("dtype", "shape", "stride", "storage_offset", "device_uuid")
+    )
+
+
+def _trace_jsonable(value: Any, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, bytes):
+        return {"type": "bytes", "length": len(value)}
+    if depth > 4:
+        return {"type": type(value).__name__, "truncated": True}
+    if hasattr(value, "name") and hasattr(value, "value"):
+        return {
+            "type": type(value).__name__,
+            "name": value.name,
+            "value": value.value,
+        }
+    if _is_ipc_cache_engine_key(value):
+        token_ids = tuple(value.token_ids)
+        return {
+            "type": "IPCCacheEngineKey",
+            "model_name": value.model_name,
+            "world_size": value.world_size,
+            "worker_id": value.worker_id,
+            "token_count": len(token_ids),
+            "token_head": list(token_ids[:8]),
+            "token_tail": list(token_ids[-8:]),
+            "start": value.start,
+            "end": value.end,
+            "request_id": value.request_id,
+            "cache_salt": value.cache_salt,
+        }
+    if _is_cuda_ipc_wrapper(value):
+        return {
+            "type": type(value).__name__,
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "stride": list(value.stride),
+            "storage_offset": value.storage_offset,
+            "device_uuid": value.device_uuid,
+            "raw_cuda_ipc": type(value).__name__ == "RawCudaIPCWrapper",
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _trace_jsonable(item, depth=depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return {
+            "type": "tuple",
+            "items": [_trace_jsonable(item, depth=depth + 1) for item in value],
+        }
+    if isinstance(value, list):
+        if value and all(_is_cuda_ipc_wrapper(item) for item in value):
+            return {
+                "type": "KVCache",
+                "count": len(value),
+                "wrappers": [
+                    _trace_jsonable(item, depth=depth + 1) for item in value[:16]
+                ],
+                "truncated": len(value) > 16,
+            }
+        if len(value) > 64:
+            return {
+                "type": "list",
+                "length": len(value),
+                "head": [_trace_jsonable(item, depth=depth + 1) for item in value[:16]],
+                "tail": [_trace_jsonable(item, depth=depth + 1) for item in value[-4:]],
+            }
+        return [_trace_jsonable(item, depth=depth + 1) for item in value]
+    if hasattr(value, "__dict__"):
+        return {
+            "type": type(value).__name__,
+            "fields": {
+                key: _trace_jsonable(item, depth=depth + 1)
+                for key, item in vars(value).items()
+                if not key.startswith("_")
+            },
+        }
+    return {"type": type(value).__name__, "repr": repr(value)[:200]}
+
+
+_TRACE_WRITE_LOCK = threading.Lock()
+
+
+def _write_trace_row(row: dict[str, Any]) -> None:
+    if not _is_trace_enabled():
+        return
+    row.update(
+        {
+            "pid": os.getpid(),
+            "worker_label": _trace_worker_label(),
+            "time_s": time.time(),
+        }
+    )
+    trace_dir = os.path.dirname(_trace_file_path())
+    if trace_dir:
+        os.makedirs(trace_dir, exist_ok=True)
+    with _TRACE_WRITE_LOCK:
+        with open(_trace_file_path(), "a", encoding="utf-8") as trace_file:
+            trace_file.write(json.dumps(row, sort_keys=True) + "\n")
 
 
 # Main classes
@@ -206,8 +343,24 @@ class MessageQueueClient:
                     future = self.pending_futures.pop(request_uid)
                     if b_response:
                         response = msgspec_decode(b_response[0], cls=response_cls)
+                        _write_trace_row(
+                            {
+                                "phase": "response",
+                                "request_uid": request_uid,
+                                "request_type": request_type.name,
+                                "response": _trace_jsonable(response),
+                            }
+                        )
                         future.set_result(response)
                     else:
+                        _write_trace_row(
+                            {
+                                "phase": "response",
+                                "request_uid": request_uid,
+                                "request_type": request_type.name,
+                                "response": None,
+                            }
+                        )
                         future.set_result(None)
 
     def submit_request(
@@ -230,6 +383,14 @@ class MessageQueueClient:
         future: MessagingFuture[T] = MessagingFuture()
         request_uid = self.request_counter
         self.request_counter += 1
+        _write_trace_row(
+            {
+                "phase": "submit",
+                "request_uid": request_uid,
+                "request_type": request_type.name,
+                "payloads": [_trace_jsonable(payload) for payload in request_payloads],
+            }
+        )
         self.input_queue.put(
             MessageQueueClient.WrappedRequest(
                 request_uid=request_uid,

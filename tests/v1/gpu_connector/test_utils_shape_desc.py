@@ -14,6 +14,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 # First Party
+from lmcache.utils import EngineType  # noqa: E402
 from lmcache.v1.gpu_connector.utils import (  # noqa: E402
     attempt_permute_to_contiguous_view,
     get_device,
@@ -22,6 +23,7 @@ from lmcache.v1.gpu_connector.utils import (  # noqa: E402
     get_head_size,
     get_num_heads,
     make_page_buffer_shape_desc,
+    normalize_kv_and_discover_format,
 )
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
@@ -176,6 +178,63 @@ def test_get_group_data_ptrs_cross_layer_returns_single_base():
     fmt = lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
     ptrs = get_group_data_ptrs(big, fmt, list(range(80)))
     assert ptrs == [big.data_ptr()]
+
+
+@pytest.mark.parametrize(
+    "shape,kv_layout,expected_format",
+    [
+        ((32, 80, 2, 16, 8, 64), "NHD", lmc_ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS),
+        ((32, 80, 2, 8, 16, 64), "HND", lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS),
+    ],
+)
+def test_normalize_vllm_cross_layer_one_wrapper_list(
+    shape,
+    kv_layout,
+    expected_format,
+):
+    """MP registration unwraps a single IPC wrapper into ``[tensor]``.
+
+    Cross-layer layout discovery must preserve the single backing tensor instead
+    of treating the one-element list as a per-layer list.
+    """
+    tensor = torch.empty(*shape, dtype=torch.bfloat16, device="cuda")
+    fmt, normalized = normalize_kv_and_discover_format(
+        [tensor],
+        EngineType.VLLM,
+        layout_hints={"kv_layout": kv_layout},
+    )
+
+    assert fmt == expected_format
+    assert normalized is tensor
+
+
+def test_normalize_vllm_compact_nhd_one_wrapper_list():
+    tensor = torch.empty(2, 6, 16, 8, dtype=torch.bfloat16, device="cuda")
+    fmt, normalized = normalize_kv_and_discover_format(
+        [tensor],
+        EngineType.VLLM,
+        layout_hints={"kv_layout": "NHD"},
+    )
+
+    assert fmt == lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+    assert isinstance(normalized, list)
+    assert normalized[0] is tensor
+    assert get_num_heads(normalized, fmt, layer_idx=0) == 1
+    assert get_head_size(normalized, fmt, layer_idx=0) == 8
+    sd = make_page_buffer_shape_desc(
+        normalized,
+        fmt,
+        layer_idx=0,
+        num_layers_in_group=1,
+        num_blocks=6,
+        block_size=16,
+    )
+    assert sd.kv_size == 2
+    assert sd.nl == 1
+    assert sd.nb == 6
+    assert sd.bs == 16
+    assert sd.nh == 1
+    assert sd.hs == 8
 
 
 def test_attempt_permute_preserves_bare_tensor():

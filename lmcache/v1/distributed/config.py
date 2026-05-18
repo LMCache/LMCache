@@ -100,6 +100,8 @@ class StorageManagerConfig:
 
 def add_storage_manager_args(
     parser: argparse.ArgumentParser,
+    *,
+    require_core_args: bool = True,
 ) -> argparse.ArgumentParser:
     """
     Add storage manager configuration arguments to an existing parser.
@@ -110,6 +112,10 @@ def add_storage_manager_args(
 
     Args:
         parser: The argument parser to add arguments to.
+        require_core_args: Whether ``--l1-size-gb`` and
+            ``--eviction-policy`` are required at argparse time. Commands
+            that can seed those values from a config file should pass
+            ``False`` and validate after config loading.
 
     Returns:
         argparse.ArgumentParser: The same parser with storage manager
@@ -130,7 +136,7 @@ def add_storage_manager_args(
     memory_group.add_argument(
         "--l1-size-gb",
         type=float,
-        required=True,
+        required=require_core_args,
         help="The size of L1 memory in GB.",
     )
     memory_group.add_argument(
@@ -177,7 +183,7 @@ def add_storage_manager_args(
         "--eviction-policy",
         type=str,
         choices=["LRU", "IsolatedLRU", "noop"],
-        required=True,
+        required=require_core_args,
         help="The eviction policy to use ('LRU', 'IsolatedLRU', or 'noop'). "
         "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
         "quotas keyed by cache_salt to be configured via the HTTP API.",

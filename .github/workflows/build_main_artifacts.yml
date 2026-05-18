@@ -44,6 +44,11 @@ jobs:
                   releases.githubusercontent.com:443
                   download.pytorch.org:443
                   download-r2.pytorch.org:443
+                  security.ubuntu.com:80
+                  repo.almalinux.org:443
+                  mirrors.almalinux.org:443
+                  mirror.stream.centos.org:443
+                  vault.centos.org:443
 
             - name: Checkout code
               uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
@@ -62,10 +67,15 @@ jobs:
               with:
                 python-version: "3.13"
 
+            - name: Install native MP build dependencies
+              run: |
+                sudo apt-get update
+                sudo apt-get install -y cmake libzmq3-dev llvm-18-dev
+
             - name: Install build tooling
               run: |
                 python -m pip install --upgrade pip
-                pip install build cibuildwheel
+                pip install build cibuildwheel wheel
 
             - name: Clean up release artifacts
               run: |
@@ -75,13 +85,45 @@ jobs:
               run: |
                 NO_CUDA_EXT=1 python -m build --sdist
 
+            - name: Smoke-test opt-in native MP package binary
+              env:
+                LMCACHE_BUILD_NATIVE_MP: "1"
+                NO_CUDA_EXT: "1"
+              run: |
+                rm -rf /tmp/lmcache-native-package-wheel /tmp/lmcache-native-package-install
+                python setup.py bdist_wheel \
+                  --dist-dir /tmp/lmcache-native-package-wheel \
+                  --bdist-dir /tmp/lmcache-native-package-bdist
+                wheel=$(find /tmp/lmcache-native-package-wheel -name '*.whl' -print -quit)
+                test -n "$wheel"
+                python -m pip install --no-deps --target /tmp/lmcache-native-package-install "$wheel"
+                test -x /tmp/lmcache-native-package-install/lmcache/bin/lmcache-mp-server-native
+                /tmp/lmcache-native-package-install/lmcache/bin/lmcache-mp-server-native --help
+
             - name: Build CUDA wheels with cibuildwheel
               # Configuration is set in pyproject.toml
               # this will build lmcache with the latest version of torch
               # building from source will be required if a serving engine uses
               # an earlier non-ABI compatible version of torch
               env:
-                CIBW_TEST_COMMAND: "python -c 'import lmcache.c_ops'"
+                CIBW_BEFORE_ALL_LINUX: >-
+                  if command -v dnf >/dev/null; then dnf install -y cmake
+                  zeromq-devel llvm-devel; elif command -v yum >/dev/null; then
+                  yum install -y cmake zeromq-devel llvm-devel; elif command -v
+                  apt-get >/dev/null; then apt-get update && apt-get install -y
+                  cmake libzmq3-dev llvm-18-dev; fi
+                CIBW_ENVIRONMENT: >-
+                  TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"
+                  ENABLE_CXX11_ABI=1
+                  PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130
+                  LMCACHE_BUILD_NATIVE_MP=1
+                  LMCACHE_NATIVE_MP_ENABLE_CUDA=1
+                CIBW_TEST_COMMAND: >-
+                  python -c "import os, pathlib, subprocess; import lmcache,
+                  lmcache.c_ops; binary = pathlib.Path(lmcache.__file__).parent
+                  / 'bin' / 'lmcache-mp-server-native-cuda'; assert
+                  binary.exists(), binary; assert os.access(binary, os.X_OK),
+                  binary; subprocess.run([str(binary), '--help'], check=True)"
               run: |
                 python -m cibuildwheel --output-dir dist
 

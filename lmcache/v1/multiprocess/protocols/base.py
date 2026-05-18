@@ -72,6 +72,9 @@ class RequestType(enum.Enum):
     CB_LOOKUP_PRE_COMPUTED_V2 = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED_V2 = enum.auto()
 
+    # Native C++ MP extensions. Append-only to preserve existing enum values.
+    LOOKUP_WITH_RESULT = enum.auto()
+
 
 @dataclass
 class ProtocolDefinition:

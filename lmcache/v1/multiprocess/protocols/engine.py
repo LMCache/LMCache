@@ -32,6 +32,7 @@ REQUEST_NAMES = [
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
+    "LOOKUP_WITH_RESULT",
 ]
 
 # Type alias for cache keys
@@ -105,6 +106,19 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "LOOKUP": ProtocolDefinition(
             payload_classes=[KeyType, int],
             response_class=None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Native C++ extension: submit a prefix lookup and return the hit chunks
+        # in the same response. Lookup locks are still tracked server-side for
+        # later RETRIEVE/FREE_LOOKUP_LOCKS handling.
+        # Payload:
+        #   - key: KeyType - Cache key to look up
+        #   - tp_size: int - Tensor-parallel size for
+        #       MLA multi-reader locking
+        # Returns: int | None - Chunk count when done, None if unsupported
+        "LOOKUP_WITH_RESULT": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=int | None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Query the status of a prefetch job by request_id

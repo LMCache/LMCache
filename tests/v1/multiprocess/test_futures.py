@@ -3,12 +3,14 @@
 import multiprocessing as mp
 import threading
 import time
+from types import SimpleNamespace
 
 # Third Party
 import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess import futures as futures_module
 from lmcache.v1.multiprocess.futures import CUDAMessagingFuture, MessagingFuture
 
 # ==============================================================================
@@ -171,6 +173,66 @@ def test_messaging_future_complex_type():
     assert result == complex_data, "Complex types should be preserved"
 
     thread.join()
+
+
+def test_cuda_future_result_on_current_stream_uses_stream_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test stream-ordered wait path without requiring a real CUDA device."""
+    created_events = []
+
+    class _FakeCudaEvent:
+        def __init__(self, device: int, event_bytes: bytes) -> None:
+            self.device = device
+            self.event_bytes = event_bytes
+            self.synchronized = False
+            self.stream_waited = False
+
+        def synchronize(self) -> None:
+            self.synchronized = True
+
+    class _FakeEventFactory:
+        @staticmethod
+        def from_ipc_handle(device: int, event_bytes: bytes) -> _FakeCudaEvent:
+            event = _FakeCudaEvent(device, event_bytes)
+            created_events.append(event)
+            return event
+
+    class _FakeStream:
+        def __init__(self) -> None:
+            self.waited_events: list[_FakeCudaEvent] = []
+
+        def wait_event(self, event: _FakeCudaEvent) -> None:
+            event.stream_waited = True
+            self.waited_events.append(event)
+
+    stream = _FakeStream()
+    requested_devices: list[int] = []
+
+    def _current_stream(device: int) -> _FakeStream:
+        requested_devices.append(device)
+        return stream
+
+    monkeypatch.setattr(
+        futures_module,
+        "torch_dev",
+        SimpleNamespace(
+            current_device=lambda: 0,
+            current_stream=_current_stream,
+            Event=_FakeEventFactory,
+        ),
+    )
+
+    raw_future = MessagingFuture[tuple[bytes, bool]]()
+    cuda_future = CUDAMessagingFuture.FromMessagingFuture(raw_future, device=3)
+    raw_future.set_result((b"event-bytes", True))
+
+    assert cuda_future.result_on_current_stream(timeout=1.0) is True
+    assert requested_devices == [3]
+    assert len(created_events) == 1
+    assert stream.waited_events == created_events
+    assert created_events[0].stream_waited is True
+    assert created_events[0].synchronized is False
 
 
 # ==============================================================================

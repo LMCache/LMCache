@@ -36,13 +36,31 @@ def is_false(value: str) -> bool:
     return value.lower() in ("false", "0", "no", "n", "off")
 
 
-def vllm_layout_hints() -> "LayoutHints":
+def vllm_layout_hints(
+    config: Optional["LMCacheEngineConfig"] = None,
+) -> "LayoutHints":
     """Build layout_hints dict by querying vLLM at runtime."""
-    hints: dict[str, str] = {}
+    hints: dict[str, object] = {}
     kv_layout = try_get_vllm_kv_cache_layout()
     if kv_layout is not None:
         hints["kv_layout"] = kv_layout
+    lmcache_config = config if config is not None else lmcache_get_or_create_config()
+    if lmcache_config.use_layerwise:
+        hints["use_layerwise"] = True
     return hints  # type: ignore[return-value]
+
+
+def normalize_world_size_and_kv_rank_for_mla(
+    *,
+    world_size: int,
+    rank: int,
+    tensor_parallel_size: int,
+    use_mla: bool,
+) -> Tuple[int, int]:
+    """Return the KV-cache world size and rank used by MP cache keys."""
+    if not use_mla:
+        return world_size, rank
+    return world_size // tensor_parallel_size, rank // tensor_parallel_size
 
 
 def try_get_vllm_kv_cache_layout() -> Literal["NHD", "HND"] | None:

@@ -4,6 +4,7 @@
 # Standard
 from unittest.mock import patch
 import argparse
+import json
 
 # Third Party
 import pytest
@@ -112,6 +113,18 @@ class TestServerCommandArguments:
         assert args.http_host == "0.0.0.0"
         assert args.http_port == 8080
 
+    def test_config_file_can_seed_required_storage_args(self, parser):
+        args = parser.parse_args(
+            [
+                "server",
+                "--config-file",
+                "/tmp/lmcache-server.yaml",
+            ]
+        )
+        assert args.config_file == "/tmp/lmcache-server.yaml"
+        assert args.l1_size_gb is None
+        assert args.eviction_policy is None
+
 
 class TestServerCommandExecute:
     def test_func_bound_to_execute(self, cmd, parser):
@@ -148,3 +161,355 @@ class TestServerCommandExecute:
         assert "mp_config" in kwargs
         assert "storage_manager_config" in kwargs
         assert "obs_config" in kwargs
+
+    @patch("lmcache.v1.multiprocess.http_server.run_http_server")
+    def test_execute_uses_config_file_for_storage_defaults(
+        self,
+        mock_run,
+        parser,
+        tmp_path,
+    ):
+        """Config-file values seed required server startup fields."""
+        disk_path = tmp_path / "l2"
+        config_file = tmp_path / "server.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "chunk_size: 128",
+                    "max_local_cpu_size: 2.5",
+                    "cache_policy: LRU",
+                    f"local_disk: {disk_path}",
+                ]
+            )
+        )
+        args = parser.parse_args(["server", "--config-file", str(config_file)])
+        cmd = ServerCommand()
+
+        cmd.execute(args)
+
+        mock_run.assert_called_once()
+        kwargs = mock_run.call_args.kwargs
+        mp_config = kwargs["mp_config"]
+        storage_config = kwargs["storage_manager_config"]
+        assert mp_config.chunk_size == 128
+        assert storage_config.l1_manager_config.memory_config.size_in_bytes == int(
+            2.5 * (1 << 30)
+        )
+        assert storage_config.eviction_config.eviction_policy == "LRU"
+        adapter = storage_config.l2_adapter_config.adapters[0]
+        assert adapter.base_path == str(disk_path)
+
+    @patch("lmcache.v1.multiprocess.http_server.run_http_server")
+    def test_execute_uses_config_file_env_for_storage_defaults(
+        self,
+        mock_run,
+        parser,
+        tmp_path,
+        monkeypatch,
+    ):
+        """LMCACHE_CONFIG_FILE seeds required Python server startup fields."""
+        disk_path = tmp_path / "env-file-l2"
+        config_file = tmp_path / "server-from-env.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "chunk_size: 160",
+                    "max_local_cpu_size: 4.5",
+                    "cache_policy: LRU",
+                    f"local_disk: {disk_path}",
+                ]
+            )
+        )
+        monkeypatch.setenv("LMCACHE_CONFIG_FILE", str(config_file))
+        args = parser.parse_args(["server"])
+        cmd = ServerCommand()
+
+        cmd.execute(args)
+
+        mock_run.assert_called_once()
+        kwargs = mock_run.call_args.kwargs
+        mp_config = kwargs["mp_config"]
+        storage_config = kwargs["storage_manager_config"]
+        assert mp_config.chunk_size == 160
+        assert storage_config.l1_manager_config.memory_config.size_in_bytes == int(
+            4.5 * (1 << 30)
+        )
+        assert storage_config.eviction_config.eviction_policy == "LRU"
+        adapter = storage_config.l2_adapter_config.adapters[0]
+        assert adapter.base_path == str(disk_path)
+
+    @patch("lmcache.v1.multiprocess.http_server.run_http_server")
+    def test_execute_config_file_precedes_engine_env(
+        self,
+        mock_run,
+        parser,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Config-file startup values win over supported LMCache env vars."""
+        file_disk_path = tmp_path / "file-l2"
+        env_disk_path = tmp_path / "env-l2"
+        config_file = tmp_path / "server.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "chunk_size: 128",
+                    "max_local_cpu_size: 2.5",
+                    "cache_policy: LRU",
+                    f"local_disk: {file_disk_path}",
+                ]
+            )
+        )
+        monkeypatch.setenv("LMCACHE_CHUNK_SIZE", "96")
+        monkeypatch.setenv("LMCACHE_MAX_LOCAL_CPU_SIZE", "3.5")
+        monkeypatch.setenv("LMCACHE_CACHE_POLICY", "noop")
+        monkeypatch.setenv("LMCACHE_LOCAL_DISK", str(env_disk_path))
+        args = parser.parse_args(["server", "--config-file", str(config_file)])
+        cmd = ServerCommand()
+
+        cmd.execute(args)
+
+        mock_run.assert_called_once()
+        kwargs = mock_run.call_args.kwargs
+        mp_config = kwargs["mp_config"]
+        storage_config = kwargs["storage_manager_config"]
+        assert mp_config.chunk_size == 128
+        assert storage_config.l1_manager_config.memory_config.size_in_bytes == int(
+            2.5 * (1 << 30)
+        )
+        assert storage_config.eviction_config.eviction_policy == "LRU"
+        adapter = storage_config.l2_adapter_config.adapters[0]
+        assert adapter.base_path == str(file_disk_path)
+
+    @patch("lmcache.v1.multiprocess.http_server.run_http_server")
+    def test_execute_uses_env_for_storage_defaults(
+        self,
+        mock_run,
+        parser,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Supported LMCache env vars seed Python server startup fields."""
+        disk_path = tmp_path / "env-l2"
+        monkeypatch.setenv("LMCACHE_CHUNK_SIZE", "96")
+        monkeypatch.setenv("LMCACHE_MAX_LOCAL_CPU_SIZE", "3.5")
+        monkeypatch.setenv("LMCACHE_CACHE_POLICY", "LRU")
+        monkeypatch.setenv("LMCACHE_LOCAL_DISK", str(disk_path))
+        args = parser.parse_args(["server"])
+        cmd = ServerCommand()
+
+        cmd.execute(args)
+
+        mock_run.assert_called_once()
+        kwargs = mock_run.call_args.kwargs
+        mp_config = kwargs["mp_config"]
+        storage_config = kwargs["storage_manager_config"]
+        assert mp_config.chunk_size == 96
+        assert storage_config.l1_manager_config.memory_config.size_in_bytes == int(
+            3.5 * (1 << 30)
+        )
+        assert storage_config.eviction_config.eviction_policy == "LRU"
+        adapter = storage_config.l2_adapter_config.adapters[0]
+        assert adapter.base_path == str(disk_path)
+
+    @patch("lmcache.v1.multiprocess.native_launcher.run_native_server")
+    def test_execute_native_uses_config_file_before_launch(
+        self,
+        mock_run_native,
+        parser,
+        tmp_path,
+    ):
+        """Native launch sees supported config-file values on parsed args."""
+        disk_path = tmp_path / "native-l2"
+        config_file = tmp_path / "native-server.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "chunk_size: 64",
+                    "max_local_cpu_size: 1.25",
+                    "cache_policy: LRU",
+                    f"local_disk: {disk_path}",
+                ]
+            )
+        )
+        args = parser.parse_args(
+            ["server", "--native", "--config-file", str(config_file)]
+        )
+        cmd = ServerCommand()
+
+        cmd.execute(args)
+
+        mock_run_native.assert_called_once()
+        native_args = mock_run_native.call_args.args[0]
+        assert native_args.chunk_size == 64
+        assert native_args.l1_size_gb == 1.25
+        assert native_args.eviction_policy == "LRU"
+        assert json.loads(native_args.l2_adapter[0]) == {
+            "base_path": str(disk_path),
+            "type": "fs",
+        }
+
+    @patch("lmcache.v1.multiprocess.native_launcher.run_native_server")
+    def test_execute_native_uses_config_file_env_before_launch(
+        self,
+        mock_run_native,
+        parser,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Native launch sees LMCACHE_CONFIG_FILE values on parsed args."""
+        disk_path = tmp_path / "native-env-file-l2"
+        config_file = tmp_path / "native-server-from-env.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "chunk_size: 192",
+                    "max_local_cpu_size: 2.25",
+                    "cache_policy: LRU",
+                    f"local_disk: {disk_path}",
+                ]
+            )
+        )
+        monkeypatch.setenv("LMCACHE_CONFIG_FILE", str(config_file))
+        args = parser.parse_args(["server", "--native"])
+        cmd = ServerCommand()
+
+        cmd.execute(args)
+
+        mock_run_native.assert_called_once()
+        native_args = mock_run_native.call_args.args[0]
+        assert native_args.chunk_size == 192
+        assert native_args.l1_size_gb == 2.25
+        assert native_args.eviction_policy == "LRU"
+        assert json.loads(native_args.l2_adapter[0]) == {
+            "base_path": str(disk_path),
+            "type": "fs",
+        }
+
+    @patch("lmcache.v1.multiprocess.native_launcher.run_native_server")
+    def test_execute_native_config_file_precedes_engine_env(
+        self,
+        mock_run_native,
+        parser,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Native launch ignores engine env overrides when config file exists."""
+        file_disk_path = tmp_path / "native-file-l2"
+        env_disk_path = tmp_path / "native-env-l2"
+        config_file = tmp_path / "native-server.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "chunk_size: 64",
+                    "max_local_cpu_size: 1.25",
+                    "cache_policy: LRU",
+                    f"local_disk: {file_disk_path}",
+                ]
+            )
+        )
+        monkeypatch.setenv("LMCACHE_CHUNK_SIZE", "80")
+        monkeypatch.setenv("LMCACHE_MAX_LOCAL_CPU_SIZE", "1.75")
+        monkeypatch.setenv("LMCACHE_CACHE_POLICY", "noop")
+        monkeypatch.setenv("LMCACHE_LOCAL_DISK", str(env_disk_path))
+        monkeypatch.setenv("LMCACHE_REMOTE_URL", "redis://localhost:6379")
+        args = parser.parse_args(
+            ["server", "--native", "--config-file", str(config_file)]
+        )
+        cmd = ServerCommand()
+
+        cmd.execute(args)
+
+        mock_run_native.assert_called_once()
+        native_args = mock_run_native.call_args.args[0]
+        assert native_args.chunk_size == 64
+        assert native_args.l1_size_gb == 1.25
+        assert native_args.eviction_policy == "LRU"
+        assert json.loads(native_args.l2_adapter[0]) == {
+            "base_path": str(file_disk_path),
+            "type": "fs",
+        }
+
+    @patch("lmcache.v1.multiprocess.native_launcher.run_native_server")
+    def test_execute_native_uses_env_before_launch(
+        self,
+        mock_run_native,
+        parser,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Native launch sees supported LMCache env values on parsed args."""
+        disk_path = tmp_path / "native-env-l2"
+        monkeypatch.setenv("LMCACHE_MP_NATIVE", "1")
+        monkeypatch.setenv("LMCACHE_CHUNK_SIZE", "80")
+        monkeypatch.setenv("LMCACHE_MAX_LOCAL_CPU_SIZE", "1.75")
+        monkeypatch.setenv("LMCACHE_CACHE_POLICY", "LRU")
+        monkeypatch.setenv("LMCACHE_LOCAL_DISK", str(disk_path))
+        args = parser.parse_args(["server"])
+        cmd = ServerCommand()
+
+        cmd.execute(args)
+
+        mock_run_native.assert_called_once()
+        native_args = mock_run_native.call_args.args[0]
+        assert native_args.chunk_size == 80
+        assert native_args.l1_size_gb == 1.75
+        assert native_args.eviction_policy == "LRU"
+        assert json.loads(native_args.l2_adapter[0]) == {
+            "base_path": str(disk_path),
+            "type": "fs",
+        }
+
+    @patch("lmcache.v1.multiprocess.native_launcher.run_native_server")
+    def test_execute_native_rejects_unsupported_config_file_mode(
+        self,
+        mock_run_native,
+        parser,
+        tmp_path,
+        capsys,
+    ):
+        """Native launch fails before exec for unsupported config-file modes."""
+        config_file = tmp_path / "native-unsupported.yaml"
+        config_file.write_text(
+            "\n".join(
+                [
+                    "max_local_cpu_size: 1",
+                    "cache_policy: LRU",
+                    "remote_url: redis://localhost:6379",
+                ]
+            )
+        )
+        args = parser.parse_args(
+            ["server", "--native", "--config-file", str(config_file)]
+        )
+        cmd = ServerCommand()
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd.execute(args)
+
+        assert exc_info.value.code == 2
+        mock_run_native.assert_not_called()
+        assert "remote storage" in capsys.readouterr().err
+
+    @patch("lmcache.v1.multiprocess.native_launcher.run_native_server")
+    def test_execute_native_rejects_unsupported_env_mode(
+        self,
+        mock_run_native,
+        parser,
+        monkeypatch,
+        capsys,
+    ):
+        """Native launch fails before exec for unsupported LMCache env modes."""
+        monkeypatch.setenv("LMCACHE_MP_NATIVE", "1")
+        monkeypatch.setenv("LMCACHE_REMOTE_URL", "redis://localhost:6379")
+        args = parser.parse_args(
+            ["server", "--l1-size-gb", "1", "--eviction-policy", "LRU"]
+        )
+        cmd = ServerCommand()
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd.execute(args)
+
+        assert exc_info.value.code == 2
+        mock_run_native.assert_not_called()
+        assert "remote storage" in capsys.readouterr().err
