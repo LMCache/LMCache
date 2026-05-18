@@ -104,6 +104,20 @@ class LayoutHints(TypedDict, total=False):
             Each entry must be a positive int. Layers with the same
             ``logical_block_size`` and identical other identity fields
             are grouped together.
+        per_layer_kv_cache_group_id: Optional list of length
+            ``num_layers`` carrying the engine-side block-ID *namespace*
+            handle for each layer. On vLLM with the hybrid KV cache
+            manager active, each ``KVCacheGroupSpec`` allocates block
+            IDs from a disjoint ``BlockPool`` namespace; two layers
+            with otherwise identical identity may still pull block IDs
+            from independent pools and must therefore land in different
+            LMCache groups. The hint participates in
+            :data:`LayerGroupIdentity` as the namespace disambiguator
+            (DeepSeek-V4 hybrid manager: even+MTP-SWA layers vs odd-SWA
+            layers share every other identity field but use distinct
+            gids). Each entry must be a non-negative int. When absent,
+            every layer is treated as namespace 0 (preserving
+            behavior on engines without hybrid KV cache groupings).
     """
 
     kv_layout: Literal["NHD", "HND"]
@@ -112,6 +126,7 @@ class LayoutHints(TypedDict, total=False):
     head_dim: int
     inference_engine_logical_block_size: int
     per_layer_logical_block_size: list[int]
+    per_layer_kv_cache_group_id: list[int]
 
 
 def attempt_permute_to_contiguous_view(

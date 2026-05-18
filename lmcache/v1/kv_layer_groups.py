@@ -35,10 +35,10 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 }
 
 
-# The 5-tuple that uniquely identifies a set of kernel-equivalent layers:
+# The 7-tuple that uniquely identifies a set of kernel-equivalent layers:
 # ``(kv_size, num_heads, head_size, block_size, logical_block_size,
-# dtype)``. Two layers share a transfer-kernel launch iff they share
-# this identity — see the grouping loop in
+# kv_cache_group_id, dtype)``. Two layers share a transfer-kernel
+# launch iff they share this identity — see the grouping loop in
 # :meth:`KVLayerGroupsManager.__init__` for the derivation.
 #
 # The fifth slot (``logical_block_size``) is the *scheduler-side*
@@ -52,11 +52,27 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 # grid while the SWA layers use a 64-token grid). Two layers with the
 # same physical layout but different scheduler grids are
 # kernel-incompatible — one ``LoadStoreOp`` cannot index both — so the
-# logical block size must participate in the identity tuple. When the
-# hint is absent, every layer's logical block size defaults to its
-# physical ``bs`` and the 6-tuple collapses to the prior 5-tuple
-# behavior.
-LayerGroupIdentity = tuple[int, int, int, int, int, torch.dtype]
+# logical block size must participate in the identity tuple.
+#
+# The sixth slot (``kv_cache_group_id``) is the engine's per-layer
+# block-ID namespace handle. Two layers may share an LMCache transfer-
+# kernel group only if a single ``LoadStoreOp``'s ``block_ids``
+# correctly indexes both — which is true iff they share a namespace.
+# It comes from
+# :data:`~lmcache.v1.gpu_connector.utils.LayoutHints.per_layer_kv_cache_group_id`
+# when the engine supplies it, otherwise every layer is treated as
+# namespace 0. On DeepSeek-V4 with the hybrid manager active, the
+# even-indexed-plus-MTP SWA layers (vLLM gid 1) and the odd-indexed
+# SWA layers (vLLM gid 2) have identical ``KVCacheSpec`` field values
+# — same ``block_size``, ``sliding_window``, ``head_size``, dtype, and
+# physical ``shape[1]`` — but pull block IDs from disjoint pools.
+# Without this slot they merge into one LMCache group and a STORE op
+# carrying gid 1's block IDs would silently mis-index gid 2's layers.
+#
+# When neither hint is provided, every layer's logical block size
+# defaults to its physical ``bs`` and every layer's namespace defaults
+# to 0, so the 7-tuple collapses to the prior 5-tuple grouping.
+LayerGroupIdentity = tuple[int, int, int, int, int, int, torch.dtype]
 
 
 @dataclass
@@ -131,6 +147,18 @@ class KVLayerGroupInfo:
     indicates the field has not been populated yet (left in for
     backwards compatibility with no-arg constructors); the manager
     always sets a positive value at construction."""
+    kv_cache_group_id: int = 0
+    """Engine-side block-ID namespace handle for this group. Stamped
+    from
+    :data:`~lmcache.v1.gpu_connector.utils.LayoutHints.per_layer_kv_cache_group_id`
+    at registration. Two LMCache groups with different
+    ``kv_cache_group_id`` values reflect layers whose
+    ``LoadStoreOp.block_ids`` come from disjoint engine-side
+    ``BlockPool``-allocated namespaces — they cannot be merged into one
+    transfer-kernel launch even when every other field matches.
+    Defaults to 0 when the engine does not provide the hint, in which
+    case all layers share namespace 0 and grouping behaves identically
+    to the prior 6-tuple identity."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -148,7 +176,8 @@ class KVLayerGroupInfo:
             f"dtype={self.dtype}, "
             f"compress_ratio={self.compress_ratio}, "
             f"physical_chunk_size={self.physical_chunk_size}, "
-            f"logical_bs={self.logical_block_size})"
+            f"logical_bs={self.logical_block_size}, "
+            f"kv_cache_group_id={self.kv_cache_group_id})"
         )
 
     @property
@@ -167,9 +196,10 @@ class KVLayerGroupsManager:
 
     At construction time, every layer in ``kv_caches`` is bucketed by its
     :data:`LayerGroupIdentity` (``(kv_size, num_heads, head_size,
-    block_size, logical_block_size, dtype)``). Each bucket becomes one
-    :class:`KVLayerGroupInfo` holding the layer indices, a shared
-    :class:`PageBufferShapeDesc`, and the group's torch dtype.
+    block_size, logical_block_size, kv_cache_group_id, dtype)``). Each
+    bucket becomes one :class:`KVLayerGroupInfo` holding the layer
+    indices, a shared :class:`PageBufferShapeDesc`, and the group's
+    torch dtype.
 
     Downstream consumers (``VLLMPagedMemGPUConnectorV3``,
     ``GPUCacheContext``, the multiprocess server) iterate
@@ -228,11 +258,19 @@ class KVLayerGroupsManager:
                   Required when the engine has KV layer groups with
                   mixed scheduler block sizes (vLLM hybrid manager
                   active on DeepSeek-V4).
+                * ``per_layer_kv_cache_group_id`` (optional list of
+                  length ``num_layers``). When present, each layer's
+                  engine-side block-ID *namespace* handle joins the
+                  identity tuple, so layers whose ``KVCacheSpec``
+                  field values fully match but pull block IDs from
+                  disjoint engine-side namespaces (e.g.
+                  DeepSeek-V4's vLLM gids 1 and 2: even+MTP vs odd
+                  SWA layers) end up in different LMCache groups.
 
-                ``None`` (or a hints dict without either key) means
-                every group is treated as non-compressed
+                ``None`` (or a hints dict without any of the above)
+                means every group is treated as non-compressed
                 (``compress_ratio == 1``, ``logical_block_size ==
-                shape_desc.bs``).
+                shape_desc.bs``, ``kv_cache_group_id == 0``).
             lmcache_logical_chunk_size: Logical tokens per LMCache chunk
                 (one logical token = one inference-engine token).
                 Together with ``compress_ratio`` it determines each
@@ -277,6 +315,7 @@ class KVLayerGroupsManager:
         # shape but different scheduler grids land in distinct LMCache
         # groups (DeepSeek-V4 hybrid manager active).
         per_layer_logical_bs: "list[int] | None" = None
+        per_layer_namespace: "list[int] | None" = None
         if layout_hints is not None:
             logical_hint = layout_hints.get("per_layer_logical_block_size")
             if logical_hint is not None:
@@ -299,14 +338,37 @@ class KVLayerGroupsManager:
                     )
                 per_layer_logical_bs = list(logical_hint)
 
+            ns_hint = layout_hints.get("per_layer_kv_cache_group_id")
+            if ns_hint is not None:
+                if len(ns_hint) != num_layers:
+                    raise ValueError(
+                        "per_layer_kv_cache_group_id length "
+                        f"({len(ns_hint)}) does not match num_layers "
+                        f"({num_layers}); each registered layer must "
+                        "have exactly one block-ID namespace entry"
+                    )
+                bad = [i for i, ns in enumerate(ns_hint) if ns < 0]
+                if bad:
+                    raise ValueError(
+                        "per_layer_kv_cache_group_id has invalid "
+                        f"(negative) entries at positions {bad[:8]}"
+                        + ("..." if len(bad) > 8 else "")
+                        + "; namespace IDs must be non-negative"
+                    )
+                per_layer_namespace = list(ns_hint)
+
         groups_dict = self._group_layers_by_identity(
-            kv_caches, gpu_kv_format, num_layers, per_layer_logical_bs
+            kv_caches,
+            gpu_kv_format,
+            num_layers,
+            per_layer_logical_bs,
+            per_layer_namespace,
         )
 
         # Emit groups in order of their first-appearing layer so that group
         # indices remain deterministic across runs.
         for group_idx, (
-            (_, _, _, bs, group_logical_bs, dt),
+            (_, _, _, bs, group_logical_bs, group_namespace, dt),
             indices,
         ) in enumerate(sorted(groups_dict.items(), key=lambda kv: kv[1][0])):
             block_stride_elems = resolve_block_stride_and_log_layout(
@@ -341,6 +403,7 @@ class KVLayerGroupsManager:
                     compress_ratio=compress_ratio,
                     physical_chunk_size=physical_chunk_size,
                     logical_block_size=group_logical_bs,
+                    kv_cache_group_id=group_namespace,
                 )
             )
 
@@ -440,20 +503,22 @@ class KVLayerGroupsManager:
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_layers: int,
         per_layer_logical_bs: "list[int] | None" = None,
+        per_layer_namespace: "list[int] | None" = None,
     ) -> dict[LayerGroupIdentity, list[int]]:
         """Partition layer indices by :data:`LayerGroupIdentity`.
 
         Linear single pass over ``kv_caches``; layers sharing the same
         ``(kv_size, num_heads, head_size, block_size,
-        logical_block_size, dtype)`` signature land in the same bucket.
-        When ``per_layer_logical_bs`` is None, each layer's
-        ``logical_block_size`` defaults to its physical block size,
-        making the 6-tuple effectively a 5-tuple (preserving prior
-        grouping behavior on engines without the hint). The returned
-        dict's value lists are later passed by reference into
-        :class:`KVLayerGroupInfo` instances, so the dict itself is
-        garbage-collected after ``__init__`` returns while the lists
-        stay alive on each group.
+        logical_block_size, kv_cache_group_id, dtype)`` signature land
+        in the same bucket. When ``per_layer_logical_bs`` is None, each
+        layer's ``logical_block_size`` defaults to its physical block
+        size; when ``per_layer_namespace`` is None, each layer's
+        namespace defaults to 0. With both defaults, the 7-tuple is
+        effectively a 5-tuple (preserving prior grouping behavior on
+        engines without these hints). The returned dict's value lists
+        are later passed by reference into :class:`KVLayerGroupInfo`
+        instances, so the dict itself is garbage-collected after
+        ``__init__`` returns while the lists stay alive on each group.
         """
         # First Party
         from lmcache.v1.gpu_connector.utils import (
@@ -477,7 +542,14 @@ class KVLayerGroupsManager:
                 if per_layer_logical_bs is not None
                 else bs
             )
-            groups_dict[(kv_size, nh, hs, bs, logical_bs, dt)].append(idx)
+            namespace = (
+                per_layer_namespace[idx]
+                if per_layer_namespace is not None
+                else 0
+            )
+            groups_dict[
+                (kv_size, nh, hs, bs, logical_bs, namespace, dt)
+            ].append(idx)
         return groups_dict
 
     @property
