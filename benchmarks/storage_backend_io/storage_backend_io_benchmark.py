@@ -185,6 +185,35 @@ def _make_keys(num_ops: int) -> list[CacheEngineKey]:
     ]
 
 
+def _compute_required_buffer_gb(
+    metadata: LMCacheMetadata,
+    num_ops: int,
+    chunk_size: int,
+) -> float:
+    """Compute the required CPU buffer size in GB for the benchmark.
+
+    Calculates the total size of all chunks based on KV shape and dtype,
+    then converts to GB with a small floor margin.
+
+    Args:
+        metadata: The benchmark metadata containing KV shape and dtype info.
+        num_ops: Number of put/get operations.
+        chunk_size: The chunk size used by the backend.
+
+    Returns:
+        Required buffer size in GB (minimum 0.01 GB).
+    """
+    chunk_size_bytes = (
+        metadata.kv_shape[0]
+        * metadata.kv_shape[1]
+        * chunk_size
+        * metadata.kv_shape[3]
+        * metadata.kv_shape[4]
+        * metadata.kv_dtype.itemsize
+    )
+    return max(0.01, (num_ops * chunk_size_bytes) / (1024**3))
+
+
 # ============================================================================
 # Abstract Base Class for Storage Backends
 # ============================================================================
@@ -344,27 +373,13 @@ class StorageBackendBenchmark(ABC):
         metadata = _build_metadata(self.chunk_size)
         logger.info(f"Prepare config for {self.backend_name} ...")
 
-        rust_raw = False
-        if "rust" in self.backend_name:
-            rust_raw = True
+        rust_raw = "rust" in self.backend_name
 
-        required_buffer_gb = 0.1
-        if rust_raw:
-            # For fixed buffer support
-            # we need a larger CPU buffer that's aligned to chunk size
-            # Calculate chunk size from metadata
-            chunk_size_bytes = (
-                metadata.kv_shape[0]
-                * metadata.kv_shape[1]
-                * self.chunk_size
-                * metadata.kv_shape[3]
-                * metadata.kv_shape[4]
-                * metadata.kv_dtype.itemsize
-            )
-            # Calculate required buffer size (num_ops * chunk_size with some margin)
-            required_buffer_gb = max(
-                0.01, (self.num_ops * chunk_size_bytes) / (1024**3)
-            )
+        required_buffer_gb = (
+            _compute_required_buffer_gb(metadata, self.num_ops, self.chunk_size)
+            if rust_raw
+            else 0.1
+        )
 
         config = LMCacheEngineConfig.from_defaults(
             chunk_size=self.chunk_size,
@@ -433,6 +448,22 @@ class StorageBackendBenchmark(ABC):
             for i in range(0, self.num_ops, slice_size)
         ]
 
+    def _execute_write_phase(self) -> float:
+        """Execute the write phase and return elapsed time in seconds.
+
+        This is shared between single-phase (write-only) and two-phase
+        (write+read) benchmarks to avoid code duplication.
+        """
+        start = time.perf_counter()
+        pending_ops = self._submit_tasks(self._keys, self._objs) or []
+
+        if pending_ops or self._uses_futures_pattern():
+            self._wait_for_futures(pending_ops)
+        else:
+            self._wait_for_completion(pending_ops)
+
+        return time.perf_counter() - start
+
     def _execute_benchmark(self) -> dict:
         """Execute the benchmark with concurrent writes.
 
@@ -445,15 +476,7 @@ class StorageBackendBenchmark(ABC):
             return self._execute_two_phase_benchmark()
 
         # Single-phase benchmark (write-only)
-        start = time.perf_counter()
-        pending_ops = self._submit_tasks(self._keys, self._objs) or []
-
-        if pending_ops or self._uses_futures_pattern():
-            self._wait_for_futures(pending_ops)
-        else:
-            self._wait_for_completion(pending_ops)
-
-        elapsed = time.perf_counter() - start
+        elapsed = self._execute_write_phase()
 
         return {
             "backend": self.backend_name,
@@ -499,15 +522,7 @@ class StorageBackendBenchmark(ABC):
 
         # Write phase
         logger.info("Begin to test write performance")
-        write_start = time.perf_counter()
-        write_ops = self._submit_tasks(self._keys, self._objs)
-
-        if write_ops or self._uses_futures_pattern():
-            self._wait_for_futures(write_ops)
-        else:
-            self._wait_for_completion(write_ops)
-
-        write_elapsed = time.perf_counter() - write_start
+        write_elapsed = self._execute_write_phase()
         logger.info("End of test write performance")
         # Release write objects
         _release_memory_objs(self._objs)
@@ -523,7 +538,7 @@ class StorageBackendBenchmark(ABC):
         # Verify integrity
         integrity_errors = 0
         integrity_passed = False
-        if hasattr(self, "verify_integrity") and self.verify_integrity:
+        if self.verify_integrity:
             integrity_errors, integrity_passed = self._verify_integrity(
                 read_results, original_data
             )
@@ -546,7 +561,7 @@ class StorageBackendBenchmark(ABC):
             else 0.0,
             "total_elapsed_sec": write_elapsed + read_elapsed,
             "use_odirect": self.use_odirect,
-            "verify_integrity": getattr(self, "verify_integrity", False),
+            "verify_integrity": self.verify_integrity,
             "integrity_errors": integrity_errors,
             "integrity_passed": integrity_passed,
         }
@@ -769,14 +784,6 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
             dst_device="cpu",
         )
 
-    def _submit_tasks(
-        self,
-        keys: list[CacheEngineKey],
-        objs: Optional[list] = None,
-    ) -> list[Any]:
-        """Submit tasks (put or get) based on the benchmark mode."""
-        return self._submit_put_tasks(keys, objs if objs else [])
-
     def _uses_futures_pattern(self) -> bool:
         """RustRawBlockBackend uses futures pattern."""
         return True
@@ -995,7 +1002,7 @@ def main() -> None:
         help="Perform write benchmark (default: True). False for read benchmark.",
     )
     parser.add_argument(
-        "--use_uring",
+        "--use-uring",
         action="store_true",
         help="Enable io_uring for raw block backend",
     )
@@ -1034,11 +1041,6 @@ def main() -> None:
         action="store_true",
         help="Enable O_DIRECT for raw block backend",
     )
-    parser.add_argument(
-        "--use-uring",
-        action="store_true",
-        help="Enable io_uring for raw block backend",
-    )
     parser.add_argument("--alignment", type=int, default=4096)
     parser.add_argument(
         "--remote-url",
@@ -1060,7 +1062,6 @@ def main() -> None:
     write_bench = args.write_bench.lower() in ("true", "1", "yes", "y", "")
 
     results = []
-
     # Run LocalDiskBackend benchmark
     if args.backend in ("local_disk", "both"):
         localdisk_bench = LocalDiskBackendBenchmark(
