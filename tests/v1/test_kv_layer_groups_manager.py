@@ -4,6 +4,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     KVLayerGroupsManager,
@@ -20,7 +21,7 @@ def _build_manager(
     tensors: list[torch.Tensor],
     *,
     num_blocks: int,
-    layout_hints: dict | None = None,
+    layout_hints: LayoutHints | None = None,
     lmcache_logical_chunk_size: int = 256,
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.

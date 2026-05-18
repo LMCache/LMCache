@@ -606,14 +606,10 @@ class KVLayerGroupsManager:
             dt = get_dtype(kv_caches, gpu_kv_format, idx)
             bs = get_block_size(kv_caches, gpu_kv_format, idx)
             logical_bs = (
-                per_layer_logical_bs[idx]
-                if per_layer_logical_bs is not None
-                else bs
+                per_layer_logical_bs[idx] if per_layer_logical_bs is not None else bs
             )
             namespace = (
-                per_layer_namespace[idx]
-                if per_layer_namespace is not None
-                else 0
+                per_layer_namespace[idx] if per_layer_namespace is not None else 0
             )
             sliding_window = (
                 per_layer_sliding_window[idx]

@@ -1216,9 +1216,7 @@ class LMCacheMPWorkerAdapter:
         # carries the per-gid structure verbatim. See the unhealthy
         # branch above for rationale on flattening at this layer.
         flat_block_ids: list[int] = [
-            block_id
-            for group_block_ids in op.block_ids
-            for block_id in group_block_ids
+            block_id for group_block_ids in op.block_ids for block_id in group_block_ids
         ]
         self.retrieve_futures[request_id] = (future, flat_block_ids)
 

@@ -601,8 +601,8 @@ class MPCacheEngine:
             # namespace and a single staged tensor; for V4 hybrid-on
             # there are 5 namespaces and 5 staged tensors with
             # heterogeneous lengths.
-            staged_block_ids_per_namespace = (
-                gpu_context.stage_block_ids_per_namespace(gpu_block_ids)
+            staged_block_ids_per_namespace = gpu_context.stage_block_ids_per_namespace(
+                gpu_block_ids
             )
 
             # Wait for vLLM to finish
@@ -684,8 +684,8 @@ class MPCacheEngine:
                     for group_idx, group in enumerate(groups):
                         bpc_g = gpu_context.blocks_per_chunk(group_idx)
                         bpc_full_g = gpu_context.blocks_per_chunk_full(group_idx)
-                        kernel_chunk_tokens = (
-                            gpu_context.get_physical_chunk_size(group_idx)
+                        kernel_chunk_tokens = gpu_context.get_physical_chunk_size(
+                            group_idx
                         )
                         ns_block_ids_gpu = staged_block_ids_per_namespace[
                             group.kv_cache_group_id
@@ -903,9 +903,7 @@ class MPCacheEngine:
                 for group_idx, group in enumerate(groups):
                     bpc_g = gpu_context.blocks_per_chunk(group_idx)
                     bpc_full_g = gpu_context.blocks_per_chunk_full(group_idx)
-                    kernel_chunk_tokens = (
-                        gpu_context.get_physical_chunk_size(group_idx)
-                    )
+                    kernel_chunk_tokens = gpu_context.get_physical_chunk_size(group_idx)
                     ns_block_ids_gpu = staged_block_ids_per_namespace[
                         group.kv_cache_group_id
                     ]
@@ -914,14 +912,12 @@ class MPCacheEngine:
                         # from each ``bpc_full_g``-sized chunk slot in
                         # ``ns_block_ids_gpu``. Build a flat gather index
                         # ``[batch_len * bpc_g]`` once per kernel call.
-                        chunk_offsets = (
-                            torch.arange(
-                                batch_len,
-                                device=ns_block_ids_gpu.device,
-                                dtype=torch.long,
-                            )
-                            * bpc_full_g
-                            + (start_chunk_id * bpc_full_g + (bpc_full_g - bpc_g))
+                        chunk_offsets = torch.arange(
+                            batch_len,
+                            device=ns_block_ids_gpu.device,
+                            dtype=torch.long,
+                        ) * bpc_full_g + (
+                            start_chunk_id * bpc_full_g + (bpc_full_g - bpc_g)
                         )
                         within_chunk = torch.arange(
                             bpc_g,
@@ -997,8 +993,8 @@ class MPCacheEngine:
             # ``store`` for the same pattern. The closure-captured
             # ``staged_block_ids_per_namespace`` is consumed inside
             # ``_retrieve_loop``.
-            staged_block_ids_per_namespace = (
-                gpu_context.stage_block_ids_per_namespace(gpu_block_ids)
+            staged_block_ids_per_namespace = gpu_context.stage_block_ids_per_namespace(
+                gpu_block_ids
             )
 
             # Not all backends support interprocess Events (CUDA IPC specific)
