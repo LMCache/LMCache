@@ -10,21 +10,36 @@ import time
 # Third Party
 import pytest
 
-torch = pytest.importorskip("torch", reason="torch required")
-if not torch.cuda.is_available():
-    pytest.skip("CUDA not available", allow_module_level=True)
+# Native path needs CUDA + c_ops with record_completion_on_stream.
+# Fallback path tests run anywhere.
+try:
+    # Third Party
+    import torch  # noqa: F401
 
-lmc_ops = pytest.importorskip("lmcache.c_ops", reason="lmcache.c_ops not built")
-if not hasattr(lmc_ops, "record_completion_on_stream"):
-    pytest.skip(
-        "record_completion_on_stream not available", allow_module_level=True
-    )
+    _has_cuda = torch.cuda.is_available()
+except ImportError:
+    _has_cuda = False
 
-# Third Party
-import cupy  # noqa: E402
+try:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
+    _has_native_op = hasattr(lmc_ops, "record_completion_on_stream")
+except ImportError:
+    lmc_ops = None
+    _has_native_op = False
+
+native_only = pytest.mark.skipif(
+    not (_has_cuda and _has_native_op),
+    reason="requires CUDA and native record_completion_on_stream",
+)
+
+if _has_cuda and _has_native_op:
+    # Third Party
+    import cupy
 
 # First Party
-from lmcache.v1.multiprocess.native_completion import (  # noqa: E402
+from lmcache.v1.multiprocess.native_completion import (
     CompletionDispatcher,
     is_native_available,
     record_on_stream,
@@ -46,6 +61,7 @@ def dispatcher():
     d.stop()
 
 
+@native_only
 class TestRecordAndDrain:
     """Low-level tests on lmc_ops.record_completion_on_stream / drain."""
 
@@ -81,6 +97,7 @@ class TestRecordAndDrain:
             assert pickle.loads(payload[0]) == idx
 
 
+@native_only
 class TestDispatcher:
     """Integration tests for CompletionDispatcher (drain + handler dispatch)."""
 
@@ -126,15 +143,11 @@ class TestDispatcher:
         assert dispatcher.handler_exception_counts().get("finish_write", 0) == 1
 
 
+@native_only
 class TestDeadlockRegression:
-    """Reproduces the deadlock shape PR fix addresses.
-
-    The original ``cupy_stream.launch_host_func(python_fn, ...)`` path
-    deadlocked when the Python callback tried to acquire the GIL while
-    the calling thread held both the GIL and the CUDA driver lock. With
-    the C++ host callback the driver thread never touches the GIL, so
-    the test below should complete well within the timeout.
-    """
+    """Regression for the GIL deadlock: the legacy
+    ``stream.launch_host_func(python_fn, ...)`` path stalls; the C++
+    callback runs without the GIL and must finish within the timeout."""
 
     def test_many_concurrent_records_no_deadlock(self, dispatcher, stream):
         received: list[list] = []
@@ -155,3 +168,49 @@ class TestDeadlockRegression:
             f"deadlock or drop: only {len(received)} of 200 dispatched"
         )
         assert len(received) == 200
+
+
+class TestFallbackPath:
+    """``record_on_stream`` must delegate to
+    ``stream.launch_host_func(fallback_handler, payload_list)`` when the
+    native recorder isn't compiled in."""
+
+    def test_falls_back_to_launch_host_func(self, monkeypatch):
+        # First Party
+        from lmcache.v1.multiprocess import native_completion
+
+        monkeypatch.setattr(native_completion, "_has_native", False)
+
+        recorded: list = []
+
+        class FakeStream:
+            def launch_host_func(self, fn, payload):
+                recorded.append((fn, payload))
+
+        def fallback(payload):
+            pass
+
+        stream = FakeStream()
+        native_completion.record_on_stream(
+            stream, "finish_write", [b"k0", b"k1"], fallback_handler=fallback
+        )
+
+        assert len(recorded) == 1
+        fn, payload = recorded[0]
+        assert fn is fallback
+        assert payload == [b"k0", b"k1"]
+
+    def test_raises_when_no_fallback_and_no_native(self, monkeypatch):
+        # First Party
+        from lmcache.v1.multiprocess import native_completion
+
+        monkeypatch.setattr(native_completion, "_has_native", False)
+
+        class FakeStream:
+            def launch_host_func(self, fn, payload):
+                raise AssertionError("should not be called when fallback is None")
+
+        with pytest.raises(RuntimeError, match="native recorder unavailable"):
+            native_completion.record_on_stream(
+                FakeStream(), "finish_write", [b"k"], fallback_handler=None
+            )
