@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import inspect
+import os
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import init_logger as lmcache_init_logger
 from lmcache.utils import check_interprocess_event_support
+from lmcache.utils import init_logger as lmcache_init_logger
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -65,6 +68,40 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
+
+_MP_CONNECTOR_TIMING_ENV = "LMCACHE_MP_CONNECTOR_TIMING"
+
+
+def _mp_connector_timing_enabled() -> bool:
+    return os.environ.get(_MP_CONNECTOR_TIMING_ENV, "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _server_url(server_host: object, server_port: object) -> str:
+    host = str(server_host)
+    if not isinstance(server_port, int | str):
+        raise TypeError("lmcache.mp.port must be an int or string")
+    if "://" not in host:
+        host = f"tcp://{host}"
+    return f"{host}:{int(server_port)}"
+
+
+def _extra_config_bool(vllm_config: VllmConfig, key: str, default: bool) -> bool:
+    value = vllm_config.kv_transfer_config.get_from_extra_config(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _worker_adapter_accepts_raw_cuda_ipc() -> bool:
+    sig = inspect.signature(LMCacheMPWorkerAdapter.__init__)
+    return "use_raw_cuda_ipc" in sig.parameters
 
 
 # Helper functions
@@ -163,6 +200,14 @@ def create_worker_adapter(
         vllm_config.parallel_config.pipeline_parallel_size,
     )
 
+    kwargs: dict[str, Any] = {}
+    if _worker_adapter_accepts_raw_cuda_ipc():
+        kwargs["use_raw_cuda_ipc"] = _extra_config_bool(
+            vllm_config,
+            "lmcache.mp.raw_cuda_ipc",
+            False,
+        )
+
     return LMCacheMPWorkerAdapter(
         server_url=server_url,
         context=zmq_context,
@@ -171,6 +216,7 @@ def create_worker_adapter(
         parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        **kwargs,
     )
 
 
@@ -349,9 +395,8 @@ class LMCacheMPRequestMetadata:
             block_ids = tracker.allocated_block_ids[start:end]
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
-            token_ids = list(tracker.all_token_ids)
             op = LoadStoreOp(
-                token_ids=token_ids,
+                token_ids=list(tracker.all_token_ids),
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
@@ -406,7 +451,6 @@ class LMCacheMPRequestMetadata:
             block_ids = tracker.allocated_block_ids[start:end]
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
-            token_ids = list(tracker.all_token_ids)
 
             # Compute how many tokens at the start of the retrieve range
             # overlap with APC-shared blocks. The server must skip writing
@@ -417,7 +461,7 @@ class LMCacheMPRequestMetadata:
             skip_first_n_tokens = apc_overlap_blocks * vllm_block_size
 
             op = LoadStoreOp(
-                token_ids=token_ids,
+                token_ids=list(tracker.all_token_ids),
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
@@ -472,6 +516,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
+    - lmcache.mp.raw_cuda_ipc: use raw CUDA IPC tensor handles for native
+      C++ CUDA transfer paths.
     """
 
     def __init__(
@@ -503,7 +549,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             )
         )
 
-        server_url = f"{server_host}:{server_port}"
+        server_url = _server_url(server_host, server_port)
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
@@ -526,6 +572,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
         self.vllm_block_size = vllm_config.cache_config.block_size
+        self._layerwise_waited_retrieve_ids: set[str] = set()
 
     @property
     def role(self) -> KVConnectorRole:
@@ -611,6 +658,61 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         Args:
             layer_name: the name of that layer
         """
+        if not hasattr(self, "worker_adapter"):
+            return
+
+        retrieve_futures = getattr(self.worker_adapter, "retrieve_futures", {})
+        for request_id, (future, block_ids) in list(retrieve_futures.items()):
+            if request_id in self._layerwise_waited_retrieve_ids:
+                continue
+
+            timeout = getattr(self.worker_adapter, "_mq_timeout", None)
+            timing_enabled = _mp_connector_timing_enabled()
+            wait_start_ns = time.perf_counter_ns() if timing_enabled else 0
+            used_current_stream_wait = False
+            try:
+                result_on_current_stream = getattr(
+                    future, "result_on_current_stream", None
+                )
+                if callable(result_on_current_stream):
+                    used_current_stream_wait = True
+                    result = result_on_current_stream(timeout=timeout)
+                else:
+                    result = future.result(timeout=timeout)
+            except TimeoutError:
+                logger.error(
+                    "Timed out waiting for layerwise retrieve for request_id=%s "
+                    "before layer %s",
+                    request_id,
+                    layer_name,
+                )
+                result = False
+
+            if timing_enabled:
+                wait_us = (time.perf_counter_ns() - wait_start_ns) // 1000
+                logger.info(
+                    "LMCache MP layerwise retrieve wait request_id=%s "
+                    "layer_name=%s wait_us=%d blocks=%d "
+                    "current_stream_wait=%s result=%s",
+                    request_id,
+                    layer_name,
+                    wait_us,
+                    len(block_ids),
+                    used_current_stream_wait,
+                    result,
+                )
+
+            if not result:
+                logger.error(
+                    "Something went wrong when processing the layerwise "
+                    "retrieve request for request_id=%s, result=%s",
+                    request_id,
+                    result,
+                )
+                if hasattr(self.worker_adapter, "error_block_ids"):
+                    self.worker_adapter.error_block_ids.update(block_ids)
+
+            self._layerwise_waited_retrieve_ids.add(request_id)
         return
 
     def save_kv_layer(
@@ -691,6 +793,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
         val = self.worker_adapter.get_finished(finished_req_ids)
+        finished_retrieves = val[1]
+        if finished_retrieves:
+            self._layerwise_waited_retrieve_ids.difference_update(finished_retrieves)
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
         return val
 
@@ -771,11 +876,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if request.status == RequestStatus.PREEMPTED:
             return 0, False
 
-        self.scheduler_adapter.maybe_submit_lookup_request(
+        submitted_async_lookup = self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=list(request.all_token_ids),
             cache_salt=tracker.cache_salt,
         )
+        if submitted_async_lookup:
+            return None, True
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
         if ret is None:
@@ -873,6 +980,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
+                        cache_salt=tracker.cache_salt,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",
@@ -1061,7 +1169,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size
+                request_tracker,
+                blocks_per_chunk,
+                self.vllm_block_size,
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -1088,7 +1198,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
-                request_tracker, blocks_per_chunk, self.vllm_block_size
+                request_tracker,
+                blocks_per_chunk,
+                self.vllm_block_size,
             )
 
             if r_meta is not None:

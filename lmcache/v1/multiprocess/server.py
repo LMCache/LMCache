@@ -305,10 +305,25 @@ class MPCacheEngine:
             TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
         ]
 
-        st = time.perf_counter()
-
         assert key.worker_id is not None, "Must store with worker_id != None"
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        return self._store_object_keys(
+            key.request_id,
+            obj_keys,
+            instance_id,
+            gpu_block_ids,
+            event_ipc_handle,
+        )
+
+    def _store_object_keys(
+        self,
+        request_id: str,
+        obj_keys: list[ObjectKey],
+        instance_id: int,
+        gpu_block_ids: list[int],
+        event_ipc_handle: bytes,
+    ) -> tuple[bytes, bool]:
+        st = time.perf_counter()
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -357,7 +372,7 @@ class MPCacheEngine:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.MP_STORE_SUBMITTED,
-                    session_id=key.request_id,
+                    session_id=request_id,
                     metadata={"device": str(gpu_context.device)},
                 )
             )
@@ -366,7 +381,7 @@ class MPCacheEngine:
                 gpu_context.cupy_stream,
                 Event(
                     event_type=EventType.MP_STORE_START,
-                    session_id=key.request_id,
+                    session_id=request_id,
                     metadata={
                         "device": str(gpu_context.device),
                         "engine_id": instance_id,
@@ -442,7 +457,7 @@ class MPCacheEngine:
                     gpu_context.cupy_stream,
                     Event(
                         event_type=EventType.MP_STORE_END,
-                        session_id=key.request_id,
+                        session_id=request_id,
                         metadata={
                             "stored_count": len(reserved_dict),
                             "device": str(gpu_context.device),
@@ -496,10 +511,29 @@ class MPCacheEngine:
             TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
         ]
 
-        st = time.perf_counter()
-
         assert key.worker_id is not None, "Must retrieve with worker_id != None"
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        return self._retrieve_object_keys(
+            key.request_id,
+            key.cache_salt,
+            obj_keys,
+            instance_id,
+            gpu_block_ids,
+            event_ipc_handle,
+            skip_first_n_tokens,
+        )
+
+    def _retrieve_object_keys(
+        self,
+        request_id: str,
+        cache_salt: str,
+        obj_keys: list[ObjectKey],
+        instance_id: int,
+        gpu_block_ids: list[int],
+        event_ipc_handle: bytes,
+        skip_first_n_tokens: int = 0,
+    ) -> tuple[bytes, bool]:
+        st = time.perf_counter()
 
         assert instance_id in self.gpu_contexts, (
             f"KV cache not registered for GPU ID {instance_id}"
@@ -513,7 +547,7 @@ class MPCacheEngine:
         self._event_bus.publish(
             Event(
                 event_type=EventType.MP_RETRIEVE_SUBMITTED,
-                session_id=key.request_id,
+                session_id=request_id,
                 metadata={"device": str(gpu_context.device)},
             )
         )
@@ -522,7 +556,7 @@ class MPCacheEngine:
             gpu_context.cupy_stream,
             Event(
                 event_type=EventType.MP_RETRIEVE_START,
-                session_id=key.request_id,
+                session_id=request_id,
                 metadata={
                     "device": str(gpu_context.device),
                     "engine_id": instance_id,
@@ -649,13 +683,13 @@ class MPCacheEngine:
                     gpu_context.cupy_stream,
                     Event(
                         event_type=EventType.MP_RETRIEVE_END,
-                        session_id=key.request_id,
+                        session_id=request_id,
                         metadata={
                             "retrieved_count": len(prefetched_keys),
                             "device": str(gpu_context.device),
                             "engine_id": instance_id,
                             "model_name": model_name,
-                            "cache_salt": key.cache_salt,
+                            "cache_salt": cache_salt,
                             "total_bytes": total_bytes,
                         },
                     ),
@@ -985,10 +1019,9 @@ class MPCacheEngine:
             return
         if session.lookup_ipc_key is None:
             logger.warning(
-                "Session %s has no lookup ipc key, skipping touch", request_id
+                "Session %s has no lookup key, skipping touch", request_id
             )
             return
-
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
         obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes)
         # unified touch of all keys, which include retrieved and stored keys
@@ -1194,7 +1227,10 @@ def run_cache_server(
 
     # Assign thread pools
     server.add_affinity_thread_pool(
-        [RequestType.STORE, RequestType.RETRIEVE],
+        [
+            RequestType.STORE,
+            RequestType.RETRIEVE,
+        ],
         max_workers=mp_config.max_gpu_workers,
     )
     server.add_normal_thread_pool(

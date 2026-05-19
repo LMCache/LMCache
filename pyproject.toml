@@ -61,8 +61,8 @@ tag_regex = "^v?(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
 git_describe_command = ["git", "describe", "--tags", "--long", "--match", "v[0-9]*.[0-9]*", "--exclude", "v*-*"]
 
 [tool.setuptools.packages.find]
-where = [""]
-include = ["lmcache", "lmcache*"]
+where = ["", "csrc/mp/python"]
+include = ["lmcache", "lmcache*", "lmcache_mp_cpp", "lmcache_mp_cpp*"]
 
 [tool.ruff]
 # same as Black's default line length

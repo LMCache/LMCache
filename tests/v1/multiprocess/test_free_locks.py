@@ -9,7 +9,9 @@ from unittest.mock import MagicMock, patch
 import threading
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheEngineKey,
+)
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -268,3 +270,45 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     assert lookup_key.end == free_key.end
     assert lookup_key.request_id == free_key.request_id
     assert lookup_key.token_ids == free_key.token_ids
+
+
+def test_adapter_lookup_submit_does_not_wait_for_normal_lookup():
+    """Normal LOOKUP submission should not block the scheduler critical path."""
+    # First Party
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        LMCacheMPSchedulerAdapter,
+        ParallelStrategy,
+    )
+
+    adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
+    adapter.model_name = "test_model"
+    adapter.chunk_size = 256
+    adapter.blocks_in_chunk = 16
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
+    adapter._health_event = threading.Event()
+    adapter._health_event.set()
+    adapter._mq_timeout = 30.0
+    adapter._heartbeat = None
+    adapter._heartbeat_lock = threading.Lock()
+    adapter._heartbeat_interval = 5.0
+    adapter._pending_lookups = set()
+
+    mock_client = MagicMock(spec=MessageQueueClient)
+    mock_future = MagicMock()
+    mock_future.result.side_effect = AssertionError(
+        "normal LOOKUP submit must not wait for the server result"
+    )
+    mock_client.submit_request.return_value = mock_future
+    adapter.mq_client = mock_client
+
+    with patch.object(adapter, "_ensure_heartbeat_started"):
+        submitted = adapter.maybe_submit_lookup_request(
+            "req-async", list(range(512))
+        )
+
+    mock_client.submit_request.assert_called_once()
+    call_args = mock_client.submit_request.call_args
+    assert call_args[0][0] == RequestType.LOOKUP
+    assert submitted is True
+    assert adapter._pending_lookups == {"req-async"}
+    mock_future.result.assert_not_called()

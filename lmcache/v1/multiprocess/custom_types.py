@@ -22,6 +22,35 @@ Key Types:
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
 
+_CUDA_IPC_WRAPPER_WIRE_MAGIC = "lmcache.cuda_ipc_wrapper"
+_CUDA_IPC_WRAPPER_WIRE_VERSION = 1
+
+
+def _pack_msgpack_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, str, bytes)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_pack_msgpack_value(item) for item in value]
+    return {"pickle": pickle.dumps(value)}
+
+
+def _unpack_msgpack_value(value: Any) -> Any:
+    if isinstance(value, dict) and set(value) == {"pickle"}:
+        return pickle.loads(value["pickle"])
+    if isinstance(value, list):
+        return tuple(_unpack_msgpack_value(item) for item in value)
+    return value
+
+
+def _dtype_from_wire(dtype_name: str) -> torch.dtype:
+    prefix = "torch."
+    if dtype_name.startswith(prefix):
+        dtype_name = dtype_name[len(prefix) :]
+    dtype = getattr(torch, dtype_name)
+    if not isinstance(dtype, torch.dtype):
+        raise TypeError(f"Invalid serialized torch dtype: {dtype_name!r}")
+    return dtype
+
 
 class CudaIPCWrapper:
     _discovered_device_mapping: dict[str, int] = {}
@@ -120,10 +149,46 @@ class CudaIPCWrapper:
 
     @staticmethod
     def Serialize(obj: "CudaIPCWrapper") -> bytes:
-        return pickle.dumps(obj)
+        payload: dict[str, Any] = {
+            "magic": _CUDA_IPC_WRAPPER_WIRE_MAGIC,
+            "version": _CUDA_IPC_WRAPPER_WIRE_VERSION,
+            "kind": "raw" if isinstance(obj, RawCudaIPCWrapper) else "cuda",
+            "handle": _pack_msgpack_value(obj.handle),
+            "dtype": str(obj.dtype),
+            "shape": list(obj.shape),
+            "stride": list(obj.stride),
+            "storage_offset": obj.storage_offset,
+            "device_uuid": obj.device_uuid,
+        }
+        if isinstance(obj, RawCudaIPCWrapper):
+            payload["ipc_handle_reserved"] = obj._ipc_handle_reserved
+            payload["nbytes"] = obj._nbytes
+        return msgspec.msgpack.encode(payload)
 
     @staticmethod
     def Deserialize(data: bytes) -> "CudaIPCWrapper":
+        try:
+            payload = msgspec.msgpack.decode(data)
+        except msgspec.DecodeError:
+            payload = None
+        if (
+            isinstance(payload, dict)
+            and payload.get("magic") == _CUDA_IPC_WRAPPER_WIRE_MAGIC
+            and payload.get("version") == _CUDA_IPC_WRAPPER_WIRE_VERSION
+        ):
+            kind = payload.get("kind")
+            cls = RawCudaIPCWrapper if kind == "raw" else CudaIPCWrapper
+            obj = cls.__new__(cls)
+            obj.handle = _unpack_msgpack_value(payload.get("handle"))
+            obj.dtype = _dtype_from_wire(str(payload["dtype"]))
+            obj.shape = tuple(int(dim) for dim in payload["shape"])
+            obj.stride = tuple(int(dim) for dim in payload["stride"])
+            obj.storage_offset = int(payload["storage_offset"])
+            obj.device_uuid = str(payload["device_uuid"])
+            if isinstance(obj, RawCudaIPCWrapper):
+                obj._ipc_handle_reserved = bytes(payload["ipc_handle_reserved"])
+                obj._nbytes = int(payload["nbytes"])
+            return obj
         return pickle.loads(data)
 
 
@@ -309,7 +374,6 @@ class IPCCacheEngineKey:
             request_id=self.request_id,
             cache_salt=self.cache_salt,
         )
-
 
 # Type exports
 KVCache = list[CudaIPCWrapper]

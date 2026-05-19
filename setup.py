@@ -2,10 +2,13 @@
 # Standard
 from pathlib import Path
 import os
+import shutil
+import subprocess
 import sys
 
 # Third Party
 from setuptools import find_packages, setup
+from setuptools.command.build_py import build_py as setuptools_build_py
 
 ROOT_DIR = Path(__file__).parent
 HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
@@ -28,6 +31,131 @@ def _read_requirements(path: Path) -> list[str]:
         if line and not line.startswith("#"):
             reqs.append(line)
     return reqs
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
+
+
+def _native_mp_package_binary_name(enable_cuda: bool) -> str:
+    if enable_cuda:
+        return "lmcache-mp-server-native-cuda"
+    return "lmcache-mp-server-native"
+
+
+def _native_mp_shared_library_name() -> str:
+    if sys.platform == "darwin":
+        return "liblmcache_mp_cpp.dylib"
+    if sys.platform == "win32":
+        return "lmcache_mp_cpp.dll"
+    return "liblmcache_mp_cpp.so"
+
+
+def _cmake_cache_source_dir(build_dir: Path) -> Path | None:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return None
+    for raw in cache.read_text(errors="ignore").splitlines():
+        if raw.startswith("CMAKE_HOME_DIRECTORY:INTERNAL="):
+            return Path(raw.split("=", 1)[1])
+    return None
+
+
+def _prepare_cmake_build_dir(build_dir: Path, source_dir: Path) -> None:
+    cached_source = _cmake_cache_source_dir(build_dir)
+    if cached_source is not None and cached_source.resolve() != source_dir.resolve():
+        shutil.rmtree(build_dir)
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _build_native_mp_binary(build_temp: Path, build_lib: Path) -> None:
+    if not _env_flag_enabled("LMCACHE_BUILD_NATIVE_MP"):
+        return
+
+    enable_cuda = _env_flag_enabled("LMCACHE_NATIVE_MP_ENABLE_CUDA")
+    source_dir = ROOT_DIR / "csrc/mp"
+    if not source_dir.exists():
+        raise FileNotFoundError(f"native MP source directory missing: {source_dir}")
+
+    build_dir = build_temp / (
+        "lmcache-native-mp-cuda" if enable_cuda else "lmcache-native-mp"
+    )
+    _prepare_cmake_build_dir(build_dir, source_dir)
+    cmake_args = [
+        "cmake",
+        "-S",
+        str(source_dir),
+        "-B",
+        str(build_dir),
+        "-DLMCACHE_BUILD_NATIVE_MP=ON",
+    ]
+    if enable_cuda:
+        cmake_args.append("-DLMCACHE_ENABLE_CUDA=ON")
+    subprocess.run(cmake_args, check=True)
+    subprocess.run(
+        [
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--target",
+            "lmcache_mp_cpp",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--target",
+            "lmcache-mp-server-native",
+        ],
+        check=True,
+    )
+
+    suffix = ".exe" if sys.platform == "win32" else ""
+    built_binary = build_dir / f"lmcache-mp-server-native{suffix}"
+    package_dir = build_lib / "lmcache" / "bin"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    for binary_name in (
+        _native_mp_package_binary_name(False),
+        _native_mp_package_binary_name(True),
+    ):
+        stale_binary = package_dir / f"{binary_name}{suffix}"
+        if stale_binary.exists():
+            stale_binary.unlink()
+    packaged_binary = package_dir / (
+        f"{_native_mp_package_binary_name(enable_cuda)}{suffix}"
+    )
+    shutil.copy2(built_binary, packaged_binary)
+    packaged_binary.chmod(packaged_binary.stat().st_mode | 0o111)
+
+    built_library = build_dir / _native_mp_shared_library_name()
+    native_package_lib_dir = build_lib / "lmcache_mp_cpp" / "lib"
+    native_package_lib_dir.mkdir(parents=True, exist_ok=True)
+    for stale_library in native_package_lib_dir.glob("*lmcache_mp_cpp*"):
+        if stale_library.is_file():
+            stale_library.unlink()
+    shutil.copy2(
+        built_library,
+        native_package_lib_dir / _native_mp_shared_library_name(),
+    )
+
+
+def _with_native_build_cmdclass(cmdclass: dict) -> dict:
+    cmdclass = dict(cmdclass)
+
+    class BuildPyWithNative(setuptools_build_py):
+        def run(self):
+            super().run()
+            build_cmd = self.get_finalized_command("build")
+            _build_native_mp_binary(
+                Path(build_cmd.build_temp),
+                Path(self.build_lib),
+            )
+
+    cmdclass["build_py"] = BuildPyWithNative
+    return cmdclass
 
 
 def hipify_wrapper() -> None:
@@ -307,6 +435,7 @@ if __name__ == "__main__":
         get_extension = cuda_extension
 
     ext_modules, cmdclass = get_extension()
+    cmdclass = _with_native_build_cmdclass(cmdclass)
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     if BUILD_WITH_HIP:
@@ -323,12 +452,19 @@ if __name__ == "__main__":
         core_file = f"cuda{cuda_major}_core.txt"
     install_requires += _read_requirements(ROOT_DIR / "requirements" / core_file)
 
+    native_mp_packages = find_packages(where=str(ROOT_DIR / "csrc/mp/python"))
     setup(
-        packages=find_packages(
-            exclude=("csrc",)
-        ),  # Ensure csrc is excluded if it only contains sources
+        packages=find_packages(exclude=("csrc",)) + native_mp_packages,
+        package_dir={
+            package: str(Path("csrc/mp/python") / package.replace(".", "/"))
+            for package in native_mp_packages
+        },
         ext_modules=ext_modules,
         cmdclass=cmdclass,
         include_package_data=True,
+        package_data={
+            "lmcache": ["bin/lmcache-mp-server-native*"],
+            "lmcache_mp_cpp": ["lib/*lmcache_mp_cpp*"],
+        },
         install_requires=install_requires,
     )

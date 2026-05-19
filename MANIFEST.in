@@ -4,3 +4,5 @@ include requirements/common.txt
 include requirements/cuda.txt
 
 recursive-include csrc *
+prune csrc/mp/.build
+global-exclude __pycache__ *.py[cod]

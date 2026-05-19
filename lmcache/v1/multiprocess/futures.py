@@ -147,6 +147,48 @@ class CUDAMessagingFuture(MessagingFuture[T]):
 
         return True
 
+    def wait_on_current_stream(self, timeout: Optional[float] = None) -> bool:
+        """
+        Wait for the raw future, then make the current CUDA stream wait on the
+        IPC event instead of blocking the CPU on event synchronization.
+
+        Args:
+            timeout (Optional[float]): Maximum time to wait for the UNDERLYING
+                RAW FUTURE in seconds. The timeout does not cover later CUDA
+                stream execution.
+
+        Returns:
+            bool: True if the raw future is done and the stream wait was
+            enqueued, False if the timeout was reached.
+        """
+        if self.event_ is None:
+            flag = self.raw_future_.wait(timeout)
+            if not flag:
+                return False
+            self._on_raw_future_complete()
+
+        assert self.event_ is not None
+        stream = torch_dev.current_stream(self.device_)
+        stream.wait_event(self.event_)
+        return True
+
+    def result_on_current_stream(self, timeout: Optional[float] = None) -> T:
+        """
+        Get the result after enqueueing a wait for the IPC event on the current
+        CUDA stream.
+
+        Raises:
+            TimeoutError: If the raw future is not done within the timeout.
+        """
+        flag = self.wait_on_current_stream(timeout)
+        if not flag:
+            raise TimeoutError(
+                "CUDAMessagingFuture result not available within timeout"
+            )
+
+        assert self.result_ is not None
+        return self.result_
+
     def result(self, timeout: Optional[float] = None) -> T:
         """
         Get the result of the future.
