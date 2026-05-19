@@ -29,13 +29,6 @@ def _make_mock_metrics() -> tuple[MagicMock, MagicMock]:
     return mock_metrics, mock_meter
 
 
-def _gauge_callbacks(meter: MagicMock) -> dict:
-    return {
-        c.args[0]: c.kwargs["callbacks"][0]
-        for c in meter.create_observable_gauge.call_args_list
-    }
-
-
 def _counter_callbacks(meter: MagicMock) -> dict:
     return {
         c.args[0]: c.kwargs["callbacks"][0]
@@ -44,30 +37,15 @@ def _counter_callbacks(meter: MagicMock) -> dict:
 
 
 class TestRegistration:
-    def test_registers_two_gauges_and_two_counters(self):
+    def test_registers_two_counters(self):
         bus = EventBus(EventBusConfig(enabled=True))
         mock_metrics, meter = _make_mock_metrics()
         with patch(_PATCH_TARGET, mock_metrics):
             EventBusSelfMetricsSubscriber(bus)
-            assert set(_gauge_callbacks(meter)) == {
-                "lmcache_mp.event_bus.queue_depth",
-                "lmcache_mp.event_bus.drain_lag_seconds",
-            }
             assert set(_counter_callbacks(meter)) == {
                 "lmcache_mp.event_bus.dropped_events_total",
                 "lmcache_mp.event_bus.subscriber_exceptions",
             }
-
-    def test_queue_depth_callback_reflects_bus(self):
-        bus = EventBus(EventBusConfig(enabled=True))
-        bus.publish(Event(event_type=EventType.L1_READ_FINISHED, session_id="s1"))
-        bus.publish(Event(event_type=EventType.L1_READ_FINISHED, session_id="s2"))
-
-        mock_metrics, meter = _make_mock_metrics()
-        with patch(_PATCH_TARGET, mock_metrics):
-            EventBusSelfMetricsSubscriber(bus)
-            cb = _gauge_callbacks(meter)["lmcache_mp.event_bus.queue_depth"]
-            assert cb(None) == [(2, None)]
 
     def test_dropped_counter_callback_reflects_drops(self):
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=2))
