@@ -70,8 +70,6 @@ div.highlight button.copybtn + button.copybtn {
 
 /* Language switcher (中文 | Eng) — lives in the top nav bar,
    or floats at top-right if the nav bar isn't found. */
-
-/* Look of the switcher */
 .lmcache-language-switcher {
     display: inline-flex;
     align-items: center;
@@ -95,7 +93,6 @@ div.highlight button.copybtn + button.copybtn {
     z-index: 60;
 }
 
-/* The 中文 and Eng links */
 .lmcache-language-switcher a {
     color: inherit;
     opacity: 0.72;
@@ -108,7 +105,6 @@ div.highlight button.copybtn + button.copybtn {
     opacity: 1;
 }
 
-/* The "|" between 中文 and Eng */
 .lmcache-language-switcher__divider {
     opacity: 0.38;
 }
