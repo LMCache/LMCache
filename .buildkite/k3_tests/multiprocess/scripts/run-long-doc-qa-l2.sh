@@ -393,8 +393,8 @@ l1_write_keys = get_counter('lmcache_mp_l1_write_chunks_total')
 # L2 metrics
 store_keys = get_counter('lmcache_mp_l2_store_submitted_objects_chunks_total')
 store_succeeded = get_counter('lmcache_mp_l2_store_completed_objects_chunks_total')
-prefetch_lookups = get_counter('lmcache_mp_l2_prefetch_lookup_submitted_requests_total')
-prefetch_hits = get_counter('lmcache_mp_l2_prefetch_lookup_hit_chunks_total')
+prefetch_lookups = get_counter('lmcache_mp_l2_prefetch_lookup_requests_total')
+prefetch_hits = get_counter('lmcache_mp_l2_prefetch_hit_chunks_total')
 prefetch_loaded = get_counter('lmcache_mp_l2_prefetch_load_completed_chunks_total')
 
 print('=' * 60)
