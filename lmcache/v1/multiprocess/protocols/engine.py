@@ -18,6 +18,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
+    RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
@@ -32,6 +33,9 @@ REQUEST_NAMES = [
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
+    "REGISTER_KV_CACHE_NON_GPU_CONTEXT",
+    "STORE_CPU_CHUNKS",
+    "RETRIEVE_CPU_CHUNKS",
 ]
 
 # Type alias for cache keys
@@ -144,6 +148,25 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "END_SESSION": ProtocolDefinition(
             payload_classes=[str],
             response_class=None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Register non-GPU KV cache context
+        # Payload:
+        #   - RegisterNonGpuContextPayload - all metadata fields in one struct
+        # Returns: None
+        "REGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
+            payload_classes=[RegisterNonGpuContextPayload],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
+        ),
+        "STORE_CPU_CHUNKS": ProtocolDefinition(
+            payload_classes=[KeyType, int, bytes],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        "RETRIEVE_CPU_CHUNKS": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=tuple[bool, bytes],
             handler_type=HandlerType.BLOCKING,
         ),
     }
