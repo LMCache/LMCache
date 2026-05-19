@@ -5,7 +5,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
-import os
 
 # Third Party
 from vllm.config import VllmConfig
@@ -77,24 +76,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
-
-
-def _swa_suffix_only_mode() -> bool:
-    """Experimental gate: when ``LMCACHE_SWA_SUFFIX_ONLY=1`` is set, the
-    connector advertises each layer's ``sliding_window`` to LMCache so
-    LMCache can store/retrieve only the last ``ceil(window /
-    logical_block_size)`` blocks per chunk for sliding-window groups —
-    instead of the full ``lmcache_chunk_size // logical_block_size``
-    blocks. The SWA mask kernel-side guarantees positions older than
-    ``window`` are never read, so the truncated KV is sufficient for
-    correct decode after a full hit, and for the first ``window`` steps
-    of a partial-hit recompute (after which the recompute path moves
-    the window forward into freshly-recomputed positions and the cache
-    is no longer touched). On DeepSeek-V4 (``chunk_size=1024``,
-    ``window``s of 8/128/256), this collapses gid 3's per-chunk SWA
-    payload from ~236 MiB to ~1.85 MiB. Has no effect on
-    full-attention groups (``sliding_window == 0``)."""
-    return os.environ.get("LMCACHE_SWA_SUFFIX_ONLY") == "1"
 
 
 # Helper functions
@@ -792,13 +773,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         per_layer_kv_cache_group_id: list[int] | None = None
         per_layer_sliding_window: list[int] | None = None
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        # When ``LMCACHE_SWA_SUFFIX_ONLY=1`` is set, also publish the
-        # per-layer sliding_window so LMCache can shrink each
-        # SWA-flavored group's per-chunk MemoryObj slot to just the
-        # last ``ceil(window / logical_block_size)`` blocks. Outside
-        # this mode the field is omitted and LMCache falls back to
-        # the full-chunk behavior.
-        emit_sliding_window = _swa_suffix_only_mode()
+        # We always publish the per-layer ``sliding_window`` so LMCache
+        # can shrink each SWA-flavored group's per-chunk MemoryObj slot
+        # to just the last ``ceil(window / logical_block_size)`` blocks
+        # (the SWA-suffix-only optimization). Full-attention groups
+        # report ``sliding_window == 0`` and the LMCache consumer keeps
+        # the prior full-chunk behavior for those.
         if kv_cache_config is not None and getattr(
             kv_cache_config, "kv_cache_groups", None
         ):
@@ -807,12 +787,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_positional = len(kv_cache_layer_names)
             per_layer_logical_block_size = [0] * num_positional
             per_layer_kv_cache_group_id = [-1] * num_positional
-            if emit_sliding_window:
-                # Sentinel 0 means "no sliding-window cap" (= full
-                # attention). The LMCache consumer reads
-                # ``sliding_window == 0`` as "store full chunk", which
-                # matches the existing behavior.
-                per_layer_sliding_window = [0] * num_positional
+            # Sentinel 0 means "no sliding-window cap" (= full
+            # attention). The LMCache consumer reads
+            # ``sliding_window == 0`` as "store full chunk", which
+            # matches the existing behavior for non-SWA layers.
+            per_layer_sliding_window = [0] * num_positional
             for gid, group in enumerate(kv_cache_config.kv_cache_groups):
                 spec = getattr(group, "kv_cache_spec", None)
                 spec_block_size = getattr(spec, "block_size", None)
@@ -838,24 +817,22 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                             first_inner, "sliding_window", None
                         )
                 spec_sliding_window = spec_sliding_window or 0
-                if emit_sliding_window:
-                    logger.info(
-                        "LMCACHE_SWA_SUFFIX_ONLY: gid=%d spec=%s "
-                        "block_size=%s sliding_window=%d",
-                        gid,
-                        type(spec).__name__,
-                        spec_block_size,
-                        spec_sliding_window,
-                    )
+                logger.info(
+                    "register_kv_caches: gid=%d spec=%s "
+                    "block_size=%s sliding_window=%d",
+                    gid,
+                    type(spec).__name__,
+                    spec_block_size,
+                    spec_sliding_window,
+                )
                 for name in group.layer_names:
                     pos = name_to_idx.get(name)
                     if pos is not None:
                         per_layer_logical_block_size[pos] = int(spec_block_size)
                         per_layer_kv_cache_group_id[pos] = gid
-                        if per_layer_sliding_window is not None:
-                            per_layer_sliding_window[pos] = int(spec_sliding_window)
+                        per_layer_sliding_window[pos] = int(spec_sliding_window)
             # If neither list got populated (no usable specs), drop
-            # both hints so the consumer falls back to the prior
+            # all hints so the consumer falls back to the prior
             # behavior cleanly. Layers that ended up with sentinel
             # values (some specs missing block_size, some layer names
             # absent from kv_caches) will trigger a loud ValueError
