@@ -51,19 +51,14 @@ EOF
 # Launch SGLang. $1=port, $2=log file, $3="lmcache" or "no-lmcache".
 launch_sglang() {
     local port="$1" log_file="$2" mode="$3"
-    local lmcache_args=() env_prefix=()
+    local lmcache_args=()
     if [[ "${mode}" == "lmcache" ]]; then
-        # MP host/port are read from the YAML written by launch_daemon.
-        lmcache_args=(--enable-lmcache)
-        env_prefix=(env "LMCACHE_CONFIG_FILE=${LMC_CONFIG_FILE}")
+        lmcache_args=(--enable-lmcache --lmcache-config-file "${LMC_CONFIG_FILE}")
     fi
-    # Blackwell SM 12 workarounds — drop on other hardware.
-    "${env_prefix[@]}" python -m sglang.launch_server \
+    python -m sglang.launch_server \
         --model-path "${MODEL}" \
         --host 127.0.0.1 --port "${port}" \
         --max-total-tokens 4096 \
-        --disable-cuda-graph --disable-piecewise-cuda-graph \
-        --attention-backend triton \
         "${lmcache_args[@]}" \
         > "${log_file}" 2>&1 &
     SGLANG_PID=$!
