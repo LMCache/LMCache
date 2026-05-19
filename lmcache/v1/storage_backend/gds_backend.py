@@ -38,7 +38,9 @@ logger = init_logger(__name__)
 _METADATA_FILE_SUFFIX = ".metadata"
 _DATA_FILE_SUFFIX = ".kvcache.safetensors"
 _WEKA_DATA_FILE_SUFFIX = ".weka1"
-_METADATA_VERSION = 1
+# v2 adds cached_positions. Bumped from 1 so pre-v2 entries (which lack it)
+# are rejected on read rather than served with cached_positions=None.
+_METADATA_VERSION = 2
 _METADATA_MAX_SIZE = 4096  # reserve 4K for metadata.
 # TODO: It is possible to read this 4KB block without triggering read-ahead by
 # various means.
@@ -91,7 +93,7 @@ def get_fstype(path):
 
 
 def pack_metadata(
-    tensor,
+    tensor: torch.Tensor,
     fmt: MemoryFormat,
     cached_positions: Optional[torch.Tensor] = None,
     **extra_metadata,

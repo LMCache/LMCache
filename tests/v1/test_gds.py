@@ -63,7 +63,6 @@ def test_gds_metadata_cached_positions_roundtrip():
         tensor,
         fmt=MemoryFormat.KV_2LTD,
         cached_positions=positions,
-        lmcache_version="1",
     )
     _, _, _, _, extra = unpack_metadata(packed)
     assert "cached_positions" in extra
@@ -71,11 +70,11 @@ def test_gds_metadata_cached_positions_roundtrip():
     assert torch.equal(decoded, positions)
 
 
-def test_gds_metadata_without_cached_positions_is_backward_compatible():
-    # Files written before cached_positions existed simply omit the key;
-    # they must still pack/unpack and decode to "no positions".
+def test_gds_metadata_without_cached_positions_omits_key():
+    # When position caching is off, no positions are passed and the key is
+    # simply omitted (it decodes back to None on read).
     tensor = torch.randn(2, 8)
-    packed = pack_metadata(tensor, fmt=MemoryFormat.KV_2LTD, lmcache_version="1")
+    packed = pack_metadata(tensor, fmt=MemoryFormat.KV_2LTD)
     _, _, _, _, extra = unpack_metadata(packed)
     assert "cached_positions" not in extra
 

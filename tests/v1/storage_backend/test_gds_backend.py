@@ -856,7 +856,7 @@ class TestGdsMultiPath:
             metadata_bytes = pack_metadata(
                 dummy_tensor,
                 fmt=MemoryFormat.KV_2LTD,
-                lmcache_version="1",
+                lmcache_version=str(_METADATA_VERSION),
             )
             meta_path = os.path.join(
                 subdir,
@@ -885,6 +885,47 @@ class TestGdsMultiPath:
         finally:
             for p in paths:
                 shutil.rmtree(p, ignore_errors=True)
+
+    def test_old_version_entries_are_rejected(self, async_loop):
+        """Pre-change GDS entries with older _METADATA_VERSION must be rejected"""
+        path = tempfile.mkdtemp(dir=_TEST_TMPDIR)
+        try:
+            key = CacheEngineKey(
+                model_name="testmodel",
+                world_size=3,
+                worker_id=1,
+                chunk_hash=4321,
+                dtype=torch.bfloat16,
+            )
+            hash_str = str(key.chunk_hash)
+            l1_dir, l2_dir = hash_str[:2], hash_str[2:4]
+            key_str = urllib.parse.quote(key.to_string(), safe="")
+            subdir = os.path.join(path, l1_dir, l2_dir)
+            os.makedirs(subdir, exist_ok=True)
+
+            dummy_tensor = torch.zeros(2, 256, 8, 128, dtype=torch.bfloat16)
+            # Simulate a file written by an older metadata version.
+            metadata_bytes = pack_metadata(
+                dummy_tensor,
+                fmt=MemoryFormat.KV_2LTD,
+                lmcache_version=str(_METADATA_VERSION - 1),
+            )
+            meta_path = os.path.join(
+                subdir, key_str + _DATA_FILE_SUFFIX + _METADATA_FILE_SUFFIX
+            )
+            with open(meta_path, "wb") as f:
+                f.write(metadata_bytes)
+
+            backend = self._make_backend(path, "cuda:0", async_loop)
+            try:
+                time.sleep(1)  # let the startup scan run
+                assert not backend.contains(key), (
+                    "Old-version GDS entries must be rejected, not served"
+                )
+            finally:
+                backend.close()
+        finally:
+            shutil.rmtree(path, ignore_errors=True)
 
     def test_try_to_read_metadata_finds_across_all_paths(self, async_loop):
         """contains() fallback finds metadata on a non-affinity path.
@@ -915,7 +956,7 @@ class TestGdsMultiPath:
             metadata_bytes = pack_metadata(
                 dummy_tensor,
                 fmt=MemoryFormat.KV_2LTD,
-                lmcache_version="1",
+                lmcache_version=str(_METADATA_VERSION),
             )
             meta_path = os.path.join(
                 subdir,
