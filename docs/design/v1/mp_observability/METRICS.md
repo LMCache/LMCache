@@ -235,6 +235,8 @@ per-instance and per-model Prometheus metric slicing (e.g.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
+| `lmcache_mp.l0_block_allocation_records` | `lmcache_mp_l0_block_allocation_records_total` | Counter | `MP_VLLM_BLOCK_ALLOCATION` | Number of vLLM block-allocation records processed |
+| `lmcache_mp.l0_block_allocated_blocks` | `lmcache_mp_l0_block_allocated_blocks_total` | Counter | `MP_VLLM_BLOCK_ALLOCATION` | Number of newly allocated vLLM GPU KV block IDs processed |
 | `lmcache_mp.l0_block_lifetime` | `lmcache_mp_l0_block_lifetime_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - alloc_time` per sampled block |
 | `lmcache_mp.l0_block_idle_before_evict` | `lmcache_mp_l0_block_idle_before_evict_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - last_access_time` per sampled block |
 | `lmcache_mp.l0_block_reuse_gap` | `lmcache_mp_l0_block_reuse_gap_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (cache hit) | Time gaps between consecutive accesses from access history |

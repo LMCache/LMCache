@@ -383,8 +383,8 @@ per tenant or isolation domain); drop it at scrape time with
     sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
     / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
 
-L0 (GPU) Block Lifecycle Histograms
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+L0 (GPU) Block Lifecycle Metrics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Sampled (default 1%) GPU KV cache block lifecycle tracking via
 ``L0LifecycleSubscriber``. Eviction is detected at reallocation time
@@ -392,7 +392,7 @@ Sampled (default 1%) GPU KV cache block lifecycle tracking via
 selection with a ``_skipped`` set (bounded by the finite number of
 physical GPU blocks).
 
-All L0 histograms are emitted with ``instance_id`` and ``model_name``
+All L0 metrics are emitted with ``instance_id`` and ``model_name``
 OTel attributes, enabling per-instance and per-model metric slicing
 in Prometheus (e.g.
 ``lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}``).
@@ -404,6 +404,12 @@ in Prometheus (e.g.
    * - Metric
      - Type
      - Description
+   * - ``lmcache_mp.l0_block_allocation_records``
+     - Counter
+     - Number of vLLM block-allocation records processed.
+   * - ``lmcache_mp.l0_block_allocated_blocks``
+     - Counter
+     - Number of newly allocated vLLM GPU KV block IDs processed.
    * - ``lmcache_mp.l0_block_lifetime``
      - Histogram
      - Time from allocation to eviction per sampled GPU block.

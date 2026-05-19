@@ -2,18 +2,23 @@
 """Management and utility operations for the MPCacheEngine."""
 
 # Standard
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 import threading
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
+
+if TYPE_CHECKING:
+    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 
 logger = init_logger(__name__)
 
