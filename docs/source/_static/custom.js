@@ -155,7 +155,7 @@ function addLanguageSwitcher() {
   // If the nav bar isn't there, show it as a floating button instead.
   var navbar = findDocsNavbar();
   if (navbar) {
-    navbar.appendChild(switcher, navbar.firstChild);
+    navbar.appendChild(switcher);
   } else {
     switcher.classList.add("lmcache-language-switcher--fallback");
     document.body.appendChild(switcher);
