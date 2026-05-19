@@ -150,10 +150,25 @@ function addLanguageSwitcher() {
   switcher.appendChild(chineseLink);
   switcher.appendChild(divider);
   switcher.appendChild(englishLink);
-  document.body.appendChild(switcher);
+
+  // Place the switcher in the top nav bar with the other icons.
+  // If the nav bar isn't there, show it as a floating button instead.
+  var navbar = findDocsNavbar();
+  if (navbar) {
+    navbar.insertBefore(switcher, navbar.firstChild);
+  } else {
+    switcher.classList.add("lmcache-language-switcher--fallback");
+    document.body.appendChild(switcher);
+  }
 
   fallbackMissingLanguagePage(chineseLink, "zh_CN");
   fallbackMissingLanguagePage(englishLink, "en");
+}
+
+// Find the top nav bar (the row of icons that contains GitHub).
+function findDocsNavbar() {
+  var githubLink = document.querySelector('a[title="Visit GitHub"]');
+  return githubLink ? githubLink.parentElement : null;
 }
 
 /**
