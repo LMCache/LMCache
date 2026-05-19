@@ -21,7 +21,12 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    _lmcache_nvtx_annotate,
+    parse_cache_key,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     CuFileMemoryAllocator,
@@ -391,7 +396,7 @@ class GdsBackend(AllocatorBackendInterface):
                         filename = os.path.basename(fentry.name)
                         key_str = urllib.parse.unquote(filename[: -len(target_suffix)])
                         try:
-                            key = CacheEngineKey.from_string(key_str)
+                            key = parse_cache_key(key_str)
                         except ValueError as e:
                             logger.error(
                                 f"Filename {filename} can't be converted "
