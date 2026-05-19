@@ -448,8 +448,10 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
         "lmcache.v1.multiprocess.server.ipc_key_to_object_keys",
         return_value=["obj"],
     ):
-        store_ok = engine.store_cpu_chunks(key, 2, pickle.dumps([payload]))
-        success, cpu_data = engine.retrieve_cpu_chunks(key, 2)
+        store_ok = engine.commit_store(key, 2, pickle.dumps([payload]))
+        response = engine.prepare_retrieve(key, 2)
+        success = response.success
+        cpu_data = response.data
     assert isinstance(store_ok, bool)
     assert torch.allclose(mock_memory_obj.tensor, payload)
 
