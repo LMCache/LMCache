@@ -69,6 +69,10 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
+from lmcache.v1.multiprocess.protocols.engine import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
+)
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 import lmcache.c_ops as lmc_ops
@@ -400,13 +404,31 @@ class MPCacheEngine:
         return ipc_key_to_object_keys(key, chunk_hashes)
 
     @_lmcache_nvtx_annotate
-    def store_cpu_chunks(
+    def prepare_store(
+        self,
+        key: IPCCacheEngineKey,
+        instance_id: int,
+    ) -> PrepareStoreResponse:
+        """Prepare a store operation. For pickle mode, returns empty slots.
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+
+        Returns:
+            PrepareStoreResponse with empty slots for pickle mode.
+        """
+
+        return PrepareStoreResponse(context={})
+
+    @_lmcache_nvtx_annotate
+    def commit_store(
         self,
         key: IPCCacheEngineKey,
         instance_id: int,
         cpu_data: bytes,
     ) -> bool:
-        """Store worker-provided CPU chunks for non-CUDA cpu context mode.
+        """Commit serialized CPU chunks to storage.
 
         Args:
             key: Cache key for the token range to store.
@@ -415,9 +437,6 @@ class MPCacheEngine:
 
         Returns:
             ``True`` when all reserved objects are written, otherwise ``False``.
-
-        Raises:
-            ValueError: If the instance has no registered cpu context.
         """
         obj_keys = self._resolve_obj_keys(key)
 
@@ -453,11 +472,11 @@ class MPCacheEngine:
         return len(written_keys) == len(reserved_dict)
 
     @_lmcache_nvtx_annotate
-    def retrieve_cpu_chunks(
+    def prepare_retrieve(
         self,
         key: IPCCacheEngineKey,
         instance_id: int,
-    ) -> tuple[bool, bytes]:
+    ) -> PrepareRetrieveResponse:
         """Retrieve prefetched chunks and return serialized CPU tensors.
 
         Args:
@@ -465,12 +484,9 @@ class MPCacheEngine:
             instance_id: Worker instance identifier.
 
         Returns:
-            Tuple ``(success, payload)`` where ``payload`` is a pickled
-            list of CPU chunk tensors.
-
-        Raises:
-            ValueError: If the instance has no registered cpu context.
+            PrepareRetrieveResponse with serialized data on hit.
         """
+
         obj_keys = self._resolve_obj_keys(key)
 
         context = self.contexts.get(instance_id)
@@ -483,17 +499,38 @@ class MPCacheEngine:
         try:
             with self.storage_manager.read_prefetched_results(obj_keys) as memory_objs:
                 if not memory_objs or len(memory_objs) != len(obj_keys):
-                    return False, b""
+                    return PrepareRetrieveResponse(success=False, data=b"", context={})
                 prefetched_keys = obj_keys[: len(memory_objs)]
                 chunks = []
                 for memory_obj in memory_objs:
                     if memory_obj.tensor is None:
-                        return False, b""
+                        return PrepareRetrieveResponse(
+                            success=False, data=b"", context={}
+                        )
                     chunks.append(memory_obj.tensor.cpu().clone())
-                return True, pickle.dumps(chunks)
+                return PrepareRetrieveResponse(
+                    success=True, data=pickle.dumps(chunks), context={}
+                )
         finally:
             if prefetched_keys:
                 self.storage_manager.finish_read_prefetched(prefetched_keys)
+
+    @_lmcache_nvtx_annotate
+    def commit_retrieve(
+        self,
+        key: IPCCacheEngineKey,
+        instance_id: int,
+    ) -> bool:
+        """Finalize a retrieve operation. No-op for pickle mode.
+
+        Args:
+            key: Cache key (unused for pickle).
+            instance_id: Worker instance identifier (unused for pickle).
+
+        Returns:
+            Always ``True``.
+        """
+        return True
 
     @_lmcache_nvtx_annotate
     def store(
@@ -1400,7 +1437,7 @@ def run_cache_server(
         RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT,
         engine.register_kv_cache_non_gpu_context,
     )
-    add_handler_helper(server, RequestType.STORE_CPU_CHUNKS, engine.store_cpu_chunks)
+    add_handler_helper(server, RequestType.PREPARE_STORE, engine.prepare_store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
@@ -1412,9 +1449,9 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
-    add_handler_helper(
-        server, RequestType.RETRIEVE_CPU_CHUNKS, engine.retrieve_cpu_chunks
-    )
+    add_handler_helper(server, RequestType.COMMIT_STORE, engine.commit_store)
+    add_handler_helper(server, RequestType.PREPARE_RETRIEVE, engine.prepare_retrieve)
+    add_handler_helper(server, RequestType.COMMIT_RETRIEVE, engine.commit_retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.PING, engine.ping)
@@ -1431,8 +1468,10 @@ def run_cache_server(
         [
             RequestType.STORE,
             RequestType.RETRIEVE,
-            RequestType.STORE_CPU_CHUNKS,
-            RequestType.RETRIEVE_CPU_CHUNKS,
+            RequestType.PREPARE_STORE,
+            RequestType.COMMIT_STORE,
+            RequestType.PREPARE_RETRIEVE,
+            RequestType.COMMIT_RETRIEVE,
         ],
         max_workers=mp_config.max_gpu_workers,
     )

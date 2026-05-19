@@ -20,17 +20,12 @@ class NonGpuContextPickle(NonGpuContext):
     """Pickle-based implementation of :class:`NonGpuContext`.
 
     Transport mechanism:
-    - **Store**: ``prepare_store`` serialises chunks with ``pickle.dumps``; \
-``commit_store`` sends a ``STORE_CPU_CHUNKS`` message and waits for the \
-server acknowledgment.
-    - **Retrieve**: ``prepare_retrieve`` sends a ``RETRIEVE_CPU_CHUNKS`` \
-message, waits for the response, and deserialises the returned bytes with \
-``pickle.loads``; ``commit_retrieve`` is a no-op (no locks to release).
-
-    Args:
-        metadata: Layout metadata for the non-GPU context.
-        mq_client: Message-queue client for server communication.
-        mq_timeout: Timeout in seconds for blocking MQ requests.
+    - **Store**: ``prepare_store`` sends ``PREPARE_STORE`` (returns empty slots
+      for pickle mode); ``commit_store`` serialises chunks and sends
+      ``COMMIT_STORE``.
+    - **Retrieve**: ``prepare_retrieve`` sends ``PREPARE_RETRIEVE`` and
+      deserialises the returned bytes; ``commit_retrieve`` sends
+      ``COMMIT_RETRIEVE`` (no-op for pickle).
     """
 
     def __init__(
@@ -41,84 +36,70 @@ message, waits for the response, and deserialises the returned bytes with \
     ) -> None:
         super().__init__(metadata, mq_client, mq_timeout)
 
-    def prepare_store(
+    def prepare_store(self, key: Any, instance_id: int) -> list[torch.Tensor] | None:
+        """Send PREPARE_STORE RPC. For pickle, returns no pre-allocated buffers."""
+        future = self.mq_client.submit_request(
+            RequestType.PREPARE_STORE,
+            [key, instance_id],
+            get_response_class(RequestType.PREPARE_STORE),
+        )
+        try:
+            future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            pass
+        return None
+
+    def commit_store(
         self, key: Any, instance_id: int, chunks: list[torch.Tensor]
-    ) -> Any:
-        """Serialise *chunks* with ``pickle.dumps``.
-
-        Args:
-            key: Cache key for the token range to store.
-            instance_id: Worker instance identifier.
-            chunks: CPU chunk tensors to serialise.
-
-        Returns:
-            Opaque handle ``(key, instance_id, serialised_bytes)`` to be
-            passed to :meth:`commit_store`.
-        """
-        serialised = pickle.dumps(chunks)
-        return (key, instance_id, serialised)
-
-    def commit_store(self, handle: Any) -> bool:
-        """Send pickled chunks to the server via ``STORE_CPU_CHUNKS``.
-
-        Blocks until the server acknowledges the write.
-
-        Args:
-            handle: The ``(key, instance_id, bytes)`` tuple returned by
-                :meth:`prepare_store`.
+    ) -> bool:
+        """Serialize chunks and send via COMMIT_STORE.
 
         Returns:
             ``True`` on success, ``False`` on failure or timeout.
         """
-        key, instance_id, serialised = handle
+        serialised = pickle.dumps(chunks)
         future = self.mq_client.submit_request(
-            RequestType.STORE_CPU_CHUNKS,
+            RequestType.COMMIT_STORE,
             [key, instance_id, serialised],
-            get_response_class(RequestType.STORE_CPU_CHUNKS),
+            get_response_class(RequestType.COMMIT_STORE),
         )
         try:
             return bool(future.result(timeout=self.mq_timeout))
         except TimeoutError:
             return False
 
-    def prepare_retrieve(
-        self, key: Any, instance_id: int
-    ) -> tuple[Any, list[torch.Tensor] | None]:
-        """Fetch serialised chunks from the server via ``RETRIEVE_CPU_CHUNKS``.
-
-        Blocks until the server responds with the cached data (or reports a
-        miss).
-
-        Args:
-            key: Cache key for the token range to retrieve.
-            instance_id: Worker instance identifier.
+    def prepare_retrieve(self, key: Any, instance_id: int) -> list[torch.Tensor] | None:
+        """Send PREPARE_RETRIEVE and deserialize the response data.
 
         Returns:
-            ``(None, chunks)`` on cache hit where *chunks* is the
-            deserialised list of CPU tensors, or ``(None, None)`` on cache
-            miss or timeout.  The handle is ``None`` because the pickle path
-            has no resources to release in :meth:`commit_retrieve`.
+            Chunks on hit, or None on miss/timeout.
         """
         future = self.mq_client.submit_request(
-            RequestType.RETRIEVE_CPU_CHUNKS,
+            RequestType.PREPARE_RETRIEVE,
             [key, instance_id],
-            get_response_class(RequestType.RETRIEVE_CPU_CHUNKS),
+            get_response_class(RequestType.PREPARE_RETRIEVE),
         )
         try:
-            success, cpu_data_bytes = future.result(timeout=self.mq_timeout)
+            response = future.result(timeout=self.mq_timeout)
         except TimeoutError:
-            return (None, None)
-        if not success or not cpu_data_bytes:
-            return (None, None)
-        chunks: list[torch.Tensor] = pickle.loads(cpu_data_bytes)
-        return (None, chunks)
+            return None
+        if not response.success or not response.data:
+            return None
+        chunks: list[torch.Tensor] = pickle.loads(response.data)
+        return chunks
 
-    def commit_retrieve(self, handle: Any) -> None:
-        """No-op: the pickle path holds no server-side locks.
-
-        Args:
-            handle: Ignored.
-        """
+    def commit_retrieve(self, key: Any, instance_id: int) -> bool:
+        """Send COMMIT_RETRIEVE (no-op for pickle path)."""
+        future = self.mq_client.submit_request(
+            RequestType.COMMIT_RETRIEVE,
+            [key, instance_id],
+            get_response_class(RequestType.COMMIT_RETRIEVE),
+        )
+        try:
+            future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            pass
+        return True
 
     def close(self) -> None:
         """No-op: the pickle path holds no persistent resources."""

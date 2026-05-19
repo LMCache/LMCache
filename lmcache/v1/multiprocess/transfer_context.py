@@ -317,15 +317,16 @@ class NonCudaTransferContext(TransferContext):
             )
 
         torch_dev.synchronize()
+        out_buffers = self._non_gpu_context.prepare_store(key, instance_id)
         cpu_chunks = gather_paged_kv_to_cpu(
             kv_caches,
             block_ids,
             blocks_in_chunk,
             layout_hints=self._layout_hints,
             gpu_kv_format=self._gpu_kv_format,
+            out=out_buffers,
         )
-        handle = self._non_gpu_context.prepare_store(key, instance_id, cpu_chunks)
-        ok = self._non_gpu_context.commit_store(handle)
+        ok = self._non_gpu_context.commit_store(key, instance_id, cpu_chunks)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
@@ -348,14 +349,14 @@ class NonCudaTransferContext(TransferContext):
                 "Call register() before submit_retrieve()."
             )
 
-        handle, chunks = self._non_gpu_context.prepare_retrieve(key, instance_id)
-        ok = chunks is not None
-        if chunks is not None:
+        src_buffers = self._non_gpu_context.prepare_retrieve(key, instance_id)
+        ok = src_buffers is not None
+        if src_buffers is not None:
             try:
                 scatter_cpu_to_paged_kv(
                     kv_caches,
                     block_ids,
-                    chunks,
+                    src_buffers,
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,
                     layout_hints=self._layout_hints,
@@ -364,7 +365,7 @@ class NonCudaTransferContext(TransferContext):
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
-        self._non_gpu_context.commit_retrieve(handle)
+        self._non_gpu_context.commit_retrieve(key, instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
