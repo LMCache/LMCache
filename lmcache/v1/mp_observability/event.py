@@ -102,6 +102,12 @@ class EventType(Enum):
     CB_FINGERPRINTS_REGISTERED = "cb.fingerprints.registered"
     CB_CHUNKS_EVICTED = "cb.chunks.evicted"
 
+    # Cache Blending (CB) serde events — encode/decode transform observability
+    CB_SERDE_ENCODE_START = "cb.serde.encode.start"
+    CB_SERDE_ENCODE_END = "cb.serde.encode.end"
+    CB_SERDE_DECODE_START = "cb.serde.decode.start"
+    CB_SERDE_DECODE_END = "cb.serde.decode.end"
+
     # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
     CB_REQUEST_START = "cb.request.start"
     CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"

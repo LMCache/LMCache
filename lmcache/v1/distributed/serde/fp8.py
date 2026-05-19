@@ -97,6 +97,7 @@ def _create_fp8_serde(kwargs: dict[str, object]) -> SerdeProcessor:
         Fp8QuantizationSerializer(fp8_dtype),
         Fp8QuantizationDeserializer(fp8_dtype),
         max_workers=max_workers,
+        serde_type="fp8",
     )
 
 
