@@ -84,8 +84,7 @@ class CompletionDispatcher:
             self._drain_once()
 
     def dispatched_count(self) -> int:
-        # Only mutated by the single drain thread; reads are GIL-atomic.
-        return self._dispatched_count
+        return self._dispatched_count  # single-writer; read is GIL-atomic
 
     def handler_exception_counts(self) -> dict[str, int]:
         with self._lock:
@@ -98,8 +97,7 @@ class CompletionDispatcher:
             self._drain_once()
 
     def _drain_once(self) -> None:
-        # Broad except: any exception from the native drain or a handler
-        # must not kill the drain thread; log and retry next tick.
+        # Broad except keeps the drain thread alive across native/handler errors.
         try:
             completions = _lmc_ops.drain_recorded_completions()
         except Exception:
