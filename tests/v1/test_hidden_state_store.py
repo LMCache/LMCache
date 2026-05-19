@@ -314,3 +314,80 @@ def test_store_rejects_wrong_shape():
     with pytest.raises(ValueError):
         fix.store.store_hidden_states([1, 2, 3], torch.randn(3))
     fix.close()
+
+
+# ---------------------------------------------------------------------------
+# token_offset: incremental store
+# ---------------------------------------------------------------------------
+
+
+def test_store_with_token_offset_aligns_with_kv_keys():
+    """Calling store incrementally via token_offset stores all chunks with
+    correct KV-aligned keys, and retrieve returns the full concatenated rows.
+
+    Simulates the vllm-omni pattern where:
+    - call 1 covers the first CHUNK_SIZE tokens (offset=0, short token_ids)
+    - call 2 covers the next CHUNK_SIZE tokens (offset=CHUNK_SIZE, full
+      token_ids so chunk keys are KV-aligned across the whole prefix)
+    """
+    fix = _Fixture()
+    token_ids = list(range(2 * CHUNK_SIZE))
+    keys = fix.keys_for(token_ids)
+    fix.mark_kv_present(keys)
+
+    rows = torch.randn(len(token_ids), HIDDEN_DIM)
+
+    # First call: only the first chunk's tokens are available so far.
+    # Pass just that segment; chunk key is computed identically because
+    # the first chunk's key depends only on token_ids[0:CHUNK_SIZE].
+    n1 = fix.store.store_hidden_states(
+        token_ids[:CHUNK_SIZE], rows[:CHUNK_SIZE], token_offset=0
+    )
+    assert n1 == 1
+
+    # Second call: full token_ids for correct KV-aligned chunk keys,
+    # but hidden_states covers only token_ids[CHUNK_SIZE:] (the new tokens).
+    n2 = fix.store.store_hidden_states(
+        token_ids, rows[CHUNK_SIZE:], token_offset=CHUNK_SIZE
+    )
+    assert n2 == 1
+
+    # Both chunk keys should now be present.
+    for k in keys:
+        assert fix.store.has_chunk(k, layer_idx=0)
+
+    # Retrieve should return the full prefix, matching original rows.
+    out = fix.store.retrieve_hidden_states(token_ids)
+    assert out is not None
+    assert out.shape == (len(token_ids), HIDDEN_DIM)
+    torch.testing.assert_close(out, rows.to(torch.float32))
+    fix.close()
+
+
+def test_store_token_offset_rejects_bad_args():
+    """token_offset out of range or mismatched hidden_states length raises ValueError."""
+    fix = _Fixture()
+    token_ids = list(range(CHUNK_SIZE))
+
+    # Negative offset.
+    with pytest.raises(ValueError):
+        fix.store.store_hidden_states(
+            token_ids, torch.randn(CHUNK_SIZE, HIDDEN_DIM), token_offset=-1
+        )
+
+    # Offset beyond sequence length.
+    with pytest.raises(ValueError):
+        fix.store.store_hidden_states(
+            token_ids,
+            torch.randn(0, HIDDEN_DIM),
+            token_offset=CHUNK_SIZE + 1,
+        )
+
+    # hidden_states rows don't match n_toks - token_offset.
+    with pytest.raises(ValueError):
+        fix.store.store_hidden_states(
+            token_ids,
+            torch.randn(CHUNK_SIZE, HIDDEN_DIM),  # should be CHUNK_SIZE - 2 rows
+            token_offset=2,
+        )
+    fix.close()
