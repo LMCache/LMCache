@@ -10,6 +10,13 @@ import time
 # Third Party
 import pytest
 
+# First Party
+from lmcache.v1.multiprocess.native_completion import (
+    CompletionDispatcher,
+    is_native_available,
+    record_on_stream,
+)
+
 # Native path needs CUDA + c_ops with record_completion_on_stream.
 # Fallback path tests run anywhere.
 try:
@@ -35,15 +42,7 @@ native_only = pytest.mark.skipif(
 )
 
 if _has_cuda and _has_native_op:
-    # Third Party
-    import cupy
-
-# First Party
-from lmcache.v1.multiprocess.native_completion import (
-    CompletionDispatcher,
-    is_native_available,
-    record_on_stream,
-)
+    import cupy  # noqa: E402
 
 
 @pytest.fixture()
@@ -105,9 +104,7 @@ class TestDispatcher:
         seen: list[list] = []
         dispatcher.register("finish_write", seen.append)
 
-        record_on_stream(
-            stream, "finish_write", [b"k0", b"k1", b"k2"]
-        )
+        record_on_stream(stream, "finish_write", [b"k0", b"k1", b"k2"])
         stream.synchronize()
 
         # Wait for drain thread to dispatch
@@ -116,8 +113,7 @@ class TestDispatcher:
             time.sleep(0.01)
         assert seen == [[b"k0", b"k1", b"k2"]]
 
-    def test_unknown_kind_drops_payload(self, dispatcher, stream, caplog):
-        # No handler registered for this kind
+    def test_unknown_kind_drops_payload(self, dispatcher, stream):
         record_on_stream(stream, "finish_unknown", [b"x"])
         stream.synchronize()
         time.sleep(0.1)
@@ -164,9 +160,9 @@ class TestDeadlockRegression:
             record_on_stream(stream, "finish_write", [pickle.dumps(i)])
         stream.synchronize()
 
-        assert ready.wait(timeout=10.0), (
-            f"deadlock or drop: only {len(received)} of 200 dispatched"
-        )
+        assert ready.wait(
+            timeout=10.0
+        ), f"deadlock or drop: only {len(received)} of 200 dispatched"
         assert len(received) == 200
 
 

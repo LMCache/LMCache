@@ -98,6 +98,8 @@ class CompletionDispatcher:
             self._drain_once()
 
     def _drain_once(self) -> None:
+        # Broad except: any exception from the native drain or a handler
+        # must not kill the drain thread; log and retry next tick.
         try:
             completions = _lmc_ops.drain_recorded_completions()
         except Exception:
@@ -125,9 +127,7 @@ class CompletionDispatcher:
                     self._exception_counts[kind] = (
                         self._exception_counts.get(kind, 0) + 1
                     )
-                logger.exception(
-                    "CompletionDispatcher: handler for %r raised", kind
-                )
+                logger.exception("CompletionDispatcher: handler for %r raised", kind)
 
 
 def is_native_available() -> bool:
