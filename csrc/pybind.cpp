@@ -9,6 +9,7 @@
 #include "mem_alloc.h"
 #include "utils.h"
 #include "event_recorder.h"
+#include "completion_recorder.h"
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include <iostream>
@@ -96,4 +97,8 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("session_id"), py::arg("str_metadata"), py::arg("int_metadata"),
         py::call_guard<py::gil_scoped_release>());
   m.def("drain_recorded_events", &drain_recorded_events);
+  m.def("record_completion_on_stream", &record_completion_on_stream,
+        py::arg("cuda_stream_ptr"), py::arg("kind"), py::arg("payload"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("drain_recorded_completions", &drain_recorded_completions);
 }
