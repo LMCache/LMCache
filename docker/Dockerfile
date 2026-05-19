@@ -81,13 +81,13 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
-        uv pip install --prerelease=allow \
+        VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             'vllm[runai,tensorizer,flashinfer]' \
             --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
             --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
             --index-strategy unsafe-best-match ; \
     else \
-        uv pip install --prerelease=allow \
+        VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
@@ -108,7 +108,7 @@ ARG CUDA_VERSION
 
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
-    uv pip install --prerelease=allow \
+    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
@@ -120,7 +120,8 @@ WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu129) ######################
-# Installs stable vLLM with cu129 index and lmcache from the v{tag}-cu129 GitHub Release.
+# Installs nightly cu129 vLLM (no stable cu129 channel exists upstream) and
+# lmcache from the v{tag}-cu129 GitHub Release.
 
 FROM base AS image-release-cu129
 
@@ -132,8 +133,9 @@ ARG LMCACHE_VERSION
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
-    uv pip install --prerelease=allow \
+    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
+        --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     uv pip install lmcache==${VER} \

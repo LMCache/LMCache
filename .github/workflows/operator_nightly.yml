@@ -41,9 +41,8 @@ jobs:
       - name: Compute nightly tag
         id: tag
         run: |
-          DATE=$(date -u +%Y%m%d)
-          SHA=$(git rev-parse --short HEAD)
-          echo "TAG=nightly-${DATE}-${SHA}" >> "$GITHUB_OUTPUT"
+          DATE=$(date -u +%Y-%m-%d)
+          echo "TAG=nightly-${DATE}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
         uses: docker/build-push-action@v6
