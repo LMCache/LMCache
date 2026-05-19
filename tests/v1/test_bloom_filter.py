@@ -157,4 +157,9 @@ class TestClearAndStats:
         assert stats["false_positive_rate"] == pytest.approx(0.01)
         assert stats["bits_set"] > 0
         assert 0.0 < stats["fill_rate"] < 1.0
-        assert stats["size_mb"] == pytest.approx(bf.size / 8 / 1024 / 1024)
+        # Mirror production: size_mb derives from get_memory_usage_bytes(),
+        # which uses floor division. Reproducing `bf.size / 8` here only
+        # matched production when bf.size happened to be divisible by 8.
+        assert stats["size_mb"] == pytest.approx(
+            bf.get_memory_usage_bytes() / 1024 / 1024
+        )
