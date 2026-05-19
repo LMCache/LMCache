@@ -126,20 +126,34 @@ class KVFormatSpec(ABC):
     # Required hooks. Override in subclasses.
     # ------------------------------------------------------------------
     @abstractmethod
-    def num_layers(self) -> int: ...
+    def num_layers(self) -> int:
+        """Return the number of transformer layers in the KV cache."""
 
     @abstractmethod
     def page_buffer_size(self) -> int:
         """Return ``num_blocks * block_size`` (or the fused PBS axis)."""
 
     @abstractmethod
-    def num_heads(self, layer_idx: int = 0) -> int: ...
+    def num_heads(self, layer_idx: int = 0) -> int:
+        """Return the number of KV heads for ``layer_idx``."""
 
     @abstractmethod
-    def head_size(self, layer_idx: int = 0) -> int: ...
+    def head_size(self, layer_idx: int = 0) -> int:
+        """Return the per-head hidden size for ``layer_idx``."""
 
     @abstractmethod
-    def data_ptrs(self, layer_indices: list[int]) -> list[int]: ...
+    def data_ptrs(self, layer_indices: list[int]) -> list[int]:
+        """Return the device data pointers for the requested layers.
+
+        Args:
+            layer_indices: Layer indices to look up.
+
+        Returns:
+            One pointer per layer for tensor-per-layer formats; for K/V
+            split formats the K pointers are returned first followed by
+            the V pointers; for cross-layer formats a single pointer is
+            returned regardless of ``layer_indices``.
+        """
 
     @abstractmethod
     def layout_probe_tensor(self, layer_idx: int = 0) -> torch.Tensor:
@@ -154,6 +168,12 @@ class KVFormatSpec(ABC):
     # ones that differ.
     # ------------------------------------------------------------------
     def num_blocks(self) -> int:
+        """Return the number of pre-allocated KV cache blocks.
+
+        Raises:
+            ValueError: For NBBS-fused formats that do not expose a
+                separate ``num_blocks`` axis.
+        """
         raise ValueError(
             "trying to access an attribute of the GPU KV Cache "
             f"that does not exist for the format {self.format_id}. "
@@ -161,6 +181,12 @@ class KVFormatSpec(ABC):
         )
 
     def block_size(self, layer_idx: int = 0) -> int:
+        """Return the per-block token capacity for ``layer_idx``.
+
+        Raises:
+            ValueError: For NBBS-fused formats that do not expose a
+                separate ``block_size`` axis.
+        """
         raise ValueError(
             "trying to access an attribute of the GPU KV Cache "
             f"that does not exist for the format {self.format_id}. "
@@ -168,16 +194,20 @@ class KVFormatSpec(ABC):
         )
 
     def hidden_dim(self, layer_idx: int = 0) -> int:
+        """Return ``num_heads * head_size`` for ``layer_idx``."""
         return self.num_heads(layer_idx) * self.head_size(layer_idx)
 
     def tokens_per_layer(self) -> int:
+        """Return the number of tokens stored per layer (== PBS)."""
         return self.page_buffer_size()
 
     def elements_per_layer(self) -> int:
+        """Return the per-layer element count (K + V for non-MLA)."""
         kv = 1 if self.is_mla else 2
         return self.tokens_per_layer() * self.num_heads() * self.head_size() * kv
 
     def dtype(self, layer_idx: int = 0) -> torch.dtype:
+        """Return the dtype of the per-layer tensor for ``layer_idx``."""
         return self.layout_probe_tensor(layer_idx).dtype
 
     def concrete_shape_str(self) -> str:

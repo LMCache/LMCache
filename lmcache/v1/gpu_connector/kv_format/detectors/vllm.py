@@ -2,7 +2,7 @@
 """vLLM KV cache detector."""
 
 # Standard
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 # First Party
 from lmcache import torch_device_type
@@ -13,16 +13,42 @@ from lmcache.v1.gpu_connector.kv_format.detection_base import (
     descend_to_tensor,
     list_depth_tensor_dim,
 )
+from lmcache.v1.gpu_connector.kv_format.types import (
+    DiscoverableKVCache,
+    LayoutHints,
+)
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
 
 class VLLMDetector(EngineDetector):
+    """Detector for vLLM serving engine KV cache layouts."""
+
     abstract: ClassVar[bool] = False
     engine: ClassVar = EngineType.VLLM
 
-    def detect(self, kv_caches, layout_hints):
+    def detect(
+        self,
+        kv_caches: DiscoverableKVCache,
+        layout_hints: LayoutHints,
+    ) -> Optional["lmc_ops.GPUKVFormat"]:
+        """Identify the GPU KV format for vLLM.
+
+        The non-MLA flash-attention and flash-infer formats come in
+        both NHD and HND variants; the chosen variant is selected from
+        ``layout_hints['kv_layout']`` (with a CPU-backend safeguard).
+
+        Args:
+            kv_caches: Normalized KV cache structure.
+            layout_hints: May include ``kv_layout`` ("NHD" / "HND");
+                defaults to ``"NHD"`` when missing, except on the CPU
+                backend where the layout is forced to ``"HND"``.
+
+        Returns:
+            The matching ``GPUKVFormat`` enum value, or ``None`` if the
+            structure does not match any known vLLM layout.
+        """
         kv_layout = layout_hints.get("kv_layout")
         # NOTE: vLLM's CPU attention backend stores KV cache in HND layout.
         # However, ``get_kv_cache_layout`` from

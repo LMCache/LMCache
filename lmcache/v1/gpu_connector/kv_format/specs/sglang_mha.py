@@ -21,26 +21,33 @@ class SGLangMHASpec(SGLangFusedPBSSpec):
     backend_label: ClassVar = "SGLang MHA (flash attention and flash infer)"
 
     def num_layers(self) -> int:
+        """Return the number of transformer layers in the KV cache."""
         return len(self._as_kv_layer_list()[0])
 
     def num_heads(self, layer_idx: int = 0) -> int:
+        """Return the number of KV heads for ``layer_idx``."""
         return self._as_kv_layer_list()[0][layer_idx].shape[1]
 
     def head_size(self, layer_idx: int = 0) -> int:
+        """Return the per-head hidden size for ``layer_idx``."""
         return self._as_kv_layer_list()[0][layer_idx].shape[2]
 
     def hidden_dim(self, layer_idx: int = 0) -> int:
+        """Return ``num_heads * head_size`` for ``layer_idx``."""
         t = self._as_kv_layer_list()[0][layer_idx]
         return t.shape[1] * t.shape[2]
 
     def page_buffer_size(self) -> int:
+        """Return the fused ``num_blocks * block_size`` axis size."""
         return self._as_kv_layer_list()[0][0].shape[0]
 
     def elements_per_layer(self) -> int:
+        """Return the per-layer element count (K + V counted together)."""
         # Separate K and V tensors per layer.
         return self._as_kv_layer_list()[0][0].numel() * 2
 
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
+        """Return K data pointers followed by V data pointers."""
         kv = self._as_kv_layer_list()
         k_list, v_list = kv[0], kv[1]
         return [k_list[i].data_ptr() for i in layer_indices] + [
@@ -48,7 +55,9 @@ class SGLangMHASpec(SGLangFusedPBSSpec):
         ]
 
     def layout_probe_tensor(self, layer_idx: int = 0) -> torch.Tensor:
+        """Return the per-layer K tensor used for layout introspection."""
         return self._as_kv_layer_list()[0][layer_idx]
 
     def dtype(self, layer_idx: int = 0) -> torch.dtype:
+        """Return the dtype of the per-layer tensor for ``layer_idx``."""
         return self._as_kv_layer_list()[0][layer_idx].dtype

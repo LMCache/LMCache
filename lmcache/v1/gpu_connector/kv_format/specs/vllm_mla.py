@@ -26,34 +26,44 @@ class VLLMMLASpec(KVFormatSpec):
     is_block_axis_dim0: ClassVar[bool] = True
 
     def num_layers(self) -> int:
+        """Return the number of transformer layers in the KV cache."""
         return len(self._as_layer_list())
 
     def num_blocks(self) -> int:
+        """Return the number of pre-allocated KV cache blocks."""
         return self._as_layer_list()[0].shape[0]
 
     def block_size(self, layer_idx: int = 0) -> int:
+        """Return the per-block token capacity for ``layer_idx``."""
         return self._as_layer_list()[layer_idx].shape[1]
 
     def num_heads(self, layer_idx: int = 0) -> int:
+        """Return the number of KV heads for ``layer_idx`` (1 for MLA)."""
         # Heads are absorbed into hidden dim for MLA.
         return 1
 
     def head_size(self, layer_idx: int = 0) -> int:
+        """Return the per-head hidden size for ``layer_idx``."""
         return self._as_layer_list()[layer_idx].shape[2]
 
     def hidden_dim(self, layer_idx: int = 0) -> int:
+        """Return the hidden dim for ``layer_idx`` (== ``head_size`` for MLA)."""
         return self._as_layer_list()[layer_idx].shape[2]
 
     def page_buffer_size(self) -> int:
+        """Return ``num_blocks * block_size`` for the cache."""
         t = self._as_layer_list()[0]
         return t.shape[0] * t.shape[1]
 
     def elements_per_layer(self) -> int:
+        """Return the per-layer element count."""
         return self._as_layer_list()[0].numel()
 
     def data_ptrs(self, layer_indices: list[int]) -> list[int]:
+        """Return one device pointer per requested layer."""
         layers = self._as_layer_list()
         return [layers[i].data_ptr() for i in layer_indices]
 
     def layout_probe_tensor(self, layer_idx: int = 0) -> torch.Tensor:
+        """Return the per-layer tensor used for layout introspection."""
         return self._as_layer_list()[layer_idx]

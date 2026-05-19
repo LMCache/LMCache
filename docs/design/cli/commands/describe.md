@@ -256,12 +256,19 @@ Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 
 ### 4. Expose GPU KV format, shape, and attention backend in `kv_cache_layout`
 
-**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/multiprocess/gpu_context.py`, `lmcache/v1/multiprocess/server.py`
+**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/gpu_connector/kv_format/`, `lmcache/v1/multiprocess/gpu_context.py`, `lmcache/v1/multiprocess/server.py`
 
-Three new helper functions in `utils.py` (derived from `legible_print_gpu_kv_format()`):
-- `get_gpu_kv_shape_description(gpu_kv_format)` — symbolic shape (e.g., `List[num_layers] of [2, num_blocks, ...]`)
-- `get_attention_backend(gpu_kv_format)` — backend name (e.g., `vLLM non-MLA flash attention`)
-- `get_concrete_gpu_kv_shape(kv_caches, gpu_kv_format)` — shape with actual values (e.g., `List[80] of [2, 2048, 128, 8, 128]`)
+Three facade helpers in `utils.py` delegate to the per-format
+`KVFormatSpec` strategy classes under `kv_format/specs/`:
+- `get_gpu_kv_shape_description(gpu_kv_format)` — returns `spec_cls.shape_desc` (e.g., `NL x [2, NB, BS, NH, HS]`)
+- `get_attention_backend(gpu_kv_format)` — returns `spec_cls.backend_label` (e.g., `vLLM non-MLA flash attention`)
+- `get_concrete_gpu_kv_shape(kv_caches, gpu_kv_format)` — returns `spec_cls(kv_caches).concrete_shape_str()` (e.g., `80 x [2, 2048, 128, 8, 128]`)
+
+Since the metadata lives on the spec class (`shape_desc`,
+`backend_label` are `ClassVar`s; `concrete_shape_str` is a method on
+the spec instance), adding a new format means dropping a new spec
+file under `kv_format/specs/` — these helpers pick it up
+automatically through the registry.
 
 `GPUCacheContext` exposes these as properties: `gpu_kv_format_name`, `gpu_kv_shape`, `concrete_gpu_kv_shape`, `attention_backend`.
 

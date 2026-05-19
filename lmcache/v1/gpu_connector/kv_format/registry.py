@@ -109,6 +109,16 @@ def _discover(subpackage: str, failures: list[tuple[str, str]]) -> None:
 
 
 def ensure_loaded() -> None:
+    """Idempotently trigger lazy discovery of all spec and detector modules.
+
+    Walks the ``specs/`` and ``detectors/`` subpackages once, importing
+    every public module so that the ``__init_subclass__`` hooks register
+    their classes. Subsequent calls are no-ops. Failures from individual
+    modules are logged at WARNING and recorded in
+    :data:`_FAILED_SPEC_MODULES` / :data:`_FAILED_DETECTOR_MODULES`
+    instead of being raised, so a broken third-party plugin can never
+    take down the whole registry.
+    """
     global _LOADED
     if _LOADED:
         return
@@ -126,16 +136,22 @@ def ensure_loaded() -> None:
 # Public lookup API.
 # ----------------------------------------------------------------------
 def all_format_ids() -> list[str]:
+    """Return every registered ``format_id`` (triggers lazy discovery)."""
     ensure_loaded()
     return list(_SPECS_BY_ID.keys())
 
 
 def all_gpu_kv_formats() -> list["lmc_ops.GPUKVFormat"]:
+    """Return every registered ``GPUKVFormat`` enum value."""
     ensure_loaded()
     return list(_SPECS_BY_GPU_KV_FORMAT.keys())
 
 
 def get_spec_class_by_id(format_id: str) -> Optional[type["KVFormatSpec"]]:
+    """Look up the spec class by its string ``format_id``.
+
+    Returns ``None`` when no such format is registered.
+    """
     ensure_loaded()
     return _SPECS_BY_ID.get(format_id)
 
@@ -143,7 +159,10 @@ def get_spec_class_by_id(format_id: str) -> Optional[type["KVFormatSpec"]]:
 def get_spec_class(
     fmt: "lmc_ops.GPUKVFormat",
 ) -> Optional[type["KVFormatSpec"]]:
-    """Look up the spec class by C++ ``GPUKVFormat`` enum value."""
+    """Look up the spec class by C++ ``GPUKVFormat`` enum value.
+
+    Returns ``None`` when no spec is registered for ``fmt``.
+    """
     ensure_loaded()
     return _SPECS_BY_GPU_KV_FORMAT.get(fmt)
 
@@ -152,6 +171,20 @@ def get_spec(
     kv_caches: "DiscoverableKVCache",
     fmt: "lmc_ops.GPUKVFormat",
 ) -> "KVFormatSpec":
+    """Construct the spec instance for ``fmt`` bound to ``kv_caches``.
+
+    Args:
+        kv_caches: The KV cache structure the spec will introspect.
+        fmt: The C++ ``GPUKVFormat`` enum value identifying the layout.
+
+    Returns:
+        A fresh :class:`KVFormatSpec` instance bound to ``kv_caches``.
+
+    Raises:
+        ValueError: If ``fmt`` has no registered spec (the error
+            message includes the loaded format ids and any module
+            import failures, to aid debugging missing-plugin cases).
+    """
     cls = get_spec_class(fmt)
     if cls is None:
         raise ValueError(
@@ -162,11 +195,13 @@ def get_spec(
 
 
 def get_detector(engine: EngineType) -> Optional["EngineDetector"]:
+    """Return the registered detector instance for ``engine``, or ``None``."""
     ensure_loaded()
     return _DETECTORS_BY_ENGINE.get(engine)
 
 
 def supported_engines() -> list[EngineType]:
+    """Return every ``EngineType`` that has a registered detector."""
     ensure_loaded()
     return list(_DETECTORS_BY_ENGINE.keys())
 

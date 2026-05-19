@@ -53,10 +53,25 @@ def list_depth_tensor_dim(
 
 
 def descend_to_tensor(kv_caches: DiscoverableKVCache, depth: int) -> torch.Tensor:
+    """Walk ``depth`` levels of list-wrapping and return the inner tensor.
+
+    Args:
+        kv_caches: The (possibly list-wrapped) KV cache structure.
+        depth: Number of list-unwrap steps to perform.
+
+    Returns:
+        The inner :class:`torch.Tensor` reached after ``depth`` unwraps.
+
+    Raises:
+        TypeError: If the value at ``depth`` is not a :class:`torch.Tensor`.
+    """
     probe: DiscoverableKVCache = kv_caches
     for _ in range(depth):
         probe = probe[0]  # type: ignore[index]
-    assert isinstance(probe, torch.Tensor)
+    if not isinstance(probe, torch.Tensor):
+        raise TypeError(
+            "Expected torch.Tensor at depth %d, got %s" % (depth, type(probe).__name__)
+        )
     return probe
 
 
