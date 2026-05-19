@@ -268,3 +268,21 @@ backends are ``cufile`` (NVIDIA cuFile) and ``hipfile`` (AMD hipFile):
     gds_backend: "cufile"   # or "hipfile"
 
 Note that under this mode it would still use CUDA APIs to map and do operations the pre-registered GPU memory.
+
+
+Cache compatibility on metadata version bump
+--------------------------------------------
+
+The on-disk metadata format now records ``cached_positions`` (required for
+correct position-independent KV reuse). To avoid serving stale
+entries that lack it, the GDS metadata version was bumped to version 2: entries written by
+older LMCache versions are **rejected on read**, treated as cache misses, and
+transparently recomputed and re-stored in the new format.
+
+.. warning::
+
+   After upgrading to a version with this change, existing GDS cache entries
+   are ignored but **not deleted**, so they keep occupying disk. Clear the
+   GDS cache directory (``gds_path``, and every path when using the
+   comma-separated multi-path form) after upgrading. New entries are written
+   in the new format automatically.
