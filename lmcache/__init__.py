@@ -33,8 +33,6 @@ def _detect_device() -> tuple[Any, str]:
         tuple[Any, str]: A tuple of (torch_device_module, device_type_string),
             e.g. ``(torch.cuda, "cuda")`` or ``(torch.xpu, "xpu")``.
 
-    Raises:
-        RuntimeError: If no supported accelerator is found (checked CUDA, XPU, HPU).
     """
     try:
         # Third Party
@@ -46,13 +44,19 @@ def _detect_device() -> tuple[Any, str]:
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu, "hpu"
-    else:
-        # Fallback: always return torch.cuda for backward compatibility
-        # with existing tests and code paths that assume CUDA is the default.
+    elif torch.cuda.is_available():
         return torch.cuda, "cuda"
+    else:
+        # First Party
+        from lmcache.v1.platform.cpu.stub_cpu_device import StubCPUDevice
+
+        # Fallback: always return torch, cpu as stub
+        return StubCPUDevice("cpu"), "cpu"
 
 
 torch_dev, torch_device_type = _detect_device()
+
+logger.info(" torch_dev=%s, torch_device_type=%s", torch_dev, torch_device_type)
 
 
 # --------------------------

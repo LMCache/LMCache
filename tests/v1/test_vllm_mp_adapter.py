@@ -36,7 +36,7 @@ def fake_adapter(monkeypatch):
     # send_lmcache_request call don't touch a real socket.
     fake_client = MagicMock(name="mq_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
-    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda mq: 256)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
 
     future = MagicMock(name="future")
     future.result.return_value = None

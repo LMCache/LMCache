@@ -1706,7 +1706,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 self.batched_free(allocated_blocks, update_stats=False)
                 return None
 
-            # FIXME: think about whether pareant_allocator
+            # FIXME: think about whether parent_allocator
             # should be updated here.
             free_block.meta.shape = shapes[0]
             free_block.meta.dtype = dtypes[0]
