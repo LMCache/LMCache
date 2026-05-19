@@ -135,9 +135,11 @@ def create_non_gpu_context(
 ) -> NonGpuContext:
     """Factory that returns the appropriate :class:`NonGpuContext` implementation.
 
-    Currently always returns a pickle-based implementation
-    (``NonGpuContextPickle``). A future SHM-capable PR
-    may probe for shared-memory availability and fall back to pickle.
+    Currently always returns :class:`NonGpuContextPickle`; the SHM
+    transport for non-GPU CPU caches has been folded into the
+    GPU protocol path (``REGISTER_KV_CACHE`` + ``STORE`` + ``RETRIEVE``)
+    via the :mod:`lmcache.v1.platform` registry, so this factory only
+    services the pickle fallback used by tests and unsupported hosts.
 
     Args:
         metadata: Layout metadata for the non-GPU context.

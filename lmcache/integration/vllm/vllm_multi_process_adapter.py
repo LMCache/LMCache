@@ -17,7 +17,6 @@ from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
 )
@@ -28,6 +27,7 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform import _registry as platform_registry
 
 logger = init_logger(__name__)
 
@@ -124,7 +124,19 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
         ),
     )
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
-    return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
+    return [_wrap_one_kv_cache(tensor) for tensor in kv_caches.values()]
+
+
+def _wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
+    """Dispatch by ``tensor.device.type`` via the platform registry.
+
+    Concrete factories self-register at import time (CUDA in
+    ``lmcache.v1.platform.cuda``, CPU SHM in
+    ``lmcache.v1.platform.cpu``), so this call site stays free of
+    if/elif chains and new accelerators plug in by registering a
+    sibling factory.
+    """
+    return platform_registry.get_kv_wrapper_factory(tensor.device.type)(tensor)
 
 
 def send_lmcache_request(
