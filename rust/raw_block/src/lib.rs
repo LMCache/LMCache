@@ -565,6 +565,42 @@ struct RawBlockDevice {
     next_batch_id: Arc<AtomicU64>,
 }
 
+/// RAII guard for a raw file descriptor
+struct FdGuard {
+    fd: RawFd,
+}
+
+impl FdGuard {
+    /// Takes ownership of an open file descriptor.
+    ///
+    /// Args:
+    /// - `fd`: a descriptor returned by a successful `open()`.
+    fn new(fd: RawFd) -> Self {
+        FdGuard { fd }
+    }
+
+    /// Releases ownership of the fd to the caller, disarming the guard so the
+    /// descriptor is not closed on drop.
+    ///
+    /// Returns the raw descriptor, now owned by the caller.
+    fn disarm(self) -> RawFd {
+        let fd = self.fd;
+        std::mem::forget(self);
+        fd
+    }
+}
+
+impl Drop for FdGuard {
+    fn drop(&mut self) {
+        // SAFETY: `fd` was returned by a successful `open()` and ownership has
+        // not been released via `disarm()`, so this is the only close of this
+        // descriptor.
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
+}
+
 impl RawBlockDevice {
     /// Internal constructor performs all low level setup.
     fn new_internal(
@@ -592,6 +628,10 @@ impl RawBlockDevice {
         if fd < 0 {
             return Err(os_err("open failed"));
         }
+        // Take ownership of the fd so it is closed if any fallible setup step
+        // below returns early before the fd is moved into the RawBlockDevice.
+        // Disarmed once the struct is successfully constructed.
+        let fd_guard = FdGuard::new(fd);
         let size = fd_size_bytes(fd)?;
 
         let (
@@ -1138,6 +1178,11 @@ impl RawBlockDevice {
                 None, None, None, None, None, None, None, None, None, None, None,
             )
         };
+
+        // All fallible setup succeeded: hand the fd over to the struct, whose
+        // Drop is now responsible for closing it. Disarm so the guard does not
+        // close the same descriptor a second time.
+        let fd = fd_guard.disarm();
 
         Ok(Self {
             fd,
