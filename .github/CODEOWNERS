@@ -12,7 +12,7 @@
 /lmcache/v1/multiprocess/              @ApostaC @OasisGit
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
 /lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @OasisGit
-/lmcache/v1/mp_observability             @royyhuang @ApostaC @OasisGit @sammshen
+/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @OasisGit @sammshen
 
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng
@@ -62,6 +62,9 @@
 /lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py  @sammshen
 /lmcache/v1/distributed/l2_adapters/native_plugin_l2_adapter.py     @sammshen
 /lmcache/v1/distributed/l2_adapters/fs_native_l2_adapter.py         @sammshen
+
+# Offline analysis tools
+/lmcache/tools/                        @yoo-kumaneko
 
 # Tests
 /tests/                                @hickeyma @sammshen @ApostaC @deng451e
