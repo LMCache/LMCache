@@ -21,15 +21,15 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/dax.rst:1
 msgid "# SPDX-License-Identifier: Apache-2.0"
-msgstr ""
+msgstr "# SPDX-License-Identifier: Apache-2.0"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:4
 msgid "Device-DAX (/dev/dax)"
-msgstr ""
+msgstr "设备-DAX (/dev/dax)"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:7
 msgid "Overview"
-msgstr ""
+msgstr "概述"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:9
 msgid ""
@@ -37,27 +37,27 @@ msgid ""
 "``mmap(MAP_SHARED)`` and uses the mapped region as a fixed-size arena for"
 " KV cache chunks. Typical ``/dev/dax`` devices include persistent memory,"
 " CXL-attached memory, and other byte-addressable memory devices."
-msgstr ""
+msgstr "DAX 存储插件通过 ``mmap(MAP_SHARED)`` 映射 ``/dev/dax`` 设备，并将映射区域用作 KV Cache 块的固定大小区域。典型的 ``/dev/dax`` 设备包括持久内存、CXL 附加内存和其他字节可寻址内存设备。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:14
 msgid ""
 "Data stored on the DAX device may survive process restarts, but is not "
 "guaranteed to be durable."
-msgstr ""
+msgstr "存储在 DAX 设备上的数据可能在进程重启后仍然存在，但不保证其持久性。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:17
 msgid ""
 "KV cache data is stored in the DAX region as part of the backend's "
 "storage flow. Reads copy data back into CPU-backed memory objects."
-msgstr ""
+msgstr "KV Cache 数据作为后端存储流程的一部分存储在 DAX 区域。读取操作会将数据复制回 CPU 内存对象。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:22
 msgid "Configuration"
-msgstr ""
+msgstr "配置"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:42
 msgid "Multiprocess Mode"
-msgstr ""
+msgstr "多进程模式"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:44
 msgid ""
@@ -65,48 +65,48 @@ msgid ""
 "adapter named ``dax``.  The MP adapter uses the normal L2 adapter "
 "``submit -> event fd -> query`` contract; no vLLM connector protocol "
 "changes are required."
-msgstr ""
+msgstr "在 LMCache 多进程模式下，Device-DAX 被配置为名为 ``dax`` 的内置 L2 适配器。MP 适配器使用正常的 L2 适配器 ``submit -> event fd -> query`` 合同；不需要 vLLM 连接器协议的更改。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:64
 msgid "The ``--l2-adapter`` JSON accepts these fields:"
-msgstr ""
+msgstr "``--l2-adapter`` JSON 接受以下字段："
 
 #: ../../source/kv_cache/storage_backends/dax.rst:66
 msgid "``device_path``: required path to a readable and writable DAX device."
-msgstr ""
+msgstr "``device_path``: 必须可读写的 DAX 设备路径。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:67
 msgid ""
 "``max_dax_size_gb``: required mapped size in GiB. The value must fit "
 "within the device capacity when capacity can be determined with "
 "``fstat``."
-msgstr ""
+msgstr "``max_dax_size_gb``: 必需的映射大小，以 GiB 为单位。当可以通过 ``fstat`` 确定容量时，值必须适合设备容量。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:69
 msgid ""
 "``slot_bytes``: required fixed slot size in bytes. It must be large "
 "enough for one full LMCache chunk."
-msgstr ""
+msgstr "``slot_bytes``: 所需的固定槽大小（以字节为单位）。它必须足够大，以容纳一个完整的 LMCache 块。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:71
 msgid "``num_store_workers``: optional store worker count, default ``1``."
-msgstr ""
+msgstr "``num_store_workers``: 可选的存储工作线程数量，默认值为 ``1``。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:72
 msgid "``num_lookup_workers``: optional lookup worker count, default ``1``."
-msgstr ""
+msgstr "``num_lookup_workers``: 可选查找工作线程数量，默认为 ``1``。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:73
 msgid ""
 "``num_load_workers``: optional load worker count, default ``min(4, "
 "os.cpu_count())``."
-msgstr ""
+msgstr "``num_load_workers``: 可选的加载工作线程数量，默认 ``min(4, os.cpu_count())``。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:75
 msgid ""
 "``persist_enabled``: accepted by common MP L2 parsing but ignored by "
 "``dax`` in this release."
-msgstr ""
+msgstr "``persist_enabled``: 被通用 MP L2 解析接受，但在此版本中被 ``dax`` 忽略。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:78
 msgid ""
@@ -114,7 +114,7 @@ msgid ""
 "in this release.  Closing and reopening the server on the same DAX path "
 "starts with an empty index, so previously written bytes are not "
 "discoverable after restart."
-msgstr ""
+msgstr "MP DAX 在内存中存储不透明的 ``ObjectKey`` 值，并且在此版本中仅为易失性。关闭并重新打开同一路径上的服务器时，索引将为空，因此之前写入的字节在重启后无法被发现。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:83
 msgid ""
@@ -123,140 +123,140 @@ msgid ""
 "restart recovery.  Capacity accounting and eviction are slot-based: a "
 "stored object occupies one slot even if its payload is smaller than "
 "``slot_bytes``."
-msgstr ""
+msgstr "MP DAX 每个 LMCache 服务器使用一个映射的设备路径。它不添加每个 TP 的 DAX 分区、多设备条带、设备内元数据或重启恢复。容量管理和逐出是基于插槽的：即使存储对象的有效负载小于 ``slot_bytes``，它仍占用一个插槽。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:90
 msgid "Using The Batched Restore Path"
-msgstr ""
+msgstr "使用批量恢复路径"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:92
 msgid ""
 "The current DAX optimization is a staged batched restore path for "
 "retrieval. It is enabled automatically whenever the DAX backend is "
 "configured. No extra feature flag is required."
-msgstr ""
+msgstr "当前的 DAX 优化是一个分阶段的批量恢复路径，用于检索。只要配置了 DAX 后端，它会自动启用。无需额外的功能标志。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:96
 msgid "The retrieve flow is:"
-msgstr ""
+msgstr "检索流程是："
 
 #: ../../source/kv_cache/storage_backends/dax.rst:98
 msgid "Reserve a batched set of readable DAX chunks."
-msgstr ""
+msgstr "保留一组可读的 DAX 块。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:99
 msgid "Allocate CPU restore buffers from ``LocalCPUBackend``."
-msgstr ""
+msgstr "从 ``LocalCPUBackend`` 分配 CPU 恢复缓冲区。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:100
 msgid ""
 "Copy DAX data into a backend-owned pinned staging slab in coalesced "
 "regions."
-msgstr ""
+msgstr "将 DAX 数据复制到后端拥有的固定暂存块中的合并区域。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:101
 msgid "Copy from the staging slab into the final CPU ``MemoryObj`` outputs."
-msgstr ""
+msgstr "从暂存块复制到最终的 CPU ``MemoryObj`` 输出。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:102
 msgid "Upload those CPU outputs through the normal GPU connector path."
-msgstr ""
+msgstr "通过正常的 GPU 连接器路径上传这些 CPU 输出。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:104
 msgid ""
 "The store flow is unchanged: KV data is still staged through CPU memory "
 "before being written into the DAX arena."
-msgstr ""
+msgstr "存储流程保持不变：KV 数据仍然通过 CPU 内存进行暂存，然后写入 DAX 区域。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:107
 msgid "The new DAX tuning knobs control the batched restore path:"
-msgstr ""
+msgstr "新的 DAX 调优控制批量恢复路径的旋钮："
 
 #: ../../source/kv_cache/storage_backends/dax.rst:109
 msgid ""
 "``dax.restore_workers``: number of persistent worker threads used to "
 "execute restore regions in parallel."
-msgstr ""
+msgstr "``dax.restore_workers``: 用于并行执行恢复区域的持久工作线程数量。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:111
 msgid ""
 "``dax.restore_max_regions``: maximum number of restore regions in one "
 "wave. Larger values increase parallelism but also increase slab space "
 "requirements."
-msgstr ""
+msgstr "``dax.restore_max_regions``: 一次波次中最大恢复区域的数量。较大的值会增加并行性，但也会增加 slab 空间的需求。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:113
 msgid ""
 "``dax.retrieve_staging_slab_bytes``: total size in bytes of the reusable "
 "pinned retrieve slab. This must be large enough to hold one full chunk "
 "per configured restore region."
-msgstr ""
+msgstr "``dax.retrieve_staging_slab_bytes``: 可重用的固定检索块的总大小（以字节为单位）。这必须足够大，以容纳每个配置的恢复区域的一个完整块。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:117
 msgid "For a first pass, start with:"
-msgstr ""
+msgstr "对于第一次尝试，从以下开始："
 
 #: ../../source/kv_cache/storage_backends/dax.rst:119
 msgid ""
 "``dax.restore_workers`` equal to the number of CPU workers you want "
 "devoted to DAX restores"
-msgstr ""
+msgstr "``dax.restore_workers`` 等于您希望用于 DAX 恢复的 CPU 工作线程数量"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:121
 msgid "``dax.restore_max_regions`` equal to ``dax.restore_workers``"
-msgstr ""
+msgstr "``dax.restore_max_regions`` 等于 ``dax.restore_workers``"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:122
 msgid ""
 "``dax.retrieve_staging_slab_bytes`` at least ``dax.restore_max_regions * "
 "full_chunk_size``, then scale upward if larger batched restores are "
 "common"
-msgstr ""
+msgstr "``dax.retrieve_staging_slab_bytes`` 至少为 ``dax.restore_max_regions * full_chunk_size``，如果批量恢复较大，则向上调整。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:126
 msgid ""
 "If retrieve throughput is low, increase the slab size first, then "
 "increase worker and region counts together. If CPU pressure is high, "
 "reduce ``dax.restore_workers`` and ``dax.restore_max_regions``."
-msgstr ""
+msgstr "如果提取吞吐量较低，首先增加块大小，然后一起增加工作线程和区域数量。如果 CPU 压力较高，减少 ``dax.restore_workers`` 和 ``dax.restore_max_regions``。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:132
 msgid "Runtime Requirements"
-msgstr ""
+msgstr "运行时要求"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:134
 msgid ""
 "``extra_config['dax.device_path']`` is required and must point to a "
 "readable and writable DAX device."
-msgstr ""
+msgstr "``extra_config['dax.device_path']`` 是必需的，并且必须指向一个可读写的 DAX 设备。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:136
 msgid ""
 "The process must have read-write access to the DAX device (e.g., via "
 "appropriate permissions or group membership)."
-msgstr ""
+msgstr "该进程必须对 DAX 设备具有读写访问权限（例如，通过适当的权限或组成员资格）。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:138
 msgid ""
 "``LocalCPUBackend`` must be enabled because DAX reads return CPU-backed "
 "memory objects."
-msgstr ""
+msgstr "``LocalCPUBackend`` 必须启用，因为 DAX 读取返回的是 CPU 支持的内存对象。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:143
 msgid "Validation and Current Limits"
-msgstr ""
+msgstr "验证和当前限制"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:145
 msgid ""
 "Tensor parallelism is currently limited to TP=1 (``metadata.world_size =="
 " 1``)."
-msgstr ""
+msgstr "当前张量并行性仅限于 TP=1 (``metadata.world_size == 1``)。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:147
 msgid ""
 "Only single-tensor chunk layouts are supported. Multi-tensor put requests"
 " are rejected."
-msgstr ""
+msgstr "仅支持单张量块布局。多张量放置请求将被拒绝。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:149
 msgid ""
@@ -264,11 +264,11 @@ msgid ""
 " restore executors. The slab and region count can be tuned with "
 "``dax.restore_workers``, ``dax.restore_max_regions``, and "
 "``dax.retrieve_staging_slab_bytes``."
-msgstr ""
+msgstr "批量恢复使用后端拥有的检索暂存块和持久恢复执行器。可以通过 ``dax.restore_workers``、``dax.restore_max_regions`` 和 ``dax.retrieve_staging_slab_bytes`` 调整暂存块和区域数量。"
 
 #: ../../source/kv_cache/storage_backends/dax.rst:153
 msgid ""
 "Blocking batched restore preserves positional output semantics, while "
 "asynchronous batched restore returns only the consecutive hit prefix."
-msgstr ""
+msgstr "阻塞批量恢复保留了位置输出语义，而异步批量恢复仅返回连续的命中前缀。"
 

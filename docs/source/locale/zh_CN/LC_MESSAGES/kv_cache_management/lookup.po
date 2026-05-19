@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../source/kv_cache_management/lookup.rst:4
 msgid "Lookup the KV cache"
-msgstr ""
+msgstr "查找 KV Cache"
 
 #: ../../source/kv_cache_management/lookup.rst:6
 msgid "The ``lookup`` interface is defined as the following:"
-msgstr ""
+msgstr "``lookup`` 接口定义如下："
 
 #: ../../source/kv_cache_management/lookup.rst:12
 msgid ""
@@ -33,47 +33,47 @@ msgid ""
 "dictionary containing the layout information for each token. The layout "
 "information is represented as a mapping between ``instance_id`` and a "
 "tuple of ``(location, matched_prefix_length)``."
-msgstr ""
+msgstr "该函数接受一个令牌列表作为输入，并返回 event_id 以及一个包含每个令牌布局信息的字典。布局信息表示为 ``instance_id`` 与 ``(location, matched_prefix_length)`` 元组之间的映射。"
 
 #: ../../source/kv_cache_management/lookup.rst:16
 msgid "Example usage:"
-msgstr ""
+msgstr "示例用法："
 
 #: ../../source/kv_cache_management/lookup.rst:18
 msgid ""
 "First, we need a yaml file ``example.yaml`` to properly configure the "
 "lmcache instance:"
-msgstr ""
+msgstr "首先，我们需要一个 yaml 文件 ``example.yaml`` 来正确配置 lmcache 实例："
 
 #: ../../source/kv_cache_management/lookup.rst:36
 msgid "Second, we need to start the vllm/lmcache instance at port 8000:"
-msgstr ""
+msgstr "第二，我们需要在 8000 端口启动 vllm/lmcache 实例："
 
 #: ../../source/kv_cache_management/lookup.rst:42
 msgid ""
 "Third, we need to start the lmcache controller at port 9000 and the "
 "monitor at port 9001:"
-msgstr ""
+msgstr "第三，我们需要在 9000 端口启动 lmcache 控制器，在 9001 端口启动监视器："
 
 #: ../../source/kv_cache_management/lookup.rst:48
 msgid "Then we can send a request to vllm to see if it works properly:"
-msgstr ""
+msgstr "然后我们可以向 vllm 发送请求，以查看它是否正常工作："
 
 #: ../../source/kv_cache_management/lookup.rst:60
 msgid "Now we send a request to tokenize the prompt:"
-msgstr ""
+msgstr "现在我们发送请求以对提示进行标记化："
 
 #: ../../source/kv_cache_management/lookup.rst:71
 msgid "We should be able to see token ids in response:"
-msgstr ""
+msgstr "我们应该能够在响应中看到令牌 ID："
 
 #: ../../source/kv_cache_management/lookup.rst:77
 msgid "Finally, we can send a ``lookup`` request to the lmcache controller:"
-msgstr ""
+msgstr "最后，我们可以向 lmcache 控制器发送一个 ``lookup`` 请求："
 
 #: ../../source/kv_cache_management/lookup.rst:87
 msgid "We should be able to see the response like this:"
-msgstr ""
+msgstr "我们应该能够看到这样的响应："
 
 #: ../../source/kv_cache_management/lookup.rst:93
 msgid ""
@@ -81,5 +81,5 @@ msgid ""
 " a tuple of ``(location, matched_prefix_length)`` indicating the cache "
 "location within that instance and matched prefix length. ``event_id`` is "
 "an identifier of the controller operation and can typically be ignored."
-msgstr ""
+msgstr "字段 ``lmcache_default_instance`` 显示实例 ID，后面是一个元组 ``(location, matched_prefix_length)``，指示该实例内的缓存位置和匹配前缀长度。 ``event_id`` 是控制器操作的标识符，通常可以忽略。"
 

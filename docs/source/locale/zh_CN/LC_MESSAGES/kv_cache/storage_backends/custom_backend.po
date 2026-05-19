@@ -21,19 +21,19 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/custom_backend.rst:2
 msgid "Custom Storage Backends"
-msgstr ""
+msgstr "自定义存储后端"
 
 #: ../../source/kv_cache/storage_backends/custom_backend.rst:4
 msgid ""
 "LMCache supports integrating custom storage backends through dynamic "
 "loading or plug and play capability. This allows extending cache storage "
 "capabilities without modifying core code."
-msgstr ""
+msgstr "LMCache 支持通过动态加载或即插即用能力集成自定义存储后端。这允许在不修改核心代码的情况下扩展缓存存储能力。"
 
 #: ../../source/kv_cache/storage_backends/custom_backend.rst:6
 msgid ""
 "See :doc:`Storage Plugins "
 "<../../developer_guide/extending_lmcache/storage_plugins>` for more "
 "details."
-msgstr ""
+msgstr "有关更多详细信息，请参阅 :doc:`存储插件 <../../developer_guide/extending_lmcache/storage_plugins>`。"
 

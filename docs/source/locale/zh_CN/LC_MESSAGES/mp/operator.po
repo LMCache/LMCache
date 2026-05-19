@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/mp/operator.rst:2
 msgid "Kubernetes Operator"
-msgstr ""
+msgstr "Kubernetes 操作器"
 
 #: ../../source/mp/operator.rst:4
 msgid ""
@@ -30,17 +30,17 @@ msgid ""
 "DaemonSets, Services, and ConfigMaps (as described in the manual "
 ":doc:`deployment` guide), you declare a single ``LMCacheEngine`` custom "
 "resource and the operator reconciles all underlying Kubernetes objects."
-msgstr ""
+msgstr "LMCache Kubernetes 操作符自动化了 LMCache 多进程服务器的部署和生命周期管理。您只需声明一个 ``LMCacheEngine`` 自定义资源，操作符将协调所有底层的 Kubernetes 对象，而无需手动编写 DaemonSets、Services 和 ConfigMaps（如手册 :doc:`deployment` 指南中所述）。"
 
 #: ../../source/mp/operator.rst:15
 msgid "Why Use the Operator"
-msgstr ""
+msgstr "为什么使用操作器"
 
 #: ../../source/mp/operator.rst:17
 msgid ""
 "The manual DaemonSet approach works, but it has sharp edges the operator "
 "eliminates:"
-msgstr ""
+msgstr "手动 DaemonSet 方法可以工作，但它有一些操作员消除的尖锐边缘："
 
 #: ../../source/mp/operator.rst:20
 msgid ""
@@ -48,7 +48,7 @@ msgid ""
 "true`` and ``--host 0.0.0.0``.  Forgetting ``hostIPC`` in a hand-written "
 "manifest causes silent CUDA IPC failures "
 "(``cudaErrorMapBufferObjectFailed``) that are hard to debug."
-msgstr ""
+msgstr "**自动注入的 Pod 设置** -- 操作器始终设置 ``hostIPC: true`` 和 ``--host 0.0.0.0``。在手动编写的清单中忘记 ``hostIPC`` 会导致难以调试的静默 CUDA IPC 失败 (``cudaErrorMapBufferObjectFailed``)。"
 
 #: ../../source/mp/operator.rst:24
 msgid ""
@@ -56,14 +56,14 @@ msgid ""
 "Service with ``internalTrafficPolicy=Local`` and a connection ConfigMap "
 "that vLLM pods simply mount.  No ``hostNetwork``, no Downward API, no "
 "shell variable substitution."
-msgstr ""
+msgstr "**节点本地服务发现** -- 操作员创建一个 ClusterIP 服务，设置 ``internalTrafficPolicy=Local``，并创建一个连接的 ConfigMap，vLLM pod 只需挂载它。没有 ``hostNetwork``，没有向下 API，没有 shell 变量替换。"
 
 #: ../../source/mp/operator.rst:28
 msgid ""
 "**Auto-computed resource sizing** -- Memory requests and limits are "
 "derived from ``l1.sizeGB``, avoiding OOM kills (under-provisioned) or "
 "wasted node capacity (over-provisioned)."
-msgstr ""
+msgstr "**自动计算资源大小** -- 内存请求和限制来自 ``l1.sizeGB``，避免了 OOM 杀死（资源不足）或浪费节点容量（资源过剩）。"
 
 #: ../../source/mp/operator.rst:31
 msgid ""
@@ -71,145 +71,145 @@ msgid ""
 "``prometheus.serviceMonitor.enabled: true`` and the operator creates a "
 "``ServiceMonitor`` CR that the Prometheus Operator discovers "
 "automatically."
-msgstr ""
+msgstr "**声明式 Prometheus 集成** -- 设置 ``prometheus.serviceMonitor.enabled: true``，操作符会创建一个 ``ServiceMonitor`` CR，Prometheus 操作符会自动发现它。"
 
 #: ../../source/mp/operator.rst:34
 msgid ""
 "**CRD validation** -- OpenAPI schema validation catches misconfigurations"
 " (e.g., ``l1.sizeGB <= 0``, invalid port range) at ``kubectl apply`` "
 "time, before any pods are created."
-msgstr ""
+msgstr "**CRD 验证** -- OpenAPI 架构验证在 ``kubectl apply`` 时捕获配置错误（例如，``l1.sizeGB <= 0``，无效的端口范围），在创建任何 pod 之前。"
 
 #: ../../source/mp/operator.rst:39
 msgid "Prerequisites"
-msgstr ""
+msgstr "先决条件"
 
 #: ../../source/mp/operator.rst:41
 msgid "Kubernetes 1.20+"
-msgstr ""
+msgstr "Kubernetes 1.20+"
 
 #: ../../source/mp/operator.rst:42
 msgid "``kubectl`` configured to access your cluster"
-msgstr ""
+msgstr "``kubectl`` 配置为访问您的集群"
 
 #: ../../source/mp/operator.rst:43
 msgid ""
 "(Optional) `Prometheus Operator <https://github.com/prometheus-operator"
 "/prometheus-operator>`_ for ServiceMonitor support"
-msgstr ""
+msgstr "(可选) `Prometheus Operator <https://github.com/prometheus-operator/prometheus-operator>`_ 以支持 ServiceMonitor"
 
 #: ../../source/mp/operator.rst:47
 msgid "Installing the Operator"
-msgstr ""
+msgstr "安装 Operator"
 
 #: ../../source/mp/operator.rst:49
 msgid "**Option A: One-line install from release (recommended)**"
-msgstr ""
+msgstr "**选项 A：从发布版一行安装（推荐）**"
 
 #: ../../source/mp/operator.rst:59
 msgid "**Option B: Build from source**"
-msgstr ""
+msgstr "**选项 B：从源代码构建**"
 
 #: ../../source/mp/operator.rst:69
 msgid "Deploying an LMCacheEngine"
-msgstr ""
+msgstr "部署 LMCacheEngine"
 
 #: ../../source/mp/operator.rst:71
 msgid "A minimal CR deploys a DaemonSet with 60 GB L1 cache on every GPU node:"
-msgstr ""
+msgstr "一个最小的 CR 在每个 GPU 节点上部署一个具有 60 GB L1 缓存的 DaemonSet："
 
 #: ../../source/mp/operator.rst:87
 msgid "The operator automatically:"
-msgstr ""
+msgstr "操作符自动："
 
 #: ../../source/mp/operator.rst:89
 msgid "Creates a DaemonSet running one LMCache server pod per matched node"
-msgstr ""
+msgstr "在每个匹配的节点上创建一个运行 LMCache 服务器 Pod 的 DaemonSet"
 
 #: ../../source/mp/operator.rst:90
 msgid "Sets ``hostIPC: true`` and passes ``--host 0.0.0.0`` to the server"
-msgstr ""
+msgstr "设置 ``hostIPC: true`` 并将 ``--host 0.0.0.0`` 传递给服务器"
 
 #: ../../source/mp/operator.rst:91
 msgid "Creates a node-local ClusterIP Service for vLLM discovery"
-msgstr ""
+msgstr "为 vLLM 发现创建一个节点本地的 ClusterIP 服务"
 
 #: ../../source/mp/operator.rst:92
 msgid ""
 "Creates a connection ConfigMap (``my-cache-connection``) with the ``kv-"
 "transfer-config`` JSON that vLLM needs"
-msgstr ""
+msgstr "创建一个连接 ConfigMap (``my-cache-connection``)，其中包含 vLLM 所需的 ``kv-transfer-config`` JSON。"
 
 #: ../../source/mp/operator.rst:94
 msgid "Auto-computes resource requests/limits from the L1 cache size"
-msgstr ""
+msgstr "自动计算 L1 缓存大小的资源请求/限制"
 
 #: ../../source/mp/operator.rst:95
 msgid "Defaults ``nodeSelector`` to ``nvidia.com/gpu.present: \"true\"``"
-msgstr ""
+msgstr "默认将 ``nodeSelector`` 设置为 ``nvidia.com/gpu.present: \\\"true\\\"``"
 
 #: ../../source/mp/operator.rst:98
 msgid ""
 "The operator defaults the container image to ``lmcache/vllm-"
 "openai:latest``. Override with ``spec.image.repository`` and "
 "``spec.image.tag`` to pin a specific version."
-msgstr ""
+msgstr "该操作符将容器镜像默认设置为 ``lmcache/vllm-openai:latest``。可以通过 ``spec.image.repository`` 和 ``spec.image.tag`` 来覆盖，以固定特定版本。"
 
 #: ../../source/mp/operator.rst:103
 msgid "Connecting vLLM"
-msgstr ""
+msgstr "连接 vLLM"
 
 #: ../../source/mp/operator.rst:105
 msgid ""
 "The operator creates a ConfigMap named ``<engine-name>-connection`` "
 "containing the ``kv-transfer-config`` JSON.  Mount it in your vLLM "
 "Deployment:"
-msgstr ""
+msgstr "操作符创建一个名为 ``<engine-name>-connection`` 的 ConfigMap，其中包含 ``kv-transfer-config`` JSON。将其挂载到您的 vLLM 部署中："
 
 #: ../../source/mp/operator.rst:156
 msgid "Key requirements for vLLM pods:"
-msgstr ""
+msgstr "vLLM Pod 的关键要求："
 
 #: ../../source/mp/operator.rst:158
 msgid ""
 "**hostIPC: true** -- CUDA IPC (``cudaIpcOpenMemHandle``) needs a shared "
 "IPC namespace between vLLM and LMCache."
-msgstr ""
+msgstr "**hostIPC: true** -- CUDA IPC (``cudaIpcOpenMemHandle``) 需要在 vLLM 和 LMCache 之间共享 IPC 命名空间。"
 
 #: ../../source/mp/operator.rst:160
 msgid ""
 "**PYTHONHASHSEED=0** -- Ensures deterministic token hashing so vLLM and "
 "LMCache produce consistent cache keys."
-msgstr ""
+msgstr "**PYTHONHASHSEED=0** -- 确保确定性令牌哈希，以便 vLLM 和 LMCache 生成一致的缓存键。"
 
 #: ../../source/mp/operator.rst:162
 msgid ""
 "**ConfigMap mount** -- The ``$(cat ...)`` pattern reads the connection "
 "JSON inline.  The ConfigMap name is always ``<LMCacheEngine "
 "name>-connection``."
-msgstr ""
+msgstr "**ConfigMap挂载** -- ``$(cat ...)`` 模式在线读取连接 JSON。ConfigMap 名称始终为 ``<LMCacheEngine name>-connection``。"
 
 #: ../../source/mp/operator.rst:164
 msgid ""
 "**No hostNetwork needed** -- The operator's node-local Service handles "
 "routing via ``internalTrafficPolicy=Local``."
-msgstr ""
+msgstr "**不需要 hostNetwork** -- 操作员的节点本地服务通过 ``internalTrafficPolicy=Local`` 处理路由。"
 
 #: ../../source/mp/operator.rst:168
 msgid "Verifying the Deployment"
-msgstr ""
+msgstr "验证部署"
 
 #: ../../source/mp/operator.rst:175
 msgid "Expected output:"
-msgstr ""
+msgstr "预期输出："
 
 #: ../../source/mp/operator.rst:194
 msgid "CRD Spec Reference"
-msgstr ""
+msgstr "CRD 规格参考"
 
 #: ../../source/mp/operator.rst:197
 msgid "Image"
-msgstr ""
+msgstr "图像"
 
 #: ../../source/mp/operator.rst:203 ../../source/mp/operator.rst:226
 #: ../../source/mp/operator.rst:249 ../../source/mp/operator.rst:263
@@ -217,61 +217,61 @@ msgstr ""
 #: ../../source/mp/operator.rst:324 ../../source/mp/operator.rst:347
 #: ../../source/mp/operator.rst:478
 msgid "Field"
-msgstr ""
+msgstr "字段"
 
 #: ../../source/mp/operator.rst:204 ../../source/mp/operator.rst:227
 #: ../../source/mp/operator.rst:250 ../../source/mp/operator.rst:264
 #: ../../source/mp/operator.rst:284 ../../source/mp/operator.rst:310
 #: ../../source/mp/operator.rst:325 ../../source/mp/operator.rst:348
 msgid "Default"
-msgstr ""
+msgstr "默认"
 
 #: ../../source/mp/operator.rst:205 ../../source/mp/operator.rst:228
 #: ../../source/mp/operator.rst:251 ../../source/mp/operator.rst:265
 #: ../../source/mp/operator.rst:285 ../../source/mp/operator.rst:311
 #: ../../source/mp/operator.rst:326 ../../source/mp/operator.rst:349
 msgid "Description"
-msgstr ""
+msgstr "描述"
 
 #: ../../source/mp/operator.rst:206
 msgid "``image.repository``"
-msgstr ""
+msgstr "``image.repository``"
 
 #: ../../source/mp/operator.rst:207
 msgid "``lmcache/vllm-openai``"
-msgstr ""
+msgstr "``lmcache/vllm-openai``"
 
 #: ../../source/mp/operator.rst:208
 msgid "Container image repository."
-msgstr ""
+msgstr "容器镜像仓库。"
 
 #: ../../source/mp/operator.rst:209
 msgid "``image.tag``"
-msgstr ""
+msgstr "``image.tag``"
 
 #: ../../source/mp/operator.rst:210
 msgid "``latest``"
-msgstr ""
+msgstr "``latest``"
 
 #: ../../source/mp/operator.rst:211
 msgid "Container image tag."
-msgstr ""
+msgstr "容器镜像标签。"
 
 #: ../../source/mp/operator.rst:212
 msgid "``image.pullPolicy``"
-msgstr ""
+msgstr "``image.pullPolicy``"
 
 #: ../../source/mp/operator.rst:213
 msgid "``IfNotPresent``"
-msgstr ""
+msgstr "``如果不存在``"
 
 #: ../../source/mp/operator.rst:214
 msgid "``Always``, ``Never``, or ``IfNotPresent``."
-msgstr ""
+msgstr "``Always``, ``Never``, 或 ``IfNotPresent``。"
 
 #: ../../source/mp/operator.rst:215
 msgid "``imagePullSecrets``"
-msgstr ""
+msgstr "``imagePullSecrets``"
 
 #: ../../source/mp/operator.rst:216 ../../source/mp/operator.rst:299
 #: ../../source/mp/operator.rst:313 ../../source/mp/operator.rst:331
@@ -281,369 +281,369 @@ msgstr ""
 #: ../../source/mp/operator.rst:366 ../../source/mp/operator.rst:369
 #: ../../source/mp/operator.rst:372 ../../source/mp/operator.rst:375
 msgid "--"
-msgstr ""
+msgstr "--"
 
 #: ../../source/mp/operator.rst:217
 msgid "Image pull secret references."
-msgstr ""
+msgstr "镜像拉取密钥引用。"
 
 #: ../../source/mp/operator.rst:220
 msgid "Server"
-msgstr ""
+msgstr "服务器"
 
 #: ../../source/mp/operator.rst:229 ../../source/mp/operator.rst:488
 msgid "``server.port``"
-msgstr ""
+msgstr "``server.port``"
 
 #: ../../source/mp/operator.rst:230
 msgid "``5555``"
-msgstr ""
+msgstr "``5555``"
 
 #: ../../source/mp/operator.rst:231
 msgid "ZMQ listening port (1024--65535)."
-msgstr ""
+msgstr "ZMQ 监听端口 (1024--65535)。"
 
 #: ../../source/mp/operator.rst:232
 msgid "``server.chunkSize``"
-msgstr ""
+msgstr "``server.chunkSize``"
 
 #: ../../source/mp/operator.rst:233
 msgid "``256``"
-msgstr ""
+msgstr "``256``"
 
 #: ../../source/mp/operator.rst:234
 msgid "Token chunk size."
-msgstr ""
+msgstr "令牌块大小。"
 
 #: ../../source/mp/operator.rst:235
 msgid "``server.maxWorkers``"
-msgstr ""
+msgstr "``server.maxWorkers``"
 
 #: ../../source/mp/operator.rst:236
 msgid "``1``"
-msgstr ""
+msgstr "``1``"
 
 #: ../../source/mp/operator.rst:237
 msgid "Worker threads for ZMQ requests."
-msgstr ""
+msgstr "ZMQ 请求的工作线程。"
 
 #: ../../source/mp/operator.rst:238
 msgid "``server.hashAlgorithm``"
-msgstr ""
+msgstr "``server.hashAlgorithm``"
 
 #: ../../source/mp/operator.rst:239
 msgid "``blake3``"
-msgstr ""
+msgstr "``blake3``"
 
 #: ../../source/mp/operator.rst:240
 msgid "``builtin``, ``sha256_cbor``, or ``blake3``."
-msgstr ""
+msgstr "``builtin``, ``sha256_cbor``, 或 ``blake3``。"
 
 #: ../../source/mp/operator.rst:243
 msgid "L1 Cache"
-msgstr ""
+msgstr "L1 缓存"
 
 #: ../../source/mp/operator.rst:252 ../../source/mp/operator.rst:480
 msgid "``l1.sizeGB``"
-msgstr ""
+msgstr "``l1.sizeGB``"
 
 #: ../../source/mp/operator.rst:253
 msgid "*required*"
-msgstr ""
+msgstr "*必需*"
 
 #: ../../source/mp/operator.rst:254
 msgid "L1 cache size in GB.  Must be > 0."
-msgstr ""
+msgstr "L1 缓存大小（以 GB 为单位）。必须大于 0。"
 
 #: ../../source/mp/operator.rst:257
 msgid "Eviction"
-msgstr ""
+msgstr "逐出"
 
 #: ../../source/mp/operator.rst:266 ../../source/mp/operator.rst:482
 msgid "``eviction.policy``"
-msgstr ""
+msgstr "``eviction.policy``"
 
 #: ../../source/mp/operator.rst:267
 msgid "``LRU``"
-msgstr ""
+msgstr "``LRU``"
 
 #: ../../source/mp/operator.rst:268
 msgid "Only ``LRU`` is supported."
-msgstr ""
+msgstr "仅支持 ``LRU``。"
 
 #: ../../source/mp/operator.rst:269 ../../source/mp/operator.rst:484
 msgid "``eviction.triggerWatermark``"
-msgstr ""
+msgstr "``eviction.triggerWatermark``"
 
 #: ../../source/mp/operator.rst:270
 msgid "``0.8``"
-msgstr ""
+msgstr "``0.8``"
 
 #: ../../source/mp/operator.rst:271
 msgid "Usage ratio (0.0--1.0] to trigger eviction."
-msgstr ""
+msgstr "触发逐出的使用比例 (0.0--1.0]。"
 
 #: ../../source/mp/operator.rst:272 ../../source/mp/operator.rst:486
 msgid "``eviction.evictionRatio``"
-msgstr ""
+msgstr "``eviction.evictionRatio``"
 
 #: ../../source/mp/operator.rst:273
 msgid "``0.2``"
-msgstr ""
+msgstr "``0.2``"
 
 #: ../../source/mp/operator.rst:274
 msgid "Fraction to evict (0.0--1.0]."
-msgstr ""
+msgstr "逐出比例 (0.0--1.0]。"
 
 #: ../../source/mp/operator.rst:277 ../../source/mp/operator.rst:619
 msgid "Prometheus"
-msgstr ""
+msgstr "普罗米修斯"
 
 #: ../../source/mp/operator.rst:286
 msgid "``prometheus.enabled``"
-msgstr ""
+msgstr "``prometheus.enabled``"
 
 #: ../../source/mp/operator.rst:287
 msgid "``true``"
-msgstr ""
+msgstr "``true``"
 
 #: ../../source/mp/operator.rst:288
 msgid "Expose Prometheus metrics."
-msgstr ""
+msgstr "暴露 Prometheus 指标。"
 
 #: ../../source/mp/operator.rst:289
 msgid "``prometheus.port``"
-msgstr ""
+msgstr "``prometheus.port``"
 
 #: ../../source/mp/operator.rst:290
 msgid "``9090``"
-msgstr ""
+msgstr "``9090``"
 
 #: ../../source/mp/operator.rst:291
 msgid "``/metrics`` endpoint port."
-msgstr ""
+msgstr "``/metrics`` 端口。"
 
 #: ../../source/mp/operator.rst:292
 msgid "``prometheus.serviceMonitor.enabled``"
-msgstr ""
+msgstr "``prometheus.serviceMonitor.enabled``"
 
 #: ../../source/mp/operator.rst:293
 msgid "``false``"
-msgstr ""
+msgstr "``false``"
 
 #: ../../source/mp/operator.rst:294
 msgid "Create a ServiceMonitor CR."
-msgstr ""
+msgstr "创建一个 ServiceMonitor CR。"
 
 #: ../../source/mp/operator.rst:295
 msgid "``prometheus.serviceMonitor.interval``"
-msgstr ""
+msgstr "``prometheus.serviceMonitor.interval``"
 
 #: ../../source/mp/operator.rst:296
 msgid "``30s``"
-msgstr ""
+msgstr "``30s``"
 
 #: ../../source/mp/operator.rst:297
 msgid "Scrape interval."
-msgstr ""
+msgstr "抓取间隔。"
 
 #: ../../source/mp/operator.rst:298
 msgid "``prometheus.serviceMonitor.labels``"
-msgstr ""
+msgstr "``prometheus.serviceMonitor.labels``"
 
 #: ../../source/mp/operator.rst:300
 msgid "Extra labels on the ServiceMonitor."
-msgstr ""
+msgstr "ServiceMonitor上的额外标签。"
 
 #: ../../source/mp/operator.rst:303
 msgid "L2 Storage"
-msgstr ""
+msgstr "L2 存储"
 
 #: ../../source/mp/operator.rst:312
 msgid "``l2Backends``"
-msgstr ""
+msgstr "``l2Backends``"
 
 #: ../../source/mp/operator.rst:314
 msgid "List of L2 backends (``type`` + ``config``). See :doc:`l2_storage`."
-msgstr ""
+msgstr "L2 后端列表 (``type`` + ``config``)。请参见 :doc:`l2_storage`。"
 
 #: ../../source/mp/operator.rst:318
 msgid "Scheduling"
-msgstr ""
+msgstr "调度"
 
 #: ../../source/mp/operator.rst:327
 msgid "``nodeSelector``"
-msgstr ""
+msgstr "``nodeSelector``"
 
 #: ../../source/mp/operator.rst:328
 msgid "GPU nodes"
-msgstr ""
+msgstr "GPU 节点"
 
 #: ../../source/mp/operator.rst:329
 msgid "Defaults to ``nvidia.com/gpu.present: \"true\"``."
-msgstr ""
+msgstr "默认为 ``nvidia.com/gpu.present: \\\"true\\\"``。"
 
 #: ../../source/mp/operator.rst:330
 msgid "``affinity``"
-msgstr ""
+msgstr "``affinity``"
 
 #: ../../source/mp/operator.rst:332
 msgid "Pod affinity rules."
-msgstr ""
+msgstr "Pod 亲和性规则。"
 
 #: ../../source/mp/operator.rst:333
 msgid "``tolerations``"
-msgstr ""
+msgstr "``tolerations``"
 
 #: ../../source/mp/operator.rst:335
 msgid "Pod tolerations."
-msgstr ""
+msgstr "Pod 容忍。"
 
 #: ../../source/mp/operator.rst:336
 msgid "``priorityClassName``"
-msgstr ""
+msgstr "``priorityClassName``"
 
 #: ../../source/mp/operator.rst:338
 msgid "Priority class for pods."
-msgstr ""
+msgstr "用于 Pods 的优先级类。"
 
 #: ../../source/mp/operator.rst:341
 msgid "Overrides & Extras"
-msgstr ""
+msgstr "覆盖与额外选项"
 
 #: ../../source/mp/operator.rst:350
 msgid "``logLevel``"
-msgstr ""
+msgstr "``logLevel``"
 
 #: ../../source/mp/operator.rst:351
 msgid "``INFO``"
-msgstr ""
+msgstr "``INFO``"
 
 #: ../../source/mp/operator.rst:352
 msgid "``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``."
-msgstr ""
+msgstr "``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``。"
 
 #: ../../source/mp/operator.rst:353
 msgid "``resourceOverrides``"
-msgstr ""
+msgstr "``resourceOverrides``"
 
 #: ../../source/mp/operator.rst:355
 msgid "Override auto-computed resources."
-msgstr ""
+msgstr "覆盖自动计算的资源。"
 
 #: ../../source/mp/operator.rst:356
 msgid "``env``"
-msgstr ""
+msgstr "``env``"
 
 #: ../../source/mp/operator.rst:358
 msgid "Extra environment variables."
-msgstr ""
+msgstr "额外的环境变量。"
 
 #: ../../source/mp/operator.rst:359
 msgid "``volumes``"
-msgstr ""
+msgstr "``volumes``"
 
 #: ../../source/mp/operator.rst:361
 msgid "Extra volumes."
-msgstr ""
+msgstr "额外的卷。"
 
 #: ../../source/mp/operator.rst:362
 msgid "``volumeMounts``"
-msgstr ""
+msgstr "``volumeMounts``"
 
 #: ../../source/mp/operator.rst:364
 msgid "Extra volume mounts."
-msgstr ""
+msgstr "额外的卷挂载。"
 
 #: ../../source/mp/operator.rst:365
 msgid "``podAnnotations``"
-msgstr ""
+msgstr "``podAnnotations``"
 
 #: ../../source/mp/operator.rst:367
 msgid "Extra pod annotations."
-msgstr ""
+msgstr "额外的 pod 注释。"
 
 #: ../../source/mp/operator.rst:368
 msgid "``podLabels``"
-msgstr ""
+msgstr "``podLabels``"
 
 #: ../../source/mp/operator.rst:370
 msgid "Extra pod labels."
-msgstr ""
+msgstr "额外的 pod 标签。"
 
 #: ../../source/mp/operator.rst:371
 msgid "``serviceAccountName``"
-msgstr ""
+msgstr "``serviceAccountName``"
 
 #: ../../source/mp/operator.rst:373
 msgid "ServiceAccount for pods."
-msgstr ""
+msgstr "用于 pods 的 ServiceAccount。"
 
 #: ../../source/mp/operator.rst:374
 msgid "``extraArgs``"
-msgstr ""
+msgstr "``extraArgs``"
 
 #: ../../source/mp/operator.rst:376
 msgid "Extra CLI flags (appended last, can override)."
-msgstr ""
+msgstr "额外的 CLI 标志（最后附加，可以覆盖）。"
 
 #: ../../source/mp/operator.rst:379
 msgid "Auto-Computed Resources"
-msgstr ""
+msgstr "自动计算资源"
 
 #: ../../source/mp/operator.rst:381
 msgid ""
 "When ``spec.resourceOverrides`` is not set, the operator derives "
 "resources from ``l1.sizeGB``:"
-msgstr ""
+msgstr "当 ``spec.resourceOverrides`` 未设置时，操作符从 ``l1.sizeGB`` 派生资源："
 
 #: ../../source/mp/operator.rst:384
 msgid "**CPU request**: ``4`` cores"
-msgstr ""
+msgstr "**CPU 请求**: ``4`` 核心"
 
 #: ../../source/mp/operator.rst:385
 msgid "**Memory request**: ``ceil(l1.sizeGB + 5)`` Gi"
-msgstr ""
+msgstr "**内存请求**: ``ceil(l1.sizeGB + 5)`` Gi"
 
 #: ../../source/mp/operator.rst:386
 msgid "**Memory limit**: ``ceil(memoryRequest * 1.5)`` Gi"
-msgstr ""
+msgstr "**内存限制**: ``ceil(memoryRequest * 1.5)`` Gi"
 
 #: ../../source/mp/operator.rst:388
 msgid "For example, ``l1.sizeGB: 60`` produces a 65 Gi request and 98 Gi limit."
-msgstr ""
+msgstr "例如，``l1.sizeGB: 60`` 会产生 65 Gi 的请求和 98 Gi 的限制。"
 
 #: ../../source/mp/operator.rst:391
 msgid "Auto-Injected Pod Settings"
-msgstr ""
+msgstr "自动注入的 Pod 设置"
 
 #: ../../source/mp/operator.rst:393
 msgid ""
 "The operator always injects these into the pod spec (they are not "
 "configurable via the CRD):"
-msgstr ""
+msgstr "操作符始终将这些注入到 Pod 规格中（它们无法通过 CRD 配置）："
 
 #: ../../source/mp/operator.rst:396
 msgid "**hostIPC: true** -- Required for CUDA IPC between LMCache and vLLM."
-msgstr ""
+msgstr "**hostIPC: true** -- 这是在 LMCache 和 vLLM 之间进行 CUDA IPC 所必需的。"
 
 #: ../../source/mp/operator.rst:397
 msgid ""
 "**--host 0.0.0.0** -- Binds the server to all interfaces so the node-"
 "local Service can route to it."
-msgstr ""
+msgstr "**--host 0.0.0.0** -- 将服务器绑定到所有接口，以便节点本地服务可以路由到它。"
 
 #: ../../source/mp/operator.rst:399
 msgid ""
 "**NVIDIA_VISIBLE_DEVICES=all** -- Ensures GPU access for IPC-based memory"
 " transfers."
-msgstr ""
+msgstr "**NVIDIA_VISIBLE_DEVICES=all** -- 确保 GPU 可用于基于 IPC 的内存传输。"
 
 #: ../../source/mp/operator.rst:401
 msgid ""
 "**TCP socket probes** -- Startup (5s initial, 30 failures), liveness "
 "(10s), and readiness (5s) probes on the server port."
-msgstr ""
+msgstr "**TCP socket 探测** -- 启动（初始 5 秒，30 次失败）、存活（10 秒）和就绪（5 秒）探测在服务器端口上。"
 
 #: ../../source/mp/operator.rst:405
 msgid ""
@@ -651,328 +651,328 @@ msgid ""
 "``hostIPC: true``, the container sees the host's ``/dev/shm`` directly. "
 "Mounting an emptyDir would shadow it with a private tmpfs and break CUDA "
 "IPC."
-msgstr ""
+msgstr "操作符**不**在 ``/dev/shm`` 挂载 emptyDir。使用 ``hostIPC: true`` 时，容器直接访问主机的 ``/dev/shm``。挂载 emptyDir 会用私有 tmpfs 进行遮蔽，从而破坏 CUDA IPC。"
 
 #: ../../source/mp/operator.rst:410
 msgid "Resources Created"
-msgstr ""
+msgstr "创建的资源"
 
 #: ../../source/mp/operator.rst:412
 msgid "For an ``LMCacheEngine`` named ``my-cache``:"
-msgstr ""
+msgstr "对于名为 ``my-cache`` 的 ``LMCacheEngine``："
 
 #: ../../source/mp/operator.rst:418
 msgid "Resource"
-msgstr ""
+msgstr "资源"
 
 #: ../../source/mp/operator.rst:419
 msgid "Name"
-msgstr ""
+msgstr "名称"
 
 #: ../../source/mp/operator.rst:420
 msgid "Purpose"
-msgstr ""
+msgstr "目的"
 
 #: ../../source/mp/operator.rst:421
 msgid "DaemonSet"
-msgstr ""
+msgstr "守护进程集"
 
 #: ../../source/mp/operator.rst:422 ../../source/mp/operator.rst:425
 #: ../../source/mp/operator.rst:434
 msgid "``my-cache``"
-msgstr ""
+msgstr "``my-cache``"
 
 #: ../../source/mp/operator.rst:423
 msgid "Runs LMCache server pods."
-msgstr ""
+msgstr "运行 LMCache 服务器 Pod。"
 
 #: ../../source/mp/operator.rst:424
 msgid "Service (ClusterIP)"
-msgstr ""
+msgstr "服务 (ClusterIP)"
 
 #: ../../source/mp/operator.rst:426
 msgid "Node-local discovery (``internalTrafficPolicy=Local``)."
-msgstr ""
+msgstr "节点本地发现（``internalTrafficPolicy=Local``）。"
 
 #: ../../source/mp/operator.rst:427
 msgid "Service (headless)"
-msgstr ""
+msgstr "无头服务"
 
 #: ../../source/mp/operator.rst:428
 msgid "``my-cache-metrics``"
-msgstr ""
+msgstr "``my-cache-metrics``"
 
 #: ../../source/mp/operator.rst:429
 msgid "Prometheus scrape target."
-msgstr ""
+msgstr "Prometheus 抓取目标。"
 
 #: ../../source/mp/operator.rst:430
 msgid "ConfigMap"
-msgstr ""
+msgstr "ConfigMap"
 
 #: ../../source/mp/operator.rst:431
 msgid "``my-cache-connection``"
-msgstr ""
+msgstr "``my-cache-connection``"
 
 #: ../../source/mp/operator.rst:432
 msgid "``kv-transfer-config`` JSON for vLLM."
-msgstr ""
+msgstr "``kv-transfer-config`` vLLM 的 JSON。"
 
 #: ../../source/mp/operator.rst:433
 msgid "ServiceMonitor"
-msgstr ""
+msgstr "服务监控器"
 
 #: ../../source/mp/operator.rst:435
 msgid "Prometheus Operator integration (when enabled)."
-msgstr ""
+msgstr "启用时的 Prometheus Operator 集成。"
 
 #: ../../source/mp/operator.rst:437
 msgid "The connection ConfigMap contains:"
-msgstr ""
+msgstr "连接 ConfigMap 包含："
 
 #: ../../source/mp/operator.rst:451
 msgid "Status & Conditions"
-msgstr ""
+msgstr "状态与条件"
 
 #: ../../source/mp/operator.rst:457
 msgid "The status section includes:"
-msgstr ""
+msgstr "状态部分包括："
 
 #: ../../source/mp/operator.rst:459
 msgid "**phase**: ``Pending``, ``Running``, ``Degraded``, or ``Failed``."
-msgstr ""
+msgstr "**phase**: ``待处理``, ``运行中``, ``降级``, 或 ``失败``。"
 
 #: ../../source/mp/operator.rst:460
 msgid "**readyInstances** / **desiredInstances**: Instance counts."
-msgstr ""
+msgstr "**readyInstances** / **desiredInstances**: 实例计数。"
 
 #: ../../source/mp/operator.rst:461
 msgid ""
 "**endpoints**: Per-node connection info (node name, host IP, pod name, "
 "port, readiness)."
-msgstr ""
+msgstr "**endpoints**: 每个节点的连接信息（节点名称、主机 IP、Pod 名称、端口、就绪状态）。"
 
 #: ../../source/mp/operator.rst:463
 msgid "**conditions**:"
-msgstr ""
+msgstr "**条件**："
 
 #: ../../source/mp/operator.rst:465
 msgid "``Available`` -- At least one instance is ready."
-msgstr ""
+msgstr "``可用`` -- 至少有一个实例已准备好。"
 
 #: ../../source/mp/operator.rst:466
 msgid "``AllInstancesReady`` -- All desired instances are ready."
-msgstr ""
+msgstr "``AllInstancesReady`` -- 所有期望的实例都已准备好。"
 
 #: ../../source/mp/operator.rst:467
 msgid "``ConfigValid`` -- Spec validation passed."
-msgstr ""
+msgstr "``ConfigValid`` -- 配置验证通过。"
 
 #: ../../source/mp/operator.rst:470
 msgid "Validation Rules"
-msgstr ""
+msgstr "验证规则"
 
 #: ../../source/mp/operator.rst:472
 msgid "The operator validates the CR spec at apply time:"
-msgstr ""
+msgstr "操作符在应用时验证 CR 规格："
 
 #: ../../source/mp/operator.rst:479
 msgid "Rule"
-msgstr ""
+msgstr "规则"
 
 #: ../../source/mp/operator.rst:481
 msgid "Required, must be > 0."
-msgstr ""
+msgstr "必需，必须 > 0。"
 
 #: ../../source/mp/operator.rst:483
 msgid "Must be ``LRU`` (if set)."
-msgstr ""
+msgstr "必须是 ``LRU``（如果设置）。"
 
 #: ../../source/mp/operator.rst:485 ../../source/mp/operator.rst:487
 msgid "Must be in (0.0, 1.0]."
-msgstr ""
+msgstr "必须在 (0.0, 1.0] 之间。"
 
 #: ../../source/mp/operator.rst:489
 msgid "Must be in [1024, 65535]."
-msgstr ""
+msgstr "必须在 [1024, 65535] 之间。"
 
 #: ../../source/mp/operator.rst:492
 msgid "Examples"
-msgstr ""
+msgstr "示例"
 
 #: ../../source/mp/operator.rst:495
 msgid "Target Only GPU Nodes"
-msgstr ""
+msgstr "仅目标 GPU 节点"
 
 #: ../../source/mp/operator.rst:497
 msgid ""
 "Use ``nodeSelector`` to run LMCache only on GPU nodes.  New GPU nodes "
 "automatically get an LMCache pod:"
-msgstr ""
+msgstr "使用 ``nodeSelector`` 仅在 GPU 节点上运行 LMCache。新的 GPU 节点会自动获得一个 LMCache pod："
 
 #: ../../source/mp/operator.rst:513
 msgid ""
 "The operator defaults ``nodeSelector`` to ``nvidia.com/gpu.present: "
 "\"true\"`` when not specified, so a minimal CR already targets GPU nodes."
-msgstr ""
+msgstr "操作符默认将 ``nodeSelector`` 设置为 ``nvidia.com/gpu.present: \\\"true\\\"``，当未指定时，因此最小的 CR 已经针对 GPU 节点。"
 
 #: ../../source/mp/operator.rst:517
 msgid "Custom Server Port"
-msgstr ""
+msgstr "自定义服务器端口"
 
 #: ../../source/mp/operator.rst:519
 msgid "If the default port (5555) conflicts with other services:"
-msgstr ""
+msgstr "如果默认端口（5555）与其他服务冲突："
 
 #: ../../source/mp/operator.rst:533
 msgid ""
 "The connection ConfigMap updates automatically -- vLLM pods pick up the "
 "new port on restart."
-msgstr ""
+msgstr "连接 ConfigMap 会自动更新 -- vLLM pods 在重启时会获取新端口。"
 
 #: ../../source/mp/operator.rst:537
 msgid "Production with Prometheus Monitoring"
-msgstr ""
+msgstr "使用 Prometheus 监控的生产环境"
 
 #: ../../source/mp/operator.rst:573
 msgid "See :doc:`observability` for metric names and Grafana configuration."
-msgstr ""
+msgstr "请参阅 :doc:`可观察性` 以获取指标名称和 Grafana 配置。"
 
 #: ../../source/mp/operator.rst:576
 msgid "Override Auto-Computed Resources"
-msgstr ""
+msgstr "覆盖自动计算的资源"
 
 #: ../../source/mp/operator.rst:595
 msgid "Operator vs Manual Deployment"
-msgstr ""
+msgstr "操作员与手动部署"
 
 #: ../../source/mp/operator.rst:601
 msgid "Concern"
-msgstr ""
+msgstr "关注"
 
 #: ../../source/mp/operator.rst:602
 msgid "Manual DaemonSet"
-msgstr ""
+msgstr "手动 DaemonSet"
 
 #: ../../source/mp/operator.rst:603
 msgid "LMCacheEngine Operator"
-msgstr ""
+msgstr "LMCacheEngine Operator"
 
 #: ../../source/mp/operator.rst:604
 msgid "hostIPC"
-msgstr ""
+msgstr "hostIPC"
 
 #: ../../source/mp/operator.rst:605 ../../source/mp/operator.rst:608
 msgid "Must set manually"
-msgstr ""
+msgstr "必须手动设置"
 
 #: ../../source/mp/operator.rst:606 ../../source/mp/operator.rst:609
 msgid "Auto-injected"
-msgstr ""
+msgstr "自动注入"
 
 #: ../../source/mp/operator.rst:607
 msgid "``--host 0.0.0.0``"
-msgstr ""
+msgstr "``--host 0.0.0.0``"
 
 #: ../../source/mp/operator.rst:610
 msgid "Service discovery"
-msgstr ""
+msgstr "服务发现"
 
 #: ../../source/mp/operator.rst:611
 msgid "``hostNetwork`` + ``status.hostIP``"
-msgstr ""
+msgstr "``hostNetwork`` + ``status.hostIP``"
 
 #: ../../source/mp/operator.rst:612
 msgid "Node-local ClusterIP Service + ConfigMap"
-msgstr ""
+msgstr "节点本地 ClusterIP 服务 + ConfigMap"
 
 #: ../../source/mp/operator.rst:613
 msgid "vLLM config"
-msgstr ""
+msgstr "vLLM 配置"
 
 #: ../../source/mp/operator.rst:614
 msgid "Copy JSON into Deployment"
-msgstr ""
+msgstr "将 JSON 复制到部署中"
 
 #: ../../source/mp/operator.rst:615
 msgid "Mount ``<name>-connection`` ConfigMap"
-msgstr ""
+msgstr "挂载 ``<name>-connection`` ConfigMap"
 
 #: ../../source/mp/operator.rst:616
 msgid "Resource sizing"
-msgstr ""
+msgstr "资源大小调整"
 
 #: ../../source/mp/operator.rst:617
 msgid "Manual calculation"
-msgstr ""
+msgstr "手动计算"
 
 #: ../../source/mp/operator.rst:618
 msgid "Auto-computed from ``l1.sizeGB``"
-msgstr ""
+msgstr "从 ``l1.sizeGB`` 自动计算"
 
 #: ../../source/mp/operator.rst:620
 msgid "Manual ServiceMonitor"
-msgstr ""
+msgstr "手动 ServiceMonitor"
 
 #: ../../source/mp/operator.rst:621
 msgid "``serviceMonitor.enabled: true``"
-msgstr ""
+msgstr "``serviceMonitor.enabled: true``"
 
 #: ../../source/mp/operator.rst:622
 msgid "Validation"
-msgstr ""
+msgstr "验证"
 
 #: ../../source/mp/operator.rst:623
 msgid "Runtime errors only"
-msgstr ""
+msgstr "仅限运行时错误"
 
 #: ../../source/mp/operator.rst:624
 msgid "``kubectl apply`` rejects invalid specs"
-msgstr ""
+msgstr "``kubectl apply`` 拒绝无效的规格"
 
 #: ../../source/mp/operator.rst:625
 msgid "New GPU nodes"
-msgstr ""
+msgstr "新的 GPU 节点"
 
 #: ../../source/mp/operator.rst:626
 msgid "DaemonSet handles it"
-msgstr ""
+msgstr "DaemonSet 处理它"
 
 #: ../../source/mp/operator.rst:627
 msgid "DaemonSet handles it (same)"
-msgstr ""
+msgstr "DaemonSet 处理它（相同）"
 
 #: ../../source/mp/operator.rst:630
 msgid "Security Considerations"
-msgstr ""
+msgstr "安全考虑事项"
 
 #: ../../source/mp/operator.rst:632
 msgid ""
 "**hostIPC** exposes the host's IPC namespace (System V IPC, POSIX message"
 " queues) to the container.  Any process in the container can interact "
 "with IPC resources from other processes on the same host."
-msgstr ""
+msgstr "**hostIPC** 将主机的 IPC 命名空间（System V IPC，POSIX 消息队列）暴露给容器。容器中的任何进程都可以与同一主机上其他进程的 IPC 资源进行交互。"
 
 #: ../../source/mp/operator.rst:636
 msgid "Deploy only in trusted environments."
-msgstr ""
+msgstr "仅在受信任的环境中部署。"
 
 #: ../../source/mp/operator.rst:637
 msgid ""
 "Clusters using Pod Security Standards must allow the ``privileged`` "
 "profile for the LMCache namespace -- the ``baseline`` and ``restricted`` "
 "profiles reject ``hostIPC``."
-msgstr ""
+msgstr "使用 Pod 安全标准的集群必须允许 LMCache 命名空间的 ``privileged`` 配置文件 -- ``baseline`` 和 ``restricted`` 配置文件拒绝 ``hostIPC``。"
 
 #: ../../source/mp/operator.rst:642
 msgid "Development"
-msgstr ""
+msgstr "开发"
 
 #: ../../source/mp/operator.rst:654
 msgid "Pushing a custom operator image:"
-msgstr ""
+msgstr "推送自定义操作符镜像："
 
 #: ../../source/mp/operator.rst:665
 msgid "If your cluster needs pull credentials:"
-msgstr ""
+msgstr "如果您的集群需要拉取凭据："
 
