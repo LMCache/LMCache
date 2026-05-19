@@ -1,0 +1,203 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:3
+msgid "Nixl"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:8
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:10
+msgid ""
+"NIXL (NVIDIA Inference Xfer Library) is a high-performance library "
+"designed for accelerating point to point communications in AI inference "
+"frameworks. It provides an abstraction over various types of memory (CPU "
+"and GPU) and storage through a modular plug-in architecture, enabling "
+"efficient data transfer and coordination between different components of "
+"the inference pipeline."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:12
+msgid ""
+"LMCache supports using NIXL as a storage backend, allowing using NIXL to "
+"save either GPU or CPU memory into storage."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:15
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:17
+msgid "**LMCache**: Install with ``pip install lmcache``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:18
+msgid ""
+"**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
+"dynamo/nixl>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:19
+msgid ""
+"**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
+"Instruct"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:22
+msgid "Ways to configure LMCache NIXL Offloading"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:24
+msgid "**Configuration File**:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:26
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:28
+msgid "Example ``lmcache-config.yaml`` for POSIX backend:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:42
+msgid "Key settings:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:44
+msgid "``nixl_buffer_size``: buffer size for NIXL transfers."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:46
+msgid ""
+"``nixl_pool_size``: number of descriptors opened at init time for nixl "
+"backend. Set to 0 for dynamic mode."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:48
+msgid ""
+"``nixl_path``: directory under which the storage files will be saved "
+"(e.g. /mnt/nixl/). Needed for NIXL backends that store to file."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:50
+msgid ""
+"``nixl_buffer_device``: dictates where the memory managed by NIXL should "
+"be on. \"cpu\" or \"cuda\" is supported for \"GDS\", \"GDS_MT\", and "
+"\"OBJ\" backends - for \"POSIX\", \"HF3FS\" & \"AZURE_BLOB\", must be "
+"\"cpu\"."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:52
+msgid "``nixl_backend``: configuration of which nixl backend to use for storage."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:56
+msgid ""
+"Supported backends are: [\"GDS\", \"GDS_MT\", \"POSIX\", \"HF3FS\", "
+"\"OBJ\", \"AZURE_BLOB\"]."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:58
+msgid ""
+"Backend specific params should be provided via "
+"``extra_config.nixl_backend_params``. Please refer to NIXL documentation "
+"for specifics."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:60
+msgid "Example ``lmcache-config.yaml`` for OBJ backend using S3 API:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:78
+msgid "Example ``lmcache-config.yaml`` for POSIX backend using liburing:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:82
+msgid ""
+"using POSIX backend with liburing requires NIXL to be built with liburing"
+" support."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:98
+msgid ""
+"Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using "
+"Azure Blob Storage API:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:115
+msgid "Per-Worker Endpoint Distribution"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:117
+msgid ""
+"When using the OBJ backend with multiple tensor-parallel (TP) workers, "
+"you can distribute workers across multiple object-storage endpoints by "
+"providing a list of endpoints via ``nixl_endpoint_list``. Each worker "
+"selects an endpoint in round-robin order based on its ``local_worker_id``"
+" (the worker ID within its host)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:141
+msgid ""
+"When ``nixl_endpoint_list`` is set, any ``endpoint_override`` value in "
+"``nixl_backend_params`` is ignored (a warning is logged)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:145
+msgid "Dynamic Mode"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:147
+msgid ""
+"Nixl Storage Backend also supports a dynamic mode, which creates nixl "
+"storage descriptors on demand instead of at init time."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:149
+msgid ""
+"In order to use dynamic mode, extra_config.nixl_pool_size should be set "
+"to 0."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:152
+msgid "Restrictions"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:154
+msgid ""
+"Dynamic mode is currently only supported for nixl OBJ and AZURE_BLOB "
+"backends."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:155
+msgid "save_unfull_chunk must be set to False."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:157
+msgid "Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/nixl.rst:184
+msgid "Example ``lmcache-config.yaml`` for AZURE_BLOB backend with dynamic mode:"
+msgstr ""
+

@@ -1,0 +1,580 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/chunk_statistics.rst:4
+msgid "Chunk Statistics"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:6
+msgid ""
+"The chunk statistics feature provides insights into KV cache chunk reuse "
+"patterns, helping you understand cache efficiency and optimize your "
+"deployment."
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:9
+msgid "Overview"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:11
+msgid ""
+"Chunk statistics tracks and analyzes KV cache chunks to provide metrics "
+"on:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:13
+msgid ""
+"**Total chunks processed**: The total number of chunks that have been "
+"processed"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:14
+msgid "**Unique chunks**: The number of distinct chunks encountered"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:15
+msgid "**Duplicate chunks**: The number of repeated chunks"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:16
+msgid ""
+"**Reuse rate**: The ratio of duplicate chunks to total chunks, indicating"
+" cache efficiency"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:18
+msgid "This information is valuable for:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:20
+msgid "Understanding cache hit patterns"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:21
+msgid "Optimizing cache size and eviction policies"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:22
+msgid "Analyzing workload characteristics"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:23
+msgid "Capacity planning for production deployments"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:26
+msgid "Recording Strategies"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:28
+msgid ""
+"LMCache supports multiple recording strategies, each optimized for "
+"different use cases:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:31
+msgid "Memory Bloom Filter Strategy"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:33
+msgid ""
+"A memory-efficient strategy using Bloom filters for probabilistic "
+"duplicate detection."
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:35
+#: ../../source/production/observability/chunk_statistics.rst:64
+msgid "**Advantages:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:37
+msgid "Low memory footprint"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:38
+msgid "Fast lookup operations"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:39
+msgid "Suitable for large-scale deployments"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:41
+#: ../../source/production/observability/chunk_statistics.rst:70
+msgid "**Configuration:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:51
+#: ../../source/production/observability/chunk_statistics.rst:81
+msgid "**Environment Variables:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:60
+msgid "File Hash Strategy"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:62
+msgid ""
+"A file-based strategy that writes chunk hashes to disk for exact tracking"
+" and offline analysis."
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:66
+msgid "Exact duplicate detection (no false positives)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:67
+msgid "Persistent storage for offline analysis"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:68
+msgid "Automatic file rotation and cleanup"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:90
+msgid "Quick Start Guide"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:93
+msgid "Step 1: Enable Chunk Statistics"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:95
+msgid "Configure your LMCache instance with chunk statistics enabled:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:97
+msgid "**Using YAML Configuration:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:118
+msgid "**Using vLLM with LMCache:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:135
+msgid "Step 2: Access Statistics"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:137
+msgid "Retrieve statistics through the internal API server:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:144
+msgid "**Example Response:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:187
+msgid "Configuration Options"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:190
+msgid "Basic Configuration"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:192
+msgid "Basic Configuration Options"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:196
+#: ../../source/production/observability/chunk_statistics.rst:224
+#: ../../source/production/observability/chunk_statistics.rst:243
+msgid "Configuration Key"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:197
+#: ../../source/production/observability/chunk_statistics.rst:225
+#: ../../source/production/observability/chunk_statistics.rst:244
+msgid "Default Value"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:198
+#: ../../source/production/observability/chunk_statistics.rst:226
+#: ../../source/production/observability/chunk_statistics.rst:245
+msgid "Description"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:199
+msgid "``enable_chunk_statistics``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:200
+#: ../../source/production/observability/chunk_statistics.rst:206
+msgid "``false``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:201
+msgid "Enable chunk statistics tracking"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:202
+msgid "``chunk_statistics_strategy``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:203
+msgid "``memory_bloom_filter``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:204
+msgid "Recording strategy: ``memory_bloom_filter`` or ``file_hash``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:205
+msgid "``chunk_statistics_auto_start_statistics``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:207
+msgid "Automatically start statistics collection on initialization"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:208
+msgid "``chunk_statistics_auto_exit_timeout_hours``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:209
+msgid "``0.0``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:210
+msgid "Auto-stop after specified hours (0 = disabled)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:211
+msgid "``chunk_statistics_auto_exit_target_unique_chunks``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:212
+msgid "``0``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:213
+msgid "Auto-stop after reaching target unique chunks (0 = disabled)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:216
+msgid "Memory Bloom Filter Options"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:218
+#: ../../source/production/observability/chunk_statistics.rst:237
+msgid "Configure these options in the ``extra_config`` section:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:220
+msgid "Bloom Filter Configuration"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:227
+msgid "``chunk_statistics_mem_bf_expected_chunks``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:228
+msgid "``20000000``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:229
+msgid "Expected number of chunks for capacity planning"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:230
+msgid "``chunk_statistics_mem_bf_false_positive_rate``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:231
+msgid "``0.01``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:232
+msgid "Target false positive rate (1%)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:235
+msgid "File Hash Options"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:239
+msgid "File Hash Configuration"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:246
+msgid "``chunk_statistics_file_output_dir``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:247
+msgid "``/tmp/lmcache_chunk_statistics``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:248
+msgid "Directory for storing chunk hash files"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:249
+msgid "``chunk_statistics_file_rotation_size``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:250
+msgid "``104857600``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:251
+msgid "File size threshold for rotation (bytes, default 100MB)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:252
+msgid "``chunk_statistics_file_max_count``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:253
+msgid "``100``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:254
+msgid "Maximum number of files to keep"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:257
+msgid "Advanced Usage"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:260
+msgid "Programmatic Control"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:262
+msgid "Control statistics collection programmatically through the internal API:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:282
+msgid "Auto-Stop Configuration"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:284
+msgid "Configure automatic stopping based on time or chunk count:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:291
+msgid "Prometheus Metrics"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:293
+msgid ""
+"When using the internal API server, chunk statistics are exposed as "
+"Prometheus metrics:"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:295
+msgid ""
+"``lmcache_chunk_statistics_total_chunks``: Total number of chunks "
+"processed"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:296
+msgid "``lmcache_chunk_statistics_unique_chunks``: Number of unique chunks"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:297
+msgid "``lmcache_chunk_statistics_reuse_rate``: Cache reuse rate (0.0 to 1.0)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:298
+msgid ""
+"``lmcache_chunk_statistics_bloom_filter_size_mb``: Bloom filter memory "
+"usage (MB)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:299
+msgid ""
+"``lmcache_chunk_statistics_bloom_filter_fill_rate``: Bloom filter fill "
+"rate (0.0 to 1.0)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:300
+msgid "``lmcache_chunk_statistics_file_count``: Number of hash files created"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:301
+msgid "``lmcache_chunk_statistics_current_file_size``: Current file size (bytes)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:304
+msgid "Offline Analysis"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:306
+msgid ""
+"For the file hash strategy, you can perform detailed offline analysis of "
+"collected chunk hash data."
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:309
+msgid "Using the Analysis Script"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:311
+msgid ""
+"LMCache provides a comprehensive analysis script at "
+"``examples/chunk_statistics/analyze_chunk_hashes.py`` that supports "
+"multiple analysis modes."
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:314
+msgid "Best Practices"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:316
+msgid "**Choose the Right Strategy:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:318
+msgid "Use **memory_bloom_filter** for real-time monitoring with minimal overhead"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:319
+msgid "Use **file_hash** when exact tracking is required or for offline analysis"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:321
+msgid "**Tune Bloom Filter Parameters:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:323
+msgid "Set ``expected_chunks`` based on your workload size"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:324
+msgid "Lower ``false_positive_rate`` increases memory usage but improves accuracy"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:326
+msgid "**Monitor Memory Usage:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:328
+msgid ""
+"Track ``bloom_filter_size_mb`` metric to ensure it fits in available "
+"memory"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:329
+msgid "Adjust ``expected_chunks`` if memory usage is too high"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:331
+msgid "**File Rotation:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:333
+msgid ""
+"Configure appropriate ``file_rotation_size`` to balance file size and "
+"count"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:334
+msgid "Set ``file_max_count`` to prevent unlimited disk usage"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:336
+msgid "**Production Deployment:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:338
+msgid "Enable auto-stop to prevent indefinite data collection"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:339
+msgid "Use internal API server for centralized metrics collection"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:340
+msgid "Integrate with your monitoring stack (Prometheus, Grafana, etc.)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:343
+msgid "Troubleshooting"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:346
+msgid "Statistics Not Updating"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:348
+msgid "**Issue:** Statistics remain at zero or don't update."
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:350
+#: ../../source/production/observability/chunk_statistics.rst:361
+#: ../../source/production/observability/chunk_statistics.rst:372
+msgid "**Solutions:**"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:352
+msgid "Verify ``enable_chunk_statistics`` is set to ``true``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:353
+msgid "Check that statistics collection is started (auto-start or manual start)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:354
+msgid "Ensure requests are being processed by the LMCache instance"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:357
+msgid "High Memory Usage"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:359
+msgid "**Issue:** Bloom filter consuming too much memory."
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:363
+msgid "Reduce ``chunk_statistics_mem_bf_expected_chunks``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:364
+msgid ""
+"Increase ``chunk_statistics_mem_bf_false_positive_rate`` (trade accuracy "
+"for memory)"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:365
+msgid "Consider switching to ``file_hash`` strategy"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:368
+msgid "File System Full"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:370
+msgid "**Issue:** Disk space exhausted with file hash strategy."
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:374
+msgid "Reduce ``chunk_statistics_file_max_count``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:375
+msgid "Decrease ``chunk_statistics_file_rotation_size``"
+msgstr ""
+
+#: ../../source/production/observability/chunk_statistics.rst:376
+msgid "Implement external log rotation or archival"
+msgstr ""
+

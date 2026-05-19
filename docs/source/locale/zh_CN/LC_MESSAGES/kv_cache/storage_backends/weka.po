@@ -1,0 +1,132 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/weka.rst:2
+msgid "Weka"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:9
+msgid ""
+"WekaFS is a high-performance, distributed filesystem and is a supported "
+"option for KV Cache offloading in LMCache. Even though the local "
+"filesystem backend can work with a WekaFS mount, this particular backend "
+"is optimized for Weka's characteristics. It leverages GPUDirect Storage "
+"for I/O and it allows data-sharing between multiple LMCache instances."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:15
+msgid "Ways to configure LMCache WEKA Offloading"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:17
+msgid "**1. Environment Variables:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:33
+msgid "**2. Configuration File**:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:35
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:37
+msgid "Example ``config.yaml``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:54
+msgid "GDS Buffer Size Explanation"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:56
+msgid ""
+"The backend currently pre-registers buffer space to speed up GDS "
+"operations. This buffer space is registered in VRAM so options like "
+"``--gpu-memory-utilization`` from ``vllm`` should be considered when "
+"setting it. For example, a good rule of thumb for H100 which generally "
+"has 80GiBs of VRAM would be to start with 8GiB and set ``--gpu-memory-"
+"utilization 0.85`` and depending on your workflow fine-tune it from "
+"there."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:64
+msgid "Setup Example"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:68
+msgid "**Prerequisites:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:70
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vllm instance depending on your GPU memory."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:72
+msgid "Weka already installed and mounted."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:74
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:76
+msgid "Hugging Face access to ``meta-llama/Llama-3.1-8B-Instruct``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:82
+msgid "**Step 1. Create cache directory under your Weka mount:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:84
+msgid "To find all your WekaFS mounts run:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:90
+msgid "For the sake of this example let's say that the above returns:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:96
+msgid "Then create a directory under it (the name here is arbitrary):"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:102
+msgid "**Step 2. Start a vLLM server with Weka offloading enabled:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:104
+msgid "Create a an lmcache configuration file called: ``weka-offload.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/weka.rst:115
+msgid ""
+"If you don't want to use a config file, uncomment the first three "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr ""
+

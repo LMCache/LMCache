@@ -1,0 +1,254 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/deployment.rst:2
+msgid "Deployment Guide"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:4
+msgid ""
+"This page covers deploying LMCache multiprocess mode in Docker and "
+"Kubernetes environments, along with production best practices."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:12
+msgid "Docker"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:14
+msgid "**LMCache container:**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:25
+msgid "**vLLM container:**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:37
+msgid "Required Docker flags:"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:39
+msgid ""
+"``--network host`` -- Allows the vLLM container to reach LMCache on "
+"localhost."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:40
+msgid ""
+"``--ipc host`` -- Required for CUDA IPC shared memory transfers between "
+"containers."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:42
+msgid ""
+"``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container "
+"runtime."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:45
+msgid "**HTTP server variant:**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:47
+msgid ""
+"For health-check and cache management API support (useful with container "
+"orchestrators), use the HTTP server entry point:"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:60
+msgid "Kubernetes"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:62
+msgid ""
+"LMCache is designed for a **DaemonSet + Deployment** pattern: one LMCache"
+" server per node (DaemonSet) shared by multiple vLLM pods (Deployment)."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:65
+msgid "Example YAML files are provided in ``examples/multi_process/``."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:68
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:70
+msgid "Kubernetes cluster with GPU support (NVIDIA GPU Operator installed)"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:71
+msgid "At least 4 GPUs per node"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:72
+msgid "``kubectl`` configured to access your cluster"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:75
+msgid "Step-by-Step"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:77
+msgid "**Step 1: Create namespace**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:83
+msgid "**Step 2: Deploy LMCache DaemonSet**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:89
+msgid "**Step 3: Deploy vLLM**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:96
+msgid ""
+"The default model is ``Qwen/Qwen3-14B``.  For gated models (e.g., Llama),"
+" create a Secret with your Hugging Face token:"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:105
+msgid "Then add the ``HF_TOKEN`` environment variable to the vLLM container spec."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:107
+msgid "**Step 4: Monitor deployment**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:126
+msgid "**Step 5: Send test requests**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:141
+msgid "Architecture Notes"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:143
+msgid ""
+"**DaemonSet uses ``hostNetwork: true``** so vLLM pods discover the "
+"LMCache server via ``status.hostIP``."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:145
+msgid ""
+"**Both containers mount ``/dev/shm``** from the host to enable CUDA IPC "
+"memory sharing."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:147
+msgid ""
+"**GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain"
+" exclusively allocated to vLLM pods.  The NVIDIA container runtime "
+"automatically provides GPU access for IPC-based memory transfers."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:150
+msgid ""
+"**Multiple vLLM pods** on the same node automatically connect to the same"
+" LMCache DaemonSet instance."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:154
+msgid ""
+"LMCache pods on nodes without GPUs will crash with CUDA initialization "
+"errors.  This is expected -- LMCache only needs to run on GPU nodes where"
+" vLLM pods are scheduled."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:159
+msgid "Health Checking (HTTP Server)"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:161
+msgid ""
+"For Kubernetes liveness/readiness probes, deploy the HTTP server variant "
+"instead.  Use the ``/healthcheck`` endpoint:"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:180
+msgid "Monitoring Integration"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:182
+msgid ""
+"Prometheus metrics are enabled by default on port 9090.  Add a "
+"``ServiceMonitor`` or Prometheus scrape annotation to collect metrics "
+"from the LMCache DaemonSet pods.  See :doc:`observability` for metric "
+"details."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:187
+msgid "Cleanup"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:196
+msgid "Production Best Practices"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:198
+msgid ""
+"**Worker count (``--max-workers``, ``--max-gpu-workers``, ``--max-cpu-"
+"workers``):** ``--max-workers`` sets both the GPU affinity pool and CPU "
+"normal pool sizes (default 1).  Use ``--max-gpu-workers`` to override the"
+" GPU pool independently --- set it to at least the number of vLLM "
+"instances sharing the cache server so each instance gets its own "
+"dedicated thread.  Use ``--max-cpu-workers`` to override the CPU pool for"
+" lookup and other non-GPU operations."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:205
+msgid ""
+"**L1 memory sizing (``--l1-size-gb``):** Allocate as much CPU memory as "
+"available after accounting for the OS and vLLM. A larger L1 cache means "
+"fewer L2 round-trips."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:209
+msgid "**Eviction tuning:**"
+msgstr ""
+
+#: ../../source/mp/deployment.rst:211
+#, python-format
+msgid ""
+"``--eviction-trigger-watermark 0.8`` (default) triggers eviction when L1 "
+"is 80% full."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:213
+#, python-format
+msgid ""
+"``--eviction-ratio 0.2`` (default) frees 20% of allocated memory per "
+"eviction cycle."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:215
+msgid ""
+"Lower the watermark or increase the ratio if you observe frequent "
+"evictions under steady load."
+msgstr ""
+
+#: ../../source/mp/deployment.rst:218
+msgid ""
+"**Logging:** Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to "
+"verify L2 store/load activity.  Switch to ``INFO`` (default) for "
+"production to reduce log volume."
+msgstr ""
+
