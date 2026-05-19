@@ -6,9 +6,6 @@ Covers add / contains semantics, batch insertion, clear, and the
 statistics helpers across both string and integer item types.
 """
 
-# Standard
-import math
-
 # Third Party
 import pytest
 
@@ -17,7 +14,7 @@ from lmcache.v1.utils.bloom_filter import BloomFilter
 
 
 class TestSizing:
-    def test_default_construction(self):
+    def test_default_construction(self) -> None:
         bf = BloomFilter()
         assert bf.expected_elements == 1_000_000
         assert bf.false_positive_rate == 0.01
@@ -25,23 +22,42 @@ class TestSizing:
         assert bf.hash_count >= 1
         assert bf.item_count == 0
 
-    def test_smaller_target_rate_yields_larger_bit_array(self):
+    def test_smaller_target_rate_yields_larger_bit_array(self) -> None:
         loose = BloomFilter(expected_elements=1000, false_positive_rate=0.1)
         tight = BloomFilter(expected_elements=1000, false_positive_rate=0.001)
         assert tight.size > loose.size
         assert tight.hash_count >= loose.hash_count
 
-    def test_optimal_sizing_matches_formula(self):
-        n, p = 5000, 0.01
-        bf = BloomFilter(expected_elements=n, false_positive_rate=p)
-        expected_size = int(-(n * math.log(p)) / (math.log(2) ** 2))
-        expected_hashes = max(1, int((expected_size / n) * math.log(2)))
+    @pytest.mark.parametrize(
+        "expected_elements,false_positive_rate,expected_size,expected_hash_count",
+        [
+            # Hard-coded golden values from the standard Bloom-filter formulas
+            # m = -n * ln(p) / (ln 2)^2 and k = (m / n) * ln 2, with the
+            # implementation's int()/max(1, ...) rounding applied. Hard-coding
+            # avoids the tautology of reproducing the production formula in
+            # the test body — these values are independently re-derivable.
+            (5000, 0.01, 47925, 6),
+            (1000, 0.01, 9585, 6),
+            (10000, 0.001, 143775, 9),
+        ],
+    )
+    def test_optimal_sizing_matches_golden_values(
+        self,
+        expected_elements: int,
+        false_positive_rate: float,
+        expected_size: int,
+        expected_hash_count: int,
+    ) -> None:
+        bf = BloomFilter(
+            expected_elements=expected_elements,
+            false_positive_rate=false_positive_rate,
+        )
         assert bf.size == expected_size
-        assert bf.hash_count == expected_hashes
+        assert bf.hash_count == expected_hash_count
 
 
 class TestContainsString:
-    def test_no_false_negatives(self):
+    def test_no_false_negatives(self) -> None:
         bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
         items = [f"key-{i}" for i in range(500)]
         for item in items:
@@ -50,16 +66,16 @@ class TestContainsString:
             assert bf.contains(item)
         assert bf.item_count == 500
 
-    def test_empty_filter_contains_nothing(self):
+    def test_empty_filter_contains_nothing(self) -> None:
         bf = BloomFilter(expected_elements=100, false_positive_rate=0.01)
         assert not bf.contains("anything")
         assert not bf.contains("")
 
-    def test_false_positive_rate_within_reasonable_bound(self):
+    def test_false_positive_rate_within_reasonable_bound(self) -> None:
         # Honour the design budget loosely: with 1000 inserted and 10000
         # never-inserted items, observed false-positive rate should stay
-        # below 5x the target (small-sample variance means we can't enforce
-        # the theoretical 1%).
+        # below 5x the target. Inputs are fixed strings hashed with SHA-256,
+        # so this test is fully deterministic (no RNG, no flakes).
         bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
         for i in range(1000):
             bf.add(f"in-{i}")
@@ -69,7 +85,7 @@ class TestContainsString:
 
 
 class TestContainsInt:
-    def test_int_items_round_trip(self):
+    def test_int_items_round_trip(self) -> None:
         bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
         for n in (0, 1, 2, 255, 65536, 10**18):
             bf.add(n)
@@ -77,14 +93,23 @@ class TestContainsInt:
         # item_count counts add() calls regardless of duplicates
         assert bf.item_count == 6
 
-    def test_int_and_str_use_disjoint_hash_spaces(self):
+    def test_int_zero_round_trips(self) -> None:
+        # n=0 exercises the (0).to_bytes(0, ...) edge case in _hashes;
+        # call out separately so a regression here is unambiguous.
         bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
-        bf.add(42)
-        # The string "42" should NOT be reported as present just because the
-        # int 42 was added — they use different hash inputs.
-        # (This is a probabilistic check, but with a sizeable filter the
-        # collision odds are well below 1%.)
-        assert not bf.contains("42")
+        bf.add(0)
+        assert bf.contains(0)
+
+    @pytest.mark.parametrize("value", [0, 1, 42, 123456789])
+    def test_int_and_str_use_disjoint_hash_inputs(self, value: int) -> None:
+        # The contract is structural, not probabilistic: ints are hashed via
+        # int.to_bytes(...) while strings are hashed via f"{item}_{i}".encode().
+        # The byte streams are disjoint by construction, so contains(str(value))
+        # is deterministically False after only add(value) — no RNG involved.
+        bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
+        bf.add(value)
+        assert bf.contains(value)
+        assert not bf.contains(str(value))
 
 
 class TestBatchInsert:
@@ -94,7 +119,7 @@ class TestBatchInsert:
     without relying on the BloomFilter's internal hashing details.
     """
 
-    def test_batch_returns_unique_count_for_distinct_positions(self):
+    def test_batch_returns_unique_count_for_distinct_positions(self) -> None:
         bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
         # Three position sets, each touching disjoint bits → all three are new.
         added = bf.add_batch_with_hashes_and_check(
@@ -103,7 +128,7 @@ class TestBatchInsert:
         assert added == 3
         assert bf.item_count == 3
 
-    def test_batch_dedups_when_all_bits_already_set(self):
+    def test_batch_dedups_when_all_bits_already_set(self) -> None:
         bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
         first = bf.add_batch_with_hashes_and_check([[5, 6, 7]])
         # Same positions again — every bit is already set, so it counts as 0.
@@ -112,7 +137,7 @@ class TestBatchInsert:
         assert second == 0
         assert bf.item_count == 1
 
-    def test_batch_treats_partial_overlap_as_new(self):
+    def test_batch_treats_partial_overlap_as_new(self) -> None:
         bf = BloomFilter(expected_elements=1000, false_positive_rate=0.01)
         bf.add_batch_with_hashes_and_check([[0, 1]])
         # Position 2 is unset → the whole positions list is treated as new.
@@ -122,7 +147,7 @@ class TestBatchInsert:
 
 
 class TestClearAndStats:
-    def test_clear_resets_state(self):
+    def test_clear_resets_state(self) -> None:
         bf = BloomFilter(expected_elements=100, false_positive_rate=0.01)
         for i in range(50):
             bf.add(f"k{i}")
@@ -134,11 +159,11 @@ class TestClearAndStats:
         for i in range(50):
             assert not bf.contains(f"k{i}")
 
-    def test_memory_usage_matches_size(self):
+    def test_memory_usage_matches_size(self) -> None:
         bf = BloomFilter(expected_elements=10000, false_positive_rate=0.01)
         assert bf.get_memory_usage_bytes() == bf.size // 8
 
-    def test_statistics_shape_and_values(self):
+    def test_statistics_shape_and_values(self) -> None:
         bf = BloomFilter(expected_elements=500, false_positive_rate=0.01)
         for i in range(10):
             bf.add(f"k{i}")
