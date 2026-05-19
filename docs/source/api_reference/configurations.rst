@@ -353,7 +353,7 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
    * - nixl_pool_size
      - Number of files or objects in the storage pool
    * - nixl_endpoint_list
-     - List of object-storage endpoint URLs for per-worker distribution. Overrides ``nixl_backend_params.endpoint_override`` when set.
+     - List of object-storage endpoint URLs for per-worker distribution. Each TP worker selects an entry round-robin by ``local_worker_id``, overriding ``nixl_backend_params.endpoint_override``. Only applied when ``nixl_backend`` is ``"OBJ"`` (silently ignored otherwise). Each entry must start with ``http://`` or ``https://``; an empty list raises ``ValueError`` at engine init.
 
 
 Additional Storage Configurations
