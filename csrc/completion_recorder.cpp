@@ -39,8 +39,12 @@ void record_completion_on_stream(int64_t cuda_stream_ptr,
   auto* completion = new PendingCompletion{kind, std::move(payload)};
   auto stream = reinterpret_cast<lmcache_completion_stream_t>(
       static_cast<uintptr_t>(cuda_stream_ptr));
-  LMCACHE_COMPLETION_LAUNCH_HOST_FUNC(stream, completion_host_callback,
-                                      completion);
+  auto err = LMCACHE_COMPLETION_LAUNCH_HOST_FUNC(
+      stream, completion_host_callback, completion);
+  // On failure the callback will never run, so we own the allocation.
+  if (err != 0) {
+    delete completion;
+  }
 }
 
 CompletionDrainResult drain_recorded_completions() {

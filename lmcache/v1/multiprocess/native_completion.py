@@ -20,7 +20,6 @@ from __future__ import annotations
 from typing import Any, Callable, Iterable
 import pickle
 import threading
-import time
 
 # First Party
 from lmcache.logging import init_logger
@@ -85,6 +84,7 @@ class CompletionDispatcher:
             self._drain_once()
 
     def dispatched_count(self) -> int:
+        # Only mutated by the single drain thread; reads are GIL-atomic.
         return self._dispatched_count
 
     def handler_exception_counts(self) -> dict[str, int]:
@@ -158,7 +158,3 @@ def record_on_stream(
             "record_on_stream: native recorder unavailable and no fallback_handler"
         )
     stream.launch_host_func(fallback_handler, payload_list)
-
-
-def now_seconds() -> float:
-    return time.time()
