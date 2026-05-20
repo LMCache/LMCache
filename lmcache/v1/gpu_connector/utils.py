@@ -20,6 +20,7 @@ from typing import (
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
@@ -526,7 +527,14 @@ def normalize_kv_and_discover_format(
             detected_format = lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS
     elif serving_engine == EngineType.VLLM:
         kv_layout = layout_hints.get("kv_layout")
-        if kv_layout is None:
+        # NOTE: vLLM's CPU attention backend stores KV cache in HND layout.
+        # however, get_kv_cache_layout from vllm.v1.attention.backends.utils
+        # does not return the right layout for CPU attention.
+        # Right fix should come from vllm side, but hardcode here as safeguard.
+        if torch_device_type == "cpu":
+            kv_layout = "HND"
+            logger.info("CPU backend detected, using HND KV cache layout")
+        elif kv_layout is None:
             logger.warning(
                 "No KV Cache Layout hint provided when using vLLM, defaulting to NHD"
             )

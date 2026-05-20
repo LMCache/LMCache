@@ -1,0 +1,381 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/quickstart.rst:4
+msgid "Quickstart"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:6
+msgid ""
+"This guide helps you get LMCache running end-to-end in a couple of "
+"minutes. Use the tabs below to switch the engine. Steps are the same; "
+"only the libraries and launch commands change."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst
+msgid "vLLM"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:13
+msgid "**Install LMCache**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:21
+msgid "LMCache supports two deployment modes with vLLM:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:23
+msgid ""
+"**Multiprocess (MP) mode** -- **recommended.** LMCache runs as a "
+"standalone service and vLLM attaches via ``LMCacheMPConnector``. Scales "
+"better, exposes management/observability endpoints, and supports sharing "
+"one cache across multiple engine instances."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:27
+msgid ""
+"**In-process mode** -- LMCache runs inside the vLLM process via "
+"``LMCacheConnectorV1``. Single command, convenient for quick single-node "
+"experiments."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst
+msgid "MP mode (recommended)"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:37
+#: ../../source/getting_started/quickstart.rst:390
+msgid "Start the LMCache server:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:47
+msgid ""
+"The ZMQ port (default **5555**) accepts connections from vLLM; the HTTP "
+"frontend (default **8080**) serves the management and metrics endpoints. "
+"See :doc:`../mp/quickstart` and :doc:`../mp/configuration` for the full "
+"list of ``lmcache server`` and connector options."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:53
+msgid "Start vLLM with the MP connector in a separate terminal:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:62
+msgid ""
+"**Where does** ``LMCacheMPConnector`` **resolve to?** This depends on "
+"your vLLM version:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:64
+msgid ""
+"**vLLM < 0.20.0** -- ``\"kv_connector\":\"LMCacheMPConnector\"`` always "
+"resolves to vLLM's built-in "
+"``vllm.distributed.kv_transfer.kv_connector.v1.LMCacheMPConnector``; "
+"there is no way to redirect it to the LMCache-shipped implementation."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:69
+msgid ""
+"**vLLM >= 0.20.0** -- ``\"kv_connector\":\"LMCacheMPConnector\"`` still "
+"defaults to vLLM's built-in connector, but you can opt in to the LMCache-"
+"shipped implementation "
+"(:mod:`lmcache.integration.vllm.lmcache_mp_connector`) by adding "
+"``kv_connector_module_path``:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:81
+msgid ""
+"The LMCache-shipped connector tracks the latest LMCache server protocol "
+"and ships fixes/features ahead of the version vendored into vLLM, so "
+"prefer it whenever you are on vLLM 0.20.0 or newer."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:85
+#: ../../source/getting_started/quickstart.rst:171
+#: ../../source/getting_started/quickstart.rst:256
+msgid ""
+"**Test** -- open a new terminal and send two requests whose prompts share"
+" a prefix:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:88
+#: ../../source/getting_started/quickstart.rst:174
+#: ../../source/getting_started/quickstart.rst:259
+msgid "**First request**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:101
+#: ../../source/getting_started/quickstart.rst:187
+#: ../../source/getting_started/quickstart.rst:272
+msgid "**Second request**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:114
+msgid ""
+"**You should see LMCache logs like this** -- in MP mode the "
+"store/retrieve logs come from the standalone ``lmcache server`` process, "
+"one entry per chunk."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:118
+msgid "**First request** -- cache is empty, so every aligned chunk is offloaded:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:128
+msgid ""
+"**Second request** -- the shared prefix is retrieved from CPU RAM; only "
+"the new tail is stored:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:138
+msgid ""
+"For request-level statistics (hit ratio, bytes transferred) see "
+":doc:`../mp/observability`."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst
+msgid "In-process mode"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:144
+msgid "Start vLLM with LMCache embedded in the engine process:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:155
+msgid ""
+"To customize further, create a config file. See "
+":doc:`../api_reference/configurations` for all options."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:158
+msgid "**Alternative simpler command:**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:167
+msgid ""
+"The ``--disable-hybrid-kv-cache-manager`` flag is mandatory. All "
+"configuration options from the :doc:`../api_reference/configurations` "
+"page still apply."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:200
+msgid ""
+"**You should see LMCache logs like this** -- in-process mode emits the "
+"logs inline with the vLLM engine core."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:203
+msgid "**First request** -- prompt is offloaded to LMCache:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:209
+msgid "**Second request** -- hits the cache and stores the new tail:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:218
+msgid "**Total tokens 32**: The new prompt has 32 tokens after tokenization."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:219
+msgid ""
+"**LMCache hit tokens: 24**: 24 tokens (full 8-token chunks) were found in"
+" the cache from the first request that stored 31 tokens."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:220
+msgid ""
+"**Need to load: 8**: vLLM auto prefix caching uses block size 16; 16 "
+"tokens already sit in GPU RAM, so LMCache only loads 24-16=8."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:221
+msgid ""
+"**Why 24 hit tokens instead of 31?** LMCache hashes every 8 tokens (8, "
+"16, 24, 31). It matches page-aligned chunks, so it uses the 24-token "
+"hash."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:222
+msgid ""
+"**Stored another 8 tokens**: The new 8 tokens form a full chunk and are "
+"stored for future reuse."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst
+msgid "SGLang"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:226
+msgid "**Install SGLang**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:234
+msgid "**Start SGLang with LMCache**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:254
+msgid ""
+"Configure LMCache via the config file. See "
+":doc:`../api_reference/configurations` for the full list."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:285
+msgid "**You should see LMCache logs like this:**"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:287
+msgid "**First request** -- prompt plus generated tokens are stored:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:296
+msgid ""
+"**Second request** -- Radix Cache and LMCache share the prefix; only the "
+"new portion is stored:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:306
+msgid ""
+"**Total tokens 140**: SGLang stores KV cache for both prefill and decode "
+"tokens together, so total = 40 prompt + 100 generated = 140 tokens."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:307
+msgid ""
+"**Cached tokens: 30**: SGLang's Radix Attention Cache reused 30 tokens "
+"from the first request."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:308
+msgid ""
+"**LMCache hit tokens: 24**: LMCache detected 24 tokens (3 full 8-token "
+"chunks) stored from the first request. Since Radix Cache already provides"
+" 30 tokens in GPU memory, these 24 tokens don't need to be loaded from "
+"LMCache or stored again."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:309
+msgid ""
+"**New tokens: 10**: Only 10 prompt tokens need prefill computation (40 "
+"prompt - 30 cached = 10)."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:310
+msgid ""
+"**Stored 112 out of 140**: 24 tokens (3 full chunks) are already in "
+"LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token "
+"chunks) are stored."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst
+msgid "TensorRT-LLM"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:315
+msgid ""
+"This integration depends on the connector preset registry from `NVIDIA"
+"/TensorRT-LLM PR #12626 <https://github.com/NVIDIA/TensorRT-"
+"LLM/pull/12626>`_ and the matching LMCache adapter, neither of which has "
+"shipped in a stable release yet. Until they do, install both from source:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:332
+msgid "Once both ship in a stable release, the install command will be:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:339
+msgid ""
+"LMCache integrates with TensorRT-LLM via TRT-LLM's **KV Cache Connector**"
+" API and supports two deployment modes:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:342
+msgid ""
+"**In-process mode** (``connector: lmcache``) -- LMCache runs as a "
+"singleton inside the TRT-LLM process. Simplest setup; no extra service to"
+" manage."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:345
+msgid ""
+"**MP mode** (``connector: lmcache-mp``) -- LMCache runs as a standalone "
+"server. Multiple TRT-LLM workers on the same node can share the cache, "
+"and the cache survives a TRT-LLM crash."
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:355
+msgid "Configure LMCache via env vars:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:364
+msgid "Build the TRT-LLM ``LLM`` with ``connector: lmcache``:"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst
+msgid "MP mode"
+msgstr ""
+
+#: ../../source/getting_started/quickstart.rst:386
+msgid ""
+"``PYTHONHASHSEED=0`` must be set in **both** terminals -- chunk hashing "
+"depends on a stable ``hash()``, and the server and client must agree on "
+"the seed."
+msgstr "``PYTHONHASHSEED=0`` 必须在 **两个** 终端中设置 -- 块哈希依赖于稳定的 ``hash()``, 服务器和客户端必须就种子达成一致。"
+
+#: ../../source/getting_started/quickstart.rst:398
+msgid "In a separate terminal, point TRT-LLM at the server via ``server_url``:"
+msgstr "在另一个终端中，通过 ``server_url`` 将 TRT-LLM 指向服务器："
+
+#: ../../source/getting_started/quickstart.rst:406
+msgid "where ``run_trtllm.py`` contains:"
+msgstr "其中 ``run_trtllm.py`` 包含："
+
+#: ../../source/getting_started/quickstart.rst:429
+msgid ""
+"The TRT-LLM adapter reads :class:`LMCacheEngineConfig` the same way the "
+"vLLM adapter does: ``LMCACHE_CONFIG_FILE`` for a YAML file, otherwise "
+"individual ``LMCACHE_*`` environment variables. See "
+":doc:`../api_reference/configurations` for all options."
+msgstr "TRT-LLM 适配器以与 vLLM 适配器相同的方式读取 :class:`LMCacheEngineConfig`：对于 YAML 文件使用 ``LMCACHE_CONFIG_FILE``，否则使用单独的 ``LMCACHE_*`` 环境变量。有关所有选项，请参见 :doc:`../api_reference/configurations`。"
+
+#: ../../source/getting_started/quickstart.rst:435
+msgid ""
+"🎉 **You now have LMCache caching and reusing KV caches across all three "
+"engines.**"
+msgstr "🎉 **您现在可以在所有三个引擎中使用 LMCache 缓存和重用 KV 缓存。**"
+
+#: ../../source/getting_started/quickstart.rst:438
+msgid "Next Steps"
+msgstr "下一步"
+
+#: ../../source/getting_started/quickstart.rst:440
+msgid ""
+"**Performance Testing**: Try the :doc:`benchmarking` section to "
+"experience LMCache's performance benefits with more comprehensive "
+"examples"
+msgstr "**性能测试**：尝试 :doc:`benchmarking` 部分，以体验 LMCache 的性能优势和更全面的示例。"
+
+#: ../../source/getting_started/quickstart.rst:441
+msgid ""
+"**More Examples**: Explore the :doc:`quickstart/index` section for "
+"detailed examples including KV cache sharing across instances and "
+"disaggregated prefill"
+msgstr "**更多示例**：查看 :doc:`quickstart/index` 部分以获取详细示例，包括跨实例的 KV Cache 共享和分离式 Prefill。"
+

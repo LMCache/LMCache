@@ -1,0 +1,159 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:4
+msgid "Dynamic Backend Management"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:6
+msgid ""
+"LMCache provides a set of internal API endpoints that allow you to "
+"**list**, **close**, and **create** storage backends at runtime without "
+"restarting the serving engine.  This is useful when you need to switch "
+"between different storage configurations on the fly — for example, "
+"migrating from a ``LocalDiskBackend`` to a ``GdsBackend``, or changing "
+"the remote connector from a filesystem connector to Redis."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:14
+msgid "Overview"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:16
+msgid "The workflow for dynamically switching a storage backend is:"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:18
+msgid "**Close** the backend you want to replace."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:19
+msgid "**Update** the relevant configuration via the ``POST /conf`` API."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:20
+msgid ""
+"**Create** new backends — only backends that are not already present will"
+" be created."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:23
+msgid ""
+"Any backend that was **not** closed will be skipped during creation, so "
+"the operation is safe and idempotent."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:27
+msgid "API Endpoints"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:30
+msgid "``GET /backends``"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:32
+msgid "List all active storage backends."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:38
+#: ../../source/internal_api_server/dynamic_backend_management.rst:58
+#: ../../source/internal_api_server/dynamic_backend_management.rst:80
+msgid "Response:"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:48
+#, python-brace-format
+msgid "``DELETE /backends/{backend_name}``"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:50
+msgid ""
+"Close and remove a specific storage backend.  After this call the backend"
+" is fully shut down and removed from the internal dictionary, ensuring no"
+" stale references remain."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:71
+msgid "``POST /backends``"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:73
+msgid ""
+"Create new storage backends based on the current ``LMCacheEngineConfig``."
+" Existing backends are skipped."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:96
+msgid "Use-Case Examples"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:99
+msgid "Switching from ``LocalDiskBackend`` to ``GdsBackend``"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:101
+msgid ""
+"If you originally configured a local-disk backend and want to migrate to "
+"NVIDIA GPUDirect Storage (GDS) at runtime:"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:124
+msgid "Switching ``RemoteBackend`` connector (FS → Redis)"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:126
+msgid "To change the remote connector type without restarting:"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:147
+msgid "Replacing only one backend while keeping others"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:149
+msgid ""
+"If only the ``RemoteBackend`` needs to be updated but the "
+"``LocalCPUBackend`` should stay untouched:"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:166
+msgid "Notes"
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:168
+msgid ""
+"Closing the ``LocalCPUBackend`` is possible but should be done with "
+"caution since many other backends rely on it as an intermediate buffer."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:170
+msgid ""
+"The ``POST /backends`` endpoint calls the same ``CreateStorageBackends`` "
+"factory that is used during engine initialization, so all backend types "
+"(local CPU, local disk, GDS, remote, P2P, plugins, etc.) are supported."
+msgstr ""
+
+#: ../../source/internal_api_server/dynamic_backend_management.rst:174
+msgid ""
+"After creating backends, the ``StorageManager`` automatically refreshes "
+"its internal references (``non_allocator_backends``, "
+"``local_cpu_backend``, etc.)."
+msgstr ""
+

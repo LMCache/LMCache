@@ -33,7 +33,9 @@ jobs:
         permissions:
             pull-requests: read
         outputs:
-            lmcache: ${{ github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.lmcache == 'true' }}
+            # Skip the whole pipeline for operator releases (tags like `operator-v*`).
+            # operator_release.yml handles those; this workflow is lmcache-only.
+            lmcache: ${{ !startsWith(github.ref_name, 'operator-') && (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/') || steps.filter.outputs.lmcache == 'true') }}
         steps:
             - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
               if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')

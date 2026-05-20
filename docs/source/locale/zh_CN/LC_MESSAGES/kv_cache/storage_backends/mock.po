@@ -1,0 +1,104 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/mock.rst:2
+msgid "Mock"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:4
+msgid ""
+"LMCache provides a mock remote connector that allows you to manually set "
+"the peeking latency, read throughput, and write throughput inside of the "
+"remote url. It will create copies of your KV cache in unmanaged local "
+"RAM."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:7
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:9
+msgid ""
+"Create a configuration file (e.g., ``mock.yaml``) with the following "
+"content:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:18
+msgid ""
+"The ``remote_url`` format is "
+"``mock://SIZE/?peeking_latency=LATENCY&read_throughput=READ_GBPS&write_throughput=WRITE_GBPS``"
+" where:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:20
+msgid "``SIZE``: Maximum storage size"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:21
+msgid "``peeking_latency``: Latency for peeking operations (in milliseconds)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:22
+msgid "``read_throughput``: Read throughput (in GB/s)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:23
+msgid "``write_throughput``: Write throughput (in GB/s)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:26
+msgid "Usage"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:28
+msgid "Deploy a serving engine with the mock remote backend:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:37
+msgid ""
+"Check the retrieval (storing is async so the throughput there is "
+"meaningless) logs on the second query to confirm that the throughput is "
+"slightly lower than 2 GB/s (the CPU <-> GPU allocation/transfer also has "
+"overhead)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:40
+msgid "Example Query"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:42
+msgid "Send a test request:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:55
+msgid "Expected Logs"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:57
+msgid "You should see logs similar to the following:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mock.rst:64
+msgid ""
+"The logs confirm that the throughput is slightly lower than 2 GB/s due to"
+" CPU <-> GPU allocation/transfer overhead."
+msgstr ""
+

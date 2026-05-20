@@ -1,0 +1,159 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:2
+msgid "3FS"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:9
+msgid ""
+"3FS (Fire-Flyer File System) is an AI native distributed file-system "
+"which provides high performance and low latency. It is a supported option"
+" for KV Cache offloading in LMCache. Even though the FSConnector backend "
+"can work with 3FS storage cluster, but it access data in 3FS storage "
+"cluster by FUSE interfaces. It can't leverage 3FS high performance. This "
+"particular backend uses 3FS native USRBIO(User Space Ring Based IO) "
+"interfaces to access 3FS storage cluster which get high performance."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:16
+msgid "Configure LMCache 3FS Offloading"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:18
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:20
+msgid "Example ``config.yaml``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:66
+msgid "There are 2 methods to config hf3fs remote backend:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:67
+msgid "Plugin name mode, uses the parameter remote_storage_plugins(Recommend)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:68
+msgid ""
+"URL mode, uses the parameter remote_url(Deprecated, will be removed in a "
+"future)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:70
+msgid ""
+"For URL mode, the base_path is contained in the url. For plugin name "
+"mode, there are 2 methods to set base_path:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:71
+#, python-brace-format
+msgid ""
+"remote_storage_plugin.{plugin name}.base_path, it sets the base_path for "
+"a plugin instance."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:72
+msgid "e.g.:remote_storage_plugin.hf3fs.primary.base_path"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:73
+msgid "hf3fs_base_path, it set the base_path for all plugin instances"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:76
+msgid "Installation"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:80
+msgid "**Prerequisites:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:82
+msgid ""
+"A Machine with at least one GPU. You can adjust the max model length of "
+"your vllm instance depending on your GPU memory."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:84
+msgid "vllm and lmcache installed"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:86
+msgid "**Step 1. Install 3FS hf3fs_py_usrbio package**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:88
+msgid ""
+"The inference server need install 3FS hf3fs_py_usrbio package, recommend "
+"to build the package from source:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:99
+msgid ""
+"`3FS Build <https://github.com/deepseek-ai/3FS/blob/main/README.md#build-"
+"3fs>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:102
+msgid "**Step 2. Setup 3FS storage cluster**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:104
+msgid ""
+"`3FS Setup <https://github.com/deepseek-"
+"ai/3FS/blob/main/deploy/README.md>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:107
+msgid "**Step 3. Deploy 3FS FUSE client in inference server**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:109
+msgid ""
+"The inference server must deploy 3FS FUSE client(a fuse daemon process "
+"provided by 3FS), otherwise, it can't access 3FS storage cluster"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:112
+msgid ""
+"`Setup 3FS FUSE Client <https://github.com/deepseek-"
+"ai/3FS/blob/main/deploy/README.md#step-8-fuse-client>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:115
+msgid "**Step 4. Start a vLLM server with 3FS offloading enabled**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:117
+msgid "Create a lmcache configuration file called: ``3fs-offload.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/3fs.rst:155
+msgid "Start vllm:"
+msgstr ""
+

@@ -1,0 +1,716 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/resp.rst:2
+msgid "RESP (Native Redis/Valkey)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:9
+msgid ""
+"The RESP backend is a high-performance native C++ storage connector for "
+"Redis and Valkey servers, using the RESP2 wire protocol over TCP. It is "
+"designed for maximum throughput on KV cache store and retrieval "
+"operations, achieving **6+ GB/s** on reads with optimal configuration."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:13
+msgid "Key advantages over the standard Redis connector:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:15
+msgid ""
+"**Multi-threaded C++ I/O**: Worker threads operate in parallel with zero-"
+"copy buffer passing and full GIL release"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:16
+msgid ""
+"**Batched tiling**: Large batch operations are automatically split across"
+" worker threads for maximum parallelism"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:17
+msgid ""
+"**eventfd-based completions**: The kernel wakes Python on completion -- "
+"no polling overhead"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:18
+msgid ""
+"**Dual-mode support**: The same C++ connector works in both non-MP mode "
+"(via ``ConnectorClientBase``) and MP mode (via "
+"``NativeConnectorL2Adapter`` as an L2 adapter)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:20
+msgid ""
+"The native C++ source lives in ``csrc/storage_backends/redis/``. See "
+":doc:`Adding Native Connectors "
+"<../../developer_guide/extending_lmcache/native_connectors>` for the full"
+" architecture."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:24
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:26
+msgid ""
+"LMCache installed from source (``pip install -e .``) to compile the C++ "
+"extension"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:27
+msgid ""
+"A Redis 8.2+ or Valkey server (Redis 8.2 recommended for IO threads "
+"support)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:28
+msgid "A machine with at least one GPU for vLLM inference"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:32
+msgid "Redis Server Setup"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:35
+msgid ""
+"Redis version and server configuration have a **major** impact on "
+"throughput. Using Redis 8.2 with IO threads yields ~6 GB/s reads vs ~1.5 "
+"GB/s with Redis 6.0 defaults."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:38
+msgid "**Build Redis 8.2 from source (recommended):**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:47
+msgid "**Start the server with IO threads enabled:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:58
+msgid "Recommended Server Flags"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:62
+msgid "Flag"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:63
+msgid "Why"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:64
+msgid "``--protected-mode no``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:65
+msgid "Allow connections from other hosts (use auth in production)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:66
+msgid "``--save '' --appendonly no``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:67
+msgid "Disable persistence -- KV cache is ephemeral, persistence wastes bandwidth"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:68
+msgid "``--io-threads 4``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:69
+msgid "Enable multi-threaded I/O for parallel read/write handling"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:70
+msgid "``--port 6379``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:71
+msgid "Default port (adjust if running multiple instances)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:74
+msgid ""
+"The number of ``--io-threads`` should roughly match the number of "
+"physical cores available to the Redis process. 4 is a good starting "
+"point; benchmark with your hardware to find the optimum."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:80
+msgid "Chunk Size Selection and Throughput Tuning"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:82
+msgid ""
+"The chunk size (in tokens) determines how many bytes each Redis key-value"
+" pair holds. This is the **single most important parameter** for "
+"throughput."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:85
+msgid ""
+"**The sweet spot is ~4 MB per chunk.** Both smaller and larger chunks "
+"degrade throughput:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:87
+msgid "Chunk Size vs Throughput (Redis 8.2, 8 workers)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:91
+msgid "Chunk Size"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:92
+msgid "Total Data"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:93
+msgid "SET Throughput"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:94
+msgid "GET Throughput"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:95
+msgid "1 MB (500 keys)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:96
+msgid "500 MB"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:97
+msgid "~3.5 GB/s"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:98
+msgid "~5.2 GB/s"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:99
+msgid "**4 MB (500 keys)**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:100
+msgid "**2 GB**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:101
+msgid "**~4.4 GB/s**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:102
+msgid "**~5.9 GB/s**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:103
+msgid "8 MB (200 keys)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:104
+msgid "1.6 GB"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:105
+msgid "~4.2 GB/s"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:106
+msgid "~1.4 GB/s"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:108
+msgid "**Why 4 MB?**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:110
+msgid "Below ~2 MB, per-key overhead (RESP framing, TCP round-trips) dominates"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:111
+msgid ""
+"Above ~4 MB, Redis server-side memory allocation and TCP window sizes "
+"become bottlenecks"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:112
+msgid ""
+"At 4 MB, the balance between amortized overhead and memory pressure is "
+"optimal"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:114
+msgid "**Calculating chunk size in tokens:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:116
+msgid ""
+"The chunk size in bytes depends on the model's hidden dimension, number "
+"of KV heads, number of layers, and dtype:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:123
+msgid "For ``meta-llama/Llama-3.1-8B-Instruct`` with BFloat16:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:135
+msgid ""
+"The bytes-per-token calculation varies by model architecture. Larger "
+"models (e.g., 70B) have more layers and larger hidden dimensions, so "
+"fewer tokens are needed per chunk to reach the 4 MB sweet spot."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:141
+msgid "Throughput Sweep"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:143
+msgid ""
+"To find the optimal configuration for your hardware, use the included "
+"benchmark:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:165
+msgid "Expected output:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:181
+msgid "Environment Variable Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:183
+msgid ""
+"Sensitive credentials (and optionally host/port) can be provided via "
+"environment variables instead of config files or CLI arguments. This "
+"prevents secrets from appearing in logged configuration at startup."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:191
+msgid "Variable"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:192
+#: ../../source/kv_cache/storage_backends/resp.rst:322
+msgid "Description"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:193
+msgid "``LMCACHE_RESP_USERNAME``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:194
+msgid ""
+"Redis ACL username. Used as default when ``username`` is not set in "
+"config/JSON."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:195
+msgid "``LMCACHE_RESP_PASSWORD``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:196
+msgid ""
+"Redis AUTH password. Used as default when ``password`` is not set in "
+"config/JSON."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:197
+msgid "``LMCACHE_RESP_HOST``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:198
+msgid ""
+"Redis hostname or IP. Used as default when ``host`` is not set in "
+"config/JSON/URL."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:199
+msgid "``LMCACHE_RESP_PORT``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:200
+msgid "Redis port. Used as default when ``port`` is not set in config/JSON/URL."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:202
+msgid ""
+"Config files (non-MP) and ``--l2-adapter`` JSON (MP) take precedence over"
+" environment variables. Environment variables serve as defaults — they "
+"are used when the corresponding config value is empty or unset. They are "
+"read at adapter creation time inside the adapter itself, so they are "
+"**never stored in the config object** and **never printed in startup "
+"logs**."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:208
+msgid "**Example — MP mode with env vars:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:222
+msgid "**Example — Non-MP mode with env vars:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:236
+msgid ""
+"For production deployments, always use environment variables for "
+"credentials rather than embedding them in config files or CLI arguments."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:241
+msgid "Non-MP Mode (Single Process)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:243
+msgid ""
+"In non-MP mode, the RESP connector is used directly as a remote storage "
+"backend via the ``RESPClient`` asyncio wrapper."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:246
+msgid "**Configuration file** (``resp-config.yaml``):"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:254
+msgid ""
+"Credentials can be set via environment variables (recommended) or in the "
+"config file under ``extra_config`` (see `Environment Variable "
+"Configuration`_ above)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:257
+msgid "**Launch vLLM:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:268
+msgid ""
+"``save_unfull_chunk`` must be off (default) and chunk metadata saving "
+"must be disabled for optimal throughput with the native RESP connector."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:273
+msgid "MP Mode (Multiprocess)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:275
+msgid ""
+"In MP mode, LMCache runs as a separate server process communicating with "
+"vLLM over ZMQ. The RESP connector serves as an L2 adapter with variable-"
+"size chunk support."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:278
+msgid "**Step 1: Start Redis** (see `Redis Server Setup`_ above)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:280
+msgid "**Step 2: Launch LMCache MP Server:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:291
+msgid "**Step 3: Launch vLLM with LMCache MP Connector:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:311
+msgid "L2 Adapter Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:313
+msgid "The ``--l2-adapter`` JSON accepts these fields:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:319
+msgid "Field"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:320
+msgid "Type"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:321
+msgid "Default"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:323
+msgid "``type``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:324
+#: ../../source/kv_cache/storage_backends/resp.rst:328
+#: ../../source/kv_cache/storage_backends/resp.rst:340
+#: ../../source/kv_cache/storage_backends/resp.rst:344
+msgid "str"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:325
+#: ../../source/kv_cache/storage_backends/resp.rst:329
+#: ../../source/kv_cache/storage_backends/resp.rst:333
+msgid "(required)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:326
+msgid "Must be ``\"resp\"``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:327
+msgid "``host``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:330
+msgid "Redis/Valkey hostname or IP"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:331
+msgid "``port``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:332
+#: ../../source/kv_cache/storage_backends/resp.rst:336
+msgid "int"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:334
+msgid "Redis/Valkey port"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:335
+msgid "``num_workers``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:337
+msgid "8"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:338
+msgid "C++ worker threads for parallel I/O"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:339
+msgid "``username``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:341
+#: ../../source/kv_cache/storage_backends/resp.rst:345
+msgid "``\"\"``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:342
+msgid ""
+"Redis ACL username (leave empty for no auth). Falls back to "
+"``LMCACHE_RESP_USERNAME`` env var if empty."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:343
+msgid "``password``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:346
+msgid ""
+"Redis AUTH password (leave empty for no auth). Falls back to "
+"``LMCACHE_RESP_PASSWORD`` env var if empty."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:347
+msgid "``max_capacity_gb``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:348
+msgid "float"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:349
+msgid "0"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:350
+msgid ""
+"Maximum L2 storage capacity in GB for client-side usage tracking. "
+"Required for L2 eviction. Set to 0 (default) to disable usage tracking."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:353
+msgid "L2 Eviction"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:355
+msgid ""
+"To enable automatic eviction of least-recently-used keys when the Redis "
+"backend fills up, set ``max_capacity_gb`` and add an ``\"eviction\"`` "
+"block:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:378
+#, python-format
+msgid ""
+"This configures a 10 GB capacity limit. When usage exceeds 80% "
+"(``trigger_watermark``), the eviction controller will delete the least-"
+"recently-used ~20% of stored keys (``eviction_ratio``) using the Redis "
+"``DEL`` command."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:383
+msgid ""
+"``max_capacity_gb`` enables **client-side** size tracking. It does not "
+"configure the Redis server's ``maxmemory`` setting. You should set "
+"``max_capacity_gb`` to match or be slightly below your Redis server's "
+"available memory."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:389
+msgid "Testing the Setup"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:391
+msgid ""
+"Send the same prompt twice. The first request stores KV cache to Redis; "
+"the second retrieves it."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:408
+msgid "Verify data was stored:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:414
+msgid "Clear state between runs:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:422
+msgid "Best Practices"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:424
+msgid "**Server deployment:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:426
+msgid "Use Redis 8.2+ with ``--io-threads 4`` (or more, matching available cores)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:427
+msgid "Disable persistence (``--save '' --appendonly no``) for KV cache workloads"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:428
+msgid "Pin Redis to its own NUMA node if running on multi-socket systems"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:429
+msgid ""
+"For production, enable authentication with ``--requirepass`` and supply "
+"credentials via ``LMCACHE_RESP_USERNAME`` / ``LMCACHE_RESP_PASSWORD`` "
+"environment variables to keep them out of logs"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:431
+msgid "**Client tuning:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:433
+msgid ""
+"Start with ``num_workers: 8`` and increase if the server has spare CPU "
+"and you're not saturating the network"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:434
+msgid ""
+"More workers help when chunk sizes are smaller (more keys per batch = "
+"more parallelism needed)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:435
+msgid ""
+"On NUMA systems, ensure the LMCache process runs on the same NUMA node as"
+" the NIC"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:437
+msgid "**Chunk size:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:439
+msgid "Target ~4 MB per chunk for maximum throughput"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:440
+msgid ""
+"Calculate the token count using your model's per-token byte size (see "
+"formula above)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:441
+msgid ""
+"If unsure, run the benchmark sweep to find the optimum for your specific "
+"hardware"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:443
+msgid "**Network:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:445
+msgid "Use localhost or loopback for single-machine deployments"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:446
+msgid ""
+"For cross-machine setups, ensure low-latency networking (ideally <100 us "
+"RTT)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:447
+msgid ""
+"The RESP connector uses TCP; RDMA is not currently supported (consider "
+":doc:`Mooncake <./mooncake>` for RDMA)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:451
+msgid "Additional Resources"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:453
+msgid ""
+"Benchmark script: "
+"``examples/kv_cache_reuse/remote_backends/resp/benchmark_resp_client.py``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:454
+msgid "C++ source: ``csrc/storage_backends/redis/``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:455
+msgid "Native connector architecture: ``csrc/storage_backends/README.md``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/resp.rst:456
+msgid ""
+"Developer guide for adding new native connectors: :doc:`Adding Native "
+"Connectors <../../developer_guide/extending_lmcache/native_connectors>`"
+msgstr ""
+

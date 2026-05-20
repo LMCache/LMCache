@@ -1,0 +1,123 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:4
+msgid "Usage Stats Collection"
+msgstr "使用统计收集"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:6
+msgid ""
+"LMCache collects anonymous usage data by default to help the engineering "
+"team understand real-world workloads, prioritize optimizations, and "
+"improve reliability. All collected data is aggregated and contains no "
+"sensitive user information."
+msgstr "LMCache 默认收集匿名使用数据，以帮助工程团队了解实际工作负载，优先优化并提高可靠性。所有收集的数据都是汇总的，并不包含敏感用户信息。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:8
+msgid ""
+"A sanitized subset of the aggregated data may be publicly released for "
+"the community’s benefit (for example, see a daily usage report `here "
+"<https://github.com/Hanchenli/OSS_Growth_Toolkit/tree/main/usage_tracker/report>`_)."
+msgstr "聚合数据的一个经过清洗的子集可能会公开发布，以惠及社区（例如，查看每日使用报告 `here <https://github.com/Hanchenli/OSS_Growth_Toolkit/tree/main/usage_tracker/report>`_）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:11
+msgid "What data is collected?"
+msgstr "收集了哪些数据？"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:13
+msgid ""
+"Usage stats are emitted as three message types, implemented in "
+"``usage_context.py``:"
+msgstr "使用统计信息以三种消息类型发出，具体实现位于 ``usage_context.py``："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:15
+msgid ""
+"**EnvMessage** Captures environment details such as cloud provider, CPU "
+"info, total memory, architecture, GPU count/type, and execution source."
+msgstr "**EnvMessage** 捕获环境细节，例如云提供商、CPU 信息、总内存、架构、GPU 数量/类型和执行源。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:18
+msgid ""
+"**EngineMessage** Records engine configuration and metadata, including "
+"cache settings (chunk size, local device, cache limits), remote backend "
+"parameters, blending settings, model name, world size, and KV-cache "
+"dtype/shape."
+msgstr "**EngineMessage** 记录引擎配置和元数据，包括缓存设置（块大小、本地设备、缓存限制）、远程后端参数、混合设置、模型名称、全局大小，以及 KV Cache 的数据类型/形状。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:21
+msgid ""
+"**MetadataMessage** Reports execution metadata: the timestamp when the "
+"run started and total duration in seconds."
+msgstr "**MetadataMessage** 报告执行元数据：运行开始的时间戳和总持续时间（以秒为单位）。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:24
+msgid ""
+"These messages are serialized to JSON and POSTed to the LMCache usage "
+"server."
+msgstr "这些消息被序列化为 JSON 并通过 POST 发送到 LMCache 使用服务器。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:27
+msgid "Example JSON payload"
+msgstr "示例 JSON 有效负载"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:47
+msgid "Previewing collected data"
+msgstr "预览收集的数据"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:49
+msgid ""
+"If you enable **local logging**, usage messages are appended to your "
+"specified log file. To inspect the most recent entries:"
+msgstr "如果您启用 **本地日志记录**，使用消息将附加到您指定的日志文件中。要检查最近的条目："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:56
+msgid "Configuration & Opt-out"
+msgstr "配置与选择退出"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:58
+msgid ""
+"By default, usage tracking is **enabled**. To disable all usage stats "
+"collection, set the environment variable:"
+msgstr "默认情况下，使用情况跟踪是 **启用** 的。要禁用所有使用统计信息收集，请设置环境变量："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:64
+msgid ""
+"When ``LMCACHE_TRACK_USAGE`` is set to ``false``, "
+"``InitializeUsageContext`` will return ``None`` and no data will be sent "
+"or logged."
+msgstr "当 ``LMCACHE_TRACK_USAGE`` 设置为 ``false`` 时，``InitializeUsageContext`` 将返回 ``None``，并且不会发送或记录任何数据。"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:67
+msgid "Local logging"
+msgstr "本地日志记录"
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:69
+msgid ""
+"If you would like to log to a file in addition to (or instead of) sending"
+" data to the server, pass a local-log path when initializing:"
+msgstr "如果您希望在将数据发送到服务器的同时（或替代）记录到文件中，请在初始化时传递一个本地日志路径："
+
+#: ../../source/developer_guide/usage/usage_stats_collection.rst:81
+msgid ""
+"Omitting the ``local_log`` argument (or passing ``None``) disables local "
+"file logging."
+msgstr "省略 ``local_log`` 参数（或传递 ``None``）将禁用本地文件日志记录。"
+

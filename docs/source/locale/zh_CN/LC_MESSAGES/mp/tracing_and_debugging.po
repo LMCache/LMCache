@@ -1,0 +1,469 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/tracing_and_debugging.rst:2
+msgid "Tracing and Debugging"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:4
+msgid ""
+"LMCache MP mode can record every ``StorageManager`` public-API call to a "
+"binary **trace file** and reissue those calls later against a fresh "
+"server via ``lmcache trace replay``. The feature is designed for:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:8
+msgid ""
+"**Regression hunting** — capture a production workload, then replay it "
+"against a build under investigation to reproduce a bug offline."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:10
+msgid ""
+"**Performance characterization** — measure L1/L2 latency distributions "
+"under a realistic storage-level access pattern, without needing vLLM or a"
+" GPU."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:13
+msgid ""
+"**Configuration tuning** — replay the same trace against different L1 "
+"sizes, eviction policies, and L2 adapters to compare their behavior on "
+"identical input."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:19
+msgid ""
+"Trace recording is **independent** from ``--enable-tracing`` (OTel "
+"spans). OTel tracing exports *live* spans to an OTLP endpoint for online "
+"observability; trace recording persists a replayable binary file for "
+"offline analysis. Both can be enabled simultaneously."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:28
+msgid "Recording a Trace"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:30
+msgid ""
+"Recording is **off by default**. Enable it by adding ``--trace-level "
+"storage`` to ``lmcache server``:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:48
+msgid ""
+"Drive traffic through the server as usual (vLLM requests, benchmark "
+"scripts, etc.). The trace file is closed cleanly on ``SIGTERM`` via the "
+"EventBus stop path — no ``--stop-tracing`` command needed."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:52
+msgid "**What is captured:**"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:54
+msgid ""
+"The fully-qualified name of every decorated ``StorageManager`` call (e.g."
+" ``StorageManager.reserve_write``, "
+"``StorageManager.submit_prefetch_task``)."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:57
+msgid ""
+"Each call's input arguments (``keys``, ``layout_desc``, ``mode``, "
+"``extra_count``, ``external_request_id``, …)."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:59
+msgid "Wall-clock and monotonic timestamps per call."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:60
+msgid ""
+"A header with the file format version, trace schema version, start "
+"timestamps, and a SHA-256 digest of the active ``StorageManagerConfig`` "
+"so replay can flag mismatched configurations."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:65
+msgid "**What is not captured:**"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:67
+msgid ""
+"**KV tensor bytes.** Replay exercises bookkeeping and controller logic; "
+"payloads at replay time are zeros. The trace file stays bounded even for "
+"long runs."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:70
+msgid ""
+"Calls inside ``MPCacheEngine``, the message queue, or GPU-copy code. "
+"Those layers are out of scope for the ``storage`` trace level."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:73
+msgid "**Overhead:**"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:75
+msgid "Off: a single boolean check per ``StorageManager`` call. Effectively free."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:76
+msgid ""
+"On: encoding and file I/O happen on the EventBus drain thread, off the "
+"request path. In practice this has no visible impact on request latency."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:81
+msgid "Inspecting a Trace"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:83
+msgid "Before replaying, ``lmcache trace info`` prints a one-screen summary:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:106
+msgid ""
+"Use this to sanity-check that the trace you intend to replay covers the "
+"expected operation mix and duration."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:110
+msgid "Replaying a Trace"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:112
+msgid ""
+"``lmcache trace replay FILE`` reissues every recorded call against a "
+"**fresh** ``StorageManager`` built from CLI flags you supply. The replay-"
+"side config is **chosen by you**, not copied from the recording. This is "
+"the feature's main value — you can compare different L1/L2 setups on "
+"identical input."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:118
+msgid "Minimal invocation:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:125
+msgid ""
+"``--l1-size-gb`` and ``--eviction-policy`` are required, just like on "
+"``lmcache server``. Any storage-manager flag accepted by the server also "
+"works here (``--l2-adapter``, ``--l1-use-lazy``, ``--l2-store-policy``, "
+"…); run ``lmcache trace replay --help`` for the full list."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:131
+msgid ""
+"**Pacing.** The driver always honors the recorded inter-call timings by "
+"sleeping to align each dispatch with its recorded ``t_mono`` offset. "
+"There is **no** as-fast-as-possible mode: ``StorageManager`` reads and "
+"writes are asynchronous and carry cross-call dependencies (for example, a"
+" retrieve may depend on an earlier L2 load completing), so collapsing the"
+" recorded gaps races the internal queues and causes non-deterministic "
+"retrieve misses. If the replay host is slower than the recording host, "
+"the loop simply lags the recorded schedule."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:140
+msgid ""
+"**Output.** Every replay prints a terminal metrics table and writes a "
+"per-qualname CSV by default:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:160
+msgid "Additional per-record output is controlled by:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:166
+#: ../../source/mp/tracing_and_debugging.rst:215
+msgid "Flag"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:167
+msgid "Purpose"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:168
+msgid "``--output-dir DIR``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:169
+msgid "Directory for aggregated summary files. Default: current dir."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:170
+msgid "``--no-csv``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:171
+msgid "Skip the ``trace_replay_ops.csv`` export."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:172
+msgid "``--json``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:173
+msgid ""
+"Also write ``trace_replay_summary.json`` (per-qualname count / mean / p50"
+" / p90 / p99 / min / max, plus total duration)."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:176
+msgid "``--verbose``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:177
+msgid ""
+"Print one ``[N/total] OK|FAIL <qualname> (Xms)`` line per record to "
+"stdout in addition to the INFO log."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:179
+msgid "``--jsonl-out PATH``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:180
+#, python-brace-format
+msgid ""
+"Write one JSON object per replayed record to ``PATH`` (``{qualname, "
+"latency_ms, failed}``) for post-hoc analysis."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:183
+msgid "``-q`` / ``--quiet``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:184
+msgid ""
+"Suppress the terminal metrics table. The aggregated files are still "
+"written."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:187
+msgid "Even without ``--verbose``, the driver logs each dispatch at INFO:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:195
+msgid ""
+"Progress numbers come from a cheap pre-scan of the trace file, so you "
+"always see ``[N/total]`` rather than just a running counter."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:199
+msgid "Monitoring During Replay"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:201
+msgid ""
+"The replay driver initializes the full observability EventBus **before** "
+"constructing the replay-side ``StorageManager``. Internal events (L1/L2 "
+"lifecycle, eviction ticks, store/retrieve publishes, etc.) therefore flow"
+" through a live bus during replay and the standard subscribers — logging,"
+" metrics, OTel tracing — can attach to them."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:208
+msgid ""
+"The same observability CLI flags that the server accepts are available on"
+" ``lmcache trace replay``:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:216
+msgid "Effect"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:217
+msgid "``--disable-observability``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:218
+msgid "Turn the EventBus off entirely. No subscribers fire."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:219
+msgid "``--disable-metrics``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:220
+msgid ""
+"Skip OTel metrics init and metrics subscribers. Useful to avoid binding "
+"the Prometheus port when you only want logs."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:222
+msgid "``--disable-logging``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:223
+msgid "Skip logging subscribers."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:224
+msgid "``--enable-tracing``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:225
+msgid "Enable OTel span subscribers. Requires ``--otlp-endpoint``."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:226
+msgid "``--otlp-endpoint URL``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:227
+msgid ""
+"Export metrics/traces to an OTLP gRPC collector (e.g. "
+"``http://localhost:4317``). When unset, metrics fall back to the in-"
+"process Prometheus pull endpoint."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:230
+msgid "``--prometheus-port PORT``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:231
+msgid ""
+"Port for the Prometheus ``/metrics`` endpoint in pull mode. Default "
+"``9090``."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:233
+msgid "``--metrics-sample-rate FLOAT``"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:234
+msgid "Sampling rate for lifecycle histograms. Counters always count all events."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:237
+msgid "Typical monitoring setups:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:239
+msgid "**Raw log trail (SM/L1/L2 events to stdout):**"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:247
+msgid "**Prometheus metrics in pull mode:**"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:256
+msgid "**OTel metrics + traces to a collector:**"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:267
+msgid ""
+"The ``--trace-level`` and ``--trace-output`` flags are **recording-only**"
+" and are not accepted by ``lmcache trace replay``. A replay never writes "
+"a new trace file."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:272
+msgid "Notes, Hints, and Caveats"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:274
+msgid ""
+"**Retrieve misses are expected when the replay environment differs.** At "
+"replay start, the CLI prints a visible warning banner:"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:283
+msgid ""
+"Because KV payloads are not captured and the replay-side config and host "
+"speed may differ from recording, retrieve calls that hit at record time "
+"can miss at replay time — for instance, an async L2 load that had "
+"finished by the time the recorded retrieve was issued may still be in "
+"flight when the replayed retrieve fires. Treat retrieve-miss counts as a "
+"signal about the replay environment, **not** as a defect in the trace."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:291
+msgid ""
+"**Config-digest mismatch is informational, not fatal.** The replay always"
+" runs whether the digests match or not. A mismatch simply tells you the "
+"replay-side ``StorageManagerConfig`` differs from what was recorded — "
+"often exactly what you intended (comparing two configs on the same "
+"trace)."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:297
+msgid ""
+"**Prometheus port binding.** The server's ``--prometheus-port`` defaults "
+"to ``9090``. Running ``lmcache trace replay`` concurrently with the "
+"server — or running two replays at once — on the same port will fail. "
+"Either pass a different ``--prometheus-port`` or ``--disable-metrics`` on"
+" the secondary runs."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:303
+msgid ""
+"**Trace-recording overhead.** Recording happens on the EventBus drain "
+"thread, not the request-handling threads. The gate is a single boolean "
+"check when disabled (default), so production builds with recording off "
+"pay no measurable cost."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:308
+msgid ""
+"**Trace files are not encrypted.** Arguments such as ``ObjectKey`` chunk "
+"hashes are written in plaintext. Treat trace files with the same care as "
+"cache hash logs."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:312
+msgid ""
+"**Forward compatibility.** The header carries a format version and a "
+"trace schema version. Readers reject files with unknown versions rather "
+"than silently producing garbage. Captured API surface changes (new "
+"arguments on a traced method, new codec tags) bump the schema version; "
+"framing changes bump the format version."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:318
+msgid ""
+"**Extensibility.** The format is designed to accommodate future trace "
+"**levels** (``mq``, ``gpu``). Adding a new traced method in an existing "
+"level requires only decorating it on the recording side and registering a"
+" handler on the replay side — no format changes."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:324
+msgid "See Also"
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:326
+msgid ""
+":ref:`trace-recording` — the short ``Trace Recording`` section in the "
+"Observability page focuses on the recording-side flags."
+msgstr ""
+
+#: ../../source/mp/tracing_and_debugging.rst:328
+msgid ""
+"``docs/design/v1/mp_observability/trace.md`` in the source tree — full "
+"design doc: architecture, replay dispatcher, context-manager pairing, "
+"stats collector, and test matrix."
+msgstr ""
+

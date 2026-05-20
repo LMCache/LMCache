@@ -1,0 +1,235 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:2
+msgid "CPU RAM"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:9
+msgid ""
+"CPU RAM and Local Storage are the two ways of offloading KV cache onto "
+"non-GPU memory of the same machine that is running inference."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:13
+msgid "Two ways to configure LMCache CPU Offloading:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:15
+msgid "**1. Environment Variables:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:26
+msgid "**2. Configuration File**:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:28
+msgid "Passed in through ``LMCACHE_CONFIG_FILE=your-lmcache-config.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:30
+msgid "Example ``config.yaml``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:42
+msgid "CPU RAM Explanation:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:44
+msgid ""
+"The ``LMCACHE_MAX_LOCAL_CPU_SIZE`` is the amount of page-locked (for fast"
+" GPU transfer) CPU memory that LMCache will reserve and must be set to a "
+"number greater than 0 since local and remote backends also use CPU RAM as"
+" an intermediate buffer when transferring KV caches with the GPU. This "
+"means it is possible to set ``LMCACHE_LOCAL_CPU=False`` even though "
+"``LMCACHE_MAX_LOCAL_CPU_SIZE`` is set to a non-zero number."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:51
+msgid ""
+"However, it is recommended to *always* set ``LMCACHE_LOCAL_CPU=True`` "
+"(the default is ``True`` so if you don't specify, CPU offloading will "
+"automatically be enabled) since this allows all currently unused pinned "
+"CPU RAM that LMCache has reserved to hold KV caches. When the pinned CPU "
+"RAM is required for any disk or remote transfers, the CPU KV caches will "
+"be LRU evicted to make space so there is no danger of running out of "
+"pinned CPU RAM."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:56
+msgid ""
+"When ``LMCACHE_LOCAL_CPU=True`` is used in conjunction with the disk "
+"backend or a remote backend (:doc:`Redis <./redis>`, :doc:`Mooncake "
+"<./mooncake>`, :doc:`Valkey <./valkey>`, or :doc:`Infinistore "
+"<./infinistore>`), we can think of the CPU RAM as a \"hot cache\" that "
+"will contain the \"hottest\" (most recently accessed)subset of KV caches "
+"from Disk and Remote storage."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:61
+msgid ""
+"Thus, the cache engine also has a **prefetch** mechanism to preload the "
+"KV caches for specified tokens into the pinned CPU RAM from the disk or "
+"remote storage (*if* the KV caches for these tokens are already stored "
+"there). This can preemptively avoid the latency of the disk and remote KV"
+" transfer if we predict these tokens will be requested soon (e.g. "
+"structured or agentic workflows)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:69
+msgid "Online Inference Example"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:71
+msgid "Let's feel the TTFT (time to first token) differential!"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:75
+msgid "**Prerequisites:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:77
+msgid ""
+"A Machine with at least one GPU. Adjust the max model length of your vllm"
+" instance depending on your GPU memory and the long context you want to "
+"use."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:79
+msgid ""
+"vllm and lmcache installed (:doc:`Installation Guide "
+"<../../getting_started/installation>`)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:81
+msgid "Hugging Face access to ``meta-llama/Meta-Llama-3.1-8B-Instruct``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:87
+msgid "A few packages:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:93
+msgid "**Step 0. Set up a directory for this example:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:100
+msgid "**Step 1. Prepare a long context!**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:102
+msgid ""
+"We want a context long enough that vllm's prefix caching will not be able"
+" to hold the KV caches in GPU memory and LMCache is necessary to keep KV "
+"caches in non-GPU memory:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:110
+msgid "**Step 2. Start a vLLM server with CPU offloading enabled:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:112
+msgid "Create a an lmcache configuration file called: ``cpu-offload.yaml``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:120
+msgid ""
+"If you don't want to use a config file, uncomment the first three "
+"environment variables and then comment out the ``LMCACHE_CONFIG_FILE`` "
+"below:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:135
+msgid ""
+"``--kv-transfer-config``: This is the parameter that actually tells vLLM "
+"to use LMCache for KV cache offloading."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:136
+msgid "``kv_connector``: Specifies the LMCache connector for vLLM V1"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:137
+msgid ""
+"``kv_role``: Set to \"kv_both\" for both storing and loading KV cache "
+"(important because we will run two queries and the first will "
+"produce/store a KV cache while the second will consume/load that KV "
+"cache)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:139
+msgid "**Step 3. Query TTFT improvements with LMCache:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:141
+msgid ""
+"Once the Open AI compatible server is running on default vllm port 8000, "
+"let's query it twice with the same long context!"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:143
+msgid "Create a script called ``query-twice.py`` and paste the following code:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:209
+msgid "Then run:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:215
+msgid ""
+"Since we're in streaming mode, you'll be able to feel the TTFT "
+"differential in real time!"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:218
+msgid "**Example Output:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:243
+msgid ""
+"If you look at the logs of your vLLM server, you should see (the logs are"
+" truncated for cleanliness):"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:271
+msgid "Tips:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:273
+msgid ""
+"If you want to run the ``query-twice.py`` script multiple times, you'll "
+"need to either restart the vLLM LMCache server or change the prefix of "
+"the context you pass in since you've already warmed LMCache."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/cpu_ram.rst:275
+msgid ""
+"The max model length here was decided by running an L4 with only 23GB of "
+"GPU memory. If you have more memory, you can increase the max model "
+"length and modify ``query-twice.py`` to use more of the long context. "
+"LMCache TTFT improvement becomes more pronounced as the context length "
+"increases!"
+msgstr ""
+

@@ -1,0 +1,458 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/vllm_endpoint.rst:4
+msgid "Metrics by vLLM API"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:6
+msgid ""
+"LMCache provides detailed metrics via a Prometheus endpoint, allowing for"
+" in-depth monitoring of cache performance and behavior. This section "
+"outlines how to enable and configure observability from embedded vLLM "
+"``/metrics`` API endpoint."
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:11
+msgid "Quick Start Guide"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:14
+msgid "1) On vLLM/LMCache side"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:16
+msgid ""
+"In v1, vLLM and LMCache run in separate processes, so you have to use "
+"multi‑process Prometheus."
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:18
+msgid ""
+"The ``PROMETHEUS_MULTIPROC_DIR`` environment variable must be the same in"
+" both processes, as a IPC directory."
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:26
+msgid ""
+"Once the HTTP server is running, you can access the LMCache metrics at "
+"the ``/metrics`` endpoint."
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:35
+msgid ""
+"And you will also find some ``.db`` files in the "
+"``$PROMETHEUS_MULTIPROC_DIR`` directory."
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:39
+msgid "2) Prometheus Configuration"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:41
+msgid ""
+"To scrape the LMCache metrics with a Prometheus server, add the following"
+" job to your ``prometheus.yml`` configuration, or equivalent "
+"configuration to scrape the metrics endpoint:"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:53
+msgid "Available Metrics"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:55
+msgid ""
+"LMCache exposes a variety of metrics to monitor its performance. The "
+"following table lists all available metrics organized by category:"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:57
+msgid "LMCache Metrics"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:61
+msgid "Metric Name"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:62
+msgid "Type"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:63
+msgid "Description"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:64
+msgid "**Core Request Metrics**"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:67
+msgid "``lmcache:num_retrieve_requests``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:68
+#: ../../source/production/observability/vllm_endpoint.rst:71
+#: ../../source/production/observability/vllm_endpoint.rst:74
+#: ../../source/production/observability/vllm_endpoint.rst:77
+#: ../../source/production/observability/vllm_endpoint.rst:80
+#: ../../source/production/observability/vllm_endpoint.rst:83
+#: ../../source/production/observability/vllm_endpoint.rst:86
+#: ../../source/production/observability/vllm_endpoint.rst:89
+#: ../../source/production/observability/vllm_endpoint.rst:131
+#: ../../source/production/observability/vllm_endpoint.rst:134
+#: ../../source/production/observability/vllm_endpoint.rst:137
+#: ../../source/production/observability/vllm_endpoint.rst:140
+#: ../../source/production/observability/vllm_endpoint.rst:158
+#: ../../source/production/observability/vllm_endpoint.rst:161
+#: ../../source/production/observability/vllm_endpoint.rst:170
+#: ../../source/production/observability/vllm_endpoint.rst:173
+#: ../../source/production/observability/vllm_endpoint.rst:176
+msgid "Counter"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:69
+msgid "Total number of retrieve requests"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:70
+msgid "``lmcache:num_store_requests``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:72
+msgid "Total number of store requests"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:73
+msgid "``lmcache:num_lookup_requests``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:75
+msgid "Total number of lookup requests"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:76
+msgid "``lmcache:num_requested_tokens``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:78
+msgid "Total number of tokens requested for retrieval"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:79
+msgid "``lmcache:num_hit_tokens``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:81
+msgid "Total number of cache hit tokens from retrieval"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:82
+msgid "``lmcache:num_lookup_tokens``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:84
+msgid "Total number of tokens requested in lookup operations"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:85
+msgid "``lmcache:num_lookup_hits``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:87
+msgid "Total number of tokens hit in lookup operations"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:88
+msgid "``lmcache:num_vllm_hit_tokens``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:90
+msgid "Number of hit tokens in vLLM"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:91
+msgid "**Hit Rate Metrics**"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:94
+msgid "``lmcache:retrieve_hit_rate``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:95
+#: ../../source/production/observability/vllm_endpoint.rst:98
+#: ../../source/production/observability/vllm_endpoint.rst:104
+#: ../../source/production/observability/vllm_endpoint.rst:107
+#: ../../source/production/observability/vllm_endpoint.rst:110
+#: ../../source/production/observability/vllm_endpoint.rst:155
+#: ../../source/production/observability/vllm_endpoint.rst:164
+#: ../../source/production/observability/vllm_endpoint.rst:179
+#: ../../source/production/observability/vllm_endpoint.rst:182
+#: ../../source/production/observability/vllm_endpoint.rst:188
+#: ../../source/production/observability/vllm_endpoint.rst:191
+msgid "Gauge"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:96
+msgid "The hit rate for retrieve requests"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:97
+msgid "``lmcache:lookup_hit_rate``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:99
+msgid "The hit rate for lookup requests"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:100
+msgid "**Cache Usage Metrics**"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:103
+msgid "``lmcache:local_cache_usage``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:105
+msgid "Local cache usage in bytes"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:106
+msgid "``lmcache:remote_cache_usage``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:108
+msgid "Remote cache usage in bytes"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:109
+msgid "``lmcache:local_storage_usage``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:111
+msgid "Local storage usage in bytes"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:112
+msgid "**Performance Metrics**"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:115
+msgid "``lmcache:time_to_retrieve``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:116
+#: ../../source/production/observability/vllm_endpoint.rst:119
+#: ../../source/production/observability/vllm_endpoint.rst:122
+#: ../../source/production/observability/vllm_endpoint.rst:125
+#: ../../source/production/observability/vllm_endpoint.rst:143
+#: ../../source/production/observability/vllm_endpoint.rst:146
+#: ../../source/production/observability/vllm_endpoint.rst:149
+msgid "Histogram"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:117
+msgid "Time taken to retrieve from the cache (seconds)"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:118
+msgid "``lmcache:time_to_store``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:120
+msgid "Time taken to store to the cache (seconds)"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:121
+msgid "``lmcache:retrieve_speed``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:123
+msgid "Retrieval speed (tokens per second)"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:124
+msgid "``lmcache:store_speed``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:126
+msgid "Storage speed (tokens per second)"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:127
+msgid "**Remote Backend Metrics**"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:130
+msgid "``lmcache:num_remote_read_requests``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:132
+msgid "Total number of read requests to remote backends"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:133
+msgid "``lmcache:num_remote_read_bytes``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:135
+msgid "Total number of bytes read from remote backends"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:136
+msgid "``lmcache:num_remote_write_requests``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:138
+msgid "Total number of write requests to remote backends"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:139
+msgid "``lmcache:num_remote_write_bytes``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:141
+msgid "Total number of bytes written to remote backends"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:142
+msgid "``lmcache:remote_time_to_get``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:144
+msgid "Time taken to get data from remote backends (milliseconds)"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:145
+msgid "``lmcache:remote_time_to_put``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:147
+msgid "Time taken to put data to remote backends (milliseconds)"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:148
+msgid "``lmcache:remote_time_to_get_sync``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:150
+msgid "Time taken to get data from remote backends synchronously (milliseconds)"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:151
+msgid "**Network Monitoring Metrics**"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:154
+msgid "``lmcache:remote_ping_latency``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:156
+msgid "Latest ping latency to remote backends (milliseconds)"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:157
+msgid "``lmcache:remote_ping_errors``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:159
+msgid "Number of ping errors to remote backends"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:160
+msgid "``lmcache:remote_ping_successes``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:162
+msgid "Number of ping successes to remote backends"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:163
+msgid "``lmcache:remote_ping_error_code``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:165
+msgid "Latest ping error code to remote backends"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:166
+msgid "**Local CPU Backend Metrics**"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:169
+msgid "``lmcache:local_cpu_evict_count``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:171
+msgid "Total number of evictions in local CPU backend"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:172
+msgid "``lmcache:local_cpu_evict_keys_count``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:174
+msgid "Total number of evicted keys in local CPU backend"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:175
+msgid "``lmcache:local_cpu_evict_failed_count``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:177
+msgid "Total number of failed evictions in local CPU backend"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:178
+msgid "``lmcache:local_cpu_hot_cache_count``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:180
+msgid "The size of the hot cache"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:181
+msgid "``lmcache:local_cpu_keys_in_request_count``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:183
+msgid "The size of the keys in request"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:184
+msgid "**Memory Management Metrics**"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:187
+msgid "``lmcache:active_memory_objs_count``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:189
+msgid "The number of active memory objects"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:190
+msgid "``lmcache:pinned_memory_objs_count``"
+msgstr ""
+
+#: ../../source/production/observability/vllm_endpoint.rst:192
+msgid "The number of pinned memory objects"
+msgstr ""
+
