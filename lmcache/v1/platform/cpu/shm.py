@@ -209,6 +209,11 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         runs ``munmap`` once the tensor (and any views derived from it)
         is garbage-collected, so the per-process virtual address space
         does not leak across repeated ``to_tensor`` calls.
+
+        We rebuild the view through ``as_strided`` so the original
+        memory layout (stride / storage_offset / memory_format) is
+        replayed faithfully on the receiving side; reshape would
+        silently re-coalesce strides and lose, e.g., channels_last.
         """
         addr = shm_map_readwrite(self.shm_name, self.nbytes)
         # ``torch.frombuffer`` requires a writable buffer; build one
@@ -217,7 +222,8 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         buf_type = ctypes.c_uint8 * self.nbytes
         buf = buf_type.from_address(addr)
         flat = torch.frombuffer(buf, dtype=torch.uint8)
-        out = flat.view(self.dtype).reshape(self.shape)
+        typed = flat.view(self.dtype)
+        out = torch.as_strided(typed, self.shape, self.stride, self.storage_offset)
         # Keep ``flat`` alive for the lifetime of ``out`` so its mmap
         # is not released while still in use, then munmap on cleanup.
         out._lmcache_shm_buf = flat  # type: ignore[attr-defined]
@@ -231,12 +237,19 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
 
 # Per-process registry of SHM segments we have created, so the same
 # tensor object is only migrated to SHM once even if the factory is
-# called multiple times. Keyed by ``id(tensor)`` for cheap lookups,
-# but we proactively delete the entry via ``weakref.finalize`` when
-# the tensor is garbage-collected -- this prevents CPython object-ID
-# reuse from causing a stale SHM name to be looked up and the next
-# ``shm_open(O_EXCL)`` to fail with ``EEXIST``.
-_CPU_SHM_NAMES: dict[int, str] = {}
+# called multiple times.
+#
+# Keyed by ``id(tensor)`` for cheap O(1) lookup, but each entry also
+# holds a ``weakref.ref`` to the original tensor and we *verify the
+# referent is still that exact object* before reusing the cached SHM
+# name. CPython recycles object IDs, so a fresh tensor allocated at
+# the same address as a previously migrated (now garbage-collected)
+# one would otherwise inherit a stale name -- and because
+# :func:`shm_create_readwrite` uses ``O_EXCL``, the next migration
+# would crash with ``EEXIST`` ("File exists"). The weakref-validated
+# lookup below makes that race impossible: a stale entry can only
+# point at a dead referent, which we treat as a miss.
+_CPU_SHM_NAMES: dict[int, tuple["weakref.ReferenceType[torch.Tensor]", str]] = {}
 _CPU_SHM_LOCK = threading.Lock()
 _CPU_SHM_COUNTER = itertools.count()
 
@@ -246,7 +259,8 @@ def _cleanup_shm_segment(tid: int, shm_name: str, addr: int, nbytes: int) -> Non
     with _CPU_SHM_LOCK:
         # Only drop the entry if it still points at *this* segment;
         # a future tensor reusing ``tid`` may already have replaced it.
-        if _CPU_SHM_NAMES.get(tid) == shm_name:
+        cached = _CPU_SHM_NAMES.get(tid)
+        if cached is not None and cached[1] == shm_name:
             _CPU_SHM_NAMES.pop(tid, None)
     shm_munmap(addr, nbytes)
     shm_unlink(shm_name)
@@ -257,15 +271,21 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
 
     Used as the registered ``"cpu"`` KV-wrapper factory: the LMCache mp
     server can mmap the same physical pages on the receiving side.
-    Idempotent per tensor identity via :data:`_CPU_SHM_NAMES`. The SHM
+    Idempotent per tensor identity (validated via a stored weakref so
+    Python's id-recycling cannot produce a stale-name hit). The SHM
     segment is released (``munmap`` + ``shm_unlink``) automatically
     when the migrated tensor is garbage-collected.
     """
     tid = id(tensor)
     with _CPU_SHM_LOCK:
-        shm_name = _CPU_SHM_NAMES.get(tid)
-        if shm_name is not None:
-            return CpuShmTensorWrapper(tensor, shm_name)
+        cached = _CPU_SHM_NAMES.get(tid)
+        if cached is not None:
+            ref, cached_name = cached
+            if ref() is tensor:
+                return CpuShmTensorWrapper(tensor, cached_name)
+            # Stale entry from a GC'd tensor whose id has been
+            # reused; drop it and fall through to allocate fresh.
+            _CPU_SHM_NAMES.pop(tid, None)
 
         nbytes = tensor.numel() * tensor.element_size()
         shm_name = "%s%d_%d" % (
@@ -291,7 +311,7 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
             shm_unlink(shm_name)
             raise
 
-        _CPU_SHM_NAMES[tid] = shm_name
+        _CPU_SHM_NAMES[tid] = (weakref.ref(tensor), shm_name)
         weakref.finalize(tensor, _cleanup_shm_segment, tid, shm_name, addr, nbytes)
         logger.info(
             "Migrated CPU KV cache tensor (nbytes=%d) to SHM %s",
@@ -300,3 +320,20 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
         )
 
     return CpuShmTensorWrapper(tensor, shm_name)
+
+
+def inject_stale_cache_entry_for_test(
+    tensor: torch.Tensor,
+    dead_ref: "weakref.ReferenceType[torch.Tensor]",
+    stale_shm_name: str,
+) -> None:
+    """Test-only hook: pre-seed the registry with a stale entry.
+
+    Lets unit tests reproduce the CPython id-reuse race -- where a
+    fresh tensor lands on the same id as a previously migrated and
+    garbage-collected one -- without the per-test global-state
+    surgery that would otherwise have to reach into the module's
+    private dict / lock.
+    """
+    with _CPU_SHM_LOCK:
+        _CPU_SHM_NAMES[id(tensor)] = (dead_ref, stale_shm_name)

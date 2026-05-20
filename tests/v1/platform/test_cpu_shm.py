@@ -129,3 +129,89 @@ def test_to_tensor_view_carries_munmap_finalizer():
         del src
         gc.collect()
         shm_unlink(w.shm_name)
+
+
+def test_to_tensor_replays_stride_and_storage_offset():
+    """``to_tensor`` rebuilds the view via stride+offset (not reshape)."""
+    src = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4).contiguous()
+    w = migrate_to_shm_and_wrap(src)
+    try:
+        view = w.to_tensor()
+        assert tuple(view.stride()) == w.stride
+        assert int(view.storage_offset()) == w.storage_offset
+        assert torch.equal(view, src)
+    finally:
+        del src, view
+        shm_unlink(w.shm_name)
+
+
+def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
+    """If wrapping the N-th tensor raises, earlier SHM names are unlinked.
+
+    Drives :func:`wrap_kv_caches` with two CPU tensors and forces the
+    second factory call to raise; the first iteration's SHM segment
+    must be ``shm_unlink``-ed so the named segment does not outlive
+    the failed batch.
+    """
+    # First Party
+    from lmcache.integration.vllm import vllm_multi_process_adapter as adapter
+    from lmcache.v1.platform.cpu.shm import shm_map_readwrite
+
+    real_wrap = adapter._wrap_one_kv_cache
+    state = {"n": 0, "first_name": None}
+
+    def flaky_wrap(tensor):
+        state["n"] += 1
+        if state["n"] == 2:
+            raise RuntimeError("simulated migration failure")
+        w = real_wrap(tensor)
+        state["first_name"] = w.shm_name
+        return w
+
+    monkeypatch.setattr(adapter, "_wrap_one_kv_cache", flaky_wrap)
+
+    t1 = torch.zeros((2, 2), dtype=torch.float32)
+    t2 = torch.zeros((2, 2), dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="simulated migration failure"):
+        adapter.wrap_kv_caches({"a": t1, "b": t2})
+
+    # The first iteration's SHM segment must no longer be openable.
+    nbytes = t1.numel() * t1.element_size()
+    with pytest.raises(OSError):
+        shm_map_readwrite(state["first_name"], nbytes)
+
+
+def test_migrate_ignores_stale_entry_from_id_reuse():
+    """A cached entry whose weakref is dead must not be reused.
+
+    Simulates CPython recycling an object id by injecting a stale
+    ``(dead_ref, old_name)`` tuple keyed by the live tensor's id,
+    then calling :func:`migrate_to_shm_and_wrap`. The factory must
+    treat the dead entry as a miss and allocate a fresh SHM segment
+    -- if it blindly reused the cached name, ``shm_create_readwrite``
+    would crash with ``EEXIST`` (and even worse, the fresh tensor
+    would be silently bound to the wrong SHM name).
+    """
+    # Standard
+    import gc
+    import weakref as _wr
+
+    # First Party
+    from lmcache.v1.platform.cpu.shm import inject_stale_cache_entry_for_test
+
+    # Build a tensor we will let die so we have a guaranteed-dead ref.
+    ghost = torch.zeros((1,), dtype=torch.float32)
+    dead_ref = _wr.ref(ghost)
+    del ghost
+    gc.collect()
+    assert dead_ref() is None
+
+    live = torch.zeros((2, 2), dtype=torch.float32)
+    stale_name = "/lmcache_test_stale_%d" % os.getpid()
+    inject_stale_cache_entry_for_test(live, dead_ref, stale_name)
+
+    w = migrate_to_shm_and_wrap(live)
+    try:
+        assert w.shm_name != stale_name
+    finally:
+        shm_unlink(w.shm_name)
