@@ -1,250 +1,217 @@
-# Non-GPU Context Design (MP mode, non-CUDA)
+# Non-GPU Context Design (Multiprocess Mode)
 
 ## 1. Motivation
 
-LMCache multiprocess mode relies on **CUDA IPC** to transfer KV cache data
-between vLLM worker processes and the LMCache cache server. The existing
-path wraps GPU tensors in `CudaIPCWrapper`, exchanges IPC handles via ZMQ
-messages, and uses CUDA events for cross-process synchronisation.
+LMCache multiprocess mode originally depended on CUDA IPC: workers send IPC handles,
+and the server reads/writes worker GPU memory directly. That path works well on
+CUDA, but the required primitives are CUDA-specific (IPC memory handles,
+interprocess CUDA events, CUDA stream semantics).
 
-This design is fundamentally tied to the CUDA programming model:
+For **CPU, XPU, HPU, and other non-CUDA devices**, those primitives do not exist.
+The non-GPU context design introduces a device-agnostic path where workers move KV
+data through CPU chunks instead of CUDA IPC handles.
 
-| CUDA IPC dependency | Why it blocks non-CUDA devices |
-|---|---|
-| `CudaIPCWrapper` / `cudaIpcGetMemHandle` | Only works on NVIDIA CUDA tensors |
-| `torch.cuda.Event(interprocess=True)` | CUDA-specific IPC event API |
-| `cupy.cuda.ExternalStream` | CUDA stream wrapper |
-| GPU pointer arithmetic in C++ kernels | Assumes CUDA device pointers |
+Goal: keep the existing CUDA path unchanged while adding a second path that works
+across non-CUDA backends.
 
-For non-CUDA accelerators — **CPU, Intel XPU, Habana HPU**, or any future
-device — none of these primitives are available.
+## 2. Design
 
-The **non-GPU context** path introduces a device-agnostic KV transfer mechanism:
+### 2.1 Architecture Overview
 
-1. Workers **gather** paged KV blocks into contiguous CPU chunk tensors.
-2. CPU chunks are **transported** to the server through a pluggable
-   serialisation layer (pickle today, shared memory in the future).
-3. On retrieve, the server returns CPU chunks and workers **scatter** them
-   back into device-local paged KV tensors.
+```text
+Worker adapter (vLLM MP adapter)
+  └─ TransferContext
+      ├─ HandleTransferContext  (CUDA IPC path)
+      └─ DataTransferContext    (non-CUDA data path)
+          └─ NonGpuContext
+             ├─ NonGpuContextPickle
+             └─ NonGpuContextShm (TODO)
+```
 
-The existing CUDA IPC path is **untouched** — the two paths coexist behind a
-polymorphic `TransferContext` abstraction.
+State machine overview (worker-side):
 
-### Transport comparison
+```text
+                       create_transfer_context()
+                                 |
+                 +---------------+---------------+
+                 |                               |
+                 v                               v
+      HandleTransferContext            DataTransferContext
+          (device == CUDA)            (device != CUDA)
+                 |                               |
+                 v                               v
+              register()                      register()
+                 |                               |
+                 +---------------+---------------+
+                                 |
+                                 v
+                                READY
+                                 |
+                 +---------------+-------------------------------+
+                 |                                               |
+                 v                                               v
+    submit_store (handle path)                  submit_store (data path)
+    -> STORE request (async)                    -> prepare_store -> gather -> commit_store
+                 |                                               |
+                 +---------------+-------------------------------+
+                                 |
+                                 v
+                                READY
+                                 |
+                 +---------------+-------------------------------+
+                 |                                               |
+                 v                                               v
+  submit_retrieve (handle path)               submit_retrieve (data path)
+  -> RETRIEVE request (async)                 -> prepare_retrieve -> scatter -> commit_retrieve
+                 |                                               |
+                 +---------------+-------------------------------+
+                                 |
+                                 v
+                                READY
+                                 |
+                                 v
+                               close()
+```
+
+Overall data flow:
+- **CUDA path**: worker sends a handle, server pulls/pushes data directly.
+- **Non-CUDA path**: worker gathers/scatters paged KV and exchanges CPU-side data
+  via a transport-specific `NonGpuContext` implementation.
+
+### 2.2 Worker Side: TransferContext
+
+`TransferContext` is the worker-side transport abstraction with four methods:
+`register`, `submit_store`, `submit_retrieve`, and `close`.
+The contract is intentionally minimal so worker adapters only depend on these
+four lifecycle and transfer operations.
+
+- **HandleTransferContext** keeps the original CUDA IPC behavior:
+  worker sends a handle and server performs direct GPU-side transfer.
+- **DataTransferContext** is the non-CUDA path:
+  worker transfers actual data chunks through `NonGpuContext`.
+
+`DataTransferContext` flows:
+- **submit_store**: `prepare_store` → `gather_paged_kv_to_cpu` → `commit_store`
+- **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
+
+Why `prepare → data operation → commit`:
+- `prepare_*`: set up transport state (for SHM this allocates/returns shared buffers;
+  for pickle it is a protocol RPC that does not allocate transfer buffers).
+- gather/scatter: worker-local data movement between paged KV and contiguous
+  CPU chunks, performed between protocol phases.
+- `commit_*`: finalize and notify server to consume or release transfer state.
+
+`create_transfer_context()` selects the implementation once based on device type
+(CUDA → `HandleTransferContext`, otherwise → `DataTransferContext`).
+It also validates that all KV cache tensors share one device type and rejects
+mixed-device configurations by raising an error.
+
+| Context | What is transferred | Who performs copy work | Completion style |
+|---|---|---|---|
+| HandleTransferContext | Device handle/reference | Server pulls/pushes via IPC | Async MQ future |
+| DataTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
+
+### 2.3 Server Side: GPU Context vs Non-GPU Context
+
+- **GPU Context (existing path):** server uses CUDA IPC handles to access worker
+  device memory directly.
+- **Non-GPU Context:** server participates in two separate two-phase protocols
+  exposed by `NonGpuContext`: `prepare_store/commit_store` for store, and
+  `prepare_retrieve/commit_retrieve` for retrieve, plus lifecycle cleanup via
+  `close`.
+
+`NonGpuContext` implementations:
+- **NonGpuContextPickle**: serialize/deserialize chunk payloads with pickle.
+- **NonGpuContextShm**: shared-memory transport (planned/TODO).
+
+This split keeps server protocol stable while allowing transport-specific behavior
+behind one interface contract.
+
+### 2.4 Transport Comparison
 
 **Store (worker → server storage):**
 
 | Transport | Copies | Data flow |
 |---|---|---|
-| CUDA IPC | 2 | GPU KV → GPU staging buffer → CPU memory obj |
-| Pickle | 4 | GPU KV → CPU chunk → pickle.dumps → pickle.loads → CPU memory obj |
-| SHM (TODO) | 1 | GPU KV → CPU memory obj (SHM mapped) |
+| Handle (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
+| Pickle | 4 | GPU KV → CPU chunk → serialize → deserialize → CPU memory object |
+| SHM (TODO) | 1 | GPU KV → CPU memory object (SHM mapped) |
 
 **Retrieve (server storage → worker):**
 
 | Transport | Copies | Data flow |
 |---|---|---|
-| CUDA IPC | 2 | CPU memory obj → GPU staging buffer → GPU KV |
-| Pickle | 4 | CPU memory obj → pickle.dumps → pickle.loads → CPU chunk → GPU KV |
-| SHM (TODO) | 1 | CPU memory obj (SHM mapped) → GPU KV |
+| Handle (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
+| Pickle | 4 | CPU memory object → serialize → deserialize → CPU chunk → GPU KV |
+| SHM (TODO) | 1 | CPU memory object (SHM mapped) → GPU KV |
 
-**Applicability:**
-
-| Transport | Platform requirement | Pros | Cons |
+| Transport | Pros | Cons | Best fit |
 |---|---|---|---|
-| CUDA IPC | NVIDIA CUDA devices only | Async GPU streams, mature path | CUDA-only |
-| Pickle | Any device, no dependencies | Generally available, zero setup | 4 copies + serialisation overhead |
-| SHM (TODO) | `/dev/shm` capacity ≥ L1 cache size | Fewest copies (1), no serialisation | Requires sufficient shared memory |
+| Handle (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
+| Pickle | Works everywhere, no SHM setup | Extra serialization + copy overhead | Universal fallback |
+| SHM (TODO) | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput non-CUDA setups |
 
-## 2. Architecture Overview
+## 3. Protocol & Data Flow
 
-### 2.1 Layered architecture
+### 3.1 MQ Request Types Used by Non-GPU Path
 
-```
-vllm_multi_process_adapter.py    ← Engine adapter, device-agnostic
-  └── TransferContext             ← Worker-side transport abstraction (§3)
-        ├── HandleTransferContext    ← CUDA IPC + MQ future path
-        └── DataTransferContext     ← Synchronous gather/scatter path
-              └── NonGpuContext        ← Serialisation abstraction (§4.2)
-                    ├── NonGpuContextPickle   ← pickle.dumps/loads (§4.3)
-                    └── NonGpuContextShm      ← shared memory (§4.4, TODO)
-```
+The non-GPU path uses five request types:
 
-Two layers of abstraction serve different purposes:
+1. `REGISTER_KV_CACHE_NON_GPU_CONTEXT`  
+   Worker registers non-CUDA KV layout metadata so the server can reconstruct
+   the worker KV memory layout for store/retrieve operations.
 
-- **TransferContext** (§3) — decides **CUDA vs non-CUDA** routing at the
-  worker adapter level.
-- **NonGpuContext** (§4.2) — decides **how** CPU chunk data is serialised and
-  transported (pickle vs SHM). Only used inside `DataTransferContext`.
+2. `PREPARE_STORE`  
+   Worker asks server/transport to prepare store-side transfer state.
 
-### 2.2 State machine (worker ↔ server)
+3. `COMMIT_STORE`  
+   Worker commits store data so server can persist it into storage.
+
+4. `PREPARE_RETRIEVE`  
+   Worker asks server to prepare retrieval payload/state for a key.
+
+5. `COMMIT_RETRIEVE`  
+   Worker acknowledges retrieval completion so transport state can be finalized.
+
+### 3.2 Data Flow: Pickle Path
+
+Store:
+1. Worker `prepare_store` RPC.
+2. Worker gathers paged KV into CPU chunks.
+3. Worker `commit_store` sends serialized bytes.
+4. Server deserializes and writes to storage.
+
+Retrieve:
+1. Worker `prepare_retrieve` RPC.
+2. Server reads from storage and returns serialized bytes.
+3. Worker deserializes to CPU chunks.
+4. Worker scatters chunks back to paged KV.
+5. Worker `commit_retrieve` finalizes protocol state.
 
 ```text
-                           register_kv_caches()
-                                      |
-                                      v
-                    create_transfer_context(kv_caches)
-                                      |
-                     +----------------+----------------+
-                     |                                 |
-                     v                                 v
-              [device == cuda]                 [device != cuda]
-                     |                                 |
-                     v                                 v
-      HandleTransferContext.register()     DataTransferContext.register()
-      → REGISTER_KV_CACHE               → REGISTER_KV_CACHE_NON_GPU_CONTEXT
-        (CUDA IPC handles)                 (scalar metadata fields)
-                     |                         + create_non_gpu_context()
-                     +----------------+----------------+
-                                      |
-                                      v
-                              [READY / SERVING]
-                                      |
-                     +----------------+----------------+
-                     |                                 |
-                     v                                 v
-       transfer_ctx.submit_store()      transfer_ctx.submit_store()
-                     |                                 |
-                     v                                 v
-           STORE (GPU → L1)            gather_paged_kv_to_cpu()
-           [async MQ future]           + _non_gpu_context.prepare_store()
-                     |                 + _non_gpu_context.commit_store() [sync]
-                     v                         _store_done[id] = ok
-                 [READY]                               |
-                     +----------------+----------------+
-                                      |
-                                      v
-      transfer_ctx.submit_retrieve()  +  poll_finished()
-                                      |
-                     +----------------+----------------+
-                     |                                 |
-                     v                                 v
-          RETRIEVE (L1 → GPU)     _non_gpu_context.prepare_retrieve() [sync]
-          [async MQ future]       + scatter_cpu_to_paged_kv()
-                     |            + _non_gpu_context.commit_retrieve()
-                     v            _retrieve_done[id] = (ok, block_ids)
-                     +----------------+----------------+
-                                      |
-                                      v
-                              [READY / SERVING]
-                                      |
-                                      v
-                           unregister_kv_cache()
-                                      |
-                                      v
-                                  [TERMINATED]
+Store (pickle)
+Worker: prepare_store --> Server
+Worker: gather paged KV -> CPU chunks
+Worker: commit_store(serialized bytes) --> Server
+Server: deserialize -> storage write
+
+Retrieve (pickle)
+Worker: prepare_retrieve --> Server
+Server: read storage -> serialize bytes
+Server: serialized bytes --> Worker
+Worker: deserialize -> scatter to paged KV
+Worker: commit_retrieve --> Server
 ```
 
-## 3. Worker-side: TransferContext Abstraction
+### 3.3 Data Flow: SHM Path (TODO)
 
-### 3.1 Problem
+Store:
+1. Worker `prepare_store` obtains SHM slot/offset.
+2. Worker gathers directly into SHM-backed buffers.
+3. Worker `commit_store` notifies server to consume SHM data.
 
-Before this refactoring, `vllm_multi_process_adapter.py` contained
-non-CUDA-specific branching in every method — `register_kv_caches`,
-`submit_store_request`, `submit_retrieve_request`, `get_finished`, and the
-unhealthy drain path. Adding a third transport would require touching every
-branch.
-
-### 3.2 Solution
-
-`transfer_context.py` defines the `TransferContext` ABC with six methods:
-`register`, `submit_store`, `submit_retrieve`, `poll_finished`, `drain_all`,
-and `close`. The adapter holds a single `TransferContext` and delegates —
-no `if/else` anywhere.
-
-### 3.3 `create_transfer_context()` factory
-
-Inspects device types of all KV cache tensors **exactly once**. CUDA →
-`HandleTransferContext`; otherwise → `DataTransferContext`. Mixed device types
-are rejected.
-
-### 3.4 `HandleTransferContext`
-
-Wraps the original CUDA IPC path. Sends `REGISTER_KV_CACHE` / `STORE` /
-`RETRIEVE` messages with IPC handles, tracks async MQ futures.
-`poll_finished` queries futures; `drain_all` marks all pending as finished
-for unhealthy shutdown. Semantics identical to pre-refactoring.
-
-### 3.5 `DataTransferContext`
-
-Holds a `NonGpuContext` instance internally. Sends
-`REGISTER_KV_CACHE_NON_GPU_CONTEXT` with scalar metadata. Store and retrieve
-are **synchronous**: gather → prepare/commit, then record result in
-`_store_done` / `_retrieve_done`. `poll_finished` simply drains these dicts.
-
-## 4. Server-side: Non-GPU Context Protocol
-
-### 4.1 Why GPU context and non-GPU context need different protocols
-
-| | GPU context | non-GPU context |
-|---|---|---|
-| Registration | `REGISTER_KV_CACHE` — IPC handles | `REGISTER_KV_CACHE_NON_GPU_CONTEXT` — scalar fields |
-| Store | `STORE` — event handle + block IDs, server reads GPU directly | `STORE_CPU_CHUNKS` — serialised CPU tensors |
-| Retrieve | `RETRIEVE` — event handle + block IDs, server writes GPU directly | `RETRIEVE_CPU_CHUNKS` — key lookup, returns CPU tensors |
-
-Registration uses **scalar fields** (`block_size`, `num_layers`,
-`hidden_dim_size`, `dtype_str`, `use_mla`) instead of pickled objects
-to avoid cross-process pickle security and compatibility concerns. The
-server reconstructs `MemoryLayoutDesc` from the scalars internally.
-
-### 4.2 `NonGpuContext` ABC: two-phase prepare/commit
-
-The serialisation layer is abstracted behind `NonGpuContext` so that pickle
-and SHM can be swapped without touching `DataTransferContext` or the server.
-
-The ABC defines: `prepare_store`, `commit_store`, `prepare_retrieve`,
-`commit_retrieve`, `close`.
-
-Why two phases? Pickle can do everything in one step (prepare serialises,
-commit sends). SHM needs prepare to allocate a slot, then the worker writes
-into mapped memory, then commit tells the server "ready". The split
-accommodates both without forcing unnecessary round-trips on pickle.
-
-| Phase | Pickle | SHM (TODO) |
-|---|---|---|
-| `prepare_store` | `pickle.dumps(chunks)` → opaque handle | MQ `PREPARE_STORE` → get SHM offset → `memcpy` into SHM |
-| `commit_store` | MQ `STORE_CPU_CHUNKS`, block for ack | MQ `COMMIT_STORE` → server reads from SHM |
-| `prepare_retrieve` | MQ `RETRIEVE_CPU_CHUNKS` → `pickle.loads` | MQ `PREPARE_RETRIEVE` → server writes to SHM → map tensor views |
-| `commit_retrieve` | no-op | MQ `FINISH_READ` → release SHM read lock |
-
-`create_non_gpu_context()` factory currently always returns `NonGpuContextPickle`.
-Future: probe `/dev/shm` availability and capacity, fall back to pickle if
-insufficient.
-
-## 5. Data Path: Gather / Scatter
-
-### 5.1 Chunk format
-
-- **Non-MLA**: `[2, num_layers, chunk_tokens, hidden_dim]` — dim 0 = `(K, V)`.
-- **MLA**: `[num_layers, chunk_tokens, hidden_dim]` — single latent vector.
-
-Where `chunk_tokens = blocks_per_chunk × block_size`.
-
-### 5.2 Supported KV layouts
-
-| Format enum | Layout | Shape per layer |
-|---|---|---|
-| `NL_X_TWO_NB_BS_NH_HS` | NHD | `[2, NB, BS, NH, HS]` |
-| `NL_X_NB_TWO_BS_NH_HS` | NHD (flashinfer) | `[NB, 2, BS, NH, HS]` |
-| `NL_X_TWO_NB_NH_BS_HS` | HND | `[2, NB, NH, BS, HS]` |
-| `NL_X_NB_TWO_NH_BS_HS` | HND (flashinfer) | `[NB, 2, NH, BS, HS]` |
-| `NL_X_NB_BS_HS` | MLA | `[NB, BS, HS]` |
-
-### 5.3 Block-level indexing
-
-Gather and scatter operate at **block granularity** (`tensor[block_ids]`)
-rather than per-token `index_select` / `index_copy_`. For HND layouts, a
-`permute(0, 2, 1, 3)` converts between head-major and token-major order.
-
-### 5.4 Utility functions
-
-- **`compute_kv_layout`** — extracts `(block_size, num_layers, hidden_dim_size, dtype_str, gpu_kv_format)` from live KV tensors.
-- **`gather_paged_kv_to_cpu`** — gathers paged blocks into CPU chunk tensors.
-- **`scatter_cpu_to_paged_kv`** — scatters CPU chunks back into device paged KV tensors. Respects `skip_first_n_tokens` for partial-prefix retrieval.
-
-## Non-goals
-
-- No change to existing CUDA IPC path semantics.
-- No CPU-specific logic added to shared `gpu_connector/utils.py`.
-- No wire-protocol incompatibility between CUDA and non-GPU context workers in
-  the same cluster.
+Retrieve:
+1. Worker `prepare_retrieve` asks server to populate SHM.
+2. Server writes retrieved chunks into SHM.
+3. Worker scatters from SHM-backed buffers into paged KV.
+4. Worker `commit_retrieve` releases/read-completes SHM state.
