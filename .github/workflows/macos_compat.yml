@@ -41,7 +41,10 @@ jobs:
     permissions:
       pull-requests: read
     outputs:
-      lmcache: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.lmcache == 'true' }}
+      # workflow_call / workflow_dispatch bypass the paths-filter (which
+      # only runs for push / pull_request). Treat both as "always run"
+      # so callers don't get a silently-skipped job.
+      lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || steps.filter.outputs.lmcache == 'true' }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         if: github.event_name == 'push'
