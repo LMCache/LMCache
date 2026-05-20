@@ -434,6 +434,16 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         self.init = False
         self.group_kv_cache_pointers_on_gpu: Optional[list[torch.Tensor]] = None
         self.group_tmp_buffer: Optional[list[torch.Tensor]] = None
+        # Per-group analogues of the scalar gpu_kv_format / block_size /
+        # page_buffer_size / head_size fields. Hybrid-attention models
+        # (Gemma 4, Gemma 3) expose layer groups with mismatched shapes
+        # — sliding-window vs global — so we cache per-group state here
+        # and feed it to the transfer kernel one group at a time.
+        # Populated by ``_initialize_kv_cache_pointers``.
+        self.group_gpu_kv_formats: Optional[list["lmc_ops.GPUKVFormat"]] = None
+        self.group_block_sizes: Optional[list[int]] = None
+        self.group_page_buffer_sizes: Optional[list[int]] = None
+        self.group_head_sizes: Optional[list[int]] = None
 
         self.store_stream = torch.cuda.Stream()
         self.load_stream = torch.cuda.Stream()
@@ -476,30 +486,13 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             )
         klg_manager = self.metadata.kv_layer_groups_manager
 
-        # Heterogeneous-block_size sanity check.
-        #
-        # ``self.block_size`` is a single scalar sampled from the first
-        # layer's ``bs`` and is forwarded to ``multi_layer_kv_transfer``
-        # as a *global* kernel parameter below (see ``to_gpu`` /
-        # ``from_gpu`` / layerwise paths). That works only when every
-        # group shares the same ``shape_desc.bs``. Mixed-compression
-        # deployments (e.g. DeepSeek V4 with compressed + dense groups
-        # in the same model) violate this assumption and will silently
-        # corrupt transfers on this non-MP path. Log loudly so the
-        # mismatch surfaces before it turns into a data-corruption bug;
-        # the MP path (see ``GPUCacheContext`` / mp server) handles
-        # per-group ``bs`` correctly and should be used instead.
-        heterogeneous_bs = {g.shape_desc.bs for g in klg_manager.kv_layer_groups}
-        if len(heterogeneous_bs) > 1:
-            logger.warning(
-                "VLLMPagedMemGPUConnectorV3 detected heterogeneous per-group "
-                "block_size %s but forwards a single scalar block_size=%d to "
-                "multi_layer_kv_transfer. This non-MP path is NOT adapted for "
-                "mixed-compression KV layouts and may corrupt transfers. Use "
-                "the multi-process connector path for such models.",
-                sorted(heterogeneous_bs),
-                self.block_size,
-            )
+        # Hybrid-attention models can expose KV groups with mismatched
+        # block_size / num_heads / head_size (sliding window vs global).
+        # We compute per-group format and sizes below and use them in
+        # ``to_gpu``/``from_gpu`` instead of forwarding the scalar fields,
+        # so the transfer kernel receives the right shape per group. The
+        # scalar fields above remain as a back-compat fallback for
+        # callers that haven't been ported.
 
         if self.use_gpu:
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
@@ -511,6 +504,10 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             ]
 
         self.group_kv_cache_pointers_on_gpu = []
+        self.group_gpu_kv_formats = []
+        self.group_block_sizes = []
+        self.group_page_buffer_sizes = []
+        self.group_head_sizes = []
         for group in klg_manager.kv_layer_groups:
             ptrs = get_group_data_ptrs(
                 self.kvcaches, self.gpu_kv_format, group.layer_indices
@@ -521,24 +518,75 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
             gpu.copy_(cpu)
             self.group_kv_cache_pointers_on_gpu.append(gpu)
 
+            # Re-derive the format from this group's slice so hybrid models
+            # that present different layouts per group still get the right
+            # ``GPUKVFormat`` (uniform models simply re-derive the same
+            # value). Block / head sizes come from the group's
+            # ``shape_desc`` — already discovered by
+            # ``KVLayerGroupsManager`` and authoritative for this group.
+            group_kv_caches = [self.kvcaches[i] for i in group.layer_indices]
+            group_gpu_kv_format, _ = normalize_kv_and_discover_format(
+                group_kv_caches, EngineType.VLLM, layout_hints=self.layout_hints
+            )
+            self.group_gpu_kv_formats.append(group_gpu_kv_format)
+            self.group_block_sizes.append(group.shape_desc.bs)
+            self.group_page_buffer_sizes.append(
+                group.shape_desc.nb * group.shape_desc.bs
+            )
+            self.group_head_sizes.append(group.shape_desc.hs)
+
         self.init = True
         logger.info("init kv cache pointers success in VLLMPagedMemGPUConnectorV3")
+
+    def _resolve_group_slot_mapping(
+        self, group_idx: int, **kwargs
+    ) -> torch.Tensor:
+        """Pick the slot mapping that applies to KV layer group ``group_idx``.
+
+        Hybrid-attention paths set ``slot_mappings_by_group``: a per-group
+        positional tuple where index ``i`` is the slot mapping for KV
+        layer group ``i``. Uniform paths (or older callers) only set
+        ``slot_mapping`` — a single tensor that applies to every group.
+        We try the per-group tuple first and fall through to the scalar
+        when it isn't present or doesn't cover this group.
+        """
+        slot_mappings_by_group = kwargs.get("slot_mappings_by_group")
+        if slot_mappings_by_group is not None:
+            if group_idx < len(slot_mappings_by_group):
+                return slot_mappings_by_group[group_idx]
+            # Fewer per-group mappings than connector groups: log so we see
+            # the mismatch instead of silently using the scalar fallback.
+            logger.warning(
+                "slot_mappings_by_group has %d entries but connector group "
+                "index %d was requested; falling back to scalar slot_mapping.",
+                len(slot_mappings_by_group),
+                group_idx,
+            )
+        if "slot_mapping" not in kwargs:
+            raise ValueError(
+                "Either 'slot_mapping' or 'slot_mappings_by_group' must be "
+                "provided in kwargs."
+            )
+        return kwargs["slot_mapping"]
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         assert memory_obj.raw_tensor is not None
-        assert "slot_mapping" in kwargs
+        assert "slot_mapping" in kwargs or "slot_mappings_by_group" in kwargs
         if self.use_mla:
             assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT
         else:
             assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
 
-        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None
         assert self.kvcaches[0].device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
+        assert self.group_gpu_kv_formats is not None
+        assert self.group_block_sizes is not None
+        assert self.group_page_buffer_sizes is not None
+        assert self.group_head_sizes is not None
 
         # avoid read/write stream race condition for shared block
         # this will only be potentially non-zero for the first
@@ -546,7 +594,23 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
         vllm_cached = kwargs.get("vllm_cached_tokens", 0)
         skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
 
-        for i, kv_cache_pointer in enumerate(self.group_kv_cache_pointers_on_gpu):
+        for i, (
+            kv_cache_pointer,
+            group_gpu_kv_format,
+            group_block_size,
+            group_page_buffer_size,
+            group_head_size,
+        ) in enumerate(
+            zip(
+                self.group_kv_cache_pointers_on_gpu,
+                self.group_gpu_kv_formats,
+                self.group_block_sizes,
+                self.group_page_buffer_sizes,
+                self.group_head_sizes,
+                strict=True,
+            )
+        ):
+            slot_mapping = self._resolve_group_slot_mapping(i, **kwargs)
             memory_obj_tensor = memory_obj.get_tensor(i)
             assert memory_obj_tensor is not None
             lmc_ops.multi_layer_kv_transfer(
@@ -554,30 +618,47 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 kv_cache_pointer,
                 slot_mapping[start:end],
                 self.device,
-                self.page_buffer_size,
+                group_page_buffer_size,
                 lmc_ops.TransferDirection.H2D,
-                self.gpu_kv_format,
-                block_size=self.block_size,
-                head_size=self.head_size,
+                group_gpu_kv_format,
+                block_size=group_block_size,
+                head_size=group_head_size,
                 skip_prefix_n_tokens=skip_prefix_n_tokens,
             )
 
     @_lmcache_nvtx_annotate
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         assert memory_obj.raw_tensor is not None
-        assert "slot_mapping" in kwargs
+        assert "slot_mapping" in kwargs or "slot_mappings_by_group" in kwargs
 
-        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None
         assert self.kvcaches[0].device == self.device
         self._initialize_kv_cache_pointers()
         assert self.group_kv_cache_pointers_on_gpu is not None
+        assert self.group_gpu_kv_formats is not None
+        assert self.group_block_sizes is not None
+        assert self.group_page_buffer_sizes is not None
+        assert self.group_head_sizes is not None
         with torch.cuda.stream(self.store_stream):
             if not self.use_gpu or end - start != self.chunk_size:
-                for i, kv_cache_pointer in enumerate(
-                    self.group_kv_cache_pointers_on_gpu
+                for i, (
+                    kv_cache_pointer,
+                    group_gpu_kv_format,
+                    group_block_size,
+                    group_page_buffer_size,
+                    group_head_size,
+                ) in enumerate(
+                    zip(
+                        self.group_kv_cache_pointers_on_gpu,
+                        self.group_gpu_kv_formats,
+                        self.group_block_sizes,
+                        self.group_page_buffer_sizes,
+                        self.group_head_sizes,
+                        strict=True,
+                    )
                 ):
+                    slot_mapping = self._resolve_group_slot_mapping(i, **kwargs)
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None
                     lmc_ops.multi_layer_kv_transfer(
@@ -585,29 +666,43 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
-                        self.page_buffer_size,
+                        group_page_buffer_size,
                         lmc_ops.TransferDirection.D2H,
-                        self.gpu_kv_format,
-                        block_size=self.block_size,
-                        head_size=self.head_size,
+                        group_gpu_kv_format,
+                        block_size=group_block_size,
+                        head_size=group_head_size,
                     )
             else:
                 # kvcaches -> gpu_buffer -> memobj
                 assert self.group_tmp_buffer is not None
-                for i, kv_cache_pointer in enumerate(
-                    self.group_kv_cache_pointers_on_gpu
+                for i, (
+                    kv_cache_pointer,
+                    group_gpu_kv_format,
+                    group_block_size,
+                    group_page_buffer_size,
+                    group_head_size,
+                ) in enumerate(
+                    zip(
+                        self.group_kv_cache_pointers_on_gpu,
+                        self.group_gpu_kv_formats,
+                        self.group_block_sizes,
+                        self.group_page_buffer_sizes,
+                        self.group_head_sizes,
+                        strict=True,
+                    )
                 ):
+                    slot_mapping = self._resolve_group_slot_mapping(i, **kwargs)
                     tmp_gpu_buffer = self.group_tmp_buffer[i][:, :, : end - start, :]
                     lmc_ops.multi_layer_kv_transfer(
                         tmp_gpu_buffer,
                         kv_cache_pointer,
                         slot_mapping[start:end],
                         self.device,
-                        self.page_buffer_size,
+                        group_page_buffer_size,
                         lmc_ops.TransferDirection.D2H,
-                        self.gpu_kv_format,
-                        block_size=self.block_size,
-                        head_size=self.head_size,
+                        group_gpu_kv_format,
+                        block_size=group_block_size,
+                        head_size=group_head_size,
                     )
                     memory_obj_tensor = memory_obj.get_tensor(i)
                     assert memory_obj_tensor is not None

@@ -116,9 +116,13 @@ class RequestTracker:
     # The token ids that has been scheduled so far
     token_ids: list[int]
 
-    # The block ids that has been allocated so far
-    # NOTE: allocated blocks could be more than the number of tokens
-    allocated_block_ids: list[int]
+    # Block ids allocated so far, grouped by KV cache group. Hybrid-attention
+    # models (Gemma 4, Gemma 3) expose multiple KV groups — one per attention
+    # shape (sliding window vs global) — and vLLM's scheduler tracks block
+    # allocations per group. Storing per-group preserves that structure
+    # end-to-end through the connector. NOTE: allocated blocks could be more
+    # than the number of tokens.
+    allocated_block_ids_by_group: tuple[list[int], ...]
 
     # The number of tokens that has been saved
     num_saved_tokens: int = 0
@@ -142,6 +146,45 @@ class RequestTracker:
     # The number of tokens that are cached in LMCache for this request
     num_lmcache_cached_tokens: int = 0
 
+    @staticmethod
+    def _normalize_block_ids(
+        block_ids: Union[Optional[tuple[list[int], ...]], list[int], tuple[Any, ...]],
+    ) -> tuple[list[int], ...]:
+        """Coerce vLLM's heterogeneous ``block_ids`` shapes into a per-group tuple.
+
+        vLLM has shipped three shapes across versions: a flat ``list[int]``,
+        a single-tuple ``(list[int],)`` for one KV group, and an N-tuple
+        ``(list[int], ...)`` for hybrid models. Empty inputs become an empty
+        tuple, never a ``(list[int],)`` of one empty list — the caller treats
+        the two as different states (no update vs reset to empty single group).
+        """
+        if block_ids is None:
+            return tuple()
+        if isinstance(block_ids, tuple):
+            if len(block_ids) == 0:
+                return tuple()
+            return tuple(list(group) for group in block_ids)
+        if isinstance(block_ids, list):
+            if len(block_ids) == 0:
+                return tuple()
+            if isinstance(block_ids[0], list):
+                return tuple(list(group) for group in block_ids)
+            return (list(block_ids),)
+        raise ValueError(f"Unsupported block_ids type {type(block_ids)}")
+
+    @property
+    def num_allocated_blocks(self) -> int:
+        """Maximum block count across KV groups.
+
+        Hybrid attention groups can have different per-token block counts
+        (sliding window vs global), so pick the max — that's the worst-case
+        space the request occupies and what callers (e.g. token-slot capacity
+        checks) need.
+        """
+        if not self.allocated_block_ids_by_group:
+            return 0
+        return max(len(group) for group in self.allocated_block_ids_by_group)
+
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
@@ -164,24 +207,11 @@ class RequestTracker:
             request_priority (int): the priority of the request
             skip_save (bool): whether the request cache should be saved
         """
-        # vLLM 0.9.0 update: request.block_ids changed from list[int] to
-        # tuple[list[int]]
-        # Need to check the type of request.block_ids
-
-        unfolded_block_ids = []
-
-        if not isinstance(new_request.block_ids[0], list):
-            unfolded_block_ids = new_request.block_ids.copy()
-        else:
-            # According to the vLLM code
-            # (https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/
-            # sched/scheduler.py#L943),
-            # only one KVCacheGroup is supported in connector for now.
-
-            # TODO: Please support multiple KVCacheGroup in connector.
-            # NOTE: Also, `update` method in RequestTracker should be
-            # updated accordingly.
-            unfolded_block_ids = new_request.block_ids[0].copy()
+        # vLLM exposes ``block_ids`` as either a flat list (single KV group)
+        # or a tuple of lists (multiple KV groups, e.g. Gemma 4 hybrid
+        # attention). _normalize_block_ids coerces both shapes into a
+        # per-group tuple so the rest of the tracker stays shape-agnostic.
+        block_ids_by_group = RequestTracker._normalize_block_ids(new_request.block_ids)
 
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
@@ -194,7 +224,7 @@ class RequestTracker:
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
             token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
-            allocated_block_ids=unfolded_block_ids,
+            allocated_block_ids_by_group=block_ids_by_group,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
             mm_hashes=mm_hashes,
@@ -226,28 +256,16 @@ class RequestTracker:
             # https://github.com/vllm-project/vllm/commit/
             # b029de9902aa3ac58806c8c17776c7074175b6db#
             # diff-cafd89ce8a698a56acb24ada62831cbc7a980782f78a52d1742ba238031f296cL94
-            new_block_ids = []
-        elif len(new_block_ids) == 0:
-            new_block_ids = []
-        elif isinstance(new_block_ids, tuple):
-            new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list):
-            # If input is a list, flatten it to handle potential nesting.
-            # This also correctly processes already-flat lists.
-            new_block_ids = [
-                i
-                for elem in new_block_ids
-                for i in (elem if isinstance(elem, list) else [elem])
-            ]
+            new_block_ids_by_group = tuple()
         else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
+            new_block_ids_by_group = self._normalize_block_ids(new_block_ids)
 
         if preempted:
             assert all_token_ids is not None, (
                 f"Preempted request {self.req_id} has no all_token_ids"
             )
             # the block ids will change after preemption
-            self.allocated_block_ids = new_block_ids
+            self.allocated_block_ids_by_group = new_block_ids_by_group
             # reset the number of saved tokens
             self.num_saved_tokens = lmcache_cached_tokens
             num_computed_tokens = max(lmcache_cached_tokens, vllm_cached_tokens)
@@ -262,7 +280,32 @@ class RequestTracker:
             )
             self.token_ids = all_token_ids[:num_tokens_needed]
         else:
-            self.allocated_block_ids.extend(new_block_ids)
+            # vLLM may reschedule a request without allocating new blocks,
+            # especially after a successful cache load. An empty per-group
+            # tuple means "no change" — distinct from "all KV groups
+            # disappeared", which would be a real bug to surface.
+            if not new_block_ids_by_group:
+                pass
+            elif not self.allocated_block_ids_by_group:
+                self.allocated_block_ids_by_group = new_block_ids_by_group
+            elif len(self.allocated_block_ids_by_group) != len(
+                new_block_ids_by_group
+            ):
+                raise ValueError(
+                    "KV cache group count changed for request "
+                    f"{self.req_id}: had "
+                    f"{len(self.allocated_block_ids_by_group)}, "
+                    f"got {len(new_block_ids_by_group)}"
+                )
+            else:
+                self.allocated_block_ids_by_group = tuple(
+                    current + new
+                    for current, new in zip(
+                        self.allocated_block_ids_by_group,
+                        new_block_ids_by_group,
+                        strict=True,
+                    )
+                )
             self.token_ids.extend(new_token_ids)
 
         # When a request is scheduled again, and the number of new tokens
@@ -278,8 +321,21 @@ class ReqMeta:
     req_id: str
     # Request tokens
     token_ids: list[int]  # torch.Tensor
-    # Slot mapping
+    # Slot mapping. For hybrid attention this is the longest per-group
+    # mapping — see slot_mappings_by_layer for the per-layer view the GPU
+    # connector actually consumes.
     slot_mapping: torch.Tensor
+    # Per-group block ids — kept on the meta so worker-side bookkeeping
+    # (failed-load invalidation, capacity checks) can still see the
+    # per-group structure after the tracker is out of scope.
+    block_ids_by_group: Optional[tuple[list[int], ...]] = None
+    # Per-group slot mapping tensors, ordered by group index.
+    slot_mappings_by_group: Optional[tuple[torch.Tensor, ...]] = None
+    # Per-layer slot mapping. The GPU connector resolves a layer's mapping
+    # by name when the model has hybrid attention with mismatched per-group
+    # slot tables; consumers fall back to ``slot_mapping`` for uniform
+    # models.
+    slot_mappings_by_layer: Optional[dict[str, torch.Tensor]] = None
 
     # Whether is last prefill or not
     is_last_prefill: bool = False
@@ -294,9 +350,32 @@ class ReqMeta:
     request_configs: Optional[dict] = None
 
     @staticmethod
+    def _get_group_block_sizes(
+        num_groups: int,
+        fallback_block_size: int,
+        kv_cache_groups: Optional[list[Any]] = None,
+    ) -> tuple[int, ...]:
+        """Resolve per-group block sizes from vLLM's KV cache groups.
+
+        vLLM's hybrid attention manager stores ``KVCacheSpec.block_size``
+        per group (sliding-window groups can use smaller blocks than
+        global-attention groups). When that metadata isn't available
+        (older vLLM, single-group models), every group falls back to
+        ``fallback_block_size``.
+        """
+        group_block_sizes: list[int] = []
+        for gid in range(num_groups):
+            group_block_size = fallback_block_size
+            if kv_cache_groups is not None and gid < len(kv_cache_groups):
+                group_block_size = kv_cache_groups[gid].kv_cache_spec.block_size
+            group_block_sizes.append(group_block_size)
+        return tuple(group_block_sizes)
+
+    @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
         block_size: int,
+        kv_cache_groups: Optional[list[Any]] = None,
         lmcache_chunk_size: int = 256,
         load_spec: Optional[LoadSpec] = None,
         discard_partial_chunks: bool = True,
@@ -306,7 +385,11 @@ class ReqMeta:
 
         Args:
             tracker (RequestTracker): the request tracker.
-            block_size (int): the block size in vLLM.
+            block_size (int): the fallback block size in vLLM (used when
+                ``kv_cache_groups`` doesn't supply per-group sizes).
+            kv_cache_groups: vLLM's resolved KV cache groups. Each entry's
+                ``kv_cache_spec.block_size`` and ``layer_names`` drive the
+                per-group / per-layer slot-mapping construction.
             lmcache_chunk_size (int): the chunk size for LMCache.
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             discard_partial_chunks (bool): whether to discard partial chunks.
@@ -380,31 +463,94 @@ class ReqMeta:
             )
             token_ids = token_ids.tolist()
 
-        num_blocks = len(tracker.allocated_block_ids)
+        # Compute per-group block sizes once; sliding-window groups can
+        # have a smaller block size than global groups.
+        group_block_sizes = ReqMeta._get_group_block_sizes(
+            len(tracker.allocated_block_ids_by_group),
+            block_size,
+            kv_cache_groups,
+        )
 
-        if len(token_ids) > num_blocks * block_size:
+        max_token_slots = max(
+            (
+                len(group_block_ids) * group_block_sizes[gid]
+                for gid, group_block_ids in enumerate(
+                    tracker.allocated_block_ids_by_group
+                )
+            ),
+            default=0,
+        )
+        if len(token_ids) > max_token_slots:
             logger.error(
-                "The number of tokens is more than the number of blocks"
-                " for request %s. "
-                "Something might be wrong in scheduling logic!",
+                "Number of tokens exceeds available block slots for "
+                "request %s; something is wrong in scheduling.",
                 tracker.req_id,
             )
             logger.error(
-                "Num tokens: %d, num blocks: %d, block size: %d",
+                "Num tokens: %d, max token slots: %d, group block sizes: %s",
                 len(token_ids),
-                num_blocks,
-                block_size,
+                max_token_slots,
+                group_block_sizes,
             )
 
-        block_ids = torch.tensor(tracker.allocated_block_ids, dtype=torch.long)
-        block_offsets = torch.arange(0, block_size, dtype=torch.long)
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids.reshape((num_blocks, 1)) * block_size
-        )
+        # Build a slot mapping per group. In HYBRID KV cache mode (multiple
+        # groups) vLLM reserves block_id=0 as a "shared null block"
+        # placeholder for sliding-window prefix tokens that fall outside
+        # the window — those slots must stay PAD (-1) instead of pointing
+        # at a real KV page, otherwise the connector reads/writes garbage.
+        # In UNIFORM mode (`--disable-hybrid-kv-cache-manager` or any
+        # single-group deployment) block_id=0 is a real block and must
+        # NOT be masked; doing so corrupts the slot map and triggers
+        # CUDA illegal memory access in the transfer kernel.
+        is_hybrid_kv = len(tracker.allocated_block_ids_by_group) > 1
+        slot_mappings_by_group: dict[int, torch.Tensor] = {}
+        for gid, group_block_ids in enumerate(tracker.allocated_block_ids_by_group):
+            group_block_size = group_block_sizes[gid]
+            block_offsets = torch.arange(0, group_block_size, dtype=torch.long)
+            group_num_blocks = len(group_block_ids)
+            block_ids_tensor = torch.tensor(group_block_ids, dtype=torch.long)
+            mapping = (
+                block_offsets.reshape((1, group_block_size))
+                + block_ids_tensor.reshape((group_num_blocks, 1)).clamp_min(0)
+                * group_block_size
+            )
+            if is_hybrid_kv:
+                null_block_mask = block_ids_tensor.eq(0).reshape((group_num_blocks, 1))
+                if null_block_mask.any():
+                    mapping = mapping.masked_fill(null_block_mask, -1)
+            mapping = mapping.flatten()[: len(token_ids)]
+            assert mapping.dtype == torch.long
+            if mapping.shape[0] < len(token_ids):
+                logger.warning(
+                    "Request %s group %d slot mapping covers only %d / %d "
+                    "tokens (group block size=%d, num blocks=%d).",
+                    tracker.req_id,
+                    gid,
+                    mapping.shape[0],
+                    len(token_ids),
+                    group_block_size,
+                    group_num_blocks,
+                )
+            slot_mappings_by_group[gid] = mapping
 
-        slot_mapping = slot_mapping.flatten()[: len(token_ids)]
-        assert slot_mapping.dtype == torch.long  # TODO: this could be removed
+        # The legacy ``slot_mapping`` field is kept for callers (and
+        # external integrations) that haven't been updated to per-group.
+        # Pick the per-group mapping with the most coverage so a
+        # uniform-model consumer still sees a usable tensor.
+        if slot_mappings_by_group:
+            slot_mapping = max(
+                slot_mappings_by_group.values(),
+                key=lambda mapping: mapping.shape[0],
+            )
+        else:
+            slot_mapping = torch.empty((0,), dtype=torch.long)
+
+        slot_mappings_by_layer: dict[str, torch.Tensor] = {}
+        if kv_cache_groups is not None:
+            for gid, kv_cache_group in enumerate(kv_cache_groups):
+                group_mapping = slot_mappings_by_group.get(gid, slot_mapping)
+                for layer_name in kv_cache_group.layer_names:
+                    slot_mappings_by_layer[layer_name] = group_mapping
 
         # For load operation: log if the request is scheduled to load
         if load_spec is not None and load_spec.can_load:
@@ -421,11 +567,26 @@ class ReqMeta:
             total_chunks_for_req = math.ceil(tracker.prompt_len / lmcache_chunk_size)
             tracker.disagg_spec.total_chunks = total_chunks_for_req
 
+        ordered_slot_mappings_by_group = (
+            tuple(
+                slot_mappings_by_group[gid]
+                for gid in sorted(slot_mappings_by_group.keys())
+            )
+            if slot_mappings_by_group
+            else None
+        )
+
         # Note: We keep load_spec even when can_load=False to pass metrics to worker
         return ReqMeta(
             req_id=tracker.req_id,
             token_ids=token_ids,
             slot_mapping=slot_mapping,
+            block_ids_by_group=tuple(
+                list(group_block_ids)
+                for group_block_ids in tracker.allocated_block_ids_by_group
+            ),
+            slot_mappings_by_group=ordered_slot_mappings_by_group,
+            slot_mappings_by_layer=slot_mappings_by_layer or None,
             is_last_prefill=is_last_prefill,
             save_spec=save_spec,
             load_spec=load_spec,
@@ -462,6 +623,21 @@ class LMCacheConnectorV1Impl:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.worker_count = vllm_config.parallel_config.tensor_parallel_size
 
+        # Hybrid attention models need vLLM's resolved KV cache groups so
+        # we can build per-group / per-layer slot mappings. The connector
+        # base class has stored this on a public field in some revisions
+        # and a private one in others; fall back across both rather than
+        # pinning to a single attribute name.
+        self.kv_cache_config = getattr(parent, "kv_cache_config", None) or getattr(
+            parent, "_kv_cache_config", None
+        )
+        if self.kv_cache_config is None:
+            logger.warning(
+                "LMCacheConnectorV1Impl: kv_cache_config not found on parent "
+                "connector. Hybrid-attention features will fall back to the "
+                "single-group block-size path."
+            )
+
         # Load and configure LMCache config
         config = lmcache_get_or_create_config()
         assert isinstance(config, LMCacheEngineConfig), (
@@ -490,6 +666,83 @@ class LMCacheConnectorV1Impl:
             VLLM_VERSION,
             getattr(self.lmcache_engine, "metadata", None),
         )
+
+    def _get_group_block_sizes(
+        self, num_groups: Optional[int] = None
+    ) -> tuple[int, ...]:
+        """Per-group block sizes from the resolved vLLM KV cache groups.
+
+        ``num_groups`` defaults to the number of groups vLLM exposes; pass
+        a different value when the request has fewer groups than the
+        engine knows about (e.g. dynamic resize). Each entry falls back to
+        ``self._block_size`` when the corresponding ``kv_cache_group``
+        isn't available, so single-group / older-vLLM deployments behave
+        as before.
+        """
+        kv_cache_groups = getattr(self.kv_cache_config, "kv_cache_groups", []) or []
+        if num_groups is None:
+            num_groups = len(kv_cache_groups)
+        group_block_sizes: list[int] = []
+        for gid in range(num_groups):
+            group_block_size = self._block_size
+            if gid < len(kv_cache_groups):
+                group_block_size = kv_cache_groups[gid].kv_cache_spec.block_size
+            group_block_sizes.append(group_block_size)
+        return tuple(group_block_sizes)
+
+    def _get_max_token_slots(
+        self, block_ids_by_group: tuple[list[int], ...]
+    ) -> int:
+        """Worst-case token-slot capacity across all KV groups.
+
+        Capacity is per-group ``len(block_ids) * group_block_size``; the
+        max is what callers (e.g. token-truncation logic in
+        ``update_state_after_alloc``) need to ensure they don't drop a
+        group's payload by sizing to a smaller group.
+        """
+        group_block_sizes = self._get_group_block_sizes(len(block_ids_by_group))
+        return max(
+            (
+                len(block_ids_for_group) * group_block_sizes[gid]
+                for gid, block_ids_for_group in enumerate(block_ids_by_group)
+            ),
+            default=0,
+        )
+
+    def _resolve_full_slot_mapping(self, request: ReqMeta) -> torch.Tensor:
+        """Pick a slot-mapping tensor that covers every token.
+
+        ``request.slot_mapping`` is the longest per-group mapping, which
+        is enough for uniform models. With hybrid attention some groups
+        may be shorter than the request's token list; in that case fall
+        back to the longest tensor available across
+        ``slot_mappings_by_group`` and ``slot_mappings_by_layer``. Raises
+        if no mapping covers the full token count — that's a real bug
+        and surfacing it here is better than silently dropping tokens.
+        """
+        token_count = len(request.token_ids)
+        slot_mapping = request.slot_mapping
+
+        if slot_mapping.shape[0] >= token_count:
+            return slot_mapping[:token_count]
+
+        candidates: list[torch.Tensor] = []
+        if request.slot_mappings_by_group is not None:
+            candidates.extend(request.slot_mappings_by_group)
+        if request.slot_mappings_by_layer is not None:
+            candidates.extend(request.slot_mappings_by_layer.values())
+
+        if candidates:
+            slot_mapping = max(candidates, key=lambda mapping: mapping.shape[0])
+
+        if slot_mapping.shape[0] < token_count:
+            raise ValueError(
+                "No slot mapping fully covers request "
+                f"{request.req_id}: token_count={token_count}, "
+                f"max_slot_mapping={slot_mapping.shape[0]}"
+            )
+
+        return slot_mapping[:token_count]
 
     def _apply_extra_config(
         self, config: LMCacheEngineConfig, vllm_config: "VllmConfig"
@@ -787,7 +1040,15 @@ class LMCacheConnectorV1Impl:
 
             tokens = request.token_ids
             # TODO: have a pre-allocated buffer to hold the slot_mappings
-            slot_mapping = request.slot_mapping.to(self.device)
+            slot_mapping = self._resolve_full_slot_mapping(request).to(self.device)
+            slot_mappings_by_group = (
+                tuple(
+                    mapping.to(self.device)
+                    for mapping in request.slot_mappings_by_group
+                )
+                if request.slot_mappings_by_group is not None
+                else None
+            )
             assert len(tokens) == len(slot_mapping)
 
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
@@ -812,6 +1073,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        slot_mappings_by_group=slot_mappings_by_group,
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     )
                 else:
@@ -820,6 +1082,7 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         kvcaches=kvcaches,
                         slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                        slot_mappings_by_group=slot_mappings_by_group,
                         vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                         sync=sync,
                     )
@@ -833,6 +1096,7 @@ class LMCacheConnectorV1Impl:
                     token_mask[:lmcache_cached_tokens],
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                    slot_mappings_by_group=slot_mappings_by_group,
                     vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
                     request_configs=request.request_configs,
                     req_id=request.req_id,
@@ -863,6 +1127,8 @@ class LMCacheConnectorV1Impl:
                         token_mask[:lmcache_cached_tokens],
                         ret_token_mask,
                         slot_mapping[:lmcache_cached_tokens],
+                        request.slot_mappings_by_group,
+                        request.block_ids_by_group,
                     )
                     self._invalid_block_ids.update(missing_blocks)
 
@@ -872,6 +1138,8 @@ class LMCacheConnectorV1Impl:
         expected_mask: torch.Tensor,
         ret_mask: torch.Tensor,
         slot_mapping: torch.Tensor,
+        slot_mappings_by_group: Optional[tuple[torch.Tensor, ...]] = None,
+        block_ids_by_group: Optional[tuple[list[int], ...]] = None,
     ) -> set[int]:
         """Record block IDs associated with failed load attempts.
 
@@ -890,6 +1158,13 @@ class LMCacheConnectorV1Impl:
                 are False.
             slot_mapping: Tensor indicating slot IDs for each token. The block
                 ID is computed by dividing the slot ID by the block size.
+            slot_mappings_by_group: Per-group slot mappings for hybrid
+                attention models. When provided, used as a fallback path when
+                ``block_ids_by_group`` isn't available.
+            block_ids_by_group: Per-group allocated block IDs. Preferred input
+                for hybrid attention — slot mappings can contain padded null
+                slots that don't round-trip cleanly back to block IDs, so
+                walking the request's actual block tables is the safe path.
 
         Example:
             expected_mask = [F, T, T, T] meaning the 1st is in vLLM cache
@@ -920,22 +1195,80 @@ class LMCacheConnectorV1Impl:
         if missing_indices.numel() == 0:
             return set()
 
-        slot_mapping_cpu = slot_mapping.to(device="cpu", dtype=torch.long)
-        if slot_mapping_cpu.shape[0] > missing_mask.shape[0]:
-            slot_mapping_cpu = slot_mapping_cpu[: missing_mask.shape[0]]
+        missing_blocks: set[int] = set()
+        first_failed_token_idx = int(missing_indices[0].item())
 
-        missing_blocks_tensor = torch.unique(
-            slot_mapping_cpu[missing_indices] // self._block_size
-        )
-        missing_blocks = {int(block.item()) for block in missing_blocks_tensor}
+        # Prefer the request's actual block tables when available. Hybrid
+        # attention groups can have null-block placeholders or per-group
+        # projections that don't round-trip cleanly back to allocated
+        # block IDs through the slot mapping. A partial load is only safe
+        # up to the first failed token, so invalidate every request block
+        # touched from that boundary onward across all KV groups.
+        if block_ids_by_group is not None:
+            group_block_sizes = self._get_group_block_sizes(len(block_ids_by_group))
+            for gid, group_block_ids in enumerate(block_ids_by_group):
+                if not group_block_ids:
+                    continue
+                group_block_size = (
+                    group_block_sizes[gid]
+                    if gid < len(group_block_sizes)
+                    else self._block_size
+                )
+                first_failed_block = first_failed_token_idx // group_block_size
+                if first_failed_block >= len(group_block_ids):
+                    continue
+                missing_blocks.update(
+                    block_id
+                    for block_id in group_block_ids[first_failed_block:]
+                    if block_id > 0
+                )
+        else:
+            mapping_tensors = slot_mappings_by_group or (slot_mapping,)
+            group_block_sizes = self._get_group_block_sizes(len(mapping_tensors))
+            for gid, mapping in enumerate(mapping_tensors):
+                slot_mapping_cpu = mapping.to(device="cpu", dtype=torch.long)
+                if slot_mapping_cpu.shape[0] > missing_mask.shape[0]:
+                    slot_mapping_cpu = slot_mapping_cpu[: missing_mask.shape[0]]
+                valid_missing_indices = missing_indices[
+                    missing_indices < slot_mapping_cpu.shape[0]
+                ]
+                if valid_missing_indices.numel() == 0:
+                    logger.warning(
+                        "Request %s group %d slot mapping is shorter than "
+                        "all failed token indices (%d < %d); skipping group "
+                        "for invalid block reporting.",
+                        request_id,
+                        gid,
+                        slot_mapping_cpu.shape[0],
+                        int(missing_indices.max().item()) + 1,
+                    )
+                    continue
+
+                group_block_size = (
+                    group_block_sizes[gid]
+                    if gid < len(group_block_sizes)
+                    else self._block_size
+                )
+                valid_slots = slot_mapping_cpu[valid_missing_indices]
+                # Drop padded null-block slots (-1) so they never get
+                # invalidated as if they were real blocks.
+                valid_slots = valid_slots[valid_slots >= 0]
+                if valid_slots.numel() == 0:
+                    continue
+                missing_blocks_tensor = torch.unique(valid_slots // group_block_size)
+                missing_blocks.update(
+                    int(block.item()) for block in missing_blocks_tensor
+                )
 
         if not missing_blocks:
             return set()
 
         logger.warning(
-            "Request %s failed to load %d tokens across %d blocks",
+            "Request %s failed to load %d tokens from token %d onward "
+            "across %d blocks",
             request_id,
             missing_indices.numel(),
+            first_failed_token_idx,
             len(missing_blocks),
         )
         return missing_blocks
@@ -1018,7 +1351,15 @@ class LMCacheConnectorV1Impl:
                 token_ids = request.token_ids
                 assert isinstance(token_ids, list)
 
-                slot_mapping = request.slot_mapping
+                slot_mapping = self._resolve_full_slot_mapping(request)
+                slot_mappings_by_group = (
+                    tuple(
+                        mapping.to(self.device)
+                        for mapping in request.slot_mappings_by_group
+                    )
+                    if request.slot_mappings_by_group is not None
+                    else None
+                )
                 assert isinstance(slot_mapping, torch.Tensor)
                 assert len(slot_mapping) == len(token_ids)
 
@@ -1059,6 +1400,7 @@ class LMCacheConnectorV1Impl:
                     mask=store_mask,
                     kvcaches=kvcaches,
                     slot_mapping=slot_mapping,
+                    slot_mappings_by_group=slot_mappings_by_group,
                     offset=skip_leading_tokens,
                     sync=is_first,
                     req_id=request.req_id,
@@ -1119,7 +1461,15 @@ class LMCacheConnectorV1Impl:
 
             token_ids = request.token_ids
 
-            slot_mapping = request.slot_mapping
+            slot_mapping = self._resolve_full_slot_mapping(request)
+            slot_mappings_by_group = (
+                tuple(
+                    mapping.to(self.device)
+                    for mapping in request.slot_mappings_by_group
+                )
+                if request.slot_mappings_by_group is not None
+                else None
+            )
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
 
@@ -1184,6 +1534,7 @@ class LMCacheConnectorV1Impl:
                 mask=store_mask,
                 kvcaches=kvcaches,
                 slot_mapping=slot_mapping,
+                slot_mappings_by_group=slot_mappings_by_group,
                 offset=skip_leading_tokens,
                 transfer_spec=request.disagg_spec,
                 request_configs=request.request_configs,
@@ -1580,6 +1931,7 @@ class LMCacheConnectorV1Impl:
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
+                getattr(self.kv_cache_config, "kv_cache_groups", None),
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
@@ -1626,6 +1978,7 @@ class LMCacheConnectorV1Impl:
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
+                    getattr(self.kv_cache_config, "kv_cache_groups", None),
                     self._lmcache_chunk_size,
                     load_spec=load_spec,
                     discard_partial_chunks=self._discard_partial_chunks,
@@ -1714,8 +2067,8 @@ class LMCacheConnectorV1Impl:
                     len(request_tracker.token_ids),
                     num_current_tokens,
                 )
-                num_token_slots = (
-                    len(request_tracker.allocated_block_ids) * self._block_size
+                num_token_slots = self._get_max_token_slots(
+                    request_tracker.allocated_block_ids_by_group
                 )
                 tokens_to_keep = num_current_tokens
                 if num_token_slots < num_current_tokens:
@@ -1749,6 +2102,7 @@ class LMCacheConnectorV1Impl:
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
+                getattr(self.kv_cache_config, "kv_cache_groups", None),
                 self._lmcache_chunk_size,
                 load_spec=load_spec,
                 discard_partial_chunks=self._discard_partial_chunks,
@@ -1812,6 +2166,29 @@ class LMCacheConnectorV1Impl:
                 )
 
         return False, return_params
+
+    @_lmcache_nvtx_annotate
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """Hybrid-attention completion callback (vLLM HMA scheduler).
+
+        vLLM's hybrid KV cache manager calls this in place of
+        ``request_finished`` so the per-group block tables can be passed
+        through. Our completion bookkeeping is request-centric (not
+        block-centric), so flatten the per-group block tables into a
+        single list and delegate. This preserves existing finish
+        semantics while letting the scheduler keep the hybrid manager
+        enabled.
+        """
+        flattened_block_ids = [
+            block_id
+            for group_block_ids in block_ids
+            for block_id in group_block_ids
+        ]
+        return self.request_finished(request, flattened_block_ids)
 
     @_lmcache_nvtx_annotate
     def get_kv_events(self) -> Iterable[CacheStoreEvent]:

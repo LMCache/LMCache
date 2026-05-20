@@ -1819,19 +1819,25 @@ class LMCacheEngine:
 
     def _get_slot_mapping_list(
         self,
-        slot_mapping: Optional[Union[torch.Tensor, List[int]]],
+        slot_mapping: Optional[Union[torch.Tensor, List[int], Dict[str, torch.Tensor]]],
     ) -> Optional[List[int]]:
         """
         Convert slot_mapping to list if it's a tensor, otherwise return as is.
 
         :param slot_mapping: The slot_mapping to convert,
-            can be a torch.Tensor or List[int], or None
-        :type slot_mapping: Optional[Union[torch.Tensor, List[int]]]
+            can be a torch.Tensor, List[int], a Dict[str, torch.Tensor]
+            (per-layer mappings for hybrid attention), or None
+        :type slot_mapping: Optional[Union[torch.Tensor, List[int],
+            Dict[str, torch.Tensor]]]
         :return: The slot_mapping as a List[int], or None if input is None
         :rtype: Optional[List[int]]
         """
         if slot_mapping is None:
             return None
+        if isinstance(slot_mapping, dict):
+            if not slot_mapping:
+                return None
+            slot_mapping = next(iter(slot_mapping.values()))
         if isinstance(slot_mapping, torch.Tensor):
             return slot_mapping.tolist()
         # At this point, slot_mapping must be List[int]

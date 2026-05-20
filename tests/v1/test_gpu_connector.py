@@ -367,6 +367,259 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, num_groups, gpu_kv_fo
     allocator.close()
 
 
+@pytest.mark.parametrize("use_gpu", [True, False])
+@pytest.mark.parametrize("num_groups", [2, 3])
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+        lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,  # vllm non-MLA flash infer
+        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,  # vllm MLA
+    ],
+)
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="VLLMPagedMemGPUConnectorV3 requires CUDA",
+)
+def test_vllm_paged_connector_v3_per_group_slot_mappings(
+    use_gpu, num_groups, gpu_kv_format
+):
+    """Hybrid-attention round-trip with per-group slot mappings.
+
+    Mirrors ``test_vllm_paged_connector_v3_with_gpu_and_mla`` but feeds
+    ``slot_mappings_by_group`` instead of a single ``slot_mapping``. Each
+    group gets a distinct slot mapping; if the connector ignored the
+    per-group kwarg and used a stale scalar (or the wrong group's
+    mapping), the round-trip would land bytes in the wrong slots and the
+    final cross-check would fail.
+
+    Heterogeneous head sizes / dtypes per group also cover the
+    per-group ``gpu_kv_format`` / ``head_size`` / ``page_buffer_size``
+    state we now compute in ``_initialize_kv_cache_pointers``.
+    """
+    use_mla = gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
+    head_sizes = [64, 66, 66]
+    dtypes = [torch.uint8, torch.bfloat16, torch.uint8]
+    num_blocks = 100
+    block_size = 16
+    num_heads = 1 if use_mla else 8
+    device = "cuda"
+    num_tokens = 800
+    chunk_size = 256
+
+    allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+
+    src_kv_groups: list[list] = []
+    dst_kv_groups: list[list] = []
+    src_kv_caches: dict[str, torch.Tensor] = {}
+    dst_kv_caches: dict[str, torch.Tensor] = {}
+    for i in range(num_groups):
+        for groups, kv_caches in [
+            (src_kv_groups, src_kv_caches),
+            (dst_kv_groups, dst_kv_caches),
+        ]:
+            kv_group = generate_kv_cache_paged_list_tensors(
+                num_blocks=num_blocks,
+                device=device,
+                block_size=block_size,
+                dtype=dtypes[i],
+                num_layers=8,
+                head_size=head_sizes[i],
+                gpu_kv_format=gpu_kv_format,
+            )
+            groups.append(kv_group)
+            for j, layer_tensor in enumerate(kv_group):
+                kv_caches[f"{i}-{j}"] = layer_tensor
+
+    # Distinct per-group slot mapping. Each group samples num_tokens
+    # *different* slots from the same range so any cross-group leak
+    # leaves slots either unwritten or overwritten with the wrong
+    # group's data, which the per-group equality check below catches.
+    rng = random.Random(0xC0FFEE)
+    per_group_slot_mappings = []
+    for i in range(num_groups):
+        slots = rng.sample(range(0, num_blocks * block_size), num_tokens)
+        per_group_slot_mappings.append(
+            torch.tensor(slots, device=device, dtype=torch.int64)
+        )
+    slot_mappings_by_group = tuple(per_group_slot_mappings)
+    # A scalar fallback fed into kwargs as well — if our per-group
+    # plumbing regresses to using this, the test fails because group i>0
+    # would land bytes at group 0's slots.
+    fallback_slot_mapping = per_group_slot_mappings[0]
+
+    # Pre-condition: src and dst differ before the round-trip.
+    with pytest.raises(AssertionError):
+        for i in range(num_groups):
+            if use_mla:
+                check_paged_kv_cache_equal_with_mla(
+                    src_kv_groups[i],
+                    dst_kv_groups[i],
+                    per_group_slot_mappings[i],
+                    head_sizes[i],
+                )
+            else:
+                check_paged_kv_cache_equal(
+                    src_kv_groups[i],
+                    dst_kv_groups[i],
+                    per_group_slot_mappings[i],
+                    num_heads,
+                    head_sizes[i],
+                    gpu_kv_format,
+                )
+
+    metadata = _create_metadata(use_mla, src_kv_caches, gpu_kv_format)
+    metadata2 = _create_metadata(use_mla, dst_kv_caches, gpu_kv_format)
+
+    connector = VLLMPagedMemGPUConnectorV3(
+        metadata=metadata,
+        use_gpu=use_gpu,
+        device=fallback_slot_mapping.device,
+    )
+    connector2 = VLLMPagedMemGPUConnectorV3(
+        metadata=metadata2,
+        use_gpu=use_gpu,
+        device=fallback_slot_mapping.device,
+    )
+
+    for start in range(0, num_tokens, chunk_size):
+        end = min(start + chunk_size, num_tokens)
+        memory_obj = allocator.allocate(
+            metadata.get_shapes(end - start), metadata.get_dtypes()
+        )
+        connector.from_gpu(
+            memory_obj,
+            start,
+            end,
+            kvcaches=list(src_kv_caches.values()),
+            slot_mapping=fallback_slot_mapping,
+            slot_mappings_by_group=slot_mappings_by_group,
+            offset=0,
+        )
+        if use_mla:
+            assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT
+        else:
+            assert memory_obj.metadata.fmt == MemoryFormat.KV_2LTD
+        connector2.to_gpu(
+            memory_obj,
+            start,
+            end,
+            kvcaches=list(dst_kv_caches.values()),
+            slot_mapping=fallback_slot_mapping,
+            slot_mappings_by_group=slot_mappings_by_group,
+            offset=0,
+        )
+        allocator.free(memory_obj)
+        assert allocator.memcheck()
+
+    # Per-group state should be populated (proving _initialize_kv_cache_pointers
+    # walked the layer groups instead of falling back to scalar).
+    assert connector.group_gpu_kv_formats is not None
+    assert connector.group_block_sizes is not None
+    assert connector.group_page_buffer_sizes is not None
+    assert connector.group_head_sizes is not None
+    assert len(connector.group_gpu_kv_formats) == num_groups
+    assert len(connector.group_block_sizes) == num_groups
+    assert len(connector.group_page_buffer_sizes) == num_groups
+    assert len(connector.group_head_sizes) == num_groups
+
+    for i in range(num_groups):
+        if use_mla:
+            check_paged_kv_cache_equal_with_mla(
+                src_kv_groups[i],
+                dst_kv_groups[i],
+                per_group_slot_mappings[i],
+                head_sizes[i],
+            )
+        else:
+            check_paged_kv_cache_equal(
+                src_kv_groups[i],
+                dst_kv_groups[i],
+                per_group_slot_mappings[i],
+                num_heads,
+                head_sizes[i],
+                gpu_kv_format,
+            )
+    allocator.close()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="VLLMPagedMemGPUConnectorV3 requires CUDA",
+)
+def test_vllm_paged_connector_v3_resolve_group_slot_mapping():
+    """Direct unit test for the per-group kwarg picker.
+
+    Verifies the helper:
+      - returns the requested per-group entry when it exists,
+      - falls through to scalar slot_mapping when per-group is absent,
+      - falls through to scalar when group_idx is past the per-group tuple,
+      - raises when neither is provided.
+    """
+    head_sizes = [64, 64]
+    num_blocks = 32
+    block_size = 16
+    gpu_kv_format = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+    src_kv_caches: dict[str, torch.Tensor] = {}
+    for i in range(2):
+        kv_group = generate_kv_cache_paged_list_tensors(
+            num_blocks=num_blocks,
+            device="cuda",
+            block_size=block_size,
+            dtype=torch.bfloat16,
+            num_layers=4,
+            head_size=head_sizes[i],
+            gpu_kv_format=gpu_kv_format,
+        )
+        for j, layer_tensor in enumerate(kv_group):
+            src_kv_caches[f"{i}-{j}"] = layer_tensor
+
+    metadata = _create_metadata(False, src_kv_caches, gpu_kv_format)
+    connector = VLLMPagedMemGPUConnectorV3(
+        metadata=metadata,
+        use_gpu=False,
+        device=torch.device("cuda"),
+    )
+
+    scalar = torch.tensor([1, 2, 3], dtype=torch.int64, device="cuda")
+    group_a = torch.tensor([10, 11, 12], dtype=torch.int64, device="cuda")
+    group_b = torch.tensor([20, 21, 22], dtype=torch.int64, device="cuda")
+    by_group = (group_a, group_b)
+
+    # 1. per-group entry returned when present
+    assert torch.equal(
+        connector._resolve_group_slot_mapping(
+            0, slot_mapping=scalar, slot_mappings_by_group=by_group
+        ),
+        group_a,
+    )
+    assert torch.equal(
+        connector._resolve_group_slot_mapping(
+            1, slot_mapping=scalar, slot_mappings_by_group=by_group
+        ),
+        group_b,
+    )
+
+    # 2. fall through to scalar when per-group absent
+    assert torch.equal(
+        connector._resolve_group_slot_mapping(0, slot_mapping=scalar),
+        scalar,
+    )
+
+    # 3. fall through when group_idx is past the per-group tuple length
+    assert torch.equal(
+        connector._resolve_group_slot_mapping(
+            5, slot_mapping=scalar, slot_mappings_by_group=by_group
+        ),
+        scalar,
+    )
+
+    # 4. raises when neither is provided
+    with pytest.raises(ValueError, match="slot_mapping"):
+        connector._resolve_group_slot_mapping(0)
+
+
 @pytest.mark.parametrize("use_gpu", [True])
 @pytest.mark.parametrize(
     "gpu_kv_format",
