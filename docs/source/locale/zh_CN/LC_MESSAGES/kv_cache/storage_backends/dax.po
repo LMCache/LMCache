@@ -1,0 +1,274 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/dax.rst:1
+msgid "# SPDX-License-Identifier: Apache-2.0"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:4
+msgid "Device-DAX (/dev/dax)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:9
+msgid ""
+"The DAX storage plugin maps a ``/dev/dax`` device using "
+"``mmap(MAP_SHARED)`` and uses the mapped region as a fixed-size arena for"
+" KV cache chunks. Typical ``/dev/dax`` devices include persistent memory,"
+" CXL-attached memory, and other byte-addressable memory devices."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:14
+msgid ""
+"Data stored on the DAX device may survive process restarts, but is not "
+"guaranteed to be durable."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:17
+msgid ""
+"KV cache data is stored in the DAX region as part of the backend's "
+"storage flow. Reads copy data back into CPU-backed memory objects."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:22
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:42
+msgid "Multiprocess Mode"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:44
+msgid ""
+"In LMCache multiprocess mode, Device-DAX is configured as a built-in L2 "
+"adapter named ``dax``.  The MP adapter uses the normal L2 adapter "
+"``submit -> event fd -> query`` contract; no vLLM connector protocol "
+"changes are required."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:64
+msgid "The ``--l2-adapter`` JSON accepts these fields:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:66
+msgid "``device_path``: required path to a readable and writable DAX device."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:67
+msgid ""
+"``max_dax_size_gb``: required mapped size in GiB. The value must fit "
+"within the device capacity when capacity can be determined with "
+"``fstat``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:69
+msgid ""
+"``slot_bytes``: required fixed slot size in bytes. It must be large "
+"enough for one full LMCache chunk."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:71
+msgid "``num_store_workers``: optional store worker count, default ``1``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:72
+msgid "``num_lookup_workers``: optional lookup worker count, default ``1``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:73
+msgid ""
+"``num_load_workers``: optional load worker count, default ``min(4, "
+"os.cpu_count())``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:75
+msgid ""
+"``persist_enabled``: accepted by common MP L2 parsing but ignored by "
+"``dax`` in this release."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:78
+msgid ""
+"MP DAX stores opaque ``ObjectKey`` values in memory and is volatile-only "
+"in this release.  Closing and reopening the server on the same DAX path "
+"starts with an empty index, so previously written bytes are not "
+"discoverable after restart."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:83
+msgid ""
+"MP DAX uses one mapped device path per LMCache server.  It does not add "
+"per-TP DAX partitions, multi-device striping, on-device metadata, or "
+"restart recovery.  Capacity accounting and eviction are slot-based: a "
+"stored object occupies one slot even if its payload is smaller than "
+"``slot_bytes``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:90
+msgid "Using The Batched Restore Path"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:92
+msgid ""
+"The current DAX optimization is a staged batched restore path for "
+"retrieval. It is enabled automatically whenever the DAX backend is "
+"configured. No extra feature flag is required."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:96
+msgid "The retrieve flow is:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:98
+msgid "Reserve a batched set of readable DAX chunks."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:99
+msgid "Allocate CPU restore buffers from ``LocalCPUBackend``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:100
+msgid ""
+"Copy DAX data into a backend-owned pinned staging slab in coalesced "
+"regions."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:101
+msgid "Copy from the staging slab into the final CPU ``MemoryObj`` outputs."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:102
+msgid "Upload those CPU outputs through the normal GPU connector path."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:104
+msgid ""
+"The store flow is unchanged: KV data is still staged through CPU memory "
+"before being written into the DAX arena."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:107
+msgid "The new DAX tuning knobs control the batched restore path:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:109
+msgid ""
+"``dax.restore_workers``: number of persistent worker threads used to "
+"execute restore regions in parallel."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:111
+msgid ""
+"``dax.restore_max_regions``: maximum number of restore regions in one "
+"wave. Larger values increase parallelism but also increase slab space "
+"requirements."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:113
+msgid ""
+"``dax.retrieve_staging_slab_bytes``: total size in bytes of the reusable "
+"pinned retrieve slab. This must be large enough to hold one full chunk "
+"per configured restore region."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:117
+msgid "For a first pass, start with:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:119
+msgid ""
+"``dax.restore_workers`` equal to the number of CPU workers you want "
+"devoted to DAX restores"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:121
+msgid "``dax.restore_max_regions`` equal to ``dax.restore_workers``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:122
+msgid ""
+"``dax.retrieve_staging_slab_bytes`` at least ``dax.restore_max_regions * "
+"full_chunk_size``, then scale upward if larger batched restores are "
+"common"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:126
+msgid ""
+"If retrieve throughput is low, increase the slab size first, then "
+"increase worker and region counts together. If CPU pressure is high, "
+"reduce ``dax.restore_workers`` and ``dax.restore_max_regions``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:132
+msgid "Runtime Requirements"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:134
+msgid ""
+"``extra_config['dax.device_path']`` is required and must point to a "
+"readable and writable DAX device."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:136
+msgid ""
+"The process must have read-write access to the DAX device (e.g., via "
+"appropriate permissions or group membership)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:138
+msgid ""
+"``LocalCPUBackend`` must be enabled because DAX reads return CPU-backed "
+"memory objects."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:143
+msgid "Validation and Current Limits"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:145
+msgid ""
+"Tensor parallelism is currently limited to TP=1 (``metadata.world_size =="
+" 1``)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:147
+msgid ""
+"Only single-tensor chunk layouts are supported. Multi-tensor put requests"
+" are rejected."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:149
+msgid ""
+"Batched restore uses a backend-owned retrieve staging slab and persistent"
+" restore executors. The slab and region count can be tuned with "
+"``dax.restore_workers``, ``dax.restore_max_regions``, and "
+"``dax.retrieve_staging_slab_bytes``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/dax.rst:153
+msgid ""
+"Blocking batched restore preserves positional output semantics, while "
+"asynchronous batched restore returns only the consecutive hit prefix."
+msgstr ""
+

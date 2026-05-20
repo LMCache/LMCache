@@ -1,0 +1,193 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/p2p_sharing.rst:4
+msgid "P2P KV Cache Sharing"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:6
+msgid ""
+"P2P (Peer-to-Peer) KV cache sharing enables direct cache transfer between"
+" multiple serving engine instances without requiring a centralized cache "
+"server. This approach provides high-performance cache sharing with "
+"reduced latency and improved scalability, especially beneficial in "
+"distributed inference scenarios."
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:8
+msgid ""
+"LMCache supports P2P sharing through a controller-based architecture "
+"using NIXL (NVIDIA Inference Xfer Library) for optimized data transfer "
+"between instances."
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:11
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:13
+msgid "**Multi-GPU Setup**: Your server should have at least 2 GPUs"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:14
+msgid "**NIC**: RDMA is recommended for more performance."
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:15
+msgid "**NIXL**: Install from `NIXL <https://github.com/ai-dynamo/nixl>`_"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:16
+msgid ""
+"**vLLM**: v1 version is required, refer to :ref:`installation_guide` for "
+"details."
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:17
+msgid "**LMCache**: Install from :ref:`installation_guide`"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:20
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:22
+msgid "Create two configuration files for the P2P sharing setup."
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:25
+msgid "**Instance 1 Configuration (example1.yaml)**:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:51
+msgid "**Instance 2 Configuration (example2.yaml)**:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:78
+msgid "Setup and Usage"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:80
+msgid "**Step 1: Start the LMCache Controller**"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:86
+msgid ""
+"Make sure that the 8300 and 8400 ports are set up in "
+"**controller_pull_url** and **controller_reply_url** in the configuration"
+" files. Port 9000 is the controller main port, which is arbitrary and can"
+" be changed."
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:89
+msgid "After starting the controller, access the WebUI at:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:91
+msgid "http://localhost:9000/"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:93
+msgid "**Step 2: Start vLLM Engines with LMCache Workers**"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:95
+msgid "If the NIC supports RDMA:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:101
+msgid "If the NIC does not support RDMA:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:107
+msgid "Start vLLM engine 1 at port 8010:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:117
+msgid "Start vLLM engine 2 at port 8011:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:127
+msgid "**Step 3: Test P2P Cache Sharing**"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:129
+msgid "Send a request to vLLM engine 1 to populate the cache:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:141
+msgid ""
+"Send the same request to vLLM engine 2 to demonstrate cache retrieval "
+"from **engine 1**:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:154
+msgid "Expected Output"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:156
+msgid ""
+"When the second request successfully retrieves cache from the first "
+"instance, you should see logs similar to:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:163
+msgid ""
+"These logs indicate successful P2P connection establishment and high-"
+"throughput cache retrieval."
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:167
+msgid "**Step 4: Benchmarking P2P Cache Sharing**"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:169
+msgid "Send a request workload to instance 1 to populate the cache:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:183
+msgid ""
+"Send the same request workload to instance 2 to demonstrate cache "
+"retrieval from **instance 1**:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:199
+msgid "Benchmark Results"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:201
+msgid "First instance metrics:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:216
+msgid "Second instance metrics:"
+msgstr ""
+
+#: ../../source/kv_cache/p2p_sharing.rst:231
+#, python-format
+msgid ""
+"In this example, the warm-up round metric in long_doc_qa is used because "
+"no existing KV cache is reused within an instance to benefit solely from "
+"P2P sharing. With LMCache P2P sharing enabled, the time to first token "
+"(TTFT) is reduced by 54.7%, from 2.286 s to 1.036 s, with a 63.6% "
+"reduction in total inference time (37.957 s → 13.814 s)."
+msgstr ""
+

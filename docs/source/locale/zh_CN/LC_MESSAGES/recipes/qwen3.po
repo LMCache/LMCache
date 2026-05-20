@@ -1,0 +1,150 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/qwen3.rst:4
+msgid "Qwen3MoeForCausalLM"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:7
+msgid "Validated models"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:9
+msgid "`Qwen/Qwen3-235B-A22B <https://huggingface.co/Qwen/Qwen3-235B-A22B>`_"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:10
+msgid "`Qwen/Qwen3-30B-A3B <https://huggingface.co/Qwen/Qwen3-30B-A3B>`_"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:11
+msgid ""
+"`Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 "
+"<https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8>`_"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:12
+msgid ""
+"`Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3"
+"-Coder-30B-A3B-Instruct>`_"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst
+msgid "vLLM"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:19
+msgid ""
+"**Engine documentation:** `Qwen3 MoE in vLLM supported models "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
+"generation>`_ (architecture ``Qwen3MoeForCausalLM``)."
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:24
+msgid "**Status:** Validated with LMCache."
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:26
+msgid "Start the LMCache MP server:"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:34
+msgid "**Qwen3-235B-A22B** (4 GPUs, expert parallel):"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:49
+msgid "**Qwen3-30B-A3B** (1 GPU):"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:62
+msgid "**Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs, expert parallel):"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:76
+msgid "**Qwen3-Coder-30B-A3B-Instruct** (1 GPU):"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:88
+msgid ""
+"Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
+" LMCache + vLLM wiring (ports, remote hosts, in-process mode), see "
+":doc:`../mp/quickstart`."
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:92
+msgid ""
+"If there are any issues with vLLM setup, please refer to the `vLLM "
+"Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
+"for more details."
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst
+msgid "SGLang"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:98
+msgid "**Status:** Not validated with LMCache."
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst
+msgid "TRT-LLM"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:102
+msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:105
+msgid "CacheBlend support"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:108
+msgid "Compression support"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:114
+msgid "Method"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:115
+msgid "Status"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:116
+msgid "Notes"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:117
+msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:118
+msgid "Not validated"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:122
+msgid "Caveats"
+msgstr ""
+
+#: ../../source/recipes/qwen3.rst:124
+msgid "None known."
+msgstr ""
+

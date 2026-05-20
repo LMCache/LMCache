@@ -1,0 +1,792 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/architecture.rst:2
+msgid "Architecture & Developer Guide"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:4
+msgid ""
+"This page describes the internal architecture of LMCache multiprocess "
+"mode. It is aimed at developers who want to understand, debug, or extend "
+"the system."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:12
+msgid "High-Level Architecture"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:43
+msgid "Server Variants"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:45
+msgid ""
+"All three server entry points share the same ``MPCacheEngine`` and "
+"``StorageManager`` core."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:48
+msgid ""
+"**``server.py``** -- The default ZMQ-only server.  Creates an "
+"``MPCacheEngine`` and a ``MessageQueueServer``, registers handlers for "
+"all core ``RequestType`` values, and blocks in a keep-alive loop."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:52
+msgid ""
+"**``blend_server_v2.py``** -- Extends ``MPCacheEngine`` with "
+"``BlendEngineV2``, which adds CacheBlend operations "
+"(``CB_REGISTER_KV_CACHE``, ``CB_LOOKUP_PRE_COMPUTED``, "
+"``CB_STORE_PRE_COMPUTED``, ``CB_RETRIEVE_PRE_COMPUTED``, "
+"``CB_STORE_FINAL``).  Enables non-prefix KV cache reuse across document "
+"paragraphs."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:58
+msgid ""
+"**``http_server.py``** -- Wraps ``run_cache_server()`` (from "
+"``server.py``) inside a FastAPI application.  Endpoints are contributed "
+"by modules under ``http_apis/`` and auto-registered via "
+"``HTTPAPIRegistry``: ``GET /`` (basic liveness), ``GET /healthcheck`` for"
+" Kubernetes probes, ``POST /clear-cache`` for clearing all KV cache data "
+"in L1 (CPU) memory, and ``GET /status`` for inspecting detailed internal "
+"state.  The ZMQ server runs as part of the same process, and any "
+"configured runtime plugins are spawned by ``MPRuntimePluginLauncher`` "
+"during FastAPI startup."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:68
+msgid "ZMQ Protocol"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:70
+msgid "Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern)."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:72
+msgid "**RequestType enum** (defined in ``protocols/base.py``):"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:78
+msgid "Request Type"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:79
+msgid "Handler Type"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:80
+msgid "Description"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:81
+msgid "``REGISTER_KV_CACHE``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:82 ../../source/mp/architecture.rst:85
+#: ../../source/mp/architecture.rst:117 ../../source/mp/architecture.rst:127
+#: ../../source/mp/architecture.rst:130 ../../source/mp/architecture.rst:133
+msgid "SYNC"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:83
+msgid "Register GPU KV cache tensors for a vLLM instance."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:84
+msgid "``UNREGISTER_KV_CACHE``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:86
+msgid "Unregister KV cache tensors."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:87
+msgid "``STORE``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:88 ../../source/mp/architecture.rst:91
+#: ../../source/mp/architecture.rst:94 ../../source/mp/architecture.rst:98
+#: ../../source/mp/architecture.rst:102 ../../source/mp/architecture.rst:107
+#: ../../source/mp/architecture.rst:111 ../../source/mp/architecture.rst:114
+#: ../../source/mp/architecture.rst:120 ../../source/mp/architecture.rst:123
+#: ../../source/mp/architecture.rst:136 ../../source/mp/architecture.rst:139
+#: ../../source/mp/architecture.rst:142 ../../source/mp/architecture.rst:145
+#: ../../source/mp/architecture.rst:148 ../../source/mp/architecture.rst:153
+msgid "BLOCKING"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:89
+msgid "Store KV cache chunks from GPU to L1 (CPU)."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:90
+msgid "``RETRIEVE``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:92
+msgid "Copy KV cache chunks from L1 (CPU) back to GPU."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:93
+msgid "``LOOKUP``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:95
+msgid ""
+"Submit a prefix lookup; the prefetch job is tracked server-side by "
+"request_id."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:97
+msgid "``QUERY_PREFETCH_STATUS``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:99
+msgid ""
+"Poll a prefetch job by request_id. Returns the loaded chunk count when "
+"done, or ``None`` while the prefetch is still in progress."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:101
+msgid "``QUERY_PREFETCH_LOOKUP_HITS``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:103
+msgid ""
+"Query the lookup-phase hit chunk count by request_id, before the prefetch"
+" finishes. Returns ``None`` while the lookup is still running."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:106
+msgid "``FREE_LOOKUP_LOCKS``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:108
+msgid "Release read locks from a cancelled lookup without doing a full RETRIEVE."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:110
+msgid "``END_SESSION``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:112
+msgid "Remove session state for a finished request."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:113
+msgid "``CLEAR``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:115
+msgid "Clear all cached data."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:116
+msgid "``GET_CHUNK_SIZE``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:118
+msgid "Return the server's chunk size."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:119
+msgid "``PING``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:121
+msgid "Liveness ping; the handler always returns ``True``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:122
+msgid "``REPORT_BLOCK_ALLOCATION``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:124
+msgid ""
+"Fire-and-forget channel for the vLLM scheduler to report GPU block "
+"allocation events to the observability subsystem."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:126
+msgid "``NOOP``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:128
+msgid "Debug heartbeat -- returns a confirmation string."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:129
+msgid "``CB_REGISTER_KV_CACHE``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:131
+msgid "(Blend) Register CacheBlend KV buffer."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:132
+msgid "``CB_UNREGISTER_KV_CACHE``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:134
+msgid "(Blend) Unregister CacheBlend KV buffer."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:135
+msgid "``CB_STORE_PRE_COMPUTED``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:137
+msgid "(Blend) Store pre-computed paragraph chunks."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:138
+msgid "``CB_LOOKUP_PRE_COMPUTED``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:140
+msgid "(Blend) Lookup pre-computed paragraph chunks."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:141
+msgid "``CB_RETRIEVE_PRE_COMPUTED``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:143
+msgid "(Blend) Retrieve pre-computed paragraph chunks to GPU."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:144
+msgid "``CB_STORE_FINAL``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:146
+msgid "(Blend) Store final blended chunks."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:147
+msgid "``CB_LOOKUP_PRE_COMPUTED_V2``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:149
+msgid ""
+"(Blend V2) Lookup pre-computed chunks; returns ``CBMatchResult`` entries "
+"(with old/cur ranges and per-chunk hashes) so the retrieve step can skip "
+"re-hashing."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:152
+msgid "``CB_RETRIEVE_PRE_COMPUTED_V2``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:154
+msgid ""
+"(Blend V2) Retrieve pre-computed chunks using the ``CBMatchResult`` list "
+"returned by ``CB_LOOKUP_PRE_COMPUTED_V2``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:157
+msgid "**Handler types:**"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:159
+msgid "**SYNC** -- Runs directly in the ZMQ main loop (fast, non-blocking)."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:160
+msgid ""
+"**BLOCKING** -- Dispatched to a thread pool (may involve GPU copies or "
+"I/O)."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:163
+msgid "Config System"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:165
+msgid "Each config module exposes a composable triple:"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:171
+msgid "``server.py:parse_args()`` composes them:"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:184
+msgid ""
+"Both ``blend_server_v2.py`` and ``http_server.py`` reuse this pattern, "
+"adding ``add_http_frontend_args()`` for the HTTP variant."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:188
+msgid "Distributed Storage"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:191
+msgid "StorageManager"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:193 ../../source/mp/architecture.rst:423
+msgid "``lmcache/v1/distributed/storage_manager.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:195
+msgid ""
+"The top-level manager that wires together L1, L2, and all controllers.  "
+"Key methods:"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:198
+msgid "``reserve_write()`` / ``finish_write()`` -- Two-phase write into L1."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:199
+msgid ""
+"``submit_prefetch_task()`` / ``query_prefetch_status()`` -- Async lookup "
+"+ L2 prefetch."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:201
+msgid ""
+"``read_prefetched_results()`` / ``finish_read_prefetched()`` -- Read "
+"prefetched data from L1 with automatic lock management."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:205
+msgid "L1Manager"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:207 ../../source/mp/architecture.rst:427
+msgid "``lmcache/v1/distributed/l1_manager.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:209
+msgid "Manages objects in CPU memory with a state machine:"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:219
+msgid ""
+"Each object has two ``TTLLock`` instances (read and write) with "
+"configurable timeouts to prevent deadlocks from crashed clients."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:222
+msgid ""
+"The ``L1MemoryManager`` handles the underlying memory allocation (lazy "
+"growth up to ``--l1-size-gb``)."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:226
+msgid "L2 Adapters"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:228
+msgid "``lmcache/v1/distributed/l2_adapters/``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:230
+msgid ""
+"The ``L2AdapterInterface`` (in ``base.py``) defines three async task "
+"methods:"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:232
+msgid "``submit_store_task(key, data)`` -- Push data to L2."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:233
+msgid "``submit_lookup_and_lock_task(keys)`` -- Check if keys exist in L2."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:234
+msgid "``submit_load_task(keys, layout_desc)`` -- Load data from L2 into L1."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:236
+msgid ""
+"The factory function ``create_l2_adapter()`` (in ``__init__.py``) uses "
+"``isinstance()`` on the config type to instantiate the correct adapter."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:239
+msgid ""
+"New adapter types are registered via ``register_l2_adapter_type()`` in "
+"``config.py``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:243
+msgid "Controllers"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:245
+msgid ""
+"**StoreController** (``storage_controllers/store_controller.py``): Event-"
+"driven background thread that uses ``select.poll()`` on listener eventfd "
+"and adapter store eventfds.  When new objects appear in L1 (signaled via "
+"``StoreListener``), it submits async store tasks to each L2 adapter based"
+" on the ``StorePolicy``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:251
+msgid ""
+"**EvictionController** (``storage_controllers/eviction_controller.py``): "
+"Periodically checks L1 memory usage against the watermark threshold.  "
+"When triggered, evicts objects using the configured policy (``LRU``, "
+"``IsolatedLRU``, or ``noop``) until usage drops below the target. "
+"``IsolatedLRU`` evicts per ``cache_salt`` against limits registered "
+"through the ``/quota`` HTTP endpoints; see :ref:`mp-http-quota-api`."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:258
+msgid ""
+"**PrefetchController** (``storage_controllers/prefetch_controller.py``): "
+"Handles L2 lookup and load requests submitted by ``StorageManager`` "
+"during ``LOOKUP`` RPCs.  When keys are not in L1, it queries L2 adapters "
+"and loads found data back into L1."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:264
+msgid "Request Flows"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:267
+msgid "LOOKUP Flow"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:285
+msgid "STORE Flow"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:304
+msgid "RETRIEVE Flow"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:320
+msgid "Observability Internals"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:322
+msgid ""
+"**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global "
+"singleton initialized at server startup by ``init_observability()``. "
+"Producers (L1Manager, StorageManager, MPCacheEngine) publish ``Event`` "
+"objects to a bounded queue (``--event-bus-queue-size``, default 10000, "
+"tail-drop on overflow).  A background drain thread dispatches each event "
+"to all registered subscribers."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:329
+msgid ""
+"**Subscribers** live under ``lmcache/v1/mp_observability/subscribers/`` "
+"and are grouped by concern: ``metrics/`` (OTel counters and lifecycle "
+"histograms), ``logging/`` (Python logging handlers, lookup-hash JSONL), "
+"and ``tracing/`` (OTel spans built from START/END event pairs). "
+"``init_observability()`` registers the set selected by CLI flags "
+"(``--disable-metrics``, ``--disable-logging``, ``--enable-tracing``)."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:336
+msgid ""
+"**OTel providers** are set up via ``otel_init.py`` before subscribers are"
+" constructed, so module-level ``get_meter()`` / ``get_tracer()`` calls "
+"bind to the real provider. Metrics are exported both to an in-process "
+"Prometheus ``/metrics`` endpoint (``--prometheus-port``, default 9090) "
+"and, when ``--otlp-endpoint`` is set, pushed to an OTel collector."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:344
+msgid "How to Extend"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:347
+msgid "Adding a new L2 adapter"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:349
+msgid ""
+"Create a new ``*_l2_adapter.py`` module under "
+"``lmcache/v1/distributed/l2_adapters/`` — ``__init__.py`` auto-discovers "
+"modules matching that suffix via ``pkgutil`` and imports them lazily on "
+"first use, so no other files need to be modified."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:354
+msgid ""
+"Create a config class subclassing ``L2AdapterConfigBase`` with "
+"``from_dict()`` and ``help()`` methods."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:356
+msgid ""
+"Create an adapter class implementing ``L2AdapterInterface``, and a small "
+"factory function ``(config, l1_memory_desc) -> L2AdapterInterface``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:359
+msgid "At module level, self-register both the config and the factory:"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:366
+msgid ""
+"See ``mock_l2_adapter.py`` or ``s3_l2_adapter.py`` for reference "
+"implementations."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:370
+msgid "Adding an observability subscriber"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:372
+#, python-brace-format
+msgid ""
+"Create a subscriber class subclassing ``EventSubscriber`` (defined in "
+"``lmcache/v1/mp_observability/event_bus.py``): implement "
+"``get_subscriptions()`` to return an ``{EventType: callback}`` mapping; "
+"optionally override ``shutdown()`` for cleanup."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:376
+msgid ""
+"Place the class under the appropriate concern group "
+"(``subscribers/metrics/``, ``subscribers/logging/``, or "
+"``subscribers/tracing/``) and export it from that package's "
+"``__init__.py``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:380
+msgid ""
+"Register the subscriber in ``init_observability()`` "
+"(``lmcache/v1/mp_observability/config.py``) via "
+"``bus.register_subscriber(...)`` inside the branch matching its concern "
+"(metrics / logging / tracing), gated on the corresponding CLI flag if "
+"needed."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:387
+msgid "Adding a new request type"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:389
+msgid "Add a new member to ``RequestType`` in ``protocols/base.py``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:390
+msgid ""
+"Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` "
+"file (``engine``, ``controller``, ``observability``, ``debug``, "
+"``blend``, or ``blend_v2``) and add the request name to that module's "
+"``REQUEST_NAMES``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:393
+msgid "Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``)."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:394
+msgid ""
+"Register the handler in ``run_cache_server()`` via "
+"``add_handler_helper()``."
+msgstr ""
+
+#: ../../source/mp/architecture.rst:397
+msgid "Key Source Files"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:403
+msgid "File"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:404
+msgid "Purpose"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:405
+msgid "``lmcache/v1/multiprocess/server.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:406
+msgid "MPCacheEngine + ZMQ server entry point"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:407
+msgid "``lmcache/v1/multiprocess/config.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:408
+msgid "MPServerConfig, HTTPFrontendConfig"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:409
+msgid "``lmcache/v1/multiprocess/blend_server_v2.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:410
+msgid "BlendEngineV2 (extends MPCacheEngine)"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:411
+msgid "``lmcache/v1/multiprocess/http_server.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:412
+msgid "FastAPI wrapper with health check and many other useful APIs"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:413
+msgid "``lmcache/v1/multiprocess/http_api_registry.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:414
+msgid "``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:415
+msgid "``lmcache/v1/multiprocess/http_apis/``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:416
+msgid ""
+"Extensible HTTP endpoints (``/``, ``/healthcheck``, ``/clear-cache``, "
+"``/status``)"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:418
+msgid "``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:419
+msgid ""
+"``MPRuntimePluginLauncher`` that spawns runtime plugins with the full "
+"server config serialized into environment variables"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:421
+msgid "``lmcache/v1/multiprocess/protocols/base.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:422
+msgid "RequestType, HandlerType, ProtocolDefinition"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:424
+msgid "StorageManager (top-level manager)"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:425
+msgid "``lmcache/v1/distributed/config.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:426
+msgid "StorageManagerConfig hierarchy"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:428
+msgid "L1Manager (object state machine)"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:429
+msgid "``lmcache/v1/distributed/l2_adapters/config.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:430
+msgid "L2 adapter config registry"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:431
+msgid "``lmcache/v1/distributed/l2_adapters/base.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:432
+msgid "L2AdapterInterface"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:433
+msgid "``lmcache/v1/distributed/storage_controllers/store_controller.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:434
+msgid "StoreController (event-driven L1->L2)"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:435
+msgid "``lmcache/v1/distributed/storage_controllers/eviction_controller.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:436
+msgid "EvictionController (watermark-triggered)"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:437
+msgid "``lmcache/v1/distributed/storage_controllers/prefetch_controller.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:438
+msgid "PrefetchController (L2->L1 on miss)"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:439
+msgid "``lmcache/v1/mp_observability/config.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:440
+msgid "ObservabilityConfig + ``init_observability()`` entry point"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:441
+msgid "``lmcache/v1/mp_observability/event_bus.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:442
+msgid "EventBus singleton and ``EventSubscriber`` base class"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:443
+msgid "``lmcache/v1/mp_observability/event.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:444
+msgid "``Event`` / ``EventType`` definitions"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:445
+msgid "``lmcache/v1/mp_observability/otel_init.py``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:446
+msgid "OTel metrics / tracing provider setup"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:447
+msgid "``lmcache/v1/mp_observability/subscribers/``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:448
+msgid "Metrics, logging, and tracing subscribers"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:449
+msgid "``lmcache/v1/mp_observability/trace/``"
+msgstr ""
+
+#: ../../source/mp/architecture.rst:450
+msgid "Trace recording (``--trace-level storage``) capture stack"
+msgstr ""
+

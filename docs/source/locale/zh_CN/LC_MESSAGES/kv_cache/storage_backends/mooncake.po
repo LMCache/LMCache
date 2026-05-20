@@ -1,0 +1,525 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:2
+msgid "Mooncake"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:7
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:9
+msgid ""
+"`Mooncake <https://github.com/kvcache-ai/Mooncake>`_ is an open-source "
+"distributed KV cache storage system designed specifically for LLM "
+"inference scenarios. The system creates a distributed memory pool by "
+"aggregating memory space contributed by various client nodes, enabling "
+"efficient resource utilization across clusters."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:12
+msgid ""
+"By pooling underutilized DRAM and SSD resources from multiple nodes, the "
+"system forms a unified distributed storage service that maximizes "
+"resource efficiency."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:14
+msgid "Mooncake Architecture Diagram"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:18
+msgid "Key Features"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:20
+msgid ""
+"**Distributed memory pooling**: Aggregates memory contributions from "
+"multiple client nodes into a unified storage pool"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:21
+msgid ""
+"**High bandwidth utilization**: Supports striping and parallel I/O "
+"transfer of large objects, fully utilizing multi-NIC aggregated bandwidth"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:22
+msgid ""
+"**RDMA optimization**: Built on Transfer Engine with support for TCP, "
+"RDMA (InfiniBand/RoCEv2/eRDMA/NVIDIA GPUDirect)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:23
+msgid ""
+"**Dynamic resource scaling**: Supports dynamically adding and removing "
+"nodes for elastic resource management"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:25
+msgid ""
+"For detailed architecture information, see the `Mooncake Architecture "
+"Guide <https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/mooncake-"
+"store.md>`_."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:28
+msgid "Quick Start"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:30
+msgid "Install Mooncake via pip:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:36
+msgid "This package includes all necessary components:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:38
+msgid ""
+"``mooncake_master``: Master service that manages cluster metadata and "
+"coordinates distributed storage operations"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:39
+msgid ""
+"``mooncake_http_metadata_server``: HTTP-based metadata server used by the"
+" underlying transfer engine for connection establishment"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:40
+msgid "Mooncake Python bindings"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:42
+msgid ""
+"For production deployments or custom builds, see the `Build Instructions "
+"<https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md>`_."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:45
+msgid "Setup and Deployment"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:47
+msgid "**Prerequisites:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:49
+msgid "Machine with at least one GPU for vLLM inference"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:50
+msgid "RDMA-capable network hardware and drivers (recommended) or TCP network"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:51
+msgid "Python 3.8+ with pip"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:52
+msgid "vLLM and LMCache installed"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:54
+msgid "**Step 1: Start Infrastructure Services**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:56
+msgid "Start the Mooncake master service (with built‑in HTTP metadata server):"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:64
+msgid "Expected output:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:72
+msgid "**Step 2: Create Configuration File**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:74
+msgid "Create your ``mooncake-config.yaml``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:98
+msgid "**Step 3: Start vLLM with Mooncake**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:111
+msgid "**Step 4: Verify the Setup**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:113
+msgid "Test the integration with a sample request:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:126
+msgid "**Debugging Tips:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:128
+msgid "**Enable verbose logging:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:134
+msgid "**Check service status:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:142
+msgid "**Monitor metrics:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:144
+msgid ""
+"Access metrics at ``http://localhost:9003`` when master service is "
+"running."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:147
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:149
+msgid "**LMCache Parameters:**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:155
+#: ../../source/kv_cache/storage_backends/mooncake.rst:186
+msgid "Parameter"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:156
+#: ../../source/kv_cache/storage_backends/mooncake.rst:187
+msgid "Default"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:157
+#: ../../source/kv_cache/storage_backends/mooncake.rst:188
+msgid "Description"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:158
+msgid "``chunk_size``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:159
+msgid "256"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:160
+msgid "Number of tokens per KV chunk"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:161
+msgid "``remote_url``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:162
+#: ../../source/kv_cache/storage_backends/mooncake.rst:171
+#: ../../source/kv_cache/storage_backends/mooncake.rst:190
+#: ../../source/kv_cache/storage_backends/mooncake.rst:193
+#: ../../source/kv_cache/storage_backends/mooncake.rst:196
+msgid "Required"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:163
+msgid "Mooncake store connection URL (format: ``mooncakestore://host:port/``)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:164
+msgid "``remote_serde``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:165
+msgid "\"naive\""
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:166
+msgid "Serialization method for remote storage"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:167
+msgid "``local_cpu``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:168
+#: ../../source/kv_cache/storage_backends/mooncake.rst:220
+#: ../../source/kv_cache/storage_backends/mooncake.rst:223
+#: ../../source/kv_cache/storage_backends/mooncake.rst:226
+msgid "False"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:169
+msgid ""
+"Enable/disable local CPU caching (set to False for pure Mooncake "
+"evaluation)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:170
+msgid "``max_local_cpu_size``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:172
+msgid "Maximum local CPU cache size in GB (required even when local_cpu is False)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:173
+msgid "``numa_mode``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:174
+msgid "\"auto\""
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:175
+msgid ""
+"NUMA binding mode. \"auto\" is recommended on multi‑NIC/multi‑NUMA "
+"systems to reduce tail latency."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:176
+msgid "``pre_caching_hash_algorithm``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:177
+msgid "\"sha256_cbor_64bit\""
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:178
+msgid ""
+"Hash used for pre-caching keying. For cross‑process consistency, fix "
+"``PYTHONHASHSEED`` (e.g., export ``PYTHONHASHSEED=0``)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:180
+msgid "**Mooncake Parameters (via extra_config):**"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:189
+msgid "``local_hostname``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:191
+msgid "Hostname/IP of the local node for Mooncake client identification"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:192
+msgid "``metadata_server``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:194
+msgid ""
+"HTTP metadata server address. When starting master with "
+"``--enable_http_metadata_server=1``, it exposes this endpoint."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:195
+msgid "``master_server_address``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:197
+msgid "Mooncake master service address (host:port format)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:198
+msgid "``protocol``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:199
+msgid "\"rdma\""
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:200
+msgid ""
+"Communication protocol (\"rdma\" for high performance; \"tcp\" for "
+"compatibility)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:201
+msgid "``device_name``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:202
+#: ../../source/kv_cache/storage_backends/mooncake.rst:217
+msgid "\"\""
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:203
+msgid ""
+"RDMA device specification (e.g., \"erdma_0,erdma_1\" or "
+"\"mlx5_0,mlx5_1\"). Leave empty for autodetection in most setups."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:204
+msgid "``global_segment_size``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:205
+msgid "21474836480"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:206
+msgid ""
+"**Memory size contributed by each vLLM worker** in bytes (e.g., 20 GiB "
+"recommended)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:207
+msgid "``local_buffer_size``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:208
+msgid "0"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:209
+msgid ""
+"Local buffer size in bytes used by Mooncake. Behavior depends on "
+"``save_chunk_meta``: - When ``save_chunk_meta: False`` (recommended), "
+"LMCache uses its local CPU backend for zero‑copy RDMA, so Mooncake's "
+"``local_buffer_size`` can be ``0``. - When ``save_chunk_meta: True``, "
+"Mooncake uses its own local buffer; set this to a proper value (e.g., "
+"several GiB). - Note: Some RDMA NICs have memory registration limits; "
+"registering LMCache's large CPU buffer can fail on constrained devices. "
+"In those cases, consider enabling ``save_chunk_meta: True`` and sizing "
+"``local_buffer_size`` instead."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:213
+msgid "``transfer_timeout``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:214
+msgid "1"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:215
+msgid "Timeout for transfer operations in seconds"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:216
+msgid "``storage_root_dir``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:218
+msgid "The root directory for persistence (e.g., \"/mnt/mooncake\")"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:219
+msgid "``save_chunk_meta``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:221
+msgid ""
+"Whether to save chunk metadata alongside data. Set to ``False`` to enable"
+" the optimized zero‑copy path in LMCache."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:222
+msgid "``use_exists_sync``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:224
+msgid ""
+"Use synchronous existence checks to avoid async scheduling overhead in "
+"hot paths."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:225
+msgid "``mooncake_prefer_local_alloc``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:227
+msgid "Prefer allocating on the local segment when possible."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:230
+msgid ""
+"**Understanding global_segment_size**: This parameter defines the amount "
+"of memory each vLLM worker contributes to the distributed memory pool. "
+"The total cluster memory available for KV cache storage will be: "
+"``number_of_vllm_workers × global_segment_size``."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:233
+msgid ""
+"Adjust this value based on your available system memory and expected "
+"cache requirements."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:236
+msgid ""
+"If you consistently get misses (no Mooncake hits), ensure all processes "
+"use the same hashing seed: ``export PYTHONHASHSEED=0``. This keeps "
+"pre‑caching keys consistent across processes."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:239
+msgid ""
+"RDMA device(s) usually do not need to be specified; leaving "
+"``device_name`` empty works for most deployments."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:242
+msgid "Additional Resources"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:244
+msgid ""
+"`Mooncake Store Architecture <https://github.com/kvcache-"
+"ai/Mooncake/blob/main/doc/en/mooncake-store.md>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:245
+msgid ""
+"`Mooncake Store Deployment Guide <https://kvcache-"
+"ai.github.io/Mooncake/deployment/mooncake-store-deployment-guide.html>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:246
+msgid ""
+"`Mooncake Store Python API Reference <https://kvcache-"
+"ai.github.io/Mooncake/python-api-reference/mooncake-store.html>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:247
+msgid ""
+"`Transfer Engine Documentation <https://github.com/kvcache-"
+"ai/Mooncake/blob/main/doc/en/transfer-engine.md>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:248
+msgid ""
+"`Build Instructions <https://github.com/kvcache-"
+"ai/Mooncake/blob/main/doc/en/build.md>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:249
+msgid "`GitHub Repository <https://github.com/kvcache-ai/Mooncake>`_"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/mooncake.rst:250
+msgid ""
+"`LMCache Integration Guide <https://github.com/kvcache-"
+"ai/Mooncake/blob/main/doc/en/lmcache-integration.md>`_"
+msgstr ""
+

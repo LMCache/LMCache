@@ -1,0 +1,353 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/bench_kvcache.rst:2
+msgid "lmcache bench kvcache"
+msgstr "lmcache bench kvcache"
+
+#: ../../source/cli/bench_kvcache.rst:4
+msgid ""
+"The ``lmcache bench kvcache`` command is an end-to-end sanity test for "
+"the LMCache Multi-Process (MP) cache server. It connects to a running "
+"server over ZMQ and exercises the full KV-cache data path for a sequence "
+"of synthetic requests, then optionally verifies per-chunk checksums "
+"through the HTTP API."
+msgstr "``lmcache bench kvcache`` 命令是对 LMCache 多进程 (MP) 缓存服务器的端到端完整性测试。它通过 ZMQ 连接到正在运行的服务器，并对一系列合成请求执行完整的 KV 缓存数据路径，然后可选地通过 HTTP API 验证每个块的校验和。"
+
+#: ../../source/cli/bench_kvcache.rst:14
+msgid ""
+"Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command "
+"does **not** require an inference engine. It only needs a running LMCache"
+" MP server (ZMQ + HTTP) and a GPU."
+msgstr "与 :ref:`lmcache bench engine <lmcache-bench-engine>` 不同，此命令**不**需要推理引擎。它只需要一个正在运行的 LMCache MP 服务器（ZMQ + HTTP）和一个 GPU。"
+
+#: ../../source/cli/bench_kvcache.rst:20
+msgid "What it does"
+msgstr "它的作用"
+
+#: ../../source/cli/bench_kvcache.rst:22
+msgid "For each sequence in ``[--start, --end)``, the tool runs two passes:"
+msgstr "对于 ``[--start, --end)`` 中的每个序列，该工具运行两个阶段："
+
+#: ../../source/cli/bench_kvcache.rst:24
+msgid ""
+"**Cold pass** -- ``LOOKUP`` is expected to miss, so the generated KV "
+"tensors are ``STORE``\\ d on the server."
+msgstr "**冷启动** -- ``LOOKUP`` 预计会未命中，因此生成的 KV 张量会被 ``STORE``\\\\ 存储在服务器上。"
+
+#: ../../source/cli/bench_kvcache.rst:26
+msgid ""
+"**Warm pass** -- ``LOOKUP`` is expected to hit; the tool issues "
+"``RETRIEVE`` and compares the retrieved KV chunks' checksums to the "
+"originals."
+msgstr "**热通道** -- ``LOOKUP`` 预计会命中；工具发出 ``RETRIEVE`` 并将检索到的 KV 块的校验和与原始值进行比较。"
+
+#: ../../source/cli/bench_kvcache.rst:30
+msgid "The full RPC path exercised is::"
+msgstr "完整的 RPC 路径是::"
+
+#: ../../source/cli/bench_kvcache.rst:36
+msgid ""
+"When ``--url`` points to the server's HTTP endpoint, per-chunk checksums "
+"are additionally cross-checked against the server-side computation, so a "
+"mismatch between producer and consumer surfaces as a loud ``CHECKSUM "
+"MISMATCH`` log line."
+msgstr "当 ``--url`` 指向服务器的 HTTP 端点时，逐块的校验和会额外与服务器端的计算进行交叉检查，因此生产者和消费者之间的不匹配会以显眼的 ``CHECKSUM MISMATCH`` 日志行的形式显现出来。"
+
+#: ../../source/cli/bench_kvcache.rst:43
+msgid "Quick start"
+msgstr "快速开始"
+
+#: ../../source/cli/bench_kvcache.rst:45
+msgid "Start the MP server in one terminal:"
+msgstr "在一个终端中启动 MP 服务器："
+
+#: ../../source/cli/bench_kvcache.rst:54
+msgid "Then in another terminal:"
+msgstr "然后在另一个终端中："
+
+#: ../../source/cli/bench_kvcache.rst:62
+msgid ""
+"By default the tool runs forever (``--end`` unset); stop it with "
+"``Ctrl-C`` at any time. Pass ``--end N`` for a bounded run."
+msgstr "默认情况下，该工具会一直运行（``--end`` 未设置）；您可以随时使用 ``Ctrl-C`` 停止它。传递 ``--end N`` 以进行有限次运行。"
+
+#: ../../source/cli/bench_kvcache.rst:67
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/bench_kvcache.rst:73
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/bench_kvcache.rst:74
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/cli/bench_kvcache.rst:75
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/bench_kvcache.rst:76
+msgid "``--rpc-url URL``"
+msgstr "``--rpc-url URL``"
+
+#: ../../source/cli/bench_kvcache.rst:77
+msgid "``tcp://localhost:5555``"
+msgstr "``tcp://localhost:5555``"
+
+#: ../../source/cli/bench_kvcache.rst:78
+msgid "ZMQ endpoint of the MP cache server."
+msgstr "MP 缓存服务器的 ZMQ 端点。"
+
+#: ../../source/cli/bench_kvcache.rst:79
+msgid "``--url URL``"
+msgstr "``--url URL``"
+
+#: ../../source/cli/bench_kvcache.rst:80
+msgid "``http://localhost:8080``"
+msgstr "``http://localhost:8080``"
+
+#: ../../source/cli/bench_kvcache.rst:81
+msgid ""
+"HTTP base URL of the server's checksum API. Used to verify per-chunk "
+"checksums end-to-end."
+msgstr "服务器的校验和 API 的 HTTP 基础 URL。用于端到端验证每个块的校验和。"
+
+#: ../../source/cli/bench_kvcache.rst:83
+#, python-brace-format
+msgid "``--mode {gpu}``"
+msgstr "``--mode {gpu}``"
+
+#: ../../source/cli/bench_kvcache.rst:84
+msgid "``gpu``"
+msgstr "``gpu``"
+
+#: ../../source/cli/bench_kvcache.rst:85
+msgid ""
+"Run mode. Only ``gpu`` is supported today; CPU mode is a planned follow-"
+"up."
+msgstr "运行模式。目前仅支持 ``gpu``；CPU 模式是计划中的后续功能。"
+
+#: ../../source/cli/bench_kvcache.rst:87
+msgid "``--num-tokens N``"
+msgstr "``--num-tokens N``"
+
+#: ../../source/cli/bench_kvcache.rst:88
+msgid "``512``"
+msgstr "``512``"
+
+#: ../../source/cli/bench_kvcache.rst:89
+msgid "Tokens per synthetic request."
+msgstr "每个合成请求的令牌数。"
+
+#: ../../source/cli/bench_kvcache.rst:90
+msgid "``--num-blocks N``"
+msgstr "``--num-blocks N``"
+
+#: ../../source/cli/bench_kvcache.rst:91
+msgid "``1024``"
+msgstr "``1024``"
+
+#: ../../source/cli/bench_kvcache.rst:92
+msgid "Number of paged blocks allocated on the GPU."
+msgstr "在 GPU 上分配的分页块数量。"
+
+#: ../../source/cli/bench_kvcache.rst:93
+msgid "``--block-size N``"
+msgstr "``--block-size N``"
+
+#: ../../source/cli/bench_kvcache.rst:94
+msgid "``16``"
+msgstr "``16``"
+
+#: ../../source/cli/bench_kvcache.rst:95
+msgid "Tokens per paged block."
+msgstr "每个分页块的令牌数。"
+
+#: ../../source/cli/bench_kvcache.rst:96
+msgid "``--start N``"
+msgstr "``--start N``"
+
+#: ../../source/cli/bench_kvcache.rst:97 ../../source/cli/bench_kvcache.rst:178
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/cli/bench_kvcache.rst:98
+msgid "First sequence number to run."
+msgstr "要运行的第一个序列号。"
+
+#: ../../source/cli/bench_kvcache.rst:99
+msgid "``--end N``"
+msgstr "``--end N``"
+
+#: ../../source/cli/bench_kvcache.rst:100
+msgid "*(unset)*"
+msgstr "*(未设置)*"
+
+#: ../../source/cli/bench_kvcache.rst:101
+msgid ""
+"Exclusive upper bound on sequence numbers. When omitted the loop runs "
+"forever."
+msgstr "序列号的独占上限。当省略时，循环将永远运行。"
+
+#: ../../source/cli/bench_kvcache.rst:103
+msgid "``--interval SECS``"
+msgstr "``--interval SECS``"
+
+#: ../../source/cli/bench_kvcache.rst:104
+msgid "``0.5``"
+msgstr "``0.5``"
+
+#: ../../source/cli/bench_kvcache.rst:105
+msgid "Delay between successive sub-passes."
+msgstr "连续子通道之间的延迟。"
+
+#: ../../source/cli/bench_kvcache.rst:106
+msgid "``--kvcache-shape-spec SPEC``"
+msgstr "``--kvcache-shape-spec SPEC``"
+
+#: ../../source/cli/bench_kvcache.rst:107
+msgid "``(2,1024,16,8,128):float16:32``"
+msgstr "``(2,1024,16,8,128):float16:32``"
+
+#: ../../source/cli/bench_kvcache.rst:108
+msgid "KV cache shape spec (see below)."
+msgstr "KV Cache 形状规格（见下文）。"
+
+#: ../../source/cli/bench_kvcache.rst:112
+msgid "KV cache shape spec"
+msgstr "KV 缓存形状规范"
+
+#: ../../source/cli/bench_kvcache.rst:114
+msgid ""
+"The ``--kvcache-shape-spec`` flag describes how KV tensors are laid out "
+"on the GPU. A spec is one or more groups separated by ``;``:"
+msgstr "``--kvcache-shape-spec`` 标志描述了 KV 张量在 GPU 上的布局。规格是一个或多个用 ``;`` 分隔的组："
+
+#: ../../source/cli/bench_kvcache.rst:121
+msgid "Fields:"
+msgstr "字段："
+
+#: ../../source/cli/bench_kvcache.rst:123
+msgid "``kv_size`` -- 2 for classical attention (separate K/V), 1 for MLA."
+msgstr "``kv_size`` -- 经典注意力（分离 K/V）为 2，MLA 为 1。"
+
+#: ../../source/cli/bench_kvcache.rst:124
+msgid "``NB`` -- number of paged blocks."
+msgstr "``NB`` -- 分页块的数量。"
+
+#: ../../source/cli/bench_kvcache.rst:125
+msgid "``BS`` -- block size (tokens per block)."
+msgstr "``BS`` -- 块大小（每块的令牌数）。"
+
+#: ../../source/cli/bench_kvcache.rst:126
+msgid "``NH`` -- number of attention heads per layer."
+msgstr "``NH`` -- 每层的注意力头数量。"
+
+#: ../../source/cli/bench_kvcache.rst:127
+msgid "``HS`` -- head size (in elements)."
+msgstr "``HS`` -- 头部大小（以元素为单位）。"
+
+#: ../../source/cli/bench_kvcache.rst:128
+msgid ""
+"``dtype`` -- element dtype (e.g. ``float16``, ``bfloat16``, ``float32``, "
+"``uint8``). The full set matches the keys of ``DTYPE_MAP`` in "
+"``lmcache/v1/kv_layer_groups.py``."
+msgstr "``dtype`` -- 元素数据类型（例如 ``float16``、``bfloat16``、``float32``、``uint8``）。完整的集合与 ``lmcache/v1/kv_layer_groups.py`` 中的 ``DTYPE_MAP`` 的键匹配。"
+
+#: ../../source/cli/bench_kvcache.rst:131
+msgid "``layers`` -- number of layers in this group."
+msgstr "``layers`` -- 该组中的层数。"
+
+#: ../../source/cli/bench_kvcache.rst:133
+msgid ""
+"Multi-group specs let you model heterogeneous layers (for example, MLA "
+"layers + classical attention layers in the same model):"
+msgstr "多组规格允许您建模异构层（例如，在同一模型中结合 MLA 层和经典注意力层）："
+
+#: ../../source/cli/bench_kvcache.rst:142
+msgid ""
+"All groups must share the same ``NB`` and ``BS`` (this is a physical "
+"constraint of paged KV). Layer counts across groups sum to the total "
+"layer count registered with the server."
+msgstr "所有组必须共享相同的 ``NB`` 和 ``BS``（这是分页 KV 的物理限制）。各组的层数总和等于注册到服务器的总层数。"
+
+#: ../../source/cli/bench_kvcache.rst:146
+msgid ""
+"See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py`` for"
+" the authoritative parsing rules and validation errors."
+msgstr "请参阅 ``parse_kvcache_shape_spec`` 在 ``lmcache/v1/kv_layer_groups.py`` 中的权威解析规则和验证错误。"
+
+#: ../../source/cli/bench_kvcache.rst:151
+msgid "Example output"
+msgstr "示例输出"
+
+#: ../../source/cli/bench_kvcache.rst:165
+msgid ""
+"Any ``CHECKSUM MISMATCH``, ``ERROR``, or Python traceback in the log "
+"indicates a real problem worth investigating."
+msgstr "日志中任何 ``CHECKSUM MISMATCH``、``ERROR`` 或 Python 回溯都表示存在值得调查的实际问题。"
+
+#: ../../source/cli/bench_kvcache.rst:170
+msgid "Exit codes"
+msgstr "退出代码"
+
+#: ../../source/cli/bench_kvcache.rst:176
+msgid "Code"
+msgstr "代码"
+
+#: ../../source/cli/bench_kvcache.rst:177
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/cli/bench_kvcache.rst:179
+msgid ""
+"Test loop completed (or was interrupted cleanly with Ctrl-C) with no "
+"checksum mismatches."
+msgstr "测试循环完成（或通过 Ctrl-C 干净地中断），没有校验和不匹配。"
+
+#: ../../source/cli/bench_kvcache.rst:181
+msgid "``1``"
+msgstr "``1``"
+
+#: ../../source/cli/bench_kvcache.rst:182
+msgid ""
+"Fatal error (for example, CUDA unavailable in ``--mode gpu``, server "
+"unreachable, or a checksum mismatch)."
+msgstr "致命错误（例如，在 ``--mode gpu`` 中 CUDA 不可用、服务器无法访问或校验和不匹配）。"
+
+#: ../../source/cli/bench_kvcache.rst:187
+msgid "See also"
+msgstr "另请参阅"
+
+#: ../../source/cli/bench_kvcache.rst:189
+msgid ""
+":doc:`bench` -- ``lmcache bench engine`` for engine-side workload "
+"benchmarks."
+msgstr "：doc:`bench` -- ``lmcache bench engine`` 用于引擎端工作负载基准测试。"
+
+#: ../../source/cli/bench_kvcache.rst:191
+msgid ""
+":doc:`kvcache` -- ``lmcache kvcache`` for managing KV cache state on a "
+"running server (clear, etc.)."
+msgstr ":doc:`kvcache` -- ``lmcache kvcache`` 用于管理运行服务器上的 KV Cache 状态（清除等）。"
+

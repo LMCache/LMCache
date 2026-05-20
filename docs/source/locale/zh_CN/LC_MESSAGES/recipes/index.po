@@ -1,0 +1,211 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/recipes/index.rst:4
+msgid "Recipes"
+msgstr ""
+
+#: ../../source/recipes/index.rst:6
+msgid ""
+"This section lists model architectures that have been validated end-to-"
+"end with LMCache, with a recipe page per architecture covering only the "
+"LMCache-specific configuration that diverges from defaults."
+msgstr ""
+
+#: ../../source/recipes/index.rst:10
+msgid ""
+"Engine-side documentation (how to serve the model itself) lives with the "
+"serving engine. Recipe pages link out rather than duplicate."
+msgstr ""
+
+#: ../../source/recipes/index.rst:14
+msgid "Recipe page contents"
+msgstr ""
+
+#: ../../source/recipes/index.rst:16
+msgid "Each recipe page is intentionally minimal:"
+msgstr ""
+
+#: ../../source/recipes/index.rst:18
+msgid "**Validated models** -- exact HF repo IDs that have been tested."
+msgstr ""
+
+#: ../../source/recipes/index.rst:19
+msgid ""
+"**Engine tabs** -- one tab per serving engine (vLLM, SGLang, TRT-LLM). "
+"Each tab links to the engine's own documentation for the model and shows "
+"the exact ``lmcache server`` and engine launch commands. Tabs for engines"
+" that are not yet validated state so explicitly."
+msgstr ""
+
+#: ../../source/recipes/index.rst:23
+msgid "**CacheBlend support** -- validation status (may be empty)."
+msgstr ""
+
+#: ../../source/recipes/index.rst:24
+msgid ""
+"**Compression support** -- table of compression methods (CacheGen, etc.) "
+"with per-method validation status. Extensible: new methods get a row."
+msgstr ""
+
+#: ../../source/recipes/index.rst:26
+msgid "**Caveats** -- known limitations, if any."
+msgstr ""
+
+#: ../../source/recipes/index.rst:28
+msgid ""
+"For the generic LMCache + engine wiring (ports, remote hosts, in-process "
+"mode, sending a first request), see :doc:`../getting_started/quickstart` "
+"and :doc:`../mp/quickstart`. Recipes assume those pages as a "
+"prerequisite."
+msgstr ""
+
+#: ../../source/recipes/index.rst:33
+msgid "Supported architectures"
+msgstr ""
+
+#: ../../source/recipes/index.rst:39
+msgid "Architecture"
+msgstr ""
+
+#: ../../source/recipes/index.rst:40
+msgid "Example HF model"
+msgstr ""
+
+#: ../../source/recipes/index.rst:41
+msgid "vLLM"
+msgstr ""
+
+#: ../../source/recipes/index.rst:42
+msgid "SGLang"
+msgstr ""
+
+#: ../../source/recipes/index.rst:43
+msgid "TRT-LLM"
+msgstr ""
+
+#: ../../source/recipes/index.rst:44
+msgid "Recipe"
+msgstr ""
+
+#: ../../source/recipes/index.rst:45
+msgid "``MiniMaxM2ForCausalLM``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:46
+msgid "``MiniMaxAI/MiniMax-M2``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:47 ../../source/recipes/index.rst:53
+#: ../../source/recipes/index.rst:59 ../../source/recipes/index.rst:65
+#: ../../source/recipes/index.rst:71
+msgid "✓"
+msgstr ""
+
+#: ../../source/recipes/index.rst:48 ../../source/recipes/index.rst:49
+#: ../../source/recipes/index.rst:54 ../../source/recipes/index.rst:55
+#: ../../source/recipes/index.rst:60 ../../source/recipes/index.rst:61
+#: ../../source/recipes/index.rst:66 ../../source/recipes/index.rst:67
+#: ../../source/recipes/index.rst:72 ../../source/recipes/index.rst:73
+msgid "—"
+msgstr ""
+
+#: ../../source/recipes/index.rst:50
+msgid ":doc:`minimax_m2`"
+msgstr ""
+
+#: ../../source/recipes/index.rst:51
+msgid "``Gemma4ForConditionalGeneration``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:52
+msgid "``google/gemma-4-31B-it``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:56
+msgid ":doc:`gemma4`"
+msgstr ""
+
+#: ../../source/recipes/index.rst:57
+msgid "``MistralForCausalLM``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:58
+msgid "``mistralai/Devstral-2-123B-Instruct-2512``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:62
+msgid ":doc:`devstral`"
+msgstr ""
+
+#: ../../source/recipes/index.rst:63
+msgid "``GptOssForCausalLM``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:64
+msgid "``openai/gpt-oss-120b``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:68
+msgid ":doc:`gpt_oss`"
+msgstr ""
+
+#: ../../source/recipes/index.rst:69
+msgid "``Qwen3MoeForCausalLM``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:70
+msgid "``Qwen/Qwen3-235B-A22B``"
+msgstr ""
+
+#: ../../source/recipes/index.rst:74
+msgid ":doc:`qwen3`"
+msgstr ""
+
+#: ../../source/recipes/index.rst:76
+msgid "Legend: ``✓`` validated, ``—`` not validated."
+msgstr ""
+
+#: ../../source/recipes/index.rst:79
+msgid "Contributing a recipe"
+msgstr ""
+
+#: ../../source/recipes/index.rst:81
+msgid "To add a new architecture:"
+msgstr ""
+
+#: ../../source/recipes/index.rst:83
+msgid ""
+"Copy an existing page (e.g. ``minimax_m2.rst``) to "
+"``recipes/<architecture_snake_case>.rst``."
+msgstr ""
+
+#: ../../source/recipes/index.rst:85
+msgid ""
+"Fill in **Validated models**, **Engines**, **LMCache configuration**, and"
+" **Caveats**. Keep each section terse -- if a field has nothing to say, "
+"say so in one line rather than padding it."
+msgstr ""
+
+#: ../../source/recipes/index.rst:88
+msgid "Add a row to the table above and an entry to the hidden toctree below."
+msgstr ""
+

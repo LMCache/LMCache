@@ -4,8 +4,8 @@
 
 Emits two OTel histograms in GB/s, labeled by ``engine_id``, ``device``,
 and ``model_name``:
-  - ``lmcache_mp.l0_l1_store_throughput_gbs``  — GPU→CPU (L0→L1) store
-  - ``lmcache_mp.l0_l1_load_throughput_gbs``   — CPU→GPU (L1→L0) load
+  - ``lmcache_mp.l0_l1_store_throughput``  — GPU→CPU (L0→L1) store
+  - ``lmcache_mp.l0_l1_load_throughput``   — CPU→GPU (L1→L0) load
 
 Implementation:
   - Correlates ``MP_STORE_START`` → ``MP_STORE_END`` and
@@ -45,7 +45,7 @@ class L0L1ThroughputSubscriber(EventSubscriber):
 
         meter = metrics.get_meter("lmcache_mp.perf")
         self._store_hist = meter.create_histogram(
-            "lmcache_mp.l0_l1_store_throughput_gbs",
+            "lmcache_mp.l0_l1_store_throughput",
             description=(
                 "Histogram of L0→L1 (GPU→CPU) store throughput in GB/s, "
                 "measured per request as total_bytes / (end_ts - start_ts) "
@@ -54,7 +54,7 @@ class L0L1ThroughputSubscriber(EventSubscriber):
             unit="GB/s",
         )
         self._load_hist = meter.create_histogram(
-            "lmcache_mp.l0_l1_load_throughput_gbs",
+            "lmcache_mp.l0_l1_load_throughput",
             description=(
                 "Histogram of L1→L0 (CPU→GPU) load throughput in GB/s, "
                 "measured per request as total_bytes / (end_ts - start_ts) "

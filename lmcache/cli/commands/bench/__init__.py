@@ -27,6 +27,10 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     StatsCollector,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads import create_workload
+from lmcache.cli.commands.bench.l2_adapter_bench.command import (
+    register_l2_parser,
+    run_l2_adapter_bench,
+)
 from lmcache.cli.commands.test_cache import TestCacheCommand
 from lmcache.logging import init_logger
 
@@ -61,10 +65,12 @@ class BenchCommand(BaseCommand):
         inner = parser.add_subparsers(
             dest="bench_target",
             required=True,
-            metavar="{engine,kvcache}",
+            metavar="{engine,kvcache,l2}",
         )
+        # TODO(chunxiaozheng): move engine and kvcache to sub module too
         self._register_engine(inner)
         self._register_kvcache(inner)
+        register_l2_parser(inner, self.execute)
 
     def _register_engine(
         self,
@@ -378,6 +384,7 @@ class BenchCommand(BaseCommand):
         handlers = {
             "engine": self._bench_engine,
             "kvcache": self._bench_kvcache,
+            "l2": lambda a: run_l2_adapter_bench(self, a),
         }
         handler = handlers.get(args.bench_target)
         if handler is None:

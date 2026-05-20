@@ -1,0 +1,403 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/internal_api_server/common_apis.rst:4
+msgid "Common APIs"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:6
+msgid ""
+"Common APIs are available across all components (scheduler, worker, "
+"controller)."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:11
+msgid "Endpoints"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:14
+msgid "``GET /env`` — Environment Variables"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:16
+msgid "Get all environment variables of the running process."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:18
+#: ../../source/internal_api_server/common_apis.rst:47
+#: ../../source/internal_api_server/common_apis.rst:103
+#: ../../source/internal_api_server/common_apis.rst:133
+#: ../../source/internal_api_server/common_apis.rst:163
+#: ../../source/internal_api_server/common_apis.rst:228
+#: ../../source/internal_api_server/common_apis.rst:259
+msgid "**Method**: ``GET``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:19
+msgid "**Path**: ``/env``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:20
+#: ../../source/internal_api_server/common_apis.rst:105
+#: ../../source/internal_api_server/common_apis.rst:120
+#: ../../source/internal_api_server/common_apis.rst:261
+msgid "**Parameters**: None"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:21
+msgid ""
+"**Response**: ``application/json`` — JSON object of all environment "
+"variables (sorted by key)."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:27
+#: ../../source/internal_api_server/common_apis.rst:188
+#: ../../source/internal_api_server/common_apis.rst:334
+msgid "**Example Response**:"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:39
+msgid "``GET /loglevel`` — Log Level Management"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:41
+msgid ""
+"Get or set the log level for Python loggers. Behavior depends on query "
+"parameters:"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:43
+msgid "**No parameters**: List all loggers and their levels."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:44
+msgid "**``logger_name`` only**: Get the level of the specified logger."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:45
+msgid ""
+"**``logger_name`` and ``level``**: Set the level of the specified logger "
+"(including all its handlers)."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:48
+msgid "**Path**: ``/loglevel``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:49
+#: ../../source/internal_api_server/common_apis.rst:135
+#: ../../source/internal_api_server/common_apis.rst:165
+#: ../../source/internal_api_server/common_apis.rst:307
+msgid "**Parameters**:"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:52
+#: ../../source/internal_api_server/common_apis.rst:138
+#: ../../source/internal_api_server/common_apis.rst:168
+#: ../../source/internal_api_server/common_apis.rst:233
+#: ../../source/internal_api_server/common_apis.rst:310
+msgid "Name"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:52
+#: ../../source/internal_api_server/common_apis.rst:138
+#: ../../source/internal_api_server/common_apis.rst:168
+#: ../../source/internal_api_server/common_apis.rst:233
+#: ../../source/internal_api_server/common_apis.rst:310
+msgid "Type"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:52
+#: ../../source/internal_api_server/common_apis.rst:138
+#: ../../source/internal_api_server/common_apis.rst:168
+#: ../../source/internal_api_server/common_apis.rst:233
+#: ../../source/internal_api_server/common_apis.rst:310
+msgid "Description"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:54
+msgid "``logger_name``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:54
+#: ../../source/internal_api_server/common_apis.rst:55
+#: ../../source/internal_api_server/common_apis.rst:140
+#: ../../source/internal_api_server/common_apis.rst:170
+#: ../../source/internal_api_server/common_apis.rst:235
+msgid "str"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:54
+msgid "(Optional) Logger name to query or set"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:55
+#: ../../source/internal_api_server/common_apis.rst:170
+msgid "``level``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:55
+msgid ""
+"(Optional) Log level to set (e.g. ``DEBUG``, ``INFO``, ``WARNING``, "
+"``ERROR``)"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:58
+msgid "**Response**: ``text/plain``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:71
+msgid "**Example Response** (list all):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:79
+msgid "**Example Response** (get):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:85
+msgid "**Example Response** (set):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:91
+#: ../../source/internal_api_server/common_apis.rst:214
+msgid "**Error Response** (invalid level, HTTP 400):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:99
+msgid "``GET /metrics`` — Prometheus Metrics"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:101
+msgid "Get Prometheus metrics data in the standard exposition format."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:104
+msgid "**Path**: ``/metrics``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:106
+msgid "**Response**: ``text/plain`` — Prometheus text-based exposition format."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:114
+msgid "``POST /metrics/reset`` — Reset Prometheus Metrics"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:116
+msgid "Reset all Prometheus metrics to their initial state."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:118
+#: ../../source/internal_api_server/common_apis.rst:304
+msgid "**Method**: ``POST``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:119
+msgid "**Path**: ``/metrics/reset``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:121
+msgid "**Response**: ``text/plain`` — ``\"ok\"`` on success."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:129
+msgid "``GET /threads`` — Thread Information"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:131
+msgid "Get information about active threads with optional filtering."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:134
+msgid "**Path**: ``/threads``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:140
+msgid "``name``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:140
+msgid "(Optional) Filter by thread name (fuzzy match, case-insensitive)"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:141
+msgid "``thread_id``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:141
+msgid "int"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:141
+msgid "(Optional) Filter by thread ID"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:144
+msgid "**Response**: ``text/plain`` — Thread info with stack traces and summary."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:159
+msgid "``GET /periodic-threads`` — Periodic Thread Status"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:161
+msgid "Get information about registered periodic threads."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:164
+msgid "**Path**: ``/periodic-threads``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:170
+msgid ""
+"(Optional) Filter by thread level: ``critical``, ``high``, ``medium``, "
+"``low``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:171
+msgid "``running_only``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:171
+#: ../../source/internal_api_server/common_apis.rst:172
+msgid "bool"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:171
+msgid "(Optional) Only show running threads (default: ``false``)"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:172
+msgid "``active_only``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:172
+msgid "(Optional) Only show active threads (default: ``false``)"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:175
+#: ../../source/internal_api_server/common_apis.rst:238
+#: ../../source/internal_api_server/common_apis.rst:262
+msgid "**Response**: ``application/json``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:224
+#, python-brace-format
+msgid "``GET /periodic-threads/{thread_name}`` — Single Periodic Thread"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:226
+msgid "Get detailed information about a specific periodic thread by name."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:229
+#, python-brace-format
+msgid "**Path**: ``/periodic-threads/{thread_name}``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:230
+msgid "**Path Parameters**:"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:235
+msgid "``thread_name``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:235
+msgid "Name of the periodic thread"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:244
+msgid "**Error Response** (not found, HTTP 404):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:254
+msgid "``GET /periodic-threads-health`` — Periodic Thread Health Check"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:256
+msgid ""
+"Quick health check for periodic threads. Returns healthy status if all "
+"``critical`` and ``high`` level threads are active."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:260
+msgid "**Path**: ``/periodic-threads-health``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:268
+msgid "**Example Response** (healthy):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:278
+msgid "**Example Response** (unhealthy):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:297
+msgid "``POST /run_script`` — Run Script"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:299
+msgid ""
+"Upload and execute a Python script in a restricted sandbox environment. "
+"The script has access to ``app`` (the FastAPI application instance) and a"
+" limited set of builtins. Import is restricted to modules configured in "
+"``script_allowed_imports``."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:305
+msgid "**Path**: ``/run_script``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:306
+msgid "**Content-Type**: ``multipart/form-data``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:312
+msgid "``script``"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:312
+msgid "file"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:312
+msgid "Python script file to execute"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:315
+msgid ""
+"**Response**: ``text/plain`` — The ``result`` variable from the script, "
+"or ``\"Script executed successfully\"`` if no ``result`` is set."
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:323
+msgid "**Example Script** (``scratch.py``):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:340
+msgid "**Error Response** (no script, HTTP 400):"
+msgstr ""
+
+#: ../../source/internal_api_server/common_apis.rst:346
+msgid "**Error Response** (execution error, HTTP 500):"
+msgstr ""
+

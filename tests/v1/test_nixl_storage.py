@@ -2,6 +2,8 @@
 # Standard
 from pathlib import Path
 import asyncio
+import os
+import sys
 import threading
 
 # Third Party
@@ -83,7 +85,7 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert not nixl_backend.contains(key, False)
             assert not nixl_backend.exists_in_put_tasks(key)
 
-            obj = nixl_backend.memory_allocator.allocate(shape=shape, dtype=dtype)
+            obj = nixl_backend.memory_allocator.allocate(torch.Size(shape), dtype)
             assert obj is not None
             assert obj.tensor is not None
             objs.append(obj)
@@ -110,7 +112,12 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert returned_memory_obj.get_shape() == obj.get_shape()
             assert returned_memory_obj.get_dtype() == obj.get_dtype()
             assert returned_memory_obj.metadata.address != obj.metadata.address
-            assert torch.equal(returned_memory_obj.tensor, obj.tensor)
+
+            returned_tensor = returned_memory_obj.tensor
+            obj_tensor = obj.tensor
+            assert returned_tensor is not None
+            assert obj_tensor is not None
+            assert torch.equal(returned_tensor, obj_tensor)
 
         obj_list = asyncio.run(
             nixl_backend.batched_get_non_blocking(lookup_id="test", keys=first_keys)
@@ -123,7 +130,12 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert returned_memory_obj.get_shape() == obj.get_shape()
             assert returned_memory_obj.get_dtype() == obj.get_dtype()
             assert returned_memory_obj.metadata.address != obj.metadata.address
-            assert torch.equal(returned_memory_obj.tensor, obj.tensor)
+
+            returned_tensor = returned_memory_obj.tensor
+            obj_tensor = obj.tensor
+            assert returned_tensor is not None
+            assert obj_tensor is not None
+            assert torch.equal(returned_tensor, obj_tensor)
 
         def test_eviction(new_idx, old_idx):
             nixl_backend.batched_submit_put_task([keys[new_idx]], [objs[new_idx]])
@@ -305,3 +317,253 @@ def test_nixl_posix_backend():
     config.extra_config["enable_cuda"] = False
 
     run(config, shape, dtype)
+
+
+_DYNAMIC_KV_SHAPE = (4, 2, 256, 8, 128)
+
+
+def _build_dynamic_file_backend(config, dtype):
+    """
+    Build a NixlStorageBackend in dynamic-FILE mode and the surrounding
+    event-loop thread. Returns (backend, backends, thread_loop, thread, keys,
+    objs) so the caller can drive the test and tear everything down via
+    ``_teardown_dynamic_file_backend``.
+    """
+    BACKEND_NAME = "NixlStorageBackend"
+
+    keys = [
+        create_key("e3229141e680fb413d2c5d3ebb416c4ad300d381e309fc9e417757b91406c157"),
+        create_key("e3229141e680fb413d2c5d3ebb416c4ad300d381e309fc9e417757b91406d268"),
+    ]
+
+    thread_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=thread_loop.run_forever)
+    thread.start()
+
+    metadata = LMCacheMetadata(
+        model_name="Llama-3.1-70B-Instruct",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=dtype,
+        kv_shape=_DYNAMIC_KV_SHAPE,
+    )
+
+    backends = CreateStorageBackends(
+        config,
+        metadata,
+        thread_loop,
+        dst_device=config.nixl_buffer_device,
+    )
+    nixl_backend = backends[BACKEND_NAME]
+    assert isinstance(nixl_backend, NixlStorageBackend)
+
+    # In dynamic mode the backend internally allocates with meta_shape
+    # (derived from kv_shape via init_chunk_meta), so allocate the test
+    # objects with the same shape so put/get round-trip shapes match.
+    obj_shape = nixl_backend.meta_shape
+    obj_dtype = nixl_backend.meta_dtype
+    assert obj_shape is not None
+    assert obj_dtype is not None
+
+    obj_fmt = nixl_backend.meta_fmt
+    assert obj_fmt is not None
+
+    objs = []
+    for _ in keys:
+        obj = nixl_backend.memory_allocator.allocate(obj_shape, obj_dtype, obj_fmt)
+        assert obj is not None
+        assert obj.tensor is not None
+        objs.append(obj)
+
+    objs[0].tensor.zero_()
+    objs[1].tensor.zero_()
+    objs[0].tensor[0, 0, 100, 200] = 1
+    objs[1].tensor[1, 0, 50, 300] = 1
+
+    return nixl_backend, backends, thread_loop, thread, keys, objs
+
+
+def _teardown_dynamic_file_backend(backends, thread_loop, thread, objs=()):
+    for obj in objs:
+        if obj is None:
+            continue
+        if obj.is_valid() and obj.get_ref_count() > 0:
+            obj.ref_count_down()
+    for backend in backends.values():
+        backend.close()
+    if thread_loop and thread_loop.is_running():
+        thread_loop.call_soon_threadsafe(thread_loop.stop)
+    if thread and thread.is_alive():
+        thread.join()
+
+
+def run_dynamic_file(config, dtype, tmp_path):
+    """
+    Exercise the dynamic-FILE backend's new code paths: contains/key_exists,
+    put/get round-trip, and remove for both present and missing files.
+    """
+    nixl_backend, backends, thread_loop, thread, keys, objs = (
+        _build_dynamic_file_backend(config, dtype)
+    )
+
+    retained_objs = list(objs)
+
+    try:
+        for key in keys:
+            assert not nixl_backend.contains(key, False)
+            assert not nixl_backend.exists_in_put_tasks(key)
+
+        nixl_backend.batched_submit_put_task(keys, objs)
+
+        for key in keys:
+            assert nixl_backend.contains(key, False)
+
+        files_after_put = set(os.listdir(str(tmp_path)))
+        expected_files = {nixl_backend._format_object_key(k) for k in keys}
+        assert expected_files.issubset(files_after_put), (
+            f"missing files in {tmp_path}: {expected_files - files_after_put}"
+        )
+
+        for key, obj in zip(keys, objs, strict=False):
+            returned = nixl_backend.get_blocking(key)
+            assert returned is not None
+            retained_objs.append(returned)
+            assert returned.get_size() == obj.get_size()
+            assert returned.get_shape() == obj.get_shape()
+            assert returned.get_dtype() == obj.get_dtype()
+            assert torch.equal(returned.tensor, obj.tensor)
+
+        first_remove = nixl_backend.remove(keys[0])
+        assert first_remove is True
+        assert not os.path.exists(
+            os.path.join(str(tmp_path), nixl_backend._format_object_key(keys[0]))
+        )
+
+        # Removing an already-gone file must return False
+        # instead of raising FileNotFoundError.
+        second_remove = nixl_backend.remove(keys[0])
+        assert second_remove is False
+    finally:
+        _teardown_dynamic_file_backend(backends, thread_loop, thread, retained_objs)
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_posix_dynamic_file_backend(tmp_path):
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+
+    dtype = torch.bfloat16
+
+    config.nixl_buffer_device = "cpu"
+    config.extra_config["nixl_backend"] = "POSIX"
+    config.extra_config["nixl_pool_size"] = 0  # dynamic mode
+    config.extra_config["nixl_path"] = str(tmp_path)
+    config.extra_config["enable_cuda"] = False
+
+    run_dynamic_file(config, dtype, tmp_path)
+
+
+def _count_open_fds() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.no_shared_allocator
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Requires /proc/self/fd to count open FDs",
+)
+def test_nixl_dynamic_file_fd_leak_on_setup_failure(tmp_path, monkeypatch):
+    """
+    If any operation between the per-key ``os.open`` loop and
+    ``release_storage_handler`` raises, the already-opened FDs must be
+    closed and the just-created files unlinked instead of leaked.
+    """
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+
+    dtype = torch.bfloat16
+
+    config.nixl_buffer_device = "cpu"
+    config.extra_config["nixl_backend"] = "POSIX"
+    config.extra_config["nixl_pool_size"] = 0
+    config.extra_config["nixl_path"] = str(tmp_path)
+    config.extra_config["nixl_async_put"] = False
+    config.extra_config["enable_cuda"] = False
+
+    nixl_backend, backends, thread_loop, thread, keys, objs = (
+        _build_dynamic_file_backend(config, dtype)
+    )
+
+    try:
+        baseline = _count_open_fds()
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("induced failure")
+
+        monkeypatch.setattr(nixl_backend.agent, "create_batched_storage_handler", boom)
+
+        # Sync mode: batched_submit_put_task calls future.result(), so the
+        # induced RuntimeError propagates here.
+        with pytest.raises(RuntimeError):
+            nixl_backend.batched_submit_put_task(keys, objs)
+
+        assert _count_open_fds() == baseline, "FDs leaked on transfer-setup failure"
+
+        # The put path opens the final key files with O_CREAT before
+        # registering the storage handler, so a failure here must clean
+        # up those just-created files.
+        for key in keys:
+            assert not os.path.exists(
+                os.path.join(str(tmp_path), nixl_backend._format_object_key(key))
+            ), "final key file leaked on transfer-setup failure"
+    finally:
+        _teardown_dynamic_file_backend(backends, thread_loop, thread, objs)
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_dynamic_file_no_leak_on_transfer_failure(tmp_path, monkeypatch):
+    """
+    When the NIXL transfer itself fails after the final key
+    files have been opened with ``O_CREAT``, the backend must remove
+    those empty / partially-written files.
+    """
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+
+    dtype = torch.bfloat16
+
+    config.nixl_buffer_device = "cpu"
+    config.extra_config["nixl_backend"] = "POSIX"
+    config.extra_config["nixl_pool_size"] = 0
+    config.extra_config["nixl_path"] = str(tmp_path)
+    config.extra_config["nixl_async_put"] = False
+    config.extra_config["enable_cuda"] = False
+
+    nixl_backend, backends, thread_loop, thread, keys, objs = (
+        _build_dynamic_file_backend(config, dtype)
+    )
+
+    try:
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("induced post_blocking failure")
+
+        monkeypatch.setattr(nixl_backend.agent, "post_blocking", boom)
+
+        with pytest.raises(RuntimeError):
+            nixl_backend.batched_submit_put_task(keys, objs)
+
+        for key in keys:
+            final_path = os.path.join(
+                str(tmp_path), nixl_backend._format_object_key(key)
+            )
+            assert not os.path.exists(final_path), (
+                f"final key file leaked on transfer failure: {final_path}"
+            )
+            assert not nixl_backend.contains(key, False), (
+                "contains() reports key present after failed write"
+            )
+    finally:
+        _teardown_dynamic_file_backend(backends, thread_loop, thread, objs)

@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import TYPE_CHECKING
 import os
 import sys
 
 # Third Party
 from setuptools import find_packages, setup
+
+if TYPE_CHECKING:
+    # Third Party
+    from setuptools.extension import Extension
 
 ROOT_DIR = Path(__file__).parent
 HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
@@ -13,7 +18,8 @@ HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
 
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
-BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1"
+BUILDING_SDIST = "sdist" in sys.argv
+NO_CUDA_EXT = os.environ.get("NO_CUDA_EXT", "0") == "1"
 
 # New environment variable to choose between CUDA, HIP, and SYCL
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
@@ -116,6 +122,85 @@ def _mooncake_extension(
     ]
 
 
+def _common_cpp_extensions(
+    extra_cxx_flags: list[str], fs_extra_cxx_flags: list[str] | None = None
+) -> tuple[list["Extension"], dict[str, type]]:
+    """Build pure C++ extensions that do not depend on any GPU backend.
+
+    Args:
+        extra_cxx_flags: Additional C++ compiler flags to apply to the
+            `native_storage_ops` and `lmcache_redis` pure C++ extensions.
+        fs_extra_cxx_flags: Additional C++ compiler flags to apply to the
+            `lmcache_fs` extension. Defaults to `extra_cxx_flags` when not set.
+
+    Notes:
+        `fs_extra_cxx_flags` exists to preserve pre-refactor SYCL compile-flag
+        behavior where `lmcache_fs` intentionally omitted the ABI define.
+
+    Returns:
+        A tuple of:
+            - list: CppExtension modules for native storage backends,
+              including optional mooncake when enabled.
+            - dict: cmdclass containing BuildExtension.
+    """
+    # Third Party
+    from torch.utils import cpp_extension
+
+    if fs_extra_cxx_flags is None:
+        fs_extra_cxx_flags = extra_cxx_flags
+
+    storage_manager_sources = [
+        "csrc/storage_manager/bitmap.cpp",
+        "csrc/storage_manager/pybind.cpp",
+        "csrc/storage_manager/ttl_lock.cpp",
+        "csrc/storage_manager/utils.cpp",
+    ]
+    redis_sources = [
+        "csrc/storage_backends/redis/pybind.cpp",
+        "csrc/storage_backends/redis/connector.cpp",
+    ]
+    fs_sources = [
+        "csrc/storage_backends/fs/pybind.cpp",
+        "csrc/storage_backends/fs/connector.cpp",
+    ]
+    mooncake_sources = [
+        "csrc/storage_backends/mooncake/pybind.cpp",
+        "csrc/storage_backends/mooncake/connector.cpp",
+    ]
+    ext_modules = [
+        cpp_extension.CppExtension(
+            "lmcache.native_storage_ops",
+            sources=storage_manager_sources,
+            include_dirs=["csrc/storage_manager"],
+            extra_compile_args={
+                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_redis",
+            sources=redis_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
+            extra_compile_args={
+                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": fs_extra_cxx_flags + ["-O3", "-std=c++17"],
+            },
+        ),
+    ]
+    # Mooncake extension is optional.
+    ext_modules.extend(
+        _mooncake_extension(cpp_extension, mooncake_sources, extra_cxx_flags)
+    )
+    cmdclass = {"build_ext": cpp_extension.BuildExtension}
+    return ext_modules, cmdclass
+
+
 def cuda_extension() -> tuple[list, dict]:
     # Third Party
     from torch.utils import cpp_extension  # Import here
@@ -139,24 +224,6 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/utils.cpp",
         "csrc/event_recorder.cpp",
     ]
-    storage_manager_sources = [
-        "csrc/storage_manager/bitmap.cpp",
-        "csrc/storage_manager/pybind.cpp",
-        "csrc/storage_manager/ttl_lock.cpp",
-        "csrc/storage_manager/utils.cpp",
-    ]
-    redis_sources = [
-        "csrc/storage_backends/redis/pybind.cpp",
-        "csrc/storage_backends/redis/connector.cpp",
-    ]
-    fs_sources = [
-        "csrc/storage_backends/fs/pybind.cpp",
-        "csrc/storage_backends/fs/connector.cpp",
-    ]
-    mooncake_sources = [
-        "csrc/storage_backends/mooncake/pybind.cpp",
-        "csrc/storage_backends/mooncake/connector.cpp",
-    ]
     ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
@@ -166,35 +233,7 @@ def cuda_extension() -> tuple[list, dict]:
                 "nvcc": [flag_cxx_abi],
             },
         ),
-        cpp_extension.CppExtension(
-            "lmcache.native_storage_ops",
-            sources=storage_manager_sources,
-            include_dirs=["csrc/storage_manager"],
-            extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_redis",
-            sources=redis_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
-            extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_fs",
-            sources=fs_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
-            extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
-            },
-        ),
     ]
-    # Mooncake extension is optional.
-    ext_modules.extend(
-        _mooncake_extension(cpp_extension, mooncake_sources, [flag_cxx_abi])
-    )
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
@@ -216,24 +255,6 @@ def rocm_extension() -> tuple[list, dict]:
         "csrc/mem_alloc_hip.cpp",
         "csrc/utils_hip.cpp",
         "csrc/event_recorder.cpp",
-    ]
-    storage_manager_sources = [
-        "csrc/storage_manager/bitmap.cpp",
-        "csrc/storage_manager/pybind.cpp",
-        "csrc/storage_manager/ttl_lock.cpp",
-        "csrc/storage_manager/utils.cpp",
-    ]
-    redis_sources = [
-        "csrc/storage_backends/redis/pybind.cpp",
-        "csrc/storage_backends/redis/connector.cpp",
-    ]
-    fs_sources = [
-        "csrc/storage_backends/fs/pybind.cpp",
-        "csrc/storage_backends/fs/connector.cpp",
-    ]
-    mooncake_sources = [
-        "csrc/storage_backends/mooncake/pybind.cpp",
-        "csrc/storage_backends/mooncake/connector.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -266,33 +287,7 @@ def rocm_extension() -> tuple[list, dict]:
             # libraries=['amdhip64'] # Or other relevant HIP libs if needed
             define_macros=define_macros,
         ),
-        cpp_extension.CppExtension(
-            "lmcache.native_storage_ops",
-            sources=storage_manager_sources,
-            include_dirs=["csrc/storage_manager"],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_redis",
-            sources=redis_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_fs",
-            sources=fs_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-            },
-        ),
     ]
-    # Mooncake extension is optional.
-    ext_modules.extend(_mooncake_extension(cpp_extension, mooncake_sources, []))
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
@@ -316,20 +311,6 @@ def sycl_extension() -> tuple[list, dict]:
     sycl_sources = [
         "csrc/sycl/pybind_sycl.cpp",
         "csrc/sycl/mem_kernels_sycl.cpp",
-    ]
-    storage_manager_sources = [
-        "csrc/storage_manager/bitmap.cpp",
-        "csrc/storage_manager/pybind.cpp",
-        "csrc/storage_manager/ttl_lock.cpp",
-        "csrc/storage_manager/utils.cpp",
-    ]
-    redis_sources = [
-        "csrc/storage_backends/redis/pybind.cpp",
-        "csrc/storage_backends/redis/connector.cpp",
-    ]
-    fs_sources = [
-        "csrc/storage_backends/fs/pybind.cpp",
-        "csrc/storage_backends/fs/connector.cpp",
     ]
     # Use CppExtension with DPC++ compiler (set CXX=icpx before invoking).
     # The -fsycl flag enables SYCL compilation and linking.
@@ -367,30 +348,6 @@ def sycl_extension() -> tuple[list, dict]:
             },
             extra_link_args=["-fsycl"],
         ),
-        cpp_extension.CppExtension(
-            "lmcache.native_storage_ops",
-            sources=storage_manager_sources,
-            include_dirs=["csrc/storage_manager"],
-            extra_compile_args={
-                "cxx": ["-D_GLIBCXX_USE_CXX11_ABI=1", "-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_redis",
-            sources=redis_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
-            extra_compile_args={
-                "cxx": ["-D_GLIBCXX_USE_CXX11_ABI=1", "-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_fs",
-            sources=fs_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-            },
-        ),
     ]
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
@@ -401,17 +358,58 @@ def source_dist_extension() -> tuple[list, dict]:
     return [], {}
 
 
-if __name__ == "__main__":
-    if BUILDING_SDIST:
-        get_extension = source_dist_extension
-    elif BUILD_WITH_SYCL:
-        get_extension = sycl_extension
-    elif BUILD_WITH_HIP:
-        get_extension = rocm_extension
-    else:
-        get_extension = cuda_extension
+def _get_common_cpp_flags() -> list[str]:
+    """Select common pure C++ ABI flags based on the configured build backend.
 
-    ext_modules, cmdclass = get_extension()
+    Returns:
+        A list of compiler flags for pure C++ extensions.
+    """
+    if BUILD_WITH_HIP:
+        return []
+    if BUILD_WITH_SYCL:
+        return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
+    if ENABLE_CXX11_ABI:
+        return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
+    return ["-D_GLIBCXX_USE_CXX11_ABI=0"]
+
+
+def _collect_extensions() -> tuple[list, dict]:
+    """Collect extension modules according to current setup.py build settings.
+
+    Returns:
+        A tuple of:
+            - list: extension modules selected for the current build mode.
+            - dict: cmdclass containing BuildExtension when extensions are built.
+
+    Notes:
+        - `sdist` builds skip all extension compilation.
+        - `NO_CUDA_EXT=1` keeps pure C++ extensions and skips GPU extensions.
+        - Otherwise, pure C++ extensions are combined with one GPU backend
+          extension set (CUDA, ROCm, or SYCL).
+    """
+    if BUILDING_SDIST:
+        return source_dist_extension()
+
+    common_cpp_flags = _get_common_cpp_flags()
+    # Preserve historical SYCL compatibility: lmcache_fs was compiled without
+    # _GLIBCXX_USE_CXX11_ABI in pre-refactor builds.
+    fs_cpp_flags = [] if BUILD_WITH_SYCL else common_cpp_flags
+    ext_modules, cmdclass = _common_cpp_extensions(common_cpp_flags, fs_cpp_flags)
+    if NO_CUDA_EXT:
+        return ext_modules, cmdclass
+
+    if BUILD_WITH_SYCL:
+        gpu_ext_modules, cmdclass = sycl_extension()
+    elif BUILD_WITH_HIP:
+        gpu_ext_modules, cmdclass = rocm_extension()
+    else:
+        gpu_ext_modules, cmdclass = cuda_extension()
+    ext_modules.extend(gpu_ext_modules)
+    return ext_modules, cmdclass
+
+
+if __name__ == "__main__":
+    ext_modules, cmdclass = _collect_extensions()
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     if BUILD_WITH_HIP:
