@@ -20,6 +20,8 @@ LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-30}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
 # Set LMCACHE_SHM_NAME="" to use pickle transport; unset/default uses shm transport
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
+# Set LMCACHE_MP_TRANSFER_MODE=handle for server-side copy (POSIX SHM IPC)
+LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-auto}"
 
 # Directory to collect artifacts before workspace is deleted
 ARTIFACT_DIR="/tmp/build_${BUILD_ID}_artifacts"
@@ -141,6 +143,36 @@ print(int(total))
 EOF
 }
 
+# Wait for a metric to change from its previous value
+wait_for_metric_change() {
+  local metric_name="$1"
+  local previous_value="$2"
+  local timeout_seconds="${3:-5}"
+  
+  echo "Waiting for metric '${metric_name}' to change from ${previous_value} (timeout: ${timeout_seconds}s)"
+  
+  local start_time current_time
+  start_time=$(date +%s)
+  
+  while true; do
+    current_time=$(date +%s)
+    if [ $((current_time - start_time)) -ge "${timeout_seconds}" ]; then
+      echo "Timeout: Metric '${metric_name}' did not change within ${timeout_seconds}s"
+      return 1
+    fi
+    
+    local current_value
+    current_value="$(scrape_metric "${metric_name}")"
+    
+    if [ "${current_value}" -gt "${previous_value}" ]; then
+      echo "Metric '${metric_name}' changed from ${previous_value} to ${current_value}"
+      return 0
+    fi
+    
+    sleep 1
+  done
+}
+
 # Send a completion request and print the text output
 send_completion() {
   local prompt_file="$1"
@@ -165,7 +197,9 @@ print(json.dumps({
 
 start_vllm() {
   echo "Starting vLLM server..."
-  VLLM_TARGET_DEVICE=cpu vllm serve facebook/opt-125m \
+  VLLM_TARGET_DEVICE=cpu \
+  LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}" \
+  vllm serve facebook/opt-125m \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
     --disable-hybrid-kv-cache-manager \
@@ -273,7 +307,10 @@ LMCACHE_ARGS=(
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
   --chunk-size "${LMCACHE_CHUNK_SIZE}"
 )
-if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
+if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ]; then
+  echo "Transport mode: server-side copy (handle via POSIX SHM IPC)"
+  EXPECTED_TRANSPORT="handle"
+elif [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
   echo "Transport mode: shared memory (shm)"
   EXPECTED_TRANSPORT="shm"
 else
@@ -320,7 +357,14 @@ echo "✅ E2E request validation passed"
 
 # Verify transport mode (logged after vLLM connects to LMCache server)
 echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANSPORT}'"
-if [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
+if [ "${EXPECTED_TRANSPORT}" = "handle" ]; then
+  if ! grep -q "CpuCacheContext" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected server-side copy but 'CpuCacheContext' not found in log"
+    tail -50 "${LMCACHE_LOG}"
+    false
+  fi
+  echo "✅ Transport mode confirmed: handle (server-side copy)"
+elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
   if ! grep -q "Using shm" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but 'Using shm' not found in log"
     tail -50 "${LMCACHE_LOG}"
