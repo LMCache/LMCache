@@ -1,0 +1,214 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/async_loading.rst:2
+msgid "Async Loading"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:6
+msgid "Table of Contents"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:9
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:11
+msgid ""
+"This document explains the principle, benefits, differences from vLLM PR "
+"`19330 <https://github.com/vllm-project/vllm/pull/19330>`_, and "
+"limitations of the LMCache ``async_loading`` feature. It focuses on "
+"LMCache v1 integration with vLLM and the internal storage pipeline."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:14
+msgid "Key change of components in this feature include:"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:16
+msgid "LMCache async lookup client/server (ZMQ-based)"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:17
+msgid "Storage manager orchestrating backends and concurrency"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:18
+msgid "Cache engine async API entrypoints"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:19
+msgid "vLLM adapter integration points"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:22
+msgid "Principle and Theory"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:24
+msgid ""
+"At a high level, ``async_loading`` decouples scheduler-side lookup from "
+"worker-side prefetch/retrieval, allowing overlap between I/O and "
+"computation while preserving prefix-based correctness."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:26
+msgid "The scheduler sends lookup requests with token chunk hashes and offsets."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:27
+msgid ""
+"Worker-side servers perform tiered ``batched_async_contains`` over "
+"available backends and eagerly launch non-blocking batched get operations"
+" for hit prefixes."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:28
+msgid ""
+"Completion is tracked via an ``EventManager`` to safely deliver loaded "
+"memory objects back to the requesting path."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:29
+msgid ""
+"A weighted semaphore with an ``AsyncSerializer`` prevents allocator "
+"deadlocks by shaping concurrency according to chunk budget."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:31
+msgid "The following Mermaid sequence diagram illustrates the end-to-end flow:"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:63
+msgid "Architecture (Worker Side)"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:96
+msgid "Benefits"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:98
+msgid "Performance overlap"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:99
+msgid ""
+"**I/O–Compute Overlap**: Decoupling lookup/prefetch from loading enables "
+"fetching KV chunks while vLLM continues scheduling/computation."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:100
+msgid "Robustness and error handling"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:101
+msgid ""
+"**Event-driven Synchronization**: ``EventManager`` ensures safe hand-off "
+"of futures and avoids race conditions between threads and the async loop."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:102
+msgid ""
+"**Backpressure & Deadlock Avoidance**: ``AsyncSerializer`` with a "
+"weighted semaphore caps concurrent chunk retrievals based on allocator "
+"budget, preventing starvation or allocator lockups."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:103
+msgid ""
+"**Graceful Miss Path**: Immediate response with ``None`` hit tokens when "
+"nothing is retrievable; worker returns quickly without stalling the "
+"scheduler."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:106
+msgid "Comparison with vLLM Load Failure Recovery feature"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:108
+msgid ""
+"The `VLLM_PR_19330 <https://github.com/vllm-project/vllm/pull/19330>`_ "
+"introduces a fault recovery mechanism for vLLM's KV connector "
+"infrastructure that enables graceful handling of KV cache load failures "
+"by automatically detecting failed block loads and rescheduling only "
+"affected requests for recomputation from a valid prefix. By contrast, "
+"LMCache’s ``async_loading`` is an externalized caching layer with its own"
+" client/server, storage backends, and concurrency control."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:112
+msgid "Limitations"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:114
+msgid ""
+"Only works with vllm merged `VLLM_PR_23620 <https://github.com/vllm-"
+"project/vllm/pull/23620>`_"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:115
+msgid ""
+"Backend support constraint: This feature currently requires backends that"
+" implement ``batched_async_contains``; limited to a few backends, e.g.:"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:116
+msgid "``LocalCpuBackend``"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:117
+msgid "``LocalDiskBackend``"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:118
+msgid "``S3Connector``"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:119
+msgid "``FSConnector``"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:120
+msgid "``RedisConnector/RedisClusterConnector``"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:123
+msgid "Future Work"
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:125
+msgid ""
+"Introduce a default ``batched_async_contains`` implementation, so all "
+"backends can support ``async_loading``."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:126
+msgid ""
+"Add metrics and observability to track the number of asynchronous lookup "
+"requests and the number of occupied ``MemoryObj`` instances."
+msgstr ""
+
+#: ../../source/kv_cache/async_loading.rst:127
+msgid ""
+"Improve the lookup framework by passing vLLM prefix cache hit tokens so "
+"that async lookup can skip loading parts already hit in vLLM."
+msgstr ""
+

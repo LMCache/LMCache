@@ -47,17 +47,17 @@ class ServerCommand(BaseCommand):
                 add_http_frontend_args,
                 add_mp_server_args,
             )
+
+            add_mp_server_args(parser)
+            add_storage_manager_args(parser)
+            add_http_frontend_args(parser)
+            add_observability_args(parser)
         except ImportError as e:
             print(
                 f"Failed to import server dependencies: {e}. "
                 "Install the full lmcache package to use 'lmcache server'."
             )
             return
-
-        add_mp_server_args(parser)
-        add_storage_manager_args(parser)
-        add_http_frontend_args(parser)
-        add_observability_args(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Parse CLI arguments into config objects and launch the HTTP server.

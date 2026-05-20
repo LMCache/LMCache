@@ -121,8 +121,8 @@ class KVCacheCommand(BaseCommand):
         """Clear all cached KV data via the MP HTTP server."""
         url = args.url.rstrip("/")
 
-        # MP HTTP server endpoint: POST /api/clear-cache
-        _http_request("POST", f"{url}/api/clear-cache")
+        # MP HTTP server endpoint: POST /clear-cache
+        _http_request("POST", f"{url}/clear-cache")
 
         quiet = getattr(args, "quiet", False)
         if quiet:

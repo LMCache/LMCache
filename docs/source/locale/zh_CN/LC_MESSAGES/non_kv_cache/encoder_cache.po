@@ -1,0 +1,282 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/non_kv_cache/encoder_cache.rst:2
+msgid "Encoder caching"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:4
+msgid ""
+"The **Encoder Cache (EC)** stores the output of a multimodal model's "
+"encoder stage, keyed by vLLM's per-input ``mm_hash``. When two requests "
+"share a multimodal input — the same image, video, or audio clip — the "
+"second request loads the encoder output from the cache and the encoder "
+"does not run."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:10
+msgid ""
+"This applies to any modality vLLM exposes through its encoder-cache "
+"extension point: vision encoders (CLIP / ViT-style towers used for images"
+" and sampled video frames), audio encoders (Whisper-style towers used for"
+" raw waveforms), and combined-modality encoders such as Qwen2.5-Omni. The"
+" connector is modality-agnostic — it caches a tensor of shape "
+"``[num_tokens, hidden_dim]`` keyed by ``mm_hash``, without knowing which "
+"encoder produced it."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:18
+msgid ""
+"vLLM exposes the encoder-cache extension point via ``ECConnectorBase`` "
+"(vLLM v1 only). LMCache provides an ``LMCacheECConnector`` shim on the "
+"vLLM side and an ``ECCacheEngine`` on the LMCache side; together they "
+"back the encoder cache with any of LMCache's storage backends (local CPU,"
+" local disk, remote, NIXL)."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:25
+msgid "Enabling it"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:27
+msgid "Pass ``--ec-transfer-config`` to ``vllm serve``:"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:38
+msgid ""
+"``ec_role`` choices: ``ec_producer`` (saves only), ``ec_consumer`` (reads"
+" only), ``ec_both`` (single-instance default)."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:41
+msgid ""
+"Set ``LMCACHE_CONFIG_FILE`` to point at a YAML with at least one storage "
+"backend configured for EC:"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:52
+msgid ""
+"To size EC storage independently from the (separate) KV cache, prefix "
+"overrides with ``ec_`` in YAML or ``LMCACHE_EC_`` in the environment "
+"(e.g. ``ec_max_local_disk_size: 64`` or "
+"``LMCACHE_EC_MAX_LOCAL_DISK_SIZE=64``). EC and KV always run with "
+"**separate** ``StorageManager`` instances so one cannot evict the other."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:59
+msgid ""
+"If you don't set ``local_disk`` (or its EC override) the engine still "
+"starts, but EC entries live in CPU memory only and do not survive process"
+" restart. Set ``local_disk`` (or ``ec_local_disk``) to a real path if you"
+" want cache persistence — there is no implicit on-disk default location."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:66
+msgid "Verifying it's working"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:68
+msgid "Three independent signals:"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:70
+msgid ""
+"**vLLM metric.** ``loggers.py`` reports ``MM cache hit rate: X%`` after "
+"warm requests."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:72
+msgid ""
+"**LMCache log line.** Cold (first-time) requests emit ``LMCache INFO: EC "
+"put: stored N bytes for mm_hash=H``. Warm requests emit no ``EC put``."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:75
+msgid ""
+"**On-disk file.** Under ``local_disk`` an entry of the form "
+"``<model>@1@0@<chunk_hash>@<dtype>.pt`` appears after the first request "
+"and is reused thereafter. The ``@1@0@`` prefix reflects sentinel "
+"``world_size=1, worker_id=0`` in the EC cache key, so all tensor-parallel"
+" ranks share one entry."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:82
+msgid "Design notes (user-visible)"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:84
+msgid ""
+"**Cache key uses sentinel TP shape.** Encoder outputs are replicated "
+"across TP ranks, so the EC key uses ``world_size=1, worker_id=0`` "
+"regardless of the deployment's actual TP. Concurrent puts from N ranks "
+"land on the same key with identical contents."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:89
+msgid ""
+"**Dtype decoupled from KV quant.** The dtype field of the EC cache key is"
+" the encoder output dtype (``vllm_config.model_config.dtype``), not "
+"``metadata.kv_dtype``. Changing KV quantization does not invalidate EC "
+"entries."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:93
+msgid ""
+"**Separate StorageManager from KV.** KV and EC have very different access"
+" patterns (KV chunked / layerwise / high-volume; EC single-tensor / "
+"request-scoped). Sharing one allocator pool would let one cache evict the"
+" other in unpredictable ways. Per-cache sizing knobs (``ec_max_local_*``)"
+" are explicit instead."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:98
+msgid ""
+"**Connector role pinned to \"worker\".** vLLM's ``ECConnectorBase`` is "
+"dual-role (scheduler and worker). The LMCache connector calls "
+"``create_lmcache_metadata(..., role=\"worker\")`` regardless, because the"
+" scheduler-side ``has_cache_item`` needs a fully constructed "
+"``StorageManager`` and LMCache currently aborts disk-backend setup when "
+"``metadata.role == \"scheduler\"``."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:105
+msgid ""
+"The full internal design (class layering, code paths, follow-up work) "
+"lives at :file:`docs/design/v1/encoder-cache.md` in the source tree."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:109
+msgid "Benchmark"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:111
+msgid ""
+"Live measurement on a single H100 80GB with ``Qwen/Qwen2.5-VL-7B-"
+"Instruct`` (bf16) and Big Buck Bunny (10:34, 720p, ≈ 60 MB MP4). Same "
+"chat-completion request sent 1 cold + N warm times against the same vLLM "
+"server."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:116
+msgid ""
+"Two configurations, varying only ``num_frames`` (how many frames vLLM "
+"samples from the video):"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:123
+msgid "num_frames"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:124
+msgid "EC entry"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:125
+msgid "Cold TTFT (s)"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:126
+msgid "Warm TTFT mean (s)"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:127
+msgid "Saved"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:128
+msgid "Speedup"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:129
+msgid "32 (vLLM default)"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:130
+msgid "34.3 MB"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:131
+msgid "3.923"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:132
+msgid "3.125"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:133
+msgid "798 ms"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:134
+msgid "**1.26×**"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:135
+msgid "128"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:136
+msgid "130.8 MB"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:137
+msgid "5.895"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:138
+msgid "3.375"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:139
+msgid "2.52 s"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:140
+msgid "**1.75×**"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:142
+msgid ""
+"Speedup grows with ``num_frames`` because the encoder workload scales "
+"linearly with frame count while the rest of prefill (LM forward over the "
+"resulting multimodal tokens + the short text prompt) scales sublinearly. "
+"The same principle applies to other modalities: the win is largest when "
+"the encoder is the dominant share of prefill (long videos at high frame "
+"counts, long audio clips, large images at high resolution) and smallest "
+"when text prefill dominates."
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:151
+msgid "Reproducing"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:153
+msgid "Server (heavier-encoder configuration):"
+msgstr ""
+
+#: ../../source/non_kv_cache/encoder_cache.rst:169
+msgid ""
+"Client: any streaming OpenAI-compatible client that re-sends the same "
+"multimodal payload. The benchmark measures TTFT (time to first token) "
+"because the encoder runs during prefill — any encoder savings show up "
+"there. Decode tokens-per-second is unaffected by EC."
+msgstr ""
+

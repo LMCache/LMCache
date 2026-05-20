@@ -31,8 +31,9 @@ import torch
 import zmq
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType
+from lmcache.utils import EngineType, check_interprocess_event_support
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     RawCudaIPCWrapper,
@@ -386,14 +387,16 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                 self._mq_timeout,
             )
 
-    def start_load_kv(self, stream: torch.cuda.Stream) -> None:
+    def start_load_kv(self, stream: torch_dev.Stream) -> None:
         """Send ``RETRIEVE`` requests for each pending load."""
         meta: Optional[LMCacheMPConnectorMetadata] = self._metadata
         if meta is None or not meta.loads:
             return
 
         t0 = time.perf_counter()
-        event = torch.cuda.Event(interprocess=True)
+        # Not all backends support interprocess Events (CUDA IPC specific)
+        check_interprocess_event_support()
+        event = torch_dev.Event(interprocess=True)
         event.record(stream)
 
         for req_id, spec in meta.loads.items():
@@ -426,22 +429,24 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             len(meta.loads),
         )
 
-    def wait_for_layer_load(self, layer_idx: int, stream: torch.cuda.Stream) -> None:
+    def wait_for_layer_load(self, layer_idx: int, stream: torch_dev.Stream) -> None:
         """No-op — server synchronizes via CUDA IPC events."""
         pass
 
-    def save_kv_layer(self, layer_idx: int, stream: torch.cuda.Stream) -> None:
+    def save_kv_layer(self, layer_idx: int, stream: torch_dev.Stream) -> None:
         """No-op — saves are batched in :meth:`wait_for_save`."""
         pass
 
-    def wait_for_save(self, stream: torch.cuda.Stream) -> None:
+    def wait_for_save(self, stream: torch_dev.Stream) -> None:
         """Send ``STORE`` requests for each pending save."""
         meta: Optional[LMCacheMPConnectorMetadata] = self._metadata
         if meta is None or not meta.saves:
             return
 
         t0 = time.perf_counter()
-        event = torch.cuda.Event(interprocess=True)
+        # Not all backends support interprocess Events (CUDA IPC specific)
+        check_interprocess_event_support()
+        event = torch_dev.Event(interprocess=True)
         event.record(stream)
 
         for req_id, spec in meta.saves.items():

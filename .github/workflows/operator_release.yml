@@ -1,9 +1,8 @@
 name: "Operator: Release"
 
 on:
-  push:
-    tags:
-      - "operator-v*"
+  release:
+    types: [published]
 
 env:
   IMAGE_NAME: lmcache/lmcache-operator
@@ -19,6 +18,8 @@ defaults:
 jobs:
   release:
     name: Build, push, and release
+    # Filter out main lmcache `v*` releases — only fire for operator-prefixed tags.
+    if: startsWith(github.ref_name, 'operator-v')
     runs-on: ubuntu-latest
     steps:
       - name: Harden Runner
@@ -63,11 +64,9 @@ jobs:
       - name: Build installer manifest
         run: make build-installer IMG=${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
 
-      - name: Create GitHub Release
+      - name: Attach installer to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Operator ${{ steps.version.outputs.VERSION }}"
-          generate_release_notes: true
           files: operator/dist/install.yaml
 
       - name: Update latest release alias

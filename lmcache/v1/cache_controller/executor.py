@@ -79,7 +79,7 @@ class LMCacheClusterExecutor:
                 )
             sockets.append(socket)
 
-            # TODO(Jiayi): Need a way to trak event_id -> worker_event_id mapping
+            # TODO(Jiayi): Need a way to track event_id -> worker_event_id mapping
             # Also, we need to track worker_event_id status
             worker_event_id = f"Worker{worker_id}{msg.event_id}"
             serialized_msg = msgspec.msgpack.encode(
@@ -128,7 +128,7 @@ class LMCacheClusterExecutor:
                 )
             sockets.append(socket)
 
-            # TODO(Jiayi): Need a way to trak event_id -> worker_event_id mapping
+            # TODO(Jiayi): Need a way to track event_id -> worker_event_id mapping
             # Also, we need to track worker_event_id status
             worker_event_id = f"Worker{worker_id}{msg.event_id}"
             serialized_msg = msgspec.msgpack.encode(

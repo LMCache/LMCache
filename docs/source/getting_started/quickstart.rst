@@ -58,6 +58,30 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                    --port 8000 --kv-transfer-config \
                    '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
+            .. note::
+               **Where does** ``LMCacheMPConnector`` **resolve to?** This depends on your vLLM version:
+
+               - **vLLM < 0.20.0** -- ``"kv_connector":"LMCacheMPConnector"`` always
+                 resolves to vLLM's built-in
+                 ``vllm.distributed.kv_transfer.kv_connector.v1.LMCacheMPConnector``;
+                 there is no way to redirect it to the LMCache-shipped implementation.
+
+               - **vLLM >= 0.20.0** -- ``"kv_connector":"LMCacheMPConnector"`` still
+                 defaults to vLLM's built-in connector, but you can opt in to the
+                 LMCache-shipped implementation
+                 (:mod:`lmcache.integration.vllm.lmcache_mp_connector`) by adding
+                 ``kv_connector_module_path``:
+
+                 .. code-block:: bash
+
+                    vllm serve Qwen/Qwen3-8B \
+                        --port 8000 --kv-transfer-config \
+                        '{"kv_connector":"LMCacheMPConnector", "kv_connector_module_path":"lmcache.integration.vllm.lmcache_mp_connector", "kv_role":"kv_both"}'
+
+                 The LMCache-shipped connector tracks the latest LMCache server
+                 protocol and ships fixes/features ahead of the version vendored
+                 into vLLM, so prefer it whenever you are on vLLM 0.20.0 or newer.
+
             **Test** -- open a new terminal and send two requests whose
             prompts share a prefix:
 

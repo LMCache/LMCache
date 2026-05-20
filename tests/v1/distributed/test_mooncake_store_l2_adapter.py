@@ -8,9 +8,11 @@ extension is not available.
 """
 
 # Standard
-from typing import Any
+from typing import Any, cast
 import os
 import select
+import sys
+import types
 
 # Third Party
 import pytest
@@ -170,6 +172,25 @@ class TestMooncakeStoreL2AdapterConfig:
         assert "num_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "10.0.0.1"
 
+    def test_from_dict_with_per_op_workers(self):
+        """Per-operation worker counts should be parsed as a dict
+        and excluded from setup_config."""
+        d = {
+            "type": "mooncake_store",
+            "num_workers": 16,
+            "per_op_workers": {
+                "lookup": 4,
+                "retrieve": 16,
+                "store": 4,
+            },
+            "local_hostname": "10.0.0.1",
+        }
+        config = MooncakeStoreL2AdapterConfig.from_dict(d)
+
+        assert config.per_op_workers == {"lookup": 4, "retrieve": 16, "store": 4}
+        assert "per_op_workers" not in config.setup_config
+        assert config.setup_config["local_hostname"] == "10.0.0.1"
+
     def test_from_dict_forwards_boolean_mooncake_keys_as_strings(self):
         """Non-LMCache boolean keys should be forwarded as strings."""
         config = MooncakeStoreL2AdapterConfig.from_dict(
@@ -194,12 +215,17 @@ class TestMooncakeStoreL2AdapterConfig:
         assert config.setup_config["experimental_key"] == "enabled"
 
     def test_from_dict_strips_lmcache_only_keys(self):
-        """LMCache-only keys (type, num_workers, eviction) should
+        """LMCache-only keys should
         not appear in setup_config."""
         d = {
             "type": "mooncake_store",
             "num_workers": 2,
             "eviction": "lru",
+            "per_op_workers": {
+                "lookup": 3,
+                "retrieve": 5,
+                "store": 2,
+            },
             "local_hostname": "host1",
         }
         config = MooncakeStoreL2AdapterConfig.from_dict(d)
@@ -207,6 +233,7 @@ class TestMooncakeStoreL2AdapterConfig:
         assert "type" not in config.setup_config
         assert "num_workers" not in config.setup_config
         assert "eviction" not in config.setup_config
+        assert "per_op_workers" not in config.setup_config
         assert config.setup_config["local_hostname"] == "host1"
 
     def test_from_dict_converts_values_to_str(self):
@@ -250,6 +277,34 @@ class TestMooncakeStoreL2AdapterConfig:
         d = {"type": "mooncake_store", "num_workers": "four"}
         with pytest.raises(ValueError, match="num_workers"):
             MooncakeStoreL2AdapterConfig.from_dict(d)
+
+    @pytest.mark.parametrize("value", [0, -1, "four"])
+    def test_from_dict_invalid_per_op_workers(self, value: Any):
+        """Invalid per_op_workers values should raise ValueError."""
+        d: dict[str, object] = {
+            "type": "mooncake_store",
+            "per_op_workers": {
+                "lookup": 2,
+                "retrieve": value,
+                "store": 2,
+            },
+        }
+        with pytest.raises(ValueError, match="per_op_workers"):
+            MooncakeStoreL2AdapterConfig.from_dict(d)
+
+    def test_from_dict_partial_per_op_workers(self):
+        """Partial per_op_workers is valid — unmentioned keys use shared pool."""
+        d = {
+            "type": "mooncake_store",
+            "per_op_workers": {
+                "lookup": 4,
+                "retrieve": 16,
+            },
+            "local_hostname": "10.0.0.1",
+        }
+        config = MooncakeStoreL2AdapterConfig.from_dict(d)
+        assert config.per_op_workers == {"lookup": 4, "retrieve": 16}
+        assert "store" not in config.per_op_workers
 
     def test_constructor_copies_setup_config(self):
         """Constructor should copy the setup_config dict."""
@@ -299,19 +354,37 @@ class TestMooncakeStoreRegistration:
             create_l2_adapter_from_registry(config)
 
 
-@requires_mooncake
+def _install_fake_mooncake_extension(
+    monkeypatch: pytest.MonkeyPatch,
+    client_cls: type,
+) -> None:
+    """Install a fake lmcache_mooncake module for factory unit tests."""
+
+    class FakeL1RegistrationConfig:
+        def __init__(self):
+            self.enabled = False
+            self.base = 0
+            self.size = 0
+
+    fake_module = types.ModuleType("lmcache.lmcache_mooncake")
+    fake_module_any = cast(Any, fake_module)
+    fake_module_any.L1RegistrationConfig = FakeL1RegistrationConfig
+    fake_module_any.LMCacheMooncakeClient = client_cls
+    monkeypatch.setitem(sys.modules, "lmcache.lmcache_mooncake", fake_module)
+
+
 class TestMooncakeStoreL1RegistrationFactory:
     """Tests for Mooncake TCP/RDMA L1 registration factory behavior.
 
     RDMA creation must receive a valid L1 memory descriptor; TCP creation
     must not enable preregistration even if a descriptor is provided.
+    Uses a fake native extension so these tests do not require Mooncake.
     """
 
     def test_factory_passes_disabled_l1_registration_for_tcp(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         # First Party
-        from lmcache import lmcache_mooncake
         from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 
         captured: dict[str, Any] = {}
@@ -322,16 +395,14 @@ class TestMooncakeStoreL1RegistrationFactory:
                 config: dict[str, str],
                 num_workers: int,
                 l1_registration,
+                per_op_workers=None,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
+                captured["per_op_workers"] = per_op_workers
 
-        monkeypatch.setattr(
-            lmcache_mooncake,
-            "LMCacheMooncakeClient",
-            FakeClient,
-        )
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
             native_connector_l2_adapter,
             "NativeConnectorL2Adapter",
@@ -367,7 +438,6 @@ class TestMooncakeStoreL1RegistrationFactory:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         # First Party
-        from lmcache import lmcache_mooncake
         from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 
         captured: dict[str, Any] = {}
@@ -378,16 +448,14 @@ class TestMooncakeStoreL1RegistrationFactory:
                 config: dict[str, str],
                 num_workers: int,
                 l1_registration,
+                per_op_workers=None,
             ):
                 captured["config"] = config
                 captured["num_workers"] = num_workers
                 captured["l1_registration"] = l1_registration
+                captured["per_op_workers"] = per_op_workers
 
-        monkeypatch.setattr(
-            lmcache_mooncake,
-            "LMCacheMooncakeClient",
-            FakeClient,
-        )
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
         monkeypatch.setattr(
             native_connector_l2_adapter,
             "NativeConnectorL2Adapter",
@@ -419,7 +487,61 @@ class TestMooncakeStoreL1RegistrationFactory:
         assert registration.base == l1_desc.ptr
         assert registration.size == l1_desc.size
 
-    def test_factory_requires_l1_memory_descriptor_for_rdma(self):
+    def test_factory_passes_per_op_worker_counts(self, monkeypatch: pytest.MonkeyPatch):
+        # First Party
+        from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
+
+        captured: dict[str, Any] = {}
+
+        class FakeClient:
+            def __init__(
+                self,
+                config: dict[str, str],
+                num_workers: int,
+                l1_registration,
+                per_op_workers=None,
+            ):
+                captured["config"] = config
+                captured["num_workers"] = num_workers
+                captured["l1_registration"] = l1_registration
+                captured["per_op_workers"] = per_op_workers
+
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
+        monkeypatch.setattr(
+            native_connector_l2_adapter,
+            "NativeConnectorL2Adapter",
+            lambda client: ("wrapped", client),
+        )
+
+        config = MooncakeStoreL2AdapterConfig.from_dict(
+            {
+                "type": "mooncake_store",
+                "local_hostname": "127.0.0.1",
+                "num_workers": 16,
+                "per_op_workers": {
+                    "lookup": 4,
+                    "retrieve": 16,
+                    "store": 4,
+                },
+                "protocol": "tcp",
+            }
+        )
+
+        adapter = mooncake_store_module._create_mooncake_store_l2_adapter(config)
+        wrapped_adapter: Any = adapter
+
+        assert wrapped_adapter[0] == "wrapped"
+        assert captured["config"] == config.setup_config
+        assert captured["num_workers"] == 16
+        assert captured["per_op_workers"] == {"lookup": 4, "retrieve": 16, "store": 4}
+
+    def test_factory_requires_l1_memory_descriptor_for_rdma(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeClient:
+            pass
+
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
         config = MooncakeStoreL2AdapterConfig.from_dict(
             {
                 "type": "mooncake_store",
@@ -431,7 +553,13 @@ class TestMooncakeStoreL1RegistrationFactory:
         with pytest.raises(ValueError, match="no L1 memory descriptor"):
             mooncake_store_module._create_mooncake_store_l2_adapter(config)
 
-    def test_factory_rejects_invalid_l1_memory_descriptor_for_rdma(self):
+    def test_factory_rejects_invalid_l1_memory_descriptor_for_rdma(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        class FakeClient:
+            pass
+
+        _install_fake_mooncake_extension(monkeypatch, FakeClient)
         config = MooncakeStoreL2AdapterConfig.from_dict(
             {
                 "type": "mooncake_store",
@@ -497,12 +625,16 @@ class TestMooncakeStoreIntegration:
                 "type": "mooncake_store",
                 "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
                 "metadata_server": MOONCAKE_METADATA_SERVER,
+                "master_server_addr": MOONCAKE_MASTER_SERVER_ADDRESS,
                 "num_workers": 2,
             }
         )
         self.adapter = create_l2_adapter(config)
         yield
-        self.adapter.close()
+        adapter = self.adapter
+        self.adapter = None
+        if adapter is not None:
+            adapter.close()
 
     def test_event_fds_are_distinct(self):
         """Each operation should have a distinct event fd."""
@@ -651,6 +783,116 @@ class TestMooncakeStoreIntegration:
 
         self.adapter.submit_unlock(stored_keys)
 
+    # -----------------------------------------------------------------
+    # Delete tests
+    # -----------------------------------------------------------------
+
+    def test_delete_stored_key(self):
+        """Delete a stored key, then lookup confirms it is gone."""
+        key = create_object_key(555)
+        store_obj = create_memory_obj(size=128, fill_value=7.0)
+
+        store_fd = self.adapter.get_store_event_fd()
+        lookup_fd = self.adapter.get_lookup_and_lock_event_fd()
+
+        # Store
+        store_tid = self.adapter.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd)
+        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+
+        # Confirm stored
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd)
+        bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
+        assert bitmap.test(0) is True
+        self.adapter.submit_unlock([key])
+
+        # Delete
+        self.adapter.delete([key])
+
+        # Lookup again — should be gone
+        lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd)
+        bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
+        assert bitmap.test(0) is False, "Key should not exist after delete"
+
+    def test_delete_nonexistent_keys(self):
+        """Deleting keys that don't exist should not raise."""
+        keys = [create_object_key(i + 80000) for i in range(3)]
+        # Should complete without error
+        self.adapter.delete(keys)
+
+    def test_batch_delete_mixed_existing_and_missing(self):
+        """Batch delete a mix of stored and non-stored keys."""
+        stored_keys = [create_object_key(i + 600) for i in range(3)]
+        stored_objs = [
+            create_memory_obj(size=64, fill_value=float(i + 1)) for i in range(3)
+        ]
+        missing_keys = [
+            create_object_key(90001),
+            create_object_key(90002),
+        ]
+        all_keys = stored_keys + missing_keys
+
+        store_fd = self.adapter.get_store_event_fd()
+        lookup_fd = self.adapter.get_lookup_and_lock_event_fd()
+
+        # Store the first 3
+        store_tid = self.adapter.submit_store_task(stored_keys, stored_objs)
+        assert wait_for_event_fd(store_fd)
+        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+
+        # Confirm they exist
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(stored_keys)
+        assert wait_for_event_fd(lookup_fd)
+        bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
+        for i in range(3):
+            assert bitmap.test(i) is True
+        self.adapter.submit_unlock(stored_keys)
+
+        # Batch delete mixed keys
+        self.adapter.delete(all_keys)
+
+        # Stored keys should now be gone
+        lookup_tid = self.adapter.submit_lookup_and_lock_task(stored_keys)
+        assert wait_for_event_fd(lookup_fd)
+        bitmap = self.adapter.query_lookup_and_lock_result(lookup_tid)
+        for i in range(3):
+            assert bitmap.test(i) is False, f"Key {i} should be gone after delete"
+
+    def test_delete_updates_usage_tracking(self):
+        """Deleting a stored key reduces tracked byte usage."""
+        key = create_object_key(777)
+        store_obj = create_memory_obj(size=128, fill_value=9.0)
+
+        store_fd = self.adapter.get_store_event_fd()
+        lookup_fd = self.adapter.get_lookup_and_lock_event_fd()
+
+        # Record usage before store
+        usage_before = self.adapter.get_usage().total_bytes_used
+
+        # Store
+        store_tid = self.adapter.submit_store_task([key], [store_obj])
+        assert wait_for_event_fd(store_fd)
+        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+
+        usage_after_store = self.adapter.get_usage().total_bytes_used
+        assert usage_after_store > usage_before, "Usage should increase after store"
+
+        # Confirm stored in lookup so _key_sizes is populated
+        _ = self.adapter.submit_lookup_and_lock_task([key])
+        assert wait_for_event_fd(lookup_fd)
+        self.adapter.submit_unlock([key])
+
+        # Delete
+        self.adapter.delete([key])
+
+        usage_after_delete = self.adapter.get_usage().total_bytes_used
+        assert usage_after_delete == usage_before, (
+            f"Usage should return to baseline after delete: "
+            f"before={usage_before}, after_delete={usage_after_delete}"
+        )
+
     def test_factory_creates_adapter(self):
         """Verify the factory can create a Mooncake Store L2 adapter."""
         # First Party
@@ -661,6 +903,7 @@ class TestMooncakeStoreIntegration:
                 "type": "mooncake_store",
                 "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
                 "metadata_server": MOONCAKE_METADATA_SERVER,
+                "master_server_addr": MOONCAKE_MASTER_SERVER_ADDRESS,
                 "num_workers": 2,
             }
         )
@@ -679,6 +922,13 @@ class TestMooncakeStoreIntegration:
         # First Party
         from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 
+        # The class-level fixture creates a default TCP adapter. Close it before
+        # creating the RDMA adapter, otherwise Mooncake master may allocate this
+        # test object's replica on the TCP segment and the RDMA-only client will
+        # fail with NotSupportedTransport.
+        self.adapter.close()
+        self.adapter = None
+
         page_size = 4096
         obj_size_bytes = page_size * 16
         l1_buffer = torch.empty(page_size * 256, dtype=torch.uint8, device="cpu")
@@ -693,10 +943,10 @@ class TestMooncakeStoreIntegration:
                 "type": "mooncake_store",
                 "local_hostname": MOONCAKE_LOCAL_HOSTNAME,
                 "metadata_server": MOONCAKE_METADATA_SERVER,
-                "master_server_address": MOONCAKE_MASTER_SERVER_ADDRESS,
+                "master_server_addr": MOONCAKE_MASTER_SERVER_ADDRESS,
                 "num_workers": 2,
                 "protocol": "rdma",
-                "device_name": MOONCAKE_DEVICE_NAME,
+                "rdma_devices": MOONCAKE_DEVICE_NAME,
             }
         )
         adapter = create_l2_adapter(config, l1_memory_desc=l1_desc)

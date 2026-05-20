@@ -1,0 +1,157 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:2
+msgid "SageMaker Hyperpod"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:5
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:7
+msgid ""
+"Create an Amazon SageMaker HyperPod cluster with tiered storage enabled "
+"by following the instructions at:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:9
+msgid ""
+"https://docs.aws.amazon.com/sagemaker/latest/dg/managed-tier-"
+"checkpointing-setup.html"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:11
+msgid ""
+"This enables the ai-toolkit daemon that provides shared memory access for"
+" LMCache."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:14
+msgid "Example Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:24
+msgid "Configuration Parameters"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:27
+msgid "SageMaker Hyperpod-Specific (in extra_config)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:29
+msgid ""
+"**sagemaker_hyperpod_bucket**: Bucket name for KV storage namespace "
+"(default: \"lmcache\")"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:30
+msgid ""
+"**sagemaker_hyperpod_shared_memory_name**: Name of shared memory segment "
+"(default: \"shared_memory\"). Set to None to disable shared memory."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:31
+msgid ""
+"**sagemaker_hyperpod_max_concurrent_requests**: Maximum concurrent HTTP "
+"requests allowed in-flight at any moment (application-level throttling, "
+"default: 100, minimum: 1). This limit is per LMCache engine instance. "
+"With multiple workers (e.g., high TP), each worker creates its own engine"
+" with separate limits."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:32
+msgid ""
+"**sagemaker_hyperpod_max_connections**: Maximum total TCP connections in "
+"the connection pool per LMCache engine across all daemons (default: 256, "
+"minimum: 1). For typical single-daemon setups, this effectively limits "
+"connections from one engine to one daemon. With N workers per node, total"
+" connections to the daemon = N × this value."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:33
+msgid ""
+"**sagemaker_hyperpod_max_connections_per_host**: Maximum TCP connections "
+"per LMCache engine to a single daemon address (IP:port) (default: 128, "
+"minimum: 1). \"Host\" refers to the daemon's network address, not the "
+"client machine. For today's typical single-daemon setup, this has similar"
+" effect as max_connections. This parameter enables future multi-daemon "
+"configurations where one engine connects to multiple daemons for load "
+"balancing. With N workers per node connecting to the same daemon, total "
+"connections = N × this value. Reduce proportionally for high TP setups "
+"(e.g., set to 16 for 8 workers to achieve ~128 total connections)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:34
+msgid ""
+"**sagemaker_hyperpod_timeout_ms**: Timeout for lease acquisition requests"
+" in milliseconds (default: 5000, minimum: 100)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:35
+msgid ""
+"**sagemaker_hyperpod_lease_ttl_s**: Server-side lease timeout in seconds "
+"(default: 30.0)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:36
+msgid ""
+"**sagemaker_hyperpod_put_stream_chunk_bytes**: Chunk size for streaming "
+"PUT requests in bytes (default: 65536, minimum: 1024)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:37
+msgid ""
+"**sagemaker_hyperpod_use_https**: Enable HTTPS instead of HTTP (default: "
+"False). **Note**: Ignored if ``remote_url`` already contains ``http://`` "
+"or ``https://`` protocol."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:38
+msgid ""
+"**save_chunk_meta**: Whether to save chunk metadata with data (set False "
+"for performance)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:41
+msgid "Kubernetes Deployment Requirements"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:44
+msgid "Environment Variable for Node IP"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:46
+msgid ""
+"Add the ``NODE_IP`` environment variable to resolve the local node's IP "
+"address:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:57
+msgid "/dev/shm Volume Configuration"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:59
+msgid ""
+"SageMaker Hyperpod requires /dev/shm for high-performance shared memory "
+"operations:"
+msgstr ""
+

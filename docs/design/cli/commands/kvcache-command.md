@@ -221,15 +221,15 @@ All CLI operations target the **MP HTTP server**
 
 | CLI sub-command | Existing MP HTTP endpoint | Notes |
 |----------------|--------------------------|-------|
-| `clear` | `POST /api/clear-cache` | Clears all L1 cache. Works as-is. |
+| `clear` | `POST /clear-cache` | Clears all L1 cache. Works as-is. |
 
 ### Needs new MP HTTP endpoints
 
 | CLI sub-command | What exists today | New endpoint needed on MP HTTP server |
 |----------------|------------------|---------------------------------------|
-| `info` | No per-request HTTP endpoint | `GET /api/kvcache-info?request_id=...` returning chunk ranges, locations, pinned status |
-| `pin` | ZMQ only (no HTTP) | `POST /api/pin` accepting request-id, returning OK or REJECTED with reason |
-| `compress` | ZMQ only (no HTTP) | `POST /api/compress` accepting request-id + method |
+| `info` | No per-request HTTP endpoint | `GET /kvcache-info?request_id=...` returning chunk ranges, locations, pinned status |
+| `pin` | ZMQ only (no HTTP) | `POST /pin` accepting request-id, returning OK or REJECTED with reason |
+| `compress` | ZMQ only (no HTTP) | `POST /compress` accepting request-id + method |
 
 ---
 
