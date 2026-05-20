@@ -1433,12 +1433,10 @@ class SGLangXPUConnector(GPUConnectorInterface):
         )
 
         if use_gpu:
-            assert "chunk_size" in kwargs, (
-                "chunk_size should be provided to create a GPU buffer."
-            )
-            assert "device" in kwargs, (
-                "device should be provided to create a GPU buffer."
-            )
+            if "chunk_size" not in kwargs:
+                raise ValueError("chunk_size should be provided to create a GPU buffer.")
+            if "device" not in kwargs:
+                raise ValueError("device should be provided to create a GPU buffer.")
             shape = self.get_shape(kwargs["chunk_size"])
             self.gpu_buffer = torch.empty(
                 shape, dtype=kwargs["dtype"], device=kwargs["device"]
@@ -1454,13 +1452,15 @@ class SGLangXPUConnector(GPUConnectorInterface):
         ptrs = get_group_data_ptrs(
             kv_caches, self.gpu_kv_format, list(range(num_layers))
         )
-        assert len(ptrs) == self.num_kv_cache, (
-            f"Expected {self.num_kv_cache} KV cache pointers, got {len(ptrs)}"
-        )
+        if len(ptrs) != self.num_kv_cache:
+            raise ValueError(
+                f"Expected {self.num_kv_cache} KV cache pointers, got {len(ptrs)}"
+            )
         self.kv_cache_pointers.numpy()[:] = ptrs
 
         device = get_device(kv_caches)
-        assert device.type == "xpu", f"The device should be XPU, got {device.type}."
+        if device.type != "xpu":
+            raise ValueError(f"The device should be XPU, got {device.type}.")
         idx = device.index
         if idx not in self.kv_cache_pointers_on_gpu:
             self.kv_cache_pointers_on_gpu[idx] = torch.empty(
@@ -1583,9 +1583,11 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
     def __init__(
         self, hidden_dim_size: int, num_layers: int, use_gpu: bool = False, **kwargs
     ):
-        assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
+        if "dtype" not in kwargs:
+            raise ValueError("dtype should be provided to create a GPU buffer.")
         self.dtype = kwargs["dtype"]
-        assert "device" in kwargs, "device should be provided to create a GPU buffer."
+        if "device" not in kwargs:
+            raise ValueError("device should be provided to create a GPU buffer.")
         self.device = kwargs["device"]
 
         self.hidden_dim_size = hidden_dim_size
@@ -1661,9 +1663,10 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
         In total yields num_layers + 1 times.
         """
         self.initialize_kvcaches_ptr(**kwargs)
-        assert self.kvcaches is not None, (
-            "kvcaches should be provided in kwargs or initialized beforehand."
-        )
+        if self.kvcaches is None:
+            raise ValueError(
+                "kvcaches should be provided in kwargs or initialized beforehand."
+            )
         self._lazy_initialize_format(self.kvcaches)
 
         if "slot_mapping" not in kwargs:
@@ -1716,9 +1719,10 @@ class SGLangLayerwiseXPUConnector(GPUConnectorInterface):
         In total yields num_layers + 1 times.
         """
         self.initialize_kvcaches_ptr(**kwargs)
-        assert self.kvcaches is not None, (
-            "kvcaches should be provided in kwargs or initialized beforehand."
-        )
+        if self.kvcaches is None:
+            raise ValueError(
+                "kvcaches should be provided in kwargs or initialized beforehand."
+            )
         self._lazy_initialize_format(self.kvcaches)
 
         if "slot_mapping" not in kwargs:
