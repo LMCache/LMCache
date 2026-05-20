@@ -55,9 +55,9 @@ jobs:
               run: |
                 rm -rf dist/
 
-            - name: Build source distribution (no CUDA)
+            - name: Build source distribution (no native extensions)
               run: |
-                NO_CUDA_EXT=1 python -m build --sdist
+                NO_NATIVE_EXT=1 python -m build --sdist
 
             - name: Build CUDA wheels with cibuildwheel
               # Configuration is set in pyproject.toml

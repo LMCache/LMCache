@@ -19,7 +19,18 @@ HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
 BUILDING_SDIST = "sdist" in sys.argv
-NO_CUDA_EXT = os.environ.get("NO_CUDA_EXT", "0") == "1"
+# `NO_NATIVE_EXT=1` skips compilation of all native extensions (pure-Python
+# build). `NO_CUDA_EXT=1` is the legacy name kept for backwards compatibility;
+# it has always controlled all native extensions, not just CUDA ones.
+NO_NATIVE_EXT = (
+    os.environ.get("NO_NATIVE_EXT", "0") == "1"
+    or os.environ.get("NO_CUDA_EXT", "0") == "1"
+)
+if os.environ.get("NO_CUDA_EXT", "0") == "1":
+    print(
+        "warning: NO_CUDA_EXT is deprecated; use NO_NATIVE_EXT=1 instead.",
+        file=sys.stderr,
+    )
 
 # New environment variable to choose between CUDA, HIP, and SYCL
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
@@ -383,7 +394,7 @@ def _collect_extensions() -> tuple[list, dict]:
 
     Notes:
         - `sdist` builds skip all extension compilation.
-        - `NO_CUDA_EXT=1` skips all extension compilation (pure-Python build,
+        - `NO_NATIVE_EXT=1` skips all extension compilation (pure-Python build,
           used by the lmcache-cli wheel which has no torch build dependency).
         - Otherwise, pure C++ extensions are combined with one GPU backend
           extension set (CUDA, ROCm, or SYCL).
@@ -391,7 +402,7 @@ def _collect_extensions() -> tuple[list, dict]:
     if BUILDING_SDIST:
         return source_dist_extension()
 
-    if NO_CUDA_EXT:
+    if NO_NATIVE_EXT:
         return [], {}
 
     common_cpp_flags = _get_common_cpp_flags()
