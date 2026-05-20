@@ -316,7 +316,15 @@ class CpuCacheContext:
 
     def stage_block_ids(self, block_ids: list[int]) -> torch.Tensor:
         """Copy block IDs into the pre-allocated buffer."""
+        if not block_ids:
+            raise ValueError("stage_block_ids requires a non-empty block_ids list")
         n = len(block_ids)
+        capacity = self.block_ids_buffer_.shape[0]
+        if n > capacity:
+            raise ValueError(
+                "stage_block_ids: %d block IDs exceeds buffer capacity %d"
+                % (n, capacity)
+            )
         cpu_tensor = torch.tensor(block_ids, dtype=torch.long)
         buf = self.block_ids_buffer_[:n]
         buf.copy_(cpu_tensor)

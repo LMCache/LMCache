@@ -17,7 +17,10 @@ from __future__ import annotations
 # Standard
 import ctypes
 import ctypes.util
+import itertools
 import os
+import threading
+import weakref
 
 # Third Party
 import torch
@@ -66,8 +69,12 @@ _libc.mmap.argtypes = [
     ctypes.c_int64,
 ]
 _libc.mmap.restype = ctypes.c_void_p
+_libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+_libc.munmap.restype = ctypes.c_int
 _libc.close.argtypes = [ctypes.c_int]
 _libc.close.restype = ctypes.c_int
+
+_MAP_FAILED = ctypes.c_void_p(-1).value
 
 
 def shm_create_readwrite(name: str, nbytes: int) -> int:
@@ -82,7 +89,7 @@ def shm_create_readwrite(name: str, nbytes: int) -> int:
         raise OSError(err, "ftruncate failed for %s" % name)
     addr = _libc.mmap(None, nbytes, _PROT_READ | _PROT_WRITE, _MAP_SHARED, fd, 0)
     _libc.close(fd)
-    if addr in (0, ctypes.c_void_p(-1).value):
+    if addr in (0, _MAP_FAILED):
         _librt.shm_unlink(name.encode("ascii"))
         raise OSError(ctypes.get_errno(), "mmap failed for %s" % name)
     return addr
@@ -95,9 +102,16 @@ def shm_map_readwrite(name: str, nbytes: int) -> int:
         raise OSError(ctypes.get_errno(), "shm_open(open) failed for %s" % name)
     addr = _libc.mmap(None, nbytes, _PROT_READ | _PROT_WRITE, _MAP_SHARED, fd, 0)
     _libc.close(fd)
-    if addr in (0, ctypes.c_void_p(-1).value):
+    if addr in (0, _MAP_FAILED):
         raise OSError(ctypes.get_errno(), "mmap failed for %s" % name)
     return addr
+
+
+def shm_munmap(addr: int, nbytes: int) -> None:
+    """Best-effort ``munmap`` of a previously ``mmap``-ed SHM segment."""
+    if not addr or addr == _MAP_FAILED:
+        return
+    _libc.munmap(ctypes.c_void_p(addr), nbytes)
 
 
 def shm_unlink(name: str) -> None:
@@ -145,7 +159,9 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
             raise ValueError("CpuShmTensorWrapper requires a contiguous tensor")
 
         self.shm_name = shm_name
-        self._nbytes = tensor.untyped_storage().nbytes()
+        # ``numel * element_size`` is the correct logical byte size; the
+        # underlying storage may be larger when the tensor is a view.
+        self._nbytes = tensor.numel() * tensor.element_size()
 
         # CudaIPCWrapper interface fields. ``handle`` / ``device_uuid``
         # are unused on the CPU path but kept to satisfy the parent
@@ -158,7 +174,13 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         self.device_uuid = "cpu"
 
     def to_tensor(self) -> torch.Tensor:
-        """Reconstruct the tensor by mapping the same SHM segment."""
+        """Reconstruct the tensor by mapping the same SHM segment.
+
+        The returned tensor owns the mmap: a ``weakref.finalize`` hook
+        runs ``munmap`` once the tensor (and any views derived from it)
+        is garbage-collected, so the per-process virtual address space
+        does not leak across repeated ``to_tensor`` calls.
+        """
         addr = shm_map_readwrite(self.shm_name, self._nbytes)
         # ``torch.frombuffer`` requires a writable buffer; build one
         # via ctypes so the resulting torch tensor shares storage
@@ -166,7 +188,12 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         buf_type = ctypes.c_uint8 * self._nbytes
         buf = buf_type.from_address(addr)
         flat = torch.frombuffer(buf, dtype=torch.uint8)
-        return flat.view(self.dtype).reshape(self.shape)
+        out = flat.view(self.dtype).reshape(self.shape)
+        # Keep ``flat`` alive for the lifetime of ``out`` so its mmap
+        # is not released while still in use, then munmap on cleanup.
+        out._lmcache_shm_buf = flat  # type: ignore[attr-defined]
+        weakref.finalize(out, shm_munmap, addr, self._nbytes)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +202,25 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
 
 # Per-process registry of SHM segments we have created, so the same
 # tensor object is only migrated to SHM once even if the factory is
-# called multiple times. Maps id(tensor) -> shm_name.
+# called multiple times. Keyed by ``id(tensor)`` for cheap lookups,
+# but we proactively delete the entry via ``weakref.finalize`` when
+# the tensor is garbage-collected -- this prevents CPython object-ID
+# reuse from causing a stale SHM name to be looked up and the next
+# ``shm_open(O_EXCL)`` to fail with ``EEXIST``.
 _CPU_SHM_NAMES: dict[int, str] = {}
+_CPU_SHM_LOCK = threading.Lock()
+_CPU_SHM_COUNTER = itertools.count()
+
+
+def _cleanup_shm_segment(tid: int, shm_name: str, addr: int, nbytes: int) -> None:
+    """Release the mmap, unlink, and forget the cached SHM name."""
+    with _CPU_SHM_LOCK:
+        # Only drop the entry if it still points at *this* segment;
+        # a future tensor reusing ``tid`` may already have replaced it.
+        if _CPU_SHM_NAMES.get(tid) == shm_name:
+            _CPU_SHM_NAMES.pop(tid, None)
+    shm_munmap(addr, nbytes)
+    shm_unlink(shm_name)
 
 
 def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
@@ -184,28 +228,42 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
 
     Used as the registered ``"cpu"`` KV-wrapper factory: the LMCache mp
     server can mmap the same physical pages on the receiving side.
-    Idempotent per ``id(tensor)`` thanks to :data:`_CPU_SHM_NAMES`.
+    Idempotent per tensor identity via :data:`_CPU_SHM_NAMES`. The SHM
+    segment is released (``munmap`` + ``shm_unlink``) automatically
+    when the migrated tensor is garbage-collected.
     """
     tid = id(tensor)
-    shm_name = _CPU_SHM_NAMES.get(tid)
-    if shm_name is None:
-        nbytes = tensor.untyped_storage().nbytes()
+    with _CPU_SHM_LOCK:
+        shm_name = _CPU_SHM_NAMES.get(tid)
+        if shm_name is not None:
+            return CpuShmTensorWrapper(tensor, shm_name)
+
+        nbytes = tensor.numel() * tensor.element_size()
         shm_name = "%s%d_%d" % (
             CpuShmTensorWrapper.SHM_NAME_PREFIX,
             os.getpid(),
-            tid,
+            next(_CPU_SHM_COUNTER),
         )
         addr = shm_create_readwrite(shm_name, nbytes)
-        buf_type = ctypes.c_uint8 * nbytes
-        buf = buf_type.from_address(addr)
-        shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
-        tensor.set_(
-            shm_storage,
-            tensor.storage_offset(),
-            tensor.shape,
-            tensor.stride(),
-        )
+        try:
+            buf_type = ctypes.c_uint8 * nbytes
+            buf = buf_type.from_address(addr)
+            shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
+            tensor.set_(
+                shm_storage,
+                tensor.storage_offset(),
+                tensor.shape,
+                tensor.stride(),
+            )
+        except Exception:
+            # Make sure the SHM resources don't leak if migration fails
+            # part-way (e.g. ``set_`` rejects an unusual stride).
+            shm_munmap(addr, nbytes)
+            shm_unlink(shm_name)
+            raise
+
         _CPU_SHM_NAMES[tid] = shm_name
+        weakref.finalize(tensor, _cleanup_shm_segment, tid, shm_name, addr, nbytes)
         logger.info(
             "Migrated CPU KV cache tensor (nbytes=%d) to SHM %s",
             nbytes,
