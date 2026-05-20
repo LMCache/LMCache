@@ -17,24 +17,27 @@ class L1MetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L1Manager operations.
 
     Metric parity with the old ``L1ManagerStatsLogger``:
-    - ``lmcache_mp.l1_read_keys``  — keys read from L1
-    - ``lmcache_mp.l1_write_keys`` — keys written to L1
-    - ``lmcache_mp.l1_evicted_keys`` — keys evicted from L1
+    - ``lmcache_mp.l1_read``    — chunks read from L1
+    - ``lmcache_mp.l1_write``   — chunks written to L1
+    - ``lmcache_mp.l1_evicted`` — chunks evicted from L1
     """
 
     def __init__(self) -> None:
         meter = metrics.get_meter("lmcache.l1")
         self._read_counter = meter.create_counter(
-            "lmcache_mp.l1_read_keys",
-            description="Total keys read from L1",
+            "lmcache_mp.l1_read",
+            description="Total chunks read from L1",
+            unit="chunks",
         )
         self._write_counter = meter.create_counter(
-            "lmcache_mp.l1_write_keys",
-            description="Total keys written to L1",
+            "lmcache_mp.l1_write",
+            description="Total chunks written to L1",
+            unit="chunks",
         )
         self._evicted_counter = meter.create_counter(
-            "lmcache_mp.l1_evicted_keys",
-            description="Total keys evicted from L1",
+            "lmcache_mp.l1_evicted",
+            description="Total chunks evicted from L1",
+            unit="chunks",
         )
 
     def get_subscriptions(self) -> dict[EventType, EventCallback]:

@@ -36,7 +36,7 @@ def fake_adapter(monkeypatch):
     # send_lmcache_request call don't touch a real socket.
     fake_client = MagicMock(name="mq_client")
     monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
-    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda mq: 256)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
 
     future = MagicMock(name="future")
     future.result.return_value = None
@@ -45,10 +45,14 @@ def fake_adapter(monkeypatch):
 
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
     monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
+    # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
+    # runtime); the production path performs item assignment on it
+    # (``layout_hints["inference_engine_logical_block_size"] = ...``), so
+    # the stub must also be a real dict — a string would raise
+    # ``TypeError: 'str' object does not support item assignment``.
     monkeypatch.setattr(
         "lmcache.integration.vllm.utils.vllm_layout_hints",
-        lambda: "fake-layout",
-        raising=False,
+        lambda: {},
     )
 
     parallel_strategy = ParallelStrategy(

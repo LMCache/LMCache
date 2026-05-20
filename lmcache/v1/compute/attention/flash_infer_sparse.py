@@ -18,6 +18,7 @@ import flashinfer
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashInferSparseMetadata
 
@@ -193,8 +194,8 @@ class LMCFlashInferSparseBackend(AttentionInterface):
         self.vllm_attn = vllm_attn
         self.vllm_attn_impl: FlashInferImpl = vllm_attn.impl
 
-        idx = torch.cuda.current_device()
-        self.device = torch.device(f"cuda:{idx}")
+        idx = torch_dev.current_device()
+        self.device = torch.device(f"{torch_device_type}:{idx}")
 
         self.workspace_buffer = torch.empty(
             self._WORKSPACE_BUFFER_SIZE_BYTES, dtype=torch.uint8, device=self.device

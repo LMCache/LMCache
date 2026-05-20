@@ -1,0 +1,159 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/serde.rst:2
+msgid "L2 Serde (Serialization / Deserialization)"
+msgstr ""
+
+#: ../../source/mp/serde.rst:4
+msgid ""
+"LMCache supports a **per-adapter serde** that transforms KV cache data on"
+" its way to and from an L2 adapter. Typical uses: quantization (shrink "
+"storage footprint), compression, encryption."
+msgstr ""
+
+#: ../../source/mp/serde.rst:14
+msgid "When to use serde"
+msgstr ""
+
+#: ../../source/mp/serde.rst:16
+msgid ""
+"**Save L2 storage or bandwidth.** fp8 quantization halves byte volume vs."
+" bf16 with minor accuracy loss — a good fit for disk / remote adapters."
+msgstr ""
+
+#: ../../source/mp/serde.rst:19
+msgid ""
+"**Encrypt at rest.** Wrap the raw bytes with authenticated encryption "
+"before they land on disk."
+msgstr ""
+
+#: ../../source/mp/serde.rst:21
+msgid ""
+"**Custom compression.** Anything lossless (lz4/zstd) or lossy (CacheGen-"
+"style) can be plugged in via the ``Serializer`` / ``Deserializer`` ABCs."
+msgstr ""
+
+#: ../../source/mp/serde.rst:25
+msgid ""
+"Serde is **opt-in per adapter**: one ``--l2-adapter`` may use fp8 while "
+"another stores raw bytes. When omitted, the adapter behaves exactly as if"
+" serde did not exist (no extra allocations, no extra threads)."
+msgstr ""
+
+#: ../../source/mp/serde.rst:31
+msgid "Configuring serde on an L2 adapter"
+msgstr ""
+
+#: ../../source/mp/serde.rst:33
+msgid ""
+"Add a ``\"serde\"`` sub-dict to any ``--l2-adapter`` JSON spec. The "
+"``type`` field selects a registered serde; remaining keys are forwarded "
+"to the serde factory."
+msgstr ""
+
+#: ../../source/mp/serde.rst:48
+msgid "Built-in serde types"
+msgstr ""
+
+#: ../../source/mp/serde.rst:52
+msgid "``type``"
+msgstr ""
+
+#: ../../source/mp/serde.rst:53
+msgid "Description"
+msgstr ""
+
+#: ../../source/mp/serde.rst:54
+msgid "Config fields"
+msgstr ""
+
+#: ../../source/mp/serde.rst:55
+msgid "``fp8``"
+msgstr ""
+
+#: ../../source/mp/serde.rst:56
+msgid ""
+"Quantize each element to 8-bit float; dequantize on load. Lossy but "
+"highly compressible."
+msgstr ""
+
+#: ../../source/mp/serde.rst:58
+msgid ""
+"``fp8_dtype`` (default ``float8_e4m3fn``; also accepts ``float8_e5m2``), "
+"``max_workers`` (thread pool size, default 1)"
+msgstr ""
+
+#: ../../source/mp/serde.rst:64
+msgid "Writing a custom serde"
+msgstr ""
+
+#: ../../source/mp/serde.rst:66
+msgid ""
+"Implement the two sync ABCs (``Serializer``, ``Deserializer``) with your "
+"transform logic, then register a factory keyed on a name you pick:"
+msgstr ""
+
+#: ../../source/mp/serde.rst:98
+msgid "Reference it from your adapter config:"
+msgstr ""
+
+#: ../../source/mp/serde.rst:106
+msgid "Notes"
+msgstr ""
+
+#: ../../source/mp/serde.rst:108
+msgid ""
+"**Buffer size.** ``estimate_serialized_size(layout)`` must return an "
+"upper bound on the actual serialized output — include any safety margin "
+"directly in the estimate (e.g., the built-in fp8 serializer returns ``1.5"
+" * num_elements``)."
+msgstr ""
+
+#: ../../source/mp/serde.rst:112
+msgid ""
+"**Failure handling.** If any step fails (serialize, store, load, or "
+"deserialize), the whole submitted batch is reported as failed — partial "
+"success within one batch is not surfaced. Failed keys are cleaned up "
+"automatically."
+msgstr ""
+
+#: ../../source/mp/serde.rst:116
+msgid ""
+"**Thread pool.** ``AsyncSerdeProcessor(max_workers=N)`` controls the pool"
+" size. Transforms that release the GIL (e.g., torch ops) benefit from ``N"
+" > 1``; pure-Python transforms do not."
+msgstr ""
+
+#: ../../source/mp/serde.rst:122
+msgid "Example"
+msgstr ""
+
+#: ../../source/mp/serde.rst:124
+msgid ""
+"An end-to-end script that starts an lmcache server with fp8 on a disk "
+"adapter, runs vLLM, clears L1, and re-runs the same request to trigger "
+"the L2 prefetch + fp8 deserialize path lives at "
+":file:`examples/serde/fp8/`. A pytest-based filesystem round-trip test "
+"(no vLLM required) is at "
+":file:`tests/v1/distributed/serde/test_serde_fs_e2e.py`."
+msgstr ""
+

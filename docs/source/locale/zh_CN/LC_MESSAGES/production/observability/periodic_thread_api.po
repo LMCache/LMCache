@@ -1,0 +1,232 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/periodic_thread_api.rst:4
+msgid "Periodic Thread Monitoring API"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:6
+msgid ""
+"This document describes the Periodic Thread Monitoring API feature "
+"introduced in LMCache."
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:10
+msgid "Overview"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:12
+msgid ""
+"The Periodic Thread Monitoring API provides HTTP endpoints to monitor and"
+" inspect the status of all periodic background threads running in the "
+"LMCache system. This is useful for debugging, health checking, and "
+"operational monitoring."
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:18
+msgid "API Endpoints"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:20
+msgid "Three API endpoints are available under the internal API server:"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:23
+msgid "GET /periodic-threads"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:25
+msgid "Returns information about all registered periodic threads."
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:27
+msgid "**Query Parameters:**"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:33
+msgid "Parameter"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:34
+msgid "Default"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:35
+#: ../../source/production/observability/periodic_thread_api.rst:121
+msgid "Description"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:36
+msgid "``level``"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:37
+msgid "(none)"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:38
+msgid "Filter by thread level (``critical``, ``high``, ``medium``, ``low``)"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:39
+msgid "``running_only``"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:40
+#: ../../source/production/observability/periodic_thread_api.rst:43
+msgid "``false``"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:41
+msgid "Only show running threads"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:42
+msgid "``active_only``"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:44
+msgid "Only show active threads"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:46
+#: ../../source/production/observability/periodic_thread_api.rst:79
+#: ../../source/production/observability/periodic_thread_api.rst:101
+msgid "**Response Example:**"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:75
+#, python-brace-format
+msgid "GET /periodic-threads/{thread_name}"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:77
+msgid "Returns detailed information about a specific periodic thread."
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:96
+msgid "GET /periodic-threads-health"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:98
+msgid ""
+"Quick health check for periodic threads. Returns whether all critical and"
+" high-level threads are active."
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:112
+msgid "Thread Levels"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:114
+msgid "Periodic threads are categorized by importance level:"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:120
+msgid "Level"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:122
+msgid "``critical``"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:123
+msgid "Essential for system operation"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:124
+msgid "``high``"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:125
+msgid "Important for performance"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:126
+msgid "``medium``"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:127
+msgid "Standard background tasks"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:128
+msgid "``low``"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:129
+msgid "Optional/auxiliary tasks"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:131
+msgid ""
+"The health check endpoint specifically monitors ``critical`` and ``high``"
+" level threads to determine system health."
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:135
+msgid "IrrecoverableException Handling"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:137
+msgid ""
+"Periodic threads now properly handle ``IrrecoverableException``. When "
+"such an exception is raised during thread execution:"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:140
+msgid "The exception is logged with full traceback"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:141
+msgid "The thread run is marked as failed"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:142
+msgid "The thread **stops its execution loop** instead of continuing"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:144
+msgid ""
+"This prevents threads from endlessly retrying operations that cannot "
+"succeed."
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:147
+msgid "Usage Examples"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:150
+msgid "Check Overall Thread Health"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:157
+msgid "List All Running Threads"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:164
+msgid "Get Critical Threads Only"
+msgstr ""
+
+#: ../../source/production/observability/periodic_thread_api.rst:171
+msgid "Check Specific Thread Status"
+msgstr ""
+

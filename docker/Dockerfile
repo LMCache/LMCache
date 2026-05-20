@@ -6,9 +6,9 @@
 # docs/source/getting_started/installation.rst
 # docs/production/docker_deployment.rst
 
-ARG CUDA_VERSION=12.9
+ARG CUDA_VERSION=13.0
 ARG UBUNTU_VERSION=24.04
-ARG NGC_VERSION=25.05
+ARG NGC_VERSION=25.09
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:${NGC_VERSION}-cuda${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 #################### BASE BUILD IMAGE ####################
@@ -40,7 +40,7 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
 WORKDIR /workspace
 
 # CUDA arch list used by torch
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### vLLM IMAGE & LMCache (Build) ##########################
@@ -79,14 +79,15 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    export LMCACHE_CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     if [ "$VLLM_VERSION" = "nightly" ]; then \
-        uv pip install --prerelease=allow \
+        VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             'vllm[runai,tensorizer,flashinfer]' \
             --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
             --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
             --index-strategy unsafe-best-match ; \
     else \
-        uv pip install --prerelease=allow \
+        VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
@@ -96,39 +97,50 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
-#################### vLLM IMAGE & LMCache (Release, cu12) #######################
-# Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API
+#################### vLLM IMAGE & LMCache (Release, cu13) #######################
+# Integrate vLLM and LMCache stable releases, and expose vLLM OpenAI API.
+# The default lmcache wheel on PyPI is built against cu13; the cu13 torch
+# index is hinted explicitly so vLLM also resolves to its cu13 build.
 
 FROM base AS image-release
 
-# Install LMCache and vLLM stable releases.
-# It is imperative that LMCache uses the same torch version as the
-# vLLM stable release.
+ARG CUDA_VERSION
+
 RUN . /opt/venv/bin/activate && \
-    uv pip install --prerelease=allow vllm[runai,tensorizer,flashinfer] && \
-    uv pip install lmcache --verbose
+    CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
+        vllm[runai,tensorizer,flashinfer] \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-best-match && \
+    uv pip install lmcache \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-best-match --verbose
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
-#################### vLLM IMAGE & LMCache (Release, cu13) #######################
-# Installs stable vLLM with cu13 index and lmcache from the v{tag}-cu13 GitHub Release.
+#################### vLLM IMAGE & LMCache (Release, cu129) ######################
+# Installs nightly cu129 vLLM (no stable cu129 channel exists upstream) and
+# lmcache from the v{tag}-cu129 GitHub Release.
 
-FROM base AS image-release-cu13
+FROM base AS image-release-cu129
 
-ARG CUDA_VERSION
+# Override the global CUDA_VERSION default (13.0) for this cu12.9 stage so local
+# builds that omit --build-arg CUDA_VERSION still resolve the correct torch index.
+ARG CUDA_VERSION=12.9
 ARG LMCACHE_VERSION
 
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
-    uv pip install --prerelease=allow \
+    VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
+        --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     uv pip install lmcache==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu13 \
+        --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
         --index-strategy unsafe-best-match --verbose
 
 WORKDIR /workspace

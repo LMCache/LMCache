@@ -3,7 +3,7 @@
 """Tests for EventBus, EventSubscriber, and singleton management."""
 
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import time
 
 # Third Party
@@ -511,3 +511,29 @@ class TestBlockAllocationEvent:
         bus.stop()
 
         assert len(sub.events) == 0
+
+
+_REGISTER_GAUGE = "lmcache.v1.mp_observability.event_bus.register_gauge"
+
+
+class TestSelfMonitoringGauges:
+    def test_init_registers_both_gauges(self):
+        with patch(_REGISTER_GAUGE) as mock_register:
+            EventBus(EventBusConfig(enabled=True))
+            names = [c.args[1] for c in mock_register.call_args_list]
+            assert set(names) == {
+                "lmcache_mp.event_bus.queue_depth",
+                "lmcache_mp.event_bus.drain_lag_seconds",
+            }
+
+    def test_queue_depth_callback_reflects_bus(self):
+        captured: dict[str, object] = {}
+
+        def _capture(_meter, name, _desc, func):
+            captured[name] = func
+
+        with patch(_REGISTER_GAUGE, side_effect=_capture):
+            bus = EventBus(EventBusConfig(enabled=True))
+            bus.publish(_make_event(session_id="s1"))
+            bus.publish(_make_event(session_id="s2"))
+            assert captured["lmcache_mp.event_bus.queue_depth"]() == 2

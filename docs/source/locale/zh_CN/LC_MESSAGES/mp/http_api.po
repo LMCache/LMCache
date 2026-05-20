@@ -1,0 +1,772 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/http_api.rst:2
+msgid "HTTP API"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:4
+msgid ""
+"When the MP server is started via ``lmcache server`` (the recommended "
+"entry point), a FastAPI-based HTTP frontend is exposed alongside the ZMQ "
+"socket used by vLLM. This HTTP API is intended for operators, "
+"orchestrators (e.g. Kubernetes), and debugging tools — it is **not** on "
+"the inference data path."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:10
+msgid ""
+"New endpoints are registered automatically from "
+"``lmcache/v1/multiprocess/http_apis/``: any module named ``*_api.py`` "
+"that exposes a module-level ``router`` (a :class:`fastapi.APIRouter`) is "
+"discovered at startup."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:15
+msgid ""
+"A subset of routes defined under "
+"``lmcache/v1/internal_api_server/common/`` is also exposed on this HTTP "
+"server. The module ``lmcache/v1/multiprocess/http_apis/common_api.py`` "
+"aggregates those routers (skipping modules listed in "
+"``_MP_INCOMPATIBLE_MODULES``, such as ``run_script_api``) and forwards "
+"them to the auto-discovery pipeline. Adding a new compatible module under"
+" ``internal_api_server/common`` therefore requires no wiring changes on "
+"the MP side."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:29
+msgid "Server Configuration"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:35
+msgid "Argument"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:36
+msgid "Default"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:37
+msgid "Description"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:38
+msgid "``--http-host``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:39
+msgid "``0.0.0.0``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:40
+msgid "Host to bind the HTTP server."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:41
+msgid "``--http-port``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:42
+msgid "``8080``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:43
+msgid "Port to bind the HTTP server."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:45
+msgid "Example:"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:53
+msgid ""
+"All examples below assume the server is reachable at "
+"``http://localhost:8080``."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:57
+msgid "Endpoints"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:59
+msgid ""
+"The table below groups the routes by purpose. The operational surface "
+"(health, status, cache control) is exposed at top-level paths. Routes "
+"inherited from the shared ``internal_api_server`` package are kept at "
+"their original paths for compatibility with the vLLM-embedded API server."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:69
+msgid "Method"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:70
+msgid "Path"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:71
+msgid "Purpose"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:72 ../../source/mp/http_api.rst:75
+#: ../../source/mp/http_api.rst:78 ../../source/mp/http_api.rst:84
+#: ../../source/mp/http_api.rst:90 ../../source/mp/http_api.rst:97
+#: ../../source/mp/http_api.rst:101 ../../source/mp/http_api.rst:104
+#: ../../source/mp/http_api.rst:107 ../../source/mp/http_api.rst:110
+#: ../../source/mp/http_api.rst:113 ../../source/mp/http_api.rst:116
+#: ../../source/mp/http_api.rst:122 ../../source/mp/http_api.rst:125
+#: ../../source/mp/http_api.rst:128 ../../source/mp/http_api.rst:131
+msgid "GET"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:73
+msgid "``/``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:74
+msgid "Basic liveness ping."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:76
+msgid "``/healthcheck``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:77
+msgid "K8s liveness/readiness probe."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:79
+msgid "``/status``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:80
+msgid "Detailed engine status for inspection and debugging."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:81 ../../source/mp/http_api.rst:119
+msgid "POST"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:82
+msgid "``/clear-cache``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:83
+msgid "Force-clear all KV data in L1 (CPU) memory."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:85
+msgid "``/quota``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:86
+msgid "List every registered ``cache_salt`` quota with live usage."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:87
+msgid "PUT"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:88 ../../source/mp/http_api.rst:91
+#: ../../source/mp/http_api.rst:94
+#, python-brace-format
+msgid "``/quota/{cache_salt}``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:89
+msgid "Set or update the quota (in GB) for a ``cache_salt``."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:92
+msgid "Read the quota and live usage for a single ``cache_salt``."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:93
+msgid "DELETE"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:95
+msgid "Remove a ``cache_salt``'s quota entry (its data is evicted next cycle)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:98
+msgid "``/conf``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:99
+msgid "Dump merged server configurations (mp, storage_manager, observability)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:102
+msgid "``/version``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:103
+msgid "Full version descriptor (package version + commit id)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:105
+msgid "``/lmc_version``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:106
+msgid "LMCache package version string."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:108
+msgid "``/commit_id``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:109
+msgid "Current build commit id."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:111
+msgid "``/env``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:112
+msgid "Dump process environment variables (JSON, plain text)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:114
+msgid "``/loglevel``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:115
+msgid "List or inspect logger levels; also accepts ``level`` to mutate."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:117
+msgid "``/metrics``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:118
+msgid "Prometheus exposition format."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:120
+msgid "``/metrics/reset``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:121
+msgid "Reset all observability metrics to their initial state."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:123
+msgid "``/threads``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:124
+msgid "Enumerate active Python threads and their stack traces."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:126
+msgid "``/periodic-threads``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:127
+msgid "List registered periodic threads with summary counts."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:129
+#, python-brace-format
+msgid "``/periodic-threads/{thread_name}``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:130
+msgid "Detailed status for a single periodic thread."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:132
+msgid "``/periodic-threads-health``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:133
+msgid "Quick health check for critical/high-level periodic threads."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:136
+msgid "``GET /``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:138
+msgid ""
+"Basic liveness check. Returns a static payload indicating the HTTP server"
+" is running. Use ``/healthcheck`` instead for probes that also verify the"
+" cache engine is initialized."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:142 ../../source/mp/http_api.rst:165
+#: ../../source/mp/http_api.rst:214 ../../source/mp/http_api.rst:279
+#: ../../source/mp/http_api.rst:334 ../../source/mp/http_api.rst:357
+#: ../../source/mp/http_api.rst:380 ../../source/mp/http_api.rst:394
+#: ../../source/mp/http_api.rst:415 ../../source/mp/http_api.rst:454
+#: ../../source/mp/http_api.rst:560 ../../source/mp/http_api.rst:617
+#: ../../source/mp/http_api.rst:657
+msgid "**Response** (``200 OK``):"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:151 ../../source/mp/http_api.rst:182
+#: ../../source/mp/http_api.rst:260 ../../source/mp/http_api.rst:296
+#: ../../source/mp/http_api.rst:344 ../../source/mp/http_api.rst:442
+#: ../../source/mp/http_api.rst:460 ../../source/mp/http_api.rst:471
+#: ../../source/mp/http_api.rst:482 ../../source/mp/http_api.rst:500
+#: ../../source/mp/http_api.rst:547 ../../source/mp/http_api.rst:566
+#: ../../source/mp/http_api.rst:591 ../../source/mp/http_api.rst:633
+#: ../../source/mp/http_api.rst:644 ../../source/mp/http_api.rst:684
+msgid "**Example:**"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:158
+msgid "``GET /healthcheck``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:160
+msgid ""
+"Health check endpoint suitable for Kubernetes liveness and readiness "
+"probes. A ``200`` response implies the HTTP server is alive **and** the "
+"MP cache engine is initialized. A ``503`` response indicates the engine "
+"is not yet ready (still initializing, or failed to initialize)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:173 ../../source/mp/http_api.rst:287
+msgid "**Response** (``503 Service Unavailable``):"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:188
+msgid "**Kubernetes probe snippet:**"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:206
+msgid "``GET /status``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:208
+msgid ""
+"Returns a detailed snapshot of the MP engine's internal state: L1 cache, "
+"L2 adapters, registered GPU contexts, active sessions, and in-flight "
+"prefetch jobs. Intended for operators and debugging, not for monitoring "
+"(use Prometheus metrics for time-series data — see :doc:`observability`)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:251
+msgid ""
+"**Response** (``503 Service Unavailable``) when the engine has not yet "
+"been initialized:"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:267
+msgid "``POST /clear-cache``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:269
+msgid "Force-clears **all** KV cache data currently held in L1 (CPU) memory."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:273
+msgid ""
+"This endpoint is destructive and bypasses read/write locks. In-flight "
+"store or prefetch operations may be corrupted. Use only when the server "
+"is idle, or when recovering from a known-bad cache state."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:277
+msgid "The request body is ignored."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:305
+msgid "``/quota`` — per-``cache_salt`` quota management"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:307
+msgid ""
+"These endpoints manage the per-``cache_salt`` storage budgets consumed by"
+" the ``IsolatedLRU`` eviction policy (selected via ``--eviction-policy "
+"IsolatedLRU``). Quotas are **soft**: setting a limit does not reject "
+"writes — any over-budget ``cache_salt`` is evicted at the next eviction "
+"cycle (~1 s). A ``cache_salt`` with no registered quota has an effective "
+"limit of ``0`` bytes, so its data is cleared next cycle (allowlist "
+"semantics)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:315
+msgid ""
+"These endpoints are no-ops on engines that did not start with "
+"``--eviction-policy IsolatedLRU``: the ``QuotaManager`` is still present,"
+" but the LRU policy ignores the registered quotas."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:319
+msgid ""
+"**URL escaping for the empty salt.** ``cache_salt=\"\"`` (un-salted / "
+"anonymous traffic) cannot appear in a URL path parameter, so the API "
+"accepts the sentinel ``_default`` in its place. ``PUT /quota/_default`` "
+"sets the quota for ``cache_salt=\"\"``. A user that legitimately stores "
+"data with ``cache_salt=\"_default\"`` cannot be managed via this HTTP API"
+" distinctly from anonymous traffic — both map to the same path parameter;"
+" pick any other value (e.g. ``\"default\"``) to disambiguate."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:328
+#, python-brace-format
+msgid "``PUT /quota/{cache_salt}``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:330
+msgid "Create or update a quota."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:332
+#, python-brace-format
+msgid "**Body:** ``{\"limit_gb\": <float>}`` (required, finite, non-negative)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:340
+msgid ""
+"**Errors:** ``400`` for malformed JSON, missing ``limit_gb``, non-numeric"
+" ``limit_gb``, ``nan`` / ``inf``, or negative values; ``503`` if the "
+"engine is not initialized."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:353
+#, python-brace-format
+msgid "``GET /quota/{cache_salt}``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:355
+msgid "Read the current quota and live usage for one ``cache_salt``."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:368
+msgid ""
+"``exists`` is ``false`` when no quota was ever registered for this "
+"``cache_salt`` (``limit_gb`` is then ``0.0`` and ``current_usage_gb`` "
+"reflects whatever bytes are currently cached for that salt — those bytes "
+"will evict next cycle under ``IsolatedLRU``)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:374
+#, python-brace-format
+msgid "``DELETE /quota/{cache_salt}``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:376
+msgid ""
+"Remove a ``cache_salt``'s quota entry. Any bytes still cached under this "
+"``cache_salt`` become over-budget on the next eviction cycle (effective "
+"limit drops to ``0``) and will be evicted."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:386
+#, python-brace-format
+msgid ""
+"When no quota was registered for the given ``cache_salt``, the response "
+"is ``{\"cache_salt\": \"...\", \"status\": \"not_found\"}`` (still ``200 "
+"OK``)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:390
+msgid "``GET /quota``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:392
+msgid "List every registered quota alongside its live usage."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:406
+msgid "``GET /conf``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:408
+msgid ""
+"Returns every server-side configuration object registered on "
+"``app.state.configs`` (typically ``mp``, ``storage_manager`` and "
+"``observability``) as a single indented JSON document. Dataclasses are "
+"serialized via ``safe_asdict``; other values go through "
+"``make_json_safe``. Useful for confirming what the process actually "
+"loaded — including environment overrides — without restarting."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:433
+msgid ""
+"**Response** (``503 Service Unavailable``) when configs are not wired "
+"onto ``app.state`` yet:"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:449
+msgid "``GET /version``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:451
+msgid ""
+"Returns the full version descriptor (package version combined with the "
+"current commit id), formatted by ``lmcache.utils.get_version()``."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:467
+msgid "``GET /lmc_version``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:469
+msgid ""
+"Returns the raw LMCache package version string "
+"(``lmcache.utils.VERSION``)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:478
+msgid "``GET /commit_id``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:480
+msgid ""
+"Returns the git commit id baked into the build "
+"(``lmcache.utils.COMMIT_ID``)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:489
+msgid "``GET /env``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:491
+msgid ""
+"Dumps the process environment variables as a sorted, pretty-printed JSON "
+"document. Response ``Content-Type`` is ``text/plain`` so it can be piped "
+"directly to a terminal."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:497
+msgid ""
+"The payload may contain secrets injected via environment variables. "
+"Restrict network access to this endpoint in production."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:507
+msgid "``GET /loglevel``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:509
+msgid ""
+"Inspect or mutate Python logger levels at runtime. All responses are "
+"``text/plain``. The endpoint has three modes driven by query parameters:"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:516 ../../source/mp/http_api.rst:583
+#: ../../source/mp/http_api.rst:608
+msgid "Query"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:517 ../../source/mp/http_api.rst:584
+#: ../../source/mp/http_api.rst:609
+msgid "Behavior"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:518
+msgid "(no params)"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:519
+msgid "List every logger registered with :mod:`logging` and its level."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:520
+msgid "``?logger_name=<name>``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:521
+msgid "Return the effective level of the named logger."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:522
+msgid "``?logger_name=<name>&level=<LEVEL>``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:523
+msgid ""
+"Set the named logger (and its handlers) to ``LEVEL`` "
+"(``DEBUG``/``INFO``/``WARNING``/``ERROR``/``CRITICAL``). Returns ``400`` "
+"on an unknown level."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:527
+msgid "**Examples:**"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:541
+msgid "``GET /metrics``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:543
+msgid ""
+"Prometheus exposition format for every metric registered on the default "
+"``prometheus_client`` registry. Scrape this directly from Prometheus. See"
+" :doc:`observability` for the list of exported metrics."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:554
+msgid "``POST /metrics/reset``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:556
+msgid ""
+"Resets all LMCache observability metrics to their initial state "
+"(``reset_observability_metrics``). Intended for test harnesses and "
+"benchmarks — not for production."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:573
+msgid "``GET /threads``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:575
+msgid ""
+"Enumerate active Python threads in the server process along with their "
+"stack traces, plus a total-count summary. Useful for live debugging of "
+"hangs or runaway workers."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:585
+msgid "``?name=<substr>``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:586
+msgid "Keep only threads whose name contains ``<substr>`` (case-insensitive)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:588
+msgid "``?thread_id=<int>``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:589
+msgid "Keep only the thread with the matching ``ident``."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:598
+msgid "``GET /periodic-threads``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:600
+msgid ""
+"Returns a JSON snapshot of the "
+":class:`~lmcache.v1.periodic_thread.PeriodicThreadRegistry`: counts by "
+"level plus per-thread status (last run timestamp, latest summary, etc.)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:610
+msgid "``?level=critical|high|medium|low``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:611
+msgid "Only include threads at the given level. ``400`` on unknown."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:612
+msgid "``?running_only=true``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:613
+msgid "Only include threads currently running."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:614
+msgid "``?active_only=true``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:615
+msgid "Only include threads considered active (recent tick)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:640
+#, python-brace-format
+msgid "``GET /periodic-threads/{thread_name}``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:642
+msgid "Detailed status for a single periodic thread (``404`` if not found)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:651
+msgid "``GET /periodic-threads-health``"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:653
+msgid ""
+"Fast health check covering only ``critical`` and ``high`` level periodic "
+"threads. A thread is flagged unhealthy when it is marked running but has "
+"not ticked within its expected interval."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:667
+msgid "When something is lagging:"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:691
+msgid "Adding New Endpoints"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:693
+msgid ""
+"Endpoints are auto-discovered from "
+"``lmcache/v1/multiprocess/http_apis/``. To add a new endpoint:"
+msgstr ""
+
+#: ../../source/mp/http_api.rst:696
+msgid "Create a new module in that directory named ``<name>_api.py``."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:697
+msgid "Define a module-level ``router = APIRouter()``."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:698
+msgid "Register handlers on ``router`` using FastAPI decorators."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:699
+msgid ""
+"Access the engine via ``request.app.state.engine`` and guard for the "
+"``None`` case (engine not yet initialized)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:702
+msgid ""
+"The :class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry` "
+"will pick the module up automatically at startup — no central "
+"registration list to edit."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:706
+msgid ""
+"If the route is generic enough to be shared with the vLLM-embedded API "
+"server, add it under ``lmcache/v1/internal_api_server/common/`` instead. "
+"It will be picked up on the MP side via ``common_api.py`` unless its "
+"module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (used for "
+"modules that require vLLM-specific ``app.state`` attributes, e.g. "
+"``run_script_api``)."
+msgstr ""
+
+#: ../../source/mp/http_api.rst:713
+msgid ""
+"When adding a new endpoint, please also add a matching section to this "
+"page documenting the endpoint's purpose, request/response schema, and an "
+"example ``curl`` invocation."
+msgstr ""
+

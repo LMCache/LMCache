@@ -1,0 +1,246 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:2
+msgid "Valkey"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:5
+msgid "Overview"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:7
+msgid ""
+"Valkey is an open source (BSD) high-performance key/value datastore and "
+"is a supported option for remote KV Cache offloading in LMCache. Some "
+"other remote backends are :doc:`Mooncake <./mooncake>`, :doc:`Redis "
+"<./redis>`, and :doc:`InfiniStore <./infinistore>`."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:11
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:13
+msgid "To use this connector, you need valkey-glide 2.0 or higher."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:21
+msgid "Configuration Reference"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:23
+msgid "The following ``extra_config`` keys are supported:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:29
+msgid "Key"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:30
+msgid "Default"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:31
+msgid "Description"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:32
+msgid "``valkey_num_workers``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:33
+msgid "``8``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:34
+msgid "Number of worker threads, each with its own GLIDE client connection."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:35
+msgid "``valkey_mode``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:36
+msgid "``\"standalone\"``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:37
+msgid ""
+"``\"standalone\"`` or ``\"cluster\"``. Cluster mode auto-discovers "
+"topology from a seed node."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:38
+msgid "``tls_enable``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:39
+msgid "``false``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:40
+msgid "Enable TLS. Required for ElastiCache Serverless."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:41
+msgid "``valkey_username``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:42
+#: ../../source/kv_cache/storage_backends/valkey.rst:45
+msgid "``\"\"``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:43
+msgid "Authentication username."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:44
+msgid "``valkey_password``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:46
+msgid "Authentication password."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:47
+msgid "``valkey_database``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:48
+msgid "None"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:49
+msgid "Database ID (standalone mode only, ignored in cluster mode)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:50
+msgid "``request_timeout``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:51
+msgid "``5.0``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:52
+msgid ""
+"GLIDE request timeout in seconds. Also used as the Python-side Future "
+"timeout."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:53
+msgid "``connection_timeout``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:54
+msgid "``10.0``"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:55
+msgid "GLIDE connection timeout in seconds for initial client connections."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:58
+msgid "Example Configurations"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:61
+msgid "Standalone-mode"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:64
+msgid "Basic Valkey Configuration (Standalone-mode)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:76
+msgid "Standalone-mode Valkey Configuration with database"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:89
+msgid "Cluster-mode"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:92
+msgid "Cluster-mode Valkey Configuration (Endpoint)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:94
+msgid "For example, the configuration endpoint in ElastiCache is as follows:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:96
+msgid "<cache-name>.<identifier>.clustercfg.<region>.cache.amazonaws.com"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:98
+msgid "You need to add this DNS name in the <your host>."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:113
+msgid "Cluster-mode Valkey Configuration (Nodes)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:115
+msgid ""
+"Nodes are deployed directly and configured in cluster mode without "
+"connecting them via DNS names (CNAME)."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:117
+msgid "In this scenario, you simply input multiple IP hosts and ports."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:119
+msgid "Example: 172.0.0.1:7001, 172.0.0.2:7002 ... 172.0.0.6:7006"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:132
+msgid ""
+"Cluster-mode Valkey Configuration with numbered databases (Valkey 9.0+ "
+"and Valkey-GLIDE 2.1+)"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:134
+msgid ""
+"Valkey connector supports numbered databases in both the Endpoint using "
+"DNS and the Nodes method using IP and port pairs."
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:148
+msgid "TLS / ElastiCache Serverless"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:150
+msgid "ElastiCache Serverless requires TLS. Set ``tls_enable: true``:"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:163
+msgid "Performance Tuning"
+msgstr ""
+
+#: ../../source/kv_cache/storage_backends/valkey.rst:165
+msgid ""
+"For large models (e.g., 70B with TP=8), increase the worker count for "
+"higher throughput:"
+msgstr ""
+

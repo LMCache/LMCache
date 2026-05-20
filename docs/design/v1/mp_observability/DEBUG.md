@@ -8,7 +8,7 @@ a hit-rate regression.
 
 ## Common parameters
 
-All from `GET <lmcache-url>/api/status`:
+All from `GET <lmcache-url>/status`:
 
 | Field | Source | Example |
 |---|---|---|
@@ -30,7 +30,7 @@ Reported per `(model_name, cache_salt)`.
 L2's prefetch lookups carry per-key counts, not per-token:
 
 ```
-L2_hit_tokens_total = increase(lmcache_mp_l2_prefetch_hit_keys_total) * chunk_size
+L2_hit_tokens_total = increase(lmcache_mp_l2_prefetch_hit_chunks_total) * chunk_size
 L2_hit_rate         = L2_hit_tokens_total
                     / increase(lmcache_mp_lookup_requested_tokens_total)
 ```
@@ -43,7 +43,7 @@ Total minus L2:
 
 ```
 L1_hit_tokens_total = increase(lmcache_mp_lookup_hit_tokens_total)
-                    - increase(lmcache_mp_l2_prefetch_hit_keys_total) * chunk_size
+                    - increase(lmcache_mp_l2_prefetch_hit_chunks_total) * chunk_size
 L1_hit_rate         = L1_hit_tokens_total
                     / increase(lmcache_mp_lookup_requested_tokens_total)
 ```
@@ -83,7 +83,7 @@ engage.
 
 Attach these four artifacts when reporting a hit-rate regression:
 
-1. `GET <lmcache-url>/api/status` (config + state snapshot).
+1. `GET <lmcache-url>/status` (config + state snapshot).
 2. `GET <lmcache-url>/metrics` snapshots taken **before** and **after** the run.
 3. The bench's `bench_summary.json` and `bench_results.csv` (TTFT per request).
 4. The LMCache server's stdout/stderr (eviction-trigger logs are at INFO level).

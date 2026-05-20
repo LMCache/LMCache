@@ -1,0 +1,495 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/production/observability/health_monitor.rst:4
+msgid "Health Monitor"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:6
+msgid ""
+"LMCache includes a comprehensive health monitoring framework that "
+"continuously monitors the health of the cache engine and its components. "
+"This feature is essential for production deployments to detect and "
+"respond to failures in remote storage backends."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:9
+msgid "Overview"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:11
+msgid "The Health Monitor provides:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:13
+msgid ""
+"**Automatic health checks**: Periodically monitors the health of all "
+"registered components"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:14
+msgid ""
+"**Extensible framework**: Easily add custom health checks for new "
+"components"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:15
+msgid ""
+"**Remote backend monitoring**: Built-in support for monitoring remote "
+"storage backends via ping"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:16
+msgid ""
+"**Degraded mode support**: Automatically blocks operations when the "
+"system is unhealthy"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:17
+msgid ""
+"**Prometheus metrics integration**: Health status exposed via metrics "
+"endpoint"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:20
+msgid "Architecture"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:22
+msgid "The health monitoring system consists of three main components:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:24
+msgid "**HealthCheck (Abstract Base Class)**"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:26
+msgid ""
+"Base class for individual health checks. Each health check represents one"
+" aspect of system health."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:28
+msgid "**HealthMonitor**"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:30
+msgid ""
+"The central monitor that orchestrates all health checks. It runs in a "
+"background thread and periodically executes all registered health checks."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:32
+msgid "**RemoteBackendHealthCheck**"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:34
+msgid ""
+"Built-in health check for remote storage backends. It pings the remote "
+"connector to verify connectivity."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:37
+msgid "Auto-Discovery"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:39
+msgid ""
+"The Health Monitor uses an auto-discovery mechanism to find and "
+"instantiate health checks:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:41
+msgid ""
+"At startup, the monitor scans the ``lmcache.v1.health_monitor.checks`` "
+"package"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:42
+msgid "All classes that inherit from ``HealthCheck`` are discovered"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:43
+msgid "Each check's ``create_from_engine()`` method is called to create instances"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:44
+msgid "The instances are registered with the monitor"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:46
+msgid ""
+"This design allows you to add new health checks by simply creating a new "
+"module in the checks package."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:49
+msgid "Configuration"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:51
+msgid ""
+"Health monitor configuration is done through the ``extra_config`` section"
+" of your LMCache configuration:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:53
+msgid "Health Monitor Configuration Options"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:57
+msgid "Configuration Key"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:58
+msgid "Default Value"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:59
+#: ../../source/production/observability/health_monitor.rst:148
+#: ../../source/production/observability/health_monitor.rst:175
+msgid "Description"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:60
+msgid "``ping_interval``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:61
+msgid "``30.0``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:62
+msgid "Interval (in seconds) between health check cycles"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:63
+msgid "``ping_timeout``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:64
+msgid "``5.0``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:65
+msgid "Timeout (in seconds) for each ping operation"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:66
+msgid "``get_blocking_failed_threshold``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:67
+msgid "``10``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:68
+msgid "Max number of get_blocking failed count in check interval"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:69
+msgid "``waiting_time_for_recovery``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:70
+msgid "``300.0``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:71
+msgid "Waiting time (in seconds) for recovery if get_blocking failed"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:75
+msgid "How It Works"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:78
+msgid "Runtime Behavior"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:80
+msgid "The health monitor runs in a background thread:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:82
+msgid "Every ``ping_interval`` seconds, all health checks are executed"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:83
+msgid "If any check fails, the system is marked as unhealthy"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:84
+msgid "When unhealthy, store/retrieve operations are blocked with a warning log"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:85
+msgid ""
+"Once all checks pass again, the system is marked as healthy and "
+"operations resume"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:88
+msgid "Initialization Failure Handling"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:90
+msgid "When initialization or post-initialization fails irrecoverably:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:92
+msgid "The system is marked with ``_init_failed = True``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:93
+msgid "``is_healthy()`` method returns ``False`` permanently"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:94
+msgid ""
+"Health monitoring thread will not start (if initialization fails before "
+"it starts)"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:95
+msgid "The system operates in degraded mode (recompute-only)"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:97
+msgid ""
+"This ensures that irrecoverable initialization errors don't cause "
+"cascading failures and the system can gracefully fall back to "
+"recomputation."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:101
+msgid "Graceful Degradation"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:103
+msgid "When the health monitor detects an unhealthy state:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:105
+msgid "**Store operations**: Skipped with a warning message"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:106
+msgid "**Retrieve operations**: Return empty results with a warning message"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:107
+msgid "**Lookup operations**: Return 0 (no cache hits) with a warning message"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:109
+msgid "This prevents cascading failures when remote backends are unavailable."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:112
+msgid "Built-in Health Checks"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:115
+msgid "RemoteBackendHealthCheck"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:117
+msgid ""
+"This check monitors the connectivity to remote storage backends (e.g., "
+"Redis, Valkey)."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:119
+msgid "**What it checks:**"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:121
+msgid "Pings the remote connector to verify it's reachable"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:122
+msgid "Measures ping latency"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:123
+msgid "Reports error codes for failures"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:125
+msgid "**When it's active:**"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:127
+msgid "Only when a remote backend is configured (``remote_url`` is set)"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:128
+msgid "Only if the connector supports the ``ping()`` operation"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:130
+msgid "**Metrics reported:**"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:132
+msgid "``lmcache:remote_ping_latency``: Latest ping latency (milliseconds)"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:133
+msgid "``lmcache:remote_ping_error_code``: Latest error code (0 = success)"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:134
+msgid "``lmcache:remote_ping_errors``: Total number of ping errors"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:135
+msgid "``lmcache:remote_ping_successes``: Total number of successful pings"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:138
+msgid "Prometheus Metrics"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:140
+msgid "The health monitor exposes metrics through the Prometheus endpoint:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:142
+msgid "Health Monitor Metrics"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:146
+msgid "Metric Name"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:147
+msgid "Type"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:149
+msgid "``lmcache:is_healthy``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:150
+#: ../../source/production/observability/health_monitor.rst:153
+#: ../../source/production/observability/health_monitor.rst:156
+msgid "Gauge"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:151
+msgid "Overall system health status (1 = healthy, 0 = unhealthy)"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:152
+msgid "``lmcache:remote_ping_latency``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:154
+msgid "Latest ping latency to remote backends (milliseconds)"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:155
+msgid "``lmcache:remote_ping_error_code``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:157
+msgid "Latest ping error code (0 = success, -1 = timeout, -2 = generic error)"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:158
+msgid "``lmcache:remote_ping_errors``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:159
+#: ../../source/production/observability/health_monitor.rst:162
+msgid "Counter"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:160
+msgid "Total number of ping errors to remote backends"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:161
+msgid "``lmcache:remote_ping_successes``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:163
+msgid "Total number of successful pings to remote backends"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:166
+msgid "Error Codes"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:168
+msgid "The health check system uses the following error codes:"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:170
+msgid "Health Check Error Codes"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:174
+msgid "Code"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:176
+msgid "``0``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:177
+msgid "Success - the health check passed"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:178
+msgid "``-1``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:179
+msgid "Timeout - the ping operation exceeded the configured timeout"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:180
+msgid "``-2``"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:181
+msgid "Generic error - an unexpected error occurred during the health check"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:184
+msgid "Extending the Health Monitor"
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:186
+msgid ""
+"You can add custom health checks by creating a new module in the "
+"``lmcache/v1/health_monitor/checks/`` directory."
+msgstr ""
+
+#: ../../source/production/observability/health_monitor.rst:188
+msgid ""
+"The custom check will be automatically discovered and registered when "
+"LMCache starts."
+msgstr ""
+
