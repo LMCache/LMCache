@@ -216,6 +216,63 @@ class KVLayerGroupInfo:
         return self.shape_desc.nh * self.shape_desc.hs
 
 
+def _validate_uniform_layer_format(kv_caches: "DiscoverableKVCache") -> None:
+    """Verify every layer tensor in ``kv_caches`` shares the same ``.dim()``.
+
+    LMCache currently assumes a single :class:`~lmcache.c_ops.GPUKVFormat`
+    per engine: :func:`normalize_kv_and_discover_format` inspects the
+    first tensor it can find and returns one format,
+    :data:`LayerGroupIdentity` does not include the format, and the
+    transfer-kernel call sites read a single ``gpu_kv_format_`` from the
+    GPU context. If the engine ever hands LMCache layers with divergent
+    formats, the kernel would silently use the first layer's format for
+    every layer and produce a corrupt KV cache at retrieve time.
+
+    This helper enforces the assumption at registration time. It walks
+    every leaf tensor in ``kv_caches`` and checks that the dim count
+    matches the first tensor's. Distinct formats with the same dim count
+    (e.g. axis-permuted variants) are not detected here — distinguishing
+    them would require duplicating the format-detection logic from
+    :func:`normalize_kv_and_discover_format` per leaf, which is not
+    warranted while no such mixed-format engine exists. The realistic
+    mixed case today is MLA (no TWO axis) versus MHA (TWO axis), which
+    differ in dim count and so are caught.
+
+    Args:
+        kv_caches: KV cache structure (single tensor or arbitrarily
+            nested list of tensors). Empty structures are accepted
+            silently — the early-return in
+            :meth:`KVLayerGroupsManager.__init__` already handles the
+            zero-layer case.
+
+    Raises:
+        ValueError: If two leaf tensors disagree on ``.dim()``. The
+            message names the first divergent layer index and both dim
+            counts.
+    """
+    leaf_dims: list[int] = []
+
+    def _walk(node: "DiscoverableKVCache") -> None:
+        if isinstance(node, torch.Tensor):
+            leaf_dims.append(node.dim())
+            return
+        for sub in node:
+            _walk(sub)
+
+    _walk(kv_caches)
+    if len(leaf_dims) <= 1:
+        return
+    first = leaf_dims[0]
+    for i, d in enumerate(leaf_dims[1:], start=1):
+        if d != first:
+            raise ValueError(
+                f"All layer tensors must share the same gpu_kv_format; "
+                f"layer 0 has tensor dim {first} but layer {i} has dim "
+                f"{d}. Mixed-format engines are not currently supported "
+                f"by LMCache."
+            )
+
+
 class KVLayerGroupsManager:
     """Partition a model's KV layers into transfer-kernel dispatch units.
 
@@ -337,6 +394,11 @@ class KVLayerGroupsManager:
         if num_layers == 0:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
+
+        # Enforce the single-format-per-engine invariant at registration
+        # time. See :func:`_validate_uniform_layer_format` for the
+        # rationale and the failure mode this prevents.
+        _validate_uniform_layer_format(kv_caches)
 
         # Resolve the per-layer logical block size hint, if present.
         # When absent, every layer's logical block size will default to

@@ -140,6 +140,48 @@ class TestKVLayerGroupsManager:
         assert sd1.hs == 64
 
 
+class TestUniformLayerFormatValidation:
+    """Tests for the per-layer dim-uniformity check.
+
+    The check enforces LMCache's single-format-per-engine invariant:
+    every layer tensor must share the same ``.dim()``. Mixed dim counts
+    indicate divergent ``GPUKVFormat`` (e.g. MLA without TWO axis mixed
+    with MHA carrying TWO axis), which is currently unsupported.
+    """
+
+    def test_uniform_layers_accepted(self):
+        """Sanity: a list of same-dim tensors constructs without raising."""
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
+        ]
+        manager = _build_manager(tensors, num_blocks=32)
+        assert len(manager.kv_layer_groups) == 1
+
+    def test_mixed_dim_tensors_raise(self):
+        """Mixing a 5-D MHA tensor with a 4-D MLA-style tensor must raise."""
+        tensors = [
+            # MHA-style: [TWO, NB, BS, NH, HS]
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            # MLA-style: [NB, BS, NH, HS] (no TWO axis)
+            torch.randn(32, 256, 8, 64, dtype=torch.float16),
+        ]
+        with pytest.raises(
+            ValueError,
+            match=r"layer 1 has dim 4|Mixed-format engines",
+        ):
+            _build_manager(tensors, num_blocks=32)
+
+    def test_mixed_dim_message_names_first_divergent_layer(self):
+        """The error message points at the first layer that diverges."""
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            torch.randn(32, 256, 8, 64, dtype=torch.float16),  # diverges here
+        ]
+        with pytest.raises(ValueError, match=r"layer 2 has dim 4"):
+            _build_manager(tensors, num_blocks=32)
+
+
 class TestPerLayerLogicalBlockSize:
     """Tests for the ``per_layer_logical_block_size`` LayoutHints field.
 
