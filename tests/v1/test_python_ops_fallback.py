@@ -8,7 +8,7 @@ import pytest
 import torch
 
 # First Party
-import lmcache.non_cuda_equivalents as _py_ops
+import lmcache.python_ops_fallback as _py_ops
 
 # ==========================================
 # 0. utils functions.
@@ -48,9 +48,9 @@ def _build_backend_params() -> list:
 
     Returns one entry per available backend configuration:
     - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
-    - cuda_py_ops: uses lmcache.non_cuda_equivalents with GPU visible
-    - cpy_py_ops: uses lmcache.non_cuda_equivalents with GPU mocked away
-    - xpu_py_ops: uses lmcache.non_cuda_equivalents with XPU visible
+    - cuda_py_ops: uses lmcache.python_ops_fallback with GPU visible
+    - cpy_py_ops: uses lmcache.python_ops_fallback with GPU mocked away
+    - xpu_py_ops: uses lmcache.python_ops_fallback with XPU visible
     """
     params = []
     cuda_available = torch.cuda.is_available()
@@ -1773,8 +1773,8 @@ class TestScenarios:
     def test_2_compare(self, name: str) -> None:
         """Compare results across backends for a single scenario.
 
-        When multiple backends ran (CUDA available), asserts that non_cuda
-        equivalents produce numerically identical results to cuda_ops.
+        When multiple backends ran (CUDA available), asserts that python
+        fallback equivalents produce numerically identical results to cuda_ops.
         When only one backend ran (no CUDA), simply verifies results were stored.
 
         This test runs after test_1_scenario due to alphabetical ordering of
