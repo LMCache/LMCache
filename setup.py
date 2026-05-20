@@ -383,20 +383,22 @@ def _collect_extensions() -> tuple[list, dict]:
 
     Notes:
         - `sdist` builds skip all extension compilation.
-        - `NO_CUDA_EXT=1` keeps pure C++ extensions and skips GPU extensions.
+        - `NO_CUDA_EXT=1` skips all extension compilation (pure-Python build,
+          used by the lmcache-cli wheel which has no torch build dependency).
         - Otherwise, pure C++ extensions are combined with one GPU backend
           extension set (CUDA, ROCm, or SYCL).
     """
     if BUILDING_SDIST:
         return source_dist_extension()
 
+    if NO_CUDA_EXT:
+        return [], {}
+
     common_cpp_flags = _get_common_cpp_flags()
     # Preserve historical SYCL compatibility: lmcache_fs was compiled without
     # _GLIBCXX_USE_CXX11_ABI in pre-refactor builds.
     fs_cpp_flags = [] if BUILD_WITH_SYCL else common_cpp_flags
     ext_modules, cmdclass = _common_cpp_extensions(common_cpp_flags, fs_cpp_flags)
-    if NO_CUDA_EXT:
-        return ext_modules, cmdclass
 
     if BUILD_WITH_SYCL:
         gpu_ext_modules, cmdclass = sycl_extension()
