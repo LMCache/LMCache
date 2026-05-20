@@ -124,7 +124,40 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
         ),
     )
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
-    return [_wrap_one_kv_cache(tensor) for tensor in kv_caches.values()]
+    # Per-iteration resource management: if wrapping the N-th tensor
+    # raises, ``shm_unlink`` whatever earlier iterations already
+    # registered with POSIX SHM so the named segments do not outlive
+    # the failed batch. CUDA wrappers do not own a named segment and
+    # are skipped via the duck-typed ``shm_name`` check.
+    wrappers: KVCache = []
+    try:
+        for tensor in kv_caches.values():
+            wrappers.append(_wrap_one_kv_cache(tensor))
+    except BaseException:
+        _release_partial_kv_wrappers(wrappers)
+        raise
+    return wrappers
+
+
+def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
+    """Best-effort unlink of SHM segments owned by partially built wrappers.
+
+    Used by :func:`wrap_kv_caches` to roll back a half-finished batch
+    when a later iteration raises. Only POSIX-SHM-backed wrappers carry
+    a ``shm_name`` attribute, so other wrapper kinds (e.g. CUDA-IPC)
+    are silently skipped.
+    """
+    # First Party
+    from lmcache.v1.platform.cpu.shm import shm_unlink
+
+    for w in wrappers:
+        name = getattr(w, "shm_name", None)
+        if name is None:
+            continue
+        try:
+            shm_unlink(name)
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("shm_unlink failed during rollback", exc_info=True)
 
 
 def _wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
