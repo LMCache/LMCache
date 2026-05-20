@@ -100,15 +100,15 @@ def test_wrap_kv_caches_wraps_all_tensors(monkeypatch: Any) -> None:
 
 
 def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
-    """Ensure transfer context factory returns NonCudaTransferContext for CPU KV."""
+    """Ensure transfer context factory returns DataTransferContext for CPU KV."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
-        NonCudaTransferContext,
+        DataTransferContext,
         create_transfer_context,
     )
 
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})
-    assert isinstance(context, NonCudaTransferContext)
+    assert isinstance(context, DataTransferContext)
 
 
 def test_compute_kv_layout_and_gather_scatter_roundtrip() -> None:
