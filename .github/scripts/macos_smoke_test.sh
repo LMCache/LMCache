@@ -5,7 +5,7 @@
 # server. Verifies that:
 #   1) `lmcache --help` works (CLI entry point is importable)
 #   2) `lmcache server` can launch the ZMQ + HTTP server on CPU
-#   3) the HTTP server answers GET / and GET /api/healthcheck
+#   3) the HTTP server answers GET / and GET /healthcheck
 #
 # This script is intentionally minimal — it does not exercise any
 # GPU / CUDA / vLLM code paths. It is meant to be a fast regression
