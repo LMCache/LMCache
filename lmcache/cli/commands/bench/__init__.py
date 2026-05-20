@@ -8,8 +8,8 @@ import os
 import sys
 
 # First Party
-from lmcache.cli.commands import test_cache as _test_cache_mod
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.bench import test_cache as _test_cache_mod
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
     parse_args_to_config,
@@ -31,7 +31,7 @@ from lmcache.cli.commands.bench.l2_adapter_bench.command import (
     register_l2_parser,
     run_l2_adapter_bench,
 )
-from lmcache.cli.commands.test_cache import TestCacheCommand
+from lmcache.cli.commands.bench.test_cache import TestCacheCommand
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
