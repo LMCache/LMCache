@@ -511,6 +511,10 @@ def parse_kvcache_shape_spec(
         shape_desc.nh = nh
         shape_desc.hs = hs
         shape_desc.element_size = dtype.itemsize
+        try:
+            shape_desc.dtype = dtype
+        except AttributeError:
+            pass
 
         indices = list(range(layer_offset, layer_offset + layer_count))
         groups.append(

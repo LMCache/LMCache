@@ -75,6 +75,7 @@ from lmcache.v1.multiprocess.protocols.engine import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -297,7 +298,7 @@ class MPCacheEngine:
             )
             return
 
-        gpu_context = GPUCacheContext(
+        gpu_context = create_cache_context(
             kv_caches,
             self.chunk_size,
             layout_hints=layout_hints or None,

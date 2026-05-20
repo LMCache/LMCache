@@ -91,7 +91,7 @@ def test_wrap_kv_caches_wraps_all_tensors(monkeypatch: Any) -> None:
     kv_caches = _make_kv_caches()
     monkeypatch.setattr(
         adapter_mod,
-        "CudaIPCWrapper",
+        "_wrap_one_kv_cache",
         lambda tensor: ("wrapped", tensor),
     )
 

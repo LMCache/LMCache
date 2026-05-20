@@ -116,6 +116,25 @@ class StubStream:
         self.device = device
         self.priority = priority
         self.cuda_stream = 0
+        # Mirrors the ``ptr`` attribute exposed by ``cupy.cuda.Stream``
+        # so callers (e.g. ``mp_observability.event_bus``) that pass a
+        # raw stream pointer to native recorders accept this stub
+        # without an isinstance check.
+        self.ptr = 0
+
+    def launch_host_func(self, callback: Any, arg: Any = None) -> None:
+        """Run ``callback(arg)`` synchronously.
+
+        ``cupy.cuda.Stream.launch_host_func`` schedules the callback
+        on the GPU stream's host-side completion queue; with no real
+        stream there's nothing to wait for, so we just invoke it
+        immediately. Exceptions are swallowed to mirror the cupy
+        contract (callbacks are best-effort and must not propagate).
+        """
+        try:
+            callback(arg)
+        except Exception:  # noqa: BLE001
+            pass
 
     def synchronize(self) -> None:
         """Block the host until all kernels on this stream complete.

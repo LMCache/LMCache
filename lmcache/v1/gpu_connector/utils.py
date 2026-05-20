@@ -1262,7 +1262,15 @@ def make_page_buffer_shape_desc(
         else get_num_heads(kv_caches, gpu_kv_format, layer_idx)
     )
     desc.hs = get_head_size(kv_caches, gpu_kv_format, layer_idx)
-    desc.element_size = get_dtype(kv_caches, gpu_kv_format, layer_idx).itemsize
+    dtype = get_dtype(kv_caches, gpu_kv_format, layer_idx)
+    desc.element_size = dtype.itemsize
+    # The C++ PageBufferShapeDesc has no ``dtype`` field, but the
+    # pure-Python CPU fallback (``non_cuda_equivalents``) does -- and
+    # needs it to disambiguate float16 vs bfloat16. Set best-effort.
+    try:
+        desc.dtype = dtype
+    except AttributeError:
+        pass
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride
