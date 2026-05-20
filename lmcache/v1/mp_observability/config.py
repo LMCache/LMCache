@@ -274,11 +274,21 @@ def parse_args_to_observability_config(
     return config
 
 
-def init_observability(obs_config: ObservabilityConfig) -> EventBus:
+def init_observability(
+    obs_config: ObservabilityConfig,
+    *,
+    start_prometheus_http_server: bool = True,
+) -> EventBus:
     """Initialize OTel providers, EventBus, and register subscribers.
 
     This is the single entry-point that every MP server calls at startup.
     Returns a **started** EventBus.
+
+    Args:
+        obs_config: Observability configuration.
+        start_prometheus_http_server: Whether to start a standalone
+            Prometheus HTTP server.  Set to ``False`` when an
+            external HTTP framework already serves ``/metrics``.
     """
     # First Party
     from lmcache.v1.mp_observability.event_bus import (
@@ -303,6 +313,7 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             otlp_endpoint=obs_config.otlp_endpoint,
             prometheus_port=obs_config.prometheus_port,
             resource_attributes=resource_attrs,
+            start_http_server=start_prometheus_http_server,
         )
 
     if obs_config.enabled and obs_config.tracing_enabled:
@@ -326,8 +337,10 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         from lmcache.v1.mp_observability.subscribers.metrics import (
             BlendMetricsSubscriber,
             EngineMetricsSubscriber,
+            EventBusSelfMetricsSubscriber,
             L0L1ThroughputSubscriber,
             L0LifecycleSubscriber,
+            L1EvictionLoopSubscriber,
             L1FailureMetricsSubscriber,
             L1LifecycleSubscriber,
             L1MetricsSubscriber,
@@ -336,7 +349,6 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
             L2ThroughputSubscriber,
             LookupMetricsSubscriber,
             SMLifecycleSubscriber,
-            SMMetricsSubscriber,
         )
 
         sample_rate = obs_config.metrics_sample_rate
@@ -344,15 +356,16 @@ def init_observability(obs_config: ObservabilityConfig) -> EventBus:
         bus.register_subscriber(L1MetricsSubscriber())
         bus.register_subscriber(L1LifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(L1FailureMetricsSubscriber())
-        bus.register_subscriber(L0L1ThroughputSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(L1EvictionLoopSubscriber())
+        bus.register_subscriber(L0L1ThroughputSubscriber())
         bus.register_subscriber(L2MetricsSubscriber())
         bus.register_subscriber(L2FailureMetricsSubscriber())
-        bus.register_subscriber(L2ThroughputSubscriber(sample_rate=sample_rate))
+        bus.register_subscriber(L2ThroughputSubscriber())
         bus.register_subscriber(LookupMetricsSubscriber())
-        bus.register_subscriber(SMMetricsSubscriber())
         bus.register_subscriber(SMLifecycleSubscriber(sample_rate=sample_rate))
         bus.register_subscriber(BlendMetricsSubscriber())
         bus.register_subscriber(EngineMetricsSubscriber())
+        bus.register_subscriber(EventBusSelfMetricsSubscriber(bus))
 
     if obs_config.logging_enabled:
         # First Party

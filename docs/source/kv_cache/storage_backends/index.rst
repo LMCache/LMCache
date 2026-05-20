@@ -14,6 +14,7 @@ Supported Backends
    dax
    eic
    gds
+   hfbucket
    infinistore
    local_storage
    maru
@@ -26,6 +27,7 @@ Supported Backends
    sagemaker_hyperpod
    valkey
    weka
+   3fs
    
    
   

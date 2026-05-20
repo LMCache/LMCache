@@ -9,6 +9,7 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.bench import test_cache as _test_cache_mod
 from lmcache.cli.commands.bench.engine_bench.config import (
     EngineBenchConfig,
     parse_args_to_config,
@@ -26,6 +27,11 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     StatsCollector,
 )
 from lmcache.cli.commands.bench.engine_bench.workloads import create_workload
+from lmcache.cli.commands.bench.l2_adapter_bench.command import (
+    register_l2_parser,
+    run_l2_adapter_bench,
+)
+from lmcache.cli.commands.bench.test_cache import TestCacheCommand
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -33,6 +39,13 @@ logger = init_logger(__name__)
 
 class BenchCommand(BaseCommand):
     """CLI command for sustained performance benchmarking."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # None on slim install; _register_kvcache registers a stub instead.
+        self._kvcache_delegate = (
+            TestCacheCommand() if _test_cache_mod._IMPORT_ERROR is None else None
+        )
 
     def name(self) -> str:
         return "bench"
@@ -52,9 +65,12 @@ class BenchCommand(BaseCommand):
         inner = parser.add_subparsers(
             dest="bench_target",
             required=True,
-            metavar="{engine}",
+            metavar="{engine,kvcache,l2}",
         )
+        # TODO(chunxiaozheng): move engine and kvcache to sub module too
         self._register_engine(inner)
+        self._register_kvcache(inner)
+        register_l2_parser(inner, self.execute)
 
     def _register_engine(
         self,
@@ -99,6 +115,7 @@ class BenchCommand(BaseCommand):
                 "long-doc-permutator",
                 "long-doc-qa",
                 "multi-round-chat",
+                "prefix-suffix-tuner",
                 "random-prefill",
             ],
             help="Workload type.",
@@ -262,6 +279,36 @@ class BenchCommand(BaseCommand):
             help="Benchmark duration in seconds (default: 60).",
         )
 
+        # --- Prefix-suffix-tuner workload args ---
+        psf_group = parser.add_argument_group(
+            "prefix-suffix-tuner workload options",
+        )
+        psf_group.add_argument(
+            "--psf-context-length",
+            type=int,
+            default=8000,
+            help="Total tokens per request (prefix + breaker + suffix) "
+            "(default: 8000).",
+        )
+        psf_group.add_argument(
+            "--psf-prefix-ratio",
+            type=float,
+            default=0.8,
+            help="Fraction of context-length used by the prefix (default: 0.8). "
+            "Must be in (0.0, 1.0). The remainder (minus a 32-token breaker) is "
+            "the shared suffix.",
+        )
+        psf_group.add_argument(
+            "--psf-thrash",
+            type=float,
+            default=20.0,
+            help="Size in GB of the KV-cache tier to overflow (default: 20.0). "
+            "The workload sizes its prefix pool to slightly more than this, "
+            "so every pass-2 request misses that tier and falls through to "
+            "the next one. Use the L0 (HBM) size for vanilla vLLM baselines, "
+            "or the L1 (LMCache DRAM) size for tiered baselines.",
+        )
+
         # --- Random-prefill workload args ---
         rp_group = parser.add_argument_group(
             "random-prefill workload options",
@@ -281,8 +328,64 @@ class BenchCommand(BaseCommand):
 
         parser.set_defaults(func=self.execute)
 
+    # ------------------------------------------------------------------
+    # kvcache bench target — end-to-end MP cache sanity test
+    # ------------------------------------------------------------------
+
+    def _register_kvcache(
+        self,
+        subparsers: argparse._SubParsersAction,
+    ) -> None:
+        """Register ``lmcache bench kvcache``. Delegates to
+        :class:`TestCacheCommand`, or registers a stub on slim install.
+        """
+        if _test_cache_mod._IMPORT_ERROR is not None:
+            subparsers.add_parser(
+                "kvcache",
+                help="(requires full lmcache install)",
+                description=(
+                    "End-to-end sanity test for the LMCache MP cache server. "
+                    "Requires the full `lmcache` package; not available in "
+                    "the `lmcache-cli` install."
+                ),
+            ).set_defaults(func=self.execute)
+            return
+        assert self._kvcache_delegate is not None
+        parser = subparsers.add_parser(
+            "kvcache",
+            help=self._kvcache_delegate.help(),
+            description=(
+                "End-to-end sanity test for the LMCache MP cache server: "
+                "runs LOOKUP / STORE / RETRIEVE against a live MP server "
+                "and verifies KV cache checksums."
+            ),
+        )
+        assert self._kvcache_delegate is not None
+        self._kvcache_delegate.add_arguments(parser)
+        parser.set_defaults(func=self.execute)
+
+    def _bench_kvcache(self, args: argparse.Namespace) -> None:
+        """Dispatch ``lmcache bench kvcache`` to ``TestCacheCommand``."""
+        if _test_cache_mod._IMPORT_ERROR is not None:
+            print(
+                "ERROR: `lmcache bench kvcache` needs the full LMCache "
+                "package (torch, zmq, MP runtime), but only the "
+                "`lmcache-cli` shell appears to be installed.\n"
+                "  Install the full package with `pip install lmcache` "
+                "and try again.\n"
+                f"  Original import error: {_test_cache_mod._IMPORT_ERROR}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        assert self._kvcache_delegate is not None
+        self._kvcache_delegate.execute(args)
+
     def execute(self, args: argparse.Namespace) -> None:
-        handlers = {"engine": self._bench_engine}
+        handlers = {
+            "engine": self._bench_engine,
+            "kvcache": self._bench_kvcache,
+            "l2": lambda a: run_l2_adapter_bench(self, a),
+        }
         handler = handlers.get(args.bench_target)
         if handler is None:
             print(

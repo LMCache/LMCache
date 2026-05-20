@@ -763,3 +763,107 @@ class TestCBHitRateAttributes:
         assert root.attributes["hit_tokens"] == 0
         assert root.attributes["requested_tokens"] == 1024
         assert root.attributes["hit_rate"] == 0.0
+
+    def test_prefix_hits_attr_set_on_root_span(self, exporter):
+        """CB_LOOKUP_END with prefix_hits=2 stamps prefix_hits=2 on root span."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "cb-prefix-hits"
+
+        bus.publish(
+            Event(event_type=EventType.CB_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+                metadata={"num_tokens": 512},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "num_tokens": 512,
+                    "fingerprint_hits": 0,
+                    "prefix_hits": 2,
+                    "storage_hits": 2,
+                    "stale_chunks": 0,
+                    "no_gpu_context": False,
+                    "hit_tokens": 512,
+                    "requested_tokens": 512,
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["prefix_hits"] == 2
+        assert root.attributes["hit_tokens"] == 512
+        assert root.attributes["hit_rate"] == 1.0
+
+    def test_prefix_hits_defaults_to_zero_when_absent(self, exporter):
+        """CB_LOOKUP_END without prefix_hits stamps prefix_hits=0 (backward compat)."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        registry = SpanRegistry()
+        bus.register_subscriber(BlendTracingSubscriber(registry))
+        bus.start()
+        now = time.time()
+        sid = "cb-prefix-absent"
+
+        bus.publish(
+            Event(event_type=EventType.CB_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+                metadata={"num_tokens": 256},
+            )
+        )
+        # Omit prefix_hits to simulate an older server payload
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "num_tokens": 256,
+                    "fingerprint_hits": 1,
+                    "storage_hits": 1,
+                    "stale_chunks": 0,
+                    "no_gpu_context": False,
+                    "hit_tokens": 256,
+                    "requested_tokens": 256,
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.020,
+            )
+        )
+        time.sleep(0.15)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["prefix_hits"] == 0

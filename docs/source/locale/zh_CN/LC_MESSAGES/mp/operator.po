@@ -1,0 +1,978 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/operator.rst:2
+msgid "Kubernetes Operator"
+msgstr ""
+
+#: ../../source/mp/operator.rst:4
+msgid ""
+"The LMCache Kubernetes operator automates the deployment and lifecycle "
+"management of LMCache multiprocess servers.  Instead of hand-writing "
+"DaemonSets, Services, and ConfigMaps (as described in the manual "
+":doc:`deployment` guide), you declare a single ``LMCacheEngine`` custom "
+"resource and the operator reconciles all underlying Kubernetes objects."
+msgstr ""
+
+#: ../../source/mp/operator.rst:15
+msgid "Why Use the Operator"
+msgstr ""
+
+#: ../../source/mp/operator.rst:17
+msgid ""
+"The manual DaemonSet approach works, but it has sharp edges the operator "
+"eliminates:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:20
+msgid ""
+"**Auto-injected pod settings** -- The operator always sets ``hostIPC: "
+"true`` and ``--host 0.0.0.0``.  Forgetting ``hostIPC`` in a hand-written "
+"manifest causes silent CUDA IPC failures "
+"(``cudaErrorMapBufferObjectFailed``) that are hard to debug."
+msgstr ""
+
+#: ../../source/mp/operator.rst:24
+msgid ""
+"**Node-local service discovery** -- The operator creates a ClusterIP "
+"Service with ``internalTrafficPolicy=Local`` and a connection ConfigMap "
+"that vLLM pods simply mount.  No ``hostNetwork``, no Downward API, no "
+"shell variable substitution."
+msgstr ""
+
+#: ../../source/mp/operator.rst:28
+msgid ""
+"**Auto-computed resource sizing** -- Memory requests and limits are "
+"derived from ``l1.sizeGB``, avoiding OOM kills (under-provisioned) or "
+"wasted node capacity (over-provisioned)."
+msgstr ""
+
+#: ../../source/mp/operator.rst:31
+msgid ""
+"**Declarative Prometheus integration** -- Set "
+"``prometheus.serviceMonitor.enabled: true`` and the operator creates a "
+"``ServiceMonitor`` CR that the Prometheus Operator discovers "
+"automatically."
+msgstr ""
+
+#: ../../source/mp/operator.rst:34
+msgid ""
+"**CRD validation** -- OpenAPI schema validation catches misconfigurations"
+" (e.g., ``l1.sizeGB <= 0``, invalid port range) at ``kubectl apply`` "
+"time, before any pods are created."
+msgstr ""
+
+#: ../../source/mp/operator.rst:39
+msgid "Prerequisites"
+msgstr ""
+
+#: ../../source/mp/operator.rst:41
+msgid "Kubernetes 1.20+"
+msgstr ""
+
+#: ../../source/mp/operator.rst:42
+msgid "``kubectl`` configured to access your cluster"
+msgstr ""
+
+#: ../../source/mp/operator.rst:43
+msgid ""
+"(Optional) `Prometheus Operator <https://github.com/prometheus-operator"
+"/prometheus-operator>`_ for ServiceMonitor support"
+msgstr ""
+
+#: ../../source/mp/operator.rst:47
+msgid "Installing the Operator"
+msgstr ""
+
+#: ../../source/mp/operator.rst:49
+msgid "**Option A: One-line install from release (recommended)**"
+msgstr ""
+
+#: ../../source/mp/operator.rst:59
+msgid "**Option B: Build from source**"
+msgstr ""
+
+#: ../../source/mp/operator.rst:69
+msgid "Deploying an LMCacheEngine"
+msgstr ""
+
+#: ../../source/mp/operator.rst:71
+msgid "A minimal CR deploys a DaemonSet with 60 GB L1 cache on every GPU node:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:87
+msgid "The operator automatically:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:89
+msgid "Creates a DaemonSet running one LMCache server pod per matched node"
+msgstr ""
+
+#: ../../source/mp/operator.rst:90
+msgid "Sets ``hostIPC: true`` and passes ``--host 0.0.0.0`` to the server"
+msgstr ""
+
+#: ../../source/mp/operator.rst:91
+msgid "Creates a node-local ClusterIP Service for vLLM discovery"
+msgstr ""
+
+#: ../../source/mp/operator.rst:92
+msgid ""
+"Creates a connection ConfigMap (``my-cache-connection``) with the ``kv-"
+"transfer-config`` JSON that vLLM needs"
+msgstr ""
+
+#: ../../source/mp/operator.rst:94
+msgid "Auto-computes resource requests/limits from the L1 cache size"
+msgstr ""
+
+#: ../../source/mp/operator.rst:95
+msgid "Defaults ``nodeSelector`` to ``nvidia.com/gpu.present: \"true\"``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:98
+msgid ""
+"The operator defaults the container image to ``lmcache/vllm-"
+"openai:latest``. Override with ``spec.image.repository`` and "
+"``spec.image.tag`` to pin a specific version."
+msgstr ""
+
+#: ../../source/mp/operator.rst:103
+msgid "Connecting vLLM"
+msgstr ""
+
+#: ../../source/mp/operator.rst:105
+msgid ""
+"The operator creates a ConfigMap named ``<engine-name>-connection`` "
+"containing the ``kv-transfer-config`` JSON.  Mount it in your vLLM "
+"Deployment:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:156
+msgid "Key requirements for vLLM pods:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:158
+msgid ""
+"**hostIPC: true** -- CUDA IPC (``cudaIpcOpenMemHandle``) needs a shared "
+"IPC namespace between vLLM and LMCache."
+msgstr ""
+
+#: ../../source/mp/operator.rst:160
+msgid ""
+"**PYTHONHASHSEED=0** -- Ensures deterministic token hashing so vLLM and "
+"LMCache produce consistent cache keys."
+msgstr ""
+
+#: ../../source/mp/operator.rst:162
+msgid ""
+"**ConfigMap mount** -- The ``$(cat ...)`` pattern reads the connection "
+"JSON inline.  The ConfigMap name is always ``<LMCacheEngine "
+"name>-connection``."
+msgstr ""
+
+#: ../../source/mp/operator.rst:164
+msgid ""
+"**No hostNetwork needed** -- The operator's node-local Service handles "
+"routing via ``internalTrafficPolicy=Local``."
+msgstr ""
+
+#: ../../source/mp/operator.rst:168
+msgid "Verifying the Deployment"
+msgstr ""
+
+#: ../../source/mp/operator.rst:175
+msgid "Expected output:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:194
+msgid "CRD Spec Reference"
+msgstr ""
+
+#: ../../source/mp/operator.rst:197
+msgid "Image"
+msgstr ""
+
+#: ../../source/mp/operator.rst:203 ../../source/mp/operator.rst:226
+#: ../../source/mp/operator.rst:249 ../../source/mp/operator.rst:263
+#: ../../source/mp/operator.rst:283 ../../source/mp/operator.rst:309
+#: ../../source/mp/operator.rst:324 ../../source/mp/operator.rst:347
+#: ../../source/mp/operator.rst:478
+msgid "Field"
+msgstr ""
+
+#: ../../source/mp/operator.rst:204 ../../source/mp/operator.rst:227
+#: ../../source/mp/operator.rst:250 ../../source/mp/operator.rst:264
+#: ../../source/mp/operator.rst:284 ../../source/mp/operator.rst:310
+#: ../../source/mp/operator.rst:325 ../../source/mp/operator.rst:348
+msgid "Default"
+msgstr ""
+
+#: ../../source/mp/operator.rst:205 ../../source/mp/operator.rst:228
+#: ../../source/mp/operator.rst:251 ../../source/mp/operator.rst:265
+#: ../../source/mp/operator.rst:285 ../../source/mp/operator.rst:311
+#: ../../source/mp/operator.rst:326 ../../source/mp/operator.rst:349
+msgid "Description"
+msgstr ""
+
+#: ../../source/mp/operator.rst:206
+msgid "``image.repository``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:207
+msgid "``lmcache/vllm-openai``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:208
+msgid "Container image repository."
+msgstr ""
+
+#: ../../source/mp/operator.rst:209
+msgid "``image.tag``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:210
+msgid "``latest``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:211
+msgid "Container image tag."
+msgstr ""
+
+#: ../../source/mp/operator.rst:212
+msgid "``image.pullPolicy``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:213
+msgid "``IfNotPresent``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:214
+msgid "``Always``, ``Never``, or ``IfNotPresent``."
+msgstr ""
+
+#: ../../source/mp/operator.rst:215
+msgid "``imagePullSecrets``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:216 ../../source/mp/operator.rst:299
+#: ../../source/mp/operator.rst:313 ../../source/mp/operator.rst:331
+#: ../../source/mp/operator.rst:334 ../../source/mp/operator.rst:337
+#: ../../source/mp/operator.rst:354 ../../source/mp/operator.rst:357
+#: ../../source/mp/operator.rst:360 ../../source/mp/operator.rst:363
+#: ../../source/mp/operator.rst:366 ../../source/mp/operator.rst:369
+#: ../../source/mp/operator.rst:372 ../../source/mp/operator.rst:375
+msgid "--"
+msgstr ""
+
+#: ../../source/mp/operator.rst:217
+msgid "Image pull secret references."
+msgstr ""
+
+#: ../../source/mp/operator.rst:220
+msgid "Server"
+msgstr ""
+
+#: ../../source/mp/operator.rst:229 ../../source/mp/operator.rst:488
+msgid "``server.port``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:230
+msgid "``5555``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:231
+msgid "ZMQ listening port (1024--65535)."
+msgstr ""
+
+#: ../../source/mp/operator.rst:232
+msgid "``server.chunkSize``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:233
+msgid "``256``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:234
+msgid "Token chunk size."
+msgstr ""
+
+#: ../../source/mp/operator.rst:235
+msgid "``server.maxWorkers``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:236
+msgid "``1``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:237
+msgid "Worker threads for ZMQ requests."
+msgstr ""
+
+#: ../../source/mp/operator.rst:238
+msgid "``server.hashAlgorithm``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:239
+msgid "``blake3``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:240
+msgid "``builtin``, ``sha256_cbor``, or ``blake3``."
+msgstr ""
+
+#: ../../source/mp/operator.rst:243
+msgid "L1 Cache"
+msgstr ""
+
+#: ../../source/mp/operator.rst:252 ../../source/mp/operator.rst:480
+msgid "``l1.sizeGB``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:253
+msgid "*required*"
+msgstr ""
+
+#: ../../source/mp/operator.rst:254
+msgid "L1 cache size in GB.  Must be > 0."
+msgstr ""
+
+#: ../../source/mp/operator.rst:257
+msgid "Eviction"
+msgstr ""
+
+#: ../../source/mp/operator.rst:266 ../../source/mp/operator.rst:482
+msgid "``eviction.policy``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:267
+msgid "``LRU``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:268
+msgid "Only ``LRU`` is supported."
+msgstr ""
+
+#: ../../source/mp/operator.rst:269 ../../source/mp/operator.rst:484
+msgid "``eviction.triggerWatermark``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:270
+msgid "``0.8``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:271
+msgid "Usage ratio (0.0--1.0] to trigger eviction."
+msgstr ""
+
+#: ../../source/mp/operator.rst:272 ../../source/mp/operator.rst:486
+msgid "``eviction.evictionRatio``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:273
+msgid "``0.2``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:274
+msgid "Fraction to evict (0.0--1.0]."
+msgstr ""
+
+#: ../../source/mp/operator.rst:277 ../../source/mp/operator.rst:619
+msgid "Prometheus"
+msgstr ""
+
+#: ../../source/mp/operator.rst:286
+msgid "``prometheus.enabled``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:287
+msgid "``true``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:288
+msgid "Expose Prometheus metrics."
+msgstr ""
+
+#: ../../source/mp/operator.rst:289
+msgid "``prometheus.port``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:290
+msgid "``9090``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:291
+msgid "``/metrics`` endpoint port."
+msgstr ""
+
+#: ../../source/mp/operator.rst:292
+msgid "``prometheus.serviceMonitor.enabled``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:293
+msgid "``false``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:294
+msgid "Create a ServiceMonitor CR."
+msgstr ""
+
+#: ../../source/mp/operator.rst:295
+msgid "``prometheus.serviceMonitor.interval``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:296
+msgid "``30s``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:297
+msgid "Scrape interval."
+msgstr ""
+
+#: ../../source/mp/operator.rst:298
+msgid "``prometheus.serviceMonitor.labels``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:300
+msgid "Extra labels on the ServiceMonitor."
+msgstr ""
+
+#: ../../source/mp/operator.rst:303
+msgid "L2 Storage"
+msgstr ""
+
+#: ../../source/mp/operator.rst:312
+msgid "``l2Backends``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:314
+msgid "List of L2 backends (``type`` + ``config``). See :doc:`l2_storage`."
+msgstr ""
+
+#: ../../source/mp/operator.rst:318
+msgid "Scheduling"
+msgstr ""
+
+#: ../../source/mp/operator.rst:327
+msgid "``nodeSelector``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:328
+msgid "GPU nodes"
+msgstr ""
+
+#: ../../source/mp/operator.rst:329
+msgid "Defaults to ``nvidia.com/gpu.present: \"true\"``."
+msgstr ""
+
+#: ../../source/mp/operator.rst:330
+msgid "``affinity``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:332
+msgid "Pod affinity rules."
+msgstr ""
+
+#: ../../source/mp/operator.rst:333
+msgid "``tolerations``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:335
+msgid "Pod tolerations."
+msgstr ""
+
+#: ../../source/mp/operator.rst:336
+msgid "``priorityClassName``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:338
+msgid "Priority class for pods."
+msgstr ""
+
+#: ../../source/mp/operator.rst:341
+msgid "Overrides & Extras"
+msgstr ""
+
+#: ../../source/mp/operator.rst:350
+msgid "``logLevel``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:351
+msgid "``INFO``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:352
+msgid "``DEBUG``, ``INFO``, ``WARNING``, ``ERROR``."
+msgstr ""
+
+#: ../../source/mp/operator.rst:353
+msgid "``resourceOverrides``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:355
+msgid "Override auto-computed resources."
+msgstr ""
+
+#: ../../source/mp/operator.rst:356
+msgid "``env``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:358
+msgid "Extra environment variables."
+msgstr ""
+
+#: ../../source/mp/operator.rst:359
+msgid "``volumes``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:361
+msgid "Extra volumes."
+msgstr ""
+
+#: ../../source/mp/operator.rst:362
+msgid "``volumeMounts``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:364
+msgid "Extra volume mounts."
+msgstr ""
+
+#: ../../source/mp/operator.rst:365
+msgid "``podAnnotations``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:367
+msgid "Extra pod annotations."
+msgstr ""
+
+#: ../../source/mp/operator.rst:368
+msgid "``podLabels``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:370
+msgid "Extra pod labels."
+msgstr ""
+
+#: ../../source/mp/operator.rst:371
+msgid "``serviceAccountName``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:373
+msgid "ServiceAccount for pods."
+msgstr ""
+
+#: ../../source/mp/operator.rst:374
+msgid "``extraArgs``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:376
+msgid "Extra CLI flags (appended last, can override)."
+msgstr ""
+
+#: ../../source/mp/operator.rst:379
+msgid "Auto-Computed Resources"
+msgstr ""
+
+#: ../../source/mp/operator.rst:381
+msgid ""
+"When ``spec.resourceOverrides`` is not set, the operator derives "
+"resources from ``l1.sizeGB``:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:384
+msgid "**CPU request**: ``4`` cores"
+msgstr ""
+
+#: ../../source/mp/operator.rst:385
+msgid "**Memory request**: ``ceil(l1.sizeGB + 5)`` Gi"
+msgstr ""
+
+#: ../../source/mp/operator.rst:386
+msgid "**Memory limit**: ``ceil(memoryRequest * 1.5)`` Gi"
+msgstr ""
+
+#: ../../source/mp/operator.rst:388
+msgid "For example, ``l1.sizeGB: 60`` produces a 65 Gi request and 98 Gi limit."
+msgstr ""
+
+#: ../../source/mp/operator.rst:391
+msgid "Auto-Injected Pod Settings"
+msgstr ""
+
+#: ../../source/mp/operator.rst:393
+msgid ""
+"The operator always injects these into the pod spec (they are not "
+"configurable via the CRD):"
+msgstr ""
+
+#: ../../source/mp/operator.rst:396
+msgid "**hostIPC: true** -- Required for CUDA IPC between LMCache and vLLM."
+msgstr ""
+
+#: ../../source/mp/operator.rst:397
+msgid ""
+"**--host 0.0.0.0** -- Binds the server to all interfaces so the node-"
+"local Service can route to it."
+msgstr ""
+
+#: ../../source/mp/operator.rst:399
+msgid ""
+"**NVIDIA_VISIBLE_DEVICES=all** -- Ensures GPU access for IPC-based memory"
+" transfers."
+msgstr ""
+
+#: ../../source/mp/operator.rst:401
+msgid ""
+"**TCP socket probes** -- Startup (5s initial, 30 failures), liveness "
+"(10s), and readiness (5s) probes on the server port."
+msgstr ""
+
+#: ../../source/mp/operator.rst:405
+msgid ""
+"The operator does **not** mount an emptyDir at ``/dev/shm``.  With "
+"``hostIPC: true``, the container sees the host's ``/dev/shm`` directly. "
+"Mounting an emptyDir would shadow it with a private tmpfs and break CUDA "
+"IPC."
+msgstr ""
+
+#: ../../source/mp/operator.rst:410
+msgid "Resources Created"
+msgstr ""
+
+#: ../../source/mp/operator.rst:412
+msgid "For an ``LMCacheEngine`` named ``my-cache``:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:418
+msgid "Resource"
+msgstr ""
+
+#: ../../source/mp/operator.rst:419
+msgid "Name"
+msgstr ""
+
+#: ../../source/mp/operator.rst:420
+msgid "Purpose"
+msgstr ""
+
+#: ../../source/mp/operator.rst:421
+msgid "DaemonSet"
+msgstr ""
+
+#: ../../source/mp/operator.rst:422 ../../source/mp/operator.rst:425
+#: ../../source/mp/operator.rst:434
+msgid "``my-cache``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:423
+msgid "Runs LMCache server pods."
+msgstr ""
+
+#: ../../source/mp/operator.rst:424
+msgid "Service (ClusterIP)"
+msgstr ""
+
+#: ../../source/mp/operator.rst:426
+msgid "Node-local discovery (``internalTrafficPolicy=Local``)."
+msgstr ""
+
+#: ../../source/mp/operator.rst:427
+msgid "Service (headless)"
+msgstr ""
+
+#: ../../source/mp/operator.rst:428
+msgid "``my-cache-metrics``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:429
+msgid "Prometheus scrape target."
+msgstr ""
+
+#: ../../source/mp/operator.rst:430
+msgid "ConfigMap"
+msgstr ""
+
+#: ../../source/mp/operator.rst:431
+msgid "``my-cache-connection``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:432
+msgid "``kv-transfer-config`` JSON for vLLM."
+msgstr ""
+
+#: ../../source/mp/operator.rst:433
+msgid "ServiceMonitor"
+msgstr ""
+
+#: ../../source/mp/operator.rst:435
+msgid "Prometheus Operator integration (when enabled)."
+msgstr ""
+
+#: ../../source/mp/operator.rst:437
+msgid "The connection ConfigMap contains:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:451
+msgid "Status & Conditions"
+msgstr ""
+
+#: ../../source/mp/operator.rst:457
+msgid "The status section includes:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:459
+msgid "**phase**: ``Pending``, ``Running``, ``Degraded``, or ``Failed``."
+msgstr ""
+
+#: ../../source/mp/operator.rst:460
+msgid "**readyInstances** / **desiredInstances**: Instance counts."
+msgstr ""
+
+#: ../../source/mp/operator.rst:461
+msgid ""
+"**endpoints**: Per-node connection info (node name, host IP, pod name, "
+"port, readiness)."
+msgstr ""
+
+#: ../../source/mp/operator.rst:463
+msgid "**conditions**:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:465
+msgid "``Available`` -- At least one instance is ready."
+msgstr ""
+
+#: ../../source/mp/operator.rst:466
+msgid "``AllInstancesReady`` -- All desired instances are ready."
+msgstr ""
+
+#: ../../source/mp/operator.rst:467
+msgid "``ConfigValid`` -- Spec validation passed."
+msgstr ""
+
+#: ../../source/mp/operator.rst:470
+msgid "Validation Rules"
+msgstr ""
+
+#: ../../source/mp/operator.rst:472
+msgid "The operator validates the CR spec at apply time:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:479
+msgid "Rule"
+msgstr ""
+
+#: ../../source/mp/operator.rst:481
+msgid "Required, must be > 0."
+msgstr ""
+
+#: ../../source/mp/operator.rst:483
+msgid "Must be ``LRU`` (if set)."
+msgstr ""
+
+#: ../../source/mp/operator.rst:485 ../../source/mp/operator.rst:487
+msgid "Must be in (0.0, 1.0]."
+msgstr ""
+
+#: ../../source/mp/operator.rst:489
+msgid "Must be in [1024, 65535]."
+msgstr ""
+
+#: ../../source/mp/operator.rst:492
+msgid "Examples"
+msgstr ""
+
+#: ../../source/mp/operator.rst:495
+msgid "Target Only GPU Nodes"
+msgstr ""
+
+#: ../../source/mp/operator.rst:497
+msgid ""
+"Use ``nodeSelector`` to run LMCache only on GPU nodes.  New GPU nodes "
+"automatically get an LMCache pod:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:513
+msgid ""
+"The operator defaults ``nodeSelector`` to ``nvidia.com/gpu.present: "
+"\"true\"`` when not specified, so a minimal CR already targets GPU nodes."
+msgstr ""
+
+#: ../../source/mp/operator.rst:517
+msgid "Custom Server Port"
+msgstr ""
+
+#: ../../source/mp/operator.rst:519
+msgid "If the default port (5555) conflicts with other services:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:533
+msgid ""
+"The connection ConfigMap updates automatically -- vLLM pods pick up the "
+"new port on restart."
+msgstr ""
+
+#: ../../source/mp/operator.rst:537
+msgid "Production with Prometheus Monitoring"
+msgstr ""
+
+#: ../../source/mp/operator.rst:573
+msgid "See :doc:`observability` for metric names and Grafana configuration."
+msgstr ""
+
+#: ../../source/mp/operator.rst:576
+msgid "Override Auto-Computed Resources"
+msgstr ""
+
+#: ../../source/mp/operator.rst:595
+msgid "Operator vs Manual Deployment"
+msgstr ""
+
+#: ../../source/mp/operator.rst:601
+msgid "Concern"
+msgstr ""
+
+#: ../../source/mp/operator.rst:602
+msgid "Manual DaemonSet"
+msgstr ""
+
+#: ../../source/mp/operator.rst:603
+msgid "LMCacheEngine Operator"
+msgstr ""
+
+#: ../../source/mp/operator.rst:604
+msgid "hostIPC"
+msgstr ""
+
+#: ../../source/mp/operator.rst:605 ../../source/mp/operator.rst:608
+msgid "Must set manually"
+msgstr ""
+
+#: ../../source/mp/operator.rst:606 ../../source/mp/operator.rst:609
+msgid "Auto-injected"
+msgstr ""
+
+#: ../../source/mp/operator.rst:607
+msgid "``--host 0.0.0.0``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:610
+msgid "Service discovery"
+msgstr ""
+
+#: ../../source/mp/operator.rst:611
+msgid "``hostNetwork`` + ``status.hostIP``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:612
+msgid "Node-local ClusterIP Service + ConfigMap"
+msgstr ""
+
+#: ../../source/mp/operator.rst:613
+msgid "vLLM config"
+msgstr ""
+
+#: ../../source/mp/operator.rst:614
+msgid "Copy JSON into Deployment"
+msgstr ""
+
+#: ../../source/mp/operator.rst:615
+msgid "Mount ``<name>-connection`` ConfigMap"
+msgstr ""
+
+#: ../../source/mp/operator.rst:616
+msgid "Resource sizing"
+msgstr ""
+
+#: ../../source/mp/operator.rst:617
+msgid "Manual calculation"
+msgstr ""
+
+#: ../../source/mp/operator.rst:618
+msgid "Auto-computed from ``l1.sizeGB``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:620
+msgid "Manual ServiceMonitor"
+msgstr ""
+
+#: ../../source/mp/operator.rst:621
+msgid "``serviceMonitor.enabled: true``"
+msgstr ""
+
+#: ../../source/mp/operator.rst:622
+msgid "Validation"
+msgstr ""
+
+#: ../../source/mp/operator.rst:623
+msgid "Runtime errors only"
+msgstr ""
+
+#: ../../source/mp/operator.rst:624
+msgid "``kubectl apply`` rejects invalid specs"
+msgstr ""
+
+#: ../../source/mp/operator.rst:625
+msgid "New GPU nodes"
+msgstr ""
+
+#: ../../source/mp/operator.rst:626
+msgid "DaemonSet handles it"
+msgstr ""
+
+#: ../../source/mp/operator.rst:627
+msgid "DaemonSet handles it (same)"
+msgstr ""
+
+#: ../../source/mp/operator.rst:630
+msgid "Security Considerations"
+msgstr ""
+
+#: ../../source/mp/operator.rst:632
+msgid ""
+"**hostIPC** exposes the host's IPC namespace (System V IPC, POSIX message"
+" queues) to the container.  Any process in the container can interact "
+"with IPC resources from other processes on the same host."
+msgstr ""
+
+#: ../../source/mp/operator.rst:636
+msgid "Deploy only in trusted environments."
+msgstr ""
+
+#: ../../source/mp/operator.rst:637
+msgid ""
+"Clusters using Pod Security Standards must allow the ``privileged`` "
+"profile for the LMCache namespace -- the ``baseline`` and ``restricted`` "
+"profiles reject ``hostIPC``."
+msgstr ""
+
+#: ../../source/mp/operator.rst:642
+msgid "Development"
+msgstr ""
+
+#: ../../source/mp/operator.rst:654
+msgid "Pushing a custom operator image:"
+msgstr ""
+
+#: ../../source/mp/operator.rst:665
+msgid "If your cluster needs pull credentials:"
+msgstr ""
+

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.serde import SerdeConfig
 
 logger = init_logger(__name__)
 
@@ -151,6 +152,52 @@ class L2AdapterConfigBase(ABC):
     #: Defaults to ``PersistConfig()`` (persist enabled).
     persist_config: PersistConfig = PersistConfig()
 
+    #: Populated by ``_parse_serde_config`` after ``from_dict``; ``None``
+    #: means serde is disabled for this adapter. When set,
+    #: ``StorageManager`` wraps the adapter with
+    #: ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
+    #: and serde runs transparently around store / load.
+    #:
+    #: JSON schema::
+    #:
+    #:     {
+    #:         "type": "<registered_serde_name>",
+    #:         ...type_specific_keys (forwarded to the factory)
+    #:     }
+    #:
+    #: Built-in types and their kwargs:
+    #:   - ``"fp8"`` — see :class:`Fp8QuantizationSerializer`.
+    #:     Accepts ``fp8_dtype`` (torch dtype name, default
+    #:     ``"float8_e4m3fn"``) and ``max_workers`` (thread-pool size
+    #:     for async (de)serialize, default ``1``).
+    serde_config: SerdeConfig | None = None
+
+    @staticmethod
+    def _parse_serde_config(d: dict[str, object]) -> SerdeConfig | None:
+        """Parse an optional ``"serde"`` sub-dict from an adapter JSON spec.
+
+        Expected format::
+
+            {
+                "type": "fs",
+                ...,
+                "serde": {"type": "fp8", "fp8_dtype": "float8_e4m3fn"}
+            }
+
+        Returns ``None`` when the key is absent (serde disabled).
+        """
+        serde_dict = d.get("serde")
+        if serde_dict is None:
+            return None
+        if not isinstance(serde_dict, dict):
+            raise ValueError(f"'serde' must be a dict, got {type(serde_dict).__name__}")
+        serde_type = serde_dict.get("type")
+        if not isinstance(serde_type, str):
+            raise ValueError("'serde' dict must include a 'type' field")
+        # Forward all keys except "type" as type-specific kwargs.
+        kwargs = {k: v for k, v in serde_dict.items() if k != "type"}
+        return SerdeConfig(type=serde_type, kwargs=kwargs)
+
     @staticmethod
     def _parse_eviction_config(d: dict) -> EvictionConfig | None:
         """
@@ -180,9 +227,10 @@ class L2AdapterConfigBase(ABC):
         from lmcache.v1.distributed.config import EvictionConfig  # noqa: PLC0415
 
         policy = eviction_dict.get("eviction_policy")
-        if policy not in ("LRU", "noop"):
+        if policy not in ("LRU", "IsolatedLRU", "noop"):
             raise ValueError(
-                f"eviction.eviction_policy must be 'LRU' or 'noop', got {policy!r}"
+                "eviction.eviction_policy must be 'LRU', 'IsolatedLRU', or "
+                f"'noop', got {policy!r}"
             )
         return EvictionConfig(
             eviction_policy=policy,
@@ -207,6 +255,60 @@ class L2AdapterConfigBase(ABC):
         """
         persist_enabled = bool(d.get("persist_enabled", True))
         return PersistConfig(persist_enabled=persist_enabled)
+
+    @staticmethod
+    def _validate_num_workers(raw: object) -> int:
+        """Validate and return a positive integer worker count.
+
+        Raises:
+            ValueError: If ``raw`` is not a positive integer.
+        """
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+            raise ValueError("num_workers must be a positive integer")
+        return raw
+
+    @staticmethod
+    def _validate_per_op_workers(
+        per_op_workers: dict[str, int] | None,
+    ) -> dict[str, int] | None:
+        """Validate per-operation worker counts (``None`` is a no-op).
+
+        Raises:
+            ValueError: If any worker count is not a positive integer.
+        """
+        if per_op_workers is None:
+            return None
+        for key, value in per_op_workers.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(
+                    f"per_op_workers[{key!r}] must be a positive integer, got {value!r}"
+                )
+        return per_op_workers
+
+    @staticmethod
+    def _parse_per_op_workers_from_dict(
+        d: dict[str, object],
+    ) -> dict[str, int] | None:
+        """Parse ``per_op_workers`` from a raw configuration dict.
+
+        Returns ``None`` if the key is absent.
+
+        Raises:
+            ValueError: If the value is not a dict of integers.
+        """
+        raw = d.get("per_op_workers")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("per_op_workers must be a dict")
+        per_op_workers: dict[str, int] = {}
+        for k, v in raw.items():
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise ValueError(
+                    f"per_op_workers[{k!r}] must be an integer, got {type(v).__name__}"
+                )
+            per_op_workers[str(k)] = v
+        return per_op_workers
 
     @classmethod
     @abstractmethod
@@ -364,6 +466,7 @@ def parse_args_to_l2_adapters_config(args: argparse.Namespace) -> L2AdaptersConf
             adapter_cfg = config_cls.from_dict(d)
             adapter_cfg.eviction_config = L2AdapterConfigBase._parse_eviction_config(d)
             adapter_cfg.persist_config = L2AdapterConfigBase._parse_persist_config(d)
+            adapter_cfg.serde_config = L2AdapterConfigBase._parse_serde_config(d)
             adapter_configs.append(adapter_cfg)
         except (TypeError, ValueError) as e:
             logger.error(

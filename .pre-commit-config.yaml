@@ -7,6 +7,29 @@ repos:
     entry: python tools/check_spdx_header.py
     language: python
     types: [python]
+  - id: ban-torch-device
+    name: Ban direct torch device usage
+    entry: >-
+      bash -c '
+      matches=$(grep -rHnE "torch\.(cuda|xpu|hpu)" "$@");
+      if [ -n "$matches" ]; then
+        echo "";
+        echo "========================================";
+        echo "  BANNED: direct torch device usage found";
+        echo "  Fix: use torch_dev/torch_device_type";
+        echo "========================================";
+        echo "";
+        echo "$matches";
+        exit 1;
+      fi' --
+    language: system
+    types: [python]
+    files: ^lmcache/
+    exclude: |
+      (?x)^(
+        lmcache/__init__\.py|
+        lmcache/.*/gpu_connector/.*
+      )$
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
   hooks:
