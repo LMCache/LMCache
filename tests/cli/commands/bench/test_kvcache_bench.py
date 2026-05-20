@@ -21,7 +21,7 @@ import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
-from lmcache.cli.commands.bench.test_cache import (
+from lmcache.cli.commands.bench.kvcache_bench.helpers import (
     _allocate_gpu_kv_cache,
     _build_token_ids,
     _make_key,
@@ -63,16 +63,21 @@ class TestCommandMetadata:
     def test_help(self, cmd: BenchCommand) -> None:
         assert "benchmark" in cmd.help().lower()
 
-    def test_test_cache_lives_under_bench_package(self) -> None:
-        """``test_cache`` is the impl behind ``bench kvcache`` and must
-        live inside the ``bench`` sub-package, not at the top-level CLI
-        commands package — otherwise auto-discovery would expose
-        ``TestCacheCommand`` as a stand-alone verb.
+    def test_kvcache_helpers_live_under_kvcache_bench_package(self) -> None:
+        """Helpers backing ``bench kvcache`` must live inside the
+        ``kvcache_bench`` sub-package, mirroring the engine / l2 layout.
         """
         # First Party
-        from lmcache.cli.commands.bench.test_cache import TestCacheCommand
+        from lmcache.cli.commands.bench.kvcache_bench import command as kv_cmd
+        from lmcache.cli.commands.bench.kvcache_bench import helpers as kv_helpers
 
-        assert TestCacheCommand.__module__ == ("lmcache.cli.commands.bench.test_cache")
+        assert kv_cmd.__name__ == ("lmcache.cli.commands.bench.kvcache_bench.command")
+        assert kv_helpers.__name__ == (
+            "lmcache.cli.commands.bench.kvcache_bench.helpers"
+        )
+        # Public command surface mirrors the sibling subpackages.
+        assert callable(kv_cmd.register_kvcache_parser)
+        assert callable(kv_cmd.run_kvcache_bench)
 
 
 # ------------------------------------------------------------------ #
