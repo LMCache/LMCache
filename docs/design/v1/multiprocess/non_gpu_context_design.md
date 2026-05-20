@@ -63,8 +63,8 @@ polymorphic `TransferContext` abstraction.
 ```
 vllm_multi_process_adapter.py    ← Engine adapter, device-agnostic
   └── TransferContext             ← Worker-side transport abstraction (§3)
-        ├── CudaTransferContext    ← CUDA IPC + MQ future path
-        └── NonCudaTransferContext     ← Synchronous gather/scatter path
+        ├── HandleTransferContext    ← CUDA IPC + MQ future path
+        └── DataTransferContext     ← Synchronous gather/scatter path
               └── NonGpuContext        ← Serialisation abstraction (§4.2)
                     ├── NonGpuContextPickle   ← pickle.dumps/loads (§4.3)
                     └── NonGpuContextShm      ← shared memory (§4.4, TODO)
@@ -75,7 +75,7 @@ Two layers of abstraction serve different purposes:
 - **TransferContext** (§3) — decides **CUDA vs non-CUDA** routing at the
   worker adapter level.
 - **NonGpuContext** (§4.2) — decides **how** CPU chunk data is serialised and
-  transported (pickle vs SHM). Only used inside `NonCudaTransferContext`.
+  transported (pickle vs SHM). Only used inside `DataTransferContext`.
 
 ### 2.2 State machine (worker ↔ server)
 
@@ -91,7 +91,7 @@ Two layers of abstraction serve different purposes:
               [device == cuda]                 [device != cuda]
                      |                                 |
                      v                                 v
-      CudaTransferContext.register()     NonCudaTransferContext.register()
+      HandleTransferContext.register()     DataTransferContext.register()
       → REGISTER_KV_CACHE               → REGISTER_KV_CACHE_NON_GPU_CONTEXT
         (CUDA IPC handles)                 (scalar metadata fields)
                      |                         + create_non_gpu_context()
@@ -155,17 +155,17 @@ no `if/else` anywhere.
 ### 3.3 `create_transfer_context()` factory
 
 Inspects device types of all KV cache tensors **exactly once**. CUDA →
-`CudaTransferContext`; otherwise → `NonCudaTransferContext`. Mixed device types
+`HandleTransferContext`; otherwise → `DataTransferContext`. Mixed device types
 are rejected.
 
-### 3.4 `CudaTransferContext`
+### 3.4 `HandleTransferContext`
 
 Wraps the original CUDA IPC path. Sends `REGISTER_KV_CACHE` / `STORE` /
 `RETRIEVE` messages with IPC handles, tracks async MQ futures.
 `poll_finished` queries futures; `drain_all` marks all pending as finished
 for unhealthy shutdown. Semantics identical to pre-refactoring.
 
-### 3.5 `NonCudaTransferContext`
+### 3.5 `DataTransferContext`
 
 Holds a `NonGpuContext` instance internally. Sends
 `REGISTER_KV_CACHE_NON_GPU_CONTEXT` with scalar metadata. Store and retrieve
@@ -190,7 +190,7 @@ server reconstructs `MemoryLayoutDesc` from the scalars internally.
 ### 4.2 `NonGpuContext` ABC: two-phase prepare/commit
 
 The serialisation layer is abstracted behind `NonGpuContext` so that pickle
-and SHM can be swapped without touching `NonCudaTransferContext` or the server.
+and SHM can be swapped without touching `DataTransferContext` or the server.
 
 The ABC defines: `prepare_store`, `commit_store`, `prepare_retrieve`,
 `commit_retrieve`, `close`.

@@ -145,8 +145,8 @@ class TransferContext(ABC):
         """Release resources held by this context."""
 
 
-class CudaTransferContext(TransferContext):
-    """CUDA IPC + MQ future transport context."""
+class HandleTransferContext(TransferContext):
+    """Handle-based IPC + MQ future transport context."""
 
     def __init__(self) -> None:
         self._mq_client: MessageQueueClient | None = None
@@ -195,7 +195,7 @@ class CudaTransferContext(TransferContext):
     ) -> MessagingFuture:
         if self._mq_client is None or self._send_request is None:
             raise RuntimeError(
-                "CUDA transfer context is not registered. "
+                "Handle transfer context is not registered. "
                 "Call register() before submit_store()."
             )
         return self._send_request(
@@ -217,7 +217,7 @@ class CudaTransferContext(TransferContext):
     ) -> MessagingFuture:
         if self._mq_client is None or self._send_request is None:
             raise RuntimeError(
-                "CUDA transfer context is not registered. "
+                "Handle transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
         return self._send_request(
@@ -231,8 +231,8 @@ class CudaTransferContext(TransferContext):
         self._send_request = None
 
 
-class NonCudaTransferContext(TransferContext):
-    """Non-CUDA context transport for non-CUDA workers."""
+class DataTransferContext(TransferContext):
+    """Data transfer context for non-CUDA workers."""
 
     def __init__(self) -> None:
         self._non_gpu_context: NonGpuContext | None = None
@@ -312,7 +312,7 @@ class NonCudaTransferContext(TransferContext):
     ) -> MessagingFuture:
         if self._non_gpu_context is None:
             raise RuntimeError(
-                "Non-CUDA transfer context is not registered. "
+                "Data transfer context is not registered. "
                 "Call register() before submit_store()."
             )
 
@@ -345,7 +345,7 @@ class NonCudaTransferContext(TransferContext):
     ) -> MessagingFuture:
         if self._non_gpu_context is None:
             raise RuntimeError(
-                "Non-CUDA transfer context is not registered. "
+                "Data transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
 
@@ -405,5 +405,5 @@ def create_transfer_context(
     device_type = next(iter(device_types))
     logger.info("Creating transfer context (device_type=%s)", device_type)
     if device_type == "cuda":
-        return CudaTransferContext()
-    return NonCudaTransferContext()
+        return HandleTransferContext()
+    return DataTransferContext()
