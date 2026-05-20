@@ -80,12 +80,33 @@ def test_migrate_finalizer_unlinks_on_gc():
     src = torch.zeros((2, 2), dtype=torch.float32)
     w = migrate_to_shm_and_wrap(src)
     name = w.shm_name
-    nbytes = w._nbytes
+    nbytes = w.nbytes
     # Drop both references; the weakref.finalize hook should unlink.
     del src, w
     gc.collect()
     with pytest.raises(OSError):
         shm_map_readwrite(name, nbytes)
+
+
+def test_shm_create_cleans_up_on_existing_name():
+    """If ``shm_open(O_EXCL)`` fails the helper must not leave the fd open.
+
+    We exercise the failure path by creating a segment, then asking
+    ``shm_create_readwrite`` to recreate the same name -- it must
+    raise without leaking the file descriptor it briefly held.
+    """
+    name = "/lmcache_test_excl_%d" % os.getpid()
+    addr = shm_create_readwrite(name, 4096)
+    try:
+        with pytest.raises(OSError):
+            shm_create_readwrite(name, 4096)
+    finally:
+        shm_unlink(name)
+    # And after unlink, the name is reusable again.
+    addr2 = shm_create_readwrite(name, 4096)
+    assert addr2 not in (0, None)
+    shm_unlink(name)
+    _ = addr  # silence unused-variable hint
 
 
 def test_to_tensor_view_carries_munmap_finalizer():

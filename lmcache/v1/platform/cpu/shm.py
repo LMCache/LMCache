@@ -38,6 +38,16 @@ logger = init_logger(__name__)
 # CPU-specific dependency on libc/librt lives next to the only place
 # that needs it. TODO(maobaolong): replace with ``posix_ipc`` once we
 # are willing to take that runtime dependency.
+#
+# We deliberately do not use stdlib ``mmap`` here: ``mmap.mmap`` would
+# work for the in-process side, but we still need ``shm_open`` /
+# ``shm_unlink`` (not exposed by stdlib), and we hand the raw address
+# to ``ctypes.from_address`` + ``torch.frombuffer`` to share storage
+# with the migrated tensor. So we keep the raw mmap pointers and
+# pair every successful mmap with a matching ``munmap`` -- on the
+# error paths via ``try/finally``, on the happy path via
+# ``weakref.finalize`` hooks attached to the migrated tensor and to
+# every ``CpuShmTensorWrapper.to_tensor()`` view.
 # ---------------------------------------------------------------------------
 
 _O_RDWR = os.O_RDWR
@@ -78,32 +88,51 @@ _MAP_FAILED = ctypes.c_void_p(-1).value
 
 
 def shm_create_readwrite(name: str, nbytes: int) -> int:
-    """Create + size a POSIX SHM segment, return mapped address."""
-    fd = _librt.shm_open(name.encode("ascii"), _O_RDWR | _O_CREAT | _O_EXCL, 0o600)
+    """Create + size a POSIX SHM segment, return mapped address.
+
+    Every failure path tears down whatever has already been allocated
+    (fd, named segment) so the caller never has to compensate.
+    """
+    name_b = name.encode("ascii")
+    fd = _librt.shm_open(name_b, _O_RDWR | _O_CREAT | _O_EXCL, 0o600)
     if fd < 0:
         raise OSError(ctypes.get_errno(), "shm_open(create) failed for %s" % name)
-    if _libc.ftruncate(fd, nbytes) != 0:
-        err = ctypes.get_errno()
+    addr = 0
+    try:
+        if _libc.ftruncate(fd, nbytes) != 0:
+            raise OSError(ctypes.get_errno(), "ftruncate failed for %s" % name)
+        addr = _libc.mmap(None, nbytes, _PROT_READ | _PROT_WRITE, _MAP_SHARED, fd, 0)
+        if addr in (0, _MAP_FAILED):
+            addr = 0
+            raise OSError(ctypes.get_errno(), "mmap failed for %s" % name)
+    except BaseException:
+        # Roll back whatever we have so far: the named segment is
+        # always created at this point; mmap may or may not have
+        # succeeded.
+        if addr:
+            _libc.munmap(ctypes.c_void_p(addr), nbytes)
+        _librt.shm_unlink(name_b)
+        raise
+    finally:
         _libc.close(fd)
-        _librt.shm_unlink(name.encode("ascii"))
-        raise OSError(err, "ftruncate failed for %s" % name)
-    addr = _libc.mmap(None, nbytes, _PROT_READ | _PROT_WRITE, _MAP_SHARED, fd, 0)
-    _libc.close(fd)
-    if addr in (0, _MAP_FAILED):
-        _librt.shm_unlink(name.encode("ascii"))
-        raise OSError(ctypes.get_errno(), "mmap failed for %s" % name)
     return addr
 
 
 def shm_map_readwrite(name: str, nbytes: int) -> int:
-    """Open an existing POSIX SHM segment, return mapped address."""
+    """Open an existing POSIX SHM segment, return mapped address.
+
+    The fd is always closed before returning (success or failure) so
+    we never leak a file descriptor even when ``mmap`` fails.
+    """
     fd = _librt.shm_open(name.encode("ascii"), _O_RDWR, 0o600)
     if fd < 0:
         raise OSError(ctypes.get_errno(), "shm_open(open) failed for %s" % name)
-    addr = _libc.mmap(None, nbytes, _PROT_READ | _PROT_WRITE, _MAP_SHARED, fd, 0)
-    _libc.close(fd)
-    if addr in (0, _MAP_FAILED):
-        raise OSError(ctypes.get_errno(), "mmap failed for %s" % name)
+    try:
+        addr = _libc.mmap(None, nbytes, _PROT_READ | _PROT_WRITE, _MAP_SHARED, fd, 0)
+        if addr in (0, _MAP_FAILED):
+            raise OSError(ctypes.get_errno(), "mmap failed for %s" % name)
+    finally:
+        _libc.close(fd)
     return addr
 
 
@@ -161,7 +190,7 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         self.shm_name = shm_name
         # ``numel * element_size`` is the correct logical byte size; the
         # underlying storage may be larger when the tensor is a view.
-        self._nbytes = tensor.numel() * tensor.element_size()
+        self.nbytes = tensor.numel() * tensor.element_size()
 
         # CudaIPCWrapper interface fields. ``handle`` / ``device_uuid``
         # are unused on the CPU path but kept to satisfy the parent
@@ -181,18 +210,18 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         is garbage-collected, so the per-process virtual address space
         does not leak across repeated ``to_tensor`` calls.
         """
-        addr = shm_map_readwrite(self.shm_name, self._nbytes)
+        addr = shm_map_readwrite(self.shm_name, self.nbytes)
         # ``torch.frombuffer`` requires a writable buffer; build one
         # via ctypes so the resulting torch tensor shares storage
         # with the SHM mapping (zero copy across processes).
-        buf_type = ctypes.c_uint8 * self._nbytes
+        buf_type = ctypes.c_uint8 * self.nbytes
         buf = buf_type.from_address(addr)
         flat = torch.frombuffer(buf, dtype=torch.uint8)
         out = flat.view(self.dtype).reshape(self.shape)
         # Keep ``flat`` alive for the lifetime of ``out`` so its mmap
         # is not released while still in use, then munmap on cleanup.
         out._lmcache_shm_buf = flat  # type: ignore[attr-defined]
-        weakref.finalize(out, shm_munmap, addr, self._nbytes)
+        weakref.finalize(out, shm_munmap, addr, self.nbytes)
         return out
 
 
