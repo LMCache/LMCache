@@ -45,7 +45,7 @@ def __getattr__(name: str) -> object:
     """
     if name == "CpuCacheContext":
         # First Party
-        from lmcache.v1.platform.cache_context import CpuCacheContext
+        from lmcache.v1.platform.cpu.cache_context import CpuCacheContext
 
         return CpuCacheContext
 
