@@ -559,6 +559,25 @@ class StorageManager:
         """
         self._l1_manager.touch_keys(keys)
 
+    def get_shm_pool_info(self) -> dict:
+        """Return SHM pool metadata from the L1 memory manager."""
+        return self._l1_manager.get_shm_pool_info()
+
+    def unsafe_read(
+        self, keys: list[ObjectKey]
+    ) -> tuple[list[ObjectKey], list[MemoryObj]]:
+        """Read already read-locked objects without acquiring new read locks."""
+        read_results = self._l1_manager.unsafe_read(keys)
+        good_keys: list[ObjectKey] = []
+        good_objs: list[MemoryObj] = []
+        for key in keys:
+            err, obj = read_results.get(key, (L1Error.KEY_NOT_EXIST, None))
+            if err != L1Error.SUCCESS or obj is None:
+                continue
+            good_keys.append(key)
+            good_objs.append(obj)
+        return good_keys, good_objs
+
     @property
     def quota_manager(self) -> QuotaManager:
         """Per-cache_salt quota registry.

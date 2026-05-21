@@ -47,6 +47,10 @@ class MPServerConfig:
     )
     """Runtime plugin configuration (locations + extra config)."""
 
+    shm_name: str | None = None
+    """SHM segment name for non-GPU KV transfer.
+    None: auto-allocate (default). "": force pickle. Other: use that name."""
+
 
 @dataclass
 class RuntimePluginConfig:
@@ -167,6 +171,15 @@ def add_mp_server_args(
         'Example: \'{"plugin.frontend.heartbeat_url": '
         '"http://localhost:5000/heartbeat"}\'',
     )
+    mp_group.add_argument(
+        "--shm-name",
+        type=str,
+        default=None,
+        help="SHM segment name for non-GPU KV transfer. "
+        "Default (not specified): auto-allocate. "
+        'Set to "" to force pickle path (disable SHM). '
+        "Set to a name to use that specific SHM segment.",
+    )
     return parser
 
 
@@ -202,6 +215,7 @@ def parse_args_to_mp_server_config(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,
         ),
+        shm_name=args.shm_name,
     )
 
 

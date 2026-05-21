@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Standard
+import os
+import shutil
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
@@ -16,7 +20,23 @@ from lmcache.v1.memory_management import (
 logger = init_logger(__name__)
 
 
-# HELPER FUNCTIONS
+def _unlink_stale_shm(shm_name: str) -> None:
+    """Remove a stale LMCache shm segment if it exists."""
+    normalized = shm_name.lstrip("/")
+    if "/" in normalized or "\\" in normalized:
+        logger.warning("Refusing to unlink invalid shm name %s", shm_name)
+        return
+    if not normalized.startswith("lmcache_l1_pool_"):
+        return
+    shm_path = os.path.join("/dev/shm", normalized)
+    try:
+        os.unlink(shm_path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("Failed to remove stale shm segment %s", shm_path, exc_info=True)
+
+
 def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInterface:
     """
     Create a memory allocator based on the provided configuration.
@@ -45,6 +65,27 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.size_in_bytes,
             config.align_bytes,
         )
+        shm_name = config.shm_name
+        if shm_name:
+            try:
+                free_bytes = shutil.disk_usage("/dev/shm").free
+                if free_bytes < config.size_in_bytes:
+                    raise RuntimeError(
+                        "insufficient /dev/shm capacity: "
+                        f"need {config.size_in_bytes} bytes, have {free_bytes} bytes"
+                    )
+                _unlink_stale_shm(shm_name)
+                return MixedMemoryAllocator(
+                    config.size_in_bytes,
+                    align_bytes=config.align_bytes,
+                    shm_name=shm_name,
+                )
+            except (RuntimeError, OSError, ValueError):
+                logger.warning(
+                    "Failed to initialize SHM pool (%s), falling back to pickle path",
+                    shm_name,
+                    exc_info=True,
+                )
         return MixedMemoryAllocator(
             config.size_in_bytes,
             align_bytes=config.align_bytes,
@@ -65,6 +106,13 @@ class L1MemoryManager:
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
+        self._shm_pool_info = {"shm_name": "", "pool_size": 0}
+        if isinstance(self._allocator, MixedMemoryAllocator):
+            if self._allocator.shm_name:
+                self._shm_pool_info = {
+                    "shm_name": self._allocator.shm_name,
+                    "pool_size": self._size_in_bytes,
+                }
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -173,6 +221,10 @@ class L1MemoryManager:
         Close the memory manager and release all resources.
         """
         self._allocator.close()
+
+    def get_shm_pool_info(self) -> dict:
+        """Return SHM pool metadata for non-GPU SHM transport."""
+        return dict(self._shm_pool_info)
 
     # Debugging APIs
     def memcheck(self):

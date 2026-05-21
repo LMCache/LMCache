@@ -25,7 +25,7 @@ Worker adapter (vLLM MP adapter)
       └─ DataTransferContext    (non-CUDA data path)
           └─ NonGpuContext
              ├─ NonGpuContextPickle
-             └─ NonGpuContextShm (TODO)
+             └─ NonGpuContextShm
 ```
 
 State machine overview (worker-side):
@@ -122,7 +122,7 @@ mixed-device configurations by raising an error.
 
 `NonGpuContext` implementations:
 - **NonGpuContextPickle**: serialize/deserialize chunk payloads with pickle.
-- **NonGpuContextShm**: shared-memory transport (planned/TODO).
+- **NonGpuContextShm**: shared-memory transport via /dev/shm mapped buffers.
 
 This split keeps server protocol stable while allowing transport-specific behavior
 behind one interface contract.
@@ -135,7 +135,7 @@ behind one interface contract.
 |---|---|---|
 | Handle (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
 | Pickle | 4 | GPU KV → CPU chunk → serialize → deserialize → CPU memory object |
-| SHM (TODO) | 1 | GPU KV → CPU memory object (SHM mapped) |
+| SHM | 1 | GPU KV → CPU memory object (SHM mapped) |
 
 **Retrieve (server storage → worker):**
 
@@ -143,13 +143,13 @@ behind one interface contract.
 |---|---|---|
 | Handle (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
 | Pickle | 4 | CPU memory object → serialize → deserialize → CPU chunk → GPU KV |
-| SHM (TODO) | 1 | CPU memory object (SHM mapped) → GPU KV |
+| SHM | 1 | CPU memory object (SHM mapped) → GPU KV |
 
 | Transport | Pros | Cons | Best fit |
 |---|---|---|---|
 | Handle (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
 | Pickle | Works everywhere, no SHM setup | Extra serialization + copy overhead | Universal fallback |
-| SHM (TODO) | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput non-CUDA setups |
+| SHM | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput non-CUDA setups |
 
 ## 3. Protocol & Data Flow
 
@@ -203,7 +203,7 @@ Worker: deserialize -> scatter to paged KV
 Worker: commit_retrieve --> Server
 ```
 
-### 3.3 Data Flow: SHM Path (TODO)
+### 3.3 Data Flow: SHM Path
 
 Store:
 1. Worker `prepare_store` obtains SHM slot/offset.

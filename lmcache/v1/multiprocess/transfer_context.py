@@ -25,6 +25,7 @@ from lmcache.v1.multiprocess.non_gpu_context import (
     scatter_cpu_to_paged_kv,
 )
 from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocols.engine import RegisterNonGpuContextResponse
 
 logger = init_logger(__name__)
 
@@ -291,14 +292,25 @@ class DataTransferContext(TransferContext):
                 )
             ],
         )
+        response = future.result(timeout=mq_timeout)
+        shm_name = ""
+        pool_size = 0
+        if isinstance(response, RegisterNonGpuContextResponse):
+            shm_name = response.shm_name
+            pool_size = response.pool_size
 
         metadata = NonGpuContextMetadata(
             layout_desc=layout_desc,
             block_size=block_size,
             use_mla=use_mla_flag,
         )
-        self._non_gpu_context = create_non_gpu_context(metadata, mq_client, mq_timeout)
-        future.result(timeout=mq_timeout)
+        self._non_gpu_context = create_non_gpu_context(
+            metadata,
+            mq_client,
+            mq_timeout,
+            shm_name=shm_name,
+            pool_size=pool_size,
+        )
 
     def submit_store(
         self,
@@ -317,7 +329,13 @@ class DataTransferContext(TransferContext):
             )
 
         torch_dev.synchronize()
-        out_buffers = self._non_gpu_context.prepare_store(key, instance_id)
+        result = self._non_gpu_context.prepare_store(key, instance_id)
+        out_buffers, chunk_indices = result if result is not None else (None, None)
+        # All chunks already in cache — nothing to gather or commit.
+        if chunk_indices is not None and len(chunk_indices) == 0:
+            future: MessagingFuture[bool] = MessagingFuture()
+            future.set_result(True)
+            return future
         cpu_chunks = gather_paged_kv_to_cpu(
             kv_caches,
             block_ids,
@@ -325,10 +343,11 @@ class DataTransferContext(TransferContext):
             layout_hints=self._layout_hints,
             gpu_kv_format=self._gpu_kv_format,
             out=out_buffers,
+            chunk_indices=chunk_indices,
         )
         ok = self._non_gpu_context.commit_store(key, instance_id, cpu_chunks)
 
-        future: MessagingFuture[bool] = MessagingFuture()
+        future = MessagingFuture()
         future.set_result(ok)
         return future
 

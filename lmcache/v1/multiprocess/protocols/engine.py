@@ -46,6 +46,14 @@ class PrepareRetrieveResponse:
     )  # pickle: {}, shm will put slot info here
 
 
+@dataclass
+class RegisterNonGpuContextResponse:
+    """Response for REGISTER_KV_CACHE_NON_GPU_CONTEXT."""
+
+    shm_name: str = ""
+    pool_size: int = 0
+
+
 # Define request names for this protocol group
 REQUEST_NAMES = [
     "REGISTER_KV_CACHE",
@@ -179,10 +187,10 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Register non-GPU KV cache context
         # Payload:
         #   - RegisterNonGpuContextPayload - all metadata fields in one struct
-        # Returns: None
+        # Returns: RegisterNonGpuContextResponse
         "REGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
             payload_classes=[RegisterNonGpuContextPayload],
-            response_class=None,
+            response_class=RegisterNonGpuContextResponse,
             handler_type=HandlerType.SYNC,
         ),
         "PREPARE_STORE": ProtocolDefinition(

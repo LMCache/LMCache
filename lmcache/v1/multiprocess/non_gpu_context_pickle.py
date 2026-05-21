@@ -36,7 +36,9 @@ class NonGpuContextPickle(NonGpuContext):
     ) -> None:
         super().__init__(metadata, mq_client, mq_timeout)
 
-    def prepare_store(self, key: Any, instance_id: int) -> list[torch.Tensor] | None:
+    def prepare_store(
+        self, key: Any, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int]] | None:
         """Send PREPARE_STORE RPC. For pickle, returns no pre-allocated buffers."""
         future = self.mq_client.submit_request(
             RequestType.PREPARE_STORE,
