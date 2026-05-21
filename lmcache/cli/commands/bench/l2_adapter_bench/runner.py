@@ -228,6 +228,10 @@ def bench_lookup(
         results = _wait_lookup_finished(adapter, task_ids, 60.0)
         t1 = time.perf_counter()
         elapsed = t1 - t0
+
+        for keys in keys_batches:
+            adapter.submit_unlock(keys)
+
         timed_out = len(results) < len(task_ids)
 
         total_found = sum(_bitmap_count(results.get(tid)) for tid in task_ids)
