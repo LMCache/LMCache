@@ -100,5 +100,18 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("record_completion_on_stream", &record_completion_on_stream,
         py::arg("cuda_stream_ptr"), py::arg("kind"), py::arg("payload"),
         py::call_guard<py::gil_scoped_release>());
-  m.def("drain_recorded_completions", &drain_recorded_completions);
+  // Return each payload item as py::bytes; pybind11 utf-8-decodes std::string
+  // by default, corrupting binary payloads (e.g. pickle, msgpack).
+  m.def("drain_recorded_completions", []() {
+    auto items = drain_recorded_completions();
+    py::list out;
+    for (auto& kv : items) {
+      py::list payload;
+      for (auto& s : kv.second) {
+        payload.append(py::bytes(s));
+      }
+      out.append(py::make_tuple(py::str(kv.first), payload));
+    }
+    return out;
+  });
 }
