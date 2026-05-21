@@ -173,7 +173,9 @@ class CuObjectS3Connector(S3Connector):
 
     def _rdma_upload(self, key_str: str, memory_obj: MemoryObj) -> s3.S3Request:
         """Build an RDMA-augmented PUT request via CRT."""
-        data_size = memory_obj.get_physical_size()
+        # Use get_size() (logical size) to stay consistent with the
+        # parent's download size check.
+        data_size = memory_obj.get_size()
 
         # Prepare RDMA token (sub-region within the registered pool)
         rdma_token = self._cuobj_client.prepare_put(memory_obj.data_ptr, data_size)
@@ -272,7 +274,9 @@ class CuObjectS3Connector(S3Connector):
 
     def _rdma_download(self, key_str: str, mem_obj: MemoryObj) -> s3.S3Request:
         """Build an RDMA-augmented GET request via CRT."""
-        data_size = mem_obj.get_physical_size()
+        # Use get_size() (logical size) for symmetry with _rdma_upload
+        # and consistency with the parent's size-check contract.
+        data_size = mem_obj.get_size()
 
         # Prepare RDMA token (server will RDMA_WRITE into this buffer)
         rdma_token = self._cuobj_client.prepare_get(mem_obj.data_ptr, data_size)
