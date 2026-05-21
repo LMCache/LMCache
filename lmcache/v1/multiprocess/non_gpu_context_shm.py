@@ -2,9 +2,9 @@
 """Shared-memory NonGpuContext implementation for multiprocess mode."""
 
 # Standard
+from multiprocessing import shared_memory
+from multiprocessing.resource_tracker import unregister
 from typing import Any
-import mmap
-import os
 
 # Third Party
 import torch
@@ -15,8 +15,6 @@ from lmcache.v1.multiprocess.non_gpu_context import (
     NonGpuContextMetadata,
 )
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-
-INVALID_SHM_FD = -1
 
 
 class NonGpuContextShm(NonGpuContext):
@@ -36,16 +34,20 @@ class NonGpuContextShm(NonGpuContext):
 
         self._shm_name = shm_name
         self._pool_size = pool_size
-        self._shm_fd = INVALID_SHM_FD
-        shm_path = os.path.join("/dev/shm", shm_name.lstrip("/"))
-        self._shm_fd = os.open(shm_path, os.O_RDWR)
+        self._shm: shared_memory.SharedMemory | None = None
+        self._shm_buffer: memoryview | None = None
         try:
-            self._mmap_obj = mmap.mmap(
-                self._shm_fd, self._pool_size, access=mmap.ACCESS_WRITE
+            self._shm = shared_memory.SharedMemory(
+                name=shm_name.lstrip("/"), create=False
             )
+            # The SHM segment is owned by the server process. Unregister it
+            # from this worker's resource tracker so that Python does not
+            # unlink the segment when this worker exits.
+            unregister(f"/{self._shm.name}", "shared_memory")
+            self._shm_buffer = self._shm.buf
         except Exception:
-            os.close(self._shm_fd)
-            self._shm_fd = INVALID_SHM_FD
+            self._shm = None
+            self._shm_buffer = None
             raise
 
     def _make_tensor_view(
@@ -63,8 +65,12 @@ class NonGpuContextShm(NonGpuContext):
         if itemsize <= 0:
             raise ValueError(f"Invalid dtype size for {dtype_str}")
         count = length // itemsize
+        if self._shm_buffer is None:
+            raise RuntimeError(
+                f"Shared memory buffer not initialized for shm_name={self._shm_name}"
+            )
         tensor_1d = torch.frombuffer(
-            self._mmap_obj, dtype=dtype, count=count, offset=offset
+            self._shm_buffer, dtype=dtype, count=count, offset=offset
         )
         return tensor_1d.view(torch.Size(shape))
 
@@ -150,11 +156,10 @@ class NonGpuContextShm(NonGpuContext):
             return False
 
     def close(self) -> None:
-        if self._shm_fd == INVALID_SHM_FD:
+        if self._shm is None:
             return
         try:
-            self._mmap_obj.close()
+            self._shm.close()
         finally:
-            fd = self._shm_fd
-            self._shm_fd = INVALID_SHM_FD
-            os.close(fd)
+            self._shm = None
+            self._shm_buffer = None

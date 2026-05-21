@@ -120,6 +120,8 @@ def create_non_gpu_context(
 
     Returns SHM-based implementation when shared-memory pool information is
     available; otherwise falls back to the pickle-based implementation.
+    If SHM initialization fails for any reason (e.g. segment not found,
+    permission error), gracefully falls back to pickle transport.
 
     Args:
         metadata: Layout metadata for the non-GPU context.
@@ -135,12 +137,22 @@ def create_non_gpu_context(
         # Local
         from .non_gpu_context_shm import NonGpuContextShm
 
-        logger.info(
-            "Creating NonGpuContextShm (shm_name=%s, pool_size=%d)",
-            shm_name,
-            pool_size,
-        )
-        return NonGpuContextShm(metadata, mq_client, mq_timeout, shm_name, pool_size)
+        try:
+            logger.info(
+                "Creating NonGpuContextShm (shm_name=%s, pool_size=%d)",
+                shm_name,
+                pool_size,
+            )
+            return NonGpuContextShm(
+                metadata, mq_client, mq_timeout, shm_name, pool_size
+            )
+        except Exception:
+            logger.warning(
+                "Failed to initialize SHM context (shm_name=%s), "
+                "falling back to pickle transport",
+                shm_name,
+                exc_info=True,
+            )
 
     # Local
     from .non_gpu_context_pickle import NonGpuContextPickle
