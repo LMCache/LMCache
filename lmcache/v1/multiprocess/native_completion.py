@@ -33,14 +33,10 @@ import threading
 
 # Third Party
 import msgspec
-
-# First Party
-from lmcache.logging import init_logger
-
-# Third Party
 import torch  # noqa: F401 — must be imported before lmcache.c_ops
 
 # First Party
+from lmcache.logging import init_logger
 import lmcache.c_ops as _lmc_ops
 
 logger = init_logger(__name__)
@@ -124,7 +120,7 @@ class DeviceHostFuncDispatcher:
             reg = registry.get(kind)
             if reg is None:
                 logger.warning(
-                    "DeviceHostFuncDispatcher: no handler for kind=%r" " (dropped %d)",
+                    "DeviceHostFuncDispatcher: no handler for kind=%r (dropped %d)",
                     kind,
                     len(encoded_items),
                 )

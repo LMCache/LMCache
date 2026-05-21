@@ -578,12 +578,12 @@ class MPCacheEngine:
         obj_keys = self._resolve_obj_keys(key)
 
         context = self.contexts.get(instance_id)
-        assert (
-            context is not None
-        ), f"No context registered for instance ID {instance_id}"
-        assert (
-            context.gpu_context is not None
-        ), f"GPU context not registered for instance ID {instance_id}"
+        assert context is not None, (
+            f"No context registered for instance ID {instance_id}"
+        )
+        assert context.gpu_context is not None, (
+            f"GPU context not registered for instance ID {instance_id}"
+        )
         gpu_context = context.gpu_context
         model_name = context.model_name
 
@@ -766,12 +766,12 @@ class MPCacheEngine:
         obj_keys = self._resolve_obj_keys(key)
 
         context = self.contexts.get(instance_id)
-        assert (
-            context is not None
-        ), f"No context registered for instance ID {instance_id}"
-        assert (
-            context.gpu_context is not None
-        ), f"GPU context not registered for instance ID {instance_id}"
+        assert context is not None, (
+            f"No context registered for instance ID {instance_id}"
+        )
+        assert context.gpu_context is not None, (
+            f"GPU context not registered for instance ID {instance_id}"
+        )
         gpu_context = context.gpu_context
         model_name = context.model_name
 

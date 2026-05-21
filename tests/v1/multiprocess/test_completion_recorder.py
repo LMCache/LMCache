@@ -161,7 +161,7 @@ class TestDeadlockRegression:
             submit_callback_to_stream(stream, "finish_write", [i])
         stream.synchronize()
 
-        assert ready.wait(
-            timeout=10.0
-        ), f"deadlock or drop: only {len(received)} of 200 dispatched"
+        assert ready.wait(timeout=10.0), (
+            f"deadlock or drop: only {len(received)} of 200 dispatched"
+        )
         assert len(received) == 200

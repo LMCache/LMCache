@@ -35,15 +35,15 @@ static void
 void record_completion_on_stream(int64_t cuda_stream_ptr,
                                  const std::string& kind,
                                  std::vector<std::string> payload) {
-  auto completion =
-      std::make_unique<PendingCompletion>(PendingCompletion{kind, std::move(payload)});
+  auto completion = std::make_unique<PendingCompletion>(
+      PendingCompletion{kind, std::move(payload)});
   auto stream = reinterpret_cast<lmcache_completion_stream_t>(
       static_cast<uintptr_t>(cuda_stream_ptr));
   // Pass ownership through the driver as a raw pointer; the host callback
   // re-adopts it. Reclaim if the launch itself fails.
   PendingCompletion* raw = completion.release();
-  auto err = LMCACHE_COMPLETION_LAUNCH_HOST_FUNC(
-      stream, completion_host_callback, raw);
+  auto err = LMCACHE_COMPLETION_LAUNCH_HOST_FUNC(stream,
+                                                 completion_host_callback, raw);
   if (err != 0) {
     delete raw;
   }
