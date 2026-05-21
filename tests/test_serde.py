@@ -4,11 +4,16 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenEncoderOutput
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
+
+# CacheGen has hand-written CUDA and SYCL kernels.  Skip when neither GPU
+# backend is available (e.g. CPU-only CI).
+_GPU_AVAILABLE = torch_dev.is_available()
 
 
 def generate_kv_cache(num_tokens, device):
@@ -35,8 +40,8 @@ def to_blob(kv_tuples):
 
 @pytest.mark.parametrize("chunk_size", [16, 128, 256])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
+    not _GPU_AVAILABLE,
+    reason="No GPU backend (CUDA or XPU) available",
 )
 def test_cachegen_encoder(chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
@@ -61,7 +66,7 @@ def test_cachegen_encoder(chunk_size):
     serializer = CacheGenSerializer(config, metadata)
     # serializer2 = CacheGenSerializer(config, metadata2)
 
-    kv = to_blob(generate_kv_cache(chunk_size, "cuda"))
+    kv = to_blob(generate_kv_cache(chunk_size, torch_device_type))
     output = serializer.to_bytes(kv)
     # huggingface:
     # kv2 = kv.permute([0, 1, 3, 2, 4])
@@ -75,8 +80,8 @@ def test_cachegen_encoder(chunk_size):
 
 @pytest.mark.parametrize("chunk_size", [16, 128, 256])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
+    not _GPU_AVAILABLE,
+    reason="No GPU backend (CUDA or XPU) available",
 )
 def test_cachegen_decoder(chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
@@ -92,7 +97,7 @@ def test_cachegen_decoder(chunk_size):
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size, "cuda"))
+    kv = to_blob(generate_kv_cache(chunk_size, torch_device_type))
     output = serializer.to_bytes(kv)
 
     decoded_kv = deserializer.from_bytes(output)
@@ -101,8 +106,8 @@ def test_cachegen_decoder(chunk_size):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to CacheGenSerializer",
+    not _GPU_AVAILABLE,
+    reason="No GPU backend (CUDA or XPU) available",
 )
 def test_cachegen_unmatched_size():
     chunk_size = 256
@@ -119,7 +124,7 @@ def test_cachegen_unmatched_size():
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size - 20, "cuda"))
+    kv = to_blob(generate_kv_cache(chunk_size - 20, torch_device_type))
     output = serializer.to_bytes(kv)
 
     decoded_kv = deserializer.from_bytes(output)

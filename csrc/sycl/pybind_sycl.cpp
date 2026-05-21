@@ -8,6 +8,7 @@
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
 #include "mem_kernels_sycl.h"
+#include "cachegen_kernels_sycl.h"
 
 namespace py = pybind11;
 
@@ -43,4 +44,20 @@ PYBIND11_MODULE(xpu_ops, m) {
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
+
+  // CacheGen / RoPE kernels (Intel XPU).  Names match the CUDA c_ops module
+  // (lmcache.c_ops) so lmcache._get_backend() can transparently override.
+  m.def("calculate_cdf", &calculate_cdf_xpu, py::arg("input"),
+        py::arg("max_bins"));
+  m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused_xpu,
+        py::arg("old_positions"), py::arg("new_positions"), py::arg("key"),
+        py::arg("head_size"), py::arg("cos_sin_cache"), py::arg("is_neox"));
+  m.def("encode_fast_new", &encode_fast_new_xpu, py::arg("cdf"),
+        py::arg("input_sym"), py::arg("output_buffer"),
+        py::arg("output_lengths"));
+  m.def("decode_fast_new", &decode_fast_new_xpu, py::arg("cdf"),
+        py::arg("bytestreams"), py::arg("lengths"), py::arg("output"));
+  m.def("decode_fast_prefsum", &decode_fast_prefsum_xpu, py::arg("cdf"),
+        py::arg("bytestreams"), py::arg("lengths_prefsum"),
+        py::arg("output"));
 }

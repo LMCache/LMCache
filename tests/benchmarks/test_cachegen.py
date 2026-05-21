@@ -4,10 +4,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
+
+_GPU_AVAILABLE = torch_dev.is_available()
 
 
 def generate_kv_cache(num_tokens, device):
@@ -49,8 +52,8 @@ def to_blob(kv_tuples):
 @pytest.mark.benchmark(group="cachegen")
 @pytest.mark.parametrize("chunk_size", [64, 256, 768])
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="TODO: Add non-CUDA implementation to CacheGenSerializer/Deserializer",
+    not _GPU_AVAILABLE,
+    reason="No GPU backend (CUDA or XPU) available",
 )
 def test_cachegen_decoder_bench(benchmark, chunk_size):
     config = LMCacheEngineConfig.from_defaults(chunk_size=chunk_size)
@@ -66,7 +69,7 @@ def test_cachegen_decoder_bench(benchmark, chunk_size):
     serializer = CacheGenSerializer(config, metadata)
     deserializer = CacheGenDeserializer(config, metadata, torch.bfloat16)
 
-    kv = to_blob(generate_kv_cache(chunk_size, "cuda"))
+    kv = to_blob(generate_kv_cache(chunk_size, torch_device_type))
     output = serializer.to_bytes(kv)
 
     benchmark(deserializer.from_bytes, output)
