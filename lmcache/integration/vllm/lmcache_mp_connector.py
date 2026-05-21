@@ -122,8 +122,6 @@ def create_scheduler_adapter(
     server_urls: list[str],
     zmq_context: zmq.Context,
     vllm_config: VllmConfig,
-    mq_timeout: float,
-    heartbeat_interval: float,
 ) -> LMCacheMPSchedulerAdapter:
     # `vllm_config.parallel_config.world_size` and `.rank` are vLLM's GLOBAL
     # view across every worker process (ranks 0 .. world_size - 1). We use
@@ -161,14 +159,14 @@ def create_scheduler_adapter(
         n_servers=n_servers,
     )
 
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPSchedulerAdapter(
         server_urls=server_urls,
         context=zmq_context,
         model_name=vllm_config.model_config.model,
         vllm_block_size=vllm_config.cache_config.block_size,
         parallel_strategy=parallel_strategy,
-        mq_timeout=mq_timeout,
-        heartbeat_interval=heartbeat_interval,
+        extra_config=extra_config,
     )
 
 
@@ -176,8 +174,6 @@ def create_worker_adapter(
     server_urls: list[str],
     zmq_context: zmq.Context,
     vllm_config: VllmConfig,
-    mq_timeout: float,
-    heartbeat_interval: float,
 ) -> LMCacheMPWorkerAdapter:
     # See `create_scheduler_adapter` for the global_/local_ naming rationale.
     n_servers = len(server_urls)
@@ -218,14 +214,14 @@ def create_worker_adapter(
         n_servers=n_servers,
     )
 
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPWorkerAdapter(
         server_url=local_server_url,
         context=zmq_context,
         model_name=vllm_config.model_config.model,
         vllm_block_size=vllm_config.cache_config.block_size,
         parallel_strategy=parallel_strategy,
-        mq_timeout=mq_timeout,
-        heartbeat_interval=heartbeat_interval,
+        extra_config=extra_config,
     )
 
 
@@ -620,8 +616,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 server_urls,
                 zmq_context,
                 vllm_config,
-                mq_timeout,
-                heartbeat_interval,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
@@ -629,8 +623,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 server_urls,
                 zmq_context,
                 vllm_config,
-                mq_timeout,
-                heartbeat_interval,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")

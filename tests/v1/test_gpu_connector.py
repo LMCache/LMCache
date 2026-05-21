@@ -779,7 +779,7 @@ def test_vllm_paged_connector_v2_to_gpu_bench(benchmark):
 
     chunk_size = 256
 
-    allocator = GPUMemoryAllocator(1024 * 1024 * 1024)
+    allocator = GPUMemoryAllocator(1024 * 1024 * 1024, device)
 
     gpu_kv_src = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(num_blocks, device, block_size)

@@ -5,10 +5,12 @@ from functools import partial
 from itertools import islice
 from typing import Generator
 import argparse
+import pickle
 import threading
 import time
 
 # Third Party
+import torch
 import zmq
 
 # First Party
@@ -55,15 +57,21 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheEngineKey,
     KVCache,
+    RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueServer
+from lmcache.v1.multiprocess.non_gpu_context import NonGpuContextMetadata
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
     get_payload_classes,
+)
+from lmcache.v1.multiprocess.protocols.engine import (
+    PrepareRetrieveResponse,
+    PrepareStoreResponse,
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -173,6 +181,45 @@ class _PrefetchJob:
     cache_salt: str = ""
 
 
+@dataclass
+class RegisteredContext:
+    """Registered context metadata for a single worker instance.
+
+    At least one of ``gpu_context`` or ``non_cuda_metadata`` is expected to be
+    populated for valid registrations.
+    """
+
+    model_name: str
+    world_size: int
+    gpu_context: GPUCacheContext | None = None
+    non_cuda_metadata: NonGpuContextMetadata | None = None
+
+    @property
+    def is_gpu(self) -> bool:
+        """Return whether this registration uses a GPU transfer context."""
+        return self.gpu_context is not None
+
+    def get_layout_desc(self, chunk_size: int) -> MemoryLayoutDesc:
+        """Return the layout descriptor for this registration.
+
+        Args:
+            chunk_size: Chunk size in tokens used for GPU layout derivation.
+
+        Returns:
+            The resolved memory layout descriptor.
+
+        Raises:
+            ValueError: If no GPU context or non-CUDA metadata is configured.
+        """
+        if self.gpu_context is not None:
+            return get_layout_desc(self.gpu_context, chunk_size)
+        if self.non_cuda_metadata is None:
+            raise ValueError(
+                "Invalid RegisteredContext: no GPU or non-CUDA metadata configured"
+            )
+        return self.non_cuda_metadata.layout_desc
+
+
 # Main class for the mp cache engine
 class MPCacheEngine:
     def __init__(
@@ -181,14 +228,8 @@ class MPCacheEngine:
         chunk_size: int = 256,
         hash_algorithm: str = "blake3",
     ):
-        # GPU ID -> KV cache tensors
-        self.gpu_contexts: dict[int, GPUCacheContext] = {}
-
-        # GPU ID -> (model name, world size) as metadata
-        # NOTE: This is mainly for determining the layout desc during prefetch
-        # We assume that if the (model name, world size) is the same, then
-        # the layout desc returned by the gpu context is the same.
-        self.gpu_context_meta: dict[int, tuple[str, int]] = {}
+        # Worker instance ID -> registered context metadata
+        self.contexts: dict[int, RegisteredContext] = {}
 
         # chunk size
         self.chunk_size = chunk_size
@@ -216,6 +257,15 @@ class MPCacheEngine:
 
         self._setup_metrics()
 
+    @property
+    def gpu_contexts(self) -> dict[int, GPUCacheContext]:
+        """Return GPU-only context mapping for backward compatibility."""
+        return {
+            instance_id: ctx.gpu_context
+            for instance_id, ctx in self.contexts.items()
+            if ctx.gpu_context is not None
+        }
+
     def register_kv_cache(
         self,
         instance_id: int,
@@ -239,7 +289,7 @@ class MPCacheEngine:
             layout_hints: See :class:`LayoutHints`.  Forwarded to
                 :class:`GPUCacheContext` for GPU KV format detection.
         """
-        if instance_id in self.gpu_contexts:
+        if instance_id in self.contexts:
             logger.warning(
                 "Instance %s's KV cache is already registered, "
                 "skipping the new registration",
@@ -253,8 +303,11 @@ class MPCacheEngine:
             layout_hints=layout_hints or None,
             engine_type=engine_type,
         )
-        self.gpu_contexts[instance_id] = gpu_context
-        self.gpu_context_meta[instance_id] = (model_name, world_size)
+        self.contexts[instance_id] = RegisteredContext(
+            model_name=model_name,
+            world_size=world_size,
+            gpu_context=gpu_context,
+        )
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
             instance_id,
@@ -268,13 +321,216 @@ class MPCacheEngine:
         Args:
             instance_id (int): The GPU instance ID (such as PID).
         """
-        if instance_id in self.gpu_contexts:
-            del self.gpu_contexts[instance_id]
-            del self.gpu_context_meta[instance_id]
+        context = self.contexts.pop(instance_id, None)
+        if context is None:
+            logger.warning(
+                "No registered context found for instance ID %d", instance_id
+            )
+            return
+
+        if context.is_gpu:
             logger.info("Unregistered KV cache for GPU ID %d", instance_id)
             torch_dev.empty_cache()
         else:
-            logger.warning("No KV cache found for GPU ID %d to unregister", instance_id)
+            logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
+
+    def register_kv_cache_non_gpu_context(
+        self,
+        payload: RegisterNonGpuContextPayload,
+    ) -> None:
+        """Register non-CUDA KV layout metadata for non-GPU context mode.
+
+        Args:
+            payload: Struct containing all registration fields
+                (instance_id, model_name, world_size, block_size,
+                num_layers, hidden_dim_size, dtype_str, use_mla).
+
+        Raises:
+            ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
+        """
+        if payload.instance_id in self.contexts:
+            logger.warning(
+                "Instance %s's KV cache is already registered, "
+                "skipping the new registration",
+                payload.instance_id,
+            )
+            return
+
+        dtype = getattr(torch, payload.dtype_str, None)
+        if dtype is None or not isinstance(dtype, torch.dtype):
+            raise ValueError(
+                f"Invalid dtype_str '{payload.dtype_str}': must be a valid torch dtype "
+                "attribute name (e.g. 'float16' for torch.float16, "
+                "'bfloat16' for torch.bfloat16, 'float32' for torch.float32)."
+            )
+
+        shape = (
+            torch.Size([payload.num_layers, self.chunk_size, payload.hidden_dim_size])
+            if payload.use_mla
+            else torch.Size(
+                [2, payload.num_layers, self.chunk_size, payload.hidden_dim_size]
+            )
+        )
+        layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
+        self.contexts[payload.instance_id] = RegisteredContext(
+            model_name=payload.model_name,
+            world_size=payload.world_size,
+            non_cuda_metadata=NonGpuContextMetadata(
+                layout_desc=layout_desc,
+                block_size=payload.block_size,
+                use_mla=payload.use_mla,
+            ),
+        )
+
+    def _resolve_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
+        """Resolve object keys from an IPC cache key.
+
+        Args:
+            key: IPC cache key describing model/session/token range.
+
+        Returns:
+            Resolved object keys for the requested token range.
+
+        Raises:
+            ValueError: If ``key.worker_id`` is ``None``.
+        """
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+        ]
+        if key.worker_id is None:
+            raise ValueError("Must resolve keys with worker_id != None")
+        return ipc_key_to_object_keys(key, chunk_hashes)
+
+    @_lmcache_nvtx_annotate
+    def prepare_store(
+        self,
+        key: IPCCacheEngineKey,
+        instance_id: int,
+    ) -> PrepareStoreResponse:
+        """Prepare a store operation. For pickle mode, returns empty slots.
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+
+        Returns:
+            PrepareStoreResponse with empty slots for pickle mode.
+        """
+
+        return PrepareStoreResponse(context={})
+
+    @_lmcache_nvtx_annotate
+    def commit_store(
+        self,
+        key: IPCCacheEngineKey,
+        instance_id: int,
+        cpu_data: bytes,
+    ) -> bool:
+        """Commit serialized CPU chunks to storage.
+
+        Args:
+            key: Cache key for the token range to store.
+            instance_id: Worker instance identifier.
+            cpu_data: Pickled list of CPU tensors produced by the worker.
+
+        Returns:
+            ``True`` when all reserved objects are written, otherwise ``False``.
+        """
+        obj_keys = self._resolve_obj_keys(key)
+
+        context = self.contexts.get(instance_id)
+        if context is None or context.non_cuda_metadata is None:
+            raise ValueError(
+                f"non-CUDA context not registered for instance ID {instance_id}"
+            )
+        ctx = context.non_cuda_metadata
+        chunks: list[torch.Tensor] = pickle.loads(cpu_data)
+        reserved_dict = self.storage_manager.reserve_write(
+            obj_keys, ctx.layout_desc, "new"
+        )
+        written_keys: list[ObjectKey] = []
+        try:
+            for idx, obj_key in enumerate(obj_keys):
+                if obj_key not in reserved_dict:
+                    continue
+                if idx >= len(chunks):
+                    continue
+                memory_obj = reserved_dict[obj_key]
+                if memory_obj.tensor is None:
+                    continue
+                chunk_cpu = chunks[idx]
+                if chunk_cpu.shape != memory_obj.tensor.shape:
+                    continue
+                memory_obj.tensor.copy_(chunk_cpu)
+                written_keys.append(obj_key)
+        finally:
+            if written_keys:
+                self.storage_manager.finish_write(written_keys)
+
+        return len(written_keys) == len(reserved_dict)
+
+    @_lmcache_nvtx_annotate
+    def prepare_retrieve(
+        self,
+        key: IPCCacheEngineKey,
+        instance_id: int,
+    ) -> PrepareRetrieveResponse:
+        """Retrieve prefetched chunks and return serialized CPU tensors.
+
+        Args:
+            key: Cache key for the token range to retrieve.
+            instance_id: Worker instance identifier.
+
+        Returns:
+            PrepareRetrieveResponse with serialized data on hit.
+        """
+
+        obj_keys = self._resolve_obj_keys(key)
+
+        context = self.contexts.get(instance_id)
+        if context is None or context.non_cuda_metadata is None:
+            raise ValueError(
+                f"non-CUDA context not registered for instance ID {instance_id}"
+            )
+
+        prefetched_keys: list[ObjectKey] = []
+        try:
+            with self.storage_manager.read_prefetched_results(obj_keys) as memory_objs:
+                if not memory_objs or len(memory_objs) != len(obj_keys):
+                    return PrepareRetrieveResponse(success=False, data=b"", context={})
+                prefetched_keys = obj_keys[: len(memory_objs)]
+                chunks = []
+                for memory_obj in memory_objs:
+                    if memory_obj.tensor is None:
+                        return PrepareRetrieveResponse(
+                            success=False, data=b"", context={}
+                        )
+                    chunks.append(memory_obj.tensor.cpu().clone())
+                return PrepareRetrieveResponse(
+                    success=True, data=pickle.dumps(chunks), context={}
+                )
+        finally:
+            if prefetched_keys:
+                self.storage_manager.finish_read_prefetched(prefetched_keys)
+
+    @_lmcache_nvtx_annotate
+    def commit_retrieve(
+        self,
+        key: IPCCacheEngineKey,
+        instance_id: int,
+    ) -> bool:
+        """Finalize a retrieve operation. No-op for pickle mode.
+
+        Args:
+            key: Cache key (unused for pickle).
+            instance_id: Worker instance identifier (unused for pickle).
+
+        Returns:
+            Always ``True``.
+        """
+        return True
 
     @_lmcache_nvtx_annotate
     def store(
@@ -299,22 +555,18 @@ class MPCacheEngine:
                 that signals the completion of the store operation. The second
                 element indicates whether the store operation was successful.
         """
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
-
         st = time.perf_counter()
+        obj_keys = self._resolve_obj_keys(key)
 
-        assert key.worker_id is not None, "Must store with worker_id != None"
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
-
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
+        context = self.contexts.get(instance_id)
+        assert context is not None, (
+            f"No context registered for instance ID {instance_id}"
         )
-        gpu_context = self.gpu_contexts[instance_id]
-        model_name = self.gpu_context_meta[instance_id][0]
+        assert context.gpu_context is not None, (
+            f"GPU context not registered for instance ID {instance_id}"
+        )
+        gpu_context = context.gpu_context
+        model_name = context.model_name
 
         # ``blocks_per_chunk`` is counted in inference-engine-side
         # blocks (each block addresses
@@ -490,22 +742,18 @@ class MPCacheEngine:
                 that signals the completion of the retrieve operation. The second
                 element indicates whether the key was successfully retrieved.
         """
-        session = self.session_manager.get_or_create(key.request_id)
-        session.set_tokens(list(key.token_ids))
-        chunk_hashes = [
-            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
-        ]
-
         st = time.perf_counter()
+        obj_keys = self._resolve_obj_keys(key)
 
-        assert key.worker_id is not None, "Must retrieve with worker_id != None"
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
-
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
+        context = self.contexts.get(instance_id)
+        assert context is not None, (
+            f"No context registered for instance ID {instance_id}"
         )
-        gpu_context = self.gpu_contexts[instance_id]
-        model_name = self.gpu_context_meta[instance_id][0]
+        assert context.gpu_context is not None, (
+            f"GPU context not registered for instance ID {instance_id}"
+        )
+        gpu_context = context.gpu_context
+        model_name = context.model_name
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
@@ -675,18 +923,16 @@ class MPCacheEngine:
         model_name: str,
         world_size: int,
     ) -> MemoryLayoutDesc | None:
-        """Find layout desc from a matching GPU context.
+        """Find layout desc from a matching GPU or CPU context.
 
         Returns:
-            The layout descriptor, or None if no context
-            matches (model_name, world_size).
+            The layout descriptor, or None if no context matches
+            ``(model_name, world_size)``. GPU contexts are checked first,
+            then CPU contexts.
         """
-        for gpu_id, (m, w) in self.gpu_context_meta.items():
-            if m == model_name and w == world_size:
-                return get_layout_desc(
-                    self.gpu_contexts[gpu_id],
-                    self.chunk_size,
-                )
+        for context in self.contexts.values():
+            if context.model_name == model_name and context.world_size == world_size:
+                return context.get_layout_desc(self.chunk_size)
         return None
 
     def lookup(
@@ -1002,13 +1248,18 @@ class MPCacheEngine:
         sm = self.storage_manager.report_status()
 
         gpu_context_meta: dict[str, dict] = {}
-        for gpu_id, meta in self.gpu_context_meta.items():
+        non_cuda_context_meta: dict[str, dict] = {}
+        registered_gpu_ids: list[int] = []
+        registered_non_cuda_ids: list[int] = []
+
+        for instance_id, context in self.contexts.items():
             entry: dict = {
-                "model_name": meta[0],
-                "world_size": meta[1],
+                "model_name": context.model_name,
+                "world_size": context.world_size,
             }
-            ctx = self.gpu_contexts.get(gpu_id)
-            if ctx is not None:
+            if context.gpu_context is not None:
+                registered_gpu_ids.append(instance_id)
+                ctx = context.gpu_context
                 entry["kv_cache_layout"] = {
                     "num_layers": ctx.num_layers,
                     "inference_engine_logical_block_size": (
@@ -1026,15 +1277,26 @@ class MPCacheEngine:
                     "attention_backend": ctx.attention_backend,
                     "cache_size_per_token": ctx.cache_size_per_token(),
                 }
-            gpu_context_meta[str(gpu_id)] = entry
+                gpu_context_meta[str(instance_id)] = entry
+                continue
+
+            if context.non_cuda_metadata is not None:
+                registered_non_cuda_ids.append(instance_id)
+                non_cuda_context_meta[str(instance_id)] = {
+                    **entry,
+                    "block_size": context.non_cuda_metadata.block_size,
+                    "use_mla": context.non_cuda_metadata.use_mla,
+                }
 
         return {
             "is_healthy": sm["is_healthy"],
             "engine_type": self.__class__.__name__,
             "chunk_size": self.chunk_size,
             "hash_algorithm": self.token_hasher.hash_algorithm_name,
-            "registered_gpu_ids": list(self.gpu_contexts.keys()),
+            "registered_gpu_ids": registered_gpu_ids,
             "gpu_context_meta": gpu_context_meta,
+            "registered_non_cuda_instance_ids": registered_non_cuda_ids,
+            "non_cuda_context_meta": non_cuda_context_meta,
             "active_sessions": self.session_manager.active_count(),
             "active_prefetch_jobs": self._active_prefetch_count(),
             "storage_manager": sm,
@@ -1086,7 +1348,7 @@ class MPCacheEngine:
         logger.info("MPCacheEngine closed")
 
         # Release GPU contexts
-        self.gpu_contexts.clear()
+        self.contexts.clear()
 
     def _active_prefetch_count(self) -> int:
         """Return the number of active prefetch jobs (thread-safe)."""
@@ -1170,6 +1432,12 @@ def run_cache_server(
         server, RequestType.UNREGISTER_KV_CACHE, engine.unregister_kv_cache
     )
     add_handler_helper(server, RequestType.STORE, engine.store)
+    add_handler_helper(
+        server,
+        RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT,
+        engine.register_kv_cache_non_gpu_context,
+    )
+    add_handler_helper(server, RequestType.PREPARE_STORE, engine.prepare_store)
     add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
     add_handler_helper(
         server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
@@ -1181,6 +1449,9 @@ def run_cache_server(
     )
     add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
     add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
+    add_handler_helper(server, RequestType.COMMIT_STORE, engine.commit_store)
+    add_handler_helper(server, RequestType.PREPARE_RETRIEVE, engine.prepare_retrieve)
+    add_handler_helper(server, RequestType.COMMIT_RETRIEVE, engine.commit_retrieve)
     add_handler_helper(server, RequestType.CLEAR, engine.clear)
     add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
     add_handler_helper(server, RequestType.PING, engine.ping)
@@ -1194,7 +1465,14 @@ def run_cache_server(
 
     # Assign thread pools
     server.add_affinity_thread_pool(
-        [RequestType.STORE, RequestType.RETRIEVE],
+        [
+            RequestType.STORE,
+            RequestType.RETRIEVE,
+            RequestType.PREPARE_STORE,
+            RequestType.COMMIT_STORE,
+            RequestType.PREPARE_RETRIEVE,
+            RequestType.COMMIT_RETRIEVE,
+        ],
         max_workers=mp_config.max_gpu_workers,
     )
     server.add_normal_thread_pool(
