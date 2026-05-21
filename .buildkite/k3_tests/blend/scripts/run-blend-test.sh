@@ -176,6 +176,14 @@ LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-70}"
 LMCACHE_CHUNK_SIZE="${LMCACHE_CHUNK_SIZE:-1024}"
 LMCACHE_L1_ALIGN_BYTES="${LMCACHE_L1_ALIGN_BYTES:-16777216}"
 
+# The blend E2E launches all vLLM instances inside one worker/container.  Some
+# runtime environments (including Modal's container networking) expose a host
+# address that NCCL can initialize with, but Gloo then fails while creating
+# vLLM's CPU-side model-parallel group.  Pin vLLM/Gloo to loopback by default;
+# callers can still override these if they intentionally run across nodes.
+export VLLM_HOST_IP="${VLLM_HOST_IP:-127.0.0.1}"
+export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-lo}"
+
 # Same layout as .buildkite/k3_harness/setup-blend-env.sh: DEFAULT_VENV_BIN=/opt/venv/bin, TEST_VENV_BIN=/workspace/.venv/bin
 DEFAULT_VENV_DIR="${DEFAULT_VENV_DIR:-${DEFAULT_VENV:-/opt/venv}}"
 DEFAULT_VENV_DIR="${DEFAULT_VENV_DIR%/}"

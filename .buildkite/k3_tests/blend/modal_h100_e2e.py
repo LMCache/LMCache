@@ -231,19 +231,32 @@ def run_cacheblend_e2e(
     build_id = build_id or f"modal-cacheblend-{mode}-{int(time.time())}"
     repo = Path("/workspace/LMCache")
     env = os.environ.copy()
+    cuda_home = next(
+        (
+            candidate
+            for candidate in (
+                env.get("CUDA_HOME"),
+                "/usr/local/cuda-12.9",
+                "/usr/local/cuda-12.8",
+                "/usr/local/cuda",
+            )
+            if candidate and (Path(candidate) / "bin" / "nvcc").exists()
+        ),
+        env.get("CUDA_HOME", "/usr/local/cuda"),
+    )
     env.update(
         {
             "PYTHONUNBUFFERED": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             "CC": "gcc",
             "CXX": "g++",
-            "CUDA_HOME": "/usr/local/cuda-12.9",
-            "CUDA_PATH": "/usr/local/cuda-12.9",
-            "PATH": f"/usr/local/cuda-12.9/bin:{os.environ.get('PATH', '')}",
+            "CUDA_HOME": cuda_home,
+            "CUDA_PATH": cuda_home,
+            "PATH": f"{cuda_home}/bin:{os.environ.get('PATH', '')}",
             "LD_LIBRARY_PATH": "/usr/local/cuda-13.0/targets/x86_64-linux/lib:"
             "/usr/local/cuda-13.0/lib64:"
-            "/usr/local/cuda-12.9/targets/x86_64-linux/lib:"
-            "/usr/local/cuda-12.9/lib64:"
+            f"{cuda_home}/targets/x86_64-linux/lib:"
+            f"{cuda_home}/lib64:"
             f"{os.environ.get('LD_LIBRARY_PATH', '')}",
             "LMCACHE_MODAL_IMAGE": DEFAULT_IMAGE,
             "BUILDKITE_BUILD_ID": build_id,
@@ -257,6 +270,11 @@ def run_cacheblend_e2e(
             "TELEMETRY_PORT": "5768",
             "TENSOR_PARALLEL": "1",
             "GPU_MEM_UTIL": "0.5",
+            # Single-worker Modal runs should keep vLLM/Gloo on loopback.  This
+            # avoids container-network interface auto-detection failures during
+            # vLLM's CPU-side Gloo group creation.
+            "VLLM_HOST_IP": "127.0.0.1",
+            "GLOO_SOCKET_IFNAME": "lo",
             "HF_HOME": "/workspace/.cache/huggingface",
             "HUGGINGFACE_HUB_CACHE": "/workspace/.cache/huggingface/hub",
         }
