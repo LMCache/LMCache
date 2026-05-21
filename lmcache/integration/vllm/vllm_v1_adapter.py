@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import math
@@ -42,7 +42,7 @@ from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import validate_and_set_config_value
-from lmcache.v1.gpu_connector.utils import is_attention_kv_cache
+from lmcache.v1.gpu_connector.utils import filter_attention_kv_cache_dict
 from lmcache.v1.manager import LMCacheManager
 
 if TYPE_CHECKING:
@@ -60,16 +60,29 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _filter_attention_kv_cache_dict(
-    kv_caches: dict[str, Any],
-) -> tuple[dict[str, torch.Tensor], int]:
-    """Return attention-layer KV tensors and the number of skipped layers."""
-    attn_kv_caches = {
-        name: kv
-        for name, kv in kv_caches.items()
-        if is_attention_kv_cache(kv)
-    }
-    return attn_kv_caches, len(kv_caches) - len(attn_kv_caches)
+def _select_largest_block_group(
+    block_groups: Sequence[list[int]],
+    req_id: str,
+) -> tuple[list[int], bool]:
+    """Return the largest block group and whether the choice is ambiguous.
+
+    Hybrid models expose more than one KV cache group. The attention group
+    grows with token count, while recurrent groups may have a short fixed
+    block list. If the largest group is tied, we cannot prove which group
+    corresponds to attention KV, so callers should fail closed for save.
+    """
+    max_len = max(len(group) for group in block_groups)
+    largest_groups = [group for group in block_groups if len(group) == max_len]
+    is_ambiguous = max_len > 0 and len(largest_groups) > 1
+    if is_ambiguous:
+        logger.warning(
+            "Request %s has ambiguous KV cache block groups with %d blocks. "
+            "Disabling LMCache save for this request to avoid using "
+            "non-attention block IDs.",
+            req_id,
+            max_len,
+        )
+    return largest_groups[0].copy(), is_ambiguous
 
 
 @dataclass
@@ -195,7 +208,13 @@ class RequestTracker:
             # regardless of prompt length.  Instead, pick the group with
             # the most blocks so we track the attention group whose block
             # count actually grows with the token count.
-            unfolded_block_ids = max(new_request.block_ids, key=len).copy()
+            # If the choice is tied, fail closed by disabling save for
+            # the request.
+            unfolded_block_ids, ambiguous_block_group = _select_largest_block_group(
+                new_request.block_ids,
+                new_request.req_id,
+            )
+            skip_save = skip_save or ambiguous_block_group
 
         # NOTE: Initialized in `update_state_after_alloc`
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
@@ -248,7 +267,11 @@ class RequestTracker:
             # (attention group).  The mamba group gets 0 new blocks after
             # the initial allocation, so max-by-len reliably selects the
             # attention group for all subsequent prefill/decode steps.
-            new_block_ids = max(new_block_ids, key=len)
+            new_block_ids, ambiguous_block_group = _select_largest_block_group(
+                new_block_ids,
+                self.req_id,
+            )
+            self.skip_save = self.skip_save or ambiguous_block_group
         elif isinstance(new_block_ids, list):
             # If input is a list, flatten it to handle potential nesting.
             # This also correctly processes already-flat lists.
@@ -378,8 +401,6 @@ class ReqMeta:
         else:
             num_tokens_to_save = input_token_len
 
-        save_spec = SaveSpec(skip_leading_tokens, not skip_save)
-
         # Calculate the token ids and slot mappings for load and save
         token_ids = input_token_ids[:num_tokens_to_save]
 
@@ -402,12 +423,26 @@ class ReqMeta:
         # what the allocated blocks can hold, aligned down to the
         # LMCache chunk boundary so the token database gets exact
         # multiples.
-        max_saveable_tokens = num_blocks * block_size
-        max_saveable_tokens = (
-            max_saveable_tokens // lmcache_chunk_size * lmcache_chunk_size
-        )
-        if max_saveable_tokens > 0 and len(token_ids) > max_saveable_tokens:
-            token_ids = token_ids[:max_saveable_tokens]
+        slot_capacity = num_blocks * block_size
+        max_saveable_tokens = slot_capacity // lmcache_chunk_size * lmcache_chunk_size
+        if not skip_save and len(token_ids) > max_saveable_tokens:
+            if max_saveable_tokens == 0:
+                logger.debug(
+                    "Skipping save for request %s because %d allocated "
+                    "attention-block tokens cannot hold one LMCache chunk "
+                    "of size %d.",
+                    tracker.req_id,
+                    slot_capacity,
+                    lmcache_chunk_size,
+                )
+                if load_spec is None:
+                    return None
+                token_ids = token_ids[:slot_capacity]
+                skip_save = True
+            else:
+                token_ids = token_ids[:max_saveable_tokens]
+
+        save_spec = SaveSpec(skip_leading_tokens, not skip_save)
 
         # Update num_saved_tokens AFTER the HMA cap so it reflects
         # what was actually saved, not what was requested.  The old
@@ -610,7 +645,10 @@ class LMCacheConnectorV1Impl:
         )
         self.current_layer = 0
 
-        self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
+        self.force_skip_save = (
+            bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
+            or vllm_config.model_config.is_attention_free
+        )
         self._requests_priority: dict[str, int] = {}
         self._invalid_block_ids: set[int] = set()
 
@@ -772,7 +810,7 @@ class LMCacheConnectorV1Impl:
         #  not called, we should consider removing it.
         assert len(self.kv_caches) == 0 and len(kv_caches) > 0
 
-        attn_kv_caches, skipped = _filter_attention_kv_cache_dict(kv_caches)
+        attn_kv_caches, skipped = filter_attention_kv_cache_dict(kv_caches)
         cacheable_kv_caches = attn_kv_caches if skipped > 0 else kv_caches
 
         should_reconfigure_layers = skipped > 0 or (
@@ -790,6 +828,8 @@ class LMCacheConnectorV1Impl:
                 skipped,
             )
             self.num_layers = len(cacheable_kv_caches)
+            if self.num_layers == 0:
+                self.force_skip_save = True
 
             engine = self.lmcache_engine
             if engine is not None:
@@ -1403,7 +1443,7 @@ class LMCacheConnectorV1Impl:
         # Hybrid models (mamba + attention): LMCache only caches
         # attention layers.  Reporting a hit causes the scheduler
         # to skip ALL layers including mamba, leaving recurrent
-        # state uninitialized → garbled output.
+        # state uninitialized, causing garbled output.
         if self._has_non_attention_layers:
             return 0
         # to handle preempted requests, we want `get_num_new_matched_tokens` to be

@@ -8,6 +8,7 @@
 # mypy: disable-error-code="union-attr,call-overload"
 # Standard
 from typing import (
+    Any,
     TYPE_CHECKING,
     Literal,
     Optional,
@@ -1386,7 +1387,7 @@ def is_attention_kv_cache(kv_cache: object) -> TypeGuard[torch.Tensor]:
     return isinstance(kv_cache, torch.Tensor) and kv_cache.dim() in (3, 5)
 
 
-def filter_attention_kv_caches(kv_caches: list) -> list:
+def filter_attention_kv_caches(kv_caches: list[object]) -> list[torch.Tensor]:
     """Filter KV caches to attention-only tensors for hybrid models.
 
     Hybrid models (e.g., Qwen 3.5 with mamba + attention) store
@@ -1399,14 +1400,10 @@ def filter_attention_kv_caches(kv_caches: list) -> list:
             multi-tensor recurrent state).
 
     Returns:
-        Filtered list containing only attention-layer tensors.
-        If nothing was filtered, the original list is returned
-        unchanged.  If all entries were filtered out, an empty
-        list is returned and the caller should skip GPU init.
+        Filtered list containing only attention-layer tensors. If
+        all entries were filtered out, an empty list is returned
+        and the caller should skip GPU init.
     """
-    if not isinstance(kv_caches, list):
-        return kv_caches
-
     filtered = [kv for kv in kv_caches if is_attention_kv_cache(kv)]
     if len(filtered) < len(kv_caches):
         logger.info(
@@ -1416,3 +1413,19 @@ def filter_attention_kv_caches(kv_caches: list) -> list:
             len(filtered),
         )
     return filtered
+
+
+def filter_attention_kv_cache_dict(
+    kv_caches: dict[str, Any],
+) -> tuple[dict[str, torch.Tensor], int]:
+    """Return attention KV tensors and the number of skipped entries.
+
+    Args:
+        kv_caches: Mapping from layer names to vLLM KV cache entries.
+
+    Returns:
+        A tuple containing the attention-only mapping and the count of
+        entries skipped because they are not supported attention KV tensors.
+    """
+    filtered = {name: kv for name, kv in kv_caches.items() if is_attention_kv_cache(kv)}
+    return filtered, len(kv_caches) - len(filtered)
