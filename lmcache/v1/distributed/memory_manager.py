@@ -67,6 +67,11 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
         )
         shm_name = config.shm_name
         if shm_name:
+            # Ensure the segment always carries the lmcache_l1_pool_ prefix so
+            # that _unlink_stale_shm can recognise user-supplied names too.
+            bare = shm_name.lstrip("/")
+            if not bare.startswith("lmcache_l1_pool_"):
+                shm_name = f"lmcache_l1_pool_{bare}"
             try:
                 free_bytes = shutil.disk_usage("/dev/shm").free
                 if free_bytes < config.size_in_bytes:

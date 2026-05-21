@@ -345,6 +345,9 @@ class DataTransferContext(TransferContext):
             out=out_buffers,
             chunk_indices=chunk_indices,
         )
+        if out_buffers is not None:
+            # SHM path uses async device->CPU copies; complete them before commit.
+            torch_dev.synchronize()
         ok = self._non_gpu_context.commit_store(key, instance_id, cpu_chunks)
 
         future = MessagingFuture()
@@ -384,6 +387,9 @@ class DataTransferContext(TransferContext):
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")
                 ok = False
+            # SHM path: ensure all device writes are complete before releasing
+            # the SHM slot (server may immediately reuse it after commit_retrieve).
+            torch_dev.synchronize()
         self._non_gpu_context.commit_retrieve(key, instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()

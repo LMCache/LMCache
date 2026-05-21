@@ -89,8 +89,11 @@ class NonGpuContextShm(NonGpuContext):
         )
         try:
             response = future.result(timeout=self.mq_timeout)
-        except TimeoutError:
-            return None
+        except TimeoutError as err:
+            raise TimeoutError(
+                f"PREPARE_STORE timed out for instance_id={instance_id} "
+                f"after {self.mq_timeout}s"
+            ) from err
         context = response.context if isinstance(response.context, dict) else {}
         slots = context.get("slots")
         if not isinstance(slots, list):

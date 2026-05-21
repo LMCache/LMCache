@@ -393,14 +393,7 @@ class MPCacheEngine:
                     "skipping the new registration",
                     payload.instance_id,
                 )
-                if existing_context.shm_active:
-                    pool_info = self.storage_manager.get_shm_pool_info()
-                    if isinstance(pool_info, dict):
-                        return RegisterNonGpuContextResponse(
-                            shm_name=str(pool_info.get("shm_name", "")),
-                            pool_size=int(pool_info.get("pool_size", 0)),
-                        )
-                return RegisterNonGpuContextResponse()
+                return self._build_existing_non_gpu_context_response(existing_context)
 
         dtype = getattr(torch, payload.dtype_str, None)
         if dtype is None or not isinstance(dtype, torch.dtype):
@@ -456,14 +449,7 @@ class MPCacheEngine:
                     "skipping the new registration",
                     payload.instance_id,
                 )
-                if existing_context.shm_active:
-                    pool_info = self.storage_manager.get_shm_pool_info()
-                    if isinstance(pool_info, dict):
-                        return RegisterNonGpuContextResponse(
-                            shm_name=str(pool_info.get("shm_name", "")),
-                            pool_size=int(pool_info.get("pool_size", 0)),
-                        )
-                return RegisterNonGpuContextResponse()
+                return self._build_existing_non_gpu_context_response(existing_context)
             self.contexts[payload.instance_id] = RegisteredContext(
                 model_name=payload.model_name,
                 world_size=payload.world_size,
@@ -475,6 +461,27 @@ class MPCacheEngine:
                 shm_active=shm_active,
             )
         return response
+
+    def _build_existing_non_gpu_context_response(
+        self, existing_context: RegisteredContext
+    ) -> RegisterNonGpuContextResponse:
+        """Build a response for an already-registered non-GPU context.
+
+        Args:
+            existing_context: The already-registered context for this instance.
+
+        Returns:
+            RegisterNonGpuContextResponse with SHM pool info if the context
+            uses SHM transport, or an empty response otherwise.
+        """
+        if existing_context.shm_active:
+            pool_info = self.storage_manager.get_shm_pool_info()
+            if isinstance(pool_info, dict):
+                return RegisterNonGpuContextResponse(
+                    shm_name=str(pool_info.get("shm_name", "")),
+                    pool_size=int(pool_info.get("pool_size", 0)),
+                )
+        return RegisterNonGpuContextResponse()
 
     @staticmethod
     def _make_non_gpu_transfer_key(
