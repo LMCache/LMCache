@@ -209,7 +209,7 @@ Install LMCache
 
                 .. code-block:: bash
 
-                    docker pull docker pull intel/vllm:0.17.0-xpu
+                    docker pull intel/vllm:0.17.0-xpu
 
         See :ref:`docker_deployment` for running the container and ROCm images.
 

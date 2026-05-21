@@ -8,12 +8,15 @@ This module provides GPU-side KV cache management functionality, including:
 """
 
 # Standard
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import array
 
 # Third Party
-import cupy
 import torch
+
+if TYPE_CHECKING:
+    # Third Party
+    import cupy
 
 # First Party
 from lmcache import torch_dev
@@ -144,7 +147,10 @@ class GPUCacheContext:
 
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
-        self.cupy_stream_ = cupy.cuda.ExternalStream(
+        # Third Party
+        import cupy
+
+        self.cupy_stream_: "cupy.cuda.Stream" = cupy.cuda.ExternalStream(
             self.cuda_stream_.cuda_stream, self.device_.index
         )
 
@@ -184,7 +190,7 @@ class GPUCacheContext:
         return self.cuda_stream_
 
     @property
-    def cupy_stream(self) -> cupy.cuda.Stream:
+    def cupy_stream(self) -> "cupy.cuda.Stream":
         return self.cupy_stream_
 
     @property
@@ -192,7 +198,7 @@ class GPUCacheContext:
         return self.high_priority_cuda_stream_
 
     @property
-    def high_priority_cupy_stream(self) -> cupy.cuda.Stream:
+    def high_priority_cupy_stream(self) -> "cupy.cuda.Stream":
         return self.high_priority_cupy_stream_
 
     @property
@@ -460,7 +466,10 @@ class PlainGPUCacheContext:
 
         # GPU streams
         self._cuda_stream = torch_dev.Stream(device=self._device)
-        self._cupy_stream = cupy.cuda.ExternalStream(
+        # Third Party
+        import cupy
+
+        self._cupy_stream: "cupy.cuda.Stream" = cupy.cuda.ExternalStream(
             self._cuda_stream.cuda_stream, self._device.index
         )
 
@@ -512,7 +521,7 @@ class PlainGPUCacheContext:
         return self._cuda_stream
 
     @property
-    def cupy_stream(self) -> cupy.cuda.Stream:
+    def cupy_stream(self) -> "cupy.cuda.Stream":
         return self._cupy_stream
 
     @property
@@ -520,7 +529,7 @@ class PlainGPUCacheContext:
         return self._high_priority_cuda_stream
 
     @property
-    def high_priority_cupy_stream(self) -> cupy.cuda.Stream:
+    def high_priority_cupy_stream(self) -> "cupy.cuda.Stream":
         return self._high_priority_cupy_stream
 
     @property

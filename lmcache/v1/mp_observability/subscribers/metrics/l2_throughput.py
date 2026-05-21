@@ -4,8 +4,8 @@
 
 Emits two OTel histograms in GB/s, labeled by ``l2_name`` (the registered
 adapter type, e.g. ``"fs"``, ``"nixl_store"``):
-  - ``lmcache_mp.l2_store_throughput_gbs``  — L1→L2 store
-  - ``lmcache_mp.l2_load_throughput_gbs``   — L2→L1 load
+  - ``lmcache_mp.l2_store_throughput``  — L1→L2 store
+  - ``lmcache_mp.l2_load_throughput``   — L2→L1 load
 
 Implementation:
   - Store path correlates ``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED``
@@ -59,7 +59,7 @@ class L2ThroughputSubscriber(EventSubscriber):
 
         meter = metrics.get_meter("lmcache_mp.perf")
         self._store_hist = meter.create_histogram(
-            "lmcache_mp.l2_store_throughput_gbs",
+            "lmcache_mp.l2_store_throughput",
             description=(
                 "Histogram of L1->L2 store throughput in GB/s, measured "
                 "per task as total_bytes / (completed_ts - "
@@ -69,7 +69,7 @@ class L2ThroughputSubscriber(EventSubscriber):
             unit="GB/s",
         )
         self._load_hist = meter.create_histogram(
-            "lmcache_mp.l2_load_throughput_gbs",
+            "lmcache_mp.l2_load_throughput",
             description=(
                 "Histogram of L2->L1 load throughput in GB/s, measured "
                 "per (request, adapter) pair as total_bytes / "

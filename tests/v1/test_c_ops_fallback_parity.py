@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Verify that every public function/enum in non_cuda_equivalents that also
+Verify that every public function/enum in python_ops_fallback that also
 exists in c_ops has a matching signature.
 
-Does NOT require non_cuda_equivalents to implement everything in c_ops —
+Does NOT require python_ops_fallback to implement everything in c_ops —
 only checks the intersection. If you implement a function in the fallback,
 its signature must match c_ops exactly.
 
@@ -24,7 +24,7 @@ import re
 import pytest
 
 # First Party
-import lmcache.non_cuda_equivalents as fallback
+import lmcache.python_ops_fallback as fallback
 
 try:
     # First Party
@@ -212,7 +212,7 @@ _shared_enum_names = sorted(set(_fallback_enums) & set(_c_ops_enums))
     _shared_func_names if _shared_func_names else ["__placeholder__"],
 )
 def test_function_signature_parity(func_name):
-    """For every function that non_cuda_equivalents chose to implement,
+    """For every function that python_ops_fallback chose to implement,
     its signature must match c_ops exactly.
 
     When c_ops has real py::arg() names  → check names, count, defaults.
@@ -291,7 +291,7 @@ def test_function_signature_parity(func_name):
     _shared_enum_names if _shared_enum_names else ["__placeholder__"],
 )
 def test_enum_parity(enum_name):
-    """For every enum that non_cuda_equivalents defines,
+    """For every enum that python_ops_fallback defines,
     its members and values must match c_ops."""
     if enum_name == "__placeholder__":
         pytest.skip("No shared enums found between c_ops and fallback")

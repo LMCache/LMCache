@@ -6,6 +6,9 @@ import argparse
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 class ServerCommand(BaseCommand):
@@ -53,9 +56,10 @@ class ServerCommand(BaseCommand):
             add_http_frontend_args(parser)
             add_observability_args(parser)
         except ImportError as e:
-            print(
-                f"Failed to import server dependencies: {e}. "
-                "Install the full lmcache package to use 'lmcache server'."
+            logger.warning(
+                "lmcache-cli (lightweight) detected (%s); install the full "
+                "lmcache package to use 'server' and 'bench'.",
+                e,
             )
             return
 
