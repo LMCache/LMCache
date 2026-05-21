@@ -30,7 +30,7 @@ Reported per `(model_name, cache_salt)`.
 L2's prefetch lookups carry per-key counts, not per-token:
 
 ```
-L2_hit_tokens_total = increase(lmcache_mp_l2_prefetch_hit_keys_total) * chunk_size
+L2_hit_tokens_total = increase(lmcache_mp_l2_prefetch_hit_chunks_total) * chunk_size
 L2_hit_rate         = L2_hit_tokens_total
                     / increase(lmcache_mp_lookup_requested_tokens_total)
 ```
@@ -43,7 +43,7 @@ Total minus L2:
 
 ```
 L1_hit_tokens_total = increase(lmcache_mp_lookup_hit_tokens_total)
-                    - increase(lmcache_mp_l2_prefetch_hit_keys_total) * chunk_size
+                    - increase(lmcache_mp_l2_prefetch_hit_chunks_total) * chunk_size
 L1_hit_rate         = L1_hit_tokens_total
                     / increase(lmcache_mp_lookup_requested_tokens_total)
 ```

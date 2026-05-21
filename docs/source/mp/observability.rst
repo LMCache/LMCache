@@ -112,7 +112,7 @@ collector.
 
 All metrics use the ``lmcache_mp.`` prefix (multiprocess). On Prometheus,
 dots are converted to underscores and counters get a ``_total`` suffix
-(e.g. ``lmcache_mp_l1_read_keys_total``).
+(e.g. ``lmcache_mp_l1_read_chunks_total``).
 
 .. _mp-observability-resource:
 
@@ -140,35 +140,6 @@ and propagate to every exported datapoint via OTLP. On Prometheus, SDK
 resource attributes surface on the ``target_info`` series rather than
 on each time-series — this is standard OTel behavior.
 
-StorageManager Metrics
-~~~~~~~~~~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 40 15 45
-
-   * - Metric
-     - Type
-     - Description
-   * - ``lmcache_mp.sm_read_requests``
-     - Counter
-     - Number of read (prefetch) requests received by the StorageManager.
-   * - ``lmcache_mp.sm_read_succeed_keys``
-     - Counter
-     - Number of keys successfully read from LMCache.
-   * - ``lmcache_mp.sm_read_failed_keys``
-     - Counter
-     - Number of keys that failed to read.
-   * - ``lmcache_mp.sm_write_requests``
-     - Counter
-     - Number of write (reserve) requests.
-   * - ``lmcache_mp.sm_write_succeed_keys``
-     - Counter
-     - Number of keys successfully reserved for write.
-   * - ``lmcache_mp.sm_write_failed_keys``
-     - Counter
-     - Number of keys that failed to reserve (OOM, write conflict).
-
 L1 Metrics
 ~~~~~~~~~~
 
@@ -179,15 +150,15 @@ L1 Metrics
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.l1_read_keys``
+   * - ``lmcache_mp.l1_read``
      - Counter
-     - Number of keys read from L1.
-   * - ``lmcache_mp.l1_write_keys``
+     - Number of chunks read from L1.
+   * - ``lmcache_mp.l1_write``
      - Counter
-     - Number of keys written to L1.
-   * - ``lmcache_mp.l1_evicted_keys``
+     - Number of chunks written to L1.
+   * - ``lmcache_mp.l1_evicted``
      - Counter
-     - Number of keys evicted by the EvictionController.
+     - Number of chunks evicted by the EvictionController.
    * - ``lmcache_mp.l1_eviction_loop_ticks``
      - Counter
      - L1 eviction-loop iterations (every cycle, regardless of whether
@@ -216,16 +187,16 @@ memory overhead.
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.l1_chunk_lifetime_seconds``
+   * - ``lmcache_mp.l1_chunk_lifetime``
      - Histogram
      - Time from allocation to eviction per sampled chunk.
-   * - ``lmcache_mp.l1_chunk_idle_before_evict_seconds``
+   * - ``lmcache_mp.l1_chunk_idle_before_evict``
      - Histogram
      - Time from last access to eviction per sampled chunk.
-   * - ``lmcache_mp.l1_chunk_reuse_gap_seconds``
+   * - ``lmcache_mp.l1_chunk_reuse_gap``
      - Histogram
      - Time gap between consecutive touches (read or write) of the same chunk.
-   * - ``lmcache_mp.l1_chunk_evict_reuse_gap_seconds``
+   * - ``lmcache_mp.l1_chunk_evict_reuse_gap``
      - Histogram
      - Time from eviction to next reuse (capped at 300 s).
 
@@ -251,12 +222,12 @@ for chunks that pass the (deterministic, hash-based) sampling gate.
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.real_reuse_gap_seconds``
+   * - ``lmcache_mp.real_reuse_gap``
      - Histogram (tag: ``cache_salt``)
      - Time gap between a chunk's last access (read or write) and its
        next read.  Captures storage cost — how long a stored chunk sat
        between accesses.  Emitted only on read events.
-   * - ``lmcache_mp.real_reuse_gap_chunks``
+   * - ``lmcache_mp.real_reuse_gap_objects``
      - Histogram (tag: ``cache_salt``)
      - Per-``cache_salt`` access-counter gap between two reads of the
        same chunk.  Captures storage volume — how many chunk-accesses
@@ -273,49 +244,43 @@ L2 Metrics
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.l2_store_tasks``
+   * - ``lmcache_mp.l2_store_submitted``
      - Counter
-     - Number of L2 store tasks submitted.
-   * - ``lmcache_mp.l2_store_keys``
+     - Number of L2 store requests submitted.
+   * - ``lmcache_mp.l2_store_submitted_objects``
      - Counter
-     - Number of keys submitted for L2 store.
+     - Number of chunks submitted for L2 store.
    * - ``lmcache_mp.l2_store_completed``
      - Counter (attr: ``l2_name``)
-     - Number of L2 store tasks completed, labeled by adapter type.
-   * - ``lmcache_mp.l2_store_succeeded_keys``
+     - Number of L2 store requests completed, labeled by adapter type.
+   * - ``lmcache_mp.l2_store_completed_objects``
      - Counter
-     - Number of keys successfully stored to L2.
-   * - ``lmcache_mp.l2_store_failed_keys``
-     - Counter
-     - Number of keys that failed to store to L2.
-   * - ``lmcache_mp.l2_prefetch_lookups``
+     - Number of chunks successfully stored to L2.
+   * - ``lmcache_mp.l2_prefetch_lookup``
      - Counter
      - Number of L2 prefetch lookup requests.
-   * - ``lmcache_mp.l2_prefetch_lookup_keys``
+   * - ``lmcache_mp.l2_prefetch_lookup_objects``
      - Counter
-     - Number of keys submitted for L2 prefetch lookup.
-   * - ``lmcache_mp.l2_prefetch_hit_keys``
+     - Number of chunks submitted for L2 prefetch lookup.
+   * - ``lmcache_mp.l2_prefetch_hit``
      - Counter
-     - Number of prefix keys found in L2 lookup.
-   * - ``lmcache_mp.l2_prefetch_load_tasks``
+     - Number of prefix chunks found in L2 lookup.
+   * - ``lmcache_mp.l2_prefetch_load_submitted``
      - Counter
-     - Number of L2 prefetch load tasks submitted.
-   * - ``lmcache_mp.l2_prefetch_load_keys``
+     - Number of L2 prefetch load requests submitted.
+   * - ``lmcache_mp.l2_prefetch_load_submitted_objects``
      - Counter
-     - Number of keys submitted for L2 load.
-   * - ``lmcache_mp.l2_prefetch_loaded_keys``
+     - Number of chunks submitted for L2 load.
+   * - ``lmcache_mp.l2_prefetch_load_completed``
      - Counter
-     - Number of keys successfully loaded from L2.
-   * - ``lmcache_mp.l2_prefetch_failed_keys``
-     - Counter
-     - Number of keys that failed to load from L2.
+     - Number of chunks successfully loaded from L2.
    * - ``lmcache_mp.l2_load_completed``
      - Counter (attr: ``l2_name``)
-     - Number of per-adapter L2 load tasks completed, labeled by adapter type.
+     - Number of per-adapter L2 load requests completed, labeled by adapter type.
 
 The ``l2_name``-labeled counters (``l2_store_completed`` and
 ``l2_load_completed``) exist so dashboards can compute per-backend IOPS on
-demand via ``rate(lmcache_mp_l2_store_completed_total{l2_name="..."}[1m])``
+demand via ``rate(lmcache_mp_l2_store_completed_requests_total{l2_name="..."}[1m])``
 (and the equivalent for loads).  No separate ``*_iops`` metric is exported;
 keeping the raw counter lets dashboard users pick their own window.
 
@@ -353,7 +318,7 @@ Prometheus ``/metrics`` endpoint.
        stay near zero in healthy operation.
    * - ``lmcache_mp.l2_prefetch_failure``
      - Counter
-     - Keys that L2 reported present at lookup but failed to land in L1.
+     - Chunks that L2 reported present at lookup but failed to land in L1.
        Tagged by ``reason`` ∈ {``l1_oom``, ``not_found``} plus
        ``model_name``. ``l1_oom`` means L1 had no room to receive the
        prefetched object; ``not_found`` means the adapter returned no
@@ -382,11 +347,11 @@ intentionally excluded — it is vLLM-owned and not observable from LMCache.
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.lookup_requested_tokens``
+   * - ``lmcache_mp.lookup_requested``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens submitted for lookup (denominator of the L1+L2
        token-level hit rate). Only chunk-aligned tokens are counted.
-   * - ``lmcache_mp.lookup_hit_tokens``
+   * - ``lmcache_mp.lookup_hit``
      - Counter (attrs: ``model_name``, ``cache_salt``)
      - Total tokens found in L1 or L2 during lookup (numerator of the
        L1+L2 token-level hit rate). Counts the contiguous prefix hit only.
@@ -434,13 +399,13 @@ in Prometheus (e.g.
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.l0_block_lifetime_seconds``
+   * - ``lmcache_mp.l0_block_lifetime``
      - Histogram
      - Time from allocation to eviction per sampled GPU block.
-   * - ``lmcache_mp.l0_block_idle_before_evict_seconds``
+   * - ``lmcache_mp.l0_block_idle_before_evict``
      - Histogram
      - Time from last access to eviction per sampled GPU block.
-   * - ``lmcache_mp.l0_block_reuse_gap_seconds``
+   * - ``lmcache_mp.l0_block_reuse_gap``
      - Histogram
      - Time gaps between consecutive accesses of the same GPU block.
 
@@ -459,7 +424,7 @@ All throughput histograms are emitted with ``engine_id`` (vLLM worker
 instance id), ``device`` (e.g. ``"cuda:3"``), and ``model_name`` OTel
 attributes, enabling per-worker, per-device, and per-model slicing in
 Prometheus (e.g.
-``lmcache_mp_l0_l1_store_throughput_gbs{engine_id="0",device="cuda:3",model_name="meta-llama/Llama-3.1-8B"}``).
+``lmcache_mp_l0_l1_store_throughput_GB_per_second{engine_id="0",device="cuda:3",model_name="meta-llama/Llama-3.1-8B"}``).
 
 .. list-table::
    :header-rows: 1
@@ -468,23 +433,23 @@ Prometheus (e.g.
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.l0_l1_store_throughput_gbs``
+   * - ``lmcache_mp.l0_l1_store_throughput``
      - Histogram
      - GPU→CPU (L0→L1) store throughput in GB/s per request.
-   * - ``lmcache_mp.l0_l1_load_throughput_gbs``
+   * - ``lmcache_mp.l0_l1_load_throughput``
      - Histogram
      - CPU→GPU (L1→L0) load throughput in GB/s per request.
 
 L1 ↔ L2 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Per-task throughput of L1↔L2 transfers via
+Per-request throughput of L1↔L2 transfers via
 ``L2ThroughputSubscriber``. The store path correlates
 ``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED`` by
 ``(adapter_index, task_id)``. The load path correlates the per-adapter
 ``L2_LOAD_TASK_SUBMITTED`` → ``L2_LOAD_TASK_COMPLETED`` events by
 ``(request_id, adapter_index)``; the request-level
-``L2_PREFETCH_LOAD_*`` events used by the key-count counters aggregate
+``L2_PREFETCH_LOAD_*`` events used by the chunk-count counters aggregate
 across adapters and cannot be attributed to a specific ``l2_name``.
 
 Timestamps span **submit → complete**, so the duration includes adapter
@@ -496,7 +461,7 @@ need pure copy-time throughput.
 All L1↔L2 throughput histograms carry a single ``l2_name`` OTel
 attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
 ``"mooncake_store"``) — enabling per-backend slicing in Prometheus (e.g.
-``lmcache_mp_l2_store_throughput_gbs{l2_name="nixl_store"}``).
+``lmcache_mp_l2_store_throughput_GB_per_second{l2_name="nixl_store"}``).
 
 .. list-table::
    :header-rows: 1
@@ -505,10 +470,10 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
    * - Metric
      - Type
      - Description
-   * - ``lmcache_mp.l2_store_throughput_gbs``
+   * - ``lmcache_mp.l2_store_throughput``
      - Histogram
-     - L1→L2 store throughput in GB/s per task.
-   * - ``lmcache_mp.l2_load_throughput_gbs``
+     - L1→L2 store throughput in GB/s per request.
+   * - ``lmcache_mp.l2_load_throughput``
      - Histogram
      - L2→L1 load throughput in GB/s per (request, adapter) pair.
 

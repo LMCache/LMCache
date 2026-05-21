@@ -55,7 +55,9 @@ def _make_context(
             for _ in range(num_layers)
         ]
         fmt = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-    manager = KVLayerGroupsManager(kv_caches, fmt, num_blocks=1, block_size=1)
+    manager = KVLayerGroupsManager(
+        kv_caches, fmt, num_blocks=1, lmcache_logical_chunk_size=chunk_size
+    )
     ctx.kv_layer_groups_manager_ = manager
 
     # Build flat tmp_gpu_buffer_ with prefix-sum offsets (new layout)
@@ -67,7 +69,7 @@ def _make_context(
             ctx.tmp_chunk_group_offsets_[-1] + byte_size
         )
     ctx.tmp_chunk_bytes_ = ctx.tmp_chunk_group_offsets_[-1]
-    ctx.lmcache_chunk_size = chunk_size
+    ctx.lmcache_logical_chunk_size = chunk_size
     ctx.tmp_gpu_buffer_ = torch.empty(
         ctx.tmp_chunk_bytes_ * ctx.max_batch_size,
         dtype=torch.uint8,
@@ -110,7 +112,7 @@ def _make_context_multi_group(
         kv_caches,
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=1,
-        block_size=1,
+        lmcache_logical_chunk_size=chunk_size,
     )
     ctx.kv_layer_groups_manager_ = manager
 
@@ -123,7 +125,7 @@ def _make_context_multi_group(
             ctx.tmp_chunk_group_offsets_[-1] + byte_size
         )
     ctx.tmp_chunk_bytes_ = ctx.tmp_chunk_group_offsets_[-1]
-    ctx.lmcache_chunk_size = chunk_size
+    ctx.lmcache_logical_chunk_size = chunk_size
     ctx.tmp_gpu_buffer_ = torch.empty(
         ctx.tmp_chunk_bytes_ * ctx.max_batch_size,
         dtype=torch.uint8,

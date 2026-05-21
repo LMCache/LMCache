@@ -47,14 +47,7 @@ jobs:
           uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
           with:
             disable-sudo-and-containers: true
-            egress-policy: block
-            allowed-endpoints: >
-              github.com:443
-              pypi.org:443
-              files.pythonhosted.org:443
-              crates.io:443
-              index.crates.io:443
-              static.crates.io:443
+            egress-policy: audit
 
         - name: Checkout code
           uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1

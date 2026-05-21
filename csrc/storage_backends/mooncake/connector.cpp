@@ -32,8 +32,9 @@ void ensure_batch_result_size(const std::vector<T>& results, size_t expected,
 }  // namespace
 
 MooncakeConnector::MooncakeConnector(ConfigDict config, int num_workers,
-                                     L1RegistrationConfig l1_registration)
-    : ConnectorBase(num_workers),
+                                     L1RegistrationConfig l1_registration,
+                                     WorkerPoolConfig worker_pool_config)
+    : ConnectorBase(num_workers, std::move(worker_pool_config)),
       config_(std::move(config)),
       l1_registration_(l1_registration) {
   // Create a RealClient via the static factory.
@@ -122,6 +123,8 @@ void MooncakeConnector::on_workers_stopped() { unregister_all_buffers(); }
 size_t MooncakeConnector::choose_num_tiles(Op op, size_t num_items) const {
   (void)op;
   (void)num_items;
+  // Mooncake's batch APIs already parallelize internally. Keep each LMCache
+  // batch as one tile so we do not split a single backend batch across workers.
   return 1;
 }
 
