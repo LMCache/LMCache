@@ -1928,6 +1928,31 @@ class LMCacheConnectorV1Impl:
         return False, return_params
 
     @_lmcache_nvtx_annotate
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """Handle HMA request completion across all KV cache groups.
+
+        Args:
+            request (Request): the finished request.
+            block_ids (tuple[list[int], ...]): block IDs for each KV cache group.
+
+        Returns:
+            The same async-transfer ownership flag and optional transfer params
+            as request_finished().
+        """
+        if len(block_ids) == 0:
+            return self.request_finished(request, [])
+
+        selected_block_ids, _ = _select_largest_block_group(
+            block_ids,
+            request.request_id,
+        )
+        return self.request_finished(request, selected_block_ids)
+
+    @_lmcache_nvtx_annotate
     def get_kv_events(self) -> Iterable[CacheStoreEvent]:
         if self.lmcache_engine is not None:
             return self.lmcache_engine.get_kv_events()

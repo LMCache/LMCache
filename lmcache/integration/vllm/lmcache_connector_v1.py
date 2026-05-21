@@ -10,6 +10,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+
+try:
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        SupportsHMA as SupportsHMABase,
+    )
+except ImportError:
+
+    class SupportsHMABase:
+        """Compatibility fallback for vLLM versions without HMA support."""
+
+        pass
+
+
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 import torch
@@ -27,7 +41,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
+class LMCacheConnectorV1Dynamic(KVConnectorBase_V1, SupportsHMABase):
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -206,3 +220,21 @@ class LMCacheConnectorV1Dynamic(KVConnectorBase_V1):
             returned by the engine.
         """
         return self._lmcache_engine.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, Optional[dict[str, Any]]]:
+        """
+        Called when an HMA request has finished for all KV cache groups.
+
+        Args:
+            request (Request): the finished request.
+            block_ids (tuple[list[int], ...]): block IDs for each KV cache group.
+
+        Returns:
+            The same async-transfer ownership flag and optional transfer params
+            as request_finished().
+        """
+        return self._lmcache_engine.request_finished_all_groups(request, block_ids)

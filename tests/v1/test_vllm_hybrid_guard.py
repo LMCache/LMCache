@@ -15,7 +15,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
     KVConnectorRole,
 )
 
+try:
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (  # noqa: E402
+        supports_hma,
+    )
+except ImportError:
+    supports_hma = None
+
 # First Party
+from lmcache.integration.vllm.lmcache_connector_v1 import (  # noqa: E402
+    LMCacheConnectorV1Dynamic,
+)
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorV1Impl,
     ReqMeta,
@@ -81,6 +92,67 @@ def test_get_num_new_matched_tokens_returns_zero_for_hybrid_models() -> None:
     request = cast(Any, SimpleNamespace(request_id="req-1"))
 
     assert connector.get_num_new_matched_tokens(request, num_computed_tokens=0) == 0
+
+
+def test_dynamic_connector_declares_hma_support() -> None:
+    """Test vLLM's HMA factory guard accepts LMCacheConnectorV1Dynamic."""
+    if supports_hma is None:
+        pytest.skip("vLLM version does not expose supports_hma")
+
+    assert supports_hma(LMCacheConnectorV1Dynamic)
+
+
+def test_dynamic_connector_request_finished_all_groups_delegates() -> None:
+    """Test HMA completion is forwarded to the implementation."""
+
+    class _FakeEngine:
+        def __init__(self) -> None:
+            self.request: Any = None
+            self.block_ids: tuple[list[int], ...] = ()
+
+        def request_finished_all_groups(
+            self,
+            request: Any,
+            block_ids: tuple[list[int], ...],
+        ) -> tuple[bool, dict[str, Any]]:
+            self.request = request
+            self.block_ids = block_ids
+            return False, {"done": True}
+
+    engine = _FakeEngine()
+    connector = LMCacheConnectorV1Dynamic.__new__(LMCacheConnectorV1Dynamic)
+    connector._lmcache_engine = engine
+    request = SimpleNamespace(request_id="req-1")
+
+    assert connector.request_finished_all_groups(request, ([99], [10, 11])) == (
+        False,
+        {"done": True},
+    )
+    assert engine.request is request
+    assert engine.block_ids == ([99], [10, 11])
+
+
+def test_impl_request_finished_all_groups_uses_attention_block_group() -> None:
+    """Test HMA completion picks the attention-like KV cache group."""
+    selected_block_ids: list[int] = []
+    connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
+
+    def fake_request_finished(
+        request: Any,
+        block_ids: list[int],
+    ) -> tuple[bool, None]:
+        nonlocal selected_block_ids
+        selected_block_ids = block_ids
+        return False, None
+
+    connector.request_finished = fake_request_finished  # type: ignore[method-assign]
+
+    request = SimpleNamespace(request_id="req-1")
+    assert connector.request_finished_all_groups(request, ([99], [10, 11])) == (
+        False,
+        None,
+    )
+    assert selected_block_ids == [10, 11]
 
 
 @pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
