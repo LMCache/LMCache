@@ -61,8 +61,8 @@ from lmcache.v1.multiprocess.gpu_context import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.native_completion import (
-    CompletionDispatcher,
-    record_on_stream,
+    DeviceHostFuncDispatcher,
+    submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -214,14 +214,18 @@ class MPCacheEngine:
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
-        self._completion_dispatcher = CompletionDispatcher()
-        self._completion_dispatcher.register(
-            "finish_write", self.storage_manager.finish_write
+        self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
+        self._device_host_func_dispatcher.register(
+            "finish_write",
+            self.storage_manager.finish_write,
+            item_type=ObjectKey,
         )
-        self._completion_dispatcher.register(
-            "finish_read_prefetched", self.storage_manager.finish_read_prefetched
+        self._device_host_func_dispatcher.register(
+            "finish_read_prefetched",
+            self.storage_manager.finish_read_prefetched,
+            item_type=ObjectKey,
         )
-        self._completion_dispatcher.start()
+        self._device_host_func_dispatcher.start()
 
         # Prefetch job tracking for two-phase lookup, keyed by request_id.
         # TODO: implement periodic cleanup of stale _prefetch_jobs entries
@@ -325,9 +329,9 @@ class MPCacheEngine:
         assert key.worker_id is not None, "Must store with worker_id != None"
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
-        )
+        assert (
+            instance_id in self.gpu_contexts
+        ), f"KV cache not registered for GPU ID {instance_id}"
         gpu_context = self.gpu_contexts[instance_id]
         model_name = self.gpu_context_meta[instance_id][0]
 
@@ -442,11 +446,10 @@ class MPCacheEngine:
             finally:
                 event.record()
                 if reserved_dict:
-                    record_on_stream(
+                    submit_callback_to_stream(
                         gpu_context.cupy_stream,
                         "finish_write",
                         list(reserved_dict.keys()),
-                        fallback_handler=self.storage_manager.finish_write,
                     )
                 # All reserved MemoryObjs share one layout_desc, so per-object
                 # size is identical — avoid summing N identical values.
@@ -518,9 +521,9 @@ class MPCacheEngine:
         assert key.worker_id is not None, "Must retrieve with worker_id != None"
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
-        assert instance_id in self.gpu_contexts, (
-            f"KV cache not registered for GPU ID {instance_id}"
-        )
+        assert (
+            instance_id in self.gpu_contexts
+        ), f"KV cache not registered for GPU ID {instance_id}"
         gpu_context = self.gpu_contexts[instance_id]
         model_name = self.gpu_context_meta[instance_id][0]
 
@@ -658,11 +661,10 @@ class MPCacheEngine:
             finally:
                 event.record()
                 if retrieve_succeeded:
-                    record_on_stream(
+                    submit_callback_to_stream(
                         gpu_context.cupy_stream,
                         "finish_read_prefetched",
                         prefetched_keys,
-                        fallback_handler=self.storage_manager.finish_read_prefetched,
                     )
                 self._event_bus.publish_on_stream(
                     gpu_context.cupy_stream,
@@ -1102,7 +1104,7 @@ class MPCacheEngine:
         """
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
-        self._completion_dispatcher.stop()
+        self._device_host_func_dispatcher.stop()
 
         # Close storage manager
         self.storage_manager.close()

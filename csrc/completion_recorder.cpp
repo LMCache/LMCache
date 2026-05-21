@@ -9,17 +9,14 @@ CompletionRecorder& CompletionRecorder::instance() {
   return recorder;
 }
 
-void CompletionRecorder::push(PendingCompletion* completion) {
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    buffer_.push_back(std::move(*completion));
-  }
-  delete completion;
+void CompletionRecorder::push(std::unique_ptr<PendingCompletion> completion) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  buffer_.push_back(std::move(completion));
 }
 
-std::vector<PendingCompletion> CompletionRecorder::drain() {
+std::vector<std::unique_ptr<PendingCompletion>> CompletionRecorder::drain() {
   std::lock_guard<std::mutex> lock(mutex_);
-  std::vector<PendingCompletion> result;
+  std::vector<std::unique_ptr<PendingCompletion>> result;
   result.swap(buffer_);
   return result;
 }
@@ -29,21 +26,26 @@ static void
     CUDART_CB
 #endif
     completion_host_callback(void* data) {
-  auto* completion = static_cast<PendingCompletion*>(data);
-  CompletionRecorder::instance().push(completion);
+  // Adopt the raw pointer back into a unique_ptr.
+  std::unique_ptr<PendingCompletion> completion(
+      static_cast<PendingCompletion*>(data));
+  CompletionRecorder::instance().push(std::move(completion));
 }
 
 void record_completion_on_stream(int64_t cuda_stream_ptr,
                                  const std::string& kind,
                                  std::vector<std::string> payload) {
-  auto* completion = new PendingCompletion{kind, std::move(payload)};
+  auto completion =
+      std::make_unique<PendingCompletion>(PendingCompletion{kind, std::move(payload)});
   auto stream = reinterpret_cast<lmcache_completion_stream_t>(
       static_cast<uintptr_t>(cuda_stream_ptr));
+  // Pass ownership through the driver as a raw pointer; the host callback
+  // re-adopts it. Reclaim if the launch itself fails.
+  PendingCompletion* raw = completion.release();
   auto err = LMCACHE_COMPLETION_LAUNCH_HOST_FUNC(
-      stream, completion_host_callback, completion);
-  // On failure the callback will never run, so we own the allocation.
+      stream, completion_host_callback, raw);
   if (err != 0) {
-    delete completion;
+    delete raw;
   }
 }
 
@@ -52,7 +54,7 @@ CompletionDrainResult drain_recorded_completions() {
   CompletionDrainResult result;
   result.reserve(completions.size());
   for (auto& c : completions) {
-    result.emplace_back(std::move(c.kind), std::move(c.payload));
+    result.emplace_back(std::move(c->kind), std::move(c->payload));
   }
   return result;
 }

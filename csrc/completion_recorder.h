@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -31,13 +32,14 @@ struct PendingCompletion {
 class CompletionRecorder {
  public:
   static CompletionRecorder& instance();
-  void push(PendingCompletion* completion);
-  std::vector<PendingCompletion> drain();
+  // Takes ownership of the heap-allocated PendingCompletion.
+  void push(std::unique_ptr<PendingCompletion> completion);
+  std::vector<std::unique_ptr<PendingCompletion>> drain();
 
  private:
   CompletionRecorder() = default;
   std::mutex mutex_;
-  std::vector<PendingCompletion> buffer_;
+  std::vector<std::unique_ptr<PendingCompletion>> buffer_;
 };
 
 // Schedule a completion record. Called WITHOUT the GIL.
