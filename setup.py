@@ -31,6 +31,8 @@ if os.environ.get("NO_CUDA_EXT", "0") == "1":
         "warning: NO_CUDA_EXT is deprecated; use NO_NATIVE_EXT=1 instead.",
         file=sys.stderr,
     )
+# Common C++ extensions only; skip CUDA / ROCm / SYCL.
+NO_GPU_EXT = os.environ.get("NO_GPU_EXT", "0") == "1"
 
 # New environment variable to choose between CUDA, HIP, and SYCL
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
@@ -393,11 +395,10 @@ def _collect_extensions() -> tuple[list, dict]:
             - dict: cmdclass containing BuildExtension when extensions are built.
 
     Notes:
-        - `sdist` builds skip all extension compilation.
-        - `NO_NATIVE_EXT=1` skips all extension compilation (pure-Python build,
-          used by the lmcache-cli wheel which has no torch build dependency).
-        - Otherwise, pure C++ extensions are combined with one GPU backend
-          extension set (CUDA, ROCm, or SYCL).
+        - `sdist`: no extensions.
+        - `NO_NATIVE_EXT=1`: no extensions (pure-Python lmcache-cli wheel).
+        - `NO_GPU_EXT=1`: common C++ extensions only.
+        - Default: common C++ extensions + one GPU backend (CUDA/ROCm/SYCL).
     """
     if BUILDING_SDIST:
         return source_dist_extension()
@@ -410,6 +411,9 @@ def _collect_extensions() -> tuple[list, dict]:
     # _GLIBCXX_USE_CXX11_ABI in pre-refactor builds.
     fs_cpp_flags = [] if BUILD_WITH_SYCL else common_cpp_flags
     ext_modules, cmdclass = _common_cpp_extensions(common_cpp_flags, fs_cpp_flags)
+
+    if NO_GPU_EXT:
+        return ext_modules, cmdclass
 
     if BUILD_WITH_SYCL:
         gpu_ext_modules, cmdclass = sycl_extension()
@@ -425,21 +429,23 @@ if __name__ == "__main__":
     ext_modules, cmdclass = _collect_extensions()
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
-    if BUILD_WITH_HIP:
-        core_file = "rocm_core.txt"
-    elif BUILD_WITH_SYCL:
-        core_file = "xpu_core.txt"
-    else:
-        # CUDA major selects between cu12 and cu13 vendor pins (cupy, nixl).
-        # Defaults to cu13 (the PyPI build); cu12.9 wheel builds set
-        # LMCACHE_CUDA_MAJOR=12 to pull cu12 wheels of those deps.
-        cuda_major = os.environ.get("LMCACHE_CUDA_MAJOR", "13")
-        if cuda_major not in ("12", "13"):
-            raise ValueError(
-                f"LMCACHE_CUDA_MAJOR must be '12' or '13', got '{cuda_major}'"
-            )
-        core_file = f"cuda{cuda_major}_core.txt"
-    install_requires += _read_requirements(ROOT_DIR / "requirements" / core_file)
+    # NO_GPU_EXT skips GPU-vendor deps (cupy / nixl).
+    if not NO_GPU_EXT:
+        if BUILD_WITH_HIP:
+            core_file = "rocm_core.txt"
+        elif BUILD_WITH_SYCL:
+            core_file = "xpu_core.txt"
+        else:
+            # CUDA major selects between cu12 and cu13 vendor pins (cupy, nixl).
+            # Defaults to cu13 (the PyPI build); cu12.9 wheel builds set
+            # LMCACHE_CUDA_MAJOR=12 to pull cu12 wheels of those deps.
+            cuda_major = os.environ.get("LMCACHE_CUDA_MAJOR", "13")
+            if cuda_major not in ("12", "13"):
+                raise ValueError(
+                    f"LMCACHE_CUDA_MAJOR must be '12' or '13', got '{cuda_major}'"
+                )
+            core_file = f"cuda{cuda_major}_core.txt"
+        install_requires += _read_requirements(ROOT_DIR / "requirements" / core_file)
 
     setup(
         packages=find_packages(
