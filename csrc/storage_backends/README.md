@@ -157,7 +157,7 @@ PYBIND11_MODULE(lmcache_mybackend, m) {
 Add your sources to `setup.py` alongside the existing Redis extension:
 
 ```python
-# In cuda_extension() and rocm_extension():
+# In _common_cpp_extensions():
 mybackend_sources = [
     "csrc/storage_backends/mybackend/pybind.cpp",
     "csrc/storage_backends/mybackend/connector.cpp",

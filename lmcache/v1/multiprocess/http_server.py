@@ -5,10 +5,10 @@ import argparse
 
 # Third Party
 from fastapi import FastAPI
-import torch
 import uvicorn
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
@@ -57,8 +57,8 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info(
-        "Starting LMCache HTTP server... (CUDA available: %s)",
-        torch.cuda.is_available(),
+        "Starting LMCache HTTP server... (accelerator available: %s)",
+        torch_dev.is_available(),
     )
     mp_config = _configs["mp"]
     if mp_config.engine_type == "blend":

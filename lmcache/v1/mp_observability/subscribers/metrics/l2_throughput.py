@@ -4,8 +4,8 @@
 
 Emits two OTel histograms in GB/s, labeled by ``l2_name`` (the registered
 adapter type, e.g. ``"fs"``, ``"nixl_store"``):
-  - ``lmcache_mp.l2_store_throughput_gbs``  — L1→L2 store
-  - ``lmcache_mp.l2_load_throughput_gbs``   — L2→L1 load
+  - ``lmcache_mp.l2_store_throughput``  — L1→L2 store
+  - ``lmcache_mp.l2_load_throughput``   — L2→L1 load
 
 Implementation:
   - Store path correlates ``L2_STORE_SUBMITTED`` → ``L2_STORE_COMPLETED``
@@ -21,8 +21,17 @@ Implementation:
   - ``(end_ts - start_ts)`` spans submit -> complete and therefore
     includes adapter queue, network, and disk time — not just transfer.
     The histogram is "bytes / end-to-end latency", not raw transfer rate.
-  - Sampling decision is made at SUBMITTED time; unsampled tasks leave
-    zero state.
+
+Fast-path adapters:
+  Some adapters (``mock``, ``fs``, ``nixl_store``) skip writes for keys
+  that are already present, which makes ``dt`` collapse to near-zero and
+  inflates store throughput (the controller asked to store N bytes but
+  the adapter actually transferred 0).  When ``L2_STORE_COMPLETED``
+  carries ``bytes_transferred``, the store path uses it instead of the
+  submitted bytes; if ``bytes_transferred == 0`` the sample is dropped
+  (no work, no useful throughput data).  When the field is absent
+  (adapter doesn't track it), behavior matches the load path -- submitted
+  bytes / dt.
 """
 
 # Future
@@ -30,7 +39,6 @@ from __future__ import annotations
 
 # Standard
 from typing import Any
-import random
 
 # Third Party
 from opentelemetry import metrics
@@ -41,43 +49,30 @@ from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
 
 class L2ThroughputSubscriber(EventSubscriber):
-    """Records L1↔L2 throughput by correlating SUBMITTED→COMPLETED pairs.
+    """Records L1↔L2 throughput by correlating SUBMITTED→COMPLETED pairs."""
 
-    Parameters:
-        sample_rate: Fraction of tasks to track (0, 1.0].  Default 0.01
-            (1%), matching other lifecycle subscribers.
-    """
-
-    def __init__(self, sample_rate: float = 0.01) -> None:
-        assert 0 < sample_rate <= 1.0, (
-            f"sample_rate must be in (0, 1.0], got {sample_rate}"
-        )
-        self._sample_rate = sample_rate
-
-        # (adapter_index, task_id) -> (t_start, total_bytes).  Populated
-        # only for sampled store tasks; bytes are read from SUBMITTED and
-        # retrieved at COMPLETED time.
+    def __init__(self) -> None:
+        # (adapter_index, task_id) -> (t_start, total_bytes).
         self._pending_store: dict[tuple[int, int], tuple[float, int]] = {}
-        # (request_id, adapter_index) -> (t_start, total_bytes).  Populated
-        # only for sampled load tasks.
+        # (request_id, adapter_index) -> (t_start, total_bytes).
         self._pending_load: dict[tuple[int, int], tuple[float, int]] = {}
 
         meter = metrics.get_meter("lmcache_mp.perf")
         self._store_hist = meter.create_histogram(
-            "lmcache_mp.l2_store_throughput_gbs",
+            "lmcache_mp.l2_store_throughput",
             description=(
                 "Histogram of L1->L2 store throughput in GB/s, measured "
-                "per sampled task as total_bytes / (completed_ts - "
+                "per task as total_bytes / (completed_ts - "
                 "submitted_ts).  Spans adapter queue + network/disk I/O, "
                 "so this is end-to-end latency-based throughput."
             ),
             unit="GB/s",
         )
         self._load_hist = meter.create_histogram(
-            "lmcache_mp.l2_load_throughput_gbs",
+            "lmcache_mp.l2_load_throughput",
             description=(
                 "Histogram of L2->L1 load throughput in GB/s, measured "
-                "per sampled (request, adapter) pair as total_bytes / "
+                "per (request, adapter) pair as total_bytes / "
                 "(completed_ts - submitted_ts).  Spans adapter queue + "
                 "network/disk I/O."
             ),
@@ -97,8 +92,6 @@ class L2ThroughputSubscriber(EventSubscriber):
     # -- Store path (L1->L2) -----------------------------------------------
 
     def _on_store_submitted(self, event: Event) -> None:
-        if random.random() >= self._sample_rate:
-            return
         key = self._store_key(event)
         if key is not None:
             total_bytes = int(event.metadata.get("total_bytes", 0))
@@ -108,18 +101,21 @@ class L2ThroughputSubscriber(EventSubscriber):
         key = self._store_key(event)
         if key is None:
             return
+        # If the adapter reports per-task transfer bytes, prefer that
+        # over submitted bytes.  ``None`` means "adapter doesn't track" ->
+        # fall back to submitted-bytes accounting (the load-path code).
+        bytes_transferred = event.metadata.get("bytes_transferred")
         self._record(
             event=event,
             correlation_key=key,
             pending=self._pending_store,
             hist=self._store_hist,
+            override_bytes=bytes_transferred,
         )
 
     # -- Load path (L2->L1) ------------------------------------------------
 
     def _on_load_submitted(self, event: Event) -> None:
-        if random.random() >= self._sample_rate:
-            return
         key = self._load_key(event)
         if key is not None:
             total_bytes = int(event.metadata.get("total_bytes", 0))
@@ -170,13 +166,19 @@ class L2ThroughputSubscriber(EventSubscriber):
         correlation_key: tuple[int, int],
         pending: dict[tuple[int, int], tuple[float, int]],
         hist: Any,
+        override_bytes: int | None = None,
     ) -> None:
         pending_entry = pending.pop(correlation_key, None)
         if pending_entry is None:
-            return  # task wasn't sampled
+            return  # no matching SUBMITTED event;
         t_start, total_bytes = pending_entry
 
-        if total_bytes <= 0:
+        # ``override_bytes`` carries the adapter-reported transfer bytes
+        # for fast-path-aware adapters.  ``None`` -> use submitted bytes
+        # (current behavior).  ``0`` -> adapter fast-pathed everything,
+        # there is no real throughput to record -- drop the sample.
+        effective_bytes = total_bytes if override_bytes is None else override_bytes
+        if effective_bytes <= 0:
             return
 
         dt = event.timestamp - t_start
@@ -188,4 +190,4 @@ class L2ThroughputSubscriber(EventSubscriber):
         if l2_name is not None:
             attrs["l2_name"] = str(l2_name)
 
-        hist.record(total_bytes / dt / 1e9, attributes=attrs)
+        hist.record(effective_bytes / dt / 1e9, attributes=attrs)

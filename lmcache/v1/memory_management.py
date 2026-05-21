@@ -16,6 +16,7 @@ from sortedcontainers import SortedList
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
@@ -392,8 +393,8 @@ def _resolve_pinned_alloc_free(
             (lmc_ops.free_shm_pinned_ptr, size, shm_name),
         )
     elif numa_mapping:
-        if torch.cuda.is_available():
-            current_device_id = torch.cuda.current_device()
+        if torch_dev.is_available():
+            current_device_id = torch_dev.current_device()
         else:
             current_device_id = 0
         gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
@@ -440,8 +441,8 @@ def _free_cpu_memory(
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
 ) -> None:
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    if torch_dev.is_available():
+        torch_dev.synchronize()
 
     _, free_info = _resolve_pinned_alloc_free(
         numa_mapping,
@@ -1705,7 +1706,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 self.batched_free(allocated_blocks, update_stats=False)
                 return None
 
-            # FIXME: think about whether pareant_allocator
+            # FIXME: think about whether parent_allocator
             # should be updated here.
             free_block.meta.shape = shapes[0]
             free_block.meta.dtype = dtypes[0]
@@ -2208,8 +2209,8 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def close(self):
         if not self._unregistered:
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            if torch_dev.is_available():
+                torch_dev.synchronize()
             if self.buffer.numel() == 0:
                 return
             _free_cpu_memory(
@@ -2242,7 +2243,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
     def __init__(
         self,
         size: int,
-        device="cuda",
+        device=torch_device_type,
         align_bytes: Optional[int] = None,
         use_paging: bool = False,
         **kwargs,
@@ -2251,7 +2252,7 @@ class GPUMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the GPU memory in bytes.
         :param Optional[int] align_bytes: The byte alignment for allocations.
         """
-        if not torch.cuda.is_available():
+        if not torch_dev.is_available():
             device = "cpu"
 
         self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
@@ -2335,7 +2336,7 @@ class AdHocMemoryAllocator(MemoryAllocatorInterface):
         """
         :param str device: The device of the ad hoc memory allocator.
         """
-        if not torch.cuda.is_available():
+        if not torch_dev.is_available():
             self.device = "cpu"
         else:
             self.device = device
@@ -2424,8 +2425,8 @@ class CuFileMemoryAllocator(GPUMemoryAllocator):
         if device is None:
             # TODO(Serapheim): Ideally we'd get the device from the upper
             # layer - for now just use the current device.
-            if torch.cuda.is_available():
-                device = f"cuda:{torch.cuda.current_device()}"
+            if torch_dev.is_available():
+                device = f"{torch_device_type}:{torch_dev.current_device()}"
             else:
                 device = "cpu:0"
         super().__init__(size, device, align_bytes=4096)
@@ -2448,9 +2449,9 @@ class HipFileMemoryAllocator(GPUMemoryAllocator):
 
         self.hipFileBufDeregister = hipFileBufDeregister
         if device is None:
-            if torch.cuda.is_available():
+            if torch_dev.is_available():
                 # TODO: On ROCm, PyTorch still uses the CUDA API internally
-                device = f"cuda:{torch.cuda.current_device()}"
+                device = f"{torch_device_type}:{torch_dev.current_device()}"
             else:
                 device = "cpu:0"
 
@@ -2481,7 +2482,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         shapes: list[torch.Size],
         dtypes: list[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        device: str = "cuda",
+        device: str = torch_device_type,
     ):
         self.gpu_buffer = torch.empty(
             size,
@@ -2564,89 +2565,3 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
 
     def __str__(self):
         return "PDMemoryAllocator"
-
-
-class XPUMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated XPU memory."""
-
-    def __init__(
-        self,
-        size: int,
-        device="xpu",
-        align_bytes: Optional[int] = None,
-        use_paging: bool = False,
-        **kwargs,
-    ):
-        self.tensor = torch.empty((size,), dtype=torch.uint8, device=device)
-
-        self.allocator: MemoryAllocatorInterface
-        if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.allocator = PagedTensorMemoryAllocator(
-                tensor=self.tensor,
-                shapes=kwargs["shapes"],
-                dtypes=kwargs["dtypes"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            alloc_kwargs = {}
-            if align_bytes is not None:
-                alloc_kwargs["align_bytes"] = align_bytes
-            self.allocator = TensorMemoryAllocator(self.tensor, **alloc_kwargs)
-
-        self.device_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        with self.device_mem_lock:
-            return self.allocator.allocate(shapes, dtypes, fmt, str(self))
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[MemoryObj]]:
-        with self.device_mem_lock:
-            return self.allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt, str(self)
-            )
-
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        with self.device_mem_lock:
-            self.allocator.free(memory_obj)
-
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        with self.device_mem_lock:
-            self.allocator.batched_free(memory_objs)
-
-    def memcheck(self):
-        with self.device_mem_lock:
-            return self.allocator.memcheck()
-
-    def close(self):
-        if hasattr(torch, "xpu") and torch.xpu.is_available():
-            torch.xpu.synchronize()
-
-    def __str__(self):
-        return "XPUMemoryAllocator"

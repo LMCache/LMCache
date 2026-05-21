@@ -5,10 +5,10 @@
 #
 # Flow:
 #   1. Run a `lmcache bench engine --workload random-prefill` round.
-#   2. Snapshot lmcache_mp_l1_write_keys_total via /metrics.
+#   2. Snapshot lmcache_mp_l1_write_chunks_total via /metrics.
 #   3. Kill the LMCache server, relaunch on the same port.
 #   4. Wait for the new server to be ready and for the worker to
-#      re-register (poll /api/status until gpu_context_meta is non-empty).
+#      re-register (poll /status until gpu_context_meta is non-empty).
 #   5. Run the same bench round again.
 #   6. Snapshot the metric again.
 #   7. Assert run2 > 0 and run2 >= 0.8 * run1.
@@ -97,7 +97,7 @@ run_bench_round() {
 }
 
 scrape_l1_write_keys() {
-    # Print the latest lmcache_mp_l1_write_keys_total value (single sample,
+    # Print the latest lmcache_mp_l1_write_chunks_total value (single sample,
     # unlabeled) from the LMCache HTTP server's /metrics endpoint.
     python3 - <<EOF
 import sys, urllib.request
@@ -111,7 +111,7 @@ total = None
 for line in body.splitlines():
     if line.startswith("#"):
         continue
-    if not line.startswith("lmcache_mp_l1_write_keys_total"):
+    if not line.startswith("lmcache_mp_l1_write_chunks_total"):
         continue
     parts = line.rsplit(" ", 1)
     if len(parts) != 2:
@@ -122,7 +122,7 @@ for line in body.splitlines():
         continue
     total = (total or 0.0) + val
 if total is None:
-    print(f"ERROR: lmcache_mp_l1_write_keys_total not found at {url}", file=sys.stderr)
+    print(f"ERROR: lmcache_mp_l1_write_chunks_total not found at {url}", file=sys.stderr)
     sys.exit(1)
 print(int(total))
 EOF
@@ -131,7 +131,7 @@ EOF
 wait_for_lmcache_http() {
     local deadline=$(( $(date +%s) + 60 ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        if curl -sf "http://localhost:${LMCACHE_HTTP_PORT}/api/healthcheck" > /dev/null 2>&1; then
+        if curl -sf "http://localhost:${LMCACHE_HTTP_PORT}/healthcheck" > /dev/null 2>&1; then
             echo "LMCache HTTP healthy"
             return 0
         fi
@@ -142,7 +142,7 @@ wait_for_lmcache_http() {
 }
 
 wait_for_worker_reregister() {
-    # Poll /api/status until gpu_context_meta has at least one entry,
+    # Poll /status until gpu_context_meta has at least one entry,
     # which proves the vLLM worker re-registered with the new server.
     local deadline=$(( $(date +%s) + RECOVER_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -150,7 +150,7 @@ wait_for_worker_reregister() {
         count=$(python3 - <<EOF 2>/dev/null
 import json, urllib.request
 try:
-    body = urllib.request.urlopen("http://localhost:${LMCACHE_HTTP_PORT}/api/status", timeout=5).read()
+    body = urllib.request.urlopen("http://localhost:${LMCACHE_HTTP_PORT}/status", timeout=5).read()
     data = json.loads(body)
     print(len(data.get("gpu_context_meta", {})))
 except Exception:
@@ -211,7 +211,7 @@ ROUND1_WRITES=$(scrape_l1_write_keys) || {
     echo "FAIL: could not scrape /metrics after round 1"
     exit 1
 }
-echo "Round 1 lmcache_mp_l1_write_keys_total = $ROUND1_WRITES"
+echo "Round 1 lmcache_mp_l1_write_chunks_total = $ROUND1_WRITES"
 
 if [ "$ROUND1_WRITES" -le 0 ]; then
     echo "FAIL: round 1 produced no L1 writes; benchmark setup is broken"
@@ -257,7 +257,7 @@ ROUND2_WRITES=$(scrape_l1_write_keys) || {
     echo "FAIL: could not scrape /metrics after round 2"
     exit 1
 }
-echo "Round 2 lmcache_mp_l1_write_keys_total = $ROUND2_WRITES"
+echo "Round 2 lmcache_mp_l1_write_chunks_total = $ROUND2_WRITES"
 
 # ── Step 4: Compare metrics ──────────────────────────────────
 echo ""

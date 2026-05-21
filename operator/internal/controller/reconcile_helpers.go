@@ -36,13 +36,30 @@ import (
 	"github.com/LMCache/LMCache/internal/resources"
 )
 
-// handleFinalizer adds or processes the finalizer. Returns (err, done).
-// If done is true, the caller should return immediately.
+// handleFinalizer migrates any LMCacheEngine carrying the legacy
+// "lmcache.ai/cleanup" finalizer off of it. Owner references on every
+// child resource (DaemonSet, Services, ConfigMap, managed Secret)
+// already cause K8s garbage collection to cascade-delete them when
+// the CR goes away, so no finalizer work is necessary today.
+//
+// Why this changed: a no-op finalizer blocks CR deletion whenever the
+// controller pod isn't running (e.g. during cluster issues or a
+// `kubectl delete -k config/default` that takes down the operator
+// alongside the CRDs), with no upside since GC already does the work.
+// See discussion in https://github.com/LMCache/LMCache/issues/2693.
+//
+// We may re-introduce a finalizer in the future for state K8s GC
+// can't reach — e.g. evicting L2 Redis keys on CR delete, federation
+// deregistration. When that happens, this function will grow real
+// cleanup work alongside the legacy migration.
+//
+// Returns (err, done). If done is true the caller must return.
 func (r *LMCacheEngineReconciler) handleFinalizer(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) (error, bool) {
+	// On the deletion path we still need to clear the legacy finalizer
+	// if a CR created by an older operator version is being deleted,
+	// otherwise K8s would block on it forever.
 	if engine.DeletionTimestamp != nil {
 		if controllerutil.ContainsFinalizer(engine, finalizerName) {
-			// Owned resources are cleaned up by K8s garbage collection via ownerRefs.
-			// Remove the finalizer to allow deletion.
 			controllerutil.RemoveFinalizer(engine, finalizerName)
 			if err := r.Update(ctx, engine); err != nil {
 				return err, true
@@ -51,15 +68,17 @@ func (r *LMCacheEngineReconciler) handleFinalizer(ctx context.Context, engine *l
 		return nil, true
 	}
 
-	// Add finalizer if not present.
-	if !controllerutil.ContainsFinalizer(engine, finalizerName) {
-		controllerutil.AddFinalizer(engine, finalizerName)
+	// Pro-active migration on the create/update path: strip the
+	// legacy finalizer from any CR that still has it from a prior
+	// operator version, so future deletes don't deadlock.
+	if controllerutil.ContainsFinalizer(engine, finalizerName) {
+		controllerutil.RemoveFinalizer(engine, finalizerName)
 		if err := r.Update(ctx, engine); err != nil {
 			return err, true
 		}
-		// Return done=true so the controller requeues with a fresh Get.
-		// Continuing here would risk a resourceVersion conflict because
-		// the Update changed the object on the server.
+		// Return done=true so the controller requeues with a fresh
+		// Get; continuing here would race with the resourceVersion
+		// bump the Update just produced on the server.
 		return nil, true
 	}
 
