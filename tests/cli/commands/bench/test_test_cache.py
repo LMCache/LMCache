@@ -21,7 +21,7 @@ import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
-from lmcache.cli.commands.test_cache import (
+from lmcache.cli.commands.bench.test_cache import (
     _allocate_gpu_kv_cache,
     _build_token_ids,
     _make_key,
@@ -62,6 +62,17 @@ class TestCommandMetadata:
 
     def test_help(self, cmd: BenchCommand) -> None:
         assert "benchmark" in cmd.help().lower()
+
+    def test_test_cache_lives_under_bench_package(self) -> None:
+        """``test_cache`` is the impl behind ``bench kvcache`` and must
+        live inside the ``bench`` sub-package, not at the top-level CLI
+        commands package — otherwise auto-discovery would expose
+        ``TestCacheCommand`` as a stand-alone verb.
+        """
+        # First Party
+        from lmcache.cli.commands.bench.test_cache import TestCacheCommand
+
+        assert TestCacheCommand.__module__ == ("lmcache.cli.commands.bench.test_cache")
 
 
 # ------------------------------------------------------------------ #

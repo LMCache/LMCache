@@ -21,32 +21,32 @@ msgstr ""
 
 #: ../../source/recipes/index.rst:4
 msgid "Recipes"
-msgstr ""
+msgstr "食谱"
 
 #: ../../source/recipes/index.rst:6
 msgid ""
 "This section lists model architectures that have been validated end-to-"
 "end with LMCache, with a recipe page per architecture covering only the "
 "LMCache-specific configuration that diverges from defaults."
-msgstr ""
+msgstr "本节列出了经过 LMCache 端到端验证的模型架构，每个架构都有一个配方页面，涵盖与默认设置不同的仅 LMCache 特定配置。"
 
 #: ../../source/recipes/index.rst:10
 msgid ""
 "Engine-side documentation (how to serve the model itself) lives with the "
 "serving engine. Recipe pages link out rather than duplicate."
-msgstr ""
+msgstr "引擎端文档（如何服务模型本身）与服务引擎一起存在。食谱页面链接而不是重复。"
 
 #: ../../source/recipes/index.rst:14
 msgid "Recipe page contents"
-msgstr ""
+msgstr "食谱页面内容"
 
 #: ../../source/recipes/index.rst:16
 msgid "Each recipe page is intentionally minimal:"
-msgstr ""
+msgstr "每个食谱页面都故意保持简约："
 
 #: ../../source/recipes/index.rst:18
 msgid "**Validated models** -- exact HF repo IDs that have been tested."
-msgstr ""
+msgstr "**验证过的模型** -- 已测试的确切 HF 仓库 ID。"
 
 #: ../../source/recipes/index.rst:19
 msgid ""
@@ -54,21 +54,21 @@ msgid ""
 "Each tab links to the engine's own documentation for the model and shows "
 "the exact ``lmcache server`` and engine launch commands. Tabs for engines"
 " that are not yet validated state so explicitly."
-msgstr ""
+msgstr "**引擎选项卡** -- 每个服务引擎 (vLLM, SGLang, TRT-LLM) 一个选项卡。每个选项卡链接到该引擎的模型文档，并显示确切的 ``lmcache server`` 和引擎启动命令。尚未验证的引擎的选项卡会明确说明。"
 
 #: ../../source/recipes/index.rst:23
 msgid "**CacheBlend support** -- validation status (may be empty)."
-msgstr ""
+msgstr "**CacheBlend 支持** -- 验证状态（可能为空）。"
 
 #: ../../source/recipes/index.rst:24
 msgid ""
 "**Compression support** -- table of compression methods (CacheGen, etc.) "
 "with per-method validation status. Extensible: new methods get a row."
-msgstr ""
+msgstr "**压缩支持** -- 压缩方法（CacheGen 等）的表格，包含每种方法的验证状态。可扩展：新方法将获得一行。"
 
 #: ../../source/recipes/index.rst:26
 msgid "**Caveats** -- known limitations, if any."
-msgstr ""
+msgstr "**注意事项** -- 已知的限制（如果有的话）。"
 
 #: ../../source/recipes/index.rst:28
 msgid ""
@@ -76,49 +76,49 @@ msgid ""
 "mode, sending a first request), see :doc:`../getting_started/quickstart` "
 "and :doc:`../mp/quickstart`. Recipes assume those pages as a "
 "prerequisite."
-msgstr ""
+msgstr "有关通用 LMCache + 引擎连接（端口、远程主机、进程内模式、发送第一个请求），请参阅 :doc:`../getting_started/quickstart` 和 :doc:`../mp/quickstart`。食谱假设这些页面是先决条件。"
 
 #: ../../source/recipes/index.rst:33
 msgid "Supported architectures"
-msgstr ""
+msgstr "支持的架构"
 
 #: ../../source/recipes/index.rst:39
 msgid "Architecture"
-msgstr ""
+msgstr "架构"
 
 #: ../../source/recipes/index.rst:40
 msgid "Example HF model"
-msgstr ""
+msgstr "示例 HF 模型"
 
 #: ../../source/recipes/index.rst:41
 msgid "vLLM"
-msgstr ""
+msgstr "vLLM"
 
 #: ../../source/recipes/index.rst:42
 msgid "SGLang"
-msgstr ""
+msgstr "SGLang"
 
 #: ../../source/recipes/index.rst:43
 msgid "TRT-LLM"
-msgstr ""
+msgstr "TRT-LLM"
 
 #: ../../source/recipes/index.rst:44
 msgid "Recipe"
-msgstr ""
+msgstr "食谱"
 
 #: ../../source/recipes/index.rst:45
 msgid "``MiniMaxM2ForCausalLM``"
-msgstr ""
+msgstr "``MiniMaxM2ForCausalLM``"
 
 #: ../../source/recipes/index.rst:46
 msgid "``MiniMaxAI/MiniMax-M2``"
-msgstr ""
+msgstr "``MiniMaxAI/MiniMax-M2``"
 
 #: ../../source/recipes/index.rst:47 ../../source/recipes/index.rst:53
 #: ../../source/recipes/index.rst:59 ../../source/recipes/index.rst:65
 #: ../../source/recipes/index.rst:71
 msgid "✓"
-msgstr ""
+msgstr "✓"
 
 #: ../../source/recipes/index.rst:48 ../../source/recipes/index.rst:49
 #: ../../source/recipes/index.rst:54 ../../source/recipes/index.rst:55
@@ -126,86 +126,86 @@ msgstr ""
 #: ../../source/recipes/index.rst:66 ../../source/recipes/index.rst:67
 #: ../../source/recipes/index.rst:72 ../../source/recipes/index.rst:73
 msgid "—"
-msgstr ""
+msgstr "—"
 
 #: ../../source/recipes/index.rst:50
 msgid ":doc:`minimax_m2`"
-msgstr ""
+msgstr ":doc:`minimax_m2`"
 
 #: ../../source/recipes/index.rst:51
 msgid "``Gemma4ForConditionalGeneration``"
-msgstr ""
+msgstr "``Gemma4ForConditionalGeneration``"
 
 #: ../../source/recipes/index.rst:52
 msgid "``google/gemma-4-31B-it``"
-msgstr ""
+msgstr "``google/gemma-4-31B-it``"
 
 #: ../../source/recipes/index.rst:56
 msgid ":doc:`gemma4`"
-msgstr ""
+msgstr ":doc:`gemma4`"
 
 #: ../../source/recipes/index.rst:57
 msgid "``MistralForCausalLM``"
-msgstr ""
+msgstr "``MistralForCausalLM``"
 
 #: ../../source/recipes/index.rst:58
 msgid "``mistralai/Devstral-2-123B-Instruct-2512``"
-msgstr ""
+msgstr "``mistralai/Devstral-2-123B-Instruct-2512``"
 
 #: ../../source/recipes/index.rst:62
 msgid ":doc:`devstral`"
-msgstr ""
+msgstr ":doc:`devstral`"
 
 #: ../../source/recipes/index.rst:63
 msgid "``GptOssForCausalLM``"
-msgstr ""
+msgstr "``GptOssForCausalLM``"
 
 #: ../../source/recipes/index.rst:64
 msgid "``openai/gpt-oss-120b``"
-msgstr ""
+msgstr "``openai/gpt-oss-120b``"
 
 #: ../../source/recipes/index.rst:68
 msgid ":doc:`gpt_oss`"
-msgstr ""
+msgstr ":gpt_oss:"
 
 #: ../../source/recipes/index.rst:69
 msgid "``Qwen3MoeForCausalLM``"
-msgstr ""
+msgstr "``Qwen3MoeForCausalLM``"
 
 #: ../../source/recipes/index.rst:70
 msgid "``Qwen/Qwen3-235B-A22B``"
-msgstr ""
+msgstr "``Qwen/Qwen3-235B-A22B``"
 
 #: ../../source/recipes/index.rst:74
 msgid ":doc:`qwen3`"
-msgstr ""
+msgstr "：doc:`qwen3`"
 
 #: ../../source/recipes/index.rst:76
 msgid "Legend: ``✓`` validated, ``—`` not validated."
-msgstr ""
+msgstr "图例：``✓`` 已验证，``—`` 未验证。"
 
 #: ../../source/recipes/index.rst:79
 msgid "Contributing a recipe"
-msgstr ""
+msgstr "贡献一个食谱"
 
 #: ../../source/recipes/index.rst:81
 msgid "To add a new architecture:"
-msgstr ""
+msgstr "要添加一个新架构："
 
 #: ../../source/recipes/index.rst:83
 msgid ""
 "Copy an existing page (e.g. ``minimax_m2.rst``) to "
 "``recipes/<architecture_snake_case>.rst``."
-msgstr ""
+msgstr "将现有页面（例如 ``minimax_m2.rst``）复制到 ``recipes/<architecture_snake_case>.rst``。"
 
 #: ../../source/recipes/index.rst:85
 msgid ""
 "Fill in **Validated models**, **Engines**, **LMCache configuration**, and"
 " **Caveats**. Keep each section terse -- if a field has nothing to say, "
 "say so in one line rather than padding it."
-msgstr ""
+msgstr "填写 **已验证模型**、**引擎**、**LMCache 配置** 和 **注意事项**。保持每个部分简洁 -- 如果某个字段没有内容，请用一行说明，而不是填充内容。"
 
 #: ../../source/recipes/index.rst:88
 msgid "Add a row to the table above and an entry to the hidden toctree below."
-msgstr ""
+msgstr "在上面的表格中添加一行，并在下面的隐藏 toctree 中添加一个条目。"
 

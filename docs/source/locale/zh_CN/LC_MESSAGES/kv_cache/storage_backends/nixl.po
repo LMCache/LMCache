@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:3
 msgid "Nixl"
-msgstr ""
+msgstr "Nixl"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:8
 msgid "Overview"
-msgstr ""
+msgstr "概述"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:10
 msgid ""
@@ -35,69 +35,69 @@ msgid ""
 "and GPU) and storage through a modular plug-in architecture, enabling "
 "efficient data transfer and coordination between different components of "
 "the inference pipeline."
-msgstr ""
+msgstr "NIXL（NVIDIA 推理传输库）是一个高性能库，旨在加速 AI 推理框架中的点对点通信。它通过模块化插件架构提供对各种类型内存（CPU 和 GPU）和存储的抽象，使得推理管道中不同组件之间的数据传输和协调更加高效。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:12
 msgid ""
 "LMCache supports using NIXL as a storage backend, allowing using NIXL to "
 "save either GPU or CPU memory into storage."
-msgstr ""
+msgstr "LMCache 支持将 NIXL 用作存储后端，允许将显存或 CPU 内存保存到存储中。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:15
 msgid "Prerequisites"
-msgstr ""
+msgstr "前提条件"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:17
 msgid "**LMCache**: Install with ``pip install lmcache``"
-msgstr ""
+msgstr "**LMCache**: 使用 ``pip install lmcache`` 安装"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:18
 msgid ""
 "**NIXL**: Install from `NIXL GitHub repository <https://github.com/ai-"
 "dynamo/nixl>`_"
-msgstr ""
+msgstr "**NIXL**: 从 `NIXL GitHub repository <https://github.com/ai-dynamo/nixl>`_ 安装"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:19
 msgid ""
 "**Model Access**: Valid Hugging Face token (HF_TOKEN) for Llama 3.1 8B "
 "Instruct"
-msgstr ""
+msgstr "**模型访问**：有效的 Hugging Face 令牌 (HF_TOKEN) 用于 Llama 3.1 8B Instruct"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:22
 msgid "Ways to configure LMCache NIXL Offloading"
-msgstr ""
+msgstr "配置 LMCache NIXL 卸载的方法"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:24
 msgid "**Configuration File**:"
-msgstr ""
+msgstr "**配置文件**："
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:26
 msgid "Passed in through ``LMCACHE_CONFIG_FILE=lmcache-config.yaml``"
-msgstr ""
+msgstr "通过 ``LMCACHE_CONFIG_FILE=lmcache-config.yaml`` 传入"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:28
 msgid "Example ``lmcache-config.yaml`` for POSIX backend:"
-msgstr ""
+msgstr "示例 ``lmcache-config.yaml`` 用于 POSIX 后端："
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:42
 msgid "Key settings:"
-msgstr ""
+msgstr "关键设置："
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:44
 msgid "``nixl_buffer_size``: buffer size for NIXL transfers."
-msgstr ""
+msgstr "``nixl_buffer_size``: NIXL 传输的缓冲区大小。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:46
 msgid ""
 "``nixl_pool_size``: number of descriptors opened at init time for nixl "
 "backend. Set to 0 for dynamic mode."
-msgstr ""
+msgstr "``nixl_pool_size``: 初始化时为 nixl 后端打开的描述符数量。设置为 0 以启用动态模式。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:48
 msgid ""
 "``nixl_path``: directory under which the storage files will be saved "
 "(e.g. /mnt/nixl/). Needed for NIXL backends that store to file."
-msgstr ""
+msgstr "``nixl_path``: 存储文件将保存的目录（例如 /mnt/nixl/）。对于将数据存储到文件的 NIXL 后端，这是必需的。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:50
 msgid ""
@@ -105,48 +105,48 @@ msgid ""
 "be on. \"cpu\" or \"cuda\" is supported for \"GDS\", \"GDS_MT\", and "
 "\"OBJ\" backends - for \"POSIX\", \"HF3FS\" & \"AZURE_BLOB\", must be "
 "\"cpu\"."
-msgstr ""
+msgstr "``nixl_buffer_device``: 指定 NIXL 管理的内存应该位于何处。对于 \\\"GDS\\\"、\\\"GDS_MT\\\" 和 \\\"OBJ\\\" 后端，支持 \\\"cpu\\\" 或 \\\"cuda\\\"；对于 \\\"POSIX\\\"、\\\"HF3FS\\\" 和 \\\"AZURE_BLOB\\\"，必须为 \\\"cpu\\\"。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:52
 msgid "``nixl_backend``: configuration of which nixl backend to use for storage."
-msgstr ""
+msgstr "``nixl_backend``: 配置用于存储的 nixl 后端。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:56
 msgid ""
 "Supported backends are: [\"GDS\", \"GDS_MT\", \"POSIX\", \"HF3FS\", "
 "\"OBJ\", \"AZURE_BLOB\"]."
-msgstr ""
+msgstr "支持的后端包括：[\\\"GDS\\\", \\\"GDS_MT\\\", \\\"POSIX\\\", \\\"HF3FS\\\", \\\"OBJ\\\", \\\"AZURE_BLOB\\\"]。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:58
 msgid ""
 "Backend specific params should be provided via "
 "``extra_config.nixl_backend_params``. Please refer to NIXL documentation "
 "for specifics."
-msgstr ""
+msgstr "后端特定参数应通过 ``extra_config.nixl_backend_params`` 提供。有关具体信息，请参阅 NIXL 文档。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:60
 msgid "Example ``lmcache-config.yaml`` for OBJ backend using S3 API:"
-msgstr ""
+msgstr "示例 ``lmcache-config.yaml`` 用于使用 S3 API 的 OBJ 后端："
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:78
 msgid "Example ``lmcache-config.yaml`` for POSIX backend using liburing:"
-msgstr ""
+msgstr "示例 ``lmcache-config.yaml`` 用于使用 liburing 的 POSIX 后端："
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:82
 msgid ""
 "using POSIX backend with liburing requires NIXL to be built with liburing"
 " support."
-msgstr ""
+msgstr "使用带有 liburing 支持的 POSIX 后端需要将 NIXL 构建为支持 liburing。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:98
 msgid ""
 "Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using "
 "Azure Blob Storage API:"
-msgstr ""
+msgstr "示例 ``lmcache-config.yaml`` 用于 AZURE_BLOB 后端，通过 Azure Blob Storage API 进行卸载："
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:115
 msgid "Per-Worker Endpoint Distribution"
-msgstr ""
+msgstr "每个工作节点的端点分配"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:117
 msgid ""
@@ -155,49 +155,49 @@ msgid ""
 "providing a list of endpoints via ``nixl_endpoint_list``. Each worker "
 "selects an endpoint in round-robin order based on its ``local_worker_id``"
 " (the worker ID within its host)."
-msgstr ""
+msgstr "当使用 OBJ 后端与多个张量并行 (TP) 工作节点时，您可以通过提供一个端点列表来在多个对象存储端点之间分配工作节点，方法是使用 ``nixl_endpoint_list``。每个工作节点根据其 ``local_worker_id``（其主机内的工作节点 ID）以轮询方式选择一个端点。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:141
 msgid ""
 "When ``nixl_endpoint_list`` is set, any ``endpoint_override`` value in "
 "``nixl_backend_params`` is ignored (a warning is logged)."
-msgstr ""
+msgstr "当设置 ``nixl_endpoint_list`` 时，``nixl_backend_params`` 中的任何 ``endpoint_override`` 值将被忽略（会记录警告）。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:145
 msgid "Dynamic Mode"
-msgstr ""
+msgstr "动态模式"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:147
 msgid ""
 "Nixl Storage Backend also supports a dynamic mode, which creates nixl "
 "storage descriptors on demand instead of at init time."
-msgstr ""
+msgstr "Nixl 存储后端还支持动态模式，该模式按需创建 nixl 存储描述符，而不是在初始化时创建。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:149
 msgid ""
 "In order to use dynamic mode, extra_config.nixl_pool_size should be set "
 "to 0."
-msgstr ""
+msgstr "为了使用动态模式，extra_config.nixl_pool_size 应设置为 0。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:152
 msgid "Restrictions"
-msgstr ""
+msgstr "限制"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:154
 msgid ""
 "Dynamic mode is currently only supported for nixl OBJ and AZURE_BLOB "
 "backends."
-msgstr ""
+msgstr "动态模式目前仅支持 nixl OBJ 和 AZURE_BLOB 后端。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:155
 msgid "save_unfull_chunk must be set to False."
-msgstr ""
+msgstr "save_unfull_chunk 必须设置为 False。"
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:157
 msgid "Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:"
-msgstr ""
+msgstr "示例 ``lmcache-config.yaml`` 用于动态模式的 OBJ 后端："
 
 #: ../../source/kv_cache/storage_backends/nixl.rst:184
 msgid "Example ``lmcache-config.yaml`` for AZURE_BLOB backend with dynamic mode:"
-msgstr ""
+msgstr "示例 ``lmcache-config.yaml`` 用于动态模式的 AZURE_BLOB 后端："
 

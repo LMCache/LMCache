@@ -2,9 +2,6 @@
 
 # Standard
 from typing import Dict, Type
-import importlib
-import inspect
-import pkgutil
 
 # First Party
 from lmcache.logging import init_logger
@@ -12,27 +9,22 @@ from lmcache.v1.lookup_client.record_strategies.base import (
     AsyncRecorder,
     RecordStrategy,
 )
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
 logger = init_logger(__name__)
 
 
 def _discover_strategies() -> Dict[str, Type[RecordStrategy]]:
-    strategies = {}
-    # First Party
-    from lmcache.v1.lookup_client import record_strategies
-
-    for importer, modname, ispkg in pkgutil.iter_modules(
-        record_strategies.__path__, record_strategies.__name__ + "."
+    strategies: Dict[str, Type[RecordStrategy]] = {}
+    for cls in discover_subclasses(
+        __name__,
+        RecordStrategy,  # type: ignore[type-abstract]
+        include_abstract=True,
+        on_import_error=lambda mod, exc: None,
     ):
-        try:
-            module = importlib.import_module(modname)
-            for name, obj in inspect.getmembers(module, inspect.isclass):
-                if issubclass(obj, RecordStrategy) and obj is not RecordStrategy:
-                    # Use module name as strategy name
-                    strategy_name = modname.split(".")[-1]
-                    strategies[strategy_name] = obj
-        except Exception:
-            continue
+        # Use module short name as strategy name
+        strategy_name = cls.__module__.rsplit(".", 1)[-1]
+        strategies[strategy_name] = cls
     return strategies
 
 

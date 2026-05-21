@@ -44,6 +44,9 @@ def test_discover_adapters(monkeypatch):
     non_adapter_module = ModuleType("non_adapter")
     non_adapter_module.NotAnAdapter = object
 
+    fake_package = ModuleType("lmcache.v1.storage_backend.connector")
+    fake_package.__path__ = []  # type: ignore[attr-defined]
+
     def fake_iter_modules(_path):
         """Yield a mix of adapter and non-adapter module names."""
         yield None, "good_adapter", False
@@ -54,6 +57,8 @@ def test_discover_adapters(monkeypatch):
 
     def fake_import_module(name):
         """Return fake modules or simulate import failure."""
+        if name == "lmcache.v1.storage_backend.connector":
+            return fake_package
         if name.endswith(".good_adapter"):
             return good_module
         if name.endswith(".broken_adapter"):

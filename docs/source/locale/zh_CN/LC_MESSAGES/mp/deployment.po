@@ -21,171 +21,171 @@ msgstr ""
 
 #: ../../source/mp/deployment.rst:2
 msgid "Deployment Guide"
-msgstr ""
+msgstr "部署指南"
 
 #: ../../source/mp/deployment.rst:4
 msgid ""
 "This page covers deploying LMCache multiprocess mode in Docker and "
 "Kubernetes environments, along with production best practices."
-msgstr ""
+msgstr "本页介绍了在 Docker 和 Kubernetes 环境中部署 LMCache 多进程模式的最佳实践。"
 
 #: ../../source/mp/deployment.rst:12
 msgid "Docker"
-msgstr ""
+msgstr "Docker"
 
 #: ../../source/mp/deployment.rst:14
 msgid "**LMCache container:**"
-msgstr ""
+msgstr "**LMCache 容器：**"
 
 #: ../../source/mp/deployment.rst:25
 msgid "**vLLM container:**"
-msgstr ""
+msgstr "**vLLM 容器：**"
 
 #: ../../source/mp/deployment.rst:37
 msgid "Required Docker flags:"
-msgstr ""
+msgstr "所需的 Docker 标志："
 
 #: ../../source/mp/deployment.rst:39
 msgid ""
 "``--network host`` -- Allows the vLLM container to reach LMCache on "
 "localhost."
-msgstr ""
+msgstr "``--network host`` -- 允许 vLLM 容器访问本地主机上的 LMCache。"
 
 #: ../../source/mp/deployment.rst:40
 msgid ""
 "``--ipc host`` -- Required for CUDA IPC shared memory transfers between "
 "containers."
-msgstr ""
+msgstr "``--ipc host`` -- 需要用于容器之间的 CUDA IPC 共享内存传输。"
 
 #: ../../source/mp/deployment.rst:42
 msgid ""
 "``--runtime nvidia --gpus all`` -- GPU access via the NVIDIA container "
 "runtime."
-msgstr ""
+msgstr "``--runtime nvidia --gpus all`` -- 通过 NVIDIA 容器运行时访问 GPU。"
 
 #: ../../source/mp/deployment.rst:45
 msgid "**HTTP server variant:**"
-msgstr ""
+msgstr "**HTTP 服务器变体：**"
 
 #: ../../source/mp/deployment.rst:47
 msgid ""
 "For health-check and cache management API support (useful with container "
 "orchestrators), use the HTTP server entry point:"
-msgstr ""
+msgstr "对于健康检查和缓存管理 API 支持（在容器编排器中非常有用），请使用 HTTP 服务器入口点："
 
 #: ../../source/mp/deployment.rst:60
 msgid "Kubernetes"
-msgstr ""
+msgstr "Kubernetes"
 
 #: ../../source/mp/deployment.rst:62
 msgid ""
 "LMCache is designed for a **DaemonSet + Deployment** pattern: one LMCache"
 " server per node (DaemonSet) shared by multiple vLLM pods (Deployment)."
-msgstr ""
+msgstr "LMCache 设计为 **DaemonSet + Deployment** 模式：每个节点一个 LMCache 服务器（DaemonSet），由多个 vLLM pod（Deployment）共享。"
 
 #: ../../source/mp/deployment.rst:65
 msgid "Example YAML files are provided in ``examples/multi_process/``."
-msgstr ""
+msgstr "在 ``examples/multi_process/`` 中提供了示例 YAML 文件。"
 
 #: ../../source/mp/deployment.rst:68
 msgid "Prerequisites"
-msgstr ""
+msgstr "前提条件"
 
 #: ../../source/mp/deployment.rst:70
 msgid "Kubernetes cluster with GPU support (NVIDIA GPU Operator installed)"
-msgstr ""
+msgstr "支持 GPU 的 Kubernetes 集群（安装了 NVIDIA GPU Operator）"
 
 #: ../../source/mp/deployment.rst:71
 msgid "At least 4 GPUs per node"
-msgstr ""
+msgstr "每个节点至少需要 4 个 GPU"
 
 #: ../../source/mp/deployment.rst:72
 msgid "``kubectl`` configured to access your cluster"
-msgstr ""
+msgstr "``kubectl`` 配置为访问您的集群"
 
 #: ../../source/mp/deployment.rst:75
 msgid "Step-by-Step"
-msgstr ""
+msgstr "逐步指南"
 
 #: ../../source/mp/deployment.rst:77
 msgid "**Step 1: Create namespace**"
-msgstr ""
+msgstr "**步骤 1：创建命名空间**"
 
 #: ../../source/mp/deployment.rst:83
 msgid "**Step 2: Deploy LMCache DaemonSet**"
-msgstr ""
+msgstr "**步骤 2：部署 LMCache DaemonSet**"
 
 #: ../../source/mp/deployment.rst:89
 msgid "**Step 3: Deploy vLLM**"
-msgstr ""
+msgstr "**步骤 3：部署 vLLM**"
 
 #: ../../source/mp/deployment.rst:96
 msgid ""
 "The default model is ``Qwen/Qwen3-14B``.  For gated models (e.g., Llama),"
 " create a Secret with your Hugging Face token:"
-msgstr ""
+msgstr "默认模型是 ``Qwen/Qwen3-14B``。对于受限模型（例如 Llama），请使用您的 Hugging Face 令牌创建一个 Secret："
 
 #: ../../source/mp/deployment.rst:105
 msgid "Then add the ``HF_TOKEN`` environment variable to the vLLM container spec."
-msgstr ""
+msgstr "然后将 ``HF_TOKEN`` 环境变量添加到 vLLM 容器规格中。"
 
 #: ../../source/mp/deployment.rst:107
 msgid "**Step 4: Monitor deployment**"
-msgstr ""
+msgstr "**步骤 4：监控部署**"
 
 #: ../../source/mp/deployment.rst:126
 msgid "**Step 5: Send test requests**"
-msgstr ""
+msgstr "**步骤 5：发送测试请求**"
 
 #: ../../source/mp/deployment.rst:141
 msgid "Architecture Notes"
-msgstr ""
+msgstr "架构说明"
 
 #: ../../source/mp/deployment.rst:143
 msgid ""
 "**DaemonSet uses ``hostNetwork: true``** so vLLM pods discover the "
 "LMCache server via ``status.hostIP``."
-msgstr ""
+msgstr "**DaemonSet 使用 ``hostNetwork: true``** 以便 vLLM pod 通过 ``status.hostIP`` 发现 LMCache 服务器。"
 
 #: ../../source/mp/deployment.rst:145
 msgid ""
 "**Both containers mount ``/dev/shm``** from the host to enable CUDA IPC "
 "memory sharing."
-msgstr ""
+msgstr "**两个容器从主机挂载 ``/dev/shm``** 以启用 CUDA IPC 内存共享。"
 
 #: ../../source/mp/deployment.rst:147
 msgid ""
 "**GPUs are NOT requested in the DaemonSet** -- this allows GPUs to remain"
 " exclusively allocated to vLLM pods.  The NVIDIA container runtime "
 "automatically provides GPU access for IPC-based memory transfers."
-msgstr ""
+msgstr "**不在 DaemonSet 中请求 GPU** -- 这允许 GPU 保持专门分配给 vLLM pod。NVIDIA 容器运行时自动提供 GPU 访问以进行基于 IPC 的内存传输。"
 
 #: ../../source/mp/deployment.rst:150
 msgid ""
 "**Multiple vLLM pods** on the same node automatically connect to the same"
 " LMCache DaemonSet instance."
-msgstr ""
+msgstr "**多个 vLLM pod** 在同一节点上会自动连接到同一个 LMCache DaemonSet 实例。"
 
 #: ../../source/mp/deployment.rst:154
 msgid ""
 "LMCache pods on nodes without GPUs will crash with CUDA initialization "
 "errors.  This is expected -- LMCache only needs to run on GPU nodes where"
 " vLLM pods are scheduled."
-msgstr ""
+msgstr "没有 GPU 的节点上的 LMCache pod 会因 CUDA 初始化错误而崩溃。这是预期的——LMCache 只需要在调度有 vLLM pod 的 GPU 节点上运行。"
 
 #: ../../source/mp/deployment.rst:159
 msgid "Health Checking (HTTP Server)"
-msgstr ""
+msgstr "健康检查 (HTTP 服务器)"
 
 #: ../../source/mp/deployment.rst:161
 msgid ""
 "For Kubernetes liveness/readiness probes, deploy the HTTP server variant "
 "instead.  Use the ``/healthcheck`` endpoint:"
-msgstr ""
+msgstr "对于 Kubernetes 活跃性/就绪性探针，请部署 HTTP 服务器变体。使用 ``/healthcheck`` 端点："
 
 #: ../../source/mp/deployment.rst:180
 msgid "Monitoring Integration"
-msgstr ""
+msgstr "监控集成"
 
 #: ../../source/mp/deployment.rst:182
 msgid ""
@@ -193,15 +193,15 @@ msgid ""
 "``ServiceMonitor`` or Prometheus scrape annotation to collect metrics "
 "from the LMCache DaemonSet pods.  See :doc:`observability` for metric "
 "details."
-msgstr ""
+msgstr "默认情况下，Prometheus 指标在 9090 端口启用。添加 ``ServiceMonitor`` 或 Prometheus 抓取注释以从 LMCache DaemonSet Pod 收集指标。有关指标详细信息，请参见 :doc:`observability`。"
 
 #: ../../source/mp/deployment.rst:187
 msgid "Cleanup"
-msgstr ""
+msgstr "清理"
 
 #: ../../source/mp/deployment.rst:196
 msgid "Production Best Practices"
-msgstr ""
+msgstr "生产最佳实践"
 
 #: ../../source/mp/deployment.rst:198
 msgid ""
@@ -212,43 +212,43 @@ msgid ""
 "instances sharing the cache server so each instance gets its own "
 "dedicated thread.  Use ``--max-cpu-workers`` to override the CPU pool for"
 " lookup and other non-GPU operations."
-msgstr ""
+msgstr "**工作进程数量 (``--max-workers``, ``--max-gpu-workers``, ``--max-cpu-workers``):** ``--max-workers`` 设置 GPU 亲和力池和 CPU 正常池的大小（默认值为 1）。使用 ``--max-gpu-workers`` 独立覆盖 GPU 池——将其设置为至少与共享缓存服务器的 vLLM 实例数量相同，以便每个实例获得自己的专用线程。使用 ``--max-cpu-workers`` 来覆盖查找和其他非 GPU 操作的 CPU 池。"
 
 #: ../../source/mp/deployment.rst:205
 msgid ""
 "**L1 memory sizing (``--l1-size-gb``):** Allocate as much CPU memory as "
 "available after accounting for the OS and vLLM. A larger L1 cache means "
 "fewer L2 round-trips."
-msgstr ""
+msgstr "**L1 内存大小 (``--l1-size-gb``):** 在考虑操作系统和 vLLM 后，分配尽可能多的 CPU 内存。更大的 L1 缓存意味着更少的 L2 往返。"
 
 #: ../../source/mp/deployment.rst:209
 msgid "**Eviction tuning:**"
-msgstr ""
+msgstr "**逐出调优:**"
 
 #: ../../source/mp/deployment.rst:211
 #, python-format
 msgid ""
 "``--eviction-trigger-watermark 0.8`` (default) triggers eviction when L1 "
 "is 80% full."
-msgstr ""
+msgstr "``--eviction-trigger-watermark 0.8``（默认值）在 L1 达到 80% 满时触发逐出。"
 
 #: ../../source/mp/deployment.rst:213
 #, python-format
 msgid ""
 "``--eviction-ratio 0.2`` (default) frees 20% of allocated memory per "
 "eviction cycle."
-msgstr ""
+msgstr "``--eviction-ratio 0.2``（默认值）在每个逐出周期释放 20% 的分配内存。"
 
 #: ../../source/mp/deployment.rst:215
 msgid ""
 "Lower the watermark or increase the ratio if you observe frequent "
 "evictions under steady load."
-msgstr ""
+msgstr "如果在稳定负载下观察到频繁的逐出，请降低水位线或增加比率。"
 
 #: ../../source/mp/deployment.rst:218
 msgid ""
 "**Logging:** Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to "
 "verify L2 store/load activity.  Switch to ``INFO`` (default) for "
 "production to reduce log volume."
-msgstr ""
+msgstr "**日志记录:** 在初始设置期间使用 ``LMCACHE_LOG_LEVEL=DEBUG`` 来验证 L2 存储/加载活动。 在生产中切换到 ``INFO``（默认）以减少日志量。"
 

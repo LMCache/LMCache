@@ -21,59 +21,59 @@ msgstr ""
 
 #: ../../source/kv_cache_management/clear.rst:4
 msgid "Clear the KV cache"
-msgstr ""
+msgstr "清除 KV Cache"
 
 #: ../../source/kv_cache_management/clear.rst:6
 msgid "The ``clear`` interface is defined as the following:"
-msgstr ""
+msgstr "``clear`` 接口定义如下："
 
 #: ../../source/kv_cache_management/clear.rst:12
 msgid ""
 "The function removes the KV cache stored at ``location`` for the "
 "specified ``instance_id``. It returns an ``event_id`` and the number of "
 "tokens scheduled for clearing."
-msgstr ""
+msgstr "该函数会移除指定 ``instance_id`` 在 ``location`` 存储的 KV Cache。它返回一个 ``event_id`` 和计划清除的令牌数量。"
 
 #: ../../source/kv_cache_management/clear.rst:17
 msgid "Example usage:"
-msgstr ""
+msgstr "示例用法："
 
 #: ../../source/kv_cache_management/clear.rst:19
 msgid ""
 "First, create a yaml file ``example.yaml`` to configure the lmcache "
 "instance:"
-msgstr ""
+msgstr "首先，创建一个 yaml 文件 ``example.yaml`` 来配置 lmcache 实例："
 
 #: ../../source/kv_cache_management/clear.rst:37
 msgid "Start the vllm/lmcache instance at port 8000:"
-msgstr ""
+msgstr "在 8000 端口启动 vllm/lmcache 实例："
 
 #: ../../source/kv_cache_management/clear.rst:44
 msgid "Start the lmcache controller at port 9000 and the monitor at port 9001:"
-msgstr ""
+msgstr "在9000端口启动lmcache控制器，在9001端口启动监视器："
 
 #: ../../source/kv_cache_management/clear.rst:50
 msgid "Send a request to vllm:"
-msgstr ""
+msgstr "发送请求到 vllm："
 
 #: ../../source/kv_cache_management/clear.rst:62
 msgid "Clear the KV cache in the system:"
-msgstr ""
+msgstr "清除系统中的 KV Cache："
 
 #: ../../source/kv_cache_management/clear.rst:74
 msgid "The controller responds with a message similar to:"
-msgstr ""
+msgstr "控制器会回复类似于以下消息："
 
 #: ../../source/kv_cache_management/clear.rst:80
 msgid ""
 "This indicates that the KV cache for 12 tokens has been scheduled for "
 "clearing. We can verify the cache has been cleared by performing a "
 "lookup:"
-msgstr ""
+msgstr "这表明 12 个令牌的 KV Cache 已被安排清除。我们可以通过执行查找来验证缓存是否已被清除："
 
 #: ../../source/kv_cache_management/clear.rst:91
 msgid ""
 "The lookup should return an empty result, confirming that the KV cache "
 "has been cleared for the given tokens."
-msgstr ""
+msgstr "查找应该返回一个空结果，确认给定的令牌的 KV Cache 已被清除。"
 
