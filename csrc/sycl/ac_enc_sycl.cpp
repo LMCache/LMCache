@@ -67,8 +67,7 @@ inline void spill_reg_to_shared(uint32_t& output_reg, int& output_reg_len,
   // We still write byte-by-byte rather than as a uint32_t to keep the
   // offset arithmetic alignment-agnostic (output_shared_offset is not
   // guaranteed to be 4-byte aligned).
-  output_shared[output_shared_offset] =
-      static_cast<uint8_t>(output_reg >> 24);
+  output_shared[output_shared_offset] = static_cast<uint8_t>(output_reg >> 24);
   output_shared[output_shared_offset + 1] =
       static_cast<uint8_t>((output_reg >> 16) & 0xFFu);
   output_shared[output_shared_offset + 2] =
@@ -150,121 +149,116 @@ void launch_encode(sycl::queue& queue, const int16_t* cdf,
 
     cgh.parallel_for(
         sycl::nd_range<2>(global_range, local_range),
-        [=](sycl::nd_item<2> item)
-            [[sycl::reqd_sub_group_size(INTEL_SUB_GROUP_SIZE)]] {
-              const int layer_id = static_cast<int>(item.get_group(0));
-              const int block_y = static_cast<int>(item.get_group(1));
-              const int tx = static_cast<int>(item.get_local_id(1));
-              const int channel_id = block_y * BLOCK_SIZE + tx;
+        [=](sycl::nd_item<2> item) [[sycl::reqd_sub_group_size(
+            INTEL_SUB_GROUP_SIZE)]] {
+          const int layer_id = static_cast<int>(item.get_group(0));
+          const int block_y = static_cast<int>(item.get_group(1));
+          const int tx = static_cast<int>(item.get_local_id(1));
+          const int channel_id = block_y * BLOCK_SIZE + tx;
 
-              // Load CDF[layer_id, block_y*BLOCK_SIZE : +BLOCK_SIZE, :]
-              const int cdf_size = BLOCK_SIZE * lp;
-              for (int i = tx; i < cdf_size; i += BLOCK_SIZE) {
-                const int cid = i / lp;
-                const int lid = i % lp;
-                const int shared_offset = lid * BLOCK_SIZE + cid;
-                const int16_t v =
-                    cdf[(static_cast<int64_t>(layer_id) * nchannels +
-                         block_y * BLOCK_SIZE + cid) *
-                            lp +
-                        lid];
-                cdf_shared[shared_offset] = static_cast<uint16_t>(v);
-              }
+          // Load CDF[layer_id, block_y*BLOCK_SIZE : +BLOCK_SIZE, :]
+          const int cdf_size = BLOCK_SIZE * lp;
+          for (int i = tx; i < cdf_size; i += BLOCK_SIZE) {
+            const int cid = i / lp;
+            const int lid = i % lp;
+            const int shared_offset = lid * BLOCK_SIZE + cid;
+            const int16_t v = cdf[(static_cast<int64_t>(layer_id) * nchannels +
+                                   block_y * BLOCK_SIZE + cid) *
+                                      lp +
+                                  lid];
+            cdf_shared[shared_offset] = static_cast<uint16_t>(v);
+          }
 
-              item.barrier(sycl::access::fence_space::local_space);
+          item.barrier(sycl::access::fence_space::local_space);
 
-              // Per-(layer, channel) AC state machine.
-              uint32_t low = 0u;
-              uint32_t high = 0xFFFFFFFFu;
-              uint64_t pending_bits = 0;
-              const int max_symbol = lp - 2;
+          // Per-(layer, channel) AC state machine.
+          uint32_t low = 0u;
+          uint32_t high = 0xFFFFFFFFu;
+          uint64_t pending_bits = 0;
+          const int max_symbol = lp - 2;
 
-              uint32_t output_reg = 0;
-              int output_reg_len = 0;
-              int output_shared_offset = tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+          uint32_t output_reg = 0;
+          int output_reg_len = 0;
+          int output_shared_offset = tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
 
-              auto out_acc = output_shared;  // alias
+          auto out_acc = output_shared;  // alias
 
-              for (int i = 0; i < ntokens; ++i) {
-                const uint8_t sym =
-                    input_sym[(static_cast<int64_t>(layer_id) * ntokens + i) *
-                                  nchannels +
-                              channel_id];
-                const uint64_t span = static_cast<uint64_t>(high) -
-                                      static_cast<uint64_t>(low) + 1;
-                const uint32_t c_low = cdf_shared[sym * BLOCK_SIZE + tx];
-                const uint32_t c_high =
-                    sym == max_symbol
-                        ? 0x10000u
-                        : cdf_shared[(sym + 1) * BLOCK_SIZE + tx];
+          for (int i = 0; i < ntokens; ++i) {
+            const uint8_t sym =
+                input_sym[(static_cast<int64_t>(layer_id) * ntokens + i) *
+                              nchannels +
+                          channel_id];
+            const uint64_t span =
+                static_cast<uint64_t>(high) - static_cast<uint64_t>(low) + 1;
+            const uint32_t c_low = cdf_shared[sym * BLOCK_SIZE + tx];
+            const uint32_t c_high =
+                sym == max_symbol ? 0x10000u
+                                  : cdf_shared[(sym + 1) * BLOCK_SIZE + tx];
 
-                high = (low - 1) +
-                       static_cast<uint32_t>((span * c_high) >> PRECISION);
-                low = low + static_cast<uint32_t>((span * c_low) >> PRECISION);
+            high =
+                (low - 1) + static_cast<uint32_t>((span * c_high) >> PRECISION);
+            low = low + static_cast<uint32_t>((span * c_low) >> PRECISION);
 
-                while (true) {
-                  if (high < 0x80000000u) {
-                    append_bit_and_pending(0, pending_bits, output_reg,
-                                           output_reg_len, out_acc,
-                                           output_shared_offset);
-                    low <<= 1;
-                    high <<= 1;
-                    high |= 1;
-                  } else if (low >= 0x80000000u) {
-                    append_bit_and_pending(1, pending_bits, output_reg,
-                                           output_reg_len, out_acc,
-                                           output_shared_offset);
-                    low <<= 1;
-                    high <<= 1;
-                    high |= 1;
-                  } else if (low >= 0x40000000u && high < 0xC0000000u) {
-                    pending_bits++;
-                    low <<= 1;
-                    low &= 0x7FFFFFFFu;
-                    high <<= 1;
-                    high |= 0x80000001u;
-                  } else {
-                    break;
-                  }
-                }
-              }
-
-              pending_bits += 1;
-              if (low < 0x40000000u) {
+            while (true) {
+              if (high < 0x80000000u) {
                 append_bit_and_pending(0, pending_bits, output_reg,
                                        output_reg_len, out_acc,
                                        output_shared_offset);
-              } else {
+                low <<= 1;
+                high <<= 1;
+                high |= 1;
+              } else if (low >= 0x80000000u) {
                 append_bit_and_pending(1, pending_bits, output_reg,
                                        output_reg_len, out_acc,
                                        output_shared_offset);
+                low <<= 1;
+                high <<= 1;
+                high |= 1;
+              } else if (low >= 0x40000000u && high < 0xC0000000u) {
+                pending_bits++;
+                low <<= 1;
+                low &= 0x7FFFFFFFu;
+                high <<= 1;
+                high |= 0x80000001u;
+              } else {
+                break;
               }
-              spill_partial_reg_to_shared(output_reg, output_reg_len, out_acc,
-                                          output_shared_offset);
+            }
+          }
 
-              const int my_len = output_shared_offset -
-                                 tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
-              output_lengths[layer_id * nchannels + channel_id] = my_len;
-              lengths_shared[tx] = my_len;
+          pending_bits += 1;
+          if (low < 0x40000000u) {
+            append_bit_and_pending(0, pending_bits, output_reg, output_reg_len,
+                                   out_acc, output_shared_offset);
+          } else {
+            append_bit_and_pending(1, pending_bits, output_reg, output_reg_len,
+                                   out_acc, output_shared_offset);
+          }
+          spill_partial_reg_to_shared(output_reg, output_reg_len, out_acc,
+                                      output_shared_offset);
 
-              item.barrier(sycl::access::fence_space::local_space);
+          const int my_len =
+              output_shared_offset - tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+          output_lengths[layer_id * nchannels + channel_id] = my_len;
+          lengths_shared[tx] = my_len;
 
-              // Coalesced write-out by channel.
-              for (int i = 0; i < BLOCK_SIZE; ++i) {
-                const int peer_len = lengths_shared[i];
-                const int current_channel = block_y * BLOCK_SIZE + i;
-                for (int j = tx; j < peer_len; j += BLOCK_SIZE) {
-                  const int64_t global_offset =
-                      (static_cast<int64_t>(layer_id) * nchannels +
-                       current_channel) *
-                          output_buffer_length_per_thread +
-                      j;
-                  const int local_offset =
-                      i * OUTPUT_BUFFER_LENGTH_PER_THREAD + j;
-                  output_buffer[global_offset] = output_shared[local_offset];
-                }
-              }
-            });
+          item.barrier(sycl::access::fence_space::local_space);
+
+          // Coalesced write-out by channel.
+          for (int i = 0; i < BLOCK_SIZE; ++i) {
+            const int peer_len = lengths_shared[i];
+            const int current_channel = block_y * BLOCK_SIZE + i;
+            for (int j = tx; j < peer_len; j += BLOCK_SIZE) {
+              const int64_t global_offset =
+                  (static_cast<int64_t>(layer_id) * nchannels +
+                   current_channel) *
+                      output_buffer_length_per_thread +
+                  j;
+              const int local_offset = i * OUTPUT_BUFFER_LENGTH_PER_THREAD + j;
+              output_buffer[global_offset] = output_shared[local_offset];
+            }
+          }
+        });
   });
 }
 
@@ -282,8 +276,7 @@ void encode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& input_sym,
                          at::Tensor& output_lengths) {
   if (!cdf.device().is_xpu() || !input_sym.device().is_xpu() ||
       !output_buffer.device().is_xpu() || !output_lengths.device().is_xpu()) {
-    throw std::runtime_error(
-        "encode_fast_new_xpu: all tensors must be on XPU");
+    throw std::runtime_error("encode_fast_new_xpu: all tensors must be on XPU");
   }
 
   const auto cdf_shape = cdf.sizes();
@@ -325,10 +318,8 @@ void encode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& input_sym,
   const int16_t* cdf_ptr = cdf_c.data_ptr<int16_t>();
   // Accept both Byte (uint8) and Char (int8) input symbols (the CUDA
   // kernel uses int8); bit pattern is what the AC state machine reads.
-  const uint8_t* sym_ptr =
-      reinterpret_cast<const uint8_t*>(sym_c.data_ptr());
-  uint8_t* out_buf_ptr =
-      reinterpret_cast<uint8_t*>(output_buffer.data_ptr());
+  const uint8_t* sym_ptr = reinterpret_cast<const uint8_t*>(sym_c.data_ptr());
+  uint8_t* out_buf_ptr = reinterpret_cast<uint8_t*>(output_buffer.data_ptr());
   int32_t* out_len_ptr = output_lengths.data_ptr<int32_t>();
 
   switch (block_size) {
@@ -365,7 +356,6 @@ void encode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& input_sym,
                          nlayers, nchannels, ntokens, lp);
       break;
     default:
-      throw std::runtime_error(
-          "encode_fast_new_xpu: unsupported block size");
+      throw std::runtime_error("encode_fast_new_xpu: unsupported block size");
   }
 }

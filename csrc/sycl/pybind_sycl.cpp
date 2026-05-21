@@ -58,6 +58,5 @@ PYBIND11_MODULE(xpu_ops, m) {
   m.def("decode_fast_new", &decode_fast_new_xpu, py::arg("cdf"),
         py::arg("bytestreams"), py::arg("lengths"), py::arg("output"));
   m.def("decode_fast_prefsum", &decode_fast_prefsum_xpu, py::arg("cdf"),
-        py::arg("bytestreams"), py::arg("lengths_prefsum"),
-        py::arg("output"));
+        py::arg("bytestreams"), py::arg("lengths_prefsum"), py::arg("output"));
 }

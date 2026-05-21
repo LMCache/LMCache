@@ -19,12 +19,10 @@ at::Tensor calculate_cdf_xpu(const at::Tensor& input, int64_t max_bins);
 // Arithmetic encoder (forward): produces a byte buffer + per-channel
 // length tensor.  Signature matches encode_cuda_new.
 void encode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& input_sym,
-                         at::Tensor& output_buffer,
-                         at::Tensor& output_lengths);
+                         at::Tensor& output_buffer, at::Tensor& output_lengths);
 
 // Arithmetic decoder (per-channel buffer): inverse of encode_fast_new.
-void decode_fast_new_xpu(const at::Tensor& cdf,
-                         const at::Tensor& bytestreams,
+void decode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& bytestreams,
                          const at::Tensor& lengths, at::Tensor& output);
 
 // Arithmetic decoder (1-D bytestream with prefix-sum offsets):

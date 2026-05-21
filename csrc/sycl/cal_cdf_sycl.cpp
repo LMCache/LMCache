@@ -91,7 +91,8 @@ void launch_calculate_cdf(sycl::queue& queue, const uint8_t* input,
               }
 
               if (in_range) {
-                // Histogram pass: counts at hist[v+1][tx].  hist[0][tx] stays 0.
+                // Histogram pass: counts at hist[v+1][tx].  hist[0][tx] stays
+                // 0.
                 for (int i = 0; i < ntokens; ++i) {
                   const uint8_t v =
                       input[(static_cast<int64_t>(layer_id) * ntokens + i) *

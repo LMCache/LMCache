@@ -7,6 +7,7 @@ comparison on the same device.
 
 Run with: ``pytest tests/benchmarks/test_xpu_kernels_microbench.py --benchmark-only``
 """
+
 # Third Party
 import pytest
 import torch
@@ -29,18 +30,22 @@ def _xpu_sync():
 
 @pytest.fixture(scope="module")
 def xops():
+    # First Party
     import lmcache.xpu_ops as XOPS  # noqa: WPS433
+
     return XOPS
 
 
 # ---------------- calculate_cdf ----------------
 
+
 @pytest.mark.benchmark(group="calculate_cdf")
 @pytest.mark.parametrize("ntokens", [256, 1024, 4096])
 def test_bench_cdf_sycl(benchmark, xops, ntokens):
     nlayers, nchannels, max_bins = 32, 1024, 32
-    sym = torch.randint(0, max_bins, (nlayers, ntokens, nchannels),
-                        dtype=torch.uint8, device=XPU)
+    sym = torch.randint(
+        0, max_bins, (nlayers, ntokens, nchannels), dtype=torch.uint8, device=XPU
+    )
     _xpu_sync()
 
     def run():
@@ -55,8 +60,9 @@ def test_bench_cdf_sycl(benchmark, xops, ntokens):
 @pytest.mark.parametrize("ntokens", [256, 1024, 4096])
 def test_bench_cdf_fallback(benchmark, ntokens):
     nlayers, nchannels, max_bins = 32, 1024, 32
-    sym = torch.randint(0, max_bins, (nlayers, ntokens, nchannels),
-                        dtype=torch.uint8, device=XPU)
+    sym = torch.randint(
+        0, max_bins, (nlayers, ntokens, nchannels), dtype=torch.uint8, device=XPU
+    )
     _xpu_sync()
 
     def run():
@@ -69,9 +75,11 @@ def test_bench_cdf_fallback(benchmark, ntokens):
 
 # ---------------- encode_fast_new ----------------
 
+
 def _make_encode_inputs(xops, nlayers, ntokens, nchannels, max_bins):
-    sym = torch.randint(0, max_bins, (nlayers, ntokens, nchannels),
-                        dtype=torch.uint8, device=XPU)
+    sym = torch.randint(
+        0, max_bins, (nlayers, ntokens, nchannels), dtype=torch.uint8, device=XPU
+    )
     cdf = xops.calculate_cdf(sym, max_bins)
     buf = torch.zeros((nlayers, nchannels, 256), dtype=torch.uint8, device=XPU)
     lens = torch.zeros((nlayers, nchannels), dtype=torch.int32, device=XPU)
@@ -82,8 +90,9 @@ def _make_encode_inputs(xops, nlayers, ntokens, nchannels, max_bins):
 @pytest.mark.parametrize("ntokens", [64, 256])
 def test_bench_encode_sycl(benchmark, xops, ntokens):
     nlayers, nchannels, max_bins = 32, 1024, 32
-    sym, cdf, buf, lens = _make_encode_inputs(xops, nlayers, ntokens,
-                                              nchannels, max_bins)
+    sym, cdf, buf, lens = _make_encode_inputs(
+        xops, nlayers, ntokens, nchannels, max_bins
+    )
     _xpu_sync()
 
     def run():
@@ -97,8 +106,9 @@ def test_bench_encode_sycl(benchmark, xops, ntokens):
 @pytest.mark.parametrize("ntokens", [64, 256])
 def test_bench_encode_fallback(benchmark, xops, ntokens):
     nlayers, nchannels, max_bins = 32, 1024, 32
-    sym, cdf, buf, lens = _make_encode_inputs(xops, nlayers, ntokens,
-                                              nchannels, max_bins)
+    sym, cdf, buf, lens = _make_encode_inputs(
+        xops, nlayers, ntokens, nchannels, max_bins
+    )
     _xpu_sync()
 
     def run():
@@ -110,12 +120,14 @@ def test_bench_encode_fallback(benchmark, xops, ntokens):
 
 # ---------------- decode_fast_new ----------------
 
+
 @pytest.mark.benchmark(group="decode_fast_new")
 @pytest.mark.parametrize("ntokens", [256])
 def test_bench_decode_sycl(benchmark, xops, ntokens):
     nlayers, nchannels, max_bins = 32, 1024, 32
-    sym, cdf, buf, lens = _make_encode_inputs(xops, nlayers, ntokens,
-                                              nchannels, max_bins)
+    sym, cdf, buf, lens = _make_encode_inputs(
+        xops, nlayers, ntokens, nchannels, max_bins
+    )
     xops.encode_fast_new(cdf, sym, buf, lens)
     out = torch.zeros_like(sym)
     _xpu_sync()
@@ -137,6 +149,7 @@ def test_bench_decode_sycl(benchmark, xops, ntokens):
 
 # ---------------- rotary_embedding_k_fused ----------------
 
+
 @pytest.mark.benchmark(group="rope_k_fused")
 @pytest.mark.parametrize("ntokens", [256, 1024, 4096])
 def test_bench_rope_sycl(benchmark, xops, ntokens):
@@ -149,8 +162,9 @@ def test_bench_rope_sycl(benchmark, xops, ntokens):
     _xpu_sync()
 
     def run():
-        xops.rotary_embedding_k_fused(old_positions, new_positions, key,
-                                      head_size, cos_sin, True)
+        xops.rotary_embedding_k_fused(
+            old_positions, new_positions, key, head_size, cos_sin, True
+        )
         _xpu_sync()
 
     benchmark(run)
@@ -160,4 +174,3 @@ def test_bench_rope_sycl(benchmark, xops, ntokens):
 # triggers an internal IndexKernel OOB on XPU at these shapes.  Per the
 # project plan we do not patch fallback to fit XPU; SYCL is the
 # performance and correctness path.
-

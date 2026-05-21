@@ -7,6 +7,7 @@ records the compression ratio.
 
 Run with: ``pytest tests/benchmarks/test_cachegen_xpu_e2e.py --benchmark-only``
 """
+
 # Third Party
 import pytest
 import torch
@@ -32,9 +33,7 @@ def _generate_kv(num_tokens, device):
         k = torch.rand(shape, dtype=torch.bfloat16, device=device)
         v = torch.rand(shape, dtype=torch.bfloat16, device=device)
         pairs.append((k, v))
-    return torch.stack(
-        [torch.stack(p, dim=0) for p in pairs], dim=0
-    )
+    return torch.stack([torch.stack(p, dim=0) for p in pairs], dim=0)
 
 
 def _make_serde(chunk_size):
@@ -65,8 +64,10 @@ def test_e2e_encode(benchmark, chunk_size):
 
     out = benchmark(run)
     raw_bytes = kv.element_size() * kv.numel()
-    print(f"\n[chunk={chunk_size}] raw={raw_bytes} compressed={len(out)} "
-          f"ratio={raw_bytes / max(len(out), 1):.2f}x")
+    print(
+        f"\n[chunk={chunk_size}] raw={raw_bytes} compressed={len(out)} "
+        f"ratio={raw_bytes / max(len(out), 1):.2f}x"
+    )
 
 
 @pytest.mark.benchmark(group="cachegen_e2e_decode")

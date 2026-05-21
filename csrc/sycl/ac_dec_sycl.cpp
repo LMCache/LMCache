@@ -90,140 +90,131 @@ void launch_decode_per_channel(sycl::queue& queue, const int16_t* cdf,
 
     cgh.parallel_for(
         sycl::nd_range<2>(global_range, local_range),
-        [=](sycl::nd_item<2> item)
-            [[sycl::reqd_sub_group_size(INTEL_SUB_GROUP_SIZE)]] {
-              const int layer_id = static_cast<int>(item.get_group(0));
-              const int block_y = static_cast<int>(item.get_group(1));
-              const int tx = static_cast<int>(item.get_local_id(1));
-              const int global_channel_offset = block_y * BLOCK_SIZE;
-              const int global_channel_id = global_channel_offset + tx;
-              const int max_symbol = lp - 2;
+        [=](sycl::nd_item<2> item) [[sycl::reqd_sub_group_size(
+            INTEL_SUB_GROUP_SIZE)]] {
+          const int layer_id = static_cast<int>(item.get_group(0));
+          const int block_y = static_cast<int>(item.get_group(1));
+          const int tx = static_cast<int>(item.get_local_id(1));
+          const int global_channel_offset = block_y * BLOCK_SIZE;
+          const int global_channel_id = global_channel_offset + tx;
+          const int max_symbol = lp - 2;
 
-              // Load per-channel lengths into SLM.
-              len_shared[tx] =
-                  lengths[layer_id * nchannels + global_channel_offset + tx];
-              item.barrier(sycl::access::fence_space::local_space);
+          // Load per-channel lengths into SLM.
+          len_shared[tx] =
+              lengths[layer_id * nchannels + global_channel_offset + tx];
+          item.barrier(sycl::access::fence_space::local_space);
 
-              // Load per-channel byte buffers into SLM, flat sweep over
-              // BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD bytes -- each
-              // sub-group lane handles every BLOCK_SIZE-th byte across the
-              // entire tile, removing the per-channel outer loop and giving
-              // the IGC more freedom to schedule the loads.
-              const int total_bytes = BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD;
-              for (int k = tx; k < total_bytes; k += BLOCK_SIZE) {
-                const int i = k / OUTPUT_BUFFER_LENGTH_PER_THREAD;
-                const int j = k - i * OUTPUT_BUFFER_LENGTH_PER_THREAD;
-                const int channel_id = global_channel_offset + i;
-                const int length = len_shared[i];
-                uint8_t v = 0;
-                if (j < length) {
-                  const int64_t off =
-                      (static_cast<int64_t>(layer_id) * nchannels +
-                       channel_id) *
-                          OUTPUT_BUFFER_LENGTH_PER_THREAD +
-                      j;
-                  v = bytestreams[off];
-                }
-                bs_shared[k] = v;
+          // Load per-channel byte buffers into SLM, flat sweep over
+          // BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD bytes -- each
+          // sub-group lane handles every BLOCK_SIZE-th byte across the
+          // entire tile, removing the per-channel outer loop and giving
+          // the IGC more freedom to schedule the loads.
+          const int total_bytes = BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+          for (int k = tx; k < total_bytes; k += BLOCK_SIZE) {
+            const int i = k / OUTPUT_BUFFER_LENGTH_PER_THREAD;
+            const int j = k - i * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+            const int channel_id = global_channel_offset + i;
+            const int length = len_shared[i];
+            uint8_t v = 0;
+            if (j < length) {
+              const int64_t off =
+                  (static_cast<int64_t>(layer_id) * nchannels + channel_id) *
+                      OUTPUT_BUFFER_LENGTH_PER_THREAD +
+                  j;
+              v = bytestreams[off];
+            }
+            bs_shared[k] = v;
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+
+          // Load CDF[layer_id, channel_block, :] into SLM (column-major).
+          const int cdf_size = lp * BLOCK_SIZE;
+          for (int i = tx; i < cdf_size; i += BLOCK_SIZE) {
+            const int cid = i / lp;
+            const int lid = i % lp;
+            const int16_t v = cdf[(static_cast<int64_t>(layer_id) * nchannels +
+                                   global_channel_offset + cid) *
+                                      lp +
+                                  lid];
+            cdf_shared[lid * BLOCK_SIZE + cid] = static_cast<uint16_t>(v);
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+
+          // ---------- AC decode state ----------
+          uint32_t low = 0u;
+          uint32_t high = 0xFFFFFFFFu;
+          const uint32_t c_count = 0x10000u;
+
+          uint8_t byte_buffer = 0;
+          int bit_idx = 1;  // next bit: (byte_buffer >> (8-bit_idx)) & 1
+          int byte_buffer_offset = 4;
+
+          // Initial 32-bit value from first 4 bytes (big-endian).
+          const int row_base = tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+          uint32_t v0 = (static_cast<uint32_t>(bs_shared[row_base]) << 24) |
+                        (static_cast<uint32_t>(bs_shared[row_base + 1]) << 16) |
+                        (static_cast<uint32_t>(bs_shared[row_base + 2]) << 8) |
+                        static_cast<uint32_t>(bs_shared[row_base + 3]);
+          // CUDA reads as ((uint32_t*)row)[0] then big_to_small.  On
+          // little-endian devices this equals the big-endian read above.
+          (void)big_to_small_u32;
+          uint32_t value = v0;
+          byte_buffer = bs_shared[row_base + byte_buffer_offset];
+
+          for (int i = 0; i < ntokens; ++i) {
+            const uint64_t span =
+                static_cast<uint64_t>(high) - static_cast<uint64_t>(low) + 1;
+            const uint16_t count =
+                static_cast<uint16_t>(((static_cast<uint64_t>(value) -
+                                        static_cast<uint64_t>(low) + 1) *
+                                           c_count -
+                                       1) /
+                                      span);
+
+            const uint16_t sym_i = binsearch<BLOCK_SIZE>(
+                cdf_shared, count, static_cast<uint8_t>(max_symbol), tx);
+
+            output[(static_cast<int64_t>(layer_id) * ntokens + i) * nchannels +
+                   global_channel_id] = static_cast<uint8_t>(sym_i);
+
+            if (i == ntokens - 1) break;
+
+            const uint32_t c_low = cdf_shared[sym_i * BLOCK_SIZE + tx];
+            const uint32_t c_high =
+                sym_i == max_symbol ? 0x10000u
+                                    : cdf_shared[(sym_i + 1) * BLOCK_SIZE + tx];
+
+            high =
+                (low - 1) + static_cast<uint32_t>((span * c_high) >> PRECISION);
+            low = low + static_cast<uint32_t>((span * c_low) >> PRECISION);
+
+            while (true) {
+              if (low >= 0x80000000u || high < 0x80000000u) {
+                low <<= 1;
+                high <<= 1;
+                high |= 1;
+                value = (value << 1) | ((byte_buffer >> (8 - bit_idx)) & 1u);
+                bit_idx += 1;
+              } else if (low >= 0x40000000u && high < 0xC0000000u) {
+                low <<= 1;
+                low &= 0x7FFFFFFFu;
+                high <<= 1;
+                high |= 0x80000001u;
+                value -= 0x40000000u;
+                value = (value << 1) | ((byte_buffer >> (8 - bit_idx)) & 1u);
+                bit_idx += 1;
+              } else {
+                break;
               }
-              item.barrier(sycl::access::fence_space::local_space);
 
-              // Load CDF[layer_id, channel_block, :] into SLM (column-major).
-              const int cdf_size = lp * BLOCK_SIZE;
-              for (int i = tx; i < cdf_size; i += BLOCK_SIZE) {
-                const int cid = i / lp;
-                const int lid = i % lp;
-                const int16_t v =
-                    cdf[(static_cast<int64_t>(layer_id) * nchannels +
-                         global_channel_offset + cid) *
-                            lp +
-                        lid];
-                cdf_shared[lid * BLOCK_SIZE + cid] = static_cast<uint16_t>(v);
+              if (bit_idx == 9) {
+                bit_idx = 1;
+                byte_buffer_offset += 1;
+                byte_buffer = bs_shared[row_base + byte_buffer_offset];
               }
-              item.barrier(sycl::access::fence_space::local_space);
-
-              // ---------- AC decode state ----------
-              uint32_t low = 0u;
-              uint32_t high = 0xFFFFFFFFu;
-              const uint32_t c_count = 0x10000u;
-
-              uint8_t byte_buffer = 0;
-              int bit_idx = 1;  // next bit: (byte_buffer >> (8-bit_idx)) & 1
-              int byte_buffer_offset = 4;
-
-              // Initial 32-bit value from first 4 bytes (big-endian).
-              const int row_base = tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
-              uint32_t v0 = (static_cast<uint32_t>(bs_shared[row_base]) << 24) |
-                            (static_cast<uint32_t>(bs_shared[row_base + 1])
-                             << 16) |
-                            (static_cast<uint32_t>(bs_shared[row_base + 2])
-                             << 8) |
-                            static_cast<uint32_t>(bs_shared[row_base + 3]);
-              // CUDA reads as ((uint32_t*)row)[0] then big_to_small.  On
-              // little-endian devices this equals the big-endian read above.
-              (void)big_to_small_u32;
-              uint32_t value = v0;
-              byte_buffer = bs_shared[row_base + byte_buffer_offset];
-
-              for (int i = 0; i < ntokens; ++i) {
-                const uint64_t span = static_cast<uint64_t>(high) -
-                                      static_cast<uint64_t>(low) + 1;
-                const uint16_t count = static_cast<uint16_t>(
-                    ((static_cast<uint64_t>(value) -
-                      static_cast<uint64_t>(low) + 1) *
-                         c_count -
-                     1) /
-                    span);
-
-                const uint16_t sym_i = binsearch<BLOCK_SIZE>(
-                    cdf_shared, count, static_cast<uint8_t>(max_symbol), tx);
-
-                output[(static_cast<int64_t>(layer_id) * ntokens + i) *
-                           nchannels +
-                       global_channel_id] = static_cast<uint8_t>(sym_i);
-
-                if (i == ntokens - 1) break;
-
-                const uint32_t c_low = cdf_shared[sym_i * BLOCK_SIZE + tx];
-                const uint32_t c_high =
-                    sym_i == max_symbol
-                        ? 0x10000u
-                        : cdf_shared[(sym_i + 1) * BLOCK_SIZE + tx];
-
-                high = (low - 1) +
-                       static_cast<uint32_t>((span * c_high) >> PRECISION);
-                low = low + static_cast<uint32_t>((span * c_low) >> PRECISION);
-
-                while (true) {
-                  if (low >= 0x80000000u || high < 0x80000000u) {
-                    low <<= 1;
-                    high <<= 1;
-                    high |= 1;
-                    value = (value << 1) |
-                            ((byte_buffer >> (8 - bit_idx)) & 1u);
-                    bit_idx += 1;
-                  } else if (low >= 0x40000000u && high < 0xC0000000u) {
-                    low <<= 1;
-                    low &= 0x7FFFFFFFu;
-                    high <<= 1;
-                    high |= 0x80000001u;
-                    value -= 0x40000000u;
-                    value = (value << 1) |
-                            ((byte_buffer >> (8 - bit_idx)) & 1u);
-                    bit_idx += 1;
-                  } else {
-                    break;
-                  }
-
-                  if (bit_idx == 9) {
-                    bit_idx = 1;
-                    byte_buffer_offset += 1;
-                    byte_buffer =
-                        bs_shared[row_base + byte_buffer_offset];
-                  }
-                }
-              }
-            });
+            }
+          }
+        });
   });
 }
 
@@ -242,139 +233,131 @@ void launch_decode_prefsum(sycl::queue& queue, const int16_t* cdf,
         sycl::range<1>(MAX_LP * BLOCK_SIZE), cgh);
     sycl::local_accessor<uint8_t, 1> bs_shared(
         sycl::range<1>(BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD), cgh);
-    sycl::local_accessor<int32_t, 1> sum_shared(
-        sycl::range<1>(BLOCK_SIZE + 1), cgh);
+    sycl::local_accessor<int32_t, 1> sum_shared(sycl::range<1>(BLOCK_SIZE + 1),
+                                                cgh);
 
     cgh.parallel_for(
         sycl::nd_range<2>(global_range, local_range),
-        [=](sycl::nd_item<2> item)
-            [[sycl::reqd_sub_group_size(INTEL_SUB_GROUP_SIZE)]] {
-              const int layer_id = static_cast<int>(item.get_group(0));
-              const int block_y = static_cast<int>(item.get_group(1));
-              const int tx = static_cast<int>(item.get_local_id(1));
-              const int global_channel_offset = block_y * BLOCK_SIZE;
-              const int global_channel_id = global_channel_offset + tx;
-              const int max_symbol = lp - 2;
+        [=](sycl::nd_item<2> item) [[sycl::reqd_sub_group_size(
+            INTEL_SUB_GROUP_SIZE)]] {
+          const int layer_id = static_cast<int>(item.get_group(0));
+          const int block_y = static_cast<int>(item.get_group(1));
+          const int tx = static_cast<int>(item.get_local_id(1));
+          const int global_channel_offset = block_y * BLOCK_SIZE;
+          const int global_channel_id = global_channel_offset + tx;
+          const int max_symbol = lp - 2;
 
-              // Load running prefix sums for [BLOCK_SIZE + 1] positions.
-              // CUDA computes lengths_prefix[gid / nchannels][gid % nchannels]
-              // where gid is the *global* index across (layer, channel).
-              for (int i = tx; i < BLOCK_SIZE + 1; i += BLOCK_SIZE) {
-                const int gid = layer_id * nchannels + global_channel_offset +
-                                i - 1;
-                int32_t val = 0;
-                if (gid >= 0) {
-                  const int row = gid / nchannels;
-                  const int col = gid % nchannels;
-                  val = static_cast<int32_t>(
-                      lengths_prefix[row * nchannels + col]);
-                }
-                sum_shared[i] = val;
+          // Load running prefix sums for [BLOCK_SIZE + 1] positions.
+          // CUDA computes lengths_prefix[gid / nchannels][gid % nchannels]
+          // where gid is the *global* index across (layer, channel).
+          for (int i = tx; i < BLOCK_SIZE + 1; i += BLOCK_SIZE) {
+            const int gid =
+                layer_id * nchannels + global_channel_offset + i - 1;
+            int32_t val = 0;
+            if (gid >= 0) {
+              const int row = gid / nchannels;
+              const int col = gid % nchannels;
+              val = static_cast<int32_t>(lengths_prefix[row * nchannels + col]);
+            }
+            sum_shared[i] = val;
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+
+          // Load per-channel byte buffers via prefix-sum windowing.
+          for (int i = 0; i < BLOCK_SIZE; ++i) {
+            const int start_offset = sum_shared[i];
+            const int end_offset = sum_shared[i + 1];
+            const int length = end_offset - start_offset;
+            for (int j = tx; j < OUTPUT_BUFFER_LENGTH_PER_THREAD;
+                 j += BLOCK_SIZE) {
+              uint8_t v = (j < length) ? bytestreams[start_offset + j] : 0;
+              bs_shared[i * OUTPUT_BUFFER_LENGTH_PER_THREAD + j] = v;
+            }
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+
+          // Load CDF.
+          const int cdf_size = lp * BLOCK_SIZE;
+          for (int i = tx; i < cdf_size; i += BLOCK_SIZE) {
+            const int cid = i / lp;
+            const int lid = i % lp;
+            const int16_t v = cdf[(static_cast<int64_t>(layer_id) * nchannels +
+                                   global_channel_offset + cid) *
+                                      lp +
+                                  lid];
+            cdf_shared[lid * BLOCK_SIZE + cid] = static_cast<uint16_t>(v);
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+
+          // Decode (identical body to per-channel kernel).
+          uint32_t low = 0u;
+          uint32_t high = 0xFFFFFFFFu;
+          const uint32_t c_count = 0x10000u;
+
+          uint8_t byte_buffer = 0;
+          int bit_idx = 1;
+          int byte_buffer_offset = 4;
+
+          const int row_base = tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
+          uint32_t value =
+              (static_cast<uint32_t>(bs_shared[row_base]) << 24) |
+              (static_cast<uint32_t>(bs_shared[row_base + 1]) << 16) |
+              (static_cast<uint32_t>(bs_shared[row_base + 2]) << 8) |
+              static_cast<uint32_t>(bs_shared[row_base + 3]);
+          byte_buffer = bs_shared[row_base + byte_buffer_offset];
+
+          for (int i = 0; i < ntokens; ++i) {
+            const uint64_t span =
+                static_cast<uint64_t>(high) - static_cast<uint64_t>(low) + 1;
+            const uint16_t count =
+                static_cast<uint16_t>(((static_cast<uint64_t>(value) -
+                                        static_cast<uint64_t>(low) + 1) *
+                                           c_count -
+                                       1) /
+                                      span);
+
+            const uint16_t sym_i = binsearch<BLOCK_SIZE>(
+                cdf_shared, count, static_cast<uint8_t>(max_symbol), tx);
+            output[(static_cast<int64_t>(layer_id) * ntokens + i) * nchannels +
+                   global_channel_id] = static_cast<uint8_t>(sym_i);
+
+            if (i == ntokens - 1) break;
+
+            const uint32_t c_low = cdf_shared[sym_i * BLOCK_SIZE + tx];
+            const uint32_t c_high =
+                sym_i == max_symbol ? 0x10000u
+                                    : cdf_shared[(sym_i + 1) * BLOCK_SIZE + tx];
+
+            high =
+                (low - 1) + static_cast<uint32_t>((span * c_high) >> PRECISION);
+            low = low + static_cast<uint32_t>((span * c_low) >> PRECISION);
+
+            while (true) {
+              if (low >= 0x80000000u || high < 0x80000000u) {
+                low <<= 1;
+                high <<= 1;
+                high |= 1;
+                value = (value << 1) | ((byte_buffer >> (8 - bit_idx)) & 1u);
+                bit_idx += 1;
+              } else if (low >= 0x40000000u && high < 0xC0000000u) {
+                low <<= 1;
+                low &= 0x7FFFFFFFu;
+                high <<= 1;
+                high |= 0x80000001u;
+                value -= 0x40000000u;
+                value = (value << 1) | ((byte_buffer >> (8 - bit_idx)) & 1u);
+                bit_idx += 1;
+              } else {
+                break;
               }
-              item.barrier(sycl::access::fence_space::local_space);
-
-              // Load per-channel byte buffers via prefix-sum windowing.
-              for (int i = 0; i < BLOCK_SIZE; ++i) {
-                const int start_offset = sum_shared[i];
-                const int end_offset = sum_shared[i + 1];
-                const int length = end_offset - start_offset;
-                for (int j = tx; j < OUTPUT_BUFFER_LENGTH_PER_THREAD;
-                     j += BLOCK_SIZE) {
-                  uint8_t v =
-                      (j < length) ? bytestreams[start_offset + j] : 0;
-                  bs_shared[i * OUTPUT_BUFFER_LENGTH_PER_THREAD + j] = v;
-                }
+              if (bit_idx == 9) {
+                bit_idx = 1;
+                byte_buffer_offset += 1;
+                byte_buffer = bs_shared[row_base + byte_buffer_offset];
               }
-              item.barrier(sycl::access::fence_space::local_space);
-
-              // Load CDF.
-              const int cdf_size = lp * BLOCK_SIZE;
-              for (int i = tx; i < cdf_size; i += BLOCK_SIZE) {
-                const int cid = i / lp;
-                const int lid = i % lp;
-                const int16_t v =
-                    cdf[(static_cast<int64_t>(layer_id) * nchannels +
-                         global_channel_offset + cid) *
-                            lp +
-                        lid];
-                cdf_shared[lid * BLOCK_SIZE + cid] = static_cast<uint16_t>(v);
-              }
-              item.barrier(sycl::access::fence_space::local_space);
-
-              // Decode (identical body to per-channel kernel).
-              uint32_t low = 0u;
-              uint32_t high = 0xFFFFFFFFu;
-              const uint32_t c_count = 0x10000u;
-
-              uint8_t byte_buffer = 0;
-              int bit_idx = 1;
-              int byte_buffer_offset = 4;
-
-              const int row_base = tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
-              uint32_t value =
-                  (static_cast<uint32_t>(bs_shared[row_base]) << 24) |
-                  (static_cast<uint32_t>(bs_shared[row_base + 1]) << 16) |
-                  (static_cast<uint32_t>(bs_shared[row_base + 2]) << 8) |
-                  static_cast<uint32_t>(bs_shared[row_base + 3]);
-              byte_buffer = bs_shared[row_base + byte_buffer_offset];
-
-              for (int i = 0; i < ntokens; ++i) {
-                const uint64_t span = static_cast<uint64_t>(high) -
-                                      static_cast<uint64_t>(low) + 1;
-                const uint16_t count = static_cast<uint16_t>(
-                    ((static_cast<uint64_t>(value) -
-                      static_cast<uint64_t>(low) + 1) *
-                         c_count -
-                     1) /
-                    span);
-
-                const uint16_t sym_i = binsearch<BLOCK_SIZE>(
-                    cdf_shared, count, static_cast<uint8_t>(max_symbol), tx);
-                output[(static_cast<int64_t>(layer_id) * ntokens + i) *
-                           nchannels +
-                       global_channel_id] = static_cast<uint8_t>(sym_i);
-
-                if (i == ntokens - 1) break;
-
-                const uint32_t c_low = cdf_shared[sym_i * BLOCK_SIZE + tx];
-                const uint32_t c_high =
-                    sym_i == max_symbol
-                        ? 0x10000u
-                        : cdf_shared[(sym_i + 1) * BLOCK_SIZE + tx];
-
-                high = (low - 1) +
-                       static_cast<uint32_t>((span * c_high) >> PRECISION);
-                low = low + static_cast<uint32_t>((span * c_low) >> PRECISION);
-
-                while (true) {
-                  if (low >= 0x80000000u || high < 0x80000000u) {
-                    low <<= 1;
-                    high <<= 1;
-                    high |= 1;
-                    value = (value << 1) |
-                            ((byte_buffer >> (8 - bit_idx)) & 1u);
-                    bit_idx += 1;
-                  } else if (low >= 0x40000000u && high < 0xC0000000u) {
-                    low <<= 1;
-                    low &= 0x7FFFFFFFu;
-                    high <<= 1;
-                    high |= 0x80000001u;
-                    value -= 0x40000000u;
-                    value = (value << 1) |
-                            ((byte_buffer >> (8 - bit_idx)) & 1u);
-                    bit_idx += 1;
-                  } else {
-                    break;
-                  }
-                  if (bit_idx == 9) {
-                    bit_idx = 1;
-                    byte_buffer_offset += 1;
-                    byte_buffer =
-                        bs_shared[row_base + byte_buffer_offset];
-                  }
-                }
-              }
-            });
+            }
+          }
+        });
   });
 }
 
@@ -385,40 +368,39 @@ int decoder_get_block_size(int nchannels) {
   return factor;
 }
 
-#define DISPATCH_DECODE_BLOCKSIZE(LAUNCHER, BLOCKSIZE_VAR, ...)              \
-  switch (BLOCKSIZE_VAR) {                                                   \
-    case 1:                                                                  \
-      LAUNCHER<1>(__VA_ARGS__);                                              \
-      break;                                                                 \
-    case 2:                                                                  \
-      LAUNCHER<2>(__VA_ARGS__);                                              \
-      break;                                                                 \
-    case 4:                                                                  \
-      LAUNCHER<4>(__VA_ARGS__);                                              \
-      break;                                                                 \
-    case 8:                                                                  \
-      LAUNCHER<8>(__VA_ARGS__);                                              \
-      break;                                                                 \
-    case 16:                                                                 \
-      LAUNCHER<16>(__VA_ARGS__);                                             \
-      break;                                                                 \
-    case 32:                                                                 \
-      LAUNCHER<32>(__VA_ARGS__);                                             \
-      break;                                                                 \
-    case 64:                                                                 \
-      LAUNCHER<64>(__VA_ARGS__);                                             \
-      break;                                                                 \
-    case 128:                                                                \
-      LAUNCHER<128>(__VA_ARGS__);                                            \
-      break;                                                                 \
-    default:                                                                 \
-      throw std::runtime_error("unsupported block size");                    \
+#define DISPATCH_DECODE_BLOCKSIZE(LAUNCHER, BLOCKSIZE_VAR, ...) \
+  switch (BLOCKSIZE_VAR) {                                      \
+    case 1:                                                     \
+      LAUNCHER<1>(__VA_ARGS__);                                 \
+      break;                                                    \
+    case 2:                                                     \
+      LAUNCHER<2>(__VA_ARGS__);                                 \
+      break;                                                    \
+    case 4:                                                     \
+      LAUNCHER<4>(__VA_ARGS__);                                 \
+      break;                                                    \
+    case 8:                                                     \
+      LAUNCHER<8>(__VA_ARGS__);                                 \
+      break;                                                    \
+    case 16:                                                    \
+      LAUNCHER<16>(__VA_ARGS__);                                \
+      break;                                                    \
+    case 32:                                                    \
+      LAUNCHER<32>(__VA_ARGS__);                                \
+      break;                                                    \
+    case 64:                                                    \
+      LAUNCHER<64>(__VA_ARGS__);                                \
+      break;                                                    \
+    case 128:                                                   \
+      LAUNCHER<128>(__VA_ARGS__);                               \
+      break;                                                    \
+    default:                                                    \
+      throw std::runtime_error("unsupported block size");       \
   }
 
 }  // namespace
 
-void decode_fast_new_xpu(const at::Tensor& cdf,
-                         const at::Tensor& bytestreams,
+void decode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& bytestreams,
                          const at::Tensor& lengths, at::Tensor& output) {
   if (!cdf.device().is_xpu() || !bytestreams.device().is_xpu() ||
       !lengths.device().is_xpu() || !output.device().is_xpu()) {
@@ -446,8 +428,8 @@ void decode_fast_new_xpu(const at::Tensor& cdf,
   }
 
   auto cdf_c = cdf.is_contiguous() ? cdf : cdf.contiguous();
-  auto bs_c = bytestreams.is_contiguous() ? bytestreams
-                                          : bytestreams.contiguous();
+  auto bs_c =
+      bytestreams.is_contiguous() ? bytestreams : bytestreams.contiguous();
   auto len_c = lengths.is_contiguous() ? lengths : lengths.contiguous();
 
   const c10::DeviceGuard guard(cdf.device());
@@ -494,8 +476,8 @@ void decode_fast_prefsum_xpu(const at::Tensor& cdf,
   }
 
   auto cdf_c = cdf.is_contiguous() ? cdf : cdf.contiguous();
-  auto bs_c = bytestreams.is_contiguous() ? bytestreams
-                                          : bytestreams.contiguous();
+  auto bs_c =
+      bytestreams.is_contiguous() ? bytestreams : bytestreams.contiguous();
   auto pref_c = lengths_prefsum.is_contiguous() ? lengths_prefsum
                                                 : lengths_prefsum.contiguous();
 

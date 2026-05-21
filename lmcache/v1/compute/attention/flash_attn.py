@@ -2,21 +2,28 @@
 # Standard
 from typing import TYPE_CHECKING
 
-# Third Party
 try:
+    # Third Party
     from vllm.attention import Attention
 except ImportError:
     # vLLM >= 0.17 moved the Attention class.
     from vllm.model_executor.layers.attention.attention import Attention
+
+# Third Party
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
 try:
+    # Third Party
     from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 except ImportError:
     # CUDA flash-attention extensions are unavailable on Intel XPU; use the
     # vLLM-shipped XPU flash-attention ops instead.
+    # Third Party
     from vllm._xpu_ops import xpu_ops
+
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata
+# Third Party
 import torch
 
 # First Party
