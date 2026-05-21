@@ -26,3 +26,5 @@ steps:
               - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
     artifact_paths:
       - "logs_*/*.log"
+      - "logs_*/*.json"
+      - "logs_*/*.txt"

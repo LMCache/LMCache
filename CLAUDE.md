@@ -38,6 +38,18 @@ not relocate them.
 
 ## PR Review Instructions
 
+For maintainer-facing PR comments, do **not** write agent-generated/status-style
+updates. Kuntai Du explicitly called out that incremental generated updates make
+the review thread difficult to follow. Use concise human summaries focused on:
+
+- actual design decisions;
+- tradeoffs and scope boundaries;
+- what was verified, only when relevant to the review;
+- the specific reviewer attention requested.
+
+Avoid repeated E2E/status packets, chronological debugging notes, or “agent ran X”
+narratives unless a maintainer directly asks for that level of detail.
+
 When asked to review a PR, use the `/pr-review` skill which implements the full review
 process from `docs/coding_standards.md` Section 9.
 

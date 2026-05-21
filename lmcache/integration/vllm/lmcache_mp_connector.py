@@ -60,6 +60,9 @@ except ImportError:
     )
 
 if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+
     # Third Party
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -81,9 +84,9 @@ logger = lmcache_init_logger(__name__)
 def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     if block_ids is None:
         return []
-    assert isinstance(block_ids, tuple), (
-        f"Expected block_ids to be a tuple of lists, but got {type(block_ids)}"
-    )
+    assert isinstance(
+        block_ids, tuple
+    ), f"Expected block_ids to be a tuple of lists, but got {type(block_ids)}"
 
     if len(block_ids) > 1:
         raise RuntimeError(
@@ -219,6 +222,7 @@ class LMCacheMPRequestTracker:
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_blocks: int = 0
     num_lmcache_hit_blocks: int = 0
+    cb_match_result: list["CBMatchResult"] = field(default_factory=list)
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
@@ -234,6 +238,7 @@ class LMCacheMPRequestTracker:
         self.num_stored_blocks = 0
         self.num_vllm_hit_blocks = 0
         self.num_lmcache_hit_blocks = 0
+        self.cb_match_result = []
         self.state = LMCacheMPRequestState.PREFETCHING
 
     ####
@@ -361,6 +366,7 @@ class LMCacheMPRequestMetadata:
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
+                cacheblend_store_final=tracker.num_lmcache_hit_blocks > 0,
             )
 
             ret = LMCacheMPRequestMetadata(
@@ -428,6 +434,7 @@ class LMCacheMPRequestMetadata:
                 start=start_token_idx,
                 end=end_token_idx,
                 skip_first_n_tokens=skip_first_n_tokens,
+                cb_match_result=tracker.cb_match_result,
             )
 
             ret = LMCacheMPRequestMetadata(
@@ -786,6 +793,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # Save the vllm and lmcache hit tokens
         tracker.num_vllm_hit_blocks = num_vllm_blocks
         tracker.num_lmcache_hit_blocks = num_lmcache_blocks
+        if hasattr(self.scheduler_adapter, "get_lookup_matches"):
+            tracker.cb_match_result = self.scheduler_adapter.get_lookup_matches(
+                request.request_id
+            )
 
         need_to_load = max(0, ret - num_computed_tokens)
         logger.debug(
@@ -1142,9 +1153,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             self.scheduler_adapter.report_block_allocations(records)
 
     def _get_request_tracker(self, request_id: str) -> LMCacheMPRequestTracker:
-        assert request_id in self.request_trackers, (
-            f"Request tracker for request_id {request_id} not found. "
-        )
+        assert (
+            request_id in self.request_trackers
+        ), f"Request tracker for request_id {request_id} not found. "
         return self.request_trackers[request_id]
 
     def _get_or_create_request_tracker(

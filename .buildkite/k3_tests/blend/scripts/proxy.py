@@ -56,11 +56,26 @@ logger = init_logger(__name__)
 
 # Do not return exception text to clients (avoids leaking stack paths and internals).
 _PROXY_CLIENT_ERROR_MESSAGE = "Internal server error"
+_TELEMETRY_TIMEOUT_SEC = float(os.environ.get("PROXY_TELEMETRY_TIMEOUT_SEC", "300"))
+_ALLOW_TELEMETRY_TIMEOUT_FALLBACK = (
+    os.environ.get("PROXY_ALLOW_TELEMETRY_TIMEOUT_FALLBACK", "0") == "1"
+)
 
 # ---------------------------------------------------------------------------
 # Pending-request tracking (shared between proxy app and telemetry app)
 # ---------------------------------------------------------------------------
 pending_requests: dict[str, asyncio.Event] = {}
+# Additional telemetry ids that should resolve to a pending proxy request id.
+# vLLM can wrap or replace the caller-supplied X-Request-Id with its generated
+# OpenAI response id (for example ``cmpl-...`` / ``chatcmpl-...``).  The proxy
+# learns that response id only after the prefiller responds, so telemetry can
+# legitimately arrive first and must be replayed once the alias is known.
+pending_request_aliases: dict[str, str] = {}
+# Telemetry arrivals whose id did not resolve yet.  Keyed by observed telemetry
+# id, value is a list of (world_size, kv_rank) arrivals to replay if a later
+# prefill response maps that id to a still-pending proxy request.
+unmatched_tp_arrivals: dict[str, list[tuple[int, int]]] = {}
+_MAX_UNMATCHED_TELEMETRY_IDS = 1024
 # TP worker arrivals per request: world_size and which ranks have checked in.
 pending_tp_state: dict[str, dict] = {}
 pending_requests_lock = threading.Lock()
@@ -84,7 +99,103 @@ def remove_pending_request(request_id: str):
     """Remove a pending request and its TP state from the dictionary."""
     with pending_requests_lock:
         pending_requests.pop(request_id, None)
+        aliases_to_remove = [
+            alias
+            for alias, pending_id in pending_request_aliases.items()
+            if pending_id == request_id
+        ]
+        for alias in aliases_to_remove:
+            pending_request_aliases.pop(alias, None)
         pending_tp_state.pop(request_id, None)
+
+
+def register_pending_request_alias(request_id: str, observed_request_id: str) -> None:
+    """Map an observed backend/telemetry id to this proxy's pending request id."""
+    if not observed_request_id or observed_request_id == request_id:
+        return
+
+    with pending_requests_lock:
+        if request_id not in pending_requests:
+            return
+        pending_request_aliases[observed_request_id] = request_id
+        logger.info(
+            "Request %s: registered telemetry alias %s",
+            request_id,
+            observed_request_id,
+        )
+        for world_size, kv_rank in unmatched_tp_arrivals.pop(observed_request_id, []):
+            _record_worker_arrival_locked(request_id, world_size, kv_rank)
+
+
+def _resolve_pending_request_id(observed_request_id: str) -> str | None:
+    """Map a telemetry request ID back to this proxy's pending request ID."""
+    if observed_request_id in pending_requests:
+        return observed_request_id
+    if observed_request_id in pending_request_aliases:
+        return pending_request_aliases[observed_request_id]
+
+    # vLLM may wrap caller-supplied IDs inside generated IDs such as
+    # ``chatcmpl-<request-id>-<suffix>``. Prefer matching the exact pending
+    # ID as a substring instead of splitting on hyphens; the proxy-generated
+    # ID itself is a truncated UUID and can contain hyphens.
+    for pending_id in pending_requests:
+        if pending_id and pending_id in observed_request_id:
+            return pending_id
+
+    # Backward-compatible fallback for legacy wrappers that inserted the
+    # request ID after a leading segment. This is intentionally last because it
+    # corrupts raw truncated UUIDs like ``123e4567-e89b-12``.
+    legacy_id = "-".join(observed_request_id.split("-")[1:])[:16]
+    if legacy_id in pending_requests:
+        return legacy_id
+    return None
+
+
+def _record_unmatched_arrival(
+    observed_request_id: str,
+    world_size: int,
+    kv_rank: int,
+) -> None:
+    """Remember unresolved telemetry briefly so response-id aliases can replay it."""
+    if len(unmatched_tp_arrivals) >= _MAX_UNMATCHED_TELEMETRY_IDS:
+        # Dicts preserve insertion order; drop one oldest id to keep this bounded
+        # during long diagnostics with unrelated telemetry noise.
+        unmatched_tp_arrivals.pop(next(iter(unmatched_tp_arrivals)), None)
+    unmatched_tp_arrivals.setdefault(observed_request_id, []).append(
+        (world_size, kv_rank)
+    )
+
+
+def _record_worker_arrival_locked(
+    request_id: str,
+    world_size: int,
+    kv_rank: int,
+) -> bool:
+    """Record one TP worker arrival. Caller must hold pending_requests_lock."""
+    event = pending_requests.get(request_id, None)
+    if event is None:
+        return False
+
+    if request_id not in pending_tp_state:
+        pending_tp_state[request_id] = {
+            "world_size": world_size,
+            "received_ranks": set(),
+        }
+    state = pending_tp_state[request_id]
+    state["received_ranks"].add(kv_rank)
+    logger.info(
+        f"Request {request_id}: TP worker kv_rank={kv_rank} reported "
+        f"({len(state['received_ranks'])}/{state['world_size']})"
+    )
+
+    if len(state["received_ranks"]) >= state["world_size"]:
+        pending_tp_state.pop(request_id, None)
+        if main_event_loop is not None:
+            main_event_loop.call_soon_threadsafe(event.set)
+        else:
+            event.set()
+        return True
+    return False
 
 
 def notify_request(
@@ -98,32 +209,16 @@ def notify_request(
     Returns True if all workers are done and the event was signaled.
     """
     with pending_requests_lock:
-        # vLLM wraps the request ID as "chatcmpl-{uuid}-{suffix}",
-        # so strip the first and last segments to recover the original UUID.
-        request_id = "-".join(chatcmpl_request_id.split("-")[1:])
-        request_id = request_id[:16]
-        event = pending_requests.get(request_id, None)
-        if event is None:
+        request_id = _resolve_pending_request_id(chatcmpl_request_id)
+        if request_id is None:
+            logger.warning(
+                "Telemetry for unknown request id %s; pending request ids: %s",
+                chatcmpl_request_id,
+                sorted(pending_requests),
+            )
+            _record_unmatched_arrival(chatcmpl_request_id, world_size, kv_rank)
             return False
-
-        if request_id not in pending_tp_state:
-            pending_tp_state[request_id] = {
-                "world_size": world_size,
-                "received_ranks": set(),
-            }
-        state = pending_tp_state[request_id]
-        state["received_ranks"].add(kv_rank)
-        logger.info(
-            f"Request {request_id}: TP worker kv_rank={kv_rank} reported "
-            f"({len(state['received_ranks'])}/{state['world_size']})"
-        )
-
-        if len(state["received_ranks"]) >= state["world_size"]:
-            pending_tp_state.pop(request_id, None)
-            if main_event_loop is not None:
-                main_event_loop.call_soon_threadsafe(event.set)
-            return True
-    return False
+        return _record_worker_arrival_locked(request_id, world_size, kv_rank)
 
 
 # ---------------------------------------------------------------------------
@@ -379,28 +474,56 @@ async def _handle_disagg_request(request: Request, endpoint: str):
             prefill_req_data.pop("stream_options", None)
 
             prefill_send_time = time.monotonic()
-            await _send_prefill(prefill_client, endpoint, prefill_req_data, request_id)
+            prefill_response = await _send_prefill(
+                prefill_client, endpoint, prefill_req_data, request_id
+            )
             prefill_first_response_time = time.monotonic()
             prefill_duration = prefill_first_response_time - prefill_send_time
             logger.info(
                 f"Request {request_id}: prefill request"
                 f" duration = {prefill_duration:.4f}s"
             )
+            try:
+                prefill_response_id = prefill_response.json().get("id")
+            except Exception:
+                prefill_response_id = None
+            if isinstance(prefill_response_id, str):
+                register_pending_request_alias(request_id, prefill_response_id)
 
-            # Wait for telemetry notification (KV cache ready)
-            await event.wait()
-            notify_time = time.monotonic()
-            notify_wait_duration = notify_time - prefill_first_response_time
-            logger.info(
-                f"Request {request_id}: finished saving KV caches after prefill"
-                f" response = {notify_wait_duration * 1000:.2f}ms"
-            )
-            logger.debug(f"Event signaled for {request_id}, forwarding to decoder")
+            # Wait for telemetry notification (KV cache ready). Keep this bounded:
+            # if telemetry is dropped, an unbounded wait keeps the client request and
+            # Modal worker open until their outer timeouts fire, hiding the real
+            # missing-telemetry failure mode and burning GPU time.
+            try:
+                await asyncio.wait_for(event.wait(), timeout=_TELEMETRY_TIMEOUT_SEC)
+                notify_time = time.monotonic()
+                notify_wait_duration = notify_time - prefill_first_response_time
+                logger.info(
+                    f"Request {request_id}: finished saving KV caches after prefill"
+                    f" response = {notify_wait_duration * 1000:.2f}ms"
+                )
+                logger.debug(f"Event signaled for {request_id}, forwarding to decoder")
+            except TimeoutError:
+                if not _ALLOW_TELEMETRY_TIMEOUT_FALLBACK:
+                    logger.error(
+                        "Request %s: telemetry wait timed out after %.1fs",
+                        request_id,
+                        _TELEMETRY_TIMEOUT_SEC,
+                    )
+                    raise
+                logger.warning(
+                    "Request %s: telemetry wait timed out after %.1fs; "
+                    "fallback enabled; forwarding request to decoder after "
+                    "prefill response",
+                    request_id,
+                    _TELEMETRY_TIMEOUT_SEC,
+                )
 
         finally:
             remove_pending_request(request_id)
 
         # -- Step 2: Decode -> decoder ----------------------------------------
+        logger.info(f"Request {request_id}: forwarding request to decoder")
         if is_stream:
 
             async def generate_stream():
@@ -418,10 +541,14 @@ async def _handle_disagg_request(request: Request, endpoint: str):
                         )
                         first_chunk = False
                     yield chunk
+                logger.info(
+                    f"Request {request_id}: streaming decode response completed"
+                )
 
             return StreamingResponse(generate_stream(), media_type="application/json")
         else:
             response = await _send_decode(decode_client, endpoint, req_data)
+            logger.info(f"Request {request_id}: decode response completed")
             return JSONResponse(content=response.json())
 
     except httpx.HTTPStatusError as e:

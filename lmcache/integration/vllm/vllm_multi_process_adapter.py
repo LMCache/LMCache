@@ -17,6 +17,7 @@ from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
+    CBMatchResult,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
@@ -46,6 +47,7 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    cacheblend = os.getenv("LMCACHE_ENABLE_CACHEBLEND", "False")
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -105,6 +107,31 @@ def _resolve_extra_config(
             )
         resolved[item.name] = value
     return resolved
+
+
+def _is_cacheblend_enabled(extra_config: dict[str, Any] | None) -> bool:
+    if extra_config is not None:
+        cfg = _resolve_extra_config(extra_config)
+        cacheblend_raw = cfg[ExtraConfigDefault.cacheblend.name]
+    else:
+        cacheblend_raw = ExtraConfigDefault.cacheblend.value
+    return str(cacheblend_raw).lower() in {"1", "true", "yes", "on"}
+
+
+def _unique_token_coverage(matches: list[CBMatchResult]) -> int:
+    intervals = sorted((m.cur_st, m.cur_ed) for m in matches if m.cur_ed > m.cur_st)
+    if not intervals:
+        return 0
+    total = 0
+    cur_st, cur_ed = intervals[0]
+    for st, ed in intervals[1:]:
+        if st <= cur_ed:
+            cur_ed = max(cur_ed, ed)
+        else:
+            total += cur_ed - cur_st
+            cur_st, cur_ed = st, ed
+    total += cur_ed - cur_st
+    return total
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
@@ -378,6 +405,12 @@ class LoadStoreOp:
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
+    cb_match_result: list[CBMatchResult] | None = None
+    """CacheBlend V2 match metadata returned by CB_LOOKUP_PRE_COMPUTED_V2."""
+
+    cacheblend_store_final: bool = False
+    """Use CB_STORE_FINAL instead of CB_STORE_PRE_COMPUTED for this store."""
+
     def __len__(self) -> int:
         return len(self.block_ids)
 
@@ -441,9 +474,19 @@ class LMCacheMPSchedulerAdapter:
         #   even after the server has already popped the job (exactly-once).
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
+        self._finished_lookup_matches: dict[str, list[CBMatchResult]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
+        self.enable_cacheblend = _is_cacheblend_enabled(extra_config)
+        logger.info(
+            "%s initialized: adapter_file=%s, "
+            "enable_cacheblend=%s, extra_config_keys=%s",
+            self.__class__.__name__,
+            __file__,
+            self.enable_cacheblend,
+            sorted((extra_config or {}).keys()),
+        )
 
         # Read chunk size from lmcache
         try:
@@ -551,21 +594,40 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         ).no_worker_id_version()
 
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.LOOKUP,
-            [key, self.tp_size],
+        enable_cacheblend = getattr(self, "enable_cacheblend", False)
+        request_type = (
+            RequestType.CB_LOOKUP_PRE_COMPUTED_V2
+            if enable_cacheblend
+            else RequestType.LOOKUP
         )
+        payloads = [key] if enable_cacheblend else [key, self.tp_size]
+        logger.info(
+            "LMCache MP lookup request: request_id=%s request_type=%s "
+            "enable_cacheblend=%s token_start=%s token_end=%s adapter_file=%s",
+            request_id,
+            request_type.name,
+            enable_cacheblend,
+            0,
+            aligned_end,
+            __file__,
+        )
+        future = send_lmcache_request(self.mq_client, request_type, payloads)
         try:
-            future.result(timeout=self._mq_timeout)
+            result = future.result(timeout=self._mq_timeout)
         except TimeoutError:
             logger.warning(
-                "LOOKUP request timed out after %ss. Marking server as unhealthy.",
+                "%s request timed out after %ss. Marking server as unhealthy.",
+                request_type.name,
                 self._mq_timeout,
             )
             self._health_event.clear()
             return
-        self._pending_lookups.add(request_id)
+        if enable_cacheblend:
+            matches = list(result or [])
+            self._finished_lookup_matches[request_id] = matches
+            self._finished_lookup_results[request_id] = _unique_token_coverage(matches)
+        else:
+            self._pending_lookups.add(request_id)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -586,7 +648,8 @@ class LMCacheMPSchedulerAdapter:
             None if the lookup request is not finished yet.
         """
         if request_id not in self._pending_lookups:
-            # No job — either unhealthy at submit time or already cleaned up.
+            # No async job — either unhealthy at submit time, CacheBlend lookup
+            # completed synchronously, or the job was already cleaned up.
             # If we have a cached result, return it to handle repeated calls.
             return self._finished_lookup_results.get(request_id, 0)
 
@@ -620,6 +683,10 @@ class LMCacheMPSchedulerAdapter:
         self._finished_lookup_results[request_id] = token_count
         return token_count
 
+    def get_lookup_matches(self, request_id: str) -> list[CBMatchResult]:
+        """Return CacheBlend V2 match metadata for a completed lookup."""
+        return self._finished_lookup_matches.get(request_id, [])
+
     def num_blocks_per_chunk(self) -> int:
         """
         Returns:
@@ -635,6 +702,7 @@ class LMCacheMPSchedulerAdapter:
         """
         self._pending_lookups.discard(request_id)
         self._finished_lookup_results.pop(request_id, None)
+        self._finished_lookup_matches.pop(request_id, None)
 
     def free_lookup_locks(
         self,
@@ -829,9 +897,23 @@ class LMCacheMPWorkerAdapter:
         # Request IDs already returned as finished_sending to the scheduler.
         # Prevents re-reporting the same ID after drain clears tracking sets.
         self._returned_finished: set[str] = set()
+        # Request IDs already reported to the disagg request-telemetry hook.
+        # Telemetry is a KV-store-readiness signal for the proxy and must be
+        # emitted when LMCache store completes, even if vLLM scheduler-side
+        # finished_sending reconciliation has not returned the id yet.
+        self._telemetry_reported_stores: set[str] = set()
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
+        self.enable_cacheblend = _is_cacheblend_enabled(extra_config)
+        logger.info(
+            "%s initialized: adapter_file=%s, "
+            "enable_cacheblend=%s, extra_config_keys=%s",
+            self.__class__.__name__,
+            __file__,
+            self.enable_cacheblend,
+            sorted((extra_config or {}).keys()),
+        )
 
         # Read chunk size from lmcache
         try:
@@ -948,23 +1030,43 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        self.transfer_ctx = create_transfer_context(kv_caches)
         layout_hints = vllm_layout_hints()
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
         )
         try:
-            self.transfer_ctx.register(
-                self.instance_id,
-                kv_caches,
-                self.model_name,
-                self.world_size,
-                self.blocks_in_chunk,
-                self.mq_client,
-                self._mq_timeout,
-                send_request=send_lmcache_request,
-                layout_hints=layout_hints,
-            )
+            if self.enable_cacheblend:
+                request_type = RequestType.CB_REGISTER_KV_CACHE
+                payloads = [
+                    self.instance_id,
+                    wrap_kv_caches(kv_caches),
+                    self.model_name,
+                    self.world_size,
+                ]
+                logger.info(
+                    "LMCache MP register request: request_type=%s "
+                    "enable_cacheblend=%s model=%s world_size=%s adapter_file=%s",
+                    request_type.name,
+                    self.enable_cacheblend,
+                    self.model_name,
+                    self.world_size,
+                    __file__,
+                )
+                future = send_lmcache_request(self.mq_client, request_type, payloads)
+                future.result(timeout=self._mq_timeout)
+            else:
+                self.transfer_ctx = create_transfer_context(kv_caches)
+                self.transfer_ctx.register(
+                    self.instance_id,
+                    kv_caches,
+                    self.model_name,
+                    self.world_size,
+                    self.blocks_in_chunk,
+                    self.mq_client,
+                    self._mq_timeout,
+                    send_request=send_lmcache_request,
+                    layout_hints=layout_hints,
+                )
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to "
@@ -1047,28 +1149,54 @@ class LMCacheMPWorkerAdapter:
             return
 
         assert op.token_ids is not None
-        key = self._create_key(
-            op.token_ids,
-            op.start,
-            op.end,
-            request_id=request_id,
-            cache_salt=cache_salt,
-        )
-        if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting store requests."
+        if self.enable_cacheblend:
+            # CacheBlend store APIs treat key.token_ids as the document/chunk
+            # being registered and copy from the vLLM KV buffer at `offset`.
+            # The normal STORE path instead carries the full request token_ids
+            # plus start/end. Keep those semantics separate.
+            store_token_ids = op.token_ids[op.start : op.end]
+            key = self._create_key(
+                store_token_ids,
+                0,
+                len(store_token_ids),
+                request_id=request_id,
+                cache_salt=cache_salt,
             )
-        future = self.transfer_ctx.submit_store(
-            request_id,
-            key,
-            self.instance_id,
-            self.kv_caches,
-            op.block_ids,
-            event,
-            self.blocks_in_chunk,
-        )
+            request_type = (
+                RequestType.CB_STORE_FINAL
+                if op.cacheblend_store_final
+                else RequestType.CB_STORE_PRE_COMPUTED
+            )
+            payloads = [key, op.start, self.instance_id, event.ipc_handle()]
+            future = send_lmcache_request(
+                self.mq_client,
+                request_type,
+                payloads,
+            ).to_cuda_future()
+        else:
+            key = self._create_key(
+                op.token_ids,
+                op.start,
+                op.end,
+                request_id=request_id,
+                cache_salt=cache_salt,
+            )
+            if self.transfer_ctx is None:
+                raise RuntimeError(
+                    "Transfer context is not initialized. "
+                    "Call register_kv_caches() before submitting store requests."
+                )
+            future = self.transfer_ctx.submit_store(
+                request_id,
+                key,
+                self.instance_id,
+                self.kv_caches,
+                op.block_ids,
+                event,
+                self.blocks_in_chunk,
+            )
         self.store_futures[request_id] = future
+        self._start_store_telemetry_watcher(request_id, future)
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -1102,21 +1230,36 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-        if self.transfer_ctx is None:
-            raise RuntimeError(
-                "Transfer context is not initialized. "
-                "Call register_kv_caches() before submitting retrieve requests."
+        if self.enable_cacheblend:
+            request_type = RequestType.CB_RETRIEVE_PRE_COMPUTED_V2
+            payloads = [
+                key,
+                op.cb_match_result or [],
+                op.start,
+                self.instance_id,
+                event.ipc_handle(),
+            ]
+            future = send_lmcache_request(
+                self.mq_client,
+                request_type,
+                payloads,
+            ).to_cuda_future()
+        else:
+            if self.transfer_ctx is None:
+                raise RuntimeError(
+                    "Transfer context is not initialized. "
+                    "Call register_kv_caches() before submitting retrieve requests."
+                )
+            future = self.transfer_ctx.submit_retrieve(
+                request_id,
+                key,
+                self.instance_id,
+                self.kv_caches,
+                op.block_ids,
+                event,
+                self.blocks_in_chunk,
+                skip_first_n_tokens=op.skip_first_n_tokens,
             )
-        future = self.transfer_ctx.submit_retrieve(
-            request_id,
-            key,
-            self.instance_id,
-            self.kv_caches,
-            op.block_ids,
-            event,
-            self.blocks_in_chunk,
-            skip_first_n_tokens=op.skip_first_n_tokens,
-        )
         self.retrieve_futures[request_id] = (future, list(op.block_ids))
 
     @_lmcache_nvtx_annotate
@@ -1275,6 +1418,8 @@ class LMCacheMPWorkerAdapter:
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
 
+        self._report_store_finished_telemetry(finished_stores)
+
         # Update the internal states
         ret_stores = self._process_finished_stores(
             finished_stores, finished_req_ids_from_engine
@@ -1283,13 +1428,7 @@ class LMCacheMPWorkerAdapter:
         # the invocation of `get_finished` means that
         # these requests' KV caches are already fully stored.
         # or the requests normally ends without any store.
-        if ret_stores:
-            self.request_telemetry.on_request_store_finished(
-                request_ids_set=ret_stores,
-                model_name=self.model_name,
-                world_size=self.world_size,
-                kv_rank=self.worker_id,
-            )
+        self._report_store_finished_telemetry(ret_stores)
 
         return ret_stores, finished_retrieves
 
@@ -1346,6 +1485,63 @@ class LMCacheMPWorkerAdapter:
         self.previously_finished.difference_update(safe_finished_s)
 
         return safe_finished_s
+
+    def _report_store_finished_telemetry(self, request_ids: set[str]) -> None:
+        """Report completed store ids to disagg telemetry once.
+
+        The proxy uses this as the strict prefill->decode handoff gate. Scheduler
+        `finished_sending` semantics still require vLLM's engine-finished side,
+        but the proxy only needs the LMCache store future to be complete.
+        """
+        pending = request_ids - self._telemetry_reported_stores
+        if not pending:
+            return
+        self._telemetry_reported_stores.update(pending)
+        self.request_telemetry.on_request_store_finished(
+            request_ids_set=pending,
+            model_name=self.model_name,
+            world_size=self.world_size,
+            kv_rank=self.worker_id,
+        )
+
+    def _start_store_telemetry_watcher(
+        self,
+        request_id: str,
+        future: MessagingFuture[StoreResult],
+    ) -> None:
+        """Emit request telemetry as soon as a submitted store future finishes.
+
+        vLLM may not call ``get_finished`` until after the disagg proxy has
+        already waited for prefill KV readiness. Starting a lightweight watcher
+        when the store is submitted lets strict prefill->decode handoff observe
+        the real store completion without falling back or blocking vLLM's
+        scheduler path.
+        """
+
+        def wait_and_report() -> None:
+            try:
+                result = future.result()
+            except Exception:
+                logger.exception(
+                    "Store telemetry watcher failed for request_id=%s",
+                    request_id,
+                )
+                return
+
+            if not result:
+                logger.error(
+                    "Store telemetry watcher saw failed store for request_id=%s",
+                    request_id,
+                )
+                return
+
+            self._report_store_finished_telemetry({request_id})
+
+        threading.Thread(
+            target=wait_and_report,
+            name=f"lmcache-store-telemetry-{request_id}",
+            daemon=True,
+        ).start()
 
     def _create_key(
         self,

@@ -1,6 +1,6 @@
 # K8s Test Pipelines
 
-Each subdirectory under `k3_tests/` is a self-contained test with these files:
+Each subdirectory under `k3_tests/` is a self-contained test with these files. For the CacheBlend V2 disaggregated serving E2E specifically, see [`blend/README.md`](blend/README.md) and [`blend/BK_WEB_SETUP.md`](blend/BK_WEB_SETUP.md).
 
 | File | Purpose |
 |------|---------|

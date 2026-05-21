@@ -10,6 +10,23 @@ LMCache is a KV cache management engine for LLM serving that reduces Time To Fir
 
 The default branch is `dev`. Base all new branches and pull requests against `dev`.
 
+## PR Comment Style
+
+For maintainer-facing GitHub comments, avoid agent-generated/status-style updates.
+Do not post incremental progress packets, repeated E2E evidence dumps, or
+chronological debugging narratives unless a maintainer explicitly asks for them.
+
+Default to one concise human summary that explains:
+
+- the actual design decision;
+- the tradeoff or scope boundary;
+- what was verified only when it directly helps the reviewer;
+- what specifically needs reviewer attention.
+
+Kuntai Du’s reviewer feedback is the standing rule: too much agent-generated/status
+content makes PR threads difficult to follow; reviewers need concise human summaries
+of design decisions, tradeoffs, and review asks.
+
 ## Python Environment
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage Python environments and dependencies:

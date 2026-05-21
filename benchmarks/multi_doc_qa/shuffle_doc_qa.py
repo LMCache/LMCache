@@ -27,6 +27,7 @@ from openai import OpenAI
 from transformers import AutoTokenizer
 
 SERVICE_PORT = os.environ.get("SERVICE_PORT", "10001")
+REQUEST_TIMEOUT_SEC = float(os.environ.get("BENCHMARK_REQUEST_TIMEOUT_SEC", "1800"))
 
 
 def ordinal_word(i: int) -> str:
@@ -262,6 +263,8 @@ def main() -> None:
     client = OpenAI(
         api_key="dummy-key",
         base_url=f"http://localhost:{args.port}/v1",
+        timeout=REQUEST_TIMEOUT_SEC,
+        max_retries=0,
     )
 
     models = client.models.list()

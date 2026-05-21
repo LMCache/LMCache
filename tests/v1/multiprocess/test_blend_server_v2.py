@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 """
 Unit and integration tests for BlendTokenRangeMatcher and BlendEngineV2.
 
@@ -22,7 +23,7 @@ Tests cover:
 """
 
 # Standard
-from typing import Generator
+from typing import Generator, cast
 import multiprocessing as mp
 import os
 import time
@@ -31,6 +32,11 @@ import time
 import pytest
 import torch
 import zmq
+
+pytest.importorskip(
+    "lmcache.native_storage_ops",
+    reason="blend_server_v2 integration tests require native storage extension",
+)
 
 # First Party
 from lmcache.utils import EngineType
@@ -42,6 +48,7 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
+from lmcache.v1.multiprocess import blend_server_v2 as blend_server_v2_mod
 from lmcache.v1.multiprocess.blend_server_v2 import (
     BlendEngineV2,
     BlendTokenRangeMatcher,
@@ -919,6 +926,73 @@ def test_cb_register_unregister_kv_cache_v2(
     assert result is None
 
 
+def test_cb_register_uses_paged_context_for_vllm_layer_cache_list(monkeypatch):
+    """vLLM registers one paged KV tensor per layer, not a single CB arena."""
+
+    class FakePlainContext:
+        num_layers = 1
+
+        def __init__(self, kv_caches, chunk_size):
+            self.kv_caches = kv_caches
+            self.chunk_size = chunk_size
+
+    class FakePagedContext:
+        num_layers = 2
+
+        def __init__(self, kv_caches, chunk_size):
+            self.kv_caches = kv_caches
+            self.chunk_size = chunk_size
+
+    monkeypatch.setattr(blend_server_v2_mod, "PlainGPUCacheContext", FakePlainContext)
+    monkeypatch.setattr(
+        blend_server_v2_mod, "PagedGPUCacheBlendContext", FakePagedContext
+    )
+
+    engine = BlendEngineV2.__new__(BlendEngineV2)
+    engine.chunk_size = CHUNK_SIZE
+    engine._cb_gpu_contexts = {}
+    engine._cb_gpu_context_meta = {}
+
+    engine.cb_register_kv_cache(7, cast(KVCache, ["layer0", "layer1"]), "testmodel", 1)
+
+    assert isinstance(engine._cb_gpu_contexts[7], FakePagedContext)
+    assert engine._cb_gpu_contexts[7].kv_caches == ["layer0", "layer1"]
+    assert engine._cb_gpu_context_meta[7] == ("testmodel", 1)
+
+
+def test_cb_register_preserves_plain_context_for_single_cb_arena(monkeypatch):
+    """The original single plain CacheBlend tensor path remains unchanged."""
+
+    class FakePlainContext:
+        num_layers = 1
+
+        def __init__(self, kv_caches, chunk_size):
+            self.kv_caches = kv_caches
+            self.chunk_size = chunk_size
+
+    class FakePagedContext:
+        num_layers = 2
+
+        def __init__(self, kv_caches, chunk_size):
+            self.kv_caches = kv_caches
+            self.chunk_size = chunk_size
+
+    monkeypatch.setattr(blend_server_v2_mod, "PlainGPUCacheContext", FakePlainContext)
+    monkeypatch.setattr(
+        blend_server_v2_mod, "PagedGPUCacheBlendContext", FakePagedContext
+    )
+
+    engine = BlendEngineV2.__new__(BlendEngineV2)
+    engine.chunk_size = CHUNK_SIZE
+    engine._cb_gpu_contexts = {}
+    engine._cb_gpu_context_meta = {}
+
+    engine.cb_register_kv_cache(8, cast(KVCache, ["plain-arena"]), "testmodel", 1)
+
+    assert isinstance(engine._cb_gpu_contexts[8], FakePlainContext)
+    assert engine._cb_gpu_contexts[8].kv_caches == ["plain-arena"]
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CB register multiple instances requires CUDA"
 )
@@ -1153,9 +1227,9 @@ def test_cb_lookup_v2_sub_sequence_match(
     ).result(timeout=DEFAULT_TIMEOUT)
 
     assert isinstance(cb_results, list)
-    assert len(cb_results) == 1, (
-        "Should find exactly one match (the stored chunk embedded in the query)"
-    )
+    assert (
+        len(cb_results) == 1
+    ), "Should find exactly one match (the stored chunk embedded in the query)"
     r = cb_results[0]
     # The stored chunk was at old_st=0 in its original sequence
     assert r.old_st == 0
@@ -1277,9 +1351,9 @@ def test_cb_lookup_v2_cannot_find_normal_store(
     ).result(timeout=DEFAULT_TIMEOUT)
 
     assert isinstance(cb_results, list)
-    assert len(cb_results) == 0, (
-        "CB_LOOKUP_PRE_COMPUTED_V2 must not see data stored via normal STORE"
-    )
+    assert (
+        len(cb_results) == 0
+    ), "CB_LOOKUP_PRE_COMPUTED_V2 must not see data stored via normal STORE"
 
 
 @pytest.mark.skipif(
@@ -1530,18 +1604,18 @@ def test_cb_retrieve_v2_verify_data_correctness(
     torch.cuda.synchronize()
     src_slice = cb_client_context.get_tensor_slice(source_offset, CHUNK_SIZE)
     dst_slice = cb_client_context.get_tensor_slice(dest_offset, CHUNK_SIZE)
-    assert torch.allclose(src_slice, dst_slice, atol=1e-4), (
-        "Retrieved data at dest_offset should match the stored source data"
-    )
+    assert torch.allclose(
+        src_slice, dst_slice, atol=1e-4
+    ), "Retrieved data at dest_offset should match the stored source data"
 
     # Regions outside the retrieved range should remain zero
     beyond = cb_client_context.get_tensor_slice(
         dest_offset + CHUNK_SIZE,
         cb_client_context.num_tokens - (dest_offset + CHUNK_SIZE),
     )
-    assert torch.allclose(beyond, torch.zeros_like(beyond), atol=1e-4), (
-        "Regions beyond the retrieved window should be unchanged (zeros)"
-    )
+    assert torch.allclose(
+        beyond, torch.zeros_like(beyond), atol=1e-4
+    ), "Regions beyond the retrieved window should be unchanged (zeros)"
 
 
 @pytest.mark.skipif(
@@ -1610,9 +1684,9 @@ def test_cb_retrieve_v2_sub_sequence(
     # Data should have been copied to gpu_st = cur_st + offset = CHUNK_SIZE + 0
     src_slice = cb_client_context.get_tensor_slice(0, CHUNK_SIZE)
     dst_slice = cb_client_context.get_tensor_slice(CHUNK_SIZE, CHUNK_SIZE)
-    assert torch.allclose(src_slice, dst_slice, atol=1e-4), (
-        "Sub-sequence retrieve must copy data to cur_st + offset in the GPU buffer"
-    )
+    assert torch.allclose(
+        src_slice, dst_slice, atol=1e-4
+    ), "Sub-sequence retrieve must copy data to cur_st + offset in the GPU buffer"
 
 
 @pytest.mark.skipif(
@@ -1712,16 +1786,16 @@ def test_cb_retrieve_v2_multiple_chunks_data_correctness(
     # chunk_A → gpu_st = 0 + 2*CHUNK_SIZE = slot 2
     src_a = cb_client_context.get_tensor_slice(0, CHUNK_SIZE)
     dst_a = cb_client_context.get_tensor_slice(dest_offset, CHUNK_SIZE)
-    assert torch.allclose(dst_a, src_a, atol=1e-4), (
-        "Slot 2 must match slot 0 (chunk_A source)"
-    )
+    assert torch.allclose(
+        dst_a, src_a, atol=1e-4
+    ), "Slot 2 must match slot 0 (chunk_A source)"
 
     # chunk_B → gpu_st = CHUNK_SIZE + 2*CHUNK_SIZE = slot 3
     src_b = cb_client_context.get_tensor_slice(CHUNK_SIZE, CHUNK_SIZE)
     dst_b = cb_client_context.get_tensor_slice(dest_offset + CHUNK_SIZE, CHUNK_SIZE)
-    assert torch.allclose(dst_b, src_b, atol=1e-4), (
-        "Slot 3 must match slot 1 (chunk_B source)"
-    )
+    assert torch.allclose(
+        dst_b, src_b, atol=1e-4
+    ), "Slot 3 must match slot 1 (chunk_B source)"
 
 
 @pytest.mark.skipif(
@@ -1807,9 +1881,9 @@ def test_cb_retrieve_v2_unaligned_nonzero_offset(
     torch.cuda.synchronize()
     src_slice = cb_client_context.get_tensor_slice(0, CHUNK_SIZE)
     dst_slice = cb_client_context.get_tensor_slice(2 * CHUNK_SIZE, CHUNK_SIZE)
-    assert torch.allclose(src_slice, dst_slice, atol=1e-4), (
-        "gpu_st = cur_st + offset = 2*CHUNK_SIZE must hold the stored source data"
-    )
+    assert torch.allclose(
+        src_slice, dst_slice, atol=1e-4
+    ), "gpu_st = cur_st + offset = 2*CHUNK_SIZE must hold the stored source data"
 
 
 @pytest.mark.skipif(
@@ -1930,9 +2004,9 @@ def test_cb_store_final_v2_then_normal_lookup(
 
     expected_chunks = 1  # one full CHUNK_SIZE chunk
     assert isinstance(lookup_result, int)
-    assert lookup_result == expected_chunks, (
-        "Normal LOOKUP should find the chunk stored via CB_STORE_FINAL"
-    )
+    assert (
+        lookup_result == expected_chunks
+    ), "Normal LOOKUP should find the chunk stored via CB_STORE_FINAL"
 
     # Normal RETRIEVE
     retrieve_key = create_cb_cache_key(token_ids, request_id="final-norm-retrieve-v2")
@@ -1955,9 +2029,9 @@ def test_cb_store_final_v2_then_normal_lookup(
     torch.cuda.synchronize()
     for layer in range(client_context.num_layers):
         tensor_slice = client_context.get_tensor_slice(layer, 0, pages_per_chunk)
-        assert tensor_slice.mean().item() == pytest.approx(source_value, abs=1e-4), (
-            f"Layer {layer}: retrieved data should match the stored source value"
-        )
+        assert tensor_slice.mean().item() == pytest.approx(
+            source_value, abs=1e-4
+        ), f"Layer {layer}: retrieved data should match the stored source value"
 
 
 @pytest.mark.skipif(
@@ -1992,9 +2066,9 @@ def test_cb_store_final_v2_visible_to_cb_lookup_v2(
     ).result(timeout=DEFAULT_TIMEOUT)
 
     assert isinstance(cb_results, list)
-    assert len(cb_results) == 1, (
-        "CB_LOOKUP_PRE_COMPUTED_V2 should find data stored via CB_STORE_FINAL"
-    )
+    assert (
+        len(cb_results) == 1
+    ), "CB_LOOKUP_PRE_COMPUTED_V2 should find data stored via CB_STORE_FINAL"
 
 
 # ---------------------------------------------------------------------------

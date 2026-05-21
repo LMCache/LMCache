@@ -171,3 +171,115 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     assert transfer_ctx.submit_retrieve.called
     assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
+
+
+def test_cacheblend_register_kv_caches_uses_cb_protocol(fake_adapter):
+    """CacheBlend mode registers the CB GPU cache, not the normal MP cache."""
+    adapter, send_mock, _future = fake_adapter
+    adapter.enable_cacheblend = True
+
+    adapter.register_kv_caches({"layer.0": object()})
+
+    args, _kwargs = send_mock.call_args
+    assert args[1] == RequestType.CB_REGISTER_KV_CACHE
+    assert len(args[2]) == 4
+
+
+def test_cacheblend_store_slices_tokens_for_cb_protocol(fake_adapter):
+    """CB store keys contain only the stored chunk while offset points at vLLM KV."""
+    adapter, send_mock, future = fake_adapter
+    adapter.enable_cacheblend = True
+    adapter._heartbeat = MagicMock(name="heartbeat")
+    future.to_cuda_future.return_value = future
+    event = MagicMock(name="event")
+    event.ipc_handle.return_value = b"event-handle"
+    op = LoadStoreOp(
+        token_ids=list(range(64)),
+        block_ids=[10, 11],
+        start=16,
+        end=48,
+    )
+
+    adapter.submit_store_request("req-1", op, event)
+
+    args, _kwargs = send_mock.call_args
+    assert args[1] == RequestType.CB_STORE_PRE_COMPUTED
+    key, offset, instance_id, event_handle = args[2]
+    assert tuple(key.token_ids) == tuple(range(16, 48))
+    assert key.start == 0
+    assert key.end == 32
+    assert offset == 16
+    assert instance_id == adapter.instance_id
+    assert event_handle == b"event-handle"
+
+
+def test_cacheblend_store_reports_telemetry_when_store_future_finishes(
+    fake_adapter,
+    monkeypatch,
+):
+    """CB precomputed stores must unblock strict disagg handoff directly.
+
+    CacheBlend prefill submits CB_STORE_PRE_COMPUTED futures; strict proxy mode
+    cannot wait for a later scheduler get_finished() call before decoder handoff.
+    """
+    adapter, _send_mock, future = fake_adapter
+    adapter.enable_cacheblend = True
+    adapter._heartbeat = MagicMock(name="heartbeat")
+    adapter.request_telemetry = MagicMock(name="request_telemetry")
+    future.to_cuda_future.return_value = future
+    future.result.return_value = True
+    event = MagicMock(name="event")
+    event.ipc_handle.return_value = b"event-handle"
+
+    class InlineThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(adapter_mod.threading, "Thread", InlineThread)
+
+    adapter.submit_store_request(
+        "chatcmpl-cb-prefill",
+        LoadStoreOp(
+            token_ids=list(range(64)),
+            block_ids=[10, 11],
+            start=0,
+            end=64,
+        ),
+        event,
+    )
+
+    adapter.request_telemetry.on_request_store_finished.assert_called_once_with(
+        request_ids_set={"chatcmpl-cb-prefill"},
+        model_name="test-model",
+        world_size=1,
+        kv_rank=0,
+    )
+
+
+def test_get_finished_emits_request_telemetry_when_store_future_finishes(
+    fake_adapter,
+):
+    """Telemetry must unblock disagg decode as soon as LMCache store is done.
+
+    vLLM's finished_req_ids reconciliation is needed for scheduler block
+    lifetime, but the disagg proxy waits for KV-store readiness before decoder
+    handoff. If telemetry waits for the engine-finished side too, strict mode can
+    deadlock after a successful prefill store.
+    """
+    adapter, _send_mock, future = fake_adapter
+    future.query.return_value = True
+    future.result.return_value = True
+    adapter.store_futures["req-1"] = future
+    adapter.request_telemetry = MagicMock(name="request_telemetry")
+
+    adapter.get_finished(set())
+
+    adapter.request_telemetry.on_request_store_finished.assert_called_once_with(
+        request_ids_set={"req-1"},
+        model_name="test-model",
+        world_size=1,
+        kv_rank=0,
+    )

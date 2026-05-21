@@ -82,6 +82,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.gpu_context import (
+    PagedGPUCacheBlendContext,
     PlainGPUCacheContext,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueServer
@@ -375,7 +376,9 @@ class BlendEngineV2(MPCacheEngine):
             storage_manager_config, chunk_size, hash_algorithm=hash_algorithm
         )
 
-        self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
+        self._cb_gpu_contexts: dict[
+            int, PlainGPUCacheContext | PagedGPUCacheBlendContext
+        ] = {}
 
         # CB GPU ID -> (model name, world size) as metadata
         # NOTE: This is mainly for determining the layout desc during prefetch
@@ -402,7 +405,10 @@ class BlendEngineV2(MPCacheEngine):
             model_name: The name of the model associated with this KV cache.
             world_size: The world size associated with this KV cache.
         """
-        gpu_context = PlainGPUCacheContext(kv_caches, self.chunk_size)
+        if len(kv_caches) == 1:
+            gpu_context = PlainGPUCacheContext(kv_caches, self.chunk_size)
+        else:
+            gpu_context = PagedGPUCacheBlendContext(kv_caches, self.chunk_size)
         self._cb_gpu_contexts[instance_id] = gpu_context
         self._cb_gpu_context_meta[instance_id] = (model_name, world_size)
         logger.info(
@@ -696,7 +702,7 @@ class BlendEngineV2(MPCacheEngine):
     def _cb_store_gpu_copy(
         self,
         obj_keys: list[ObjectKey],
-        gpu_context: PlainGPUCacheContext,
+        gpu_context: PlainGPUCacheContext | PagedGPUCacheBlendContext,
         offset: int,
         event_ipc_handle: bytes,
         start_event: Event | None = None,
@@ -812,9 +818,9 @@ class BlendEngineV2(MPCacheEngine):
         """
         num_tokens = key.end - key.start
 
-        assert instance_id in self._cb_gpu_contexts, (
-            f"Instance ID {instance_id} not registered for CB KV cache"
-        )
+        assert (
+            instance_id in self._cb_gpu_contexts
+        ), f"Instance ID {instance_id} not registered for CB KV cache"
         gpu_context = self._cb_gpu_contexts[instance_id]
 
         # CPU-synchronous sentinel: GPU store is about to be enqueued.
@@ -822,7 +828,11 @@ class BlendEngineV2(MPCacheEngine):
             Event(
                 event_type=EventType.CB_STORE_PRE_COMPUTED_SUBMITTED,
                 session_id=key.request_id,
-                metadata={"instance_id": instance_id},
+                metadata={
+                    "instance_id": instance_id,
+                    "num_chunks": num_tokens // self.chunk_size,
+                    "num_tokens": num_tokens,
+                },
             )
         )
         self._event_bus.publish_on_stream(
@@ -935,9 +945,9 @@ class BlendEngineV2(MPCacheEngine):
         Note:
             We must call `cb_lookup_pre_computed` first before calling this function
         """
-        assert instance_id in self._cb_gpu_contexts, (
-            f"Instance ID {instance_id} not registered for CB KV cache"
-        )
+        assert (
+            instance_id in self._cb_gpu_contexts
+        ), f"Instance ID {instance_id} not registered for CB KV cache"
         gpu_context = self._cb_gpu_contexts[instance_id]
 
         # One obj_key per match_result, in cur_st order
@@ -951,7 +961,11 @@ class BlendEngineV2(MPCacheEngine):
             Event(
                 event_type=EventType.CB_RETRIEVE_SUBMITTED,
                 session_id=key.request_id,
-                metadata={"instance_id": instance_id},
+                metadata={
+                    "instance_id": instance_id,
+                    "num_chunks": num_chunks,
+                    "num_tokens": num_chunks * self.chunk_size,
+                },
             )
         )
 
@@ -970,7 +984,11 @@ class BlendEngineV2(MPCacheEngine):
                 Event(
                     event_type=EventType.CB_RETRIEVE_START,
                     session_id=key.request_id,
-                    metadata={"instance_id": instance_id, "num_chunks": num_chunks},
+                    metadata={
+                        "instance_id": instance_id,
+                        "num_chunks": num_chunks,
+                        "num_tokens": num_chunks * self.chunk_size,
+                    },
                 ),
             )
 
@@ -988,6 +1006,7 @@ class BlendEngineV2(MPCacheEngine):
                                 metadata={
                                     "instance_id": instance_id,
                                     "num_chunks": num_chunks,
+                                    "num_tokens": num_chunks * self.chunk_size,
                                     "success": False,
                                 },
                             ),
@@ -1000,9 +1019,11 @@ class BlendEngineV2(MPCacheEngine):
                         gpu_st = r.cur_st + offset
                         gpu_ed = gpu_st + self.chunk_size
                         tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
-                        target_buffer = gpu_context.slice_kv_cache_on_tokens(
-                            gpu_st, gpu_ed
-                        )
+                        target_buffer = getattr(
+                            gpu_context,
+                            "writable_slice_on_tokens",
+                            gpu_context.slice_kv_cache_on_tokens,
+                        )(gpu_st, gpu_ed)
                         with self.lock:
                             lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
                             target_buffer.copy_(tmp_buffer, non_blocking=True)
@@ -1017,6 +1038,7 @@ class BlendEngineV2(MPCacheEngine):
                         metadata={
                             "instance_id": instance_id,
                             "num_chunks": num_chunks,
+                            "num_tokens": num_chunks * self.chunk_size,
                             "success": False,
                         },
                     ),
@@ -1046,6 +1068,7 @@ class BlendEngineV2(MPCacheEngine):
                 metadata={
                     "instance_id": instance_id,
                     "num_chunks": num_chunks,
+                    "num_tokens": num_chunks * self.chunk_size,
                     "success": True,
                 },
             ),
@@ -1080,9 +1103,9 @@ class BlendEngineV2(MPCacheEngine):
         num_tokens = key.end - key.start
 
         # Get GPU context
-        assert instance_id in self._cb_gpu_contexts, (
-            f"Instance ID {instance_id} not registered for CB KV cache"
-        )
+        assert (
+            instance_id in self._cb_gpu_contexts
+        ), f"Instance ID {instance_id} not registered for CB KV cache"
         gpu_context = self._cb_gpu_contexts[instance_id]
 
         # CPU-synchronous sentinels: SUBMITTED before SESSION_END so the
@@ -1092,7 +1115,11 @@ class BlendEngineV2(MPCacheEngine):
             Event(
                 event_type=EventType.CB_STORE_FINAL_SUBMITTED,
                 session_id=key.request_id,
-                metadata={"instance_id": instance_id},
+                metadata={
+                    "instance_id": instance_id,
+                    "num_chunks": num_tokens // self.chunk_size,
+                    "num_tokens": num_tokens,
+                },
             )
         )
         self._event_bus.publish(

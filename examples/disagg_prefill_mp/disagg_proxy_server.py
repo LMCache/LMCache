@@ -226,16 +226,33 @@ def remove_pending_request(request_id: str):
         pending_requests.pop(request_id, None)
 
 
+def _resolve_pending_request_id(observed_request_id: str) -> str | None:
+    """Map a telemetry request ID back to this proxy's pending request ID."""
+    if observed_request_id in pending_requests:
+        return observed_request_id
+    for pending_id in pending_requests:
+        if pending_id and pending_id in observed_request_id:
+            return pending_id
+    legacy_id = "-".join(observed_request_id.split("-")[1:])[:16]
+    if legacy_id in pending_requests:
+        return legacy_id
+    return None
+
+
 def notify_request(chatcmpl_request_id: str) -> bool:
     """
     Notify a pending request that the KV store is complete.
     Returns True if the request was found and notified.
     """
     with pending_requests_lock:
-        # vLLM wraps the request ID as "chatcmpl-{uuid}-{suffix}",
-        # so strip the first and last segments to recover the original UUID.
-        request_id = "-".join(chatcmpl_request_id.split("-")[1:])
-        request_id = request_id[:16]
+        request_id = _resolve_pending_request_id(chatcmpl_request_id)
+        if request_id is None:
+            logger.warning(
+                "Telemetry for unknown request id %s; pending request ids: %s",
+                chatcmpl_request_id,
+                sorted(pending_requests),
+            )
+            return False
         event = pending_requests.get(request_id, None)
         if event:
             # Schedule the event.set() on the main event loop

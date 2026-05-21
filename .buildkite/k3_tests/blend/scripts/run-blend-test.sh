@@ -5,6 +5,8 @@
 #   SHUFFLE_NUM_DOCUMENTS   shuffle_doc_qa --num-documents   (default: 3)
 #   SHUFFLE_DOCUMENT_LENGTH shuffle_doc_qa --document-length (default: 3000)
 #   SHUFFLE_OUTPUT_LEN      shuffle_doc_qa --output-len      (default: 200)
+#   LMCACHE_SERVER_ENTRYPOINT lmcache server entrypoint: cli|legacy (default: cli)
+#   LMCACHE_L1_SIZE_GB       LMCache server L1 size in GB       (default: 70)
 #   SERVICE_PORT      port for the final exposed service          (default: 10001)
 #   PREFILLER_PORT    comma-separated vLLM ports for prefillers (default: 8100)
 #   DECODER_PORT      comma-separated vLLM ports for decoders   (default: 8200)
@@ -37,12 +39,18 @@ WORK_LOG="${LOG_DIR}/build_${BUILD_ID}_blend.log"
 # Proxy stdout/stderr. Blend server/prefiller/decoder each get their own _blend_server/_prefiller_PORT/_decoder_PORT logs.
 VLLM_LOG="${LOG_DIR}/build_${BUILD_ID}_proxy.log"
 BLEND_SERVER_LOG="${LOG_DIR}/build_${BUILD_ID}_blend_server.log"
+BENCHMARK_LOG="${LOG_DIR}/build_${BUILD_ID}_benchmark.log"
+VERSIONS_LOG="${LOG_DIR}/versions.txt"
+NVIDIA_SMI_LOG="${LOG_DIR}/nvidia-smi.txt"
 # Benchmark wall-clock limit (seconds). Exit 124 from `timeout` => failure. Default stays under blend pipeline 90m.
 BENCHMARK_TIMEOUT_SEC="${BENCHMARK_TIMEOUT_SEC:-4800}"
 
 : > "${WORK_LOG}"
 : > "${VLLM_LOG}"
 : > "${BLEND_SERVER_LOG}"
+: > "${BENCHMARK_LOG}"
+: > "${VERSIONS_LOG}"
+: > "${NVIDIA_SMI_LOG}"
 
 declare -A RESERVED_PORTS=()
 
@@ -108,6 +116,17 @@ exec > >(tee -a "${WORK_LOG}") 2>&1
 check_build_logs_for_errors() {
   local -a logs=()
   local f
+  local sanitized
+  local fatal_pattern
+  # Scan only infrastructure/runtime failure signatures. Benchmark logs include
+  # arbitrary model generations, so a broad ``error`` grep can self-fail a
+  # successful E2E when the model emits text like "formatting error".
+  fatal_pattern='Traceback|\bfatal\b|CUDA error|NCCL.*(error|fail)'
+  fatal_pattern+='|ZMQ.*timeout|HTTP/1\.1" 5|status_code=5'
+  fatal_pattern+='|Internal server error|EngineDeadError|engine process failed'
+  fatal_pattern+='|benchmark.*timeout|timed out waiting for telemetry'
+  fatal_pattern+='|request.*exception|RuntimeError|process died unexpectedly'
+  fatal_pattern+='|exited with code [1-9]'
   shopt -s nullglob
   logs=("${LOG_DIR}"/build_"${BUILD_ID}"_*.log)
   shopt -u nullglob
@@ -116,14 +135,25 @@ check_build_logs_for_errors() {
     return 0
   fi
   for f in "${logs[@]}"; do
-    if grep -v '^+ ' "$f" 2>/dev/null | grep -iE '\berror\b|traceback|fatal' >/dev/null 2>&1; then
-      echo "[FAIL] Found error/traceback/fatal pattern in: $f"
+    sanitized="$(mktemp)"
+    grep -h -v '^+ ' "$f" 2>/dev/null >"${sanitized}" || true
+    if grep -iE "${fatal_pattern}" "${sanitized}" >/dev/null 2>&1; then
+      echo "[FAIL] Found fatal/runtime pattern in: $f"
       echo "--- matching lines (first 80) ---"
-      grep -v '^+ ' "$f" 2>/dev/null | grep -inE '\berror\b|traceback|fatal' | head -80 || true
+      grep -inE "${fatal_pattern}" "${sanitized}" | head -80 || true
+      echo "--- context windows (first 8 matches, +/- 12 lines) ---"
+      grep -inE "${fatal_pattern}" "${sanitized}" | head -8 | cut -d: -f1 | while read -r line_no; do
+        start=$(( line_no > 12 ? line_no - 12 : 1 ))
+        end=$(( line_no + 12 ))
+        echo "--- ${f}:${start}-${end} ---"
+        sed -n "${start},${end}p" "${sanitized}" || true
+      done
+      rm -f "${sanitized}"
       exit 1
     fi
+    rm -f "${sanitized}"
   done
-  echo "[PASS] No error/traceback/fatal pattern in build logs: ${logs[*]}"
+  echo "[PASS] No fatal/runtime pattern in build logs: ${logs[*]}"
 }
 
 export PYTHONUNBUFFERED=1
@@ -134,12 +164,17 @@ SERVICE_PORT_REQUESTED="${SERVICE_PORT:-10001}"
 PREFILLER_PORT_REQUESTED="${PREFILLER_PORT:-8100}"
 DECODER_PORT_REQUESTED="${DECODER_PORT:-8200}"
 TELEMETRY_PORT_REQUESTED="${TELEMETRY_PORT:-5768}"
+LMCACHE_HTTP_PORT_REQUESTED="${LMCACHE_HTTP_PORT:-8080}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"
 L2_FILE_PATH="${L2_FILE_PATH:-/mnt/}"
 L2_POOL_SIZE="${L2_POOL_SIZE:-10}"
 L2_SIZE_GB="${L2_SIZE_GB:-10}"
+LMCACHE_SERVER_ENTRYPOINT="${LMCACHE_SERVER_ENTRYPOINT:-cli}"
+LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-70}"
+LMCACHE_CHUNK_SIZE="${LMCACHE_CHUNK_SIZE:-1024}"
+LMCACHE_L1_ALIGN_BYTES="${LMCACHE_L1_ALIGN_BYTES:-16777216}"
 
 # Same layout as .buildkite/k3_harness/setup-blend-env.sh: DEFAULT_VENV_BIN=/opt/venv/bin, TEST_VENV_BIN=/workspace/.venv/bin
 DEFAULT_VENV_DIR="${DEFAULT_VENV_DIR:-${DEFAULT_VENV:-/opt/venv}}"
@@ -157,6 +192,7 @@ SHUFFLE_OUTPUT_LEN="${SHUFFLE_OUTPUT_LEN:-200}"
 PREFILLER_VLLM_BIN="${PREFILLER_VLLM_BIN:-${DEFAULT_VENV_BIN}/vllm}"
 DECODER_VLLM_BIN="${DECODER_VLLM_BIN:-${TEST_VENV_BIN}/vllm}"
 LMCACHE_MP_PORT="$(reserve_port "${LMCACHE_MP_PORT_REQUESTED}" "blend_server")"
+LMCACHE_HTTP_PORT="$(reserve_port "${LMCACHE_HTTP_PORT_REQUESTED}" "blend_http")"
 TELEMETRY_PORT="$(reserve_port "${TELEMETRY_PORT_REQUESTED}" "telemetry_server")"
 SERVICE_PORT="$(reserve_port "${SERVICE_PORT_REQUESTED}" "proxy_service")"
 PREFILLER_PORT="$(resolve_port_csv "prefiller" "${PREFILLER_PORT_REQUESTED}")"
@@ -174,6 +210,8 @@ echo "  Decoder ports:   ${DECODER_PORTS[*]}"
 echo "  Service port:    ${SERVICE_PORT}"
 echo "  Telemetry port:  ${TELEMETRY_PORT}"
 echo "  Blend MP port:   ${LMCACHE_MP_PORT}"
+echo "  Blend HTTP port: ${LMCACHE_HTTP_PORT}"
+echo "  LMCache server:  ${LMCACHE_SERVER_ENTRYPOINT} (engine-type=blend)"
 echo "  GPUs per instance: ${TENSOR_PARALLEL}"
 echo "  Default venv dir: ${DEFAULT_VENV_DIR} (prefiller vLLM: image-built)"
 echo "  Test venv dir:    ${TEST_VENV_DIR} (blend server / decoder vLLM / proxy / benchmark: nightly)"
@@ -182,25 +220,69 @@ echo "  Decoder vLLM:     ${DECODER_VLLM_BIN}"
 
 
 export MAX_MODEL_LEN
-export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2025.1.0/host/linux-desktop-glibc_2_11_3-x64/:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2025.1.0/host/linux-desktop-glibc_2_11_3-x64/:${LD_LIBRARY_PATH:-}
+
+{
+  echo "git_sha=$(git rev-parse HEAD)"
+  echo "model=${MODEL}"
+  echo "python_default=${DEFAULT_PYTHON}"
+  echo "python_test=${TEST_PYTHON}"
+  "${TEST_PYTHON}" - <<'PY' || true
+import importlib.metadata as md
+for pkg in ("lmcache", "vllm", "torch"):
+    try:
+        print(f"{pkg}={md.version(pkg)}")
+    except Exception as exc:
+        print(f"{pkg}=unavailable ({exc})")
+PY
+} >"${VERSIONS_LOG}" 2>&1
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi >"${NVIDIA_SMI_LOG}" 2>&1 || true
+fi
+
+CACHEBLEND_KV_TRANSFER_CONFIG="{\"kv_connector\":\"LMCacheMPConnector\",\"kv_connector_module_path\":\"lmcache.integration.vllm.lmcache_mp_connector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":${LMCACHE_MP_PORT},\"lmcache.mp.cacheblend\":true}}"
+echo "  KV config:        ${CACHEBLEND_KV_TRANSFER_CONFIG}"
 
 # ---------------------------------------------------------------------------
 # 1. Start the LMCache blend server
 # ---------------------------------------------------------------------------
 
-"${TEST_PYTHON}" -m lmcache.v1.multiprocess.blend_server_v2 \
-  --max-workers 1 \
-  --port "${LMCACHE_MP_PORT}" \
-  --l1-size 70 \
-  --eviction-policy LRU \
-  --chunk-size 1024 \
-  --l1-align-bytes 16777216 \
-  >>"${BLEND_SERVER_LOG}" 2>&1 &
+if [[ "${LMCACHE_SERVER_ENTRYPOINT}" == "cli" ]]; then
+  "${TEST_VENV_BIN}/lmcache" server \
+    --engine-type blend \
+    --host localhost \
+    --port "${LMCACHE_MP_PORT}" \
+    --http-host 0.0.0.0 \
+    --http-port "${LMCACHE_HTTP_PORT}" \
+    --max-workers 1 \
+    --l1-size-gb "${LMCACHE_L1_SIZE_GB}" \
+    --eviction-policy LRU \
+    --chunk-size "${LMCACHE_CHUNK_SIZE}" \
+    --l1-align-bytes "${LMCACHE_L1_ALIGN_BYTES}" \
+    >>"${BLEND_SERVER_LOG}" 2>&1 &
+elif [[ "${LMCACHE_SERVER_ENTRYPOINT}" == "legacy" ]]; then
+  "${TEST_PYTHON}" -m lmcache.v1.multiprocess.blend_server_v2 \
+    --max-workers 1 \
+    --port "${LMCACHE_MP_PORT}" \
+    --l1-size "${LMCACHE_L1_SIZE_GB}" \
+    --eviction-policy LRU \
+    --chunk-size "${LMCACHE_CHUNK_SIZE}" \
+    --l1-align-bytes "${LMCACHE_L1_ALIGN_BYTES}" \
+    >>"${BLEND_SERVER_LOG}" 2>&1 &
+else
+  echo "ERROR: LMCACHE_SERVER_ENTRYPOINT must be cli or legacy, got ${LMCACHE_SERVER_ENTRYPOINT}" >&2
+  exit 1
+fi
 TRACKED_PIDS+=($!)
 
 sleep 10
+if command -v curl >/dev/null 2>&1; then
+  curl -sf "http://localhost:${LMCACHE_HTTP_PORT}/healthcheck" >/dev/null 2>&1 || true
+  curl -sf "http://localhost:${LMCACHE_HTTP_PORT}/status" >>"${BLEND_SERVER_LOG}" 2>&1 || true
+fi
 # ---------------------------------------------------------------------------
-# 2. Start prefiller vLLM instances (GPUs 0..P-1, LMCacheMPCBConnector)
+# 2. Start prefiller vLLM instances (GPUs 0..P-1, CacheBlend-enabled LMCacheMPConnector)
 # ---------------------------------------------------------------------------
 GPU_IDX=0
 for port in "${PREFILLER_PORTS[@]}"; do
@@ -224,7 +306,7 @@ for port in "${PREFILLER_PORTS[@]}"; do
     --no-enable-prefix-caching \
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --kv-transfer-config \
-      "{\"kv_connector\":\"LMCacheMPCBConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":${LMCACHE_MP_PORT}}}" \
+      "${CACHEBLEND_KV_TRANSFER_CONFIG}" \
     >>"${PREFILLER_LOG}" 2>&1 &
   TRACKED_PIDS+=($!)
   GPU_IDX=$((GPU_IDX + TENSOR_PARALLEL))
@@ -252,7 +334,7 @@ for port in "${DECODER_PORTS[@]}"; do
     --no-enable-prefix-caching \
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --kv-transfer-config \
-      "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":${LMCACHE_MP_PORT}}}" \
+      "${CACHEBLEND_KV_TRANSFER_CONFIG}" \
     >>"${DECODER_LOG}" 2>&1 &
   TRACKED_PIDS+=($!)
   GPU_IDX=$((GPU_IDX + TENSOR_PARALLEL))
@@ -262,13 +344,15 @@ done
 # 4. Wait for all vLLM instances to be ready
 # ---------------------------------------------------------------------------
 for port in "${PREFILLER_PORTS[@]}"; do
-  if ! wait_for_server "$port" "$SERVER_WAIT_TIMEOUT"; then
+  PREFILLER_LOG="${LOG_DIR}/build_${BUILD_ID}_prefiller_${port}.log"
+  if ! wait_for_server "$port" "$SERVER_WAIT_TIMEOUT" "$PREFILLER_LOG"; then
     echo "ERROR: Prefiller vLLM on port ${port} did not become ready."
     exit 1
   fi
 done
 for port in "${DECODER_PORTS[@]}"; do
-  if ! wait_for_server "$port" "$SERVER_WAIT_TIMEOUT"; then
+  DECODER_LOG="${LOG_DIR}/build_${BUILD_ID}_decoder_${port}.log"
+  if ! wait_for_server "$port" "$SERVER_WAIT_TIMEOUT" "$DECODER_LOG"; then
     echo "ERROR: Decoder vLLM on port ${port} did not become ready."
     exit 1
   fi
@@ -289,21 +373,32 @@ TRACKED_PIDS+=($!)
 # ---------------------------------------------------------------------------
 # 6. Benchmark (with timeout) + log error gate
 # ---------------------------------------------------------------------------
-if ! timeout "${BENCHMARK_TIMEOUT_SEC}" \
+set +e
+timeout "${BENCHMARK_TIMEOUT_SEC}" \
   "${TEST_PYTHON}" benchmarks/multi_doc_qa/shuffle_doc_qa.py \
   --num-documents "${SHUFFLE_NUM_DOCUMENTS}" \
   --document-length "${SHUFFLE_DOCUMENT_LENGTH}" \
-  --output-len "${SHUFFLE_OUTPUT_LEN}"; then
-  rc=$?
-  if [[ "$rc" -eq 124 ]]; then
+  --output-len "${SHUFFLE_OUTPUT_LEN}" \
+  2>&1 | tee -a "${BENCHMARK_LOG}"
+benchmark_rc=${PIPESTATUS[0]}
+set -e
+if [[ "$benchmark_rc" -ne 0 ]]; then
+  if [[ "$benchmark_rc" -eq 124 ]]; then
     echo "[FAIL] shuffle_doc_qa exceeded BENCHMARK_TIMEOUT_SEC=${BENCHMARK_TIMEOUT_SEC}s"
   else
-    echo "[FAIL] shuffle_doc_qa exited with code ${rc}"
+    echo "[FAIL] shuffle_doc_qa exited with code ${benchmark_rc}"
   fi
   exit 1
 fi
 
-check_build_logs_for_errors
+echo "[PASS] shuffle_doc_qa benchmark exited 0"
 
-echo "[PASS] Blend integration test completed successfully."
+if command -v curl >/dev/null 2>&1; then
+  curl -sf "http://localhost:${LMCACHE_HTTP_PORT}/status" >"${LOG_DIR}/lmcache-status-final.json" 2>/dev/null || true
+fi
+
+check_build_logs_for_errors
+"${SCRIPT_DIR}/validate-blend-logs.sh" "${LOG_DIR}" "${BUILD_ID}"
+
+echo "[PASS] Blend integration test completed successfully with CacheBlend V2 evidence."
 exit 0

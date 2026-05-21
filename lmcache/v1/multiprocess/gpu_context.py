@@ -442,9 +442,9 @@ class PlainGPUCacheContext:
     """
 
     def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
-        assert len(kv_caches) == 1, (
-            "PlainGPUCacheContext only supports a single KV cache tensor"
-        )
+        assert (
+            len(kv_caches) == 1
+        ), "PlainGPUCacheContext only supports a single KV cache tensor"
 
         # KV cache basics
         self._kv_cache = unwrap_kv_cache_tensors(kv_caches)[0]
@@ -547,3 +547,374 @@ class PlainGPUCacheContext:
     @property
     def kv_cache_tensor(self) -> torch.Tensor:
         return self._kv_cache
+
+
+class _PagedTokenSlice:
+    """Writable token-slice facade for vLLM's per-layer paged KV tensors."""
+
+    def __init__(
+        self,
+        parent: "PagedGPUCacheBlendContext",
+        start: int,
+        end: int,
+    ) -> None:
+        self._parent = parent
+        self._start = start
+        self._end = end
+
+    def copy_(
+        self, src: torch.Tensor, non_blocking: bool = False
+    ) -> "_PagedTokenSlice":
+        expected = self._parent.get_kv_buffer_shape(self._end - self._start)
+        if tuple(src.shape) != tuple(expected):
+            raise ValueError(
+                f"Expected source shape {tuple(expected)} for paged CB copy, "
+                f"got {tuple(src.shape)}"
+            )
+        for layer_idx, layer_cache in enumerate(self._parent._kv_caches):
+            self._parent._copy_tokens_to_layer(
+                layer_cache,
+                src[:, layer_idx, :, :],
+                self._start,
+                self._end,
+                non_blocking=non_blocking,
+            )
+        return self
+
+
+class PagedGPUCacheBlendContext:
+    """CacheBlend context for vLLM's per-layer paged KV tensors.
+
+    CacheBlend's original ``PlainGPUCacheContext`` expects a single contiguous
+    ``[2, L, T, D]`` tensor. vLLM V1 registers one paged tensor per layer
+    instead. This adapter presents the same token-slice API expected by
+    ``blend_server_v2`` while reading/writing directly from/to the live vLLM
+    layer tensors, so CacheBlend can run without a second plain KV arena.
+    """
+
+    def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
+        self._kv_caches = unwrap_kv_cache_tensors(kv_caches)
+        if not self._kv_caches:
+            raise ValueError(
+                "PagedGPUCacheBlendContext requires at least one KV tensor"
+            )
+
+        self._device = self._kv_caches[0].device
+        self._dtype = self._kv_caches[0].dtype
+        self._num_layers = len(self._kv_caches)
+        first_view = self._layer_token_view(self._kv_caches[0])
+        self._num_tokens = first_view.shape[1]
+        self._hidden_dim_size = first_view.shape[2]
+
+        for idx, tensor in enumerate(self._kv_caches):
+            view = self._layer_token_view(tensor)
+            if tensor.device != self._device:
+                raise ValueError("All paged CB KV tensors must be on the same device")
+            if tensor.dtype != self._dtype:
+                raise ValueError("All paged CB KV tensors must have the same dtype")
+            if view.shape[1:] != first_view.shape[1:]:
+                expected_shape = tuple(first_view.shape[1:])
+                actual_shape = tuple(view.shape[1:])
+                raise ValueError(
+                    "Paged CB KV tensor shape mismatch at layer "
+                    f"{idx}: expected token/hidden shape {expected_shape}, "
+                    f"got {actual_shape}"
+                )
+
+        self._tmp_gpu_buffer = torch.empty(
+            self.get_kv_buffer_shape(lmcache_chunk_size),
+            dtype=self.dtype,
+            device=self.device,
+        )
+        self._cuda_stream = torch_dev.Stream(device=self._device)
+        import cupy
+
+        self._cupy_stream = cupy.cuda.ExternalStream(
+            self._cuda_stream.cuda_stream, self._device.index
+        )
+        _, high_priority = torch_dev.Stream.priority_range()
+        self._high_priority_cuda_stream = torch_dev.Stream(
+            device=self._device, priority=high_priority
+        )
+        self._high_priority_cupy_stream = cupy.cuda.ExternalStream(
+            self._high_priority_cuda_stream.cuda_stream, self._device.index
+        )
+
+    def _layer_token_view(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Return a per-layer ``[2, T, D]`` token view."""
+        if tensor.ndim == 5 and tensor.shape[0] == 2:
+            return tensor.reshape(2, tensor.shape[1] * tensor.shape[2], -1)
+        if tensor.ndim == 5 and tensor.shape[1] == 2:
+            return tensor.permute(1, 0, 2, 3, 4).reshape(
+                2, tensor.shape[0] * tensor.shape[2], -1
+            )
+        if tensor.ndim == 5 and tensor.shape[2] == 2:
+            return tensor.permute(2, 0, 1, 3, 4).reshape(
+                2, tensor.shape[0] * tensor.shape[1], -1
+            )
+        if tensor.ndim == 4 and tensor.shape[0] == 2:
+            return tensor.reshape(2, tensor.shape[1] * tensor.shape[2], -1)
+        if tensor.ndim == 3 and tensor.shape[0] == 2:
+            return tensor.reshape(2, tensor.shape[1], -1)
+        raise ValueError(
+            "Unsupported paged CB KV tensor shape: "
+            f"{tuple(tensor.shape)}; expected [2,B,S,H,D], [B,2,S,H,D], "
+            "[B,S,2,H,D], [2,B,S,D], or [2,T,D]"
+        )
+
+    def _copy_tokens_to_layer(
+        self,
+        tensor: torch.Tensor,
+        src: torch.Tensor,
+        start: int,
+        end: int,
+        *,
+        non_blocking: bool = False,
+    ) -> None:
+        """Copy ``src`` ``[2,T,D]`` into a per-layer paged KV tensor.
+
+        Some live vLLM layouts place the K/V dimension between the block and
+        slot dimensions, for example ``[B,2,S,H,D]``. Flattening those layouts
+        through ``_layer_token_view`` can materialize a copy instead of a
+        writable view, so writes are applied block-span-by-block-span here.
+        """
+        if tensor.ndim == 5 and tensor.shape[0] == 2:
+            self._copy_token_blocks(
+                tensor,
+                src,
+                start,
+                end,
+                block_size=tensor.shape[2],
+                layout="kv_block_slot",
+                non_blocking=non_blocking,
+            )
+            return
+        if tensor.ndim == 5 and tensor.shape[1] == 2:
+            self._copy_token_blocks(
+                tensor,
+                src,
+                start,
+                end,
+                block_size=tensor.shape[2],
+                layout="block_kv_slot",
+                non_blocking=non_blocking,
+            )
+            return
+        if tensor.ndim == 5 and tensor.shape[2] == 2:
+            self._copy_token_blocks(
+                tensor,
+                src,
+                start,
+                end,
+                block_size=tensor.shape[1],
+                layout="block_slot_kv",
+                non_blocking=non_blocking,
+            )
+            return
+        if tensor.ndim == 4 and tensor.shape[0] == 2:
+            self._copy_token_blocks(
+                tensor,
+                src,
+                start,
+                end,
+                block_size=tensor.shape[2],
+                layout="kv_block_slot_flat",
+                non_blocking=non_blocking,
+            )
+            return
+        if tensor.ndim == 3 and tensor.shape[0] == 2:
+            tensor[:, start:end, :].copy_(src, non_blocking=non_blocking)
+            return
+        raise ValueError(
+            "Unsupported paged CB KV tensor shape: "
+            f"{tuple(tensor.shape)}; expected [2,B,S,H,D], [B,2,S,H,D], "
+            "[B,S,2,H,D], [2,B,S,D], or [2,T,D]"
+        )
+
+    def _copy_token_blocks(
+        self,
+        tensor: torch.Tensor,
+        src: torch.Tensor,
+        start: int,
+        end: int,
+        *,
+        block_size: int,
+        layout: str,
+        non_blocking: bool,
+    ) -> None:
+        cursor = 0
+        token = start
+        while token < end:
+            block_idx, block_offset = divmod(token, block_size)
+            span = min(end - token, block_size - block_offset)
+            src_span = src[:, cursor : cursor + span, :]
+            if tensor.ndim == 5:
+                hidden_shape = tensor.shape[-2:]
+                src_view = src_span.reshape(2, span, *hidden_shape)
+                if layout == "kv_block_slot":
+                    target = tensor[:, block_idx, block_offset : block_offset + span]
+                elif layout == "block_kv_slot":
+                    target = tensor[block_idx, :, block_offset : block_offset + span]
+                else:
+                    target = tensor[block_idx, block_offset : block_offset + span]
+                    src_view = src_view.permute(1, 0, 2, 3)
+            else:
+                src_view = src_span
+                target = tensor[:, block_idx, block_offset : block_offset + span]
+            target.copy_(src_view, non_blocking=non_blocking)
+            cursor += span
+            token += span
+
+    def get_kv_buffer_shape(self, num_tokens: int) -> torch.Size:
+        return torch.Size((2, self._num_layers, num_tokens, self._hidden_dim_size))
+
+    def get_tmp_gpu_buffer(self, num_tokens: int) -> torch.Tensor:
+        return self._tmp_gpu_buffer[:, :, :num_tokens, :]
+
+    def _copy_layer_tokens_to_buffer(
+        self,
+        tensor: torch.Tensor,
+        dst: torch.Tensor,
+        start: int,
+        end: int,
+    ) -> None:
+        """Copy ``tensor[start:end]`` into ``dst`` without flattening all tokens."""
+        if tensor.ndim == 5 and tensor.shape[0] == 2:
+            self._copy_layer_token_blocks_to_buffer(
+                tensor,
+                dst,
+                start,
+                end,
+                block_size=tensor.shape[2],
+                layout="kv_block_slot",
+            )
+            return
+        if tensor.ndim == 5 and tensor.shape[1] == 2:
+            self._copy_layer_token_blocks_to_buffer(
+                tensor,
+                dst,
+                start,
+                end,
+                block_size=tensor.shape[2],
+                layout="block_kv_slot",
+            )
+            return
+        if tensor.ndim == 5 and tensor.shape[2] == 2:
+            self._copy_layer_token_blocks_to_buffer(
+                tensor,
+                dst,
+                start,
+                end,
+                block_size=tensor.shape[1],
+                layout="block_slot_kv",
+            )
+            return
+        if tensor.ndim == 4 and tensor.shape[0] == 2:
+            self._copy_layer_token_blocks_to_buffer(
+                tensor,
+                dst,
+                start,
+                end,
+                block_size=tensor.shape[2],
+                layout="kv_block_slot_flat",
+            )
+            return
+        if tensor.ndim == 3 and tensor.shape[0] == 2:
+            dst.copy_(tensor[:, start:end, :])
+            return
+        raise ValueError(
+            "Unsupported paged CB KV tensor shape: "
+            f"{tuple(tensor.shape)}; expected [2,B,S,H,D], [B,2,S,H,D], "
+            "[B,S,2,H,D], [2,B,S,D], or [2,T,D]"
+        )
+
+    def _copy_layer_token_blocks_to_buffer(
+        self,
+        tensor: torch.Tensor,
+        dst: torch.Tensor,
+        start: int,
+        end: int,
+        *,
+        block_size: int,
+        layout: str,
+    ) -> None:
+        cursor = 0
+        token = start
+        while token < end:
+            block_idx, block_offset = divmod(token, block_size)
+            span = min(end - token, block_size - block_offset)
+            if tensor.ndim == 5:
+                if layout == "kv_block_slot":
+                    src = tensor[:, block_idx, block_offset : block_offset + span]
+                    src = src.reshape(2, span, -1)
+                elif layout == "block_kv_slot":
+                    src = tensor[block_idx, :, block_offset : block_offset + span]
+                    src = src.reshape(2, span, -1)
+                else:
+                    src = tensor[block_idx, block_offset : block_offset + span]
+                    src = src.permute(1, 0, 2, 3).reshape(2, span, -1)
+            else:
+                src = tensor[:, block_idx, block_offset : block_offset + span]
+            dst[:, cursor : cursor + span, :].copy_(src)
+            cursor += span
+            token += span
+
+    def slice_kv_cache_on_tokens(self, start: int, end: int) -> torch.Tensor:
+        if start < 0 or end < start or end > self._num_tokens:
+            raise ValueError(
+                f"Invalid paged CB token slice [{start}, {end}) for "
+                f"{self._num_tokens} tokens"
+            )
+        out = self.get_tmp_gpu_buffer(end - start)
+        for layer_idx, layer_cache in enumerate(self._kv_caches):
+            self._copy_layer_tokens_to_buffer(
+                layer_cache,
+                out[:, layer_idx, :, :],
+                start,
+                end,
+            )
+        return out
+
+    def writable_slice_on_tokens(self, start: int, end: int) -> _PagedTokenSlice:
+        if start < 0 or end < start or end > self._num_tokens:
+            raise ValueError(
+                f"Invalid paged CB token slice [{start}, {end}) for "
+                f"{self._num_tokens} tokens"
+            )
+        return _PagedTokenSlice(self, start, end)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self._device
+
+    @property
+    def stream(self) -> Any:
+        return self._cuda_stream
+
+    @property
+    def cupy_stream(self) -> "cupy.cuda.Stream":
+        return self._cupy_stream
+
+    @property
+    def high_priority_stream(self) -> Any:
+        return self._high_priority_cuda_stream
+
+    @property
+    def high_priority_cupy_stream(self) -> "cupy.cuda.Stream":
+        return self._high_priority_cupy_stream
+
+    @property
+    def num_layers(self) -> int:
+        return self._num_layers
+
+    @property
+    def num_tokens(self) -> int:
+        return self._num_tokens
+
+    @property
+    def hidden_dim_size(self) -> int:
+        return self._hidden_dim_size
