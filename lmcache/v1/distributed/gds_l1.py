@@ -1346,27 +1346,34 @@ class GdsL1Backend:
         dev_offset: int,
         size_in_bytes: int,
     ) -> int:
-        """Asynchronous cuFile read into the registered region.
+        """CUDA-stream-aware cuFile read into the registered region.
 
-        Uses ``kvikio.CuFile.pread``, which submits the read on
-        kvikio's internal thread pool and returns an ``IOFuture``.
-        We call ``.get()`` to wait for completion before returning so
-        the synchronous-helper contract is preserved for callers.
+        Uses ``kvikio.CuFile.raw_read_async`` so the read is enqueued
+        on the current torch CUDA stream — the same dispatch shape as
+        ``multi_layer_block_kv_transfer`` and the existing
+        ``cudaMemcpyAsync`` in ``lmcache_memcpy_async_h2d``. When
+        ``nvidia-fs`` is loaded the read is truly stream-ordered and
+        the next kernel on the same stream waits for it implicitly;
+        in compat mode kvikio fakes the stream semantics with an
+        internal thread + completion callback, so
+        ``check_bytes_done()`` forces the wait to keep the API
+        behaving consistently across environments.
 
-        The alternative ``raw_read_async`` API takes a CUDA stream and
-        is stream-ordered, but calling its ``check_bytes_done`` once
-        per chunk forces a full stream sync per call, which is
-        catastrophic on serial-per-chunk callers. Switching to a
-        batched submit/wait pattern is a follow-up.
+        Trade-off: ``raw_read_async`` is the peer of
+        ``multi_layer_block_kv_transfer`` in the stream-ordering
+        model and is the right primitive once we can defer the sync.
+        Today we still call ``check_bytes_done()`` here because
+        callers invoke ``_gds_read`` one chunk at a time — batching
+        the deferred sync requires a downstream API change.
         """
         try:
             handle = self.handle_cache.acquire(disk_path, "r")
             try:
-                buf_slice = buf.view(torch.uint8)[
-                    dev_offset : dev_offset + size_in_bytes
-                ]
-                future = handle.pread(buf_slice, size_in_bytes, file_offset)
-                return future.get()
+                stream = torch.cuda.current_stream().cuda_stream
+                future = handle.raw_read_async(
+                    buf, stream, size_in_bytes, file_offset, dev_offset
+                )
+                return future.check_bytes_done()
             finally:
                 self.handle_cache.release(disk_path, "r")
         except Exception as e:
@@ -1381,16 +1388,18 @@ class GdsL1Backend:
         dev_offset: int,
         nbytes: int,
     ) -> None:
-        """Asynchronous cuFile write from the registered region.
+        """CUDA-stream-aware cuFile write from the registered region.
 
-        Uses ``kvikio.CuFile.pwrite`` + ``IOFuture.get()`` for the same
-        reason as :meth:`_gds_read`.
+        Uses ``raw_write_async`` for the same reasons as
+        :meth:`_gds_read` — see that method's docstring.
         """
         handle = self.handle_cache.acquire(disk_path, "r+")
         try:
-            buf_slice = buf.view(torch.uint8)[dev_offset : dev_offset + nbytes]
-            future = handle.pwrite(buf_slice, nbytes, file_offset)
-            future.get()
+            stream = torch.cuda.current_stream().cuda_stream
+            future = handle.raw_write_async(
+                buf, stream, nbytes, file_offset, dev_offset
+            )
+            future.check_bytes_done()
         finally:
             self.handle_cache.release(disk_path, "r+")
 
