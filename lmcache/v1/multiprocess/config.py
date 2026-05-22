@@ -75,12 +75,6 @@ class HTTPFrontendConfig:
     http_port: int = 8080
     """HTTP server port."""
 
-    config_dump_path: str = ""
-    """Filesystem path where the active server configuration is written
-    as JSON on startup. Empty string means use the default location
-    ``/tmp/lmcache-config-<http_port>.json``. The file is rewritten on
-    every server start and is intended for debugging / sharing."""
-
 
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
 
@@ -238,17 +232,6 @@ def add_http_frontend_args(
         default=8080,
         help="Port to bind the HTTP server. Default is 8080.",
     )
-    http_group.add_argument(
-        "--config-dump-path",
-        type=str,
-        default="",
-        help=(
-            "Filesystem path where the active server configuration is "
-            "written as JSON on startup. Defaults to "
-            "/tmp/lmcache-config-<http-port>.json. Useful for "
-            "debugging and sharing the active config."
-        ),
-    )
     return parser
 
 
@@ -267,5 +250,4 @@ def parse_args_to_http_frontend_config(
     return HTTPFrontendConfig(
         http_host=args.http_host,
         http_port=args.http_port,
-        config_dump_path=args.config_dump_path,
     )

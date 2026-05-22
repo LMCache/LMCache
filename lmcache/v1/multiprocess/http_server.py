@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import asynccontextmanager
-from dataclasses import is_dataclass
-from pathlib import Path
-from typing import Any
 import argparse
-import json
 
 # Third Party
 from fastapi import FastAPI
@@ -39,7 +35,6 @@ from lmcache.v1.multiprocess.http_api_registry import (
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
-from lmcache.v1.utils.json_utils import make_json_safe, safe_asdict
 
 logger = init_logger(__name__)
 
@@ -126,58 +121,6 @@ registry = HTTPAPIRegistry(app)
 registry.register_all_apis()
 
 
-def _serialize_configs(configs: dict[str, Any]) -> dict[str, Any]:
-    """Convert a mapping of config dataclasses into a JSON-safe dict.
-
-    Args:
-        configs: Mapping from config name to dataclass instance (or
-            already JSON-safe value).
-
-    Returns:
-        A dict where every value is composed solely of JSON-native types,
-        suitable for ``json.dumps``.
-    """
-    payload: dict[str, Any] = {}
-    for name, cfg in configs.items():
-        if is_dataclass(cfg) and not isinstance(cfg, type):
-            payload[name] = safe_asdict(cfg)
-        else:
-            payload[name] = make_json_safe(cfg)
-    return payload
-
-
-def _resolve_config_dump_path(dump_path: str, http_port: int) -> Path:
-    """Resolve the path used to persist the server configuration.
-
-    Args:
-        dump_path: User-supplied path. Empty string selects the default
-            location, namespaced by ``http_port`` so multiple servers on
-            the same host do not overwrite each other.
-        http_port: HTTP port the server is binding to.
-
-    Returns:
-        The absolute filesystem path to write the JSON config to.
-    """
-    if dump_path == "":
-        return Path(f"/tmp/lmcache-config-{http_port}.json")
-    return Path(dump_path)
-
-
-def _write_config_dump(configs: dict[str, Any], path: Path) -> None:
-    """Write the serialized server configuration to ``path``.
-
-    Args:
-        configs: Mapping of config name to dataclass instance.
-        path: Filesystem location for the JSON dump.
-
-    Raises:
-        OSError: If the parent directory cannot be created or the file
-            cannot be written.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_serialize_configs(configs), indent=2, sort_keys=True))
-
-
 def run_http_server(
     http_config: HTTPFrontendConfig,
     mp_config: MPServerConfig,
@@ -198,19 +141,6 @@ def run_http_server(
     _configs["observability"] = obs_config
     _configs["http"] = http_config
     app.state.configs = _configs
-
-    dump_path = _resolve_config_dump_path(
-        http_config.config_dump_path, http_config.http_port
-    )
-    try:
-        _write_config_dump(_configs, dump_path)
-        logger.info("Wrote LMCache server config dump to %s", dump_path)
-    except OSError as exc:
-        logger.warning(
-            "Failed to write LMCache server config dump to %s: %s",
-            dump_path,
-            exc,
-        )
 
     config = uvicorn.Config(
         app=app,

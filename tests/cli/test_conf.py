@@ -2,7 +2,7 @@
 """Tests for ``lmcache conf`` CLI subcommand.
 
 Covers:
-- Reading a previously persisted JSON dump via ``--file``.
+- Reading a JSON configuration file via ``--file``.
 - Fetching ``/conf`` from a running server via ``--url`` (mock HTTP).
 - Error handling for connection refused, HTTP 5xx, and unreadable files.
 """
@@ -67,7 +67,7 @@ def _fake_args(url: str | None = None, file: str | None = None) -> argparse.Name
 
 
 class TestConfCommandFromFile:
-    """``lmcache conf --file PATH`` reads and pretty-prints the dump."""
+    """``lmcache conf --file PATH`` reads and pretty-prints a JSON file."""
 
     def test_reads_and_prints_json(self, tmp_path: Path) -> None:
         """Valid JSON file is pretty-printed to stdout."""

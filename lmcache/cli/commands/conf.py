@@ -4,7 +4,7 @@
 Usage::
 
     lmcache conf --url http://localhost:8080
-    lmcache conf --file /tmp/lmcache-config-8080.json
+    lmcache conf --file lmcache-config.json
 """
 
 # Standard
@@ -42,7 +42,7 @@ def _fetch_from_url(url: str, timeout: int = 10) -> str:
 
 
 def _read_from_file(path: Path) -> str:
-    """Read a previously persisted config-dump file.
+    """Read a JSON configuration file.
 
     Args:
         path: Filesystem path to the JSON dump.
@@ -96,9 +96,8 @@ class ConfCommand(BaseCommand):
             type=str,
             default=None,
             help=(
-                "Read configuration from a previously persisted JSON dump "
-                "instead of querying a running server. Mutually exclusive "
-                "with --url."
+                "Read configuration from a JSON file instead of querying "
+                "a running server. Mutually exclusive with --url."
             ),
         )
 
