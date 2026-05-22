@@ -298,8 +298,10 @@ def benchmark(
 def run_gds_check(
     *,
     gds_path: str,
-    num_chunks: int,
-    chunk_bytes: int,
+    small_num_chunks: int,
+    small_chunk_bytes: int,
+    large_num_chunks: int,
+    large_chunk_bytes: int,
     use_gds: bool,
     skip_verify: bool,
     skip_bench: bool,
@@ -307,9 +309,24 @@ def run_gds_check(
     """Top-level entry point invoked by the CLI wrapper.
 
     Performs the host-info probe unconditionally, then optionally the
-    verify and bench phases. Prints a human-readable report to stdout.
+    verify and bench phases. The bench phase runs two workload shapes
+    back-to-back:
+
+    - **small chunks** (default 64 × 2 MiB): per-call-overhead-dominated.
+      Tells you how much time is spent in kvikio / Python dispatch
+      relative to the actual I/O — relevant for KV-cache-shaped
+      access patterns.
+    - **large chunks** (default 8 × 256 MiB): bandwidth-dominated.
+      Tells you how close the path gets to peak NVMe / cuFile
+      throughput once per-call overhead is amortized.
+
+    The verify phase uses the small chunk size (faster) and is the
+    same byte-for-byte round-trip check as before.
     """
-    info = probe_host(gds_path, chunk_bytes)
+    # Probe with the small chunk size — alignment check only needs
+    # one chunk_bytes value, and both phases use 4 KiB multiples so
+    # either would do.
+    info = probe_host(gds_path, small_chunk_bytes)
 
     print("=" * 60)
     print("LMCache GDS L1 platform check")
@@ -355,29 +372,66 @@ def run_gds_check(
         if not skip_verify:
             print()
             print("--- VERIFY round-trip ---")
-            verify_round_trip(backend, chunk_bytes=chunk_bytes)
+            verify_round_trip(backend, chunk_bytes=small_chunk_bytes)
             print("  PASS: bytes read back match the pattern.")
 
         if not skip_bench:
-            print()
-            print(
-                f"--- BENCH {num_chunks} chunks × "
-                f"{chunk_bytes // 1024 // 1024} MiB each ---"
+            # Small chunks: per-call overhead dominates. Use the
+            # production max_batch_size=4 so the scratch buffer
+            # matches what GPUCacheContext registers.
+            _run_bench_phase(
+                backend,
+                label="small chunks (overhead-dominated)",
+                num_chunks=small_num_chunks,
+                chunk_bytes=small_chunk_bytes,
+                max_batch_size=4,
             )
-            store_r, retrieve_r = benchmark(
-                backend, num_chunks=num_chunks, chunk_bytes=chunk_bytes
-            )
-            print(
-                f"  STORE   : {store_r.total_mib:7.1f} MiB in {store_r.seconds:6.3f}s "
-                f"= {store_r.mibs:8.1f} MiB/s"
-            )
-            r_mib = retrieve_r.total_mib
-            r_sec = retrieve_r.seconds
-            r_rate = retrieve_r.mibs
-            print(
-                f"  RETRIEVE: {r_mib:7.1f} MiB in {r_sec:6.3f}s "
-                f"= {r_rate:8.1f} MiB/s"
+            # Large chunks: bandwidth-dominated. max_batch_size=1
+            # keeps the scratch buffer at one chunk, which matters
+            # when chunks are GB-sized (4 × 2 GiB = 8 GiB VRAM is
+            # often impractical).
+            _run_bench_phase(
+                backend,
+                label="large chunks (bandwidth-dominated)",
+                num_chunks=large_num_chunks,
+                chunk_bytes=large_chunk_bytes,
+                max_batch_size=1,
             )
     finally:
         backend.close()
         _stop_loop(loop, thread)
+
+
+def _run_bench_phase(
+    backend: GdsL1Backend,
+    *,
+    label: str,
+    num_chunks: int,
+    chunk_bytes: int,
+    max_batch_size: int,
+) -> None:
+    """Run one bench phase and print its results."""
+    chunk_mib = chunk_bytes / 1024 / 1024
+    chunk_label = (
+        f"{chunk_mib:.0f} MiB"
+        if chunk_mib < 1024
+        else f"{chunk_mib / 1024:.1f} GiB"
+    )
+    print()
+    print(f"--- BENCH {label}: {num_chunks} × {chunk_label} ---")
+    store_r, retrieve_r = benchmark(
+        backend,
+        num_chunks=num_chunks,
+        chunk_bytes=chunk_bytes,
+        max_batch_size=max_batch_size,
+    )
+    print(
+        f"  STORE   : {store_r.total_mib:8.1f} MiB in {store_r.seconds:6.3f}s "
+        f"= {store_r.mibs:8.1f} MiB/s"
+    )
+    r_mib = retrieve_r.total_mib
+    r_sec = retrieve_r.seconds
+    r_rate = retrieve_r.mibs
+    print(
+        f"  RETRIEVE: {r_mib:8.1f} MiB in {r_sec:6.3f}s = {r_rate:8.1f} MiB/s"
+    )

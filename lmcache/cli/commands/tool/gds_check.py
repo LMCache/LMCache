@@ -39,17 +39,36 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "~/.lmcache_gds_check.",
     )
     parser.add_argument(
-        "--num-chunks",
+        "--small-num-chunks",
         type=int,
-        default=256,
-        help="Number of chunks to write+read in the bench phase. Default 256.",
+        default=64,
+        help="Number of small chunks. Phase 1 of the bench measures "
+        "per-call overhead, so the default is many small chunks. "
+        "Default 64.",
     )
     parser.add_argument(
-        "--chunk-mib",
+        "--small-chunk-mib",
         type=int,
         default=2,
-        help="Per-chunk size in MiB. Must be a 4 KiB multiple "
-        "(any integer MiB works). Default 2.",
+        help="Per-chunk size in MiB for the small-chunks phase. "
+        "Default 2 MiB.",
+    )
+    parser.add_argument(
+        "--large-num-chunks",
+        type=int,
+        default=8,
+        help="Number of large chunks. Phase 2 of the bench measures "
+        "sustained bandwidth, so the default is few large chunks. "
+        "Default 8.",
+    )
+    parser.add_argument(
+        "--large-chunk-mib",
+        type=int,
+        default=256,
+        help="Per-chunk size in MiB for the large-chunks phase. "
+        "Default 256 MiB. Crank to 2048 (= 2 GiB) for a hard "
+        "throughput ceiling test — note that uses "
+        "large-chunk-mib × 1 of VRAM scratch.",
     )
     parser.add_argument(
         "--no-gds",
@@ -79,8 +98,10 @@ def _run(args: argparse.Namespace) -> None:
 
     run_gds_check(
         gds_path=args.gds_path,
-        num_chunks=args.num_chunks,
-        chunk_bytes=args.chunk_mib * 1024 * 1024,
+        small_num_chunks=args.small_num_chunks,
+        small_chunk_bytes=args.small_chunk_mib * 1024 * 1024,
+        large_num_chunks=args.large_num_chunks,
+        large_chunk_bytes=args.large_chunk_mib * 1024 * 1024,
         use_gds=not args.no_gds,
         skip_verify=args.skip_verify,
         skip_bench=args.skip_bench,

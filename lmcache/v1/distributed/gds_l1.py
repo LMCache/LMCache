@@ -1192,6 +1192,15 @@ class GdsL1Backend:
                     nbytes=nbytes,
                 )
             os.rename(tmp_path, disk_path)
+            # Invalidate any cached "r"/"r+" cuFile handles for the
+            # old inode at this path. ``os.rename`` replaces the
+            # directory entry but doesn't disturb the previously
+            # opened fd, so a stale handle would happily keep reading
+            # the unlinked inode (whose size is the old write's
+            # nbytes, not the new one). This shows up as short reads
+            # immediately after an overwrite.
+            for mode in ("r", "r+"):
+                self.handle_cache.invalidate(disk_path, mode)
             self._record_save(memory_obj, disk_path, nbytes)
             # Write the sibling metadata file atomically.
             self._write_metadata_sidecar(disk_path, metadata_bytes)
