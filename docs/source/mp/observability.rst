@@ -540,6 +540,15 @@ Adapters with no in-flight work emit no datapoint for that scrape.
        the callback never raises during a scrape. Compare against the
        eviction watermark (default ``0.8``) to read whether the
        eviction loop is below or above its trigger threshold.
+   * - ``lmcache_mp.l2_usage_bytes``
+     - ObservableGauge (attr: ``l2_name``)
+     - Bytes currently held in each L2 adapter, tagged by ``l2_name``
+       (one observation per adapter).  Sampled at scrape time from
+       ``L2AdapterInterface.get_usage().total_bytes_used``.  Parallel to
+       ``l1_memory_usage_bytes`` on the L2 tier — use it to see how full
+       each backend is and whether eviction or purge is keeping up.
+       Adapters whose ``get_usage()`` raises are skipped silently rather
+       than poisoning the gauge.
    * - ``lmcache_mp.num_inflight_l2_stores``
      - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
      - L2 store tasks currently executing, per adapter.  Sustained
