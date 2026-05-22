@@ -133,11 +133,12 @@ def create_scheduler_adapter(
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     # Per-node (local) derivations: each node hosts one LMCache server.
+    if global_tp_size % n_servers != 0:
+        raise ValueError(
+            f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
+        )
     local_world_size = global_world_size // n_servers
     local_tp_size = global_tp_size // n_servers
-    assert global_tp_size % n_servers == 0, (
-        f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
-    )
 
     # `extract_world_size_and_kv_rank` expects the GLOBAL world_size / rank
     # and returns the kv-side world_size and kv_rank (excluding TP for MLA).
@@ -196,11 +197,12 @@ def create_worker_adapter(
     ranks_per_node = global_world_size // n_servers
     local_server_url = server_urls[global_rank // ranks_per_node]
 
+    if global_tp_size % n_servers != 0:
+        raise ValueError(
+            f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
+        )
     local_world_size = global_world_size // n_servers
     local_tp_size = global_tp_size // n_servers
-    assert global_tp_size % n_servers == 0, (
-        f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
-    )
     parallel_strategy = ParallelStrategy(
         use_mla=mla_enabled(vllm_config.model_config),
         kv_world_size=kv_world_size,
@@ -541,16 +543,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         super().__init__(vllm_config, role, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
-        mq_timeout = float(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.mq_timeout", 300.0
-            )
-        )
-        heartbeat_interval = float(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.heartbeat_interval", 10.0
-            )
-        )
 
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
         # string) over the legacy single-server lmcache.mp.host / lmcache.mp.port.
