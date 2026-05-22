@@ -9,7 +9,7 @@ Call graph::
         v
     submit_callback_to_stream(stream, kind, payload)
         |
-        v  Python: msgspec.msgpack.encode each payload item
+        v  Python: msgspec.msgpack.encode(payload)
         v  C++:    record_completion_on_stream (gil_scoped_release)
         v  C++:    cudaLaunchHostFunc / hipLaunchHostFunc
         |
@@ -17,9 +17,12 @@ Call graph::
         v  completion_host_callback: append PendingCompletion to buffer
         |
         v  -------- on DeviceHostFuncDispatcher drain thread (Python) --
-        v  drain_recorded_completions  (returns list of (kind, [bytes...]))
-        v  msgspec.msgpack.decode each item with the kind's registered type
-        v  handler(items)  ← finish_write / finish_read_prefetched
+        v  drain_recorded_completions  (returns list of (kind, bytes))
+        v  msgspec.msgpack.decode(bytes) with the kind's registered type
+        v  handler(decoded_payload)  ← finish_write / finish_read_prefetched
+
+Payload round-trips as a single opaque blob. For multi-arg handlers, wrap
+the args in a tuple/struct matching the registered ``payload_type``.
 
 Extends PR #2952's AB-BA fix (GIL x driver lock) to Server.store/retrieve.
 """
@@ -28,7 +31,7 @@ Extends PR #2952's AB-BA fix (GIL x driver lock) to Server.store/retrieve.
 from __future__ import annotations
 
 # Standard
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 import threading
 
 # Third Party
@@ -41,8 +44,8 @@ import lmcache.c_ops as _lmc_ops
 
 logger = init_logger(__name__)
 
-# Runs on dispatcher thread with the decoded items from one submission.
-DeviceHostFunc = Callable[[list[Any]], None]
+# Runs on dispatcher thread with the decoded payload for one submission.
+DeviceHostFunc = Callable[[Any], None]
 
 
 class _Registration(msgspec.Struct):
@@ -51,7 +54,7 @@ class _Registration(msgspec.Struct):
 
 
 class DeviceHostFuncDispatcher:
-    """Drain buffered C++ completions and dispatch each batch to the handler
+    """Drain buffered C++ completions and dispatch each payload to the handler
     registered for its ``kind``. One instance per process; owned by
     ``MPCacheEngine``."""
 
@@ -65,13 +68,13 @@ class DeviceHostFuncDispatcher:
         self._dispatched_count = 0
         self._exception_counts: dict[str, int] = {}
 
-    def register(self, kind: str, handler: DeviceHostFunc, item_type: Any) -> None:
-        """Register *handler* for *kind*; ``item_type`` is the per-payload-item
-        msgspec decode type (e.g. ``ObjectKey``)."""
+    def register(self, kind: str, handler: DeviceHostFunc, payload_type: Any) -> None:
+        """Register *handler* for *kind*. ``payload_type`` is the msgspec
+        decode type for the whole payload (e.g. ``list[ObjectKey]``)."""
         with self._lock:
             self._registry[kind] = _Registration(
                 handler=handler,
-                decoder=msgspec.msgpack.Decoder(type=item_type),
+                decoder=msgspec.msgpack.Decoder(type=payload_type),
             )
 
     def start(self) -> None:
@@ -116,18 +119,17 @@ class DeviceHostFuncDispatcher:
             return
         with self._lock:
             registry = dict(self._registry)
-        for kind, encoded_items in completions:
+        for kind, encoded_payload in completions:
             reg = registry.get(kind)
             if reg is None:
                 logger.warning(
-                    "DeviceHostFuncDispatcher: no handler for kind=%r (dropped %d)",
+                    "DeviceHostFuncDispatcher: no handler for kind=%r (dropped)",
                     kind,
-                    len(encoded_items),
                 )
                 continue
             try:
-                items = [reg.decoder.decode(item) for item in encoded_items]
-                reg.handler(items)
+                decoded = reg.decoder.decode(encoded_payload)
+                reg.handler(decoded)
                 self._dispatched_count += 1
             except Exception:
                 with self._lock:
@@ -139,9 +141,10 @@ class DeviceHostFuncDispatcher:
                 )
 
 
-def submit_callback_to_stream(stream: Any, kind: str, payload: Iterable[Any]) -> None:
+def submit_callback_to_stream(stream: Any, kind: str, payload: Any) -> None:
     """Schedule a stream-ordered host callback for *kind* with *payload*.
     Runs on the dispatcher worker registered for *kind*; never acquires the
-    GIL on the driver thread."""
-    encoded = [msgspec.msgpack.encode(p) for p in payload]
+    GIL on the driver thread. ``payload`` is delivered to the handler as a
+    single argument."""
+    encoded = msgspec.msgpack.encode(payload)
     _lmc_ops.record_completion_on_stream(stream.ptr, kind, encoded)

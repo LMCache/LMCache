@@ -259,12 +259,12 @@ class MPCacheEngine:
         self._device_host_func_dispatcher.register(
             "finish_write",
             self.storage_manager.finish_write,
-            item_type=ObjectKey,
+            payload_type=list[ObjectKey],
         )
         self._device_host_func_dispatcher.register(
             "finish_read_prefetched",
             self.storage_manager.finish_read_prefetched,
-            item_type=ObjectKey,
+            payload_type=list[ObjectKey],
         )
         self._device_host_func_dispatcher.start()
 

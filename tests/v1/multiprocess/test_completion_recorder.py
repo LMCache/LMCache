@@ -67,9 +67,9 @@ class TestRecordAndDrain:
         assert completions == []
 
     def test_single_completion_payload_is_bytes(self, stream):
-        # drain must hand back py::bytes, not utf-8-decoded str — pickle and
-        # msgpack outputs are arbitrary bytes including invalid utf-8.
-        encoded = [msgspec.msgpack.encode(b"key-1"), msgspec.msgpack.encode(b"key-2")]
+        # drain must hand back py::bytes, not utf-8-decoded str — msgpack
+        # output is arbitrary bytes including invalid utf-8.
+        encoded = msgspec.msgpack.encode([b"key-1", b"key-2"])
         lmc_ops.record_completion_on_stream(stream.ptr, "finish_write", encoded)
         stream.synchronize()
 
@@ -77,9 +77,8 @@ class TestRecordAndDrain:
         assert len(completions) == 1
         kind, payload = completions[0]
         assert kind == "finish_write"
-        for item in payload:
-            assert isinstance(item, bytes)
-        assert [msgspec.msgpack.decode(p, type=bytes) for p in payload] == [
+        assert isinstance(payload, bytes)
+        assert msgspec.msgpack.decode(payload, type=list[bytes]) == [
             b"key-1",
             b"key-2",
         ]
@@ -87,7 +86,7 @@ class TestRecordAndDrain:
     def test_many_completions_in_order(self, stream):
         for i in range(50):
             lmc_ops.record_completion_on_stream(
-                stream.ptr, "finish_write", [msgspec.msgpack.encode(i)]
+                stream.ptr, "finish_write", msgspec.msgpack.encode(i)
             )
         stream.synchronize()
 
@@ -95,7 +94,7 @@ class TestRecordAndDrain:
         assert len(completions) == 50
         for idx, (kind, payload) in enumerate(completions):
             assert kind == "finish_write"
-            assert msgspec.msgpack.decode(payload[0], type=int) == idx
+            assert msgspec.msgpack.decode(payload, type=int) == idx
 
 
 @native_only
@@ -103,8 +102,8 @@ class TestDispatcher:
     """Integration tests for DeviceHostFuncDispatcher (drain + dispatch)."""
 
     def test_dispatch_to_registered_handler(self, dispatcher, stream):
-        seen: list[list] = []
-        dispatcher.register("finish_write", seen.append, item_type=bytes)
+        seen: list[list[bytes]] = []
+        dispatcher.register("finish_write", seen.append, payload_type=list[bytes])
 
         submit_callback_to_stream(stream, "finish_write", [b"k0", b"k1", b"k2"])
         stream.synchronize()
@@ -121,14 +120,14 @@ class TestDispatcher:
         assert dispatcher.dispatched_count() == 0
 
     def test_handler_exception_does_not_kill_thread(self, dispatcher, stream):
-        calls: list[list] = []
+        calls: list[list[bytes]] = []
 
         def handler(payload):
             calls.append(payload)
             if len(calls) == 1:
                 raise RuntimeError("boom")
 
-        dispatcher.register("finish_write", handler, item_type=bytes)
+        dispatcher.register("finish_write", handler, payload_type=list[bytes])
         submit_callback_to_stream(stream, "finish_write", [b"a"])
         submit_callback_to_stream(stream, "finish_write", [b"b"])
         stream.synchronize()
@@ -139,6 +138,19 @@ class TestDispatcher:
         assert calls == [[b"a"], [b"b"]]
         assert dispatcher.handler_exception_counts().get("finish_write", 0) == 1
 
+    def test_tuple_payload_for_multiple_arguments(self, dispatcher, stream):
+        # Multi-arg handlers: wrap args in a tuple, register tuple decode type.
+        seen: list[tuple[int, str]] = []
+        dispatcher.register("finish_multi", seen.append, payload_type=tuple[int, str])
+
+        submit_callback_to_stream(stream, "finish_multi", (42, "hello"))
+        stream.synchronize()
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not seen:
+            time.sleep(0.01)
+        assert seen == [(42, "hello")]
+
 
 @native_only
 class TestDeadlockRegression:
@@ -147,7 +159,7 @@ class TestDeadlockRegression:
     callback runs without the GIL and must finish within the timeout."""
 
     def test_many_concurrent_records_no_deadlock(self, dispatcher, stream):
-        received: list[list] = []
+        received: list[int] = []
         ready = threading.Event()
 
         def handler(payload):
@@ -155,10 +167,10 @@ class TestDeadlockRegression:
             if len(received) >= 200:
                 ready.set()
 
-        dispatcher.register("finish_write", handler, item_type=int)
+        dispatcher.register("finish_write", handler, payload_type=int)
 
         for i in range(200):
-            submit_callback_to_stream(stream, "finish_write", [i])
+            submit_callback_to_stream(stream, "finish_write", i)
         stream.synchronize()
 
         assert ready.wait(timeout=10.0), (

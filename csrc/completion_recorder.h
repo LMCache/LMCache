@@ -25,8 +25,8 @@ using lmcache_completion_stream_t = cudaStream_t;
 #endif
 
 struct PendingCompletion {
-  std::string kind;                  // dispatch key, e.g. "finish_write"
-  std::vector<std::string> payload;  // pickled bytes per item
+  std::string kind;     // dispatch key, e.g. "finish_write"
+  std::string payload;  // opaque encoded bytes (e.g. msgpack)
 };
 
 class CompletionRecorder {
@@ -44,10 +44,8 @@ class CompletionRecorder {
 
 // Schedule a completion record. Called WITHOUT the GIL.
 void record_completion_on_stream(int64_t cuda_stream_ptr,
-                                 const std::string& kind,
-                                 std::vector<std::string> payload);
+                                 const std::string& kind, std::string payload);
 
-using CompletionDrainResult =
-    std::vector<std::pair<std::string, std::vector<std::string>>>;
+using CompletionDrainResult = std::vector<std::pair<std::string, std::string>>;
 
 CompletionDrainResult drain_recorded_completions();
