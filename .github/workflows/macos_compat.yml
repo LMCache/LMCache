@@ -1,10 +1,13 @@
 name: macOS Compat
 
 # Smoke test that verifies the lmcache multiprocess server can be
-# installed and launched on macOS (no CUDA, C++/CUDA extensions skipped
-# via NO_CUDA_EXT=1), and that both the HTTP endpoint and the `lmcache`
-# CLI are usable. This is a "best-effort basic compatibility" check —
-# it does not cover GPU / CUDA / vLLM code paths.
+# installed and launched on macOS (GPU backend skipped via NO_GPU_EXT=1;
+# common C++ extensions — native_storage_ops / lmcache_redis /
+# lmcache_fs — are still built so the cross-platform PipeNotifier
+# fallback in csrc/storage_backends/event_notifier.h is exercised),
+# and that both the HTTP endpoint and the `lmcache` CLI are usable.
+# This is a "best-effort basic compatibility" check — it does not
+# cover GPU / CUDA / vLLM code paths.
 
 on:
   workflow_call:
@@ -105,9 +108,12 @@ jobs:
             pyproject.toml
             requirements/*.txt
 
-      - name: Install lmcache (no CUDA ext, no vLLM)
+      - name: Install lmcache (CPU-only, common C++ ext, no vLLM)
         env:
-          NO_CUDA_EXT: "1"
+          # NO_GPU_EXT=1: build common C++ extensions (native_storage_ops,
+          # lmcache_redis, lmcache_fs) but skip the CUDA / ROCm / SYCL
+          # backend. Mirrors build_cpu_artifacts.yml on the macOS axis.
+          NO_GPU_EXT: "1"
           # Pin a synthetic version so setuptools-scm never inspects
           # git tags. Defense-in-depth on top of pyproject.toml's
           # tag_regex; harmless if tag_regex already filters tags.

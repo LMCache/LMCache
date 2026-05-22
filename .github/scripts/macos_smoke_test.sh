@@ -4,8 +4,11 @@
 # macOS basic-compatibility smoke test for the lmcache multiprocess
 # server. Verifies that:
 #   1) `lmcache --help` works (CLI entry point is importable)
-#   2) `lmcache server` can launch the ZMQ + HTTP server on CPU
-#   3) the HTTP server answers GET / and GET /healthcheck
+#   2) common C++ extensions (native_storage_ops / lmcache_redis /
+#      lmcache_fs) load on macOS, exercising the PipeNotifier fallback
+#      in csrc/storage_backends/event_notifier.h
+#   3) `lmcache server` can launch the ZMQ + HTTP server on CPU
+#   4) the HTTP server answers GET / and GET /healthcheck
 #
 # This script is intentionally minimal — it does not exercise any
 # GPU / CUDA / vLLM code paths. It is meant to be a fast regression
@@ -31,6 +34,21 @@ python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is
 
 echo "==> Step 1: lmcache CLI help"
 lmcache --help >/dev/null
+
+echo "==> Step 1.5: import common C++ extensions (CPU-only build)"
+# Mirrors the verify step in .github/workflows/build_cpu_artifacts.yml
+# on the macOS axis: makes sure NO_GPU_EXT=1 produced loadable .so's
+# and that c_ops resolves to the python_ops_fallback shim.
+python -c "
+import sys
+import lmcache
+import lmcache.native_storage_ops  # noqa: F401
+import lmcache.lmcache_redis  # noqa: F401
+import lmcache.lmcache_fs  # noqa: F401
+import lmcache.c_ops  # noqa: F401
+assert lmcache.torch_device_type == 'cpu', lmcache.torch_device_type
+assert sys.modules['lmcache.c_ops'].__name__ == 'lmcache.python_ops_fallback'
+"
 
 echo "==> Step 2: launch 'lmcache server' on ${HTTP_HOST}:${HTTP_PORT} (zmq ${ZMQ_PORT})"
 rm -f "${LOG_FILE}"
