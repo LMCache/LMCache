@@ -73,6 +73,8 @@ Available Commands
        health, L1 storage, registered models, and L2 adapters.
    * - ``query``
      - Single-shot query interface for both the serving engine and KV cache worker.
+   * - ``conf``
+     - Fetch the active MP server configuration as JSON and optionally save it.
    * - ``server``
      - Launch the LMCache server (ZMQ + HTTP). Requires full ``lmcache`` install.
    * - ``ping``
@@ -275,6 +277,41 @@ The ``gpu_kv_shape`` field uses short names from the ``GPUKVFormat`` enum:
      - head_size
    * - PBS
      - page_buffer_size (NB × BS)
+
+``conf`` — Active Server Configuration
+--------------------------------------
+
+Fetch the configuration that a running MP server actually loaded:
+
+.. code-block:: bash
+
+   lmcache conf --url http://localhost:8080
+
+To keep a copy for debugging or issue reports, pass ``--file``. The command
+still prints the JSON to stdout.
+
+.. code-block:: bash
+
+   lmcache conf --url http://localhost:8080 --file lmcache-config.json
+
+The JSON includes active MP, HTTP, storage-manager, L1/L2, policy, and
+observability configuration values. Nested L2 adapter, per-adapter eviction,
+persist, and serde configs are expanded from the active config objects.
+Sensitive fields such as passwords and secrets are redacted.
+
+``conf`` Options
+~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Flag
+     - Description
+   * - ``--url``
+     - LMCache HTTP server base URL. Defaults to ``http://localhost:8080``.
+   * - ``--file PATH``
+     - Write the fetched configuration JSON to ``PATH`` in addition to stdout.
 
 ``query``
 ---------

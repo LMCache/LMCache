@@ -3,7 +3,7 @@
 
 Usage::
 
-    lmcache conf [--url URL | --file PATH]
+    lmcache conf [--url URL] [--file PATH]
 """
 
 # Standard
@@ -40,19 +40,17 @@ def _fetch_from_url(url: str, timeout: int = 10) -> str:
         return resp.read().decode("utf-8")
 
 
-def _read_from_file(path: Path) -> str:
-    """Read a JSON configuration file.
+def _write_to_file(path: Path, body: str) -> None:
+    """Write a JSON configuration file.
 
     Args:
-        path: Filesystem path to the JSON dump.
-
-    Returns:
-        File contents as a string.
+        path: Filesystem path where the JSON config should be written.
+        body: File contents to write.
 
     Raises:
-        OSError: If the file cannot be read.
+        OSError: If the file cannot be written.
     """
-    return path.read_text()
+    path.write_text(body)
 
 
 class ConfCommand(BaseCommand):
@@ -80,23 +78,20 @@ class ConfCommand(BaseCommand):
         Args:
             parser: The ``ArgumentParser`` for this subcommand.
         """
-        source = parser.add_mutually_exclusive_group()
-        source.add_argument(
+        parser.add_argument(
             "--url",
             type=str,
             default=None,
             help=(
-                f"LMCache HTTP server base URL (default: {DEFAULT_URL}). "
-                f"Mutually exclusive with --file."
+                f"LMCache HTTP server base URL. Default: {DEFAULT_URL}."
             ),
         )
-        source.add_argument(
+        parser.add_argument(
             "--file",
             type=str,
             default=None,
             help=(
-                "Read configuration from a JSON file instead of querying "
-                "a running server. Mutually exclusive with --url."
+                "Write the fetched configuration JSON to this file."
             ),
         )
 
@@ -109,36 +104,36 @@ class ConfCommand(BaseCommand):
         Args:
             args: Parsed CLI arguments.
         """
-        if args.file is not None:
-            try:
-                body = _read_from_file(Path(args.file))
-            except OSError as exc:
-                print(
-                    f"Cannot read {args.file}: {exc}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-        else:
-            base_url = normalize_url(args.url or DEFAULT_URL)
-            endpoint = f"{base_url}/conf"
-            try:
-                body = _fetch_from_url(endpoint)
-            except urllib.error.HTTPError as exc:
-                print(
-                    f"HTTP {exc.code}: {exc.reason}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            except (urllib.error.URLError, OSError) as exc:
-                reason = getattr(exc, "reason", str(exc))
-                print(
-                    f"Cannot connect to {endpoint}: {reason}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        base_url = normalize_url(args.url or DEFAULT_URL)
+        endpoint = f"{base_url}/conf"
+        try:
+            body = _fetch_from_url(endpoint)
+        except urllib.error.HTTPError as exc:
+            print(
+                f"HTTP {exc.code}: {exc.reason}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        except (urllib.error.URLError, OSError) as exc:
+            reason = getattr(exc, "reason", str(exc))
+            print(
+                f"Cannot connect to {endpoint}: {reason}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         try:
             parsed = json.loads(body)
         except json.JSONDecodeError:
             print(body)
             return
-        print(json.dumps(parsed, indent=2, sort_keys=True))
+        pretty = json.dumps(parsed, indent=2, sort_keys=True)
+        if args.file is not None:
+            try:
+                _write_to_file(Path(args.file), pretty + "\n")
+            except OSError as exc:
+                print(
+                    f"Cannot write {args.file}: {exc}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        print(pretty)

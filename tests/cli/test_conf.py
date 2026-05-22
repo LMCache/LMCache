@@ -2,9 +2,9 @@
 """Tests for ``lmcache conf`` CLI subcommand.
 
 Covers:
-- Reading a JSON configuration file via ``--file``.
 - Fetching ``/conf`` from a running server via ``--url`` (mock HTTP).
-- Error handling for connection refused, HTTP 5xx, and unreadable files.
+- Persisting fetched JSON via ``--file``.
+- Error handling for connection refused and HTTP 5xx.
 """
 
 # Standard
@@ -62,73 +62,6 @@ def _fake_args(url: str | None = None, file: str | None = None) -> argparse.Name
 
 
 # ---------------------------------------------------------------------------
-# --file source
-# ---------------------------------------------------------------------------
-
-
-class TestConfCommandFromFile:
-    """``lmcache conf --file PATH`` reads and pretty-prints a JSON file."""
-
-    def test_reads_and_prints_json(self, tmp_path: Path) -> None:
-        """Valid JSON file is pretty-printed to stdout."""
-        dump = tmp_path / "dump.json"
-        dump.write_text(json.dumps({"http": {"port": 8080}}))
-
-        cmd = ConfCommand()
-        buf = io.StringIO()
-        with patch("sys.stdout", buf):
-            cmd.execute(_fake_args(file=str(dump)))
-
-        printed = json.loads(buf.getvalue())
-        assert printed == {"http": {"port": 8080}}
-
-    def test_indented_output(self, tmp_path: Path) -> None:
-        """Output is indented for readability."""
-        dump = tmp_path / "dump.json"
-        dump.write_text(json.dumps({"k": "v"}))
-
-        cmd = ConfCommand()
-        buf = io.StringIO()
-        with patch("sys.stdout", buf):
-            cmd.execute(_fake_args(file=str(dump)))
-
-        assert "\n" in buf.getvalue()
-        assert "  " in buf.getvalue()
-
-    def test_keys_are_sorted(self, tmp_path: Path) -> None:
-        """Output keys are sorted for stable diffs."""
-        dump = tmp_path / "dump.json"
-        dump.write_text(json.dumps({"z": 1, "a": 2}))
-
-        cmd = ConfCommand()
-        buf = io.StringIO()
-        with patch("sys.stdout", buf):
-            cmd.execute(_fake_args(file=str(dump)))
-
-        out = buf.getvalue()
-        assert out.index('"a"') < out.index('"z"')
-
-    def test_nonexistent_file_exits_1(self, tmp_path: Path) -> None:
-        """Missing file causes SystemExit(1)."""
-        cmd = ConfCommand()
-        with pytest.raises(SystemExit) as exc:
-            cmd.execute(_fake_args(file=str(tmp_path / "missing.json")))
-        assert exc.value.code == 1
-
-    def test_non_json_file_is_printed_verbatim(self, tmp_path: Path) -> None:
-        """If the file is not valid JSON, contents are printed unmodified."""
-        dump = tmp_path / "dump.json"
-        dump.write_text("not json at all")
-
-        cmd = ConfCommand()
-        buf = io.StringIO()
-        with patch("sys.stdout", buf):
-            cmd.execute(_fake_args(file=str(dump)))
-
-        assert "not json at all" in buf.getvalue()
-
-
-# ---------------------------------------------------------------------------
 # --url source
 # ---------------------------------------------------------------------------
 
@@ -149,6 +82,27 @@ class TestConfCommandFromUrl:
             printed = json.loads(buf.getvalue())
             assert printed["http"]["port"] == 8080
             assert printed["mp"]["port"] == 5555
+        finally:
+            server.server_close()
+
+    def test_fetches_prints_and_writes_file(self, tmp_path: Path) -> None:
+        """--file persists the JSON fetched from --url."""
+        body = json.dumps({"z": 1, "a": 2}).encode()
+        server, port = _start_server(200, body)
+        output_path = tmp_path / "conf.json"
+        try:
+            cmd = ConfCommand()
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                cmd.execute(
+                    _fake_args(
+                        url=f"http://127.0.0.1:{port}",
+                        file=str(output_path),
+                    )
+                )
+
+            assert json.loads(buf.getvalue()) == {"a": 2, "z": 1}
+            assert json.loads(output_path.read_text()) == {"a": 2, "z": 1}
         finally:
             server.server_close()
 
