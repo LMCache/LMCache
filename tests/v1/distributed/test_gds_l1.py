@@ -240,15 +240,15 @@ def _mock_gds_module_with_counter() -> tuple[mock.Mock, dict]:
     """Build a mock gds_module whose ``CuFile`` returns trackable mocks."""
     counter = {"opens": 0, "closes": 0}
 
-    def _make_handle(path, mode, use_direct_io=False):
-        def _open():
-            counter["opens"] += 1
+    def _make_handle(path, mode):
+        # kvikio.CuFile opens and registers the handle in its
+        # constructor — count the open here.
+        counter["opens"] += 1
 
         def _close():
             counter["closes"] += 1
 
-        handle = mock.Mock(spec=["open", "close", "read", "write"])
-        handle.open = mock.Mock(side_effect=_open)
+        handle = mock.Mock(spec=["close", "raw_read_async", "raw_write_async"])
         handle.close = mock.Mock(side_effect=_close)
         return handle
 

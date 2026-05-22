@@ -4,8 +4,15 @@
 This module makes NVMe disk the durable L1 medium, with cuFile DMA
 between disk files and the GPU staging buffer that ``GPUCacheContext``
 already owns. There is no in-VRAM warm cache: every L1 access goes
-through ``cufile.read`` / ``cufile.write`` directly into the existing
+through ``kvikio.CuFile.pread`` / ``pwrite`` directly into the existing
 ``tmp_gpu_buffer_``.
+
+We use kvikio (NVIDIA RAPIDS) as the cuFile wrapper rather than the
+bare ``cufile`` Python bindings because kvikio exposes the async
+APIs that the bare bindings omit (``IOFuture`` + future-based wait,
+plus a ``raw_read_async`` variant that's stream-ordered). Today we
+use ``pread``/``pwrite`` (thread-pool async); ``raw_read_async`` is a
+follow-up when the caller can submit a batch of reads before waiting.
 
 See ``docs/design/v1/distributed/gds_l1_backend.md`` for the full
 architecture and ``gds_l1_backend_plan.md`` for the decision log.
@@ -13,9 +20,8 @@ architecture and ``gds_l1_backend_plan.md`` for the decision log.
 Surface this module exposes:
 
 - :class:`GdsL1Backend` — owns the hot index, the cuFile handle cache,
-  the metadata scan, the thread pool, and the
-  :class:`GdsScratchAllocator`. ``L1Manager`` consumes this via an
-  optional hook (separate PR).
+  the metadata scan, and the :class:`GdsScratchAllocator`.
+  ``L1Manager`` consumes this via an optional hook.
 - :class:`GdsScratchAllocator` — tag class used for ``isinstance``
   dispatch in ``gpu_ops.py``; also the home for
   :meth:`cufile_read_into` and :meth:`cufile_write_from`.
@@ -24,15 +30,10 @@ Surface this module exposes:
   exclusive-L2 mode that GDS L1 enforces, neither field is read on
   the GDS path — the data path is gpu_ops dispatch + the gpu_buffer
   parameter, not field access on the MemoryObj.
-
-This module is self-contained: it does not modify ``L1Manager``,
-``gpu_ops.py``, or the MP server. Those wiring points are separate
-PRs.
 """
 
 # Standard
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union
 import asyncio
 import ctypes
@@ -74,7 +75,6 @@ _METADATA_VERSION = 1
 _METADATA_MAX_SIZE = 4096  # 4 KiB reserved header inside the data file
 
 _CUFILE_ALIGNMENT = 4096
-_DEFAULT_THREAD_COUNT = 4
 _DEFAULT_HANDLE_CACHE_SIZE = 1024
 
 _TORCH_DTYPES = {
@@ -283,23 +283,20 @@ class CuFileHandleCache:
 
     Args:
         max_handles: LRU capacity. Default 1024.
-        gds_module: The imported cufile module; passed in so the cache
-            does not import it at module load time (matches
-            :class:`GdsBackend`'s lazy-import pattern).
-        use_direct_io: Whether to open files with ``O_DIRECT``.
+        gds_module: The imported ``kvikio`` module; passed in so the
+            cache doesn't import it at module load time. ``None``
+            disables the cache (acquire raises).
     """
 
     def __init__(
         self,
         max_handles: int = _DEFAULT_HANDLE_CACHE_SIZE,
         gds_module: Optional[object] = None,
-        use_direct_io: bool = False,
     ) -> None:
         if max_handles <= 0:
             raise ValueError(f"max_handles must be positive, got {max_handles}")
         self._max = max_handles
         self._gds_module = gds_module
-        self._use_direct_io = use_direct_io
         self._lock = threading.Lock()
         # entries are (file_obj, in_use_count); LRU order is dict order
         self._entries: OrderedDict[tuple[str, str], list] = OrderedDict()
@@ -334,14 +331,10 @@ class CuFileHandleCache:
                 entry[1] += 1
                 return entry[0]
             # Cache miss: open under the lock to keep races simple.
-            # ``CuFile.__init__`` only stores the path; the file is not
-            # actually opened (and the handle not registered with cuFile)
-            # until ``.open()`` is called — the wrapper raises "File is
-            # not open." on read/write otherwise.
-            file_obj = self._gds_module.CuFile(
-                disk_path, mode, use_direct_io=self._use_direct_io
-            )
-            file_obj.open()
+            # ``kvikio.CuFile(path, flags)`` opens the file and
+            # registers the handle with cuFile in the constructor, so
+            # there is no separate ``.open()`` step.
+            file_obj = self._gds_module.CuFile(disk_path, mode)
             self._entries[cache_key] = [file_obj, 1]
             self._evict_idle_if_full_locked()
             return file_obj
@@ -668,15 +661,15 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
             raise RuntimeError(
                 "GdsScratchAllocator.register_gpu_buffer: gds_module is None"
             )
-        # Third Party
-        from cufile.bindings import cuFileBufRegister
-
-        cuFileBufRegister(ctypes.c_void_p(buffer.data_ptr()), nbytes, flags=0)
+        # ``kvikio.memory_register`` takes the buffer-like directly and
+        # auto-discovers the underlying CUDA allocation — no ctypes
+        # wrapping. Replaces the lower-level ``cuFileBufRegister``.
+        gds_module.memory_register(buffer)
         self._registered_buffer = buffer
         self._registered_base_ptr = buffer.data_ptr()
         self._registered_nbytes = nbytes
         logger.info(
-            "GdsScratchAllocator: registered %d bytes at 0x%x with cuFile",
+            "GdsScratchAllocator: registered %d bytes at 0x%x with kvikio",
             nbytes,
             buffer.data_ptr(),
         )
@@ -686,14 +679,18 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         when no buffer was ever registered."""
         if self._registered_base_ptr is None:
             return
-        if self._backend.use_gds and self._backend.gds_module is not None:
-            # Third Party
-            from cufile.bindings import cuFileBufDeregister
-
+        if (
+            self._backend.use_gds
+            and self._backend.gds_module is not None
+            and self._registered_buffer is not None
+        ):
             try:
-                cuFileBufDeregister(ctypes.c_void_p(self._registered_base_ptr))
+                self._backend.gds_module.memory_deregister(self._registered_buffer)
             except Exception as e:
-                logger.warning("GdsScratchAllocator: cuFileBufDeregister failed: %s", e)
+                logger.warning(
+                    "GdsScratchAllocator: kvikio.memory_deregister failed: %s",
+                    e,
+                )
         self._registered_buffer = None
         self._registered_base_ptr = None
         self._registered_nbytes = 0
@@ -734,10 +731,12 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                 f"gpu_buffer capacity "
                 f"{gpu_buffer.numel() * gpu_buffer.element_size()}"
             )
+        if self._registered_buffer is None:
+            raise RuntimeError("cufile_read_into: no GPU buffer has been registered")
         ret = self._backend.do_load(
             memory_obj.disk_path,
             file_offset=memory_obj.file_offset,
-            base_pointer=self._registered_base_ptr,
+            buf=self._registered_buffer,
             dev_offset=dev_offset,
             size_in_bytes=nbytes,
         )
@@ -775,9 +774,11 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                 f"gpu_buffer capacity "
                 f"{gpu_buffer.numel() * gpu_buffer.element_size()}"
             )
+        if self._registered_buffer is None:
+            raise RuntimeError("cufile_write_from: no GPU buffer has been registered")
         self._backend.do_save(
             memory_obj=memory_obj,
-            base_pointer=self._registered_base_ptr,
+            buf=self._registered_buffer,
             dev_offset=dev_offset,
             nbytes=nbytes,
         )
@@ -930,28 +931,24 @@ class GdsL1Backend:
             self.data_suffix = _WEKA_DATA_FILE_SUFFIX
 
         self.gds_module: Optional[object] = None
-        self._gds_driver: Optional[object] = None
         self.cudart: Optional[object] = None
         if self.use_gds:
             # Third Party
-            import cufile  # noqa: WPS433 — lazy import to avoid load-time failures
+            import kvikio  # noqa: WPS433 — lazy import to avoid load-time failures
+            import kvikio.defaults
 
-            self.gds_module = cufile
-            self._gds_driver = cufile.CuFileDriver()
-            logger.info("GdsL1Backend: cuFile driver initialised")
+            self.gds_module = kvikio
+            logger.info(
+                "GdsL1Backend: kvikio loaded (compat_mode_preferred=%s)",
+                kvikio.defaults.is_compat_mode_preferred(),
+            )
         else:
             self.cudart = ctypes.CDLL("libcudart.so")
             logger.info("GdsL1Backend: cuFile disabled, using POSIX fallback")
 
-        self._use_direct_io = config.use_direct_io
         self.handle_cache = CuFileHandleCache(
             max_handles=config.handle_cache_size,
             gds_module=self.gds_module,
-            use_direct_io=self._use_direct_io,
-        )
-
-        self._thread_pool = ThreadPoolExecutor(
-            max_workers=config.io_threads, thread_name_prefix="gds-l1-io"
         )
 
         self._hot_lock = threading.Lock()
@@ -1112,12 +1109,11 @@ class GdsL1Backend:
     def close(self) -> None:
         """Flush and release all resources."""
         # Best-effort: wait for an in-flight scan to settle before
-        # tearing down the thread pool and handle cache.
+        # tearing down the handle cache and registered buffer.
         try:
             self._scan_future.result(timeout=30)
         except Exception as e:
             logger.warning("GdsL1Backend.close: scan wait failed: %s", e)
-        self._thread_pool.shutdown(wait=True)
         self.handle_cache.close()
         self.scratch_allocator.deregister_gpu_buffer()
         logger.info("GdsL1Backend: closed")
@@ -1128,45 +1124,40 @@ class GdsL1Backend:
         self,
         disk_path: str,
         file_offset: int,
-        base_pointer: Optional[int],
+        buf: torch.Tensor,
         dev_offset: int,
         size_in_bytes: int,
     ) -> int:
-        """Read ``size_in_bytes`` from ``disk_path`` into the registered
-        VRAM region at ``base_pointer + dev_offset``.
+        """Read ``size_in_bytes`` from ``disk_path`` into ``buf`` at
+        ``dev_offset`` bytes from the start of the registered region.
 
         Returns:
             Number of bytes read, or a negative value on failure
             (mirrors :class:`GdsBackend` semantics so callers can
             log and drop the hot-index entry).
         """
-        if base_pointer is None:
-            raise ValueError("do_load: base_pointer is None — buffer not registered")
         if self.gds_module is not None:
             return self._gds_read(
-                disk_path, file_offset, base_pointer, dev_offset, size_in_bytes
+                disk_path, file_offset, buf, dev_offset, size_in_bytes
             )
         return self._posix_read(
-            disk_path, file_offset, base_pointer, dev_offset, size_in_bytes
+            disk_path, file_offset, buf.data_ptr(), dev_offset, size_in_bytes
         )
 
     def do_save(
         self,
         memory_obj: GdsMemoryObj,
-        base_pointer: Optional[int],
+        buf: torch.Tensor,
         dev_offset: int,
         nbytes: int,
     ) -> None:
-        """Write ``nbytes`` from ``base_pointer + dev_offset`` to
+        """Write ``nbytes`` from ``buf`` at ``dev_offset`` to
         ``memory_obj.disk_path``.
 
         On success, registers the key in the hot index. On failure,
         logs and re-raises so the caller can handle.
         """
-        if base_pointer is None:
-            raise ValueError("do_save: base_pointer is None — buffer not registered")
         disk_path = memory_obj.disk_path
-        # Standard
         # Late create the parent dirs so we tolerate first writes per
         # subdir cleanly without preallocating the full tree.
         os.makedirs(os.path.dirname(disk_path), exist_ok=True)
@@ -1188,7 +1179,7 @@ class GdsL1Backend:
                 self._gds_write(
                     tmp_path,
                     file_offset=_METADATA_MAX_SIZE,
-                    base_pointer=base_pointer,
+                    buf=buf,
                     dev_offset=dev_offset,
                     nbytes=nbytes,
                 )
@@ -1196,7 +1187,7 @@ class GdsL1Backend:
                 self._posix_write(
                     tmp_path,
                     file_offset=_METADATA_MAX_SIZE,
-                    base_pointer=base_pointer,
+                    base_pointer=buf.data_ptr(),
                     dev_offset=dev_offset,
                     nbytes=nbytes,
                 )
@@ -1351,21 +1342,31 @@ class GdsL1Backend:
         self,
         disk_path: str,
         file_offset: int,
-        base_pointer: int,
+        buf: torch.Tensor,
         dev_offset: int,
         size_in_bytes: int,
     ) -> int:
-        """Synchronous cuFile read into the registered VRAM region."""
-        addr = ctypes.c_void_p(base_pointer)
+        """Asynchronous cuFile read into the registered region.
+
+        Uses ``kvikio.CuFile.pread``, which submits the read on
+        kvikio's internal thread pool and returns an ``IOFuture``.
+        We call ``.get()`` to wait for completion before returning so
+        the synchronous-helper contract is preserved for callers.
+
+        The alternative ``raw_read_async`` API takes a CUDA stream and
+        is stream-ordered, but calling its ``check_bytes_done`` once
+        per chunk forces a full stream sync per call, which is
+        catastrophic on serial-per-chunk callers. Switching to a
+        batched submit/wait pattern is a follow-up.
+        """
         try:
             handle = self.handle_cache.acquire(disk_path, "r")
             try:
-                return handle.read(
-                    addr,
-                    size_in_bytes,
-                    file_offset=file_offset,
-                    dev_offset=dev_offset,
-                )
+                buf_slice = buf.view(torch.uint8)[
+                    dev_offset : dev_offset + size_in_bytes
+                ]
+                future = handle.pread(buf_slice, size_in_bytes, file_offset)
+                return future.get()
             finally:
                 self.handle_cache.release(disk_path, "r")
         except Exception as e:
@@ -1376,20 +1377,20 @@ class GdsL1Backend:
         self,
         disk_path: str,
         file_offset: int,
-        base_pointer: int,
+        buf: torch.Tensor,
         dev_offset: int,
         nbytes: int,
     ) -> None:
-        """Synchronous cuFile write from the registered VRAM region."""
-        addr = ctypes.c_void_p(base_pointer)
+        """Asynchronous cuFile write from the registered region.
+
+        Uses ``kvikio.CuFile.pwrite`` + ``IOFuture.get()`` for the same
+        reason as :meth:`_gds_read`.
+        """
         handle = self.handle_cache.acquire(disk_path, "r+")
         try:
-            handle.write(
-                addr,
-                nbytes,
-                file_offset=file_offset,
-                dev_offset=dev_offset,
-            )
+            buf_slice = buf.view(torch.uint8)[dev_offset : dev_offset + nbytes]
+            future = handle.pwrite(buf_slice, nbytes, file_offset)
+            future.get()
         finally:
             self.handle_cache.release(disk_path, "r+")
 
