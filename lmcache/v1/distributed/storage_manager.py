@@ -40,6 +40,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.mp_observability.trace.decorator import (
     enable_tracing,
     is_tracing_enabled,
@@ -119,7 +120,7 @@ class StorageManager:
         )
         self._l2_eviction_controller.start()
 
-        adapter_descriptors = [
+        self._adapter_descriptors = [
             AdapterDescriptor(index=i, config=ac)
             for i, ac in enumerate(config.l2_adapter_config.adapters)
         ]
@@ -127,7 +128,7 @@ class StorageManager:
         self._store_controller = StoreController(
             l1_manager=self._l1_manager,
             l2_adapters=self._l2_adapters,
-            adapter_descriptors=adapter_descriptors,
+            adapter_descriptors=self._adapter_descriptors,
             policy=create_store_policy(config.store_policy),
         )
         self._store_controller.start()
@@ -136,11 +137,23 @@ class StorageManager:
         self._prefetch_controller = PrefetchController(
             l1_manager=self._l1_manager,
             l2_adapters=self._l2_adapters,
-            adapter_descriptors=adapter_descriptors,
+            adapter_descriptors=self._adapter_descriptors,
             policy=create_prefetch_policy(config.prefetch_policy),
             max_in_flight=config.prefetch_max_in_flight,
         )
         self._prefetch_controller.start()
+
+        # L2 usage gauge — one observation per adapter, tagged by
+        # ``l2_name``.  Parallel to L1Manager's ``l1_memory_usage_bytes``.
+        register_gauge(
+            "lmcache.l2",
+            "lmcache_mp.l2_usage_bytes",
+            (
+                "Bytes currently held in each L2 adapter, tagged by "
+                "``l2_name`` (one observation per adapter)."
+            ),
+            self.get_l2_usages,
+        )
 
     # External APIs for serving engine integration code to call
     @enable_tracing()
@@ -568,6 +581,35 @@ class StorageManager:
         storage manager creates the registry at construction time.
         """
         return self._quota_manager
+
+    def get_l2_usages(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Per-adapter L2 usage in OTel-observation shape.
+
+        Backing data for the ``lmcache_mp.l2_usage_bytes`` observable
+        gauge.  One entry per configured adapter.
+
+        Returns:
+            A list of ``(total_bytes_used, {"l2_name": <type_name>})``
+            tuples — empty when no L2 adapters are configured.  Adapters
+            whose ``get_usage()`` raises are skipped (the gauge prefers
+            silence over a poison observation).
+        """
+        out: list[tuple[int | float, dict[str, object]]] = []
+        for adapter, desc in zip(
+            self._l2_adapters, self._adapter_descriptors, strict=True
+        ):
+            try:
+                usage = adapter.get_usage()
+            except Exception:
+                logger.exception(
+                    "L2 adapter %s get_usage() failed; skipping in gauge",
+                    desc.type_name,
+                )
+                continue
+            out.append((int(usage.total_bytes_used), {"l2_name": desc.type_name}))
+        return out
 
     def get_usage_bytes_by_cache_salt(self) -> dict[str, int]:
         """Aggregate ``cache_salt`` byte usage across every L2 adapter.
