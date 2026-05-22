@@ -76,9 +76,9 @@ class L0LifecycleSubscriber(EventSubscriber):
     """Tracks GPU (L0) KV cache block lifecycle via shadow monitoring.
 
     Metrics (all histograms, in seconds):
-    - ``lmcache_mp.l0_block_lifetime_seconds``
-    - ``lmcache_mp.l0_block_idle_before_evict_seconds``
-    - ``lmcache_mp.l0_block_reuse_gap_seconds``
+    - ``lmcache_mp.l0_block_lifetime``
+    - ``lmcache_mp.l0_block_idle_before_evict``
+    - ``lmcache_mp.l0_block_reuse_gap``
 
     Parameters:
         sample_rate: Fraction of blocks to track (0, 1.0].  Default 0.01
@@ -100,7 +100,7 @@ class L0LifecycleSubscriber(EventSubscriber):
 
         meter = metrics.get_meter("lmcache.l0")
         self._lifetime_hist = meter.create_histogram(
-            "lmcache_mp.l0_block_lifetime_seconds",
+            "lmcache_mp.l0_block_lifetime",
             description=(
                 "Histogram of GPU KV cache block lifetime from "
                 "allocation to eviction (seconds)."
@@ -108,14 +108,14 @@ class L0LifecycleSubscriber(EventSubscriber):
             unit="s",
         )
         self._idle_hist = meter.create_histogram(
-            "lmcache_mp.l0_block_idle_before_evict_seconds",
+            "lmcache_mp.l0_block_idle_before_evict",
             description=(
                 "Histogram of idle time before GPU KV cache block eviction (seconds)."
             ),
             unit="s",
         )
         self._reuse_gap_hist = meter.create_histogram(
-            "lmcache_mp.l0_block_reuse_gap_seconds",
+            "lmcache_mp.l0_block_reuse_gap",
             description=(
                 "Histogram of time gaps between consecutive GPU KV "
                 "cache block accesses (seconds)."

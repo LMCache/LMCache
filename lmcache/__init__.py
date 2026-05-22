@@ -66,7 +66,7 @@ def _get_backend() -> Any:
     """
     Try backends in order, first successful import wins.
     """
-    default_module = importlib.import_module("lmcache.non_cuda_equivalents")
+    default_module = importlib.import_module("lmcache.python_ops_fallback")
     # Third Party
     import torch
 
@@ -121,7 +121,7 @@ try:
     _ops = _get_backend()
     # override lmcache.c_ops with merged module,
     # in which:
-    #     non_cuda_equivalents as base,
+    #     python_ops_fallback as base,
     #     use backend implementation if exists
     sys.modules["lmcache.c_ops"] = _ops
 except (ImportError, ModuleNotFoundError):

@@ -4,10 +4,10 @@
 
 Both histograms are driven by StorageManager read/write events:
 
-- ``lmcache_mp.real_reuse_gap_seconds`` — wall-clock gap between a
+- ``lmcache_mp.real_reuse_gap`` — wall-clock gap between a
   chunk's most recent access (read or write) and the next read.
   Captures storage cost.
-- ``lmcache_mp.real_reuse_gap_chunks`` — per-``cache_salt`` chunk-event
+- ``lmcache_mp.real_reuse_gap_objects`` — per-``cache_salt`` chunk-event
   gap between two reads of the same chunk.  The counter advances on
   every chunk access (read AND write, all chunks); the histogram
   records gaps only on read events for sampled chunks.
@@ -118,8 +118,8 @@ def subscriber(bus):
 
 class TestReadEmitsGap:
     def test_read_then_read_records_gap(self, bus, subscriber):
-        before_t = _totals_by_salt("lmcache_mp.real_reuse_gap_seconds")
-        before_c = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before_t = _totals_by_salt("lmcache_mp.real_reuse_gap")
+        before_c = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read([_Key("h1", cache_salt="t-a")]))  # counter=1, seed
@@ -127,14 +127,16 @@ class TestReadEmitsGap:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        time_d = _delta(before_t, _totals_by_salt("lmcache_mp.real_reuse_gap_seconds"))
-        chunks_d = _delta(before_c, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        time_d = _delta(before_t, _totals_by_salt("lmcache_mp.real_reuse_gap"))
+        chunks_d = _delta(
+            before_c, _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
+        )
         assert time_d.get("t-a", (0.0, 0))[1] == 1
         assert chunks_d.get("t-a", (0.0, 0)) == (1.0, 1)
 
     def test_write_then_read_records_gap(self, bus, subscriber):
         """Write seeds the anchor; first read records gap = read - write."""
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_write([_Key("h1", cache_salt="t-w")]))  # counter=1, seed
@@ -142,21 +144,21 @@ class TestReadEmitsGap:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert delta.get("t-w", (0.0, 0)) == (1.0, 1)
 
     def test_first_access_is_cold_no_emission(self, bus, subscriber):
         """The very first event for a chunk seeds; no histogram sample."""
-        before_t = _totals_by_salt("lmcache_mp.real_reuse_gap_seconds")
-        before_c = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before_t = _totals_by_salt("lmcache_mp.real_reuse_gap")
+        before_c = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read([_Key("cold", cache_salt="t-cold")]))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        t_d = _delta(before_t, _totals_by_salt("lmcache_mp.real_reuse_gap_seconds"))
-        c_d = _delta(before_c, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        t_d = _delta(before_t, _totals_by_salt("lmcache_mp.real_reuse_gap"))
+        c_d = _delta(before_c, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert t_d.get("t-cold", (0.0, 0))[1] == 0
         assert c_d.get("t-cold", (0.0, 0))[1] == 0
 
@@ -164,7 +166,7 @@ class TestReadEmitsGap:
 class TestWriteDoesNotEmit:
     def test_write_then_write_no_emission(self, bus, subscriber):
         """Write → write does not record a sample."""
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_write([_Key("k", cache_salt="t-ww")]))
@@ -172,12 +174,12 @@ class TestWriteDoesNotEmit:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert delta.get("t-ww", (0.0, 0))[1] == 0
 
     def test_read_then_write_no_emission(self, bus, subscriber):
         """Read → write does not record a sample.  Write only updates anchor."""
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read([_Key("k", cache_salt="t-rw")]))  # seed
@@ -185,12 +187,12 @@ class TestWriteDoesNotEmit:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert delta.get("t-rw", (0.0, 0))[1] == 0
 
     def test_write_updates_anchor_for_next_read(self, bus, subscriber):
         """After read → write, the next read measures from the write."""
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read([_Key("k", cache_salt="t-x")]))  # counter=1
@@ -201,7 +203,7 @@ class TestWriteDoesNotEmit:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         # Only sample is the final read of k, gap = 5 - 3 = 2.
         assert delta.get("t-x", (0.0, 0)) == (2.0, 1)
 
@@ -209,7 +211,7 @@ class TestWriteDoesNotEmit:
 class TestChunksGapCounter:
     def test_counter_advances_for_all_accesses(self, bus, subscriber):
         """Counter bumps on every read AND write, all chunks under salt."""
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read([_Key("target", cache_salt="t-b")]))  # counter=1
@@ -222,12 +224,12 @@ class TestChunksGapCounter:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert delta.get("t-b", (0.0, 0)) == (5.0, 1)
 
     def test_cache_salt_isolates_counter(self, bus, subscriber):
         """Per-salt counter: t-x accesses don't bump t-y's gap."""
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read([_Key("target", cache_salt="t-y")]))  # y=1
@@ -244,14 +246,14 @@ class TestChunksGapCounter:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert delta.get("t-y", (0.0, 0)) == (1.0, 1)
         # tenant-x has no second read of any chunk → no sample.
         assert delta.get("t-x", (0.0, 0))[1] == 0
 
     def test_cache_salt_isolates_chunk_identity(self, bus, subscriber):
         """Same chunk_hash under different cache_salts = different keys."""
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read([_Key("shared", cache_salt="t-p")]))
@@ -259,7 +261,7 @@ class TestChunksGapCounter:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         # Both tenants saw "shared" first time → no samples.
         assert delta.get("t-p", (0.0, 0))[1] == 0
         assert delta.get("t-q", (0.0, 0))[1] == 0
@@ -270,7 +272,7 @@ class TestSampling:
         """Near-zero sample rate → cold seed skipped → no later sample."""
         sub = SMLifecycleSubscriber(sample_rate=1e-9)
         bus.register_subscriber(sub)
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         for _ in range(3):
@@ -278,7 +280,7 @@ class TestSampling:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert delta.get("t-u", (0.0, 0))[1] == 0
 
     def test_unsampled_chunks_still_advance_counter(self, bus):
@@ -295,7 +297,7 @@ class TestSampling:
         # (LRU eviction) does not break the counter semantics.
         sub = SMLifecycleSubscriber(sample_rate=1.0)
         bus.register_subscriber(sub)
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read([_Key("k", cache_salt="t-cnt")]))  # 1, seed
@@ -307,7 +309,7 @@ class TestSampling:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert delta.get("t-cnt", (0.0, 0)) == (11.0, 1)
 
 
@@ -315,7 +317,7 @@ class TestTPFanout:
     def test_read_dedupes_tp_fanout(self, bus, subscriber):
         """Same logical chunk fanned across TP ranks counts as one access."""
         keys = [_Key("tp-chunk", cache_salt="t-tp", kv_rank=r) for r in range(4)]
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
 
         bus.start()
         bus.publish(_l1_read(keys))  # counter=1 (deduped)
@@ -323,14 +325,14 @@ class TestTPFanout:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         # 4 ObjectKeys per event, 1 logical chunk, 2 events → counter=2,
         # one sample with gap=1.
         assert delta.get("t-tp", (0.0, 0)) == (1.0, 1)
 
     def test_write_dedupes_tp_fanout(self, bus, subscriber):
         """Write fanout produces a single anchor, not one per rank."""
-        before = _totals_by_salt("lmcache_mp.real_reuse_gap_chunks")
+        before = _totals_by_salt("lmcache_mp.real_reuse_gap_objects")
         keys = [_Key("tp", cache_salt="t-tpw", kv_rank=r) for r in range(4)]
 
         bus.start()
@@ -339,7 +341,7 @@ class TestTPFanout:
         time.sleep(_DRAIN_WAIT)
         bus.stop()
 
-        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_chunks"))
+        delta = _delta(before, _totals_by_salt("lmcache_mp.real_reuse_gap_objects"))
         assert delta.get("t-tpw", (0.0, 0)) == (1.0, 1)
 
 
