@@ -309,7 +309,8 @@ Sensitive fields such as passwords and secrets are redacted.
    * - Flag
      - Description
    * - ``--url``
-     - LMCache HTTP server base URL. Defaults to ``http://localhost:8080``.
+     - LMCache HTTP server base URL, full ``/conf`` endpoint URL, or a
+       local port such as ``8080``. Defaults to ``http://localhost:8080``.
    * - ``--file PATH``
      - Write the fetched configuration JSON to ``PATH`` in addition to stdout.
 

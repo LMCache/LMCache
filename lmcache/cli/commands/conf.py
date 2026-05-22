@@ -19,6 +19,7 @@ from lmcache.cli.commands.base import BaseCommand
 from lmcache.cli.commands.describe import normalize_url
 
 DEFAULT_URL = "http://localhost:8080"
+CONF_ENDPOINT = "/conf"
 
 
 def _fetch_from_url(url: str, timeout: int = 10) -> str:
@@ -51,6 +52,21 @@ def _write_to_file(path: Path, body: str) -> None:
         OSError: If the file cannot be written.
     """
     path.write_text(body)
+
+
+def _resolve_conf_endpoint(url: str | None) -> str:
+    """Resolve a base URL or ``/conf`` endpoint URL to the endpoint URL.
+
+    Args:
+        url: Optional server base URL, port shorthand, or full ``/conf`` URL.
+
+    Returns:
+        Fully-qualified URL for the ``/conf`` endpoint.
+    """
+    base_url = normalize_url(url or DEFAULT_URL)
+    if base_url.endswith(CONF_ENDPOINT):
+        return base_url
+    return f"{base_url}{CONF_ENDPOINT}"
 
 
 class ConfCommand(BaseCommand):
@@ -104,8 +120,7 @@ class ConfCommand(BaseCommand):
         Args:
             args: Parsed CLI arguments.
         """
-        base_url = normalize_url(args.url or DEFAULT_URL)
-        endpoint = f"{base_url}/conf"
+        endpoint = _resolve_conf_endpoint(args.url)
         try:
             body = _fetch_from_url(endpoint)
         except urllib.error.HTTPError as exc:

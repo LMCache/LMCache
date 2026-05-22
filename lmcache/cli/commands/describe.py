@@ -28,6 +28,8 @@ class DescribeError(Exception):
 
 def normalize_url(url: str) -> str:
     """Ensure *url* has an ``http://`` or ``https://`` scheme."""
+    if url.isdigit():
+        url = f"localhost:{url}"
     if not url.startswith(("http://", "https://")):
         url = f"http://{url}"
     return url.rstrip("/")

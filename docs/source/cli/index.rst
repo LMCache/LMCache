@@ -50,6 +50,18 @@ also save the same JSON for debugging or issue reports.
 
    lmcache conf --url http://localhost:8080 --file lmcache-config.json
 
+For a local server, the port shorthand is also accepted:
+
+.. code-block:: bash
+
+   lmcache conf --url 8080 --file lmcache-config.json
+
+Passing the full endpoint URL is also valid:
+
+.. code-block:: bash
+
+   lmcache conf --url http://localhost:8080/conf
+
 The output includes the server's active MP, HTTP, storage-manager, L1/L2,
 policy, and observability configuration values. Sensitive fields such as
 passwords and secrets are redacted.

@@ -21,6 +21,7 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.conf import ConfCommand
+from lmcache.cli.commands.conf import _resolve_conf_endpoint
 
 # ---------------------------------------------------------------------------
 # Mock HTTP handler — mirrors the pattern used in test_ping.py
@@ -64,6 +65,24 @@ def _fake_args(url: str | None = None, file: str | None = None) -> argparse.Name
 # ---------------------------------------------------------------------------
 # --url source
 # ---------------------------------------------------------------------------
+
+
+class TestResolveConfEndpoint:
+    def test_default_url(self) -> None:
+        assert _resolve_conf_endpoint(None) == "http://localhost:8080/conf"
+
+    def test_port_shorthand(self) -> None:
+        assert _resolve_conf_endpoint("8080") == "http://localhost:8080/conf"
+
+    def test_base_url(self) -> None:
+        assert _resolve_conf_endpoint("http://localhost:8080") == (
+            "http://localhost:8080/conf"
+        )
+
+    def test_conf_endpoint_url(self) -> None:
+        assert _resolve_conf_endpoint("http://localhost:8080/conf") == (
+            "http://localhost:8080/conf"
+        )
 
 
 class TestConfCommandFromUrl:
@@ -137,5 +156,21 @@ class TestConfCommandFromUrl:
             "lmcache.cli.commands.conf._fetch_from_url", side_effect=_fake_fetch
         ):
             cmd.execute(_fake_args(url=None))
+
+        assert captured["url"] == "http://localhost:8080/conf"
+
+    def test_port_shorthand_uses_localhost(self) -> None:
+        """--url 8080 resolves to http://localhost:8080/conf."""
+        captured: dict[str, str] = {}
+
+        def _fake_fetch(url: str, timeout: int = 10) -> str:
+            captured["url"] = url
+            return "{}"
+
+        cmd = ConfCommand()
+        with patch(
+            "lmcache.cli.commands.conf._fetch_from_url", side_effect=_fake_fetch
+        ):
+            cmd.execute(_fake_args(url="8080"))
 
         assert captured["url"] == "http://localhost:8080/conf"
