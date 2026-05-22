@@ -15,7 +15,7 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.commands.tool import cache_simulator
+from lmcache.cli.commands.tool import cache_simulator, gds_check
 
 
 class ToolCommand(BaseCommand):
@@ -46,9 +46,10 @@ class ToolCommand(BaseCommand):
         inner = parser.add_subparsers(
             dest="tool_name",
             required=True,
-            metavar="{cache-simulator}",
+            metavar="{cache-simulator,gds-check}",
         )
         cache_simulator.register(inner)
+        gds_check.register(inner)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Dispatch is handled per-tool via parser.set_defaults(func=...).
