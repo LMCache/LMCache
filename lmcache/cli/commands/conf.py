@@ -3,8 +3,7 @@
 
 Usage::
 
-    lmcache conf --url http://localhost:8080
-    lmcache conf --file lmcache-config.json
+    lmcache conf [--url URL | --file PATH]
 """
 
 # Standard
