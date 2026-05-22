@@ -219,6 +219,11 @@ class TestAutoDiscovery:
 
     def test_adapter_discovered(self, monkeypatch):
         """ConnectorManager should find CuObjectS3ConnectorAdapter."""
+        # Create a fake package for the connector module so that
+        # _resolve_package() in discover_subclasses can resolve it.
+        connector_pkg = ModuleType("lmcache.v1.storage_backend.connector")
+        connector_pkg.__path__ = ["fake/path"]
+
         # Create a fake module containing our adapter
         cuobj_module = ModuleType("cuobject_s3_adapter")
         cuobj_module.CuObjectS3ConnectorAdapter = CuObjectS3ConnectorAdapter
@@ -227,6 +232,8 @@ class TestAutoDiscovery:
             yield None, "cuobject_s3_adapter", False
 
         def fake_import_module(name):
+            if name == "lmcache.v1.storage_backend.connector":
+                return connector_pkg
             if name.endswith(".cuobject_s3_adapter"):
                 return cuobj_module
             raise ImportError(f"unexpected import: {name}")
