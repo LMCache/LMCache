@@ -303,6 +303,7 @@ def run_gds_check(
     large_num_chunks: int,
     large_chunk_bytes: int,
     use_gds: bool,
+    use_direct_io: bool,
     skip_verify: bool,
     skip_bench: bool,
 ) -> None:
@@ -362,7 +363,7 @@ def run_gds_check(
         gds_path=gds_path,
         gds_path_sharding="by_gpu",
         use_gds=use_gds,
-        use_direct_io=False,
+        use_direct_io=use_direct_io,
     )
     loop, thread = _start_loop()
     backend = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")

@@ -78,6 +78,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "on the same host.",
     )
     parser.add_argument(
+        "--use-direct-io",
+        action="store_true",
+        help="Open the test files with O_DIRECT. Required for true GDS "
+        "DMA on ext4 — without it, libcufile routes the I/O through "
+        "its compat path even when nvidia-fs is loaded. Combine this "
+        "with the ``Ops: Read/Write`` counters in "
+        "``/proc/driver/nvidia-fs/stats`` to confirm DMA is actually "
+        "firing.",
+    )
+    parser.add_argument(
         "--skip-verify",
         action="store_true",
         help="Skip the round-trip correctness check.",
@@ -103,6 +113,7 @@ def _run(args: argparse.Namespace) -> None:
         large_num_chunks=args.large_num_chunks,
         large_chunk_bytes=args.large_chunk_mib * 1024 * 1024,
         use_gds=not args.no_gds,
+        use_direct_io=args.use_direct_io,
         skip_verify=args.skip_verify,
         skip_bench=args.skip_bench,
     )

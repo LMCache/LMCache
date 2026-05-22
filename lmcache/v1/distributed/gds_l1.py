@@ -935,12 +935,28 @@ class GdsL1Backend:
         if self.use_gds:
             # Third Party
             import kvikio  # noqa: WPS433 — lazy import to avoid load-time failures
+            import kvikio._lib.defaults as _kvikio_defaults
             import kvikio.defaults
 
             self.gds_module = kvikio
+            # cuFile's GDS fast path on ext4 (and most local FSes
+            # other than wekafs) requires the file to be opened with
+            # ``O_DIRECT``. kvikio's ``CuFile`` constructor doesn't
+            # accept that flag directly, but it does expose
+            # ``auto_direct_io_read`` / ``auto_direct_io_write``
+            # process-wide defaults that add ``O_DIRECT`` to its
+            # internal open(). Flip both when the operator passes
+            # ``use_direct_io=True`` so GDS DMA can actually engage.
+            if config.use_direct_io:
+                _kvikio_defaults.set_auto_direct_io_read(True)
+                _kvikio_defaults.set_auto_direct_io_write(True)
             logger.info(
-                "GdsL1Backend: kvikio loaded (compat_mode_preferred=%s)",
+                "GdsL1Backend: kvikio loaded "
+                "(compat_mode_preferred=%s, "
+                "auto_direct_io_read=%s, auto_direct_io_write=%s)",
                 kvikio.defaults.is_compat_mode_preferred(),
+                _kvikio_defaults.auto_direct_io_read(),
+                _kvikio_defaults.auto_direct_io_write(),
             )
         else:
             self.cudart = ctypes.CDLL("libcudart.so")
