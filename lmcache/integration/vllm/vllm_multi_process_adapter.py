@@ -196,7 +196,7 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
         "See https://docs.lmcache.ai/mp/quickstart.html for details."
     )
     logger.warning(hint)
-    raise ConnectionError(hint)
+    raise ConnectionError(hint) from None
 
 
 def send_ping(
