@@ -3,7 +3,7 @@
 
 Usage::
 
-    lmcache conf [--url URL] [--file PATH]
+    lmcache conf [--url URL] [-o PATH]
 """
 
 # Standard
@@ -98,17 +98,14 @@ class ConfCommand(BaseCommand):
             "--url",
             type=str,
             default=None,
-            help=(
-                f"LMCache HTTP server base URL. Default: {DEFAULT_URL}."
-            ),
+            help=f"LMCache HTTP server base URL. Default: {DEFAULT_URL}.",
         )
         parser.add_argument(
-            "--file",
+            "-o",
+            "--output",
             type=str,
             default=None,
-            help=(
-                "Write the fetched configuration JSON to this file."
-            ),
+            help="Write the fetched configuration JSON to this file.",
         )
 
     def execute(self, args: argparse.Namespace) -> None:
@@ -142,12 +139,12 @@ class ConfCommand(BaseCommand):
             print(body)
             return
         pretty = json.dumps(parsed, indent=2, sort_keys=True)
-        if args.file is not None:
+        if args.output is not None:
             try:
-                _write_to_file(Path(args.file), pretty + "\n")
+                _write_to_file(Path(args.output), pretty + "\n")
             except OSError as exc:
                 print(
-                    f"Cannot write {args.file}: {exc}",
+                    f"Cannot write {args.output}: {exc}",
                     file=sys.stderr,
                 )
                 sys.exit(1)

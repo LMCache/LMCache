@@ -12,14 +12,39 @@ This module defines the protocol for:
 - END_SESSION: End a session and clean up associated resources
 """
 
+# Standard
+from dataclasses import dataclass, field
+
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
+    RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
+
+
+@dataclass
+class PrepareStoreResponse:
+    """Response for PREPARE_STORE."""
+
+    context: dict = field(
+        default_factory=dict
+    )  # pickle: {}, shm will put slot info here
+
+
+@dataclass
+class PrepareRetrieveResponse:
+    """Response for PREPARE_RETRIEVE."""
+
+    success: bool
+    data: bytes = b""
+    context: dict = field(
+        default_factory=dict
+    )  # pickle: {}, shm will put slot info here
+
 
 # Define request names for this protocol group
 REQUEST_NAMES = [
@@ -32,6 +57,11 @@ REQUEST_NAMES = [
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
+    "REGISTER_KV_CACHE_NON_GPU_CONTEXT",
+    "PREPARE_STORE",
+    "COMMIT_STORE",
+    "PREPARE_RETRIEVE",
+    "COMMIT_RETRIEVE",
 ]
 
 # Type alias for cache keys
@@ -144,6 +174,35 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "END_SESSION": ProtocolDefinition(
             payload_classes=[str],
             response_class=None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Register non-GPU KV cache context
+        # Payload:
+        #   - RegisterNonGpuContextPayload - all metadata fields in one struct
+        # Returns: None
+        "REGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
+            payload_classes=[RegisterNonGpuContextPayload],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
+        ),
+        "PREPARE_STORE": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=PrepareStoreResponse,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        "COMMIT_STORE": ProtocolDefinition(
+            payload_classes=[KeyType, int, bytes],
+            response_class=bool,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        "PREPARE_RETRIEVE": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=PrepareRetrieveResponse,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        "COMMIT_RETRIEVE": ProtocolDefinition(
+            payload_classes=[KeyType, int],
+            response_class=bool,
             handler_type=HandlerType.BLOCKING,
         ),
     }

@@ -468,7 +468,7 @@ The same endpoint is available through the CLI:
 
 .. code-block:: bash
 
-    lmcache conf --url http://localhost:8080 --file lmcache-config.json
+    lmcache conf --url http://localhost:8080 -o lmcache-config.json
 
 ``GET /version``
 ~~~~~~~~~~~~~~~~

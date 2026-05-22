@@ -93,7 +93,7 @@ Fetches the active MP server configuration from HTTP `/conf`, prints formatted
 JSON to stdout, and can persist the same JSON to a file for debugging.
 
 ```bash
-$ lmcache conf --url http://localhost:8080 --file lmcache-config.json
+$ lmcache conf --url http://localhost:8080 -o lmcache-config.json
 ```
 
 The payload is a snapshot of active config objects, not a schema catalog. It

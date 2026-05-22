@@ -31,7 +31,8 @@ Available Commands
      - Liveness check for LMCache or vLLM servers.
    * - ``bench``
      - Run sustained performance benchmarks against an inference engine,
-       or an end-to-end sanity test against an LMCache MP server.
+       an end-to-end sanity test against an LMCache MP server, or a
+       throughput/latency benchmark against an L2 cache adapter.
    * - ``kvcache``
      - Manage KV cache state (e.g. clear L1 cache).
    * - ``server``
@@ -43,18 +44,18 @@ Configuration Snapshot
 ----------------------
 
 Use ``lmcache conf`` to fetch the active MP server configuration from
-``GET /conf``. The command prints formatted JSON to stdout. Pass ``--file`` to
+``GET /conf``. The command prints formatted JSON to stdout. Pass ``--output`` or ``-o`` to
 also save the same JSON for debugging or issue reports.
 
 .. code-block:: bash
 
-   lmcache conf --url http://localhost:8080 --file lmcache-config.json
+   lmcache conf --url http://localhost:8080 -o lmcache-config.json
 
 For a local server, the port shorthand is also accepted:
 
 .. code-block:: bash
 
-   lmcache conf --url 8080 --file lmcache-config.json
+   lmcache conf --url 8080 -o lmcache-config.json
 
 Passing the full endpoint URL is also valid:
 
@@ -71,4 +72,5 @@ passwords and secrets are redacted.
 
    bench
    bench_kvcache
+   bench_l2
    kvcache

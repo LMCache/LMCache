@@ -42,15 +42,22 @@ jobs:
       - name: Build Versioned Sphinx Documentation
         run: |
           sphinx-multiversion docs/source output
+          SPHINX_LANGUAGE=zh_CN sphinx-multiversion docs/source output-zh
         continue-on-error: false
 
-      - name: Setup root docs and .nojekyll
+      - name: Setup root docs, .nojekyll, and Chinese docs
         run: |
           touch output/.nojekyll
           # Copy dev docs to root (latest docs at root URL)
           cp -r output/dev/* output/
           # Remove dev directory to avoid duplication
           rm -rf output/dev
+          # Copy Chinese dev docs to /zh_CN/ and versioned docs under /zh_CN/<version>/
+          mkdir -p output/zh_CN
+          cp -r output-zh/dev/* output/zh_CN/
+          rm -rf output-zh/dev
+          cp -r output-zh/. output/zh_CN/
+          rm -rf output-zh
 
       - name: Upload doc artifacts to GHA
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0

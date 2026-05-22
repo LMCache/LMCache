@@ -287,12 +287,12 @@ Fetch the configuration that a running MP server actually loaded:
 
    lmcache conf --url http://localhost:8080
 
-To keep a copy for debugging or issue reports, pass ``--file``. The command
+To keep a copy for debugging or issue reports, pass ``--output`` or ``-o``. The command
 still prints the JSON to stdout.
 
 .. code-block:: bash
 
-   lmcache conf --url http://localhost:8080 --file lmcache-config.json
+   lmcache conf --url http://localhost:8080 -o lmcache-config.json
 
 The JSON includes active MP, HTTP, storage-manager, L1/L2, policy, and
 observability configuration values. Nested L2 adapter, per-adapter eviction,
@@ -311,7 +311,7 @@ Sensitive fields such as passwords and secrets are redacted.
    * - ``--url``
      - LMCache HTTP server base URL, full ``/conf`` endpoint URL, or a
        local port such as ``8080``. Defaults to ``http://localhost:8080``.
-   * - ``--file PATH``
+   * - ``-o PATH`` / ``--output PATH``
      - Write the fetched configuration JSON to ``PATH`` in addition to stdout.
 
 ``query``

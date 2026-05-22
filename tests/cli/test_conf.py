@@ -3,7 +3,7 @@
 
 Covers:
 - Fetching ``/conf`` from a running server via ``--url`` (mock HTTP).
-- Persisting fetched JSON via ``--file``.
+- Persisting fetched JSON via ``--output``.
 - Error handling for connection refused and HTTP 5xx.
 """
 
@@ -20,8 +20,7 @@ import json
 import pytest
 
 # First Party
-from lmcache.cli.commands.conf import ConfCommand
-from lmcache.cli.commands.conf import _resolve_conf_endpoint
+from lmcache.cli.commands.conf import ConfCommand, _resolve_conf_endpoint
 
 # ---------------------------------------------------------------------------
 # Mock HTTP handler — mirrors the pattern used in test_ping.py
@@ -57,9 +56,9 @@ def _start_server(code: int, body: bytes = b"") -> tuple[HTTPServer, int]:
     return server, port
 
 
-def _fake_args(url: str | None = None, file: str | None = None) -> argparse.Namespace:
+def _fake_args(url: str | None = None, output: str | None = None) -> argparse.Namespace:
     """Build a namespace with the fields ``ConfCommand.execute`` reads."""
-    return argparse.Namespace(url=url, file=file)
+    return argparse.Namespace(url=url, output=output)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +104,7 @@ class TestConfCommandFromUrl:
             server.server_close()
 
     def test_fetches_prints_and_writes_file(self, tmp_path: Path) -> None:
-        """--file persists the JSON fetched from --url."""
+        """--output persists the JSON fetched from --url."""
         body = json.dumps({"z": 1, "a": 2}).encode()
         server, port = _start_server(200, body)
         output_path = tmp_path / "conf.json"
@@ -116,7 +115,7 @@ class TestConfCommandFromUrl:
                 cmd.execute(
                     _fake_args(
                         url=f"http://127.0.0.1:{port}",
-                        file=str(output_path),
+                        output=str(output_path),
                     )
                 )
 
