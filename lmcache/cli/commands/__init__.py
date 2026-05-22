@@ -1,34 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 """CLI subcommand package.
 
-To add a new command:
-
-1. Create a module with a :class:`BaseCommand` subclass.
-2. Add one import + one entry to :data:`ALL_COMMANDS` below.
+To add a new top-level command, simply create a new module (or sub-package
+with an ``__init__.py``) under this package that defines a concrete
+:class:`BaseCommand` subclass.  It will be discovered and registered
+automatically — no edits to this file are required.
 """
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.commands.bench import BenchCommand
-from lmcache.cli.commands.describe import DescribeCommand
-from lmcache.cli.commands.kvcache import KVCacheCommand
-from lmcache.cli.commands.mock import MockCommand
-from lmcache.cli.commands.ping import PingCommand
-from lmcache.cli.commands.query import QueryCommand
-from lmcache.cli.commands.server import ServerCommand
-from lmcache.cli.commands.tool import ToolCommand
-from lmcache.cli.commands.trace import TraceCommand
+from lmcache.v1.utils.subclass_discovery import discover_subclasses
 
-ALL_COMMANDS: list[BaseCommand] = [
-    MockCommand(),
-    KVCacheCommand(),
-    DescribeCommand(),
-    PingCommand(),
-    QueryCommand(),
-    ServerCommand(),
-    BenchCommand(),
-    ToolCommand(),
-    TraceCommand(),
-]
+
+def _discover_commands() -> list[BaseCommand]:
+    """Scan direct submodules of this package and collect all concrete
+    :class:`BaseCommand` subclasses, returning one instance per class.
+
+    Import errors are intentionally re-raised: a broken CLI command
+    module should fail loudly rather than silently disappear from the
+    CLI.
+    """
+
+    def _raise(module_name: str, exc: Exception) -> None:
+        raise exc
+
+    return [
+        cls()
+        for cls in discover_subclasses(
+            __name__,
+            BaseCommand,  # type: ignore[type-abstract]
+            module_filter=lambda name: name != "base",
+            on_import_error=_raise,
+        )
+    ]
+
+
+ALL_COMMANDS: list[BaseCommand] = _discover_commands()
 
 __all__ = ["ALL_COMMANDS", "BaseCommand"]
