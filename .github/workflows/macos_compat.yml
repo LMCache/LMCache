@@ -80,11 +80,8 @@ jobs:
           - "3.11"
           - "3.12"
         platform:
-          # macos-latest is Apple Silicon (arm64); macos-13 is the last
-          # GitHub-hosted Intel runner. Keep both until macos-13 is
-          # retired by GitHub.
+          # macos-latest is Apple Silicon (arm64);
           - "macos-latest"
-          - "macos-13"
 
     steps:
       - name: Harden Runner
