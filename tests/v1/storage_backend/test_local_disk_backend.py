@@ -196,6 +196,97 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
+    def test_persisted_metadata_reloads(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Persisted local disk metadata should be restored on startup."""
+        config = create_test_config(temp_disk_path)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+
+        key = create_test_key(10)
+        path = backend._key_to_path(key)
+        payload = b"abcd"
+        with open(path, "wb") as handle:
+            handle.write(payload)
+
+        backend.insert_key(
+            key,
+            size=len(payload),
+            shape=torch.Size([1]),
+            dtype=torch.bfloat16,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        backend.cache_policy.update_on_put(key)
+        backend._persist_metadata_index()
+
+        reloaded = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+
+        assert key in reloaded.dict
+        meta = reloaded.dict[key]
+        assert meta.path == reloaded._key_to_path(key)
+        assert meta.size == len(payload)
+        assert meta.pin_count == 0
+        assert reloaded.current_cache_size == len(payload)
+        assert reloaded.usage == len(payload)
+
+        local_cpu_backend.memory_allocator.close()
+
+    def test_metadata_reload_honors_cache_budget_and_restores_cached_positions(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ):
+        """Reload should stay within budget and round-trip cached positions."""
+        config = create_test_config(temp_disk_path, max_disk_size=0.00000001)
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+
+        payload = b"abcdefgh"
+        key_1 = create_test_key(11)
+        key_2 = create_test_key(12)
+        positions = torch.tensor([1, 3, 5], dtype=torch.long)
+        for key, cached_positions in ((key_1, None), (key_2, positions)):
+            path = backend._key_to_path(key)
+            with open(path, "wb") as handle:
+                handle.write(payload)
+            backend.insert_key(
+                key,
+                size=len(payload),
+                shape=torch.Size([1]),
+                dtype=torch.bfloat16,
+                fmt=MemoryFormat.KV_2LTD,
+                cached_positions=cached_positions,
+            )
+            backend.cache_policy.update_on_put(key)
+
+        backend._persist_metadata_index()
+
+        reloaded = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+
+        assert reloaded.current_cache_size <= reloaded.max_cache_size
+        assert key_1 not in reloaded.dict
+        assert key_2 in reloaded.dict
+        assert torch.equal(reloaded.dict[key_2].cached_positions, positions)
+
+        local_cpu_backend.memory_allocator.close()
+
 
 class TestMultiPathDiskBackend:
     """Test cases for multi-path (multi-device) LocalDiskBackend."""

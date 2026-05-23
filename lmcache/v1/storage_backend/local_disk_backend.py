@@ -4,6 +4,7 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
 import os
+import pickle
 import threading
 import time
 
@@ -14,7 +15,13 @@ import torch
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    STR_DTYPE_TO_TORCH_DTYPE,
+    TORCH_DTYPE_TO_STR_DTYPE,
+    _lmcache_nvtx_annotate,
+)
 from lmcache.v1.cache_controller.message import OpType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
@@ -33,6 +40,9 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
+_METADATA_INDEX_FILENAME = ".lmcache_local_disk_metadata.pkl"
+_METADATA_INDEX_VERSION = 1
 
 
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
@@ -142,8 +152,11 @@ class LocalDiskBackend(StorageBackendInterface):
         self.use_local_cpu = config.local_cpu
 
         # Block size (for file system I/O)
-        stat = os.statvfs(self.path)
-        self.os_disk_bs = stat.f_bsize
+        if hasattr(os, "statvfs"):
+            stat = os.statvfs(self.path)
+            self.os_disk_bs = stat.f_bsize
+        else:
+            self.os_disk_bs = 4096
         self.use_odirect = False
 
         if config.extra_config is not None:
@@ -166,6 +179,7 @@ class LocalDiskBackend(StorageBackendInterface):
         self.instance_id = config.lmcache_instance_id
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         self.usage = 0
+        self._metadata_index_path = os.path.join(self.path, _METADATA_INDEX_FILENAME)
 
         # Batched message sender for controller communication
         self.batched_msg_sender: Optional[BatchedMessageSender] = None
@@ -180,6 +194,7 @@ class LocalDiskBackend(StorageBackendInterface):
             )
         else:
             logger.warning("Controller message sender is not initialized")
+        self._load_metadata_index()
 
     def __str__(self) -> str:
         return "LocalDiskBackend"
@@ -671,3 +686,213 @@ class LocalDiskBackend(StorageBackendInterface):
         if self.batched_msg_sender is not None:
             self.batched_msg_sender.close()
         self.disk_worker.close()
+        self._persist_metadata_index()
+
+    def _serialize_cached_positions(
+        self, cached_positions: Optional[torch.Tensor]
+    ) -> Optional[list[int]]:
+        if cached_positions is None:
+            return None
+        if isinstance(cached_positions, torch.Tensor):
+            return cached_positions.tolist()
+        if hasattr(cached_positions, "tolist"):
+            return cached_positions.tolist()
+        logger.warning(
+            "Unsupported cached_positions type %s; omitting", type(cached_positions)
+        )
+        return None
+
+    def _deserialize_cached_positions(
+        self, cached_positions: Optional[list[int]]
+    ) -> Optional[torch.Tensor]:
+        if cached_positions is None:
+            return None
+        return torch.tensor(cached_positions, dtype=torch.long)
+
+    def _serialize_metadata_entry(
+        self, key: CacheEngineKey, meta: DiskCacheMetadata
+    ) -> dict[str, Any]:
+        dtype = meta.dtype
+        assert dtype is not None
+        shape = list(meta.shape) if meta.shape is not None else None
+        return {
+            "key": key.to_string(),
+            "meta": {
+                "path": self._key_to_path(key),
+                "size": meta.size,
+                "shape": shape,
+                "dtype": TORCH_DTYPE_TO_STR_DTYPE[dtype],
+                "cached_positions": self._serialize_cached_positions(
+                    meta.cached_positions
+                ),
+                "fmt": meta.fmt.value if meta.fmt is not None else None,
+            },
+        }
+
+    def _deserialize_metadata_entry(
+        self, entry: dict[str, Any]
+    ) -> tuple[CacheEngineKey, DiskCacheMetadata] | None:
+        try:
+            key = CacheEngineKey.from_string(entry["key"])
+            meta_info = entry["meta"]
+            dtype = STR_DTYPE_TO_TORCH_DTYPE[meta_info["dtype"]]
+            shape = meta_info["shape"]
+            fmt = MemoryFormat(meta_info["fmt"])
+        except (KeyError, ValueError, TypeError):
+            logger.warning("Skipping malformed metadata index entry")
+            return None
+
+        cached_positions = self._deserialize_cached_positions(
+            meta_info.get("cached_positions")
+        )
+        return (
+            key,
+            DiskCacheMetadata(
+                path=self._key_to_path(key),
+                size=int(meta_info["size"]),
+                shape=torch.Size(shape) if shape is not None else None,
+                dtype=dtype,
+                cached_positions=cached_positions,
+                fmt=fmt,
+                pin_count=0,
+            ),
+        )
+
+    def _load_metadata_index(self) -> None:
+        if not os.path.exists(self._metadata_index_path):
+            return
+
+        try:
+            with open(self._metadata_index_path, "rb") as handle:
+                payload = pickle.load(handle)
+        except (OSError, pickle.UnpicklingError, EOFError) as exc:
+            logger.warning(
+                "Failed to load local disk metadata index %s: %s",
+                self._metadata_index_path,
+                exc,
+            )
+            return
+
+        if not isinstance(payload, dict):
+            logger.warning(
+                "Unexpected metadata index format in %s; skipping",
+                self._metadata_index_path,
+            )
+            return
+
+        version = payload.get("version")
+        if version != _METADATA_INDEX_VERSION:
+            logger.warning(
+                "Unsupported metadata index version %s in %s; skipping",
+                version,
+                self._metadata_index_path,
+            )
+            return
+
+        entries = payload.get("entries", [])
+        if not isinstance(entries, list):
+            logger.warning(
+                "Metadata index entries malformed in %s; skipping",
+                self._metadata_index_path,
+            )
+            return
+
+        loaded_count = 0
+        restored_size = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            deserialized = self._deserialize_metadata_entry(entry)
+            if deserialized is None:
+                continue
+            key, meta = deserialized
+            try:
+                size = os.path.getsize(meta.path)
+            except OSError:
+                continue
+            meta.size = size
+            meta.pin_count = 0
+            self.dict[key] = meta
+            self.cache_policy.update_on_put(key)
+            loaded_count += 1
+            restored_size += size
+
+        self.current_cache_size = restored_size
+
+        if self.current_cache_size > self.max_cache_size:
+            evicted = 0
+            while self.current_cache_size > self.max_cache_size:
+                evict_keys = self.cache_policy.get_evict_candidates(
+                    self.dict, num_candidates=1
+                )
+                if not evict_keys:
+                    logger.warning(
+                        "Local disk cache exceeds max size but no eviction "
+                        "candidates found."
+                    )
+                    break
+                for evict_key in evict_keys:
+                    if evict_key in self.dict:
+                        self.current_cache_size -= self.dict[evict_key].size
+                    self.cache_policy.update_on_force_evict(evict_key)
+                    self.remove(evict_key, force=False)
+                evicted += len(evict_keys)
+            if evicted:
+                logger.info(
+                    "Evicted %d local disk entries to honor max cache size", evicted
+                )
+
+        self.current_cache_size = sum(meta.size for meta in self.dict.values())
+        self.usage = self.current_cache_size
+        self.stats_monitor.update_local_storage_usage(self.usage)
+
+        if loaded_count:
+            logger.info("Loaded %d local disk cache entries", loaded_count)
+
+    def _persist_metadata_index(self) -> None:
+        with self.disk_lock:
+            entries = list(self.dict.items())
+
+        persisted_entries: list[dict[str, Any]] = []
+        for key, meta in entries:
+            path = self._key_to_path(key)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            meta.size = size
+            persisted_entries.append(self._serialize_metadata_entry(key, meta))
+
+        if not persisted_entries:
+            if os.path.exists(self._metadata_index_path):
+                try:
+                    os.remove(self._metadata_index_path)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to remove empty metadata index %s: %s",
+                        self._metadata_index_path,
+                        exc,
+                    )
+            return
+
+        payload = {"version": _METADATA_INDEX_VERSION, "entries": persisted_entries}
+        tmp_path = f"{self._metadata_index_path}.tmp"
+        try:
+            with open(tmp_path, "wb") as handle:
+                pickle.dump(payload, handle)
+            os.replace(tmp_path, self._metadata_index_path)
+        except (OSError, pickle.PickleError) as exc:
+            logger.warning(
+                "Failed to persist local disk metadata index %s: %s",
+                self._metadata_index_path,
+                exc,
+            )
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError as cleanup_exc:
+                    logger.warning(
+                        "Failed to remove temporary metadata index %s: %s",
+                        tmp_path,
+                        cleanup_exc,
+                    )
