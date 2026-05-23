@@ -60,15 +60,23 @@ def _make_context(
     )
     ctx.kv_layer_groups_manager_ = manager
 
-    # Build flat tmp_gpu_buffer_ with prefix-sum offsets (new layout)
-    ctx.tmp_chunk_group_offsets_ = [0]
+    # Build flat tmp_gpu_buffer_ with per-group byte placement arrays.
+    # All groups here are full-attention, so byte_layout_order_ is identity
+    # and the layout is byte-for-byte identical to the prefix-sum layout.
+    num_groups = len(manager.kv_layer_groups)
+    ctx.byte_layout_order_ = list(range(num_groups))
+    ctx.tmp_group_byte_starts_ = [0] * num_groups
+    ctx.tmp_group_byte_sizes_ = [0] * num_groups
+    cumulative = 0
     for gidx, grp in enumerate(manager.kv_layer_groups):
         shape = ctx.get_kv_buffer_shape(chunk_size, gidx)
         byte_size = shape.numel() * grp.dtype.itemsize
-        ctx.tmp_chunk_group_offsets_.append(
-            ctx.tmp_chunk_group_offsets_[-1] + byte_size
-        )
-    ctx.tmp_chunk_bytes_ = ctx.tmp_chunk_group_offsets_[-1]
+        ctx.tmp_group_byte_starts_[gidx] = cumulative
+        ctx.tmp_group_byte_sizes_[gidx] = byte_size
+        cumulative += byte_size
+    ctx.tmp_chunk_bytes_ = cumulative
+    # No SWA groups: full_attn_bytes_ == tmp_chunk_bytes_.
+    ctx.full_attn_bytes_ = ctx.tmp_chunk_bytes_
     ctx.lmcache_logical_chunk_size = chunk_size
     ctx.tmp_gpu_buffer_ = torch.empty(
         ctx.tmp_chunk_bytes_ * ctx.max_batch_size,
@@ -116,15 +124,21 @@ def _make_context_multi_group(
     )
     ctx.kv_layer_groups_manager_ = manager
 
-    # Build flat tmp_gpu_buffer_ with prefix-sum offsets
-    ctx.tmp_chunk_group_offsets_ = [0]
+    # Build flat tmp_gpu_buffer_ with per-group byte placement arrays.
+    # All groups here are full-attention; byte_layout_order_ is identity.
+    num_groups = len(manager.kv_layer_groups)
+    ctx.byte_layout_order_ = list(range(num_groups))
+    ctx.tmp_group_byte_starts_ = [0] * num_groups
+    ctx.tmp_group_byte_sizes_ = [0] * num_groups
+    cumulative = 0
     for gidx, grp in enumerate(manager.kv_layer_groups):
         shape = ctx.get_kv_buffer_shape(chunk_size, gidx)
         byte_size = shape.numel() * grp.dtype.itemsize
-        ctx.tmp_chunk_group_offsets_.append(
-            ctx.tmp_chunk_group_offsets_[-1] + byte_size
-        )
-    ctx.tmp_chunk_bytes_ = ctx.tmp_chunk_group_offsets_[-1]
+        ctx.tmp_group_byte_starts_[gidx] = cumulative
+        ctx.tmp_group_byte_sizes_[gidx] = byte_size
+        cumulative += byte_size
+    ctx.tmp_chunk_bytes_ = cumulative
+    ctx.full_attn_bytes_ = ctx.tmp_chunk_bytes_
     ctx.lmcache_logical_chunk_size = chunk_size
     ctx.tmp_gpu_buffer_ = torch.empty(
         ctx.tmp_chunk_bytes_ * ctx.max_batch_size,
@@ -273,18 +287,19 @@ class TestMultiGroup:
     ]
 
     def test_prefix_sum_length(self) -> None:
-        """tmp_chunk_group_offsets_ should have num_groups+1 entries."""
+        """tmp_group_byte_starts_/sizes_ should have num_groups entries."""
         ctx = _make_context_multi_group(self.GROUPS_SAME_DTYPE)
         num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
-        assert len(ctx.tmp_chunk_group_offsets_) == num_groups + 1
+        assert len(ctx.tmp_group_byte_starts_) == num_groups
+        assert len(ctx.tmp_group_byte_sizes_) == num_groups
 
     def test_prefix_sum_monotone(self) -> None:
-        """Offsets must be strictly increasing."""
+        """Per-group byte starts must be strictly increasing."""
         ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE)
-        offsets = ctx.tmp_chunk_group_offsets_
-        for i in range(1, len(offsets)):
-            assert offsets[i] > offsets[i - 1], (
-                f"Offset not increasing at index {i}: {offsets}"
+        starts = ctx.tmp_group_byte_starts_
+        for i in range(1, len(starts)):
+            assert starts[i] > starts[i - 1], (
+                f"Start not increasing at index {i}: {starts}"
             )
 
     def test_flat_buffer_total_size(self) -> None:
@@ -295,12 +310,14 @@ class TestMultiGroup:
     def test_groups_non_overlapping_in_chunk(self) -> None:
         """Within a single chunk, different groups must occupy disjoint byte ranges."""
         ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE)
-        offsets = ctx.tmp_chunk_group_offsets_
+        starts = ctx.tmp_group_byte_starts_
+        sizes = ctx.tmp_group_byte_sizes_
         num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
         for i in range(num_groups):
             for j in range(i + 1, num_groups):
-                # [offsets[i], offsets[i+1]) vs [offsets[j], offsets[j+1])
-                assert offsets[i + 1] <= offsets[j] or offsets[j + 1] <= offsets[i], (
+                end_i = starts[i] + sizes[i]
+                end_j = starts[j] + sizes[j]
+                assert end_i <= starts[j] or end_j <= starts[i], (
                     f"Groups {i} and {j} overlap in chunk layout"
                 )
 
@@ -332,10 +349,10 @@ class TestMultiGroup:
         num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
         for gidx in range(num_groups):
             buf = ctx.get_tmp_chunk_gpu_buffer(group_idx=gidx)
-            expected_ptr = base_ptr + ctx.tmp_chunk_group_offsets_[gidx]
+            expected_ptr = base_ptr + ctx.tmp_group_byte_starts_[gidx]
             assert buf.data_ptr() == expected_ptr, (
                 f"Group {gidx}: expected ptr offset "
-                f"{ctx.tmp_chunk_group_offsets_[gidx]}, "
+                f"{ctx.tmp_group_byte_starts_[gidx]}, "
                 f"got {buf.data_ptr() - base_ptr}"
             )
 
@@ -408,8 +425,8 @@ class TestMultiGroup:
 
         flat = ctx.get_tmp_gpu_buffer_flat(chunk_idx=0)
         for gidx in range(num_groups):
-            g_start = ctx.tmp_chunk_group_offsets_[gidx]
-            g_end = ctx.tmp_chunk_group_offsets_[gidx + 1]
+            g_start = ctx.tmp_group_byte_starts_[gidx]
+            g_end = g_start + ctx.tmp_group_byte_sizes_[gidx]
             region = flat[g_start:g_end]
             assert region.min().item() == gidx + 1, (
                 f"Group {gidx} flat region has wrong min value"

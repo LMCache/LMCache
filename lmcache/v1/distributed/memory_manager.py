@@ -91,6 +91,12 @@ class L1MemoryManager:
         )
         if objects is None:
             return L1Error.OUT_OF_MEMORY, []
+        # Propagate full_attn_bytes from the layout to each allocated obj's
+        # metadata. Done here so we don't have to thread a new parameter
+        # through every batched_allocate implementation.
+        if layout_desc.full_attn_bytes > 0:
+            for obj in objects:
+                obj.meta.full_attn_bytes = layout_desc.full_attn_bytes
         return L1Error.SUCCESS, objects
 
     def free(self, mem_objs: list[MemoryObj]) -> L1Error:

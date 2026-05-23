@@ -111,38 +111,55 @@ class GPUCacheContext:
         # laid out in chunk-major order so that each chunk's data matches
         # the layout of a MemoryObj.raw_data (all groups concatenated):
         #
-        #   [ chunk_0: group_0_bytes | group_1_bytes | ... ]
-        #   [ chunk_1: group_0_bytes | group_1_bytes | ... ]
+        #   [ chunk_0: <full-attn groups bytes> | <SWA groups bytes> ]
+        #   [ chunk_1: <full-attn groups bytes> | <SWA groups bytes> ]
         #   ...
         #
         # This lets callers copy an entire chunk to/from a MemoryObj with a
         # single memcpy, without needing to know the per-group layout.
         # max_batch_size is the max number of chunks processed concurrently.
         self.max_batch_size = 4
-        # Byte size of one chunk entry (= one chunk across all groups).
-        # tmp_chunk_group_offsets_[g] is the byte offset of group g within
-        # a single chunk; tmp_chunk_group_offsets_[num_groups] ==
-        # tmp_chunk_bytes_. For SWA groups (``sliding_window > 0``) the
-        # per-chunk byte budget is truncated to the trailing
-        # ``ceil(window / logical_bs)`` blocks, so we size the tmp slot
-        # to that truncated count rather than the full chunk's logical
-        # token count.
-        self.tmp_chunk_group_offsets_: list[int] = [0]
-        for group_idx, group in enumerate(
-            self.kv_layer_groups_manager_.kv_layer_groups
-        ):
+        # Byte layout: full-attention groups first, SWA groups last. This
+        # places all full-attn bytes in a contiguous prefix so the retrieve
+        # path can short-H2D non-tail chunks (whose SWA suffix is unused).
+        # ``group_idx`` semantics are unchanged.
+        groups = self.kv_layer_groups_manager_.kv_layer_groups
+        self.byte_layout_order_: list[int] = sorted(
+            range(len(groups)),
+            key=lambda g: (1 if groups[g].sliding_window > 0 else 0, g),
+        )
+
+        # Per-group byte placement within one chunk slot, indexed by
+        # ``group_idx`` (not by ``byte_layout_order_`` position).
+        self.tmp_group_byte_starts_: list[int] = [0] * len(groups)
+        self.tmp_group_byte_sizes_: list[int] = [0] * len(groups)
+
+        cumulative = 0
+        _first_swa_offset: int | None = None
+        for g_idx in self.byte_layout_order_:
             # ``get_kv_buffer_shape`` takes *logical* tokens; for
             # compressed groups it folds ``compress_ratio`` logical
             # tokens into one physical slot internally. For SWA
             # groups the truncated logical-token count is
             # ``blocks_per_chunk(g) * logical_block_size``.
-            logical_tokens_g = self.storage_logical_tokens_per_chunk(group_idx)
-            shape = self.get_kv_buffer_shape(logical_tokens_g, group_idx)
-            byte_size = shape.numel() * group.dtype.itemsize
-            self.tmp_chunk_group_offsets_.append(
-                self.tmp_chunk_group_offsets_[-1] + byte_size
-            )
-        self.tmp_chunk_bytes_ = self.tmp_chunk_group_offsets_[-1]
+            logical_tokens_g = self.storage_logical_tokens_per_chunk(g_idx)
+            shape = self.get_kv_buffer_shape(logical_tokens_g, g_idx)
+            byte_size = shape.numel() * groups[g_idx].dtype.itemsize
+            self.tmp_group_byte_starts_[g_idx] = cumulative
+            self.tmp_group_byte_sizes_[g_idx] = byte_size
+            cumulative += byte_size
+            if _first_swa_offset is None and groups[g_idx].sliding_window > 0:
+                _first_swa_offset = self.tmp_group_byte_starts_[g_idx]
+
+        self.tmp_chunk_bytes_ = cumulative
+        # Byte length of the full-attention prefix. Equals tmp_chunk_bytes_
+        # when no SWA group exists (short-read becomes a no-op).
+        self.full_attn_bytes_ = (
+            _first_swa_offset
+            if _first_swa_offset is not None
+            else self.tmp_chunk_bytes_
+        )
+
         self.tmp_gpu_buffer_ = torch.empty(
             self.tmp_chunk_bytes_ * self.max_batch_size,
             dtype=torch.uint8,
@@ -409,6 +426,34 @@ class GPUCacheContext:
             return self.lmcache_logical_chunk_size
         return self.blocks_per_chunk(group_idx) * group.logical_block_size
 
+    def has_swa_groups(self) -> bool:
+        """True if any group has ``sliding_window > 0``. When False,
+        ``full_attn_bytes_ == tmp_chunk_bytes_`` and short-H2D is a no-op.
+        """
+        return self.full_attn_bytes_ < self.tmp_chunk_bytes_
+
+    def full_attn_bytes(self) -> int:
+        """Per-chunk byte length covering all full-attention groups
+        (= the chunk's prefix before any SWA suffix). Equals
+        ``tmp_chunk_bytes_`` for models without SWA groups.
+        """
+        return self.full_attn_bytes_
+
+    def get_essential_chunk_view(self, chunk_idx: int) -> torch.Tensor:
+        """Returns a uint8 view of the full-attention prefix of chunk
+        slot ``chunk_idx`` in the tmp GPU buffer. Used as the H2D
+        destination for short-reads of non-tail chunks.
+
+        Args:
+            chunk_idx: Chunk index (0 <= chunk_idx < max_batch_size).
+        """
+        if chunk_idx >= self.max_batch_size:
+            raise ValueError(
+                f"chunk_idx {chunk_idx} exceeds max_batch_size {self.max_batch_size}"
+            )
+        base = chunk_idx * self.tmp_chunk_bytes_
+        return self.tmp_gpu_buffer_[base : base + self.full_attn_bytes_]
+
     def get_tmp_chunk_gpu_buffer(self, group_idx: int = 0) -> torch.Tensor:
         """
         Returns a view of the temporary GPU buffer for the given group,
@@ -427,8 +472,8 @@ class GPUCacheContext:
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
         logical_tokens_g = self.storage_logical_tokens_per_chunk(group_idx)
         shape = self.get_kv_buffer_shape(logical_tokens_g, group_idx)
-        start = self.tmp_chunk_group_offsets_[group_idx]
-        end = self.tmp_chunk_group_offsets_[group_idx + 1]
+        start = self.tmp_group_byte_starts_[group_idx]
+        end = start + self.tmp_group_byte_sizes_[group_idx]
         return self.tmp_gpu_buffer_[start:end].view(group.dtype).view(shape)
 
     def get_tmp_chunk_gpu_buffer_batched(
@@ -451,11 +496,11 @@ class GPUCacheContext:
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
         logical_tokens_g = self.storage_logical_tokens_per_chunk(group_idx)
         shape = self.get_kv_buffer_shape(logical_tokens_g, group_idx)
-        g_start = self.tmp_chunk_group_offsets_[group_idx]
-        g_end = self.tmp_chunk_group_offsets_[group_idx + 1]
+        g_start = self.tmp_group_byte_starts_[group_idx]
+        g_size = self.tmp_group_byte_sizes_[group_idx]
         chunk = self.tmp_chunk_bytes_
         return [
-            self.tmp_gpu_buffer_[i * chunk + g_start : i * chunk + g_end]
+            self.tmp_gpu_buffer_[i * chunk + g_start : i * chunk + g_start + g_size]
             .view(group.dtype)
             .view(shape)
             for i in range(batch_size)

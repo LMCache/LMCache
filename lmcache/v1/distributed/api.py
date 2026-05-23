@@ -149,6 +149,11 @@ class MemoryLayoutDesc:
     shapes: list[torch.Size]
     dtypes: list[torch.dtype]
 
+    # Byte length of the full-attention prefix in each chunk. ``0`` is the
+    # sentinel for "no SWA / all bytes essential"; otherwise the trailing
+    # ``total - full_attn_bytes`` bytes are the skippable SWA suffix.
+    full_attn_bytes: int = 0
+
     def __post_init__(self):
         if len(self.shapes) != len(self.dtypes):
             raise ValueError(

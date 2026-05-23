@@ -36,7 +36,11 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import (
+    MemoryObj,
+    MemoryObjMetadata,
+    TensorMemoryObj,
+)
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -144,7 +148,53 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
         else:
             shapes.append(gpu_context.get_kv_buffer_shape(num_tokens, group_idx))
     dtypes = [groups[group_idx].dtype for group_idx in range(num_groups)]
-    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
+
+    # Populate full_attn_bytes only on the chunked hot path for SWA-bearing
+    # models; otherwise leave it at the 0 sentinel.
+    full_attn_bytes = 0
+    if (
+        num_tokens == gpu_context.lmcache_logical_chunk_size
+        and gpu_context.has_swa_groups()
+    ):
+        full_attn_bytes = gpu_context.full_attn_bytes()
+    return MemoryLayoutDesc(
+        shapes=shapes, dtypes=dtypes, full_attn_bytes=full_attn_bytes
+    )
+
+
+def _make_short_memory_obj_view(
+    memory_obj: MemoryObj,
+    short_bytes: int,
+) -> MemoryObj:
+    """Return a non-owning view of ``memory_obj`` whose ``get_size()``
+    reports ``short_bytes``. Used to short-H2D the full-attention prefix
+    of non-tail chunks under SWA layouts (``lmcache_memcpy_async_h2d``
+    asserts ``meta.get_size() == gpu_buffer.nbytes``).
+
+    The view shares ``raw_data`` with ``memory_obj`` (no copy); its
+    ``parent_allocator`` is None so ``__del__`` is inert. Callers must
+    keep the view alive until the H2D copy is enqueued.
+    """
+    short_meta = MemoryObjMetadata(
+        shape=torch.Size([short_bytes]),
+        # uint8 + 1-D shape => get_size() == short_bytes.
+        dtype=torch.uint8,
+        address=memory_obj.meta.address,
+        phy_size=memory_obj.meta.phy_size,
+        ref_count=0,
+        pin_count=0,
+        fmt=memory_obj.meta.fmt,
+        # shapes/dtypes None so TensorMemoryObj treats this as a single
+        # contiguous segment of length short_bytes.
+        shapes=None,
+        dtypes=None,
+        full_attn_bytes=0,
+    )
+    return TensorMemoryObj(
+        raw_data=memory_obj.raw_data,
+        metadata=short_meta,
+        parent_allocator=None,
+    )
 
 
 def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None]:
@@ -613,6 +663,14 @@ class MPCacheEngine:
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             _BATCH_SIZE = gpu_context.max_batch_size
             groups = gpu_context.kv_layer_groups_manager.kv_layer_groups
+            # Only the tail chunk of the entire retrieve carries SWA bytes
+            # that may be consumed by future queries; non-tail chunks can
+            # skip the SWA suffix in both H2D and scatter.
+            has_swa = gpu_context.has_swa_groups()
+            last_chunk_global_idx = len(memory_objs) - 1
+            # Keep short MemoryObj views alive across the H2D enqueue
+            # window; cleared after the loop.
+            short_view_keepalive: list[MemoryObj] = []
             for batch_idx, memory_obj_batch in enumerate(
                 batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
             ):
@@ -647,12 +705,33 @@ class MPCacheEngine:
                 end_chunk_id = start_chunk_id + batch_len
 
                 # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
-                # H2D copy: each memory_obj maps to its own batch slot
+                # H2D copy: each memory_obj maps to its own batch slot.
+                # SWA short-read: for non-tail chunks under a SWA layout,
+                # only copy the full_attn_bytes prefix; the SWA suffix is
+                # left as residual since scatter skips SWA on non-tail.
                 for chunk_idx, memory_obj in enumerate(memory_obj_batch):
-                    lmcache_memcpy_async_h2d(
-                        memory_obj,
-                        gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
-                    )
+                    global_chunk_idx = start_chunk_id + chunk_idx
+                    is_tail = global_chunk_idx == last_chunk_global_idx
+                    obj_full_attn_bytes = memory_obj.meta.full_attn_bytes
+                    obj_total_bytes = memory_obj.get_size()
+                    if (
+                        has_swa
+                        and not is_tail
+                        and 0 < obj_full_attn_bytes < obj_total_bytes
+                    ):
+                        # Short H2D into the essential prefix only.
+                        short_view = _make_short_memory_obj_view(
+                            memory_obj, obj_full_attn_bytes
+                        )
+                        short_view_keepalive.append(short_view)
+                        gpu_dst = gpu_context.get_essential_chunk_view(chunk_idx)
+                        lmcache_memcpy_async_h2d(short_view, gpu_dst)
+                    else:
+                        # Full H2D: tail chunk, non-SWA, or legacy cache.
+                        lmcache_memcpy_async_h2d(
+                            memory_obj,
+                            gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
+                        )
                 for group_idx, group in enumerate(groups):
                     bpc_g = gpu_context.blocks_per_chunk(group_idx)
                     bpc_full_g = gpu_context.blocks_per_chunk_full(group_idx)
@@ -660,11 +739,66 @@ class MPCacheEngine:
                     ns_block_ids_gpu = staged_block_ids_per_namespace[
                         group.kv_cache_group_id
                     ]
+
+                    # SWA tail-only scatter: under SWA, only the tail
+                    # chunk's SWA bytes may be consumed; non-tail chunks
+                    # had a short H2D so their SWA region is residual
+                    # and must NOT be scattered to paged KV.
+                    if has_swa and group.sliding_window > 0:
+                        tail_local_idx = last_chunk_global_idx - start_chunk_id
+                        if not (0 <= tail_local_idx < batch_len):
+                            # Tail chunk not in this batch.
+                            continue
+                        # Trailing bpc_g blocks of the tail chunk's slot.
+                        tail_chunk_global = start_chunk_id + tail_local_idx
+                        chunk_offset = tail_chunk_global * bpc_full_g + (
+                            bpc_full_g - bpc_g
+                        )
+                        within_chunk = torch.arange(
+                            bpc_g,
+                            device=ns_block_ids_gpu.device,
+                            dtype=torch.long,
+                        )
+                        gather_idx = within_chunk + chunk_offset
+                        chunk_block_ids_gpu = ns_block_ids_gpu[gather_idx]
+                        if skip_tokens_in_chunk % group.logical_block_size != 0:
+                            logger.error(
+                                "skip_first_n_tokens (%d) is not aligned to "
+                                "group %d logical_block_size (%d); rounding down",
+                                skip_first_n_tokens,
+                                group_idx,
+                                group.logical_block_size,
+                            )
+                        skip_blocks_in_chunk_g = (
+                            skip_tokens_in_chunk // group.logical_block_size
+                        )
+                        # Single tmp slot view for the tail chunk only.
+                        all_tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
+                            batch_len, group_idx
+                        )
+                        tmp_buffers = [all_tmp_buffers[tail_local_idx]]
+                        group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                        lmc_ops.multi_layer_block_kv_transfer(
+                            group_kv_pointers,
+                            [tb.data_ptr() for tb in tmp_buffers],
+                            chunk_block_ids_gpu,
+                            gpu_context.device,
+                            lmc_ops.TransferDirection.H2D,
+                            gpu_context.get_shape_desc(group_idx),
+                            kernel_chunk_tokens,
+                            gpu_context.gpu_kv_format_,
+                            skip_blocks_in_chunk_g,
+                        )
+                        continue
+
+                    # Full-attention groups: original scatter logic.
                     if group.sliding_window > 0 and bpc_g != bpc_full_g:
                         # SWA-suffix: pick the trailing ``bpc_g`` block IDs
                         # from each ``bpc_full_g``-sized chunk slot in
                         # ``ns_block_ids_gpu``. Build a flat gather index
                         # ``[batch_len * bpc_g]`` once per kernel call.
+                        # Defensive fallback: unreachable when has_swa is
+                        # True (handled by the tail-only branch above).
                         chunk_offsets = torch.arange(
                             batch_len,
                             device=ns_block_ids_gpu.device,
@@ -737,6 +871,9 @@ class MPCacheEngine:
                         gpu_context.gpu_kv_format_,
                         skip_blocks_in_chunk_g,
                     )
+            # All H2D copies and scatter kernels have been enqueued; safe
+            # to drop the short-view keep-alive references.
+            short_view_keepalive.clear()
 
         with (
             torch_dev.device(gpu_context.device),

@@ -138,6 +138,11 @@ class MemoryObjMetadata:
     shapes: Optional[list[torch.Size]] = None
     dtypes: Optional[list[torch.dtype]] = None
 
+    # Byte length of the full-attention prefix in this object. ``0`` means
+    # "no SWA / all bytes essential" (also the legacy default). Set by
+    # :meth:`L1MemoryManager.allocate` from ``MemoryLayoutDesc.full_attn_bytes``.
+    full_attn_bytes: int = 0
+
     def to_dict(self):
         # Note(Kuntai): this is used for serializing MemoryObjMetadata via
         # msgpack.
@@ -151,6 +156,7 @@ class MemoryObjMetadata:
             "fmt": self.fmt.value,
             "shapes": [list(shape) for shape in self.shapes] if self.shapes else None,
             "dtypes": [str(dtype) for dtype in self.dtypes] if self.dtypes else None,
+            "full_attn_bytes": self.full_attn_bytes,
         }
 
     @staticmethod
@@ -174,6 +180,8 @@ class MemoryObjMetadata:
             fmt=MemoryFormat(d["fmt"]),
             shapes=shapes,
             dtypes=dtypes,
+            # Backward-compat: missing on legacy caches.
+            full_attn_bytes=d.get("full_attn_bytes", 0),
         )
 
     def get_size(self) -> int:
