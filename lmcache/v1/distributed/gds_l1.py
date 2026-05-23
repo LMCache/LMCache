@@ -613,6 +613,20 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         self._registered_base_ptr: Optional[int] = None
         self._registered_buffer: Optional[torch.Tensor] = None
         self._registered_nbytes: int = 0
+        # ctypes-async path state. Populated only when
+        # ``backend.config.use_async_ctypes`` is True.
+        self._use_async_ctypes: bool = bool(
+            getattr(backend.config, "use_async_ctypes", False)
+        )
+        # Submission objects keep host-side ctypes storage alive until
+        # the CUDA stream actually executes the cuFile op. We hold them
+        # here for the lifetime of the allocator; freed at
+        # ``deregister_gpu_buffer``.
+        self._inflight_subs: list[object] = []
+        # Per-disk_path cache of opened ``AsyncHandle``s so we don't pay
+        # the cuFileHandleRegister cost on every chunk.
+        self._async_handles: dict[str, object] = {}
+        self._registered_stream: Optional[int] = None
 
     # --- Buffer registration -----------------------------------------
 
@@ -661,17 +675,43 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
             raise RuntimeError(
                 "GdsScratchAllocator.register_gpu_buffer: gds_module is None"
             )
-        # ``kvikio.memory_register`` takes the buffer-like directly and
-        # auto-discovers the underlying CUDA allocation — no ctypes
-        # wrapping. Replaces the lower-level ``cuFileBufRegister``.
-        gds_module.memory_register(buffer)
+        if self._use_async_ctypes:
+            # Direct-ctypes path: cuFileBufRegister via libcufile.
+            # See class docstring for the trade-offs.
+            # First Party
+            from lmcache.v1.distributed import _cufile_async as ca
+
+            # cuFile on this host caps a single registration at the
+            # largest nvidia-fs slab (16 MiB). Bigger buffers would
+            # need to be split across multiple registrations + a
+            # per-slot base-pointer table; that's deferred.
+            if nbytes > 16 * 1024 * 1024:
+                raise ValueError(
+                    f"GdsScratchAllocator: use_async_ctypes requires the "
+                    f"staging buffer to fit in a single cuFile registration "
+                    f"(<= 16 MiB on this host); got {nbytes} bytes. "
+                    f"Reduce lmcache_chunk_size or max_batch_size, or set "
+                    f"use_async_ctypes=False."
+                )
+            ca.register_buffer(buffer)
+            raw_stream = torch.cuda.current_stream().cuda_stream
+            ca.register_stream(raw_stream)
+            self._registered_stream = raw_stream
+            log_label = "cuFile (ctypes async)"
+        else:
+            # kvikio path: memory_register takes the buffer-like
+            # directly and auto-discovers the underlying CUDA
+            # allocation.
+            gds_module.memory_register(buffer)
+            log_label = "kvikio"
         self._registered_buffer = buffer
         self._registered_base_ptr = buffer.data_ptr()
         self._registered_nbytes = nbytes
         logger.info(
-            "GdsScratchAllocator: registered %d bytes at 0x%x with kvikio",
+            "GdsScratchAllocator: registered %d bytes at 0x%x with %s",
             nbytes,
             buffer.data_ptr(),
+            log_label,
         )
 
     def deregister_gpu_buffer(self) -> None:
@@ -679,16 +719,38 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         when no buffer was ever registered."""
         if self._registered_base_ptr is None:
             return
+        # Sync the CUDA stream first so any in-flight cuFile async ops
+        # complete and won't write into ctypes storage we're about to
+        # release.
+        if self._use_async_ctypes and self._registered_buffer is not None:
+            torch.cuda.synchronize(device=self._registered_buffer.device)
+        # Close any cached AsyncHandles (ctypes path only).
+        for h in list(self._async_handles.values()):
+            try:
+                h.close()
+            except Exception as e:
+                logger.warning("GdsScratchAllocator: AsyncHandle close failed: %s", e)
+        self._async_handles.clear()
+        self._inflight_subs.clear()
         if (
             self._backend.use_gds
             and self._backend.gds_module is not None
             and self._registered_buffer is not None
         ):
             try:
-                self._backend.gds_module.memory_deregister(self._registered_buffer)
+                if self._use_async_ctypes:
+                    # First Party
+                    from lmcache.v1.distributed import _cufile_async as ca
+
+                    ca.deregister_buffer(self._registered_buffer)
+                    if self._registered_stream is not None:
+                        ca.deregister_stream(self._registered_stream)
+                        self._registered_stream = None
+                else:
+                    self._backend.gds_module.memory_deregister(self._registered_buffer)
             except Exception as e:
                 logger.warning(
-                    "GdsScratchAllocator: kvikio.memory_deregister failed: %s",
+                    "GdsScratchAllocator: deregister failed: %s",
                     e,
                 )
         self._registered_buffer = None
@@ -733,6 +795,9 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
             )
         if self._registered_buffer is None:
             raise RuntimeError("cufile_read_into: no GPU buffer has been registered")
+        if self._use_async_ctypes:
+            self._ctypes_read(memory_obj, dev_offset, nbytes)
+            return
         ret = self._backend.do_load(
             memory_obj.disk_path,
             file_offset=memory_obj.file_offset,
@@ -776,12 +841,153 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
             )
         if self._registered_buffer is None:
             raise RuntimeError("cufile_write_from: no GPU buffer has been registered")
+        if self._use_async_ctypes:
+            self._ctypes_write(memory_obj, dev_offset, nbytes)
+            return
         self._backend.do_save(
             memory_obj=memory_obj,
             buf=self._registered_buffer,
             dev_offset=dev_offset,
             nbytes=nbytes,
         )
+
+    # --- direct-ctypes cuFile async path ---------------------------
+
+    def _ctypes_read(
+        self, memory_obj: GdsMemoryObj, dev_offset: int, nbytes: int
+    ) -> None:
+        """Submit a cuFileReadAsync on the current torch stream.
+
+        No per-call sync — the submission is kept alive in
+        ``_inflight_subs`` and the bytes land in the registered VRAM
+        before any subsequent kernel on the same stream runs (CUDA
+        stream ordering). Callers wanting to see ``Submission.
+        bytes_done`` must first synchronise the stream.
+        """
+        # First Party
+
+        handle = self._get_or_open_async_handle(memory_obj.disk_path, writable=False)
+        raw_stream = torch.cuda.current_stream().cuda_stream
+        sub = handle.read_async(
+            self._registered_base_ptr,
+            nbytes,
+            memory_obj.file_offset,
+            dev_offset,
+            raw_stream,
+        )
+        self._inflight_subs.append(sub)
+
+    def _ctypes_write(
+        self, memory_obj: GdsMemoryObj, dev_offset: int, nbytes: int
+    ) -> None:
+        """Submit a cuFileWriteAsync on the current torch stream.
+
+        The file is pre-allocated to the chunk's payload size + the
+        4 KiB metadata header before submitting, then the metadata
+        sidecar + hot-index entry are written synchronously. Same
+        no-per-call-sync pattern as :meth:`_ctypes_read`.
+        """
+        # First Party
+        from lmcache.v1.distributed import _cufile_async as ca
+
+        disk_path = memory_obj.disk_path
+        os.makedirs(os.path.dirname(disk_path), exist_ok=True)
+        tmp_path = disk_path + ".tmp" + _rand_suffix(8)
+
+        metadata_bytes = pack_metadata(
+            nbytes=nbytes,
+            shape=memory_obj.meta.shape,
+            dtype=memory_obj.meta.dtype,
+            fmt=memory_obj.meta.fmt,
+            lmcache_version=str(_METADATA_VERSION),
+        )
+        # Lay down the metadata header on a regular fd (O_DIRECT
+        # writes need aligned sizes/offsets and a 4 KiB header isn't
+        # the world; let the kernel write it normally), then re-open
+        # via the ctypes AsyncHandle to write the GDS payload.
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(metadata_bytes)
+            payload_size = nbytes
+            # Pre-allocate the full file (header + payload) so the
+            # cuFile write doesn't have to grow the file.
+            fd = os.open(tmp_path, os.O_RDWR)
+            try:
+                os.posix_fallocate(fd, 0, _METADATA_MAX_SIZE + payload_size)
+            finally:
+                os.close(fd)
+            with ca.AsyncHandle(tmp_path, writable=True) as handle:
+                raw_stream = torch.cuda.current_stream().cuda_stream
+                sub = handle.write_async(
+                    self._registered_base_ptr,
+                    payload_size,
+                    _METADATA_MAX_SIZE,
+                    dev_offset,
+                    raw_stream,
+                )
+                # The AsyncHandle context manager calls close() on exit;
+                # the cuFile handle deregister implicitly waits for
+                # in-flight ops on it (kernel-side ref counting). Force
+                # a stream sync here too so the bytes_done we read is
+                # actually settled.
+                torch.cuda.current_stream().synchronize()
+                actual = sub.bytes_done
+            if actual != payload_size:
+                raise RuntimeError(
+                    f"_ctypes_write: short write for {disk_path} — "
+                    f"got {actual} bytes, expected {payload_size}"
+                )
+            os.rename(tmp_path, disk_path)
+            for mode in ("r", "r+"):
+                self.handle_cache_invalidate(disk_path, mode)
+            self._backend._record_save(memory_obj, disk_path, nbytes)  # noqa: SLF001
+            self._backend._write_metadata_sidecar(disk_path, metadata_bytes)  # noqa: SLF001
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+            logger.exception("_ctypes_write failed for %s", disk_path)
+            raise
+
+    def _get_or_open_async_handle(self, disk_path: str, writable: bool) -> object:
+        """Cache opened ``AsyncHandle``s per disk_path.
+
+        cuFileHandleRegister is non-trivial; opening once per file and
+        keeping the handle alive across reads/writes is a meaningful
+        speedup for the chunk-heavy access pattern.
+        """
+        # First Party
+        from lmcache.v1.distributed import _cufile_async as ca
+
+        cache_key = (disk_path, writable)
+        h = self._async_handles.get(cache_key)
+        if h is None:
+            h = ca.AsyncHandle(disk_path, writable=writable)
+            self._async_handles[cache_key] = h
+        return h
+
+    def handle_cache_invalidate(self, disk_path: str, mode: str) -> None:
+        """Forward to the kvikio handle cache.
+
+        Exposed so ``_ctypes_write`` (and any external caller that
+        replaces a file under us) can drop stale fds — see the
+        analogous call in ``GdsL1Backend.do_save``.
+        """
+        # First Party
+        # The async path doesn't share the kvikio handle cache, but a
+        # mode-flagged ``AsyncHandle`` for the same path would be
+        # stale after a rename; drop it from our own cache too.
+        for cache_key in [(disk_path, True), (disk_path, False)]:
+            h = self._async_handles.pop(cache_key, None)
+            if h is not None:
+                try:
+                    h.close()
+                except Exception:
+                    pass
+        if self._backend.handle_cache is not None:
+            self._backend.handle_cache.invalidate(disk_path, mode)
 
     # --- MemoryAllocatorInterface (mostly no-ops) -------------------
 

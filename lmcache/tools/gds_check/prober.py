@@ -304,6 +304,7 @@ def run_gds_check(
     large_chunk_bytes: int,
     use_gds: bool,
     use_direct_io: bool,
+    use_async_ctypes: bool,
     skip_verify: bool,
     skip_bench: bool,
 ) -> None:
@@ -364,6 +365,7 @@ def run_gds_check(
         gds_path_sharding="by_gpu",
         use_gds=use_gds,
         use_direct_io=use_direct_io,
+        use_async_ctypes=use_async_ctypes,
     )
     loop, thread = _start_loop()
     backend = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
@@ -414,9 +416,7 @@ def _run_bench_phase(
     """Run one bench phase and print its results."""
     chunk_mib = chunk_bytes / 1024 / 1024
     chunk_label = (
-        f"{chunk_mib:.0f} MiB"
-        if chunk_mib < 1024
-        else f"{chunk_mib / 1024:.1f} GiB"
+        f"{chunk_mib:.0f} MiB" if chunk_mib < 1024 else f"{chunk_mib / 1024:.1f} GiB"
     )
     print()
     print(f"--- BENCH {label}: {num_chunks} × {chunk_label} ---")
@@ -433,6 +433,4 @@ def _run_bench_phase(
     r_mib = retrieve_r.total_mib
     r_sec = retrieve_r.seconds
     r_rate = retrieve_r.mibs
-    print(
-        f"  RETRIEVE: {r_mib:8.1f} MiB in {r_sec:6.3f}s = {r_rate:8.1f} MiB/s"
-    )
+    print(f"  RETRIEVE: {r_mib:8.1f} MiB in {r_sec:6.3f}s = {r_rate:8.1f} MiB/s")

@@ -50,8 +50,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--small-chunk-mib",
         type=int,
         default=2,
-        help="Per-chunk size in MiB for the small-chunks phase. "
-        "Default 2 MiB.",
+        help="Per-chunk size in MiB for the small-chunks phase. Default 2 MiB.",
     )
     parser.add_argument(
         "--large-num-chunks",
@@ -88,6 +87,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "firing.",
     )
     parser.add_argument(
+        "--use-async-ctypes",
+        action="store_true",
+        help="Use the direct-ctypes cuFileReadAsync/WriteAsync path "
+        "instead of kvikio. ~3x faster reads on hosts with nvidia-fs "
+        "loaded; requires the staging buffer to fit in a single "
+        "cuFile registration (<=16 MiB on the reference host). Off "
+        "by default to preserve the kvikio behaviour for comparison.",
+    )
+    parser.add_argument(
         "--skip-verify",
         action="store_true",
         help="Skip the round-trip correctness check.",
@@ -114,6 +122,7 @@ def _run(args: argparse.Namespace) -> None:
         large_chunk_bytes=args.large_chunk_mib * 1024 * 1024,
         use_gds=not args.no_gds,
         use_direct_io=args.use_direct_io,
+        use_async_ctypes=args.use_async_ctypes,
         skip_verify=args.skip_verify,
         skip_bench=args.skip_bench,
     )

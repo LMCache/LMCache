@@ -118,6 +118,30 @@ class GdsL1Config:
     """Advertised disk capacity for the L1 eviction signal. ``0`` means
     "no global eviction" — disk grows unbounded until external cleanup."""
 
+    use_async_ctypes: bool = False
+    """Use the direct-ctypes ``cuFileReadAsync`` / ``cuFileWriteAsync``
+    path (``lmcache.v1.distributed._cufile_async``) instead of kvikio's
+    ``raw_read_async`` / ``raw_write_async``. The ctypes path enqueues a
+    batch of cuFile ops on a CUDA stream and relies on stream ordering
+    for the wait — kvikio's Python wrapper forces a sync per call and
+    adds enough dispatch overhead to leave ~3x read throughput on the
+    table on hosts with nvidia-fs loaded.
+
+    Trade-offs vs kvikio:
+
+    - ``cuFileBufRegister`` is capped at the host's nvidia-fs slab
+      size (16 MiB on the reference host). The current implementation
+      requires ``tmp_chunk_bytes * max_batch_size <= 16 MiB`` and
+      raises at registration time otherwise.
+    - Per-call error reporting is lost — failures only surface at the
+      next stream sync (kvikio reports per-call via ``IOFuture``).
+    - cuFile compat mode rejects the async API with ``-EIO``, so this
+      flag is only useful when ``nvidia-fs`` is loaded.
+
+    Default ``False`` keeps the kvikio path so existing deployments
+    are unaffected.
+    """
+
 
 @dataclass
 class StorageManagerConfig:
@@ -347,6 +371,15 @@ def add_storage_manager_args(
         help="Advertised disk capacity for the L1 eviction signal in bytes. "
         "0 means no global eviction (unbounded disk).",
     )
+    gds_l1_group.add_argument(
+        "--gds-l1-use-async-ctypes",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use direct-ctypes cuFileReadAsync/WriteAsync instead of kvikio. "
+        "Faster on hosts with nvidia-fs loaded (avoids kvikio's per-call "
+        "dispatch overhead) but caps the registered tmp buffer at 16 MiB. "
+        "Off by default.",
+    )
 
     # Adapter config
     add_l2_adapters_args(parser)
@@ -414,6 +447,7 @@ def parse_args_to_config(
             io_threads=args.gds_l1_io_threads,
             handle_cache_size=args.gds_l1_handle_cache_size,
             disk_max_bytes=args.gds_l1_disk_max_bytes,
+            use_async_ctypes=args.gds_l1_use_async_ctypes,
         )
 
     return StorageManagerConfig(
