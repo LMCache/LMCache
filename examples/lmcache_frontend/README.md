@@ -13,7 +13,7 @@ Architecture:
 |                             |
 |  MPRuntimePluginLauncher    |                +---------------------------+
 |    |                        |                |  simple_discover_service  |
-|    +-> lmcache_mp_frontend  |   heartbeat    |  (this example)           |
+|    +-> lmcache_mp_frontend  |   heartbeat    |  (lmcache.tools)          |
 |        _plugin.py (subproc) | -------------> |                           |
 |        -> app.main()        |   (HTTP GET)   |  /lmcache_heartbeat       |
 |           - HeartbeatService|                |  /lmcache_infos           |
@@ -25,14 +25,15 @@ Only the frontend plugin talks to the discovery service; the MP HTTP
 server itself is never contacted by it.
 
 The real discovery service in production is expected to be provided
-by each company. `simple_discover_service.py` is only a flask-based
-example so you can try the flow end-to-end.
+by each company. `lmcache.tools.simple_discover_service` is shipped
+with the package as a flask-based reference implementation so you can
+try the flow end-to-end right after `pip install lmcache`.
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `simple_discover_service.py` | A tiny Flask app exposing `/lmcache_heartbeat` and `/lmcache_infos` endpoints. |
+| `lmcache/tools/simple_discover_service.py` | A tiny Flask app exposing `/lmcache_heartbeat` and `/lmcache_infos` endpoints. Runnable via `python3 -m lmcache.tools.simple_discover_service`. |
 | `run_mp_server_with_frontend.sh` | Launches the LMCache MP HTTP server with the frontend plugin wired in. |
 
 ## Quick Start
@@ -47,7 +48,7 @@ example so you can try the flow end-to-end.
 2. Start the example discovery service (listens on ``0.0.0.0:5000``):
 
    ```bash
-   python3 examples/lmcache_frontend/simple_discover_service.py
+   python3 -m lmcache.tools.simple_discover_service
    ```
 
    The service also exposes ``/heartbeat`` as an alias of
