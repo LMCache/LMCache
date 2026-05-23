@@ -431,10 +431,22 @@ class SegmentTokenDatabase(TokenDatabase):
 
         self.tokenizer = AutoTokenizer.from_pretrained(metadata.model_name)
 
-        # TODO (Jiayi): figure out how to decide when
-        # to use `1:` (whether there's a special starting token
-        # in the beginning)
-        self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]
+        # Encode blend_special_str so the resulting tokens match the BPE
+        # merges that occur when it appears mid-text. We strip surrounding
+        # whitespace from the configured separator, prepend exactly one
+        # leading space to anchor space-prefixed BPE merges, and pass
+        # add_special_tokens=False so no BOS is added. The prior length-
+        # dependent slice (encode(...)[1:]) was tokenizer-specific: it
+        # stripped a leading BOS that some tokenizers prepend (Llama-2/3,
+        # Mistral, OPT) but produced start-of-string tokens that never
+        # appear mid-text on those tokenizers. Symptom: zero segments
+        # detected → entire prompt stored as one chunk → 0% retrieval.
+        # Verified on Llama-3, Qwen2.5, OPT-125m for both `"# #"` and
+        # `" # # "` separator forms.
+        self.sep_tokens = self.tokenizer.encode(
+            " " + config.blend_special_str.strip(),
+            add_special_tokens=False,
+        )
         self.sep_tokens = torch.tensor(self.sep_tokens, device="cpu")
         self.sep_len = len(self.sep_tokens)
 

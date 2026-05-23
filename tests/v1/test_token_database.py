@@ -132,3 +132,67 @@ def test_segment_token_database(prefix_length, chunk_lengths):
         assert key.chunk_hash == hashes[i]
         # print(st, starts[i])
         # print(ed, ends[i])
+
+
+@pytest.mark.parametrize(
+    "model_name", ["facebook/opt-125m", "Qwen/Qwen2.5-0.5B-Instruct"]
+)
+@pytest.mark.parametrize("blend_special_str", [" # # ", "# #"])
+@pytest.mark.skipif(
+    not hf_credentials_available(), reason="No Hugging Face credentials found"
+)
+def test_segment_token_database_sep_tokens_match_real_text(
+    model_name, blend_special_str
+):
+    """Regression test: ``SegmentTokenDatabase.sep_tokens`` must equal the
+    BPE token sequence produced when ``blend_special_str`` appears inside
+    a real prompt. The prior ``tokenizer.encode(blend_special_str)[1:]``
+    produced start-of-string tokens that never appear mid-text on tokenizers
+    with default-BOS prepending (Llama-2/3, Mistral, OPT) — silently
+    breaking CacheBlend retrieval to 0% on those models. Symptom: zero
+    segments detected → entire prompt stored as one chunk.
+
+    The fix encodes ``" " + blend_special_str.strip()`` with
+    ``add_special_tokens=False``: stripping surrounding whitespace
+    normalizes the common-but-fragile production setting ``" # # "``,
+    the leading space anchors the same BPE merge that occurs at every
+    mid-text occurrence, and ``add_special_tokens=False`` prevents BOS
+    being prepended in the first place.
+    """
+    cfg = LMCacheEngineConfig.from_legacy(blend_special_str=blend_special_str)
+    metadata = dumb_metadata_with_model_name(model_name)
+    db = SegmentTokenDatabase(cfg, metadata)
+    sep_tokens = db.sep_tokens.tolist()
+
+    # Production-shape user_content: passages joined by " # # " (matches the
+    # real CacheBlend RAG pattern). The configured blend_special_str may
+    # vary in whitespace (" # # " vs "# #"), but the literal text in mid-
+    # prompt is always the space-padded form — which the fix must handle.
+    sep_in_text = " # # "
+    user_content = (
+        "Reference passages:"
+        + sep_in_text
+        + sep_in_text.join(
+            [
+                "[Passage A]\nFirst passage text.",
+                "[Passage B]\nSecond passage text.",
+                "[Passage C]\nThird passage text.",
+            ]
+        )
+        + sep_in_text
+        + "Question: q?"
+    )
+    prompt_ids = db.tokenizer.encode(user_content, add_special_tokens=False)
+    n_seps_in_text = user_content.count(sep_in_text)
+
+    n = len(sep_tokens)
+    matches = sum(
+        1
+        for i in range(len(prompt_ids) - n + 1)
+        if prompt_ids[i : i + n] == sep_tokens
+    )
+    assert matches == n_seps_in_text, (
+        f"{model_name} blend_special_str={blend_special_str!r}: "
+        f"sep_tokens {sep_tokens} matched {matches} times in user_content "
+        f"(expected {n_seps_in_text}). prompt_ids[:30]={prompt_ids[:30]}"
+    )
