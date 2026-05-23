@@ -33,7 +33,22 @@ DEFAULT_HEARTBEAT_INTERVAL: float = 10.0
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
-    logger.info("KV caches keys are %s", list(kv_caches.keys()))
+    # Emit a per-layer (name, shape, dtype) summary so the operator can
+    # verify the exact layer set & tensor geometry being shipped to the
+    # LMCache server, then the low-noise count of handles being wrapped.
+    kept_summary = [
+        (name, tuple(tensor.shape), str(tensor.dtype))
+        for name, tensor in kv_caches.items()
+    ]
+    logger.debug(
+        "KV cache transfer keeping %d layer(s) (name, shape, dtype):\n%s",
+        len(kept_summary),
+        "\n".join(
+            f"  [{i}] {name}  shape={shape}  dtype={dtype}"
+            for i, (name, shape, dtype) in enumerate(kept_summary)
+        ),
+    )
+    logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
     return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
 
 
@@ -273,8 +288,24 @@ class LoadStoreOp:
     token_ids: list[int]
     """Token IDs for the load/store operation"""
 
-    block_ids: list[int]
-    """Block ids for the load/store operation"""
+    block_ids: list[list[int]]
+    """Block IDs for the load/store operation, grouped by engine-side
+    ``kv_cache_group_id``.
+
+    The outer list is indexed by gid (``block_ids[gid]``) and matches
+    the order the engine reported the gids in at registration time
+    (i.e. the same order as
+    :data:`~lmcache.v1.gpu_connector.utils.LayoutHints.per_layer_kv_cache_group_id`
+    enumerates them). Each inner list contains the block IDs vLLM
+    allocated for that gid over the chunk range ``[start, end)``.
+
+    For non-hybrid models the engine has a single namespace and this
+    is a length-1 outer list whose inner list mirrors the prior flat
+    ``list[int]`` semantics. For hybrid models (vLLM with
+    ``--no-disable-hybrid-kv-cache-manager`` on DeepSeek-V4) the
+    outer list has one entry per ``KVCacheGroupSpec`` with that
+    gid's own scheduler-block-size granularity.
+    """
 
     start: int = 0
     """Start token index"""
@@ -286,7 +317,28 @@ class LoadStoreOp:
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
+    @property
+    def total_block_count(self) -> int:
+        """Sum of block counts across all engine namespaces.
+
+        Equal to ``sum(len(group_blocks) for group_blocks in
+        self.block_ids)``. Note this is the count of engine block
+        IDs across gids, not the number of LMCache transfer-kernel
+        groups (which can differ when several gids share a
+        scheduler block size). For non-hybrid models this equals
+        ``len(self.block_ids[0])``.
+        """
+        return sum(len(group_blocks) for group_blocks in self.block_ids)
+
     def __len__(self) -> int:
+        """Number of engine-side ``kv_cache_group``s present in this op.
+
+        Returns 1 for non-hybrid models and equals the engine's
+        kv_cache_group count for hybrid models. Note this is a change
+        in semantics from prior versions where ``__len__`` returned
+        the total block count; see :attr:`total_block_count` for
+        that quantity.
+        """
         return len(self.block_ids)
 
 
@@ -693,6 +745,11 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
+        # Engine-supplied layout-hint overrides cached by
+        # ``register_kv_caches`` so the heartbeat recovery path re-
+        # registers with the same hints (e.g.
+        # ``per_layer_logical_block_size`` for hybrid KV cache groups).
+        self.extra_layout_hints: dict[str, object] | None = None
 
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
@@ -729,6 +786,14 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
+        # Retain the vLLM logical block size so we can ship it to the
+        # LMCache server in ``register_kv_caches`` — the server uses it
+        # (as ``layout_hints["inference_engine_logical_block_size"]``)
+        # to derive per-group compression ratios when some KV layer
+        # groups compress multiple logical tokens into a single physical
+        # slot (``shape_desc.bs <
+        # inference_engine_logical_block_size``).
+        self.vllm_logical_block_size = vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -789,13 +854,29 @@ class LMCacheMPWorkerAdapter:
             == 0
         )
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        extra_layout_hints: dict[str, object] | None = None,
+    ) -> None:
         """
         Register the kv caches with LMCache server.
 
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
+            extra_layout_hints: Optional engine-supplied additions to the
+                :class:`~lmcache.v1.gpu_connector.utils.LayoutHints`
+                dict produced by :func:`vllm_layout_hints`. Keys present
+                here override the auto-detected ones (e.g. ``kv_layout``)
+                — callers should use this to add fields the adapter
+                cannot derive on its own, such as
+                ``per_layer_logical_block_size`` (required for vLLM's
+                hybrid KV cache manager; see the field docstring on
+                :class:`~lmcache.v1.gpu_connector.utils.LayoutHints`).
+                Pass ``None`` to use only the auto-detected hints. The
+                hints are cached on the adapter so the heartbeat
+                recovery path re-registers with the same set.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -803,6 +884,7 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
+        self.extra_layout_hints = extra_layout_hints
         self._send_register_kv_caches_request(kv_caches)
 
     def _send_register_kv_caches_request(
@@ -811,7 +893,9 @@ class LMCacheMPWorkerAdapter:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 
         Shared by the public ``register_kv_caches`` entry point and the
-        recovery path inside ``is_healthy``.
+        recovery path inside ``is_healthy``. Uses
+        ``self.extra_layout_hints`` (cached by ``register_kv_caches``)
+        so the recovery path re-registers with identical hints.
 
         Args:
             kv_caches: The KV cache dict to register.
@@ -823,7 +907,12 @@ class LMCacheMPWorkerAdapter:
         # First Party
         from lmcache.integration.vllm.utils import vllm_layout_hints
 
-        layout_hints = vllm_layout_hints()
+        layout_hints = dict(vllm_layout_hints())
+        layout_hints["inference_engine_logical_block_size"] = (
+            self.vllm_logical_block_size
+        )
+        if self.extra_layout_hints:
+            layout_hints.update(self.extra_layout_hints)
         future = send_lmcache_request(
             self.mq_client,
             RequestType.REGISTER_KV_CACHE,
@@ -955,7 +1044,15 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            self.error_block_ids.update(op.block_ids)
+            # ``op.block_ids`` is now a list[list[int]] grouped by gid;
+            # ``self.error_block_ids`` is a flat set[int]. Flatten on
+            # update — error reporting back to vLLM is namespace-blind
+            # under the current API, so the flat union is the best we
+            # can do at this layer. (A future revision could thread the
+            # gid through the error channel; for now it matches the
+            # prior single-gid behavior for non-hybrid models.)
+            for group_block_ids in op.block_ids:
+                self.error_block_ids.update(group_block_ids)
             return
 
         assert op.token_ids is not None
@@ -977,7 +1074,13 @@ class LMCacheMPWorkerAdapter:
                 op.skip_first_n_tokens,
             ],
         ).to_cuda_future()
-        self.retrieve_futures[request_id] = (future, list(op.block_ids))
+        # Stash a flattened block-id list for error reporting; the wire
+        # carries the per-gid structure verbatim. See the unhealthy
+        # branch above for rationale on flattening at this layer.
+        flat_block_ids: list[int] = [
+            block_id for group_block_ids in op.block_ids for block_id in group_block_ids
+        ]
+        self.retrieve_futures[request_id] = (future, flat_block_ids)
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(

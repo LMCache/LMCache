@@ -4,6 +4,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     KVLayerGroupsManager,
@@ -20,13 +21,15 @@ def _build_manager(
     tensors: list[torch.Tensor],
     *,
     num_blocks: int,
-    block_size: int,
+    layout_hints: LayoutHints | None = None,
+    lmcache_logical_chunk_size: int = 256,
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
     Tensors in these tests have shape ``[2, NB, BS, NH, HS]`` — the
     canonical vLLM flash-attention per-layer NHD layout matched by
-    ``GPUKVFormat.NL_X_TWO_NB_BS_NH_HS``.
+    ``GPUKVFormat.NL_X_TWO_NB_BS_NH_HS``. ``bs`` is discovered
+    per-layer from the tensor shapes, so callers no longer pass it.
     """
     # First Party
     import lmcache.c_ops as lmc_ops
@@ -35,7 +38,8 @@ def _build_manager(
         tensors,
         gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
-        block_size=block_size,
+        layout_hints=layout_hints,
+        lmcache_logical_chunk_size=lmcache_logical_chunk_size,
     )
 
 
@@ -43,12 +47,12 @@ class TestKVLayerGroupsManager:
     """Tests for KVLayerGroupsManager construction and lookups."""
 
     def test_build_empty(self):
-        manager = _build_manager([], num_blocks=32, block_size=256)
+        manager = _build_manager([], num_blocks=32)
         assert manager.kv_layer_groups == []
 
     def test_build_single_layer(self):
         tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
 
         assert len(manager.kv_layer_groups) == 1
         group = manager.kv_layer_groups[0]
@@ -66,7 +70,7 @@ class TestKVLayerGroupsManager:
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
 
         assert len(manager.kv_layer_groups) == 1
         group = manager.kv_layer_groups[0]
@@ -80,7 +84,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
         assert len(manager.kv_layer_groups) == 2
         group1, group2 = manager.kv_layer_groups
         assert group1.layer_indices == [0, 2]
@@ -94,7 +98,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float32),
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
         assert len(manager.kv_layer_groups) == 2
         group1, group2 = manager.kv_layer_groups
         assert group1.layer_indices == [0, 2]
@@ -110,7 +114,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),  # nh=8, f16
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float32),  # nh=16, f32
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
         assert len(manager.kv_layer_groups) == 4
 
         groups_by_key = {(g.shape_desc.nh, g.dtype): g for g in manager.kv_layer_groups}
@@ -124,7 +128,7 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
         ]
-        manager = _build_manager(tensors, num_blocks=32, block_size=256)
+        manager = _build_manager(tensors, num_blocks=32)
 
         sd0 = manager.get_shape_desc(0)
         assert sd0.nh == 8
@@ -134,6 +138,250 @@ class TestKVLayerGroupsManager:
         sd1 = manager.get_shape_desc(1)
         assert sd1.nh == 16
         assert sd1.hs == 64
+
+
+class TestPerLayerLogicalBlockSize:
+    """Tests for the ``per_layer_logical_block_size`` LayoutHints field.
+
+    The hint extends LayerGroupIdentity with the engine's scheduler-side
+    block size: layers with the same physical shape but different
+    scheduler block sizes (e.g. vLLM's hybrid KV cache manager handing
+    different ``KVCacheGroupSpec.block_size`` values to different
+    layers) end up in distinct LMCache groups.
+    """
+
+    def test_hint_absent_collapses_to_5tuple(self):
+        """No hint = legacy behavior: layers with matching physical
+        identity collapse to a single group."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        manager = _build_manager(tensors, num_blocks=32)
+        assert len(manager.kv_layer_groups) == 1
+        group = manager.kv_layer_groups[0]
+        assert group.layer_indices == [0, 1, 2, 3]
+        # logical_block_size defaults to physical bs when no hint
+        assert group.logical_block_size == 64
+        assert group.shape_desc.bs == 64
+        assert group.compress_ratio == 1
+
+    def test_hint_splits_layers_by_logical_bs(self):
+        """Two layers with same physical shape but different logical
+        block sizes split into distinct groups."""
+        # 4 layers all with physical bs=64. Hint says first 2 layers
+        # use scheduler block size 256 (i.e. compressed: 4 logical
+        # tokens per physical slot) and the other 2 use 64 (uncompressed).
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        layout_hints = {
+            "per_layer_logical_block_size": [256, 256, 64, 64],
+        }
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            layout_hints=layout_hints,
+            lmcache_logical_chunk_size=1024,
+        )
+        assert len(manager.kv_layer_groups) == 2
+        groups_by_logical_bs = {
+            g.logical_block_size: g for g in manager.kv_layer_groups
+        }
+        compressed = groups_by_logical_bs[256]
+        uncompressed = groups_by_logical_bs[64]
+        assert compressed.layer_indices == [0, 1]
+        assert compressed.compress_ratio == 4
+        assert compressed.physical_chunk_size == 256
+        assert uncompressed.layer_indices == [2, 3]
+        assert uncompressed.compress_ratio == 1
+        assert uncompressed.physical_chunk_size == 1024
+
+    def test_hint_length_mismatch_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="length"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_logical_block_size": [64]},
+            )
+
+    def test_hint_non_positive_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="non-positive"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_logical_block_size": [64, 0]},
+            )
+
+    def test_logical_bs_not_multiple_of_physical_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(1)
+        ]
+        with pytest.raises(ValueError, match="multiple"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_logical_block_size": [100]},
+                lmcache_logical_chunk_size=400,
+            )
+
+
+class TestPerLayerKvCacheGroupId:
+    """Tests for the ``per_layer_kv_cache_group_id`` LayoutHints field.
+
+    The hint adds the engine's per-layer block-ID namespace to
+    LayerGroupIdentity, so layers whose physical-and-logical identity
+    matches but whose engine-side block IDs come from disjoint pools
+    end up in distinct LMCache groups.
+    """
+
+    def test_hint_absent_collapses_namespaces(self):
+        """No hint = legacy behavior: every layer namespace is 0 and
+        physically-identical layers collapse to a single group."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        manager = _build_manager(tensors, num_blocks=32)
+        assert len(manager.kv_layer_groups) == 1
+        assert manager.kv_layer_groups[0].kv_cache_group_id == 0
+
+    def test_hint_splits_layers_by_namespace(self):
+        """Two sets of identical-shape layers from disjoint engine
+        namespaces split into distinct LMCache groups."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        # Layers 0, 1 in namespace 1; layers 2, 3 in namespace 2.
+        layout_hints = {
+            "per_layer_kv_cache_group_id": [1, 1, 2, 2],
+        }
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            layout_hints=layout_hints,
+        )
+        assert len(manager.kv_layer_groups) == 2
+        groups_by_ns = {g.kv_cache_group_id: g for g in manager.kv_layer_groups}
+        assert groups_by_ns[1].layer_indices == [0, 1]
+        assert groups_by_ns[2].layer_indices == [2, 3]
+
+    def test_namespace_combined_with_logical_bs(self):
+        """Both hints together: layers must match on every identity
+        field including namespace AND logical_block_size."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        # 4 layers all physical-identical. Namespace 1 with logical
+        # bs 64; namespace 1 with logical bs 256; namespace 2 with
+        # logical bs 64; namespace 2 with logical bs 64. Expected
+        # groups: {(ns=1, lbs=64): [0]}, {(ns=1, lbs=256): [1]},
+        # {(ns=2, lbs=64): [2, 3]}.
+        layout_hints = {
+            "per_layer_kv_cache_group_id": [1, 1, 2, 2],
+            "per_layer_logical_block_size": [64, 256, 64, 64],
+        }
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            layout_hints=layout_hints,
+            lmcache_logical_chunk_size=1024,
+        )
+        assert len(manager.kv_layer_groups) == 3
+        groups_by_id = {
+            (g.kv_cache_group_id, g.logical_block_size): g
+            for g in manager.kv_layer_groups
+        }
+        assert groups_by_id[(1, 64)].layer_indices == [0]
+        assert groups_by_id[(1, 256)].layer_indices == [1]
+        assert groups_by_id[(2, 64)].layer_indices == [2, 3]
+
+    def test_namespace_length_mismatch_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="length"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_kv_cache_group_id": [1]},
+            )
+
+    def test_namespace_negative_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="negative"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_kv_cache_group_id": [0, -1]},
+            )
+
+
+class TestPerLayerSlidingWindow:
+    """Tests for the ``per_layer_sliding_window`` LayoutHints field.
+
+    The hint adds the SWA window size to LayerGroupIdentity so layers
+    with different windows end up in distinct LMCache groups, and
+    activates the SWA-suffix-only optimization for groups with
+    non-zero windows.
+    """
+
+    def test_hint_absent_collapses_to_full(self):
+        """No hint = legacy behavior: all layers treated as full-attention
+        (sliding_window=0)."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        manager = _build_manager(tensors, num_blocks=32)
+        assert len(manager.kv_layer_groups) == 1
+        assert manager.kv_layer_groups[0].sliding_window == 0
+
+    def test_hint_splits_layers_by_window(self):
+        """Two sets of identical-shape layers with different windows
+        end up in distinct groups."""
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(4)
+        ]
+        layout_hints = {
+            "per_layer_sliding_window": [128, 128, 0, 0],
+        }
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            layout_hints=layout_hints,
+        )
+        assert len(manager.kv_layer_groups) == 2
+        groups_by_window = {g.sliding_window: g for g in manager.kv_layer_groups}
+        assert groups_by_window[128].layer_indices == [0, 1]
+        assert groups_by_window[0].layer_indices == [2, 3]
+
+    def test_window_length_mismatch_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="length"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_sliding_window": [128]},
+            )
+
+    def test_window_negative_raises(self):
+        tensors = [
+            torch.randn(2, 32, 64, 8, 128, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="negative"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_sliding_window": [128, -1]},
+            )
 
 
 class TestParseKvcacheShapeSpec:

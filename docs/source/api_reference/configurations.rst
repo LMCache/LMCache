@@ -334,9 +334,9 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
     extra_config: 
       # enable_nixl_storage will disable disaggregated prefill mode.
       enable_nixl_storage: true
-      nixl_backend: "POSIX"  # Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
+      nixl_backend: "POSIX"  # Options: "GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ"
       nixl_path: "/path/to/storage/"
-      nixl_file_pool_size: 64
+      nixl_pool_size: 64
 
 .. list-table::
    :header-rows: 1
@@ -347,11 +347,13 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
    * - enable_nixl_storage
      - Whether to enable Nixl storage backend. Values: true/false
    * - nixl_backend
-     - Storage backend type. Options: "GDS", "GDS_MT", "POSIX", "HF3FS"
+     - Storage backend type. Options: "GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ"
    * - nixl_path
      - File system path for Nixl storage
-   * - nixl_file_pool_size
-     - Number of files in the storage pool
+   * - nixl_pool_size
+     - Number of files or objects in the storage pool
+   * - nixl_endpoint_list
+     - List of object-storage endpoint URLs for per-worker distribution. Overrides ``nixl_backend_params.endpoint_override`` when set.
 
 
 Additional Storage Configurations

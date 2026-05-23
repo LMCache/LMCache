@@ -74,11 +74,15 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - key: KeyType - Cache key to store
         #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - gpu_block_ids: list[int] - GPU block IDs containing the data
+        #   - gpu_block_ids: list[list[int]] - GPU block IDs containing the
+        #     data, grouped by engine-side ``kv_cache_group_id``. Outer
+        #     list is indexed by gid in registration order; for non-hybrid
+        #     models this is a length-1 list whose inner list mirrors the
+        #     prior flat ``list[int]`` semantics.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "STORE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[int], bytes],
+            payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
@@ -86,13 +90,15 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - key: KeyType - Cache key to retrieve
         #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - gpu_block_ids: list[int] - GPU block IDs to store retrieved data
+        #   - gpu_block_ids: list[list[int]] - GPU block IDs to store
+        #     retrieved data, grouped by engine-side
+        #     ``kv_cache_group_id``. See STORE above for the layout.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[int], bytes, int],
+            payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),

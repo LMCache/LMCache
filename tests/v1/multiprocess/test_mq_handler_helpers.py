@@ -47,7 +47,10 @@ def register_kv_cache_handler(
         model_name: Name of the model associated with this KV cache
         world_size: World size associated with this KV cache
         engine_type: Which serving engine produced the caches
-        layout_hints: Engine-provided hints dict
+        layout_hints: Engine-provided hints dict. For vLLM,
+            ``layout_hints["inference_engine_logical_block_size"]``
+            carries the logical tokens-per-engine-block (previously a
+            standalone argument).
 
     Returns:
         None
@@ -69,6 +72,12 @@ def register_kv_cache_handler(
     )
     assert isinstance(layout_hints, dict), (
         f"Expected layout_hints to be dict, got {type(layout_hints)}"
+    )
+    # inference_engine_logical_block_size, if present, must be an int.
+    ie_logical_block_size = layout_hints.get("inference_engine_logical_block_size")
+    assert ie_logical_block_size is None or isinstance(ie_logical_block_size, int), (
+        "Expected layout_hints['inference_engine_logical_block_size'] to be int, got "
+        f"{type(ie_logical_block_size)}"
     )
     # No return value (returns None implicitly)
 
@@ -100,7 +109,7 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 
 
 def store_handler(
-    key: KeyType, gpu_id: int, gpu_block_ids: list[int], ipc_handle: bytes
+    key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]], ipc_handle: bytes
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for STORE requests.
@@ -108,7 +117,7 @@ def store_handler(
     Args:
         key: Cache key to store
         gpu_id: GPU device ID
-        gpu_block_ids: List of GPU block IDs
+        gpu_block_ids: Per-namespace list of GPU block IDs
         ipc_handle: CUDA event IPC handle
 
     Returns:
@@ -133,7 +142,7 @@ def store_handler(
 def retrieve_handler(
     key: KeyType,
     gpu_id: int,
-    gpu_block_ids: list[int],
+    gpu_block_ids: list[list[int]],
     event_handler: bytes,
     skip_first_n_tokens: int = 0,
 ) -> tuple[bytes, bool]:
@@ -143,7 +152,7 @@ def retrieve_handler(
     Args:
         key: Cache key to retrieve
         gpu_id: GPU device ID
-        gpu_block_ids: List of GPU block IDs
+        gpu_block_ids: Per-namespace list of GPU block IDs
         event_handler: CUDA event IPC handle
         skip_first_n_tokens: Number of tokens to skip at retrieve start
 

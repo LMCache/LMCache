@@ -22,7 +22,6 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
-    get_block_size,
     get_concrete_gpu_kv_shape,
     get_device,
     get_dtype,
@@ -69,7 +68,7 @@ class GPUCacheContext:
     def __init__(
         self,
         kv_caches: KVCache,
-        lmcache_chunk_size: int = 256,
+        lmcache_logical_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
         engine_type: EngineType = EngineType.VLLM,
     ):
@@ -83,16 +82,14 @@ class GPUCacheContext:
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
-        self.block_size_ = get_block_size(self.kv_caches_, self.gpu_kv_format_)
+        self.lmcache_logical_chunk_size = lmcache_logical_chunk_size
 
-        # Build per-layer KV groups. The manager owns each group's
-        # PageBufferShapeDesc (kernel-facing shape); this context only
-        # retains per-group GPU resources (pointer tensors, tmp buffers).
         self.kv_layer_groups_manager_ = KVLayerGroupsManager(
             self.kv_caches_,
             gpu_kv_format=self.gpu_kv_format_,
             num_blocks=self.num_blocks_,
-            block_size=self.block_size_,
+            layout_hints=layout_hints,
+            lmcache_logical_chunk_size=lmcache_logical_chunk_size,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
@@ -122,16 +119,25 @@ class GPUCacheContext:
         # single memcpy, without needing to know the per-group layout.
         # max_batch_size is the max number of chunks processed concurrently.
         self.max_batch_size = 4
-        self.lmcache_chunk_size = lmcache_chunk_size
         # Byte size of one chunk entry (= one chunk across all groups).
         # tmp_chunk_group_offsets_[g] is the byte offset of group g within
         # a single chunk; tmp_chunk_group_offsets_[num_groups] ==
-        # tmp_chunk_bytes_.
+        # tmp_chunk_bytes_. For SWA groups (``sliding_window > 0``) the
+        # per-chunk byte budget is truncated to the trailing
+        # ``ceil(window / logical_bs)`` blocks, so we size the tmp slot
+        # to that truncated count rather than the full chunk's logical
+        # token count.
         self.tmp_chunk_group_offsets_: list[int] = [0]
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            shape = self.get_kv_buffer_shape(lmcache_chunk_size, group_idx)
+            # ``get_kv_buffer_shape`` takes *logical* tokens; for
+            # compressed groups it folds ``compress_ratio`` logical
+            # tokens into one physical slot internally. For SWA
+            # groups the truncated logical-token count is
+            # ``blocks_per_chunk(g) * logical_block_size``.
+            logical_tokens_g = self.storage_logical_tokens_per_chunk(group_idx)
+            shape = self.get_kv_buffer_shape(logical_tokens_g, group_idx)
             byte_size = shape.numel() * group.dtype.itemsize
             self.tmp_chunk_group_offsets_.append(
                 self.tmp_chunk_group_offsets_[-1] + byte_size
@@ -197,11 +203,28 @@ class GPUCacheContext:
         return self.high_priority_cupy_stream_
 
     @property
-    def block_size(self) -> int:
+    def group_physical_block_sizes(self) -> list[int]:
+        """Per-group physical slot count (``shape_desc.bs``) in group
+        order. For non-compressed groups this equals
+        ``inference_engine_logical_block_size``; for compressed groups
+        it equals
+        ``inference_engine_logical_block_size // compress_ratio``.
         """
-        Returns the block size (number of tokens per block)
+        return [
+            group.shape_desc.bs
+            for group in self.kv_layer_groups_manager_.kv_layer_groups
+        ]
+
+    @property
+    def group_compress_ratios(self) -> list[int]:
+        """Per-group compression ratio
+        (= ``inference_engine_logical_block_size // shape_desc.bs``)
+        in group order. ``1`` for non-compressed groups.
         """
-        return self.block_size_
+        return [
+            group.compress_ratio
+            for group in self.kv_layer_groups_manager_.kv_layer_groups
+        ]
 
     @property
     def num_layers(self) -> int:
@@ -235,6 +258,87 @@ class GPUCacheContext:
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given KV layer group."""
         return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
+
+    def get_physical_chunk_size(self, group_idx: int) -> int:
+        """Returns the per-chunk physical slot count for the given group,
+        adjusted for SWA-suffix truncation when applicable.
+
+        For non-SWA groups (``sliding_window == 0``) this is
+        ``lmcache_logical_chunk_size // compress_ratio`` —
+        i.e. the full untruncated chunk's physical slot count.
+
+        For SWA groups (``sliding_window > 0``), the per-chunk payload
+        is truncated to the *last* ``ceil(sliding_window /
+        logical_block_size)`` blocks of each chunk; the kernel chunk
+        token count therefore shrinks to ``blocks_per_chunk(g) *
+        physical_block_size_g``. The kernel-side constraint
+        ``num_blocks_per_object * shape_desc.bs == kernel_chunk_tokens``
+        still holds because both sides scale with the truncation.
+        """
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        if group.sliding_window <= 0:
+            return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
+        return self.blocks_per_chunk(group_idx) * group.shape_desc.bs
+
+    def blocks_per_chunk_full(self, group_idx: int) -> int:
+        """Returns the per-chunk count of inference-engine *logical* blocks
+        for the given group, computed against this group's
+        ``logical_block_size``: ``lmcache_logical_chunk_size //
+        logical_block_size_g``.
+
+        This is the count of block IDs the engine hands out for one
+        LMCache chunk's worth of logical tokens in this group's
+        scheduler namespace, BEFORE any SWA-suffix truncation. For
+        full-attention groups this equals :meth:`blocks_per_chunk`;
+        for SWA groups :meth:`blocks_per_chunk` returns a smaller
+        truncated count, but ``blocks_per_chunk_full`` always
+        returns the full pre-truncation value (used by callers that
+        need to address the full chunk's worth of engine block IDs).
+
+        Per-group rather than global because, with vLLM's hybrid KV
+        cache manager active, different ``KVCacheGroupSpec``s use
+        different scheduler block sizes (e.g. DeepSeek-V4: gid 0 =
+        256, gid 1/2 = 64, gid 3 = 4, gid 4 = 8).
+
+        Args:
+            group_idx: 0-based group index.
+
+        Raises:
+            IndexError: If *group_idx* is out of range.
+            ValueError: If the per-group ``logical_block_size`` is
+                non-positive (programmer error from registration).
+        """
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        if group.logical_block_size <= 0:
+            raise ValueError(
+                f"group {group_idx} has invalid logical_block_size "
+                f"{group.logical_block_size}; expected a positive int "
+                "set at construction time"
+            )
+        return self.lmcache_logical_chunk_size // group.logical_block_size
+
+    def blocks_per_chunk(self, group_idx: int) -> int:
+        """Returns the per-chunk count of inference-engine *logical*
+        blocks the server will iterate when staging block IDs for this
+        group.
+
+        For full-attention groups (``sliding_window == 0``) this is
+        identical to :meth:`blocks_per_chunk_full`. For SWA groups,
+        this returns ``ceil(sliding_window / logical_block_size_g)``
+        — the count of trailing blocks per chunk that the
+        SWA-suffix-only optimization stores and retrieves. Capped at
+        ``blocks_per_chunk_full`` so the count never exceeds the
+        full chunk's block count when ``sliding_window`` is larger
+        than ``lmcache_chunk_size``.
+        """
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        if group.sliding_window <= 0:
+            return self.blocks_per_chunk_full(group_idx)
+        # ceil(sliding_window / logical_block_size)
+        suffix_blocks = (
+            group.sliding_window + group.logical_block_size - 1
+        ) // group.logical_block_size
+        return min(suffix_blocks, self.blocks_per_chunk_full(group_idx))
 
     @property
     def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
@@ -284,16 +388,45 @@ class GPUCacheContext:
         start = chunk_idx * self.tmp_chunk_bytes_
         return self.tmp_gpu_buffer_[start : start + self.tmp_chunk_bytes_]
 
+    def storage_logical_tokens_per_chunk(self, group_idx: int) -> int:
+        """Return the per-chunk logical-token count this group's tmp
+        buffer slot is sized for.
+
+        For full-attention groups (``sliding_window == 0``) this is
+        ``lmcache_logical_chunk_size`` — the full chunk's logical
+        tokens. For SWA groups, this is the SWA-truncated count
+        (= ``blocks_per_chunk(g) * logical_block_size_g``), matching
+        the truncated payload that the store/retrieve loops actually
+        move and the truncated tmp slot we sized at construction.
+
+        Distinct from :meth:`get_physical_chunk_size`, which returns
+        the per-chunk *physical* slot count fed to the kernel
+        (= ``blocks_per_chunk(g) * physical_block_size_g`` for SWA,
+        ``lmcache_logical_chunk_size // compress_ratio`` for non-SWA).
+        """
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        if group.sliding_window <= 0:
+            return self.lmcache_logical_chunk_size
+        return self.blocks_per_chunk(group_idx) * group.logical_block_size
+
     def get_tmp_chunk_gpu_buffer(self, group_idx: int = 0) -> torch.Tensor:
         """
         Returns a view of the temporary GPU buffer for the given group,
-        sized for a single chunk of ``lmcache_chunk_size`` tokens.
+        sized for a single chunk. The chunk holds
+        ``storage_logical_tokens_per_chunk(g)`` logical tokens which,
+        for a compressed group, correspond to that group's
+        ``physical_chunk_size`` physical slots. For SWA groups the
+        per-chunk slot was sized at construction to the truncated
+        SWA-suffix payload (``blocks_per_chunk(g) *
+        logical_block_size``), so this view fits cleanly inside the
+        slot.
 
         Args:
             group_idx: Index of the KV layer group (default 0).
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        shape = self.get_kv_buffer_shape(self.lmcache_chunk_size, group_idx)
+        logical_tokens_g = self.storage_logical_tokens_per_chunk(group_idx)
+        shape = self.get_kv_buffer_shape(logical_tokens_g, group_idx)
         start = self.tmp_chunk_group_offsets_[group_idx]
         end = self.tmp_chunk_group_offsets_[group_idx + 1]
         return self.tmp_gpu_buffer_[start:end].view(group.dtype).view(shape)
@@ -304,7 +437,8 @@ class GPUCacheContext:
         """
         Returns a list of ``batch_size`` non-overlapping views into the
         pre-allocated temporary GPU buffer for the given group, each
-        sized for ``lmcache_chunk_size`` tokens.
+        sized for the group's storage-logical-tokens-per-chunk count
+        (full chunk for non-SWA, SWA-truncated for SWA groups).
 
         Args:
             batch_size: Number of concurrent requests (must be <= max_batch_size).
@@ -315,7 +449,8 @@ class GPUCacheContext:
                 f"batch_size {batch_size} exceeds max_batch_size {self.max_batch_size}"
             )
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        shape = self.get_kv_buffer_shape(self.lmcache_chunk_size, group_idx)
+        logical_tokens_g = self.storage_logical_tokens_per_chunk(group_idx)
+        shape = self.get_kv_buffer_shape(logical_tokens_g, group_idx)
         g_start = self.tmp_chunk_group_offsets_[group_idx]
         g_end = self.tmp_chunk_group_offsets_[group_idx + 1]
         chunk = self.tmp_chunk_bytes_
@@ -343,30 +478,118 @@ class GPUCacheContext:
         buf.copy_(cpu_tensor, non_blocking=True)
         return buf
 
-    def get_kv_buffer_shape(self, num_tokens: int, group_idx: int = 0) -> torch.Size:
-        """
-        Returns the shape of the KV buffer for the given number of tokens.
+    def stage_block_ids_per_namespace(
+        self, per_gid_block_ids: list[list[int]]
+    ) -> list[torch.Tensor]:
+        """Copy each engine namespace's block IDs into non-overlapping
+        slots of the shared GPU buffer and return one staged tensor per
+        namespace.
+
+        The outer list of ``per_gid_block_ids`` is indexed by
+        engine-side ``kv_cache_group_id`` (gid). Inner lists are
+        concatenated into the shared buffer at successive offsets, so
+        each gid's staged tensor is a non-overlapping view of the same
+        underlying allocation. This matches the wire format of
+        :class:`~lmcache.integration.vllm.vllm_multi_process_adapter.LoadStoreOp.block_ids`
+        — outer index = gid, inner = block IDs for that gid in chunk
+        order.
+
+        For non-hybrid engines the outer list has length 1 and this
+        reduces to a single staged tensor — equivalent to
+        :meth:`stage_block_ids` on the single inner list.
 
         Args:
-            num_tokens: Number of tokens.
+            per_gid_block_ids: Per-namespace block IDs, indexed by
+                engine-side ``kv_cache_group_id``.
+
+        Returns:
+            A list parallel to *per_gid_block_ids* of int64 GPU tensor
+            views into the pre-allocated buffer. Each view is a slice
+            ``self.block_ids_buffer_[offset : offset+len_g]`` and shares
+            storage with the buffer.
+
+        Raises:
+            ValueError: If the total block count exceeds the
+                pre-allocated buffer.
+        """
+        # Pack everything into one CPU array, then copy once. This is
+        # cheaper than per-gid memcpy because each namespace can be
+        # short (V4 hybrid-on: gid 4 has only ~32 blocks per chunk).
+        offsets: list[int] = [0]
+        flat: array.array = array.array("l")
+        for group_block_ids in per_gid_block_ids:
+            flat.extend(group_block_ids)
+            offsets.append(len(flat))
+        total = offsets[-1]
+        if total > self.block_ids_buffer_.shape[0]:
+            raise ValueError(
+                f"per-namespace block ID total {total} exceeds the "
+                f"pre-allocated buffer size {self.block_ids_buffer_.shape[0]}"
+            )
+        buf = self.block_ids_buffer_[:total]
+        cpu_tensor = torch.frombuffer(flat, dtype=torch.long)
+        buf.copy_(cpu_tensor, non_blocking=True)
+        return [
+            self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
+            for i in range(len(per_gid_block_ids))
+        ]
+
+    def get_kv_buffer_shape(
+        self, logical_num_tokens: int, group_idx: int = 0
+    ) -> torch.Size:
+        """
+        Returns the shape of the KV buffer for the given number of
+        *logical* tokens.
+
+        For a compressed group (``compress_ratio > 1``) every
+        ``compress_ratio`` logical tokens are packed into a single
+        physical slot, so the returned shape's token dimension is
+        ``num_tokens // compress_ratio``. Callers therefore always
+        pass logical-token counts and never need to know per-group
+        compression ratios.
+
+        Args:
+            logical_num_tokens: Number of *logical* tokens. Must be a multiple
+                of the group's ``compress_ratio``.
             group_idx: Index of the KV layer group (default 0).
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        compress_ratio = group.compress_ratio
+        if logical_num_tokens % compress_ratio != 0:
+            raise ValueError(
+                f"logical_num_tokens ({logical_num_tokens}) is not a multiple of "
+                f"compress_ratio ({compress_ratio}) for group {group_idx}"
+            )
+        num_slots = logical_num_tokens // compress_ratio
         sd = group.shape_desc
         return torch.Size(
-            (sd.kv_size, group.num_layers, num_tokens, group.hidden_dim_size)
+            (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
 
     def cache_size_per_token(self) -> int:
         """
-        Returns the cache size per token (in bytes), summed across all groups.
+        Returns the cache size per *logical* token (in bytes), summed
+        across all groups. For a compressed group, one physical slot
+        stores ``compress_ratio`` logical tokens, so the per-logical-token
+        contribution is ``physical_slot_bytes // compress_ratio``.
+
+        Reporting-only metric (surfaced via the ``/api/status`` HTTP
+        endpoint and the ``lmcache describe`` CLI); sub-byte truncation
+        from integer division is acceptable.
         """
         total = 0
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            numels = self.get_kv_buffer_shape(1, group_idx).numel()
-            total += numels * group.dtype.itemsize
+            # ``get_kv_buffer_shape`` now takes *logical* tokens, so
+            # query ``compress_ratio`` logical tokens (= 1 physical
+            # slot) and then divide the resulting bytes back by
+            # ``compress_ratio`` to recover the per-logical-token
+            # contribution. Equivalent to the old
+            # ``physical_slot_bytes // compress_ratio`` formulation.
+            numels = self.get_kv_buffer_shape(group.compress_ratio, group_idx).numel()
+            slot_bytes = numels * group.dtype.itemsize
+            total += slot_bytes // group.compress_ratio
         return total
 
 
