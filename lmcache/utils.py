@@ -691,6 +691,7 @@ def thread_safe(func):
     Returns:
         A wrapper that serializes calls to ``func`` using the shared lock.
     """
+
     def wrapper(*args, **kwargs):
         with _shared_observability_lock:
             result = func(*args, **kwargs)
