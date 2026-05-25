@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// SYCL/XPU port of rotary_embedding_k_fused (csrc/pos_kernels.cu).
+// Fused rotary embedding (undo-then-redo) for Intel XPU.
 //
 // Algorithm
 // ---------
@@ -16,8 +16,8 @@
 //   - The cos/sin cache rows for both old and new positions are loaded
 //     once per token via cached global reads.  rot_dim is typically <=
 //     256 floats so register/L1 pressure is fine.
-//   - Branch on IS_NEOX is a template parameter so the IGC can specialise
-//     and drop the run-time test inside the hot loop.
+//   - IS_NEOX is a template parameter so the IGC can specialise and drop
+//     the run-time test inside the hot loop.
 //
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"

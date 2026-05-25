@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// SYCL/XPU implementation of calculate_cdf.  Mirrors csrc/cal_cdf.cu but
-// is hand-tuned for the Intel Xe architecture (PVC / DG2 / BMG / Arc).
+// SYCL/XPU implementation of calculate_cdf, hand-tuned for the Intel Xe
+// architecture (PVC / DG2 / BMG / Arc).
 //
 // Algorithm
 // ---------
 //   For each (layer_id, channel_id) we build a histogram of the uint8
 //   input values along the `ntokens` axis, prefix-sum it into a CDF,
 //   normalise to a uint16 range, and add the bin index so values are
-//   strictly monotonic (matches normalize_cdf_value() in the CUDA
-//   version).
+//   strictly monotonic (see normalize_cdf_value()).
 //
 // Intel XPU mapping
 // -----------------
@@ -40,11 +39,10 @@
 
 namespace {
 
-// Match CUDA cal_cdf.cu.
 constexpr int MAX_BINS_SUPPORTED = 64;
 constexpr int INTEL_SUB_GROUP_SIZE = 16;
 
-// Mirrors normalize_cdf_value() in csrc/cal_cdf.cu.
+// Linear remap into [0, 0xFFFF - max_bins].
 inline uint16_t normalize_cdf_value(uint16_t cdf_value, uint16_t total_count,
                                     int max_bins) {
   const uint32_t MAX_UINT16_VALUE = 0xFFFFu - static_cast<uint32_t>(max_bins);
@@ -83,7 +81,7 @@ void launch_calculate_cdf(sycl::queue& queue, const uint8_t* input,
               // Zero this column of the SLM histogram.  No barrier
               // needed: every work-item only ever touches column `tx`,
               // so there is zero cross-thread sharing in SLM.  Profiler
-              // (unitrace --stall-sampling) confirmed the original
+              // (unitrace --stall-sampling) confirmed that the previous
               // barriers caused ~67% SyncStall — removing them was the
               // single largest win on this kernel.
               for (int i = 0; i <= max_bins; ++i) {
@@ -101,8 +99,8 @@ void launch_calculate_cdf(sycl::queue& queue, const uint8_t* input,
                   hist[v + 1][tx] += 1;
                 }
 
-                // Inclusive prefix sum so hist[i] = sum of counts of bins
-                // [0..i-1] (matches CUDA semantics).
+                // Inclusive prefix sum so hist[i] = sum of counts of
+                // bins [0..i-1].
                 uint16_t total = 0;
                 for (int i = 0; i < max_bins; ++i) {
                   uint16_t value = hist[i + 1][tx];
@@ -136,8 +134,7 @@ void launch_calculate_cdf(sycl::queue& queue, const uint8_t* input,
   });
 }
 
-// Mirrors CUDA get_block_size() -- largest power-of-two divisor of
-// nchannels, capped at 128.
+// Largest power-of-two divisor of nchannels, capped at 128.
 int get_block_size_xpu(int nchannels) {
   static const int kCandidates[] = {128, 64, 32, 16, 8, 4, 2, 1};
   for (int bs : kCandidates) {
@@ -171,9 +168,8 @@ at::Tensor calculate_cdf_xpu(const at::Tensor& input, int64_t max_bins) {
 
   sycl::queue& queue =
       c10::xpu::getCurrentXPUStream(input.device().index()).queue();
-  // Accept both Byte (uint8) and Char (int8) inputs -- CUDA equivalent
-  // uses packed_accessor<int8_t> but values are stored as bin indices in
-  // [0, max_bins), so byte-pattern is identical regardless of signedness.
+  // Accept both Byte (uint8) and Char (int8) inputs: values are bin
+  // indices in [0, max_bins), so byte-pattern is identical either way.
   const uint8_t* in_ptr =
       reinterpret_cast<const uint8_t*>(contiguous.data_ptr());
   int16_t* out_ptr = output.data_ptr<int16_t>();

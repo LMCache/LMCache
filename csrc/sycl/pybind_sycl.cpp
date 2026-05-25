@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //
-// Python bindings for the SYCL/XPU memory kernels.
-// This module (lmcache.xpu_ops) mirrors the mem-kernel subset of
-// lmcache.xpu_ops but targets Intel XPU via SYCL.
+// Python bindings for the SYCL/XPU memory and CacheGen kernels.
+// Exposed as `lmcache.xpu_ops`.
 //
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
@@ -45,8 +44,9 @@ PYBIND11_MODULE(xpu_ops, m) {
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
 
-  // CacheGen / RoPE kernels (Intel XPU).  Names match the CUDA c_ops module
-  // (lmcache.c_ops) so lmcache._get_backend() can transparently override.
+  // CacheGen / RoPE kernels (Intel XPU).  Names match the
+  // lmcache.python_ops_fallback module so lmcache._get_backend() can
+  // transparently override.
   m.def("calculate_cdf", &calculate_cdf_xpu, py::arg("input"),
         py::arg("max_bins"));
   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused_xpu,

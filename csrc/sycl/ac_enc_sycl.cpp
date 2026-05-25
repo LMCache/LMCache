@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// SYCL/XPU port of csrc/ac_enc.cu (arithmetic encoder for CacheGen).
+// SYCL/XPU arithmetic encoder for CacheGen.
 //
 // Algorithm
 // ---------
@@ -15,17 +15,15 @@
 //       group axis 0 = layer
 //       group axis 1 = channel block (BLOCK_SIZE work-items per WG)
 //   - Each work-item owns ONE (layer, channel).  The state machine is
-//     intrinsically sequential, so we don't try to parallelise across
-//     tokens.
+//     intrinsically sequential, so we don't parallelise across tokens.
 //   - SLM:
 //       cdf_shared      [MAX_LP * BLOCK_SIZE] uint16  -- column-major
 //                                                       (lid * BLOCK_SIZE + tx)
 //       output_shared   [BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD] u8
-//     A column-major CDF layout matches the CUDA kernel: a sub-group of
-//     16 lanes will read 16 *contiguous* uint16s when looking up cdf[s],
-//     producing fully coalesced SLM access (no bank conflicts on Xe SLM
-//     banks which are 4-byte wide -- two consecutive lanes pack into the
-//     same bank line).
+//     Column-major CDF layout lets a sub-group of 16 lanes read 16
+//     *contiguous* uint16s when looking up cdf[s], giving fully coalesced
+//     SLM access without bank conflicts (Xe SLM banks are 4-byte wide, so
+//     two consecutive lanes pack into the same bank line).
 //   - Sub-group size locked to 16 (Intel native SIMD).
 //
 #pragma GCC diagnostic push
@@ -62,11 +60,9 @@ template <typename SLMRef>
 inline void spill_reg_to_shared(uint32_t& output_reg, int& output_reg_len,
                                 SLMRef output_shared,
                                 int& output_shared_offset) {
-  // output_reg is filled to 32 bits when this is called; write all 4 bytes
-  // in big-endian order so the byte-stream matches the CUDA reference.
-  // We still write byte-by-byte rather than as a uint32_t to keep the
-  // offset arithmetic alignment-agnostic (output_shared_offset is not
-  // guaranteed to be 4-byte aligned).
+  // output_reg holds 32 filled bits; write them out big-endian.
+  // Byte-by-byte because output_shared_offset is not guaranteed to be
+  // 4-byte aligned.
   output_shared[output_shared_offset] = static_cast<uint8_t>(output_reg >> 24);
   output_shared[output_shared_offset + 1] =
       static_cast<uint8_t>((output_reg >> 16) & 0xFFu);
@@ -316,8 +312,8 @@ void encode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& input_sym,
       c10::xpu::getCurrentXPUStream(cdf.device().index()).queue();
 
   const int16_t* cdf_ptr = cdf_c.data_ptr<int16_t>();
-  // Accept both Byte (uint8) and Char (int8) input symbols (the CUDA
-  // kernel uses int8); bit pattern is what the AC state machine reads.
+  // Accept both Byte (uint8) and Char (int8) input symbols; the AC
+  // state machine reads the raw bit pattern either way.
   const uint8_t* sym_ptr = reinterpret_cast<const uint8_t*>(sym_c.data_ptr());
   uint8_t* out_buf_ptr = reinterpret_cast<uint8_t*>(output_buffer.data_ptr());
   int32_t* out_len_ptr = output_lengths.data_ptr<int32_t>();

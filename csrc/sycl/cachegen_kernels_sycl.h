@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Declarations of SYCL/XPU implementations of CacheGen + RoPE kernels.
-// These mirror the CUDA counterparts in csrc/cachegen_kernels.cuh and
-// csrc/pos_kernels.cuh but are implemented in csrc/sycl/*.cpp and exposed
-// to Python via lmcache.xpu_ops.
+// Implementations live in csrc/sycl/*.cpp and are exposed to Python via
+// lmcache.xpu_ops.
 //
 #pragma once
 
@@ -17,7 +16,7 @@
 at::Tensor calculate_cdf_xpu(const at::Tensor& input, int64_t max_bins);
 
 // Arithmetic encoder (forward): produces a byte buffer + per-channel
-// length tensor.  Signature matches encode_cuda_new.
+// length tensor.
 void encode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& input_sym,
                          at::Tensor& output_buffer, at::Tensor& output_lengths);
 

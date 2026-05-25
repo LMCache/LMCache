@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// SYCL/XPU port of csrc/ac_dec.cu.  Provides BOTH:
+// Arithmetic-coding decoder for Intel XPU.  Provides:
 //   decode_fast_new_xpu      -- per-channel buffer input
 //   decode_fast_prefsum_xpu  -- 1-D packed bytestream + prefix-sum offsets
 //
 // Algorithm
 // ---------
 //   One work-item per (layer, channel); each runs an independent
-//   arithmetic-decoder state machine over `ntokens` symbols.  Mirrors the
-//   logic in csrc/ac_dec.cu including the unrolled binary search.
+//   arithmetic-decoder state machine over `ntokens` symbols, with an
+//   unrolled binary search over the channel's CDF.
 //
 // Intel XPU mapping
 // -----------------
@@ -16,9 +16,8 @@
 //   - SLM: CDF [MAX_LP * BLOCK_SIZE] uint16, per-channel byte buffer
 //     [BLOCK_SIZE * OUTPUT_BUFFER_LENGTH_PER_THREAD] uint8.
 //   - Sub-group size locked to 16 (Xe native SIMD).
-//   - Binary search uses sycl::min/sycl::max via simple loop with
-//     compile-time bound max_symbol <= MAX_LP-2 < 64 so the IGC unrolls
-//     it to ~6 comparisons.
+//   - Binary search uses a simple loop with compile-time bound
+//     max_symbol <= MAX_LP-2 < 64 so the IGC unrolls it to ~6 comparisons.
 //
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -149,14 +148,14 @@ void launch_decode_per_channel(sycl::queue& queue, const int16_t* cdf,
           int bit_idx = 1;  // next bit: (byte_buffer >> (8-bit_idx)) & 1
           int byte_buffer_offset = 4;
 
-          // Initial 32-bit value from first 4 bytes (big-endian).
+          // Initial 32-bit value from first 4 bytes (big-endian); on
+          // little-endian devices this matches a packed load followed
+          // by a byte-swap.
           const int row_base = tx * OUTPUT_BUFFER_LENGTH_PER_THREAD;
           uint32_t v0 = (static_cast<uint32_t>(bs_shared[row_base]) << 24) |
                         (static_cast<uint32_t>(bs_shared[row_base + 1]) << 16) |
                         (static_cast<uint32_t>(bs_shared[row_base + 2]) << 8) |
                         static_cast<uint32_t>(bs_shared[row_base + 3]);
-          // CUDA reads as ((uint32_t*)row)[0] then big_to_small.  On
-          // little-endian devices this equals the big-endian read above.
           (void)big_to_small_u32;
           uint32_t value = v0;
           byte_buffer = bs_shared[row_base + byte_buffer_offset];
@@ -248,8 +247,7 @@ void launch_decode_prefsum(sycl::queue& queue, const int16_t* cdf,
           const int max_symbol = lp - 2;
 
           // Load running prefix sums for [BLOCK_SIZE + 1] positions.
-          // CUDA computes lengths_prefix[gid / nchannels][gid % nchannels]
-          // where gid is the *global* index across (layer, channel).
+          // Index is the *global* (layer, channel) flattened position.
           for (int i = tx; i < BLOCK_SIZE + 1; i += BLOCK_SIZE) {
             const int gid =
                 layer_id * nchannels + global_channel_offset + i - 1;
