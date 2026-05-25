@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import hashlib
 import os
 
 # Third Party
@@ -139,8 +140,6 @@ def test_process_tokens_returns_int_keys_for_bytes_hash_func() -> None:
     hash function returns bytes (e.g. sha256_cbor). This ensures downstream
     code such as msgpack serialisation always receives plain ints.
     """
-    import hashlib
-
     cfg = LMCacheEngineConfig.from_legacy(chunk_size=16, backend="cpu")
     metadata = dumb_metadata()
     db = ChunkedTokenDatabase(cfg, metadata)
