@@ -37,22 +37,16 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 
 # 8-tuple identity for kernel-equivalent layers. Two layers share a
 # transfer-kernel launch iff their identities match. The first five fields
-# (``kv_size, num_heads, head_size, block_size, dtype``) are the legacy
-# kernel-shape signature. The other three came from the DeepSeek-V4
-# hybrid-KV-cache work and default to safe values that collapse the tuple
-# to the legacy 5-tuple when the engine doesn't supply hints:
+# are the legacy kernel-shape signature; the other three came from the
+# DeepSeek-V4 hybrid-KV-cache work and collapse to defaults when the engine
+# supplies no hints, recovering the legacy 5-tuple behavior:
 #
-# - ``logical_block_size`` — scheduler-side tokens per block. Defaults to
-#   physical ``bs``. Required when the engine hands different scheduler
-#   grids to physically-equivalent layers (V4 dense-MLA at 256 vs SWA at 64);
-#   one ``LoadStoreOp.block_ids`` cannot index two grids.
-# - ``kv_cache_group_id`` — engine-side block-ID namespace handle.
-#   Defaults to 0. Two layers in different namespaces cannot share a launch
-#   even when every other field matches (V4 vLLM gid 1 vs gid 2: same spec
-#   shape, disjoint ``BlockPool``-allocated IDs).
-# - ``sliding_window`` — SWA window size in tokens, ``0`` for full attention.
-#   Non-zero activates SWA-suffix-only stores/retrieves; layers with
-#   different windows have different per-chunk byte budgets.
+# - ``logical_block_size`` (default = physical ``bs``): scheduler-side
+#   tokens per block. ``LoadStoreOp.block_ids`` is keyed at this stride.
+# - ``kv_cache_group_id`` (default 0): engine-side block-ID namespace.
+#   Disjoint namespaces cannot share a launch (V4 vLLM gids 1 vs 2).
+# - ``sliding_window`` (default 0): SWA window in tokens; non-zero
+#   activates SWA-suffix-only stores/retrieves.
 LayerGroupIdentity = tuple[int, int, int, int, int, int, int, torch.dtype]
 
 

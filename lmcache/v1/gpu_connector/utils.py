@@ -73,77 +73,36 @@ class LayoutHints(TypedDict, total=False):
         head_dim: Per-head dimension. Used by TRT-LLM (same).
         inference_engine_logical_block_size: Inference-engine-side block
             size (logical tokens per engine block; for vLLM this is
-            ``cache_config.block_size``). Carried inside
-            ``LayoutHints`` (instead of as a standalone
-            ``REGISTER_KV_CACHE`` argument) so that engines without a
-            logical block-size concept can simply omit it. The server
-            uses it to derive per-group compression ratios when some
-            KV layer groups compress multiple logical tokens into a
-            single physical slot
+            ``cache_config.block_size``). Used to derive per-group
+            compression ratios when KV layer groups compress multiple
+            logical tokens into a single physical slot
             (``shape_desc.bs < inference_engine_logical_block_size``).
-            Single global value: every group derives compression
-            against this same ``ie_logical_block_size``. Adequate for
-            engines where every KV layer group shares one scheduler
-            block size (e.g. vLLM with hybrid KV cache manager
-            disabled). When a single global value cannot describe the
-            engine's per-layer scheduler block sizes (vLLM HMA=on, where
-            different ``KVCacheGroupSpec``s use different
-            ``block_size`` values), use ``per_layer_logical_block_size``
-            instead. When both are set, ``per_layer_logical_block_size``
-            takes precedence for grouping and chunking.
-        per_layer_logical_block_size: Optional list of length
-            ``num_layers`` carrying the *scheduler-side* tokens-per-block
-            of each layer (vLLM: each layer's
-            ``KVCacheGroupSpec.kv_cache_spec.block_size``). When
-            present, the LMCache server keys layer grouping on a
-            per-layer logical block size instead of one global value,
-            and chunking math (``blocks_per_chunk_g = lmcache_chunk_size
-            // logical_bs_g``) becomes per-group. Required when the
-            engine has KV layer groups with mixed scheduler block sizes
-            (DeepSeek-V4 with vLLM hybrid KV cache manager active).
-            Each entry must be a positive int. Layers with the same
-            ``logical_block_size`` and identical other identity fields
-            are grouped together.
-        per_layer_kv_cache_group_id: Optional list of length
-            ``num_layers`` carrying the engine-side block-ID *namespace*
-            handle for each layer. On vLLM with the hybrid KV cache
-            manager active, each ``KVCacheGroupSpec`` allocates block
-            IDs from a disjoint ``BlockPool`` namespace; two layers
-            with otherwise identical identity may still pull block IDs
-            from independent pools and must therefore land in different
-            LMCache groups. The hint participates in
-            :data:`LayerGroupIdentity` as the namespace disambiguator
-            (DeepSeek-V4 hybrid manager: even+MTP-SWA layers vs odd-SWA
-            layers share every other identity field but use distinct
-            gids). Each entry must be a non-negative int. When absent,
-            every layer is treated as namespace 0 (preserving
-            behavior on engines without hybrid KV cache groupings).
-        per_layer_sliding_window: Optional per-layer sliding-window
-            attention size in tokens, or ``0`` for full-attention
-            layers. When non-zero for a group, LMCache stores and
-            retrieves only the *last*
+            Single global value; for engines with mixed scheduler block
+            sizes use ``per_layer_logical_block_size`` instead, which
+            takes precedence when both are set.
+        per_layer_logical_block_size: Optional length-``num_layers``
+            list of each layer's scheduler-side tokens-per-block
+            (vLLM: ``KVCacheGroupSpec.kv_cache_spec.block_size``).
+            Required when KV layer groups have mixed scheduler block
+            sizes (DeepSeek-V4 with vLLM HMA active); LMCache then
+            keys grouping on per-layer logical block size and chunking
+            becomes per-group.
+        per_layer_kv_cache_group_id: Optional length-``num_layers``
+            list of each layer's engine-side block-ID namespace
+            handle. On vLLM HMA, each ``KVCacheGroupSpec`` allocates
+            block IDs from a disjoint ``BlockPool``; layers with
+            otherwise identical identity but different namespaces
+            must land in different LMCache groups. When absent, every
+            layer is treated as namespace 0.
+        per_layer_sliding_window: Optional per-layer SWA size in
+            tokens (``0`` for full-attention). When non-zero, LMCache
+            stores/retrieves only the last
             ``ceil(sliding_window / logical_block_size)`` blocks of
-            each chunk for that group, instead of all
-            ``lmcache_chunk_size // logical_block_size`` blocks. The
-            kernel-time SWA mask in the serving engine never reads
-            positions older than ``sliding_window`` from the current
-            decode position, so the truncated payload is sufficient:
-            a full hit's last cached chunk holds positions ``[L -
-            last_chunk_size + 1, L]`` of which only the last
-            ``window`` are ever accessed; a partial hit only reads
-            the cached SWA tail for the first ``window`` recompute
-            steps before the window slides into recomputed positions.
-            On DeepSeek-V4 (``chunk_size=1024``,
-            ``window in {8, 128, 256}``), this collapses gid 3's
-            per-chunk SWA payload from ~236 MiB to ~1.85 MiB.
-            Two layers with the same other fields but different
-            ``sliding_window`` values cannot share an LMCache group
-            because their per-chunk byte budgets differ — the value
-            joins :data:`LayerGroupIdentity` as an extra component.
-            The list length MUST equal the number of layers; entry
-            ``i`` is the window for the i-th positional layer. When
-            absent, every layer is treated as ``sliding_window = 0``
-            and behavior is identical to the prior 7-tuple grouping.
+            each chunk — sufficient because the engine's SWA mask
+            never reads positions older than ``sliding_window``.
+            Joins :data:`LayerGroupIdentity` since differing windows
+            imply differing per-chunk byte budgets. When absent,
+            treated as ``0``.
     """
 
     kv_layout: Literal["NHD", "HND"]

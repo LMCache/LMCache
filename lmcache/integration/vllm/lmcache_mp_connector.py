@@ -651,33 +651,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
 
-        # Build per-positional-layer logical block size and namespace from
-        # ``self._kv_cache_config.kv_cache_groups``. Under the hybrid
-        # manager, each ``KVCacheGroupSpec`` reports its own
-        # ``KVCacheSpec.block_size`` and pulls block IDs from its own
-        # ``BlockPool``; LMCache needs both signals to keep one transfer
-        # kernel per ``(physical_bs, logical_bs, namespace)`` triple.
-        # Without ``logical_bs`` we'd merge V4's C4A-main and per-layer-SWA
-        # layers (both physical ``bs=64``); without ``namespace`` we'd
-        # merge V4 gids 1 and 2 (every spec field matches, separate
-        # ``req_to_blocks`` dicts).
-        #
-        # Layers absent from ``kv_caches`` keep their sentinel entries
-        # (logical_bs=0, namespace=-1); the LMCache-side consumer rejects
-        # any non-positive / negative entry at registration, so a partial
-        # cover surfaces as a loud failure. If no hint is populated we drop
-        # both lists so single-group engines fall back to the legacy
-        # 5-tuple identity.
+        # Build per-positional-layer hints from ``kv_cache_groups``: under
+        # HMA each ``KVCacheGroupSpec`` has its own block_size, BlockPool
+        # namespace, and sliding_window. LMCache needs all three to key
+        # one transfer kernel per ``(physical_bs, logical_bs, namespace,
+        # window)`` tuple. Sentinels (logical_bs=0, namespace=-1) for
+        # uncovered layers trigger a loud failure on the LMCache side.
         per_layer_logical_block_size: list[int] | None = None
         per_layer_kv_cache_group_id: list[int] | None = None
         per_layer_sliding_window: list[int] | None = None
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        # We always publish the per-layer ``sliding_window`` so LMCache
-        # can shrink each SWA-flavored group's per-chunk MemoryObj slot
-        # to just the last ``ceil(window / logical_block_size)`` blocks
-        # (the SWA-suffix-only optimization). Full-attention groups
-        # report ``sliding_window == 0`` and the LMCache consumer keeps
-        # the prior full-chunk behavior for those.
         if kv_cache_config is not None and getattr(
             kv_cache_config, "kv_cache_groups", None
         ):
@@ -686,21 +669,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             num_positional = len(kv_cache_layer_names)
             per_layer_logical_block_size = [0] * num_positional
             per_layer_kv_cache_group_id = [-1] * num_positional
-            # Sentinel 0 means "no sliding-window cap" (= full
-            # attention). The LMCache consumer reads
-            # ``sliding_window == 0`` as "store full chunk", which
-            # matches the existing behavior for non-SWA layers.
+            # 0 = full attention (no SWA suffix-only optimization).
             per_layer_sliding_window = [0] * num_positional
             for gid, group in enumerate(kv_cache_config.kv_cache_groups):
                 spec = getattr(group, "kv_cache_spec", None)
                 spec_block_size = getattr(spec, "block_size", None)
                 if spec_block_size is None:
                     continue
-                # ``KVCacheSpec.sliding_window`` lives on the spec
-                # directly (``SlidingWindowMLASpec`` etc.), or — when vLLM
-                # has wrapped per-layer specs into
-                # ``UniformTypeKVCacheSpecs`` — on the wrapped inner
-                # specs (uniform by construction).
+                # ``sliding_window`` may live on the spec directly or on
+                # inner specs of a ``UniformTypeKVCacheSpecs`` wrapper.
                 spec_sliding_window = getattr(spec, "sliding_window", None)
                 if spec_sliding_window is None:
                     inner_specs = getattr(spec, "kv_cache_specs", None)
@@ -724,12 +701,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                         per_layer_logical_block_size[pos] = int(spec_block_size)
                         per_layer_kv_cache_group_id[pos] = gid
                         per_layer_sliding_window[pos] = int(spec_sliding_window)
-            # If neither list got populated (no usable specs), drop
-            # all hints so the consumer falls back to the prior
-            # behavior cleanly. Layers that ended up with sentinel
-            # values (some specs missing block_size, some layer names
-            # absent from kv_caches) will trigger a loud ValueError
-            # on the LMCache side.
+            # No usable specs: drop hints, fall back to legacy 5-tuple.
             if not any(per_layer_logical_block_size) and all(
                 ns == -1 for ns in per_layer_kv_cache_group_id
             ):

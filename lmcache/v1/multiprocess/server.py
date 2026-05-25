@@ -652,14 +652,11 @@ class MPCacheEngine:
                     else:
                         continue
 
-                    # Per-LMCache-group dispatch. Each group picks its own
-                    # ``blocks_per_chunk_g`` (full for full-attention,
-                    # SWA-suffix count for SWA groups), its own physical
-                    # kernel chunk size, and its block-ID slice from the
-                    # namespace-staged tensor for ``group.kv_cache_group_id``.
-                    # SWA groups slice the last ``bpc_g`` of each
-                    # ``bpc_full_g``-sized chunk; ``blocks_per_chunk_full(g)``
-                    # is the un-truncated count used to step between chunks.
+                    # Per-group dispatch: each group has its own
+                    # ``blocks_per_chunk_g``, physical kernel chunk size,
+                    # and namespace-staged block-ID slice. SWA groups
+                    # take the trailing ``bpc_g`` of each ``bpc_full_g``
+                    # chunk slot.
                     for group_idx, group in enumerate(groups):
                         bpc_g = gpu_context.blocks_per_chunk(group_idx)
                         bpc_full_g = gpu_context.blocks_per_chunk_full(group_idx)
