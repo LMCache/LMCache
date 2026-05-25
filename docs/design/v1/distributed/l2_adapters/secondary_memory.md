@@ -106,18 +106,29 @@ fabrics are out of scope.
 ## 1b. Relationship to in-flight work
 
 Several capabilities adjacent to this proposal are already shipping or in
-active development:
+active development. The list below names them with their PR/issue links
+so reviewers can verify the relationship directly:
 
-- A multi-region DAX backend with runtime hotplug HTTP routes
-  (add/drain/remove/resize/status), a generic L2 hotplug protocol, and
-  migration safety checks.
-- A DAX primary-mode path where the mapped arena is used as both
-  allocator and storage backend, removing the CPU staging copy.
-- Per-key pin/unpin correctness fixes on the asynchronous retrieve path,
-  closing a class of refcount-accumulation bugs.
-- Zero-copy KV cache sharing across processes on a single host via CXL
-  shared memory, including the metadata coordination required for
-  multi-process readers.
+- **DAX storage backend** (merged): the tiered `/dev/dax` backend that
+  this proposal generalizes — [PR #2788](https://github.com/LMCache/LMCache/pull/2788),
+  and the original RFC that scoped it, [issue #2572](https://github.com/LMCache/LMCache/issues/2572).
+- **Multi-region DAX with runtime hotplug** (open): runtime
+  `add`/`drain`/`remove`/`resize`/`status` HTTP routes, a generic L2
+  hotplug protocol, and migration safety checks —
+  [PR #3264](https://github.com/LMCache/LMCache/pull/3264).
+- **DAX primary mode** (open): the mapped arena as both allocator and
+  storage backend, removing the CPU staging copy —
+  [PR #3057](https://github.com/LMCache/LMCache/pull/3057).
+- **Async pin/unpin correctness** (open): per-key refcount-accumulation
+  fix on the asynchronous retrieve path —
+  [PR #3027](https://github.com/LMCache/LMCache/pull/3027).
+- **Zero-copy CXL shared memory across same-host instances** (merged):
+  the Maru connector that demonstrates the value of byte-addressable
+  multi-process sharing —
+  [PR #2705](https://github.com/LMCache/LMCache/pull/2705).
+- **Roadmap items**: 2026 Q2 *"CXL improvements"* (Southbound) and
+  *"Fault Tolerance"* (MP & CLI Production Readiness), both in
+  [issue #2923](https://github.com/LMCache/LMCache/issues/2923).
 
 This proposal does not duplicate any of that work. It builds on the
 hotplug, multi-region, and shared-memory pieces already in flight, and
