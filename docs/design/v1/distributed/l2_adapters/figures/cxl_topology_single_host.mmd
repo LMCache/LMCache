@@ -1,0 +1,21 @@
+%% Single-host CXL Type-3 topology: GPUs reach CXL memory through their host CPU.
+flowchart LR
+  subgraph Host["Host"]
+    direction LR
+    GPU0["GPU 0"]
+    GPU1["GPU 1"]
+    GPUn["GPU n"]
+    CPU["Host CPU<br/>(CXL root complex)"]
+    DAX[("/dev/dax arena")]
+    GPU0 -- PCIe --> CPU
+    GPU1 -- PCIe --> CPU
+    GPUn -- PCIe --> CPU
+    CPU -- CXL --> DAX
+  end
+
+  classDef gpu fill:#dbeafe,stroke:#1d4ed8,color:#0f172a;
+  classDef cpu fill:#fef3c7,stroke:#b45309,color:#0f172a;
+  classDef mem fill:#dcfce7,stroke:#15803d,color:#0f172a;
+  class GPU0,GPU1,GPUn gpu;
+  class CPU cpu;
+  class DAX mem;

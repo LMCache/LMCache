@@ -1,0 +1,30 @@
+%% SecondaryMemoryL2Adapter design overview. Locators are the topology integration point.
+flowchart TB
+  IFACE["L2AdapterInterface<br/>(contract unchanged)"]
+  ADAPTER["SecondaryMemoryL2Adapter"]
+  GROUP["RegionGroup<br/>- regions (N >= 1)<br/>- placement policy<br/>- tombstone queue<br/>- metadata channel"]
+  ROWNED["Region (owned)"]
+  RREAD["Region (read-only)"]
+  LOCAL["LocalMmapLocator<br/>(stage 1)"]
+  POOLED["PooledMemoryLocator<br/>(stage 3)"]
+  DAX[("/dev/dax<br/>this host")]
+  POOL[("CXL pool<br/>via switch")]
+
+  IFACE --> ADAPTER --> GROUP
+  GROUP --> ROWNED
+  GROUP --> RREAD
+  ROWNED --> LOCAL
+  RREAD --> POOLED
+  LOCAL --> DAX
+  POOLED --> POOL
+
+  classDef api fill:#e0e7ff,stroke:#3730a3,color:#0f172a;
+  classDef core fill:#fef3c7,stroke:#b45309,color:#0f172a;
+  classDef region fill:#dbeafe,stroke:#1d4ed8,color:#0f172a;
+  classDef loc fill:#ede9fe,stroke:#6d28d9,color:#0f172a;
+  classDef mem fill:#dcfce7,stroke:#15803d,color:#0f172a;
+  class IFACE api;
+  class ADAPTER,GROUP core;
+  class ROWNED,RREAD region;
+  class LOCAL,POOLED loc;
+  class DAX,POOL mem;

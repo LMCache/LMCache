@@ -1,0 +1,31 @@
+%% Cross-host CXL 3.0 topology: hosts (not GPUs) share a pooled CXL arena via a switch.
+flowchart LR
+  subgraph HostA["Host A"]
+    direction TB
+    A_GPUs["GPUs"]
+    A_CPU["Host CPU<br/>(CXL root complex)"]
+    A_GPUs -- PCIe --> A_CPU
+  end
+
+  subgraph HostB["Host B"]
+    direction TB
+    B_GPUs["GPUs"]
+    B_CPU["Host CPU<br/>(CXL root complex)"]
+    B_GPUs -- PCIe --> B_CPU
+  end
+
+  SW{{"CXL 3.0 switch"}}
+  POOL[("Pooled CXL memory")]
+
+  A_CPU -- CXL --> SW
+  B_CPU -- CXL --> SW
+  SW --> POOL
+
+  classDef gpu fill:#dbeafe,stroke:#1d4ed8,color:#0f172a;
+  classDef cpu fill:#fef3c7,stroke:#b45309,color:#0f172a;
+  classDef sw  fill:#ede9fe,stroke:#6d28d9,color:#0f172a;
+  classDef mem fill:#dcfce7,stroke:#15803d,color:#0f172a;
+  class A_GPUs,B_GPUs gpu;
+  class A_CPU,B_CPU cpu;
+  class SW sw;
+  class POOL mem;
