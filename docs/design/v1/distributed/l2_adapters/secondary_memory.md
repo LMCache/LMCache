@@ -103,6 +103,48 @@ The short version: this proposal is about sharing the *host-side* KV cache
 tier across hosts. Per-host multi-GPU access is already free. GPU-to-GPU
 fabrics are out of scope.
 
+## 1b. Relationship to in-flight work
+
+Several capabilities adjacent to this proposal are already shipping or in
+active development:
+
+- A multi-region DAX backend with runtime hotplug HTTP routes
+  (add/drain/remove/resize/status), a generic L2 hotplug protocol, and
+  migration safety checks.
+- A DAX primary-mode path where the mapped arena is used as both
+  allocator and storage backend, removing the CPU staging copy.
+- Per-key pin/unpin correctness fixes on the asynchronous retrieve path,
+  closing a class of refcount-accumulation bugs.
+- Zero-copy KV cache sharing across processes on a single host via CXL
+  shared memory, including the metadata coordination required for
+  multi-process readers.
+
+This proposal does not duplicate any of that work. It builds on the
+hotplug, multi-region, and shared-memory pieces already in flight, and
+adds four things:
+
+1. **A cross-node forward path.** A `RegionLocator` abstraction with a
+   `RegionScope` enum (`PROCESS | HOST | RACK | FABRIC`). The same
+   `Region` and `RegionGroup` shapes that hold single-host arenas today
+   extend to fabric-attached shared pools tomorrow without changes to the
+   L2 contract, the controllers, or the placement policy interface.
+2. **Request-handoff operations.** Two new `StorageManager` methods
+   (`commit_for_handoff`, `is_persisted`) that let a request router
+   migrate a long-context request to a host with HBM headroom without
+   losing or recopying the context. See §5.5.
+3. **A unified `Region` abstraction across DAX and Maru.** The same
+   `RegionGroup`, tombstone queue, placement-policy registry, and
+   resilience contract apply to both backends, preventing the two from
+   drifting on the pieces they have in common.
+4. **A written-down resilience contract.** The six rules in §7 codify the
+   partial-failure semantics every secondary-memory adapter must honor,
+   backed by a leak-detector test that gates merges. The pieces exist
+   today across several PRs; this proposal makes them an explicit,
+   testable contract.
+
+Items 1 and 2 are new capabilities. Items 3 and 4 are coherence and
+maintainability gains on top of work that already exists.
+
 ## 2. The abstraction: Region and Locator
 
 A region is one byte-addressable arena that can be `mmap`ed by everyone
@@ -526,6 +568,29 @@ fabric failure and metadata-channel partition.
 
 Value at end of stage 3: operators can run cross-host shared KV cache in
 production with confidence.
+
+### Minimum viable shape
+
+The proposal as written is a three-stage vision. The architecture is also
+deliberately decomposable, so a maintainer who wants to commit to less
+can pick one of two smaller floors:
+
+- **Level A (~1 PR, ~200 lines).** Ship only
+  `StorageManager.commit_for_handoff` and `StorageManager.is_persisted`
+  (§5.5), implemented over existing L2 adapters. No `Region` / `Locator`
+  work. Gives same-host request handoff today; no cross-host story yet.
+- **Level B (~3 PRs, ~400 lines).** Level A plus the `RegionScope` enum
+  and a stub `RegionLocator` interface with `LocalMmapLocator` as the
+  only implementation. Adds the architectural extension point for
+  cross-node without building any cross-node code.
+- **Full proposal.** Three stages as described above.
+
+Levels A and B do not conflict with any in-flight DAX or Maru work and
+can land independently. Either still benefits from later cross-host work
+without redesign: at level A, the `is_persisted` signature is forward-
+compatible with adding a `scope` argument; at level B, the `RegionLocator`
+interface is exactly the integration point that a future
+`PooledMemoryLocator` plugs into.
 
 ## 12. What this proposal is not
 
