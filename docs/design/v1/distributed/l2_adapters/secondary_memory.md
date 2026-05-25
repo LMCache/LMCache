@@ -110,7 +110,15 @@ who can reach it. The thing that defines "who can reach it" is the
 **locator**.
 
 ```
-Region = (name, locator, capacity_slots, state, scope, latency_class)
+Region = (name, locator, capacity_slots, state, scope)
+
+  name           stable string identifier
+  locator        how this region is reached on this host (see table below)
+  capacity_slots fixed-size slot count owned by the region
+  state          ACTIVE | DEGRADED | REMOVED (see §6)
+  scope          PROCESS | HOST | RACK | FABRIC — the reach of this region.
+                 Consumed by `is_persisted(scope=...)` in §5.5 and by
+                 placement policies that want to filter on reach.
 
 Locator: name → (mmap_ptr, capacity_bytes)  on hosts that can reach this region
                                               raises NotReachable elsewhere
@@ -145,7 +153,8 @@ we will have tomorrow.
 
 The contract for a multi-reader region:
 
-- Every host that can reach the region maps the same arena read-only.
+- Every non-owner host that can reach the region maps the same arena
+  read-only. The owner maps it read-write.
 - Each region has exactly one **owner**: the LMCache server that allocates
   and commits slots. Non-owners are readers.
 - Ownership is per-region, not per-pool. A pool can hold many regions, with
@@ -155,6 +164,16 @@ The contract for a multi-reader region:
   that already coordinates intra-host sharing in the Maru backend. We lift
   that channel from "shared-memory broadcast on one host" to "metadata
   sync among hosts that share a region."
+- **Lookup is always local.** Each host maintains a read replica of the
+  key→slot index for every region it can reach. The metadata channel
+  streams add/evict events from each region's owner to all readers; the
+  replica is updated in place. A reader's `lookup_and_lock` never queries
+  a remote host — it consults the local replica. This makes lookup
+  latency independent of cluster size and makes the metadata channel a
+  fan-out publish-subscribe stream, not a request-response RPC. The cost
+  is one per-region index replica's worth of memory on every host that
+  joins the region, which scales with the number of slots in the region
+  (not with cluster size).
 - The slot allocator is owner-local. Readers never allocate.
 
 For the single-host case (`LocalMmapLocator`), every server on the host is
@@ -330,9 +349,18 @@ Six rules. They extend, not replace, the assumptions in
 2. **`submit_unlock` is durable across region removal.** If a region
    disappears between a successful `lookup_and_lock` and the matching
    `submit_unlock`, the unlock is recorded in the region's tombstone queue.
-   The queue drains on region re-add or on adapter close. The framework's
-   "eventual success" requirement is satisfied because no refcount entry is
-   lost.
+   The queue is bounded in two ways so it cannot grow indefinitely:
+   - **By time.** The queue is tied to the region's `REMOVED` grace period
+     (§6). Within the grace period it drains either by region re-add or by
+     adapter close, whichever comes first. After the grace period expires,
+     the queue is freed. Any outstanding unlock is satisfied vacuously —
+     the region's refcount table no longer has a consumer, so there is
+     nothing to leak.
+   - **By size.** A per-region cap (default 64 K entries) bounds the queue
+     under pathological churn. On overflow the oldest entries are dropped,
+     again by the same vacuous-satisfaction argument.
+   The framework's "eventual success" requirement (`overall.md`, assumption
+   4) is met either way: no caller ever waits on the unlock.
 3. **No counter leaks under fault.** Every external-lock and slot-borrow
    path has a matching decrement on success, failure, and shutdown. A
    leak detector test drives mid-flight region removal and asserts every
@@ -375,6 +403,23 @@ lock is released, with the source region already in `REMOVED`.
   index write happens after destination commit, before the source slot is
   released, so a key is never present in two regions at once.
 
+**Crash semantics for `migrate`.** Each migration batch writes a small
+per-adapter journal entry *before* it starts: `(src_region, dst_region,
+key, dst_slot_id, phase)` where `phase` is one of `COPIED`,
+`INDEX_FLIPPED`, `SRC_RELEASED`. On adapter open the journal is replayed
+and unfinished entries are reconciled:
+
+- `COPIED` (destination written but index not flipped): drop the dst slot,
+  leave the src slot live. The key stays in the source region.
+- `INDEX_FLIPPED` (index points at dst, src not yet released): release the
+  src slot. The key is in the destination region; the source slot is freed.
+- `SRC_RELEASED`: clean entry, no action.
+
+The atomic transition point is the index flip. Before it, the source is
+authoritative; after it, the destination is. A crash can leave a stray
+unreferenced slot in either region, but never a key visible in both. The
+journal is truncated after reconciliation.
+
 The hotplug surface is the **same** in stage 1 (single host) and stage 2
 (cross host). The locator handles the topology difference; the API does
 not.
@@ -411,9 +456,13 @@ required.
    (`migrate` and `evict`), and resize at runtime. Verify correctness and
    capacity accounting.
 3. **Single-host, multi-process share.** Two LMCache processes on the
-   same host pointed at overlapping regions. Process A owns; process B
-   reads. Verify zero-copy reads, correct metadata propagation, and
-   correct behavior when A removes the region under B.
+   same host configured with an identical set of regions backed by the
+   same `/dev/dax` device. Process A is the owner of each region (it
+   allocates and commits slots); process B is a read-only peer (it joins
+   the same regions through the metadata channel). Verify zero-copy reads
+   from B, correct metadata propagation when A commits or evicts, and
+   correct behavior when A removes the region while B has live read
+   borrows.
 4. **Cross-host simulation.** A test harness that runs two LMCache
    processes against the *same* file-backed arena, communicating via an
    in-process metadata channel that simulates RPC. This is not real
@@ -503,12 +552,23 @@ production with confidence.
    next access is cheap but exposes brief windows of stale lookups.
    Proposal: lazy with a generation counter, and a fast `is_stale(key)`
    check before returning a load.
-3. **Placement policy in the cross-host case.** Should a server be
-   willing to ship a store to a region owned by another host (RPC the
-   write to the owner) or should each server only write to regions it
-   owns? Owner-only is simpler. Cross-owner write is more flexible but
-   needs a write-RPC path. Proposal: owner-only for stage 2; revisit
-   based on real workloads.
+3. **Default cross-host placement policy.** Stage 2 ships two built-in
+   `PlacementPolicy` implementations through the existing registry, both
+   pluggable so users can pick or write their own without touching the
+   abstraction:
+   - **`OwnerOnly`** (default): each server writes only to regions it
+     owns. No write-RPC path, no new failure mode beyond what the owner
+     already has. Underutilizes cross-host capacity when one host's owned
+     regions are full while peers have space.
+   - **`OwnerThenForwarding`**: a server falls back to RPC-forwarding the
+     write to the owner of a less-full peer region. Better utilization.
+     Requires a write-RPC path and ownership-aware retry on owner failure.
+
+   Both ship together in stage 2; the choice is a config knob, not an
+   architectural commitment. `OwnerOnly` is the default because it has no
+   new failure mode. The open question is *when* (and based on what
+   evidence) to flip the default — likely after we have utilization data
+   from real cross-host deployments.
 4. **Partition tolerance.** If the metadata channel partitions, readers
    may have stale ownership views. We need to decide whether to fence
    stale owners (strict, may reduce availability) or accept stale reads

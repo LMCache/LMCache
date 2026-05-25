@@ -1,10 +1,13 @@
 %% SecondaryMemoryL2Adapter design overview. Locators are the topology integration point.
+%% Both region types route through the same RegionLocator interface; either locator
+%% implementation can back either region type depending on the deployment topology.
 flowchart TB
   IFACE["L2AdapterInterface<br/>(contract unchanged)"]
   ADAPTER["SecondaryMemoryL2Adapter"]
   GROUP["RegionGroup<br/>- regions (N >= 1)<br/>- placement policy<br/>- tombstone queue<br/>- metadata channel"]
   ROWNED["Region (owned)"]
-  RREAD["Region (read-only)"]
+  RREAD["Region (read-only peer)"]
+  LOCATOR["RegionLocator<br/>(per-region)"]
   LOCAL["LocalMmapLocator<br/>(stage 1)"]
   POOLED["PooledMemoryLocator<br/>(stage 2)"]
   DAX[("/dev/dax<br/>this host")]
@@ -13,18 +16,22 @@ flowchart TB
   IFACE --> ADAPTER --> GROUP
   GROUP --> ROWNED
   GROUP --> RREAD
-  ROWNED --> LOCAL
-  RREAD --> POOLED
+  ROWNED --> LOCATOR
+  RREAD --> LOCATOR
+  LOCATOR --> LOCAL
+  LOCATOR --> POOLED
   LOCAL --> DAX
   POOLED --> POOL
 
   classDef api fill:#e0e7ff,stroke:#3730a3,color:#0f172a;
   classDef core fill:#fef3c7,stroke:#b45309,color:#0f172a;
   classDef region fill:#dbeafe,stroke:#1d4ed8,color:#0f172a;
+  classDef locIface fill:#fde68a,stroke:#92400e,color:#0f172a;
   classDef loc fill:#ede9fe,stroke:#6d28d9,color:#0f172a;
   classDef mem fill:#dcfce7,stroke:#15803d,color:#0f172a;
   class IFACE api;
   class ADAPTER,GROUP core;
   class ROWNED,RREAD region;
+  class LOCATOR locIface;
   class LOCAL,POOLED loc;
   class DAX,POOL mem;
