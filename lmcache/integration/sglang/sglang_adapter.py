@@ -243,13 +243,13 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
             if self.layer_load_layer[i] == layer_id + 1:
                 next(self.layerwise_retrievers[i])
                 self.layer_load_layer[i] += 1
-                if self.layer_load_layer[i] == self.sgl_config.num_hidden_layers:
+                if self.layer_load_layer[i] > self.sgl_config.num_hidden_layers:
                     indices_to_remove.append(i)
 
         for i in sorted(indices_to_remove, reverse=True):
             del self.layerwise_retrievers[i]
             del self.layer_load_layer[i]
-            self.lmcache_engine.lookup_unpin(self.lookup_id_list[i])
+            self.lmcache_engine.lookup_pins.pop(self.lookup_id_list[i], None)
             del self.lookup_id_list[i]
 
         return

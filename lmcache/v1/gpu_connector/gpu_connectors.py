@@ -1796,6 +1796,8 @@ class SGLangLayerwiseGPUConnector(GPUConnectorInterface):
                     token_major=True,
                 )
 
+        yield
+
         # free the buffer memory
         if self.use_gpu:
             tmp_gpu_buffer_obj.ref_count_down()
