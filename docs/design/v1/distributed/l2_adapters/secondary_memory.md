@@ -24,6 +24,11 @@ Why it matters:
   read at CXL latency, which is in the same order of magnitude as DRAM.
 - Capacity is purchased once at the fabric and amortized across every
   replica that can reach it, instead of duplicated per replica in DRAM.
+- **Graceful request handoff under HBM pressure.** When a host running
+  long-context agents exhausts HBM, the request router can migrate the
+  request to a host with headroom instead of dropping it. The target host
+  recovers the entire context from the shared pool with no network transfer
+  of KV bytes. §5.5 specifies the small operations that make this safe.
 
 The hardware story is split into two phases that the design must handle in
 one shape:
@@ -63,7 +68,7 @@ root complex.
 
 [source: `figures/cxl_topology_single_host.mmd`]
 
-**Stage 3 — cross-host.** A CXL 3.0 switch connects multiple host CPUs
+**Stage 2 — cross-host.** A CXL 3.0 switch connects multiple host CPUs
 to a shared pool. The GPUs on each host still reach the pool through
 their own local CPU — there is no GPU-to-GPU CXL path.
 
@@ -117,7 +122,7 @@ The locator is the entire topology story. Every interesting property of
 | Locator                    | Reach                                   | Status |
 |----------------------------|-----------------------------------------|--------|
 | `LocalMmapLocator(path)`   | one host, every process on the host     | Stage 1 |
-| `PooledMemoryLocator(...)` | every host wired to one CXL 3.0 switch  | Stage 3 |
+| `PooledMemoryLocator(...)` | every host wired to one CXL 3.0 switch  | Stage 2 |
 | `FabricMemoryLocator(...)` | every host on a memory fabric           | Future |
 
 The rest of the system — placement policy, slot allocator, lookup index,
@@ -130,11 +135,11 @@ The single most important property of this design is:
 > does not require touching the L2 adapter contract, the controllers, the
 > CLI, or the slot allocator.
 
-That property is what justifies the work in stages 1 and 2 even before the
-fabric hardware is widely available. We are not gambling on the timing of
-CXL 3.0 — we are choosing an abstraction that is correct for the
-single-host case we have today and that does not need to be rebuilt for
-the cross-host case we will have tomorrow.
+That property is what justifies doing stage 1 even before the fabric
+hardware is widely available. We are not gambling on the timing of CXL 3.0
+— we are choosing an abstraction that is correct for the single-host case
+we have today and that does not need to be rebuilt for the cross-host case
+we will have tomorrow.
 
 ## 3. What sharing means, concretely
 
@@ -219,6 +224,81 @@ What is new sits entirely inside `RegionGroup`:
 - The metadata channel. Single-host: shared memory; cross-host: a thin
   RPC. Same interface either way.
 
+## 5.5. Operations for request handoff
+
+A common driver for cross-replica shared cache is **graceful request
+migration**. A host running long-context agents exhausts HBM. The request
+router wants to move that request to a host with headroom instead of
+dropping it. The new host needs the full context to resume — and the
+whole point of sharing the pool is that the context bytes do not have to
+travel over the network.
+
+The shared pool gives us the bytes; two small additions to `StorageManager`
+give the router the *control plane* it needs to migrate safely. Neither
+changes the L2 contract; both extend the existing `StorageManager` surface
+that the serving engine already uses.
+
+### `commit_for_handoff`
+
+```
+commit_for_handoff(keys: list[ObjectKey]) -> CommitHandle
+```
+
+Forces the StoreController to flush these keys to L2 ahead of its normal
+cadence. Returns a handle the caller polls or awaits. Completion means
+every adapter selected by the current store policy has confirmed the
+store. Implementation: a priority lane in `StoreController` plus a
+per-handle completion notify. The default async commit path is unchanged.
+
+### `is_persisted`
+
+```
+is_persisted(keys: list[ObjectKey], scope: RegionScope) -> Bitmap
+```
+
+Returns a bit per key, set if at least one region with the requested reach
+holds the key. `scope=HOST` for same-host migration; `scope=FABRIC` for
+cross-host. Implementation: intersection of per-region indexes filtered by
+scope. The same scope values appear on `Region.scope` (§4.1 of this proposal).
+
+### Worked example
+
+```
+router decides to migrate request R from host A to host B:
+
+  on host A (source):
+    handle = sm.commit_for_handoff(keys_of_R)
+    await handle                                    # KV bytes are in the pool
+    assert sm.is_persisted(keys_of_R, FABRIC).all() # verify before handoff
+    router.route_request_to(R, host=B)              # router's API
+    # host A is now free to drop R from HBM
+
+  on host B (target):
+    serving engine receives R with the same prompt
+    handle = sm.submit_prefetch_task(keys_of_R, layout_desc)
+    # prefetch hits the shared pool, loads full context into HBM
+    # via the existing GPU connector path — no network transfer
+```
+
+### What this does not solve
+
+- **The migration decision.** "Move R from A to B" is the request router's
+  job. LMCache exposes the operations that make it safe; it does not pick
+  policy.
+- **Serving engine handoff.** How host B picks up the request stream
+  (tokens generated so far, sampling state, KV layout) is the serving
+  engine's responsibility. LMCache covers the cache side only.
+- **Mid-decode handoff.** True mid-generation migration requires the
+  StoreController commit cadence to keep up with token generation. LMCache
+  can only guarantee what has been committed; anything generated on A but
+  not yet committed is lost when A drops.
+
+### The promise
+
+When `commit_for_handoff` completes and `is_persisted(scope=FABRIC)` returns
+all-true for a request's keys, the target host's prefetch will succeed
+without any network transfer of KV bytes.
+
 ## 6. Region lifecycle
 
 Three states only.
@@ -295,7 +375,7 @@ lock is released, with the source region already in `REMOVED`.
   index write happens after destination commit, before the source slot is
   released, so a key is never present in two regions at once.
 
-The hotplug surface is the **same** in stage 1 (single host) and stage 3
+The hotplug surface is the **same** in stage 1 (single host) and stage 2
 (cross host). The locator handles the topology difference; the API does
 not.
 
@@ -306,15 +386,18 @@ The implementation surface is intentionally small.
 | File                                                              | Change                                                                                                |
 |-------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
 | `lmcache/v1/storage_backend/dax/region_group.py` (new)            | `Region`, `RegionGroup`, `RegionLocator`, `LocalMmapLocator`, placement policy registry, tombstone queue. |
-| `lmcache/v1/storage_backend/dax/metadata_channel.py` (new)        | The same-host shared-memory channel for stage 1, with a clean interface that stage 3 implements with RPC. |
+| `lmcache/v1/storage_backend/dax/metadata_channel.py` (new)        | The same-host shared-memory channel for stage 1, with a clean interface that stage 2 implements with RPC. |
 | `lmcache/v1/storage_backend/dax/core.py`                          | No interface change. The adapter now holds N cores via `RegionGroup` instead of one core directly.    |
 | `lmcache/v1/distributed/l2_adapters/dax_l2_adapter.py`            | Delegate index lookups, writes, and metrics to `RegionGroup`. Add per-region metric labels.           |
 | `lmcache/v1/storage_backend/maru_backend.py`                      | Same delegation. The shared-memory unlock path uses the tombstone queue.                              |
 | `lmcache/v1/mp/http_server.py` (or equivalent)                    | Register the five `/secondary-memory/...` routes as thin shims.                                       |
+| `lmcache/v1/distributed/storage_manager.py`                       | Add `commit_for_handoff()` and `is_persisted()` (see §5.5). No change to existing methods.            |
+| `lmcache/v1/distributed/storage_controllers/store_controller.py`  | Add a priority lane and per-handle completion notify to support `commit_for_handoff` (§5.5).          |
 | `docs/design/v1/distributed/l2_adapters/dax.md`                   | Update "Current Limits" once stage 1 lands.                                                           |
 
-No change to `L2AdapterInterface`, `StoreController`, `PrefetchController`,
-the CLI, or any other adapter.
+No change to `L2AdapterInterface`, `PrefetchController`, the CLI, or any
+other adapter. The two new `StorageManager` methods extend the surface the
+serving engine already consumes.
 
 ## 10. Test plan
 
@@ -346,36 +429,54 @@ required.
 7. **Leak detector.** 1000 cycles of lookup, partial load failure, region
    remove, and unlock. Assert every counter in every region returns to
    zero.
+8. **Request handoff.** With the cross-host simulation harness, drive a
+   sequence: write a long prefix on host A, call `commit_for_handoff`,
+   `await` it, assert `is_persisted(scope=FABRIC)` is all-true, then
+   prefetch the same prefix on host B and verify zero network transfer of
+   KV bytes and full load into B's L1. Negative test: drop the request on
+   A *before* `commit_for_handoff` completes; verify B's prefetch hits the
+   committed prefix correctly and B's serving engine sees only the truly
+   persisted suffix.
 
 ## 11. Rollout in three stages
 
 Each stage is independently mergeable, independently testable, and ships
-value on its own.
+value on its own. The stages are ordered by headline value, not by
+difficulty: stage 2 is the payoff this document is built around, and
+stage 3 is the operational hardening that can legitimately run in parallel
+with stage 2 or wait for real production demand.
 
-**Stage 1: foundation.** Land `RegionGroup`, the resilience contract, and
-the `LocalMmapLocator`. Existing single-region DAX and Maru deployments
-keep working as the N=1 case. The metadata-channel interface exists with
-the same-host shared-memory implementation. Hotplug HTTP routes are
-implemented but not yet documented as stable. The equivalence test gates
-the merge.
+**Stage 1: foundation.** Land `RegionGroup`, the resilience contract, the
+`LocalMmapLocator`, and the `StorageManager` handoff APIs from §5.5
+(`commit_for_handoff`, `is_persisted`). Existing single-region DAX and
+Maru deployments keep working as the N=1 case. The metadata-channel
+interface exists with the same-host shared-memory implementation. Hotplug
+HTTP routes are implemented but not yet documented as stable. The
+equivalence test gates the merge.
 
 Value at end of stage 1: multi-region capacity on one host with partial-
-fault tolerance and runtime add/remove. No cross-host yet.
+fault tolerance and runtime add/remove. Same-host request handoff via the
+new `StorageManager` ops. No cross-host yet.
 
-**Stage 2: operational.** Document and stabilize the
-`/secondary-memory/...` HTTP routes. Add per-region observability dashboard
-templates. Land the leak detector and fault-injection tests in CI.
+**Stage 2: cross-host (the headline).** Add `PooledMemoryLocator` for
+fabric-attached shared pools and the RPC implementation of the metadata
+channel. No changes to `RegionGroup`, the resilience contract, the
+placement policy interface, or the hotplug API. The `StorageManager`
+handoff APIs extend automatically — `is_persisted(scope=FABRIC)` now
+resolves real cross-host pools.
 
-Value at end of stage 2: operators can run multi-region secondary memory
-in production with confidence.
+Value at end of stage 2: the headline goal of this document — a single
+KV cache pool shared across a serving fleet, with safe request handoff
+between hosts.
 
-**Stage 3: cross-host.** Add `PooledMemoryLocator` for fabric-attached
-shared pools and the RPC implementation of the metadata channel. No
-changes to `RegionGroup`, the resilience contract, the placement policy
-interface, or the hotplug API.
+**Stage 3: operational hardening.** Document and stabilize the
+`/secondary-memory/...` HTTP routes as a public API. Add per-region
+observability dashboard templates. Land the leak detector and
+fault-injection tests in CI. Add chaos tests around request handoff under
+fabric failure and metadata-channel partition.
 
-Value at end of stage 3: the headline goal of this document — a single
-KV cache pool shared across a serving fleet.
+Value at end of stage 3: operators can run cross-host shared KV cache in
+production with confidence.
 
 ## 12. What this proposal is not
 
@@ -393,7 +494,7 @@ KV cache pool shared across a serving fleet.
 ## 13. Open questions
 
 1. **Metadata-channel format.** A simple length-prefixed binary log will
-   work for stage 1. For stage 3 we should decide between an existing
+   work for stage 1. For stage 2 we should decide between an existing
    transport (the same RPC layer the rest of LMCache uses) and a
    dedicated, lower-overhead one.
 2. **Reader-side eviction visibility.** When the owner of a region evicts
@@ -406,7 +507,7 @@ KV cache pool shared across a serving fleet.
    willing to ship a store to a region owned by another host (RPC the
    write to the owner) or should each server only write to regions it
    owns? Owner-only is simpler. Cross-owner write is more flexible but
-   needs a write-RPC path. Proposal: owner-only for stage 3; revisit
+   needs a write-RPC path. Proposal: owner-only for stage 2; revisit
    based on real workloads.
 4. **Partition tolerance.** If the metadata channel partitions, readers
    may have stale ownership views. We need to decide whether to fence
