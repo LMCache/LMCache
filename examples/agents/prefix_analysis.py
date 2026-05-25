@@ -17,6 +17,9 @@ import torch
 DEFAULT_TOKENIZER = "meta-llama/Llama-3.1-8B"
 DEFAULT_TOKENS_PER_GB = 8200  # Default for Llama-3.1; More details here: https://docs.lmcache.ai/getting_started/kv_cache_calculator.html
 DEFAULT_POOL_SIZES_GB: List[Union[int, float, str]] = [
+    0.1,
+    0.2,
+    0.4,
     1,
     2,
     4,
@@ -124,9 +127,23 @@ class LRUTokenPool:
     ) -> None:
         """
         Add a request to the pool, evicting LRU entries if necessary.
+        When a single request exceeds the pool capacity, tokens are trimmed
+        to capacity (keeping the head) to maintain the pool invariant that
+        current_tokens <= max_tokens.
         """
+        # For unlimited pools (max_tokens == inf), skip trimming since
+        # there is no capacity limit. Otherwise convert to int for slicing.
+        if self.max_tokens == float("inf"):
+            tokens_to_store = tokens
+        else:
+            capacity = int(self.max_tokens)
+            tokens_to_store = tokens[:capacity] if len(tokens) > capacity else tokens
+
         # Evict until we have space
-        while self.current_tokens + len(tokens) > self.max_tokens and self.requests:
+        while (
+            self.current_tokens + len(tokens_to_store) > self.max_tokens
+            and self.requests
+        ):
             old_id, old_tokens = self.requests.popitem(last=False)
             self.current_tokens -= len(old_tokens)
 
@@ -135,8 +152,19 @@ class LRUTokenPool:
                 token_tensor[old_id, :] = 0
 
         # Add new request
-        self.requests[request_id] = tokens
-        self.current_tokens += len(tokens)
+        self.requests[request_id] = tokens_to_store
+        self.current_tokens += len(tokens_to_store)
+
+        # Zero out excess tokens in tensor after trimming so substring
+        # matching does not count hits against tokens never actually stored.
+        if (
+            token_tensor is not None
+            and self.max_tokens != float("inf")
+            and len(tokens) > int(self.max_tokens)
+        ):
+            token_tensor[request_id, int(self.max_tokens) :] = 0
+
+
 
 
 def load_and_tokenize_inputs(
@@ -252,7 +280,7 @@ def analyze_hit_rates_across_pool_sizes(
             token_desc = ""
         else:
             size_tokens = int(size_gb * tokens_per_gb)
-            x_labels.append(str(int(size_gb)))
+            x_labels.append(str(size_gb))
             pool_desc = f"{size_gb}GB"
             token_desc = f" ({size_tokens:,} tokens)"
 
