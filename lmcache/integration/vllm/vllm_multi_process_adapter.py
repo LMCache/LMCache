@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, cast
 import enum
 import os
 import threading
@@ -1039,7 +1039,12 @@ class LMCacheMPWorkerAdapter:
             self.vllm_logical_block_size
         )
         if self.extra_layout_hints:
-            layout_hints.update(self.extra_layout_hints)
+            # ``LayoutHints`` is a TypedDict with a fixed set of known keys;
+            # extra hints from the connector populate those same keys at
+            # runtime, but mypy cannot verify that against an arbitrary
+            # ``dict[str, object]``. Cast widens the LHS to a plain dict
+            # so ``.update`` accepts the connector-supplied dict in-place.
+            cast("dict[str, object]", layout_hints).update(self.extra_layout_hints)
         try:
             self.transfer_ctx.register(
                 self.instance_id,
@@ -1151,7 +1156,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            op.block_ids,
+            op.block_ids,  # type: ignore[arg-type]
             event,
             self.blocks_in_chunk,
         )
@@ -1207,7 +1212,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            op.block_ids,
+            op.block_ids,  # type: ignore[arg-type]
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
