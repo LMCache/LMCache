@@ -120,19 +120,19 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l1_allocation_failure_total[$__rate_interval])) or vector(0)",
+          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l1_allocation_failure_chunks_total[$__rate_interval])) or vector(0)",
           "legendFormat": "L1 alloc failure [{{service_instance_id}}]",
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l1_read_failure_total[$__rate_interval])) or vector(0)",
+          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l1_read_failure_chunks_total[$__rate_interval])) or vector(0)",
           "legendFormat": "L1 read failure [{{service_instance_id}}]",
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l2_prefetch_failure_total[$__rate_interval])) or vector(0)",
+          "expr": "sum by (service_instance_id) (rate(lmcache_mp_l2_prefetch_failure_chunks_total[$__rate_interval])) or vector(0)",
           "legendFormat": "L2 prefetch failure [{{service_instance_id}}]",
           "refId": "C"
         }
@@ -464,19 +464,19 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l1_read_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l1_read_chunks_total[$__rate_interval])",
           "legendFormat": "L1 reads/s [{{service_instance_id}}]",
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l1_write_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l1_write_chunks_total[$__rate_interval])",
           "legendFormat": "L1 writes/s [{{service_instance_id}}]",
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l1_evicted_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l1_evicted_chunks_total[$__rate_interval])",
           "legendFormat": "L1 evictions/s [{{service_instance_id}}]",
           "refId": "C"
         }
@@ -584,33 +584,27 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_tasks_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_store_submitted_requests_total[$__rate_interval])",
           "legendFormat": "tasks submitted/s",
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_completed_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_store_completed_requests_total[$__rate_interval])",
           "legendFormat": "tasks completed/s ({{l2_name}})",
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_store_submitted_objects_chunks_total[$__rate_interval])",
           "legendFormat": "keys submitted/s",
           "refId": "C"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_succeeded_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_store_completed_objects_chunks_total[$__rate_interval])",
           "legendFormat": "succeeded keys/s",
           "refId": "D"
-        },
-        {
-          "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_failed_keys_total[$__rate_interval])",
-          "legendFormat": "failed keys/s",
-          "refId": "E"
         }
       ],
       "title": "L2 Store Pipeline",
@@ -716,43 +710,43 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_lookups_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_prefetch_lookup_requests_total[$__rate_interval])",
           "legendFormat": "lookups/s",
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_lookup_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_prefetch_lookup_objects_chunks_total[$__rate_interval])",
           "legendFormat": "lookup keys/s",
           "refId": "B"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_hit_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_prefetch_hit_chunks_total[$__rate_interval])",
           "legendFormat": "hit keys/s",
           "refId": "C"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_load_tasks_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_prefetch_load_submitted_requests_total[$__rate_interval])",
           "legendFormat": "load tasks/s",
           "refId": "D"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_load_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total[$__rate_interval])",
           "legendFormat": "load keys submitted/s",
           "refId": "E"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_loaded_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_prefetch_load_completed_chunks_total[$__rate_interval])",
           "legendFormat": "loaded keys/s",
           "refId": "F"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_prefetch_failed_keys_total[$__rate_interval])",
+          "expr": "sum(rate(lmcache_mp_l2_prefetch_failure_chunks_total[$__rate_interval]))",
           "legendFormat": "failed keys/s",
           "refId": "G"
         }
@@ -1111,13 +1105,13 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l0_l1_store_throughput_gbs_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l0_l1_store_throughput_gbs_GB_per_second_count[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l0_l1_store_throughput_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l0_l1_store_throughput_GB_per_second_count[$__rate_interval])",
           "legendFormat": "L0\u2192L1 store ({{device}})",
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l0_l1_load_throughput_gbs_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l0_l1_load_throughput_gbs_GB_per_second_count[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l0_l1_load_throughput_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l0_l1_load_throughput_GB_per_second_count[$__rate_interval])",
           "legendFormat": "L1\u2192L0 load ({{device}})",
           "refId": "B"
         }
@@ -1210,13 +1204,13 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_throughput_gbs_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l2_store_throughput_gbs_GB_per_second_count[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_store_throughput_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l2_store_throughput_GB_per_second_count[$__rate_interval])",
           "legendFormat": "L1\u2192L2 store ({{l2_name}})",
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_load_throughput_gbs_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l2_load_throughput_gbs_GB_per_second_count[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_load_throughput_GB_per_second_sum[$__rate_interval]) / rate(lmcache_mp_l2_load_throughput_GB_per_second_count[$__rate_interval])",
           "legendFormat": "L2\u2192L1 load ({{l2_name}})",
           "refId": "B"
         }
@@ -1516,13 +1510,13 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l1_read_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l1_read_chunks_total[$__rate_interval])",
           "legendFormat": "L1 read IOPS [{{service_instance_id}}]",
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l1_write_keys_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l1_write_chunks_total[$__rate_interval])",
           "legendFormat": "L1 write IOPS [{{service_instance_id}}]",
           "refId": "B"
         }
@@ -1615,13 +1609,13 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_store_completed_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_store_completed_requests_total[$__rate_interval])",
           "legendFormat": "L2 store IOPS ({{l2_name}})",
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_l2_load_completed_total[$__rate_interval])",
+          "expr": "rate(lmcache_mp_l2_load_completed_requests_total[$__rate_interval])",
           "legendFormat": "L2 load IOPS ({{l2_name}})",
           "refId": "B"
         }
@@ -1630,12 +1624,105 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Current bytes held in each L2 adapter, sampled live from adapter.get_usage(). One line per adapter, tagged by ``l2_name``. Parallel to the L1 ``lmcache_mp_l1_memory_usage_bytes`` gauge.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "showValues": false,
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 58
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "lmcache_mp_l2_usage_bytes",
+          "legendFormat": "{{l2_name}}",
+          "refId": "A"
+        }
+      ],
+      "title": "L2 Usage (current)",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 66
       },
       "id": 300,
       "title": "Production Insights",
@@ -1704,7 +1791,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 59
+        "y": 67
       },
       "id": 20,
       "options": {
@@ -1809,7 +1896,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 59
+        "y": 67
       },
       "id": 21,
       "options": {
@@ -1914,7 +2001,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 67
+        "y": 75
       },
       "id": 22,
       "options": {
@@ -2040,7 +2127,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 67
+        "y": 75
       },
       "id": 23,
       "options": {
@@ -2068,7 +2155,7 @@
         },
         {
           "editorMode": "code",
-          "expr": "rate(lmcache_mp_real_reuse_gap_chunks_sum[$__rate_interval]) / rate(lmcache_mp_real_reuse_gap_chunks_count[$__rate_interval])",
+          "expr": "rate(lmcache_mp_real_reuse_gap_objects_chunks_sum[$__rate_interval]) / rate(lmcache_mp_real_reuse_gap_objects_chunks_count[$__rate_interval])",
           "legendFormat": "avg reuse gap chunks ({{cache_salt}})",
           "refId": "B"
         }
@@ -2082,7 +2169,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 75
+        "y": 83
       },
       "id": 400,
       "title": "CacheBlend (expand if using blend_server)",
@@ -2167,7 +2254,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 76
+            "y": 84
           },
           "id": 30,
           "options": {
@@ -2336,7 +2423,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 76
+            "y": 84
           },
           "id": 31,
           "options": {
@@ -2404,7 +2491,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 76
+        "y": 84
       },
       "id": 500,
       "title": "Request Traces",
@@ -2423,7 +2510,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 77
+        "y": 85
       },
       "id": 50,
       "options": {
