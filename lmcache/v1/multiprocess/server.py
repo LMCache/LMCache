@@ -143,9 +143,8 @@ def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayo
     shapes: list[torch.Size] = []
     for group_idx in range(num_groups):
         if num_tokens == gpu_context.lmcache_logical_chunk_size:
-            # Chunked store/retrieve hot path: use the per-group
-            # storage logical-token count, which is the SWA-truncated
-            # value for SWA groups and the full chunk otherwise.
+            # Chunk hot path: per-group storage token count is SWA-truncated
+            # for SWA groups, full chunk otherwise.
             logical_tokens_g = gpu_context.storage_logical_tokens_per_chunk(group_idx)
             shapes.append(gpu_context.get_kv_buffer_shape(logical_tokens_g, group_idx))
         else:
@@ -176,16 +175,12 @@ class _PrefetchJob:
     handle: PrefetchHandle
     world_size: int
     request_id: str
-    # Number of tokens submitted for lookup (denominator for the L1+L2
-    # token-level hit-rate metric).  Equals ``len(chunk_hashes) * chunk_size``
-    # on the happy path; 0 for early-exit paths (no GPU context matches
-    # or chunk_hashes is empty).  Consumed at ``MP_LOOKUP_PREFETCH_END``
-    # emission time in ``query_prefetch_status``.
+    # Tokens submitted for lookup (denominator of the L1+L2 hit-rate
+    # metric). ``len(chunk_hashes) * chunk_size`` on the happy path; 0 for
+    # early-exit paths.
     requested_tokens: int
-    # Captured at lookup time so the ``MP_LOOKUP_PREFETCH_END`` event can
-    # carry them as labels.  ``model_name`` lets dashboards slice hit rate
-    # per model in multi-model deployments; ``cache_salt`` slices per
-    # tenant / isolation domain (an empty string means no salt set).
+    # Labels carried on ``MP_LOOKUP_PREFETCH_END`` so dashboards can slice
+    # hit rate per model and per tenant. Empty ``cache_salt`` = no salt.
     model_name: str = ""
     cache_salt: str = ""
 
@@ -595,12 +590,9 @@ class MPCacheEngine:
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            # Stage block IDs per engine-side namespace once before the
-            # loop. Each LMCache group's ``kv_cache_group_id`` indexes
-            # into this list. For non-hybrid engines there is a single
-            # namespace and a single staged tensor; for V4 hybrid-on
-            # there are 5 namespaces and 5 staged tensors with
-            # heterogeneous lengths.
+            # Stage block IDs per engine-side namespace once. Each LMCache
+            # group's ``kv_cache_group_id`` indexes into this list (one
+            # entry for non-hybrid engines, one per gid for V4 hybrid-on).
             staged_block_ids_per_namespace = gpu_context.stage_block_ids_per_namespace(
                 gpu_block_ids
             )
@@ -660,27 +652,14 @@ class MPCacheEngine:
                     else:
                         continue
 
-                    # Per-LMCache-group dispatch. Each group selects:
-                    #   * its own ``blocks_per_chunk_g``: full
-                    #     (chunk_size // logical_block_size_g) for
-                    #     full-attention groups, or the SWA-suffix
-                    #     count (ceil(window / logical_bs)) for SWA
-                    #     groups. ``blocks_per_chunk_full(g)`` always
-                    #     returns the un-truncated count (used to step
-                    #     between chunks in the engine's namespace),
-                    #     while ``blocks_per_chunk(g)`` returns the
-                    #     possibly-truncated count actually consumed.
-                    #   * its own physical kernel chunk size (=
-                    #     ``get_physical_chunk_size(g)``), fed to the
-                    #     kernel; for SWA groups this is the truncated
-                    #     ``bpc_g * physical_bs_g`` so the kernel
-                    #     constraint
-                    #     ``num_blocks_per_object * shape_desc.bs ==
-                    #     kernel_chunk`` holds.
-                    #   * its block-ID slice from the staged tensor for
-                    #     ``group.kv_cache_group_id``. For SWA groups
-                    #     we slice the *last* ``bpc_g`` of each
-                    #     ``bpc_full_g``-sized chunk.
+                    # Per-LMCache-group dispatch. Each group picks its own
+                    # ``blocks_per_chunk_g`` (full for full-attention,
+                    # SWA-suffix count for SWA groups), its own physical
+                    # kernel chunk size, and its block-ID slice from the
+                    # namespace-staged tensor for ``group.kv_cache_group_id``.
+                    # SWA groups slice the last ``bpc_g`` of each
+                    # ``bpc_full_g``-sized chunk; ``blocks_per_chunk_full(g)``
+                    # is the un-truncated count used to step between chunks.
                     for group_idx, group in enumerate(groups):
                         bpc_g = gpu_context.blocks_per_chunk(group_idx)
                         bpc_full_g = gpu_context.blocks_per_chunk_full(group_idx)
@@ -844,15 +823,10 @@ class MPCacheEngine:
             ),
         )
 
-        # ``skip_*_in_chunk`` is expressed in engine-block units
-        # (logical tokens), which is what the kernel's
-        # ``skip_blocks_in_chunk`` argument expects regardless
-        # of per-group compression. Per-group ``logical_block_size``
-        # may differ on V4 hybrid-on (e.g. SWA gids use 64 vs dense
-        # gid 0's 256), but ``skip_first_n_tokens`` is itself
-        # token-aligned to the *coarsest* group's block size, so we
-        # use the global ``ie_logical_block_size`` for the skip math
-        # and validate per-group divisibility inside the loop.
+        # ``skip_first_n_tokens`` is token-aligned to the coarsest group's
+        # block size, so we compute the skip in engine-block units against
+        # the global ``ie_logical_block_size`` and validate per-group
+        # divisibility inside the loop.
         ie_logical_block_size = (
             gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
         )
@@ -1146,17 +1120,14 @@ class MPCacheEngine:
             )
             return
 
-        # Total chunk-aligned tokens submitted for lookup; surfaces as the
-        # denominator of the L1+L2 token-level hit-rate via the
-        # ``requested_tokens`` field on ``MP_LOOKUP_PREFETCH_END``.  Sub-chunk
-        # trailing tokens are intentionally excluded — they cannot hit at
-        # chunk granularity.
+        # Chunk-aligned token count surfaces as the hit-rate denominator
+        # on ``MP_LOOKUP_PREFETCH_END``; sub-chunk trailing tokens cannot
+        # hit and are excluded by design.
         requested_tokens = len(chunk_hashes) * self.chunk_size
 
-        # Publish lookup event via EventBus for observability subscribers.
-        # Guard with has_subscribers() to avoid allocating the metadata dict
-        # (including dtype/shape list comprehensions) when no subscriber is
-        # listening (e.g. lookup hash logger is disabled).
+        # Publish lookup event for observability subscribers. Guard with
+        # has_subscribers() so we don't build the metadata dict
+        # (including list comprehensions) when nothing is listening.
         if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
             self._event_bus.publish(
                 Event(

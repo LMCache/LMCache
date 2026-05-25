@@ -110,35 +110,27 @@ class GPUCacheContext:
             _MAX_BLOCK_IDS, dtype=torch.long, device=self.device_
         )
 
-        # Temporary GPU buffer for transfers — a single flat uint8 buffer
-        # laid out in chunk-major order so that each chunk's data matches
-        # the layout of a MemoryObj.raw_data (all groups concatenated):
+        # Temporary GPU buffer for transfers — a flat uint8 buffer in
+        # chunk-major order, matching ``MemoryObj.raw_data`` layout:
         #
         #   [ chunk_0: group_0_bytes | group_1_bytes | ... ]
         #   [ chunk_1: group_0_bytes | group_1_bytes | ... ]
-        #   ...
         #
-        # This lets callers copy an entire chunk to/from a MemoryObj with a
-        # single memcpy, without needing to know the per-group layout.
-        # max_batch_size is the max number of chunks processed concurrently.
+        # Lets callers memcpy an entire chunk to/from a MemoryObj without
+        # touching the per-group layout. max_batch_size is the max number
+        # of chunks processed concurrently.
         self.max_batch_size = 4
-        # Byte size of one chunk entry (= one chunk across all groups).
-        # tmp_chunk_group_offsets_[g] is the byte offset of group g within
-        # a single chunk; tmp_chunk_group_offsets_[num_groups] ==
-        # tmp_chunk_bytes_. For SWA groups (``sliding_window > 0``) the
-        # per-chunk byte budget is truncated to the trailing
-        # ``ceil(window / logical_bs)`` blocks, so we size the tmp slot
-        # to that truncated count rather than the full chunk's logical
-        # token count.
+        # Byte size of one chunk entry (one chunk across all groups).
+        # ``tmp_chunk_group_offsets_[g]`` is group g's byte offset; the
+        # last entry equals ``tmp_chunk_bytes_``. SWA groups
+        # (``sliding_window > 0``) get the truncated ``bpc * logical_bs``
+        # budget instead of the full chunk's logical-token count.
         self.tmp_chunk_group_offsets_: list[int] = [0]
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            # ``get_kv_buffer_shape`` takes *logical* tokens; for
-            # compressed groups it folds ``compress_ratio`` logical
-            # tokens into one physical slot internally. For SWA
-            # groups the truncated logical-token count is
-            # ``blocks_per_chunk(g) * logical_block_size``.
+            # ``get_kv_buffer_shape`` takes logical tokens; SWA groups
+            # supply the truncated count.
             logical_tokens_g = self.storage_logical_tokens_per_chunk(group_idx)
             shape = self.get_kv_buffer_shape(logical_tokens_g, group_idx)
             byte_size = shape.numel() * group.dtype.itemsize
@@ -587,12 +579,9 @@ class GPUCacheContext:
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            # ``get_kv_buffer_shape`` now takes *logical* tokens, so
-            # query ``compress_ratio`` logical tokens (= 1 physical
-            # slot) and then divide the resulting bytes back by
-            # ``compress_ratio`` to recover the per-logical-token
-            # contribution. Equivalent to the old
-            # ``physical_slot_bytes // compress_ratio`` formulation.
+            # ``get_kv_buffer_shape`` takes logical tokens; query
+            # ``compress_ratio`` logical tokens (= 1 physical slot) then
+            # divide back to recover the per-logical-token contribution.
             numels = self.get_kv_buffer_shape(group.compress_ratio, group_idx).numel()
             slot_bytes = numels * group.dtype.itemsize
             total += slot_bytes // group.compress_ratio

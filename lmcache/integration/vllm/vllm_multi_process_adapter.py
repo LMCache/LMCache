@@ -914,13 +914,10 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
-        # Retain the vLLM logical block size so we can ship it to the
-        # LMCache server in ``register_kv_caches`` — the server uses it
-        # (as ``layout_hints["inference_engine_logical_block_size"]``)
-        # to derive per-group compression ratios when some KV layer
-        # groups compress multiple logical tokens into a single physical
-        # slot (``shape_desc.bs <
-        # inference_engine_logical_block_size``).
+        # Retained so we can ship it as
+        # ``layout_hints["inference_engine_logical_block_size"]`` in
+        # ``register_kv_caches``; the server uses it as the global
+        # fallback when deriving per-group compression ratios.
         self.vllm_logical_block_size = vllm_block_size
 
         # Health state (shared with heartbeat thread)
@@ -1039,11 +1036,8 @@ class LMCacheMPWorkerAdapter:
             self.vllm_logical_block_size
         )
         if self.extra_layout_hints:
-            # ``LayoutHints`` is a TypedDict with a fixed set of known keys;
-            # extra hints from the connector populate those same keys at
-            # runtime, but mypy cannot verify that against an arbitrary
-            # ``dict[str, object]``. Cast widens the LHS to a plain dict
-            # so ``.update`` accepts the connector-supplied dict in-place.
+            # Cast widens the TypedDict LHS to a plain dict so ``.update``
+            # accepts the connector-supplied ``dict[str, object]`` in place.
             cast("dict[str, object]", layout_hints).update(self.extra_layout_hints)
         try:
             self.transfer_ctx.register(
@@ -1183,13 +1177,9 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            # ``op.block_ids`` is now a list[list[int]] grouped by gid;
-            # ``self.error_block_ids`` is a flat set[int]. Flatten on
-            # update — error reporting back to vLLM is namespace-blind
-            # under the current API, so the flat union is the best we
-            # can do at this layer. (A future revision could thread the
-            # gid through the error channel; for now it matches the
-            # prior single-gid behavior for non-hybrid models.)
+            # ``op.block_ids`` is per-gid (``list[list[int]]``);
+            # ``error_block_ids`` is namespace-blind, so we flatten the
+            # union for error reporting back to vLLM.
             for group_block_ids in op.block_ids:
                 self.error_block_ids.update(group_block_ids)
             return
