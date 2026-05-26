@@ -203,7 +203,7 @@ def _run_store(adapter: RawBlockL2Adapter, keys, objects) -> bool:
     assert _wait_event_fd(adapter.get_store_event_fd())
     completed = adapter.pop_completed_store_tasks()
     assert task_id in completed
-    return completed[task_id]
+    return completed[task_id].is_successful()
 
 
 def _run_lookup(adapter: RawBlockL2Adapter, keys):
@@ -400,7 +400,7 @@ def test_raw_block_l2_adapter_listener_errors_do_not_block_eventfds():
 
             store_task_id = adapter.submit_store_task([key], [obj])
             assert _wait_event_fd(adapter.get_store_event_fd())
-            assert adapter.pop_completed_store_tasks()[store_task_id] is True
+            assert adapter.pop_completed_store_tasks()[store_task_id].is_successful()
 
             load_buffer = _create_memory_obj(fill_value=0.0)
             load_task_id = adapter.submit_load_task([key], [load_buffer])
