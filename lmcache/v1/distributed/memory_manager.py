@@ -49,12 +49,6 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
-    if config.shm_name and config.use_lazy:
-        raise ValueError(
-            "Shared memory mode (shm_name) is incompatible with lazy allocation "
-            "(--l1-use-lazy). Please pass --no-l1-use-lazy when using shm_name."
-        )
-
     if config.use_lazy:
         logger.debug(
             "use lazy memory allocator, init size is %d bytes, "
