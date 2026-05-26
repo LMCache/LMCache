@@ -36,6 +36,10 @@ from lmcache.v1.multiprocess.engine_module import (
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
+from lmcache.v1.multiprocess.native_completion import (
+    DeviceHostFuncDispatcher,
+    submit_callback_to_stream,
+)
 from lmcache.v1.multiprocess.protocols.base import RequestType
 import lmcache.c_ops as lmc_ops
 
@@ -116,6 +120,21 @@ class GPUTransferModule:
         self._ctx = ctx
         self._gpu_contexts: dict[int, GPUContextEntry] = {}
 
+        # Route finish_write / finish_read_prefetched through a C++ host
+        # callback so the driver thread doesn't acquire the GIL.
+        self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
+        self._device_host_func_dispatcher.register(
+            "finish_write",
+            self._ctx.storage_manager.finish_write,
+            payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.register(
+            "finish_read_prefetched",
+            self._ctx.storage_manager.finish_read_prefetched,
+            payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.start()
+
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
 
@@ -188,6 +207,10 @@ class GPUTransferModule:
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
+        # Stop the drain thread before storage_manager.close() so any
+        # in-flight completions reach a live storage manager.
+        self._device_host_func_dispatcher.stop()
+
         had_contexts = len(self._gpu_contexts) > 0
         self._gpu_contexts.clear()
         if had_contexts:
@@ -403,8 +426,9 @@ class GPUTransferModule:
             finally:
                 event.record()
                 if reserved_dict:
-                    gpu_context.cupy_stream.launch_host_func(
-                        self._ctx.storage_manager.finish_write,
+                    submit_callback_to_stream(
+                        gpu_context.cupy_stream,
+                        "finish_write",
                         list(reserved_dict.keys()),
                     )
                 # All reserved MemoryObjs share one layout_desc, so per-object
@@ -610,8 +634,9 @@ class GPUTransferModule:
             finally:
                 event.record()
                 if retrieve_succeeded:
-                    gpu_context.cupy_stream.launch_host_func(
-                        self._ctx.storage_manager.finish_read_prefetched,
+                    submit_callback_to_stream(
+                        gpu_context.cupy_stream,
+                        "finish_read_prefetched",
                         prefetched_keys,
                     )
                 self._ctx.event_bus.publish_on_stream(
