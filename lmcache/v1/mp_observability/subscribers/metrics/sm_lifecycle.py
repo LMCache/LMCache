@@ -68,7 +68,7 @@ class SMLifecycleSubscriber(EventSubscriber):
         self._sample_threshold = int(sample_rate * self._sample_prime)
         meter = metrics.get_meter("lmcache.sm")
         self._real_reuse_gap_seconds_hist = meter.create_histogram(
-            "lmcache_mp.real_reuse_gap_seconds",
+            "lmcache_mp.real_reuse_gap",
             description=(
                 "Gap between a chunk's last access (read or write) and "
                 "next read.  Storage cost.  Tagged with cache_salt."
@@ -76,7 +76,7 @@ class SMLifecycleSubscriber(EventSubscriber):
             unit="s",
         )
         self._real_reuse_gap_chunks_hist = meter.create_histogram(
-            "lmcache_mp.real_reuse_gap_chunks",
+            "lmcache_mp.real_reuse_gap_objects",
             description=(
                 "Per-cache_salt access-counter gap between two reads of "
                 "the same chunk.  Storage volume.  Tagged with cache_salt."

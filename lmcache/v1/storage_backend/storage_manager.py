@@ -235,7 +235,7 @@ class StorageManager:
         self.thread = threading.Thread(
             target=start_loop_in_thread_with_exceptions,
             args=(self.loop,),
-            name="storage-manger-event-loop",
+            name="storage-manager-event-loop",
         )
         self.thread.start()
 
@@ -289,13 +289,10 @@ class StorageManager:
         self._setup_metrics()
 
     def _setup_metrics(self) -> None:
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is None:
-            logger.warning(
-                "PrometheusLogger is not initialized, "
-                "event metrics will not be collected"
-            )
-            return
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            self.metadata,
+            config=self.config,
+        )
 
         metric_map = {
             "storage_events_ongoing_count": EventStatus.ONGOING,

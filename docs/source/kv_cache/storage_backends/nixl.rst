@@ -37,7 +37,8 @@ Example ``lmcache-config.yaml`` for POSIX backend:
       nixl_backend: POSIX
       nixl_pool_size: 64
       nixl_path: /mnt/nixl/cache/
-      use_direct_io: True
+      use_direct_io: true
+      nixl_use_hugepages: true  # optional, requires pre-allocated hugepages
 
 Key settings:
 
@@ -50,6 +51,8 @@ Key settings:
 - ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS" & "AZURE_BLOB", must be "cpu".
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
+
+- ``nixl_use_hugepages``: whether to use Linux hugepages (2 MiB) for the NIXL CPU buffer. Not supported for GPU buffers. Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``.
 
 .. note::
 
@@ -110,6 +113,36 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using Azure Bl
       nixl_backend_params:
         account_url: https://<your_azure_storage_account_name>.blob.core.windows.net
         container_name: <your_container_name>
+
+Per-Worker Endpoint Distribution
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When using the OBJ backend with multiple tensor-parallel (TP) workers, you can
+distribute workers across multiple object-storage endpoints by providing a list of
+endpoints via ``nixl_endpoint_list``. Each worker selects an endpoint in
+round-robin order based on its ``local_worker_id`` (the worker ID within its host).
+
+.. code-block:: yaml
+
+    extra_config:
+      enable_nixl_storage: true
+      nixl_backend: OBJ
+      nixl_pool_size: 64
+      nixl_path: /mnt/nixl/cache/
+      nixl_endpoint_list:
+        - https://node-0.object-storage:9021
+        - https://node-1.object-storage:9021
+        - https://node-2.object-storage:9021
+      nixl_backend_params:
+        access_key: <your_access_key>
+        secret_key: <your_secret_key>
+        bucket: <your_bucket>
+        region: <your_region>
+
+.. note::
+
+    When ``nixl_endpoint_list`` is set, any ``endpoint_override`` value in
+    ``nixl_backend_params`` is ignored (a warning is logged).
 
 Dynamic Mode
 ~~~~~~~~~~~~~

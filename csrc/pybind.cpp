@@ -9,6 +9,7 @@
 #include "mem_alloc.h"
 #include "utils.h"
 #include "event_recorder.h"
+#include "completion_recorder.h"
 #include <torch/torch.h>
 #include <torch/extension.h>
 #include <iostream>
@@ -60,9 +61,15 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("alloc_pinned_ptr", &alloc_pinned_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_pinned_ptr", &free_pinned_ptr);
+  m.def("alloc_hugepage_pinned_ptr", &alloc_hugepage_pinned_ptr,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("free_hugepage_pinned_ptr", &free_hugepage_pinned_ptr);
   m.def("alloc_pinned_numa_ptr", &alloc_pinned_numa_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_pinned_numa_ptr", &free_pinned_numa_ptr);
+  m.def("alloc_hugepage_pinned_numa_ptr", &alloc_hugepage_pinned_numa_ptr,
+        py::call_guard<py::gil_scoped_release>());
+  m.def("free_hugepage_pinned_numa_ptr", &free_hugepage_pinned_numa_ptr);
   m.def("alloc_numa_ptr", &alloc_numa_ptr,
         py::call_guard<py::gil_scoped_release>());
   m.def("free_numa_ptr", &free_numa_ptr);
@@ -96,4 +103,17 @@ PYBIND11_MODULE(c_ops, m) {
         py::arg("session_id"), py::arg("str_metadata"), py::arg("int_metadata"),
         py::call_guard<py::gil_scoped_release>());
   m.def("drain_recorded_events", &drain_recorded_events);
+  m.def("record_completion_on_stream", &record_completion_on_stream,
+        py::arg("cuda_stream_ptr"), py::arg("kind"), py::arg("payload"),
+        py::call_guard<py::gil_scoped_release>());
+  // Return each payload as py::bytes; pybind11 utf-8-decodes std::string
+  // by default, corrupting binary payloads (e.g. msgpack).
+  m.def("drain_recorded_completions", []() {
+    auto items = drain_recorded_completions();
+    py::list out;
+    for (auto& kv : items) {
+      out.append(py::make_tuple(py::str(kv.first), py::bytes(kv.second)));
+    }
+    return out;
+  });
 }

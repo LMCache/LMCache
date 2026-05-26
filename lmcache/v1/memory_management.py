@@ -372,25 +372,44 @@ class MemoryObj(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
 
+@dataclass
+class PinnedAllocFree:
+    """Resolved alloc/free function pair for pinned CPU memory."""
+
+    alloc_fn: Any
+    alloc_args: tuple
+    free_fn: Any
+    free_args: tuple
+
+    def alloc(self) -> int:
+        """Allocate pinned memory and return the raw pointer."""
+        return self.alloc_fn(*self.alloc_args)
+
+    def free(self, ptr: int) -> None:
+        """Free a previously allocated pinned-memory pointer."""
+        self.free_fn(ptr, *self.free_args)
+
+
 def _resolve_pinned_alloc_free(
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
     size: Optional[int] = None,
-) -> Tuple[
-    tuple,  # (alloc_fn, *alloc_args)
-    tuple,  # (free_fn, *free_args_after_ptr)
-]:
+    use_hugepages: bool = False,
+) -> PinnedAllocFree:
     """Resolve the alloc/free function pair based on memory type.
 
     Returns:
-        A tuple of (alloc_info, free_info) where:
-        - alloc_info: (alloc_fn, *args) to call as alloc_fn(size, *args)
-        - free_info: (free_fn, *args) to call as free_fn(ptr, *args)
+        A PinnedAllocFree with the resolved functions and their extra
+        arguments.  Call ``ptr = resolved.alloc()`` and ``resolved.free(ptr)``.
     """
     if shm_name:
-        return (
-            (lmc_ops.alloc_shm_pinned_ptr, shm_name),
-            (lmc_ops.free_shm_pinned_ptr, size, shm_name),
+        if use_hugepages:
+            raise ValueError("Hugepages are not supported with shared memory (shm)")
+        return PinnedAllocFree(
+            alloc_fn=lmc_ops.alloc_shm_pinned_ptr,
+            alloc_args=(size, shm_name),
+            free_fn=lmc_ops.free_shm_pinned_ptr,
+            free_args=(size, shm_name),
         )
     elif numa_mapping:
         if torch_dev.is_available():
@@ -402,31 +421,103 @@ def _resolve_pinned_alloc_free(
             f"Current device {current_device_id} is not in the GPU NUMA mapping."
         )
         numa_id = gpu_to_numa_mapping[current_device_id]
-        return (
-            (lmc_ops.alloc_pinned_numa_ptr, numa_id),
-            (lmc_ops.free_pinned_numa_ptr, size),
-        )
+        if use_hugepages:
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_hugepage_pinned_numa_ptr,
+                alloc_args=(size, numa_id),
+                free_fn=lmc_ops.free_hugepage_pinned_numa_ptr,
+                free_args=(size,),
+            )
+        else:
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_pinned_numa_ptr,
+                alloc_args=(size, numa_id),
+                free_fn=lmc_ops.free_pinned_numa_ptr,
+                free_args=(size,),
+            )
     else:
-        return (
-            (lmc_ops.alloc_pinned_ptr, 0),
-            (lmc_ops.free_pinned_ptr,),
-        )
+        flags = 0
+        if use_hugepages:
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_hugepage_pinned_ptr,
+                alloc_args=(size, flags),
+                free_fn=lmc_ops.free_hugepage_pinned_ptr,
+                free_args=(size,),
+            )
+        else:
+            return PinnedAllocFree(
+                alloc_fn=lmc_ops.alloc_pinned_ptr,
+                alloc_args=(size, flags),
+                free_fn=lmc_ops.free_pinned_ptr,
+                free_args=(),
+            )
+
+
+def _read_hugepage_info() -> Optional[Tuple[int, int, int]]:
+    """Read hugepage pool stats from sysfs.
+
+    NOTE: We only use 2 MiB hugepages, so the pool stats are taken from
+    the 2 MiB pool directly rather than the system default pool reported in
+    ``/proc/meminfo`` (which can be 1 GiB on some hosts).
+
+    Returns:
+        ``(nr_hugepages, free_hugepages, page_size_mb)`` for the hugepage
+        pool, or ``None`` if the sysfs entries are unavailable.
+    """
+    base = "/sys/kernel/mm/hugepages/hugepages-2048kB"
+    try:
+        with open(f"{base}/nr_hugepages") as f:
+            total = int(f.read().strip())
+        with open(f"{base}/free_hugepages") as f:
+            free = int(f.read().strip())
+        return total, free, 2
+    except (OSError, ValueError):
+        return None
 
 
 def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
+    use_hugepages: bool = False,
 ) -> torch.Tensor:
     if size == 0:
         return torch.empty(0, dtype=torch.uint8)
 
-    alloc_info, _ = _resolve_pinned_alloc_free(
+    resolved = _resolve_pinned_alloc_free(
         numa_mapping,
         shm_name,
+        size,
+        use_hugepages,
     )
-    alloc_fn, *alloc_args = alloc_info
-    ptr = alloc_fn(size, *alloc_args)
+
+    try:
+        ptr = resolved.alloc()
+    except RuntimeError as e:
+        if use_hugepages and "mmap failed" in str(e):
+            diag = _read_hugepage_info()
+            if diag is not None:
+                total, free, page_mb = diag
+                page_bytes = page_mb * 1024 * 1024
+                needed = (size + page_bytes - 1) // page_bytes
+                logger.error(
+                    "Failed to allocate huge pages. "
+                    "Pool has %d pages (%d free, each %d MiB). "
+                    "Requested %d bytes (%d pages). "
+                    "Please grow the %d MiB hugepage pool.",
+                    total,
+                    free,
+                    page_mb,
+                    size,
+                    needed,
+                    page_mb,
+                )
+            else:
+                logger.error(
+                    "Failed to allocate huge pages. "
+                    "Please grow the 2 MiB hugepage pool."
+                )
+        raise
 
     array_type = ctypes.c_uint8 * size
     buf = array_type.from_address(ptr)
@@ -440,17 +531,18 @@ def _free_cpu_memory(
     size: int | None = None,
     numa_mapping: Optional[NUMAMapping] = None,
     shm_name: Optional[str] = None,
+    use_hugepages: bool = False,
 ) -> None:
     if torch_dev.is_available():
         torch_dev.synchronize()
 
-    _, free_info = _resolve_pinned_alloc_free(
+    resolved = _resolve_pinned_alloc_free(
         numa_mapping,
         shm_name,
-        size=size,
+        size,
+        use_hugepages,
     )
-    free_fn, *free_args = free_info
-    free_fn(buffer.data_ptr(), *free_args)
+    resolved.free(buffer.data_ptr())
 
 
 def _allocate_gpu_memory(
@@ -534,6 +626,7 @@ class TensorMemoryObj(MemoryObj):
         return self.meta.shape
 
     def get_dtype(self) -> torch.dtype:
+        assert self.meta.dtype is not None
         return self.meta.dtype
 
     def get_shapes(self) -> list[torch.Size]:
@@ -1706,7 +1799,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
                 self.batched_free(allocated_blocks, update_stats=False)
                 return None
 
-            # FIXME: think about whether pareant_allocator
+            # FIXME: think about whether parent_allocator
             # should be updated here.
             free_block.meta.shape = shapes[0]
             free_block.meta.dtype = dtypes[0]
@@ -1819,12 +1912,12 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
     def __str__(self):
         return "PagedTensorMemoryAllocator"
 
-    def get_paged_buffers(self) -> list[torch.Tensor]:
+    def get_paged_buffers(self) -> tuple[torch.Tensor, ...]:
         """
-        Get the list of paged buffers for fixed buffer registration.
+        Get the paged buffers for fixed buffer registration.
 
         Returns:
-            List of paged buffer tensors that can be registered with io_uring
+            Tuple of paged buffer tensors that can be registered with io_uring
             for true zero copy operations.
         """
         return self.paged_buffers
@@ -2062,12 +2155,16 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
               (2) byte_array buffer memory.
     """
 
-    def __init__(self, size: int, use_paging: bool = False, **kwargs):
+    def __init__(
+        self, size: int, use_paging: bool = False, use_hugepages: bool = False, **kwargs
+    ):
         """
         :param int size: The size of the pinned memory in bytes.
+        :param bool use_hugepages: Whether to use hugepages.
         """
 
         self.numa_mapping = kwargs.get("numa_mapping", None)
+        self.use_hugepages = use_hugepages
         self.align_bytes = kwargs.get("align_bytes", AddressManager.ALIGN_BYTES)
         if self.align_bytes <= 0 or self.align_bytes & (self.align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
@@ -2083,7 +2180,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self.size = size
 
-        self.buffer = _allocate_cpu_memory(size, self.numa_mapping, self.shm_name)
+        self.buffer = _allocate_cpu_memory(
+            size, self.numa_mapping, self.shm_name, use_hugepages=use_hugepages
+        )
 
         self._unregistered = False
 
@@ -2218,15 +2317,16 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.size,
                 self.numa_mapping,
                 self.shm_name,
+                use_hugepages=self.use_hugepages,
             )
             self._unregistered = True
 
-    def get_paged_buffers(self) -> Optional[list[torch.Tensor]]:
+    def get_paged_buffers(self) -> Optional[tuple[torch.Tensor, ...]]:
         """
-        Get the list of paged buffers for fixed buffer registration.
+        Get the paged buffers for fixed buffer registration.
 
         Returns:
-            List of paged buffer tensors if using paged allocator, None otherwise.
+            Tuple of paged buffer tensors if using paged allocator, None otherwise.
             These buffers can be registered with io_uring for true zero copy operations.
         """
         if isinstance(self.pin_allocator, PagedTensorMemoryAllocator):
@@ -2568,89 +2668,3 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
 
     def __str__(self):
         return "PDMemoryAllocator"
-
-
-class XPUMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates memory in the pre-allocated XPU memory."""
-
-    def __init__(
-        self,
-        size: int,
-        device="xpu",
-        align_bytes: Optional[int] = None,
-        use_paging: bool = False,
-        **kwargs,
-    ):
-        self.tensor = torch.empty((size,), dtype=torch.uint8, device=device)
-
-        self.allocator: MemoryAllocatorInterface
-        if use_paging:
-            assert "shapes" in kwargs, (
-                "shapes must be specified for paged memory allocator"
-            )
-            assert "dtypes" in kwargs, (
-                "dtypes must be specified for paged memory allocator"
-            )
-            assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-            self.allocator = PagedTensorMemoryAllocator(
-                tensor=self.tensor,
-                shapes=kwargs["shapes"],
-                dtypes=kwargs["dtypes"],
-                fmt=kwargs["fmt"],
-            )
-        else:
-            alloc_kwargs = {}
-            if align_bytes is not None:
-                alloc_kwargs["align_bytes"] = align_bytes
-            self.allocator = TensorMemoryAllocator(self.tensor, **alloc_kwargs)
-
-        self.device_mem_lock = threading.Lock() if not use_paging else nullcontext()
-
-    @_lmcache_nvtx_annotate
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        with self.device_mem_lock:
-            return self.allocator.allocate(shapes, dtypes, fmt, str(self))
-
-    @_lmcache_nvtx_annotate
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[List[MemoryObj]]:
-        with self.device_mem_lock:
-            return self.allocator.batched_allocate(
-                shapes, dtypes, batch_size, fmt, str(self)
-            )
-
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
-        with self.device_mem_lock:
-            self.allocator.free(memory_obj)
-
-    def batched_free(
-        self,
-        memory_objs: List[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ):
-        with self.device_mem_lock:
-            self.allocator.batched_free(memory_objs)
-
-    def memcheck(self):
-        with self.device_mem_lock:
-            return self.allocator.memcheck()
-
-    def close(self):
-        if torch_dev.is_available():
-            torch_dev.synchronize()
-
-    def __str__(self):
-        return "XPUMemoryAllocator"
