@@ -31,10 +31,11 @@ fi
 protoc --version
 
 echo "--- :package: SGLang + LMCache install"
-# Install SGLang first (pins torch==2.9.1+cu130) so LMCache's c_ops in the
-# next step is compiled against the final torch ABI.
 SGLANG_FORK_URL="git+https://github.com/Shaoting-Feng/sglang.git@shaoting/sglang-lmcache-mp-nonlayerwise#subdirectory=python"
 uv pip install "${SGLANG_FORK_URL}"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 uv pip install -e . --no-build-isolation
+uv pip uninstall cupy-cuda12x 2>/dev/null || true
+
 python -c "import lmcache, sglang; print(f'sglang={sglang.__version__}; lmcache OK')"
+python -c "import cupy; print(f'cupy={cupy.__version__}')"
