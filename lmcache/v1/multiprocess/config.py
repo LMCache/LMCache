@@ -39,8 +39,12 @@ class MPServerConfig:
 
     engine_type: str = "default"
     """Cache engine backend type
-    ('default' for MPCacheEngine, 'blend' for BlendEngineV2).
+    ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
+
+    transfer_mode: str = "gpu"
+    """Transfer mode: 'gpu' for GPU-based IPC transfer (STORE/RETRIEVE),
+    'non_gpu' for non-GPU-based transfer (PREPARE/COMMIT)."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
@@ -146,9 +150,17 @@ def add_mp_server_args(
         type=str,
         default="default",
         choices=["default", "blend"],
-        help="Cache engine backend type. 'default' uses MPCacheEngine, "
-        "'blend' uses BlendEngineV2 for cross-request KV reuse. "
-        "Default is 'default'.",
+        help="Cache engine backend type. 'default' uses standard prefix caching, "
+        "'blend' when cacheblend is enabled. Default is 'default'.",
+    )
+    mp_group.add_argument(
+        "--transfer-mode",
+        type=str,
+        default="gpu",
+        choices=["gpu", "non_gpu"],
+        help="Transfer mode: 'gpu' for GPU-based IPC transfer "
+        "(STORE/RETRIEVE), 'non_gpu' for non-GPU-based transfer "
+        "(PREPARE/COMMIT). Default is 'gpu'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -198,6 +210,7 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        transfer_mode=args.transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,

@@ -134,7 +134,7 @@ def store_and_wait(adapter: DaxL2Adapter, key: ObjectKey, obj: MemoryObj) -> Non
     task_id = adapter.submit_store_task([key], [obj])
     assert wait_for_event_fd(adapter.get_store_event_fd())
     completed = adapter.pop_completed_store_tasks()
-    assert completed == {task_id: True}
+    assert completed[task_id].is_successful()
 
 
 def bitmap_to_bools(bitmap: Bitmap, size: int) -> list[bool]:
@@ -170,7 +170,8 @@ def test_dax_adapter_store_lookup_load_and_one_shot_results(tmp_path):
 
         store_task = adapter.submit_store_task([key0, key2], [obj0, obj2])
         assert wait_for_event_fd(adapter.get_store_event_fd())
-        assert adapter.pop_completed_store_tasks() == {store_task: True}
+        completed = adapter.pop_completed_store_tasks()
+        assert completed[store_task].is_successful()
         assert adapter.pop_completed_store_tasks() == {}
         assert listener.stored == [[key0, key2]]
 
@@ -294,7 +295,8 @@ def test_dax_adapter_full_arena_does_not_evict_internally(tmp_path):
 
         task_id = adapter.submit_store_task([key2], [obj2])
         assert wait_for_event_fd(adapter.get_store_event_fd())
-        assert adapter.pop_completed_store_tasks() == {task_id: False}
+        completed = adapter.pop_completed_store_tasks()
+        assert not completed[task_id].is_successful()
         assert listener.stored == [[key0], [key1]]
         assert adapter.get_usage().usage_fraction == pytest.approx(1.0)
 
