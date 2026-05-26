@@ -30,6 +30,7 @@ import aiofiles.os
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -286,12 +287,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
-        # Bytes actually written per completed store task.  Excludes
-        # duplicate-key fast-paths (see ``_execute_store``).  Reported to
-        # the L2 throughput subscriber via ``pop_completed_store_task_bytes``
-        # so the histogram reflects real disk I/O, not skipped no-ops.
-        self._completed_store_task_bytes: dict[L2TaskId, int] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -344,17 +340,18 @@ class FSL2Adapter(L2AdapterInterface):
 
     def pop_completed_store_tasks(
         self,
-    ) -> dict[L2TaskId, bool]:
+    ) -> dict[L2TaskId, L2StoreResult]:
+        """Pop all completed store tasks.
+
+        Returns:
+            dict[L2TaskId, L2StoreResult]: a dictionary mapping the task
+            id to an ``L2StoreResult`` that encodes both the success flag
+            and the bytes actually transferred.
+        """
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
         return completed
-
-    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
-        with self._lock:
-            completed_bytes = self._completed_store_task_bytes
-            self._completed_store_task_bytes = {}
-        return completed_bytes
 
     # ------------------------------------------------------------------
     # Lookup and Lock Interface
@@ -640,8 +637,7 @@ class FSL2Adapter(L2AdapterInterface):
             success = False
 
         with self._lock:
-            self._completed_store_tasks[task_id] = success
-            self._completed_store_task_bytes[task_id] = bytes_written
+            self._completed_store_tasks[task_id] = L2StoreResult(success, bytes_written)
         self._store_efd.notify()
 
     # ---- lookup ---------------------------------------------------------

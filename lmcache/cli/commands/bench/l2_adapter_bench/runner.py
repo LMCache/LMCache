@@ -21,6 +21,7 @@ import time
 # First Party
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
 # Local
@@ -46,10 +47,10 @@ def _bitmap_count(bitmap: Bitmap | None) -> int:
 
 def _wait_store_finished(
     adapter, task_ids: list[int], timeout: float
-) -> dict[int, bool]:
+) -> dict[int, L2StoreResult]:
     """Wait for all store tasks to finish.
 
-    Returns the accumulated ``{task_id: success}`` dict.
+    Returns the accumulated ``{task_id: L2StoreResult}`` dict.
     ``pop_completed_store_tasks`` consumes the adapter's completion
     dict, so we must accumulate the results here for the caller to
     use. On timeout, returns whatever was harvested so far (possibly
@@ -58,7 +59,7 @@ def _wait_store_finished(
     """
     unfinished = len(task_ids)
     efd = adapter.get_store_event_fd()
-    completed: dict[int, bool] = {}
+    completed: dict[int, L2StoreResult] = {}
     while unfinished > 0:
         if not wait_eventfd(efd, timeout=timeout):
             return completed
@@ -168,7 +169,7 @@ def bench_store(
         success_keys = sum(
             len(keys_batches[i])
             for i, tid in enumerate(task_ids)
-            if completed.get(tid, False)
+            if completed.get(tid, L2StoreResult(False, 0)).is_successful()
         )
 
         if timed_out:
