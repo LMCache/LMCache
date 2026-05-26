@@ -315,6 +315,30 @@ class IPCCacheEngineKey:
 KVCache = list[CudaIPCWrapper]
 
 
+class RegisterNonGpuContextPayload(msgspec.Struct):
+    """Payload for the REGISTER_KV_CACHE_NON_GPU_CONTEXT protocol message.
+
+    Attributes:
+        instance_id: Worker instance identifier (typically PID).
+        model_name: Model name associated with this worker.
+        world_size: Worker world size used in cache keys.
+        block_size: Tokens per paged block.
+        num_layers: Number of model layers.
+        hidden_dim_size: Flattened hidden dimension per token.
+        dtype_str: Torch dtype name (e.g. ``"float16"``).
+        use_mla: Whether the worker KV format is MLA.
+    """
+
+    instance_id: int
+    model_name: str
+    world_size: int
+    block_size: int
+    num_layers: int
+    hidden_dim_size: int
+    dtype_str: str
+    use_mla: bool
+
+
 @dataclass
 class CustomizedSerdeConfig:
     serializer: Callable[[Any], bytes]

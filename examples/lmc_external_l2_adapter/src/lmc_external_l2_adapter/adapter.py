@@ -22,6 +22,7 @@ import torch  # noqa: F401  # must precede native_storage_ops
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -128,7 +129,7 @@ class InMemoryL2Adapter(L2AdapterInterface):
         self._locked: dict[ObjectKey, int] = defaultdict(int)
 
         self._next_id: L2TaskId = 0
-        self._done_store: dict[L2TaskId, bool] = {}
+        self._done_store: dict[L2TaskId, L2StoreResult] = {}
         self._done_lookup: dict[L2TaskId, Bitmap] = {}
         self._done_load: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -171,7 +172,7 @@ class InMemoryL2Adapter(L2AdapterInterface):
 
     def pop_completed_store_tasks(
         self,
-    ) -> dict[L2TaskId, bool]:
+    ) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             done = self._done_store
             self._done_store = {}
@@ -300,7 +301,7 @@ class InMemoryL2Adapter(L2AdapterInterface):
             await asyncio.sleep(delay)
 
         with self._lock:
-            self._done_store[tid] = ok
+            self._done_store[tid] = L2StoreResult(ok, total)
         self._store_efd.notify()
 
     def _do_lookup(

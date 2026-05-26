@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
@@ -175,7 +176,7 @@ class DaxL2Adapter(L2AdapterInterface):
         self._load_executor: Optional[ThreadPoolExecutor] = None
 
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
 
@@ -265,11 +266,11 @@ class DaxL2Adapter(L2AdapterInterface):
         )
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         """Drain completed store task results.
 
         Returns:
-            Mapping from task id to task-level success. Each task appears at
+            Mapping from task id to store result. Each task appears at
             most once; subsequent calls do not return already drained tasks.
         """
         with self._lock:
@@ -512,8 +513,11 @@ class DaxL2Adapter(L2AdapterInterface):
                 if ok:
                     stored_keys.append(key)
         finally:
+            bytes_transferred = self._config.slot_bytes * len(stored_keys)
             with self._lock:
-                self._completed_store_tasks[task_id] = all(per_key_results)
+                self._completed_store_tasks[task_id] = L2StoreResult(
+                    all(per_key_results), bytes_transferred
+                )
                 self._inflight_store_tasks -= 1
 
             if stored_keys:
