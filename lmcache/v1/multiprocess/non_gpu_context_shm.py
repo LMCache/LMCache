@@ -15,6 +15,7 @@ from lmcache.v1.multiprocess.non_gpu_context import (
     NonGpuContextMetadata,
 )
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.shm_types import ShmSlotDescriptor
 
 
 class NonGpuContextShm(NonGpuContext):
@@ -75,14 +76,15 @@ class NonGpuContextShm(NonGpuContext):
         return tensor_1d.view(torch.Size(shape))
 
     def _build_slot_tensors(self, slots: list[dict[str, Any]]) -> list[torch.Tensor]:
+        descriptors = [ShmSlotDescriptor.from_dict(slot) for slot in slots]
         return [
             self._make_tensor_view(
-                offset=int(slot["offset"]),
-                length=int(slot["length"]),
-                shape=list(slot["shape"]),
-                dtype_str=str(slot["dtype"]),
+                offset=descriptor.offset,
+                length=descriptor.length,
+                shape=descriptor.shape,
+                dtype_str=descriptor.dtype,
             )
-            for slot in slots
+            for descriptor in descriptors
         ]
 
     def prepare_store(

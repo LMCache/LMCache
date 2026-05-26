@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from functools import partial
 from itertools import islice
-from typing import Generator
+from typing import Any, Generator
 import argparse
 import pickle
 import shutil
@@ -77,6 +77,7 @@ from lmcache.v1.multiprocess.protocols.engine import (
     RegisterNonGpuContextResponse,
 )
 from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.shm_types import ShmSlotDescriptor
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 import lmcache.c_ops as lmc_ops
 
@@ -636,7 +637,7 @@ class MPCacheEngine:
         reserved = self.storage_manager.reserve_write(
             obj_keys, context.non_cuda_metadata.layout_desc, "new"
         )
-        slots: list[dict] = []
+        slots: list[dict[str, Any]] = []
         chunk_indices: list[int] = []
         reserved_keys: list[ObjectKey] = []
         try:
@@ -645,12 +646,12 @@ class MPCacheEngine:
                 if memory_obj is None or memory_obj.tensor is None:
                     continue
                 slots.append(
-                    {
-                        "offset": memory_obj.shm_offset,
-                        "length": memory_obj.shm_byte_length,
-                        "shape": list(memory_obj.tensor.shape),
-                        "dtype": _dtype_to_name(memory_obj.tensor.dtype),
-                    }
+                    ShmSlotDescriptor(
+                        offset=memory_obj.shm_offset,
+                        length=memory_obj.shm_byte_length,
+                        shape=list(memory_obj.tensor.shape),
+                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
+                    ).to_dict()
                 )
                 chunk_indices.append(idx)
                 reserved_keys.append(obj_key)
@@ -802,18 +803,18 @@ class MPCacheEngine:
                 if shm_prefetched_keys:
                     self.storage_manager.finish_read_prefetched(shm_prefetched_keys)
                 return PrepareRetrieveResponse(success=False, data=b"", context={})
-            slots: list[dict] = []
+            slots: list[dict[str, Any]] = []
             for memory_obj in shm_memory_objs:
                 if memory_obj.tensor is None:
                     self.storage_manager.finish_read_prefetched(shm_prefetched_keys)
                     return PrepareRetrieveResponse(success=False, data=b"", context={})
                 slots.append(
-                    {
-                        "offset": memory_obj.shm_offset,
-                        "length": memory_obj.shm_byte_length,
-                        "shape": list(memory_obj.tensor.shape),
-                        "dtype": _dtype_to_name(memory_obj.tensor.dtype),
-                    }
+                    ShmSlotDescriptor(
+                        offset=memory_obj.shm_offset,
+                        length=memory_obj.shm_byte_length,
+                        shape=list(memory_obj.tensor.shape),
+                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
+                    ).to_dict()
                 )
             transfer_key = self._make_non_gpu_transfer_key(key, instance_id)
             with self._pending_shm_lock:
