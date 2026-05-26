@@ -48,6 +48,11 @@ class RequestType(enum.Enum):
     QUERY_PREFETCH_LOOKUP_HITS = enum.auto()
     FREE_LOOKUP_LOCKS = enum.auto()
     END_SESSION = enum.auto()
+    REGISTER_KV_CACHE_NON_GPU_CONTEXT = enum.auto()
+    PREPARE_STORE = enum.auto()
+    COMMIT_STORE = enum.auto()
+    PREPARE_RETRIEVE = enum.auto()
+    COMMIT_RETRIEVE = enum.auto()
 
     # Controller operations
     CLEAR = enum.auto()
