@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Non-GPU context abstractions and utilities for multiprocess mode.
+"""Non-GPU context abstractions and utilities for multiprocess transport.
 
 This module provides:
 - ``NonGpuContextMetadata``: layout metadata dataclass for non-CUDA workers.
@@ -7,7 +7,7 @@ This module provides:
   interface for CPU-side KV data transfer. Concrete implementations (e.g.
   ``NonGpuContextPickle``) each decide *how* data is serialised and transported.
 - ``create_non_gpu_context()``: factory that returns the appropriate
-  ``NonGpuContext`` subclass (currently always ``NonGpuContextPickle``).
+  ``NonGpuContext`` subclass.
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
   shared gather/scatter utilities used by all concrete implementations.
 """
@@ -135,7 +135,7 @@ def create_non_gpu_context(
     """
     if shm_name and pool_size > 0:
         # Local
-        from .non_gpu_context_shm import NonGpuContextShm
+        from .shm import NonGpuContextShm
 
         try:
             logger.info(
@@ -155,7 +155,7 @@ def create_non_gpu_context(
             )
 
     # Local
-    from .non_gpu_context_pickle import NonGpuContextPickle
+    from .pickle import NonGpuContextPickle
 
     logger.info("Creating NonGpuContextPickle (pickle transport)")
     return NonGpuContextPickle(metadata, mq_client, mq_timeout)

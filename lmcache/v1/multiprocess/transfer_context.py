@@ -16,7 +16,9 @@ from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
 from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.multiprocess.non_gpu_context import (
+from lmcache.v1.multiprocess.protocol import RequestType
+from lmcache.v1.multiprocess.protocols.engine import RegisterNonGpuContextResponse
+from lmcache.v1.multiprocess.transport.base import (
     NonGpuContext,
     NonGpuContextMetadata,
     compute_kv_layout,
@@ -24,8 +26,6 @@ from lmcache.v1.multiprocess.non_gpu_context import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
-from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.protocols.engine import RegisterNonGpuContextResponse
 
 logger = init_logger(__name__)
 

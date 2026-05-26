@@ -65,7 +65,6 @@ from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueServer
-from lmcache.v1.multiprocess.non_gpu_context import NonGpuContextMetadata
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
@@ -77,8 +76,9 @@ from lmcache.v1.multiprocess.protocols.engine import (
     RegisterNonGpuContextResponse,
 )
 from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.shm_types import ShmSlotDescriptor
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.multiprocess.transport.base import NonGpuContextMetadata
+from lmcache.v1.multiprocess.transport.shm_types import ShmSlotDescriptor
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
