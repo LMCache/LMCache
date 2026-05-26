@@ -34,7 +34,10 @@ from lmcache.v1.distributed.l2_adapters.dax_l2_adapter import (
     DaxL2Adapter,
     DaxL2AdapterConfig,
 )
-from lmcache.v1.distributed.l2_adapters.hotplug import L2HotplugError
+from lmcache.v1.distributed.l2_adapters.reconfiguration import (
+    L2ReconfigurableAdapter,
+    L2ReconfigureError,
+)
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import (
     AdHocMemoryAllocator,
@@ -217,7 +220,13 @@ def test_dax_hotplug_remove_migrate_preserves_loadability(tmp_path):
         store_and_wait(adapter, key, obj)
         source_path = adapter.hotplug_status()["devices"][0]["device_path"]
 
-        result = adapter.hotplug_remove_device(source_path, "migrate")
+        result = adapter.reconfigure(
+            "remove",
+            {
+                "device_path": source_path,
+                "mode": "migrate",
+            },
+        )
 
         assert result["state"] == "removed"
         assert result["moved_keys"] == 1
@@ -232,6 +241,17 @@ def test_dax_hotplug_remove_migrate_preserves_loadability(tmp_path):
     finally:
         obj.ref_count_down()
         target.ref_count_down()
+        adapter.close()
+
+
+def test_dax_adapter_implements_generic_reconfigure_status(tmp_path):
+    adapter = make_hotplug_adapter(tmp_path)
+    try:
+        assert isinstance(adapter, L2ReconfigurableAdapter)
+        status = adapter.reconfigure("status", {})
+        assert status.pop("type") == "dax"
+        assert status == adapter.hotplug_status()
+    finally:
         adapter.close()
 
 
@@ -268,7 +288,7 @@ def test_dax_hotplug_remove_blocked_restores_active_state(tmp_path):
         source_path = adapter.hotplug_status()["devices"][0]["device_path"]
         assert lookup_and_wait(adapter, [key]) == [True]
 
-        with pytest.raises(L2HotplugError) as exc_info:
+        with pytest.raises(L2ReconfigureError) as exc_info:
             adapter.hotplug_remove_device(source_path, "migrate")
 
         assert exc_info.value.status_code == 409
@@ -291,7 +311,7 @@ def test_dax_hotplug_remove_migrate_rejects_duplicate_destination_key(tmp_path):
         destination = adapter._devices[1]
         assert destination.core.put_many([key], [duplicate_obj]) == [True]
 
-        with pytest.raises(L2HotplugError) as exc_info:
+        with pytest.raises(L2ReconfigureError) as exc_info:
             adapter.hotplug_remove_device(source_path, "migrate")
 
         assert exc_info.value.status_code == 409
@@ -341,7 +361,7 @@ def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path):
     )
     missing_path = str(tmp_path / "missing_dax.bin")
     try:
-        with pytest.raises(L2HotplugError) as exc_info:
+        with pytest.raises(L2ReconfigureError) as exc_info:
             adapter.hotplug_add_device(missing_path, 2048)
 
         assert exc_info.value.status_code == 400
@@ -351,26 +371,50 @@ def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path):
         adapter.close()
 
 
-class _FakeHotplugAdapter:
-    def hotplug_status(self) -> dict:
-        return {"hotplug_enabled": True, "devices": []}
+class _FakeReconfigurableAdapter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def reconfigure_status(self) -> dict:
+        return {"type": "fake", "ready": True}
+
+    def reconfigure(self, operation: str, payload: dict[str, object]) -> dict:
+        self.calls.append((operation, payload))
+        return {"status": "ok", "operation": operation, "payload": payload}
 
 
 class _SerdeLikeWrapper:
-    def __init__(self, inner_adapter: _FakeHotplugAdapter) -> None:
+    def __init__(self, inner_adapter: _FakeReconfigurableAdapter) -> None:
         self.inner_adapter = inner_adapter
 
 
-def test_storage_manager_finds_serde_wrapped_hotplug_adapter():
+def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
+    sm = StorageManager.__new__(StorageManager)
+    adapter = _FakeReconfigurableAdapter()
+    sm._l2_adapters = [cast(L2AdapterInterface, adapter)]
+
+    result = sm.reconfigure_l2_adapter(0, "flip", {"enabled": True})
+
+    assert result == {
+        "status": "ok",
+        "operation": "flip",
+        "payload": {"enabled": True},
+        "adapter_index": 0,
+    }
+    assert adapter.calls == [("flip", {"enabled": True})]
+
+
+def test_storage_manager_finds_serde_wrapped_reconfigurable_adapter():
     sm = StorageManager.__new__(StorageManager)
     sm._l2_adapters = [
-        cast(L2AdapterInterface, _SerdeLikeWrapper(_FakeHotplugAdapter()))
+        cast(L2AdapterInterface, _SerdeLikeWrapper(_FakeReconfigurableAdapter()))
     ]
 
-    status = sm.dax_hotplug_status()
+    status = sm.get_l2_adapter_reconfigure_status()
 
     assert status["enabled"] is True
-    assert status["num_dax_adapters"] == 1
+    assert status["num_adapters"] == 1
+    assert status["adapters"][0]["adapter_index"] == 0
 
 
 def test_dax_adapter_store_lookup_load_and_one_shot_results(tmp_path):

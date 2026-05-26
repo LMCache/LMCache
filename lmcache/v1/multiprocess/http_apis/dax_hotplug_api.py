@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 # First Party
-from lmcache.v1.distributed.l2_adapters.hotplug import L2HotplugError
+from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
 
 router = APIRouter()
 
@@ -37,30 +37,13 @@ SizeRequest = int | str
 
 
 class _StorageManagerLike(Protocol):
-    def dax_hotplug_status(self) -> dict: ...
+    def get_l2_adapter_reconfigure_status(self) -> dict: ...
 
-    def dax_hotplug_add(
+    def reconfigure_l2_adapter(
         self,
         adapter_index: int,
-        device_path: str,
-        size_bytes: int,
-    ) -> dict: ...
-
-    def dax_hotplug_remove(
-        self,
-        adapter_index: int,
-        device_path: str,
-        mode: str,
-        force: bool,
-    ) -> dict: ...
-
-    def dax_hotplug_resize(
-        self,
-        adapter_index: int,
-        device_path: str,
-        size_bytes: int,
-        mode: str,
-        force: bool,
+        operation: str,
+        payload: dict[str, object],
     ) -> dict: ...
 
 
@@ -148,8 +131,51 @@ def _resolve_size_bytes(size: SizeRequest) -> int:
     return resolved
 
 
-def _api_error_response(exc: L2HotplugError) -> JSONResponse:
+def _api_error_response(exc: L2ReconfigureError) -> JSONResponse:
     return JSONResponse(status_code=exc.status_code, content=exc.payload)
+
+
+def _dax_adapter_entries(status: dict) -> list[tuple[int, dict]]:
+    raw_adapters = status.get("adapters", [])
+    if not isinstance(raw_adapters, list):
+        return []
+
+    dax_adapters = []
+    for raw_index, adapter in enumerate(raw_adapters):
+        if not isinstance(adapter, dict) or adapter.get("type") != "dax":
+            continue
+        generic_index = adapter.get("adapter_index", raw_index)
+        if not isinstance(generic_index, int):
+            generic_index = raw_index
+        dax_adapters.append((generic_index, adapter))
+    return dax_adapters
+
+
+def _dax_status_response(status: dict) -> dict:
+    adapters = []
+    for dax_index, (_, adapter) in enumerate(_dax_adapter_entries(status)):
+        public_adapter = dict(adapter)
+        public_adapter["adapter_index"] = dax_index
+        adapters.append(public_adapter)
+    return {
+        "enabled": bool(adapters),
+        "hotplug_enabled": any(
+            bool(adapter.get("hotplug_enabled", False)) for adapter in adapters
+        ),
+        "num_dax_adapters": len(adapters),
+        "adapters": adapters,
+    }
+
+
+def _resolve_dax_adapter_index(
+    sm: _StorageManagerLike,
+    adapter_index: int,
+) -> int:
+    adapters = _dax_adapter_entries(sm.get_l2_adapter_reconfigure_status())
+    if adapter_index < 0 or adapter_index >= len(adapters):
+        raise L2ReconfigureError(404, "DAX adapter not found")
+    generic_index, _ = adapters[adapter_index]
+    return generic_index
 
 
 @router.get("/dax/status", response_model=None)
@@ -159,8 +185,8 @@ async def dax_status(request: Request) -> dict | JSONResponse:
     if isinstance(sm, JSONResponse):
         return sm
     try:
-        return sm.dax_hotplug_status()
-    except L2HotplugError as exc:
+        return _dax_status_response(sm.get_l2_adapter_reconfigure_status())
+    except L2ReconfigureError as exc:
         return _api_error_response(exc)
 
 
@@ -172,14 +198,18 @@ async def dax_add(body: DaxAddRequest, request: Request) -> dict | JSONResponse:
         return sm
     try:
         size_bytes = _resolve_size_bytes(body.size)
-        return sm.dax_hotplug_add(
-            body.adapter_index,
-            body.device_path,
-            size_bytes,
+        adapter_index = _resolve_dax_adapter_index(sm, body.adapter_index)
+        return sm.reconfigure_l2_adapter(
+            adapter_index,
+            "add",
+            {
+                "device_path": body.device_path,
+                "size_bytes": size_bytes,
+            },
         )
     except ValueError:
         return JSONResponse(status_code=400, content={"error": _SIZE_ERROR})
-    except L2HotplugError as exc:
+    except L2ReconfigureError as exc:
         return _api_error_response(exc)
 
 
@@ -193,13 +223,17 @@ async def dax_remove(
     if isinstance(sm, JSONResponse):
         return sm
     try:
-        return sm.dax_hotplug_remove(
-            body.adapter_index,
-            body.device_path,
-            body.mode,
-            body.force,
+        adapter_index = _resolve_dax_adapter_index(sm, body.adapter_index)
+        return sm.reconfigure_l2_adapter(
+            adapter_index,
+            "remove",
+            {
+                "device_path": body.device_path,
+                "mode": body.mode,
+                "force": body.force,
+            },
         )
-    except L2HotplugError as exc:
+    except L2ReconfigureError as exc:
         return _api_error_response(exc)
 
 
@@ -214,14 +248,18 @@ async def dax_resize(
         return sm
     try:
         size_bytes = _resolve_size_bytes(body.size)
-        return sm.dax_hotplug_resize(
-            body.adapter_index,
-            body.device_path,
-            size_bytes,
-            body.mode,
-            body.force,
+        adapter_index = _resolve_dax_adapter_index(sm, body.adapter_index)
+        return sm.reconfigure_l2_adapter(
+            adapter_index,
+            "resize",
+            {
+                "device_path": body.device_path,
+                "size_bytes": size_bytes,
+                "mode": body.mode,
+                "force": body.force,
+            },
         )
     except ValueError:
         return JSONResponse(status_code=400, content={"error": _SIZE_ERROR})
-    except L2HotplugError as exc:
+    except L2ReconfigureError as exc:
         return _api_error_response(exc)

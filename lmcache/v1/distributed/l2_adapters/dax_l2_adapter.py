@@ -31,10 +31,8 @@ from lmcache.v1.distributed.l2_adapters.config import (
 from lmcache.v1.distributed.l2_adapters.factory import (
     register_l2_adapter_factory,
 )
-from lmcache.v1.distributed.l2_adapters.hotplug import (
-    HotplugRemoveMode,
-    HotplugResizeMode,
-    L2HotplugError,
+from lmcache.v1.distributed.l2_adapters.reconfiguration import (
+    L2ReconfigureError,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
@@ -56,7 +54,9 @@ DaxDeviceState = Literal[
     "failed",
     "removed",
 ]
-DaxHotplugError = L2HotplugError
+HotplugRemoveMode = Literal["migrate", "evict", "drain"]
+HotplugResizeMode = Literal["migrate", "evict"]
+DaxHotplugError = L2ReconfigureError
 
 _READABLE_STATES: set[DaxDeviceState] = {
     "active",
@@ -123,6 +123,23 @@ def _validate_device_path(value: object, field_name: str = "device_path") -> str
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _reconfigure_device_path(payload: dict[str, object]) -> str:
+    try:
+        return _validate_device_path(payload.get("device_path"))
+    except ValueError as exc:
+        raise L2ReconfigureError(400, str(exc)) from exc
+
+
+def _reconfigure_size_bytes(payload: dict[str, object]) -> int:
+    value = payload.get("size_bytes")
+    if isinstance(value, bool):
+        raise L2ReconfigureError(400, "size_bytes must be a positive integer")
+    try:
+        return _parse_positive_int(value, "size_bytes")
+    except ValueError as exc:
+        raise L2ReconfigureError(400, str(exc)) from exc
 
 
 class DaxL2AdapterConfig(L2AdapterConfigBase):
@@ -669,6 +686,77 @@ class DaxL2Adapter(L2AdapterInterface):
                 "devices": devices,
             }
 
+    def reconfigure_status(self) -> dict:
+        """Return generic runtime reconfiguration status for this adapter.
+
+        Returns:
+            JSON-serializable DAX hotplug status.
+        """
+        status = self.hotplug_status()
+        status["type"] = "dax"
+        return status
+
+    def reconfigure(
+        self,
+        operation: str,
+        payload: dict[str, object],
+    ) -> dict:
+        """Apply one generic runtime reconfiguration operation.
+
+        Args:
+            operation: One of ``status``, ``add``, ``remove``, or ``resize``.
+            payload: DAX-specific operation payload.
+
+        Returns:
+            JSON-serializable operation result.
+
+        Raises:
+            L2ReconfigureError: If the operation or payload is invalid, or if the
+                underlying DAX hotplug operation fails.
+        """
+        if operation == "status":
+            return self.reconfigure_status()
+
+        if operation == "add":
+            device_path = _reconfigure_device_path(payload)
+            size_bytes = _reconfigure_size_bytes(payload)
+            return self.hotplug_add_device(device_path, size_bytes)
+
+        if operation == "remove":
+            device_path = _reconfigure_device_path(payload)
+            mode = payload.get("mode", "migrate")
+            if not isinstance(mode, str):
+                raise L2ReconfigureError(400, "mode must be migrate, evict, or drain")
+            force = payload.get("force", False)
+            if not isinstance(force, bool):
+                raise L2ReconfigureError(400, "force must be a boolean")
+            return self.hotplug_remove_device(
+                device_path,
+                cast(HotplugRemoveMode, mode),
+                force,
+            )
+
+        if operation == "resize":
+            device_path = _reconfigure_device_path(payload)
+            size_bytes = _reconfigure_size_bytes(payload)
+            mode = payload.get("mode", "migrate")
+            if not isinstance(mode, str):
+                raise L2ReconfigureError(400, "mode must be migrate or evict")
+            force = payload.get("force", False)
+            if not isinstance(force, bool):
+                raise L2ReconfigureError(400, "force must be a boolean")
+            return self.hotplug_resize_device(
+                device_path,
+                size_bytes,
+                cast(HotplugResizeMode, mode),
+                force,
+            )
+
+        raise L2ReconfigureError(
+            400,
+            f"unsupported DAX reconfigure operation: {operation}",
+        )
+
     def hotplug_add_device(self, device_path: str, size_bytes: int) -> dict:
         """Map and activate one additional DAX device.
 
@@ -680,16 +768,16 @@ class DaxL2Adapter(L2AdapterInterface):
             JSON-serializable operation result.
 
         Raises:
-            L2HotplugError: If hotplug is disabled or the request is invalid.
+            L2ReconfigureError: If hotplug is disabled or the request is invalid.
         """
         self._ensure_hotplug_enabled()
         device_path = device_path.strip()
         if not device_path:
-            raise L2HotplugError(400, "device_path must be non-empty")
+            raise L2ReconfigureError(400, "device_path must be non-empty")
         if size_bytes <= 0:
-            raise L2HotplugError(400, "size_bytes must be > 0")
+            raise L2ReconfigureError(400, "size_bytes must be > 0")
         if size_bytes // self._config.slot_bytes <= 0:
-            raise L2HotplugError(400, "size_bytes does not fit one slot")
+            raise L2ReconfigureError(400, "size_bytes does not fit one slot")
 
         with self._device_lock:
             for index, entry in enumerate(self._devices):
@@ -706,7 +794,7 @@ class DaxL2Adapter(L2AdapterInterface):
                         "adapter_index": 0,
                         "device": self._device_status_locked(index, entry),
                     }
-                raise L2HotplugError(
+                raise L2ReconfigureError(
                     409,
                     "device_path already active with a different size",
                 )
@@ -718,10 +806,13 @@ class DaxL2Adapter(L2AdapterInterface):
                 )
             except ValueError as exc:
                 logger.exception("Invalid DAX hotplug add request")
-                raise L2HotplugError(400, "invalid DAX hotplug add request") from exc
+                raise L2ReconfigureError(
+                    400,
+                    "invalid DAX hotplug add request",
+                ) from exc
             except RuntimeError as exc:
                 logger.exception("Failed to map DAX hotplug device")
-                raise L2HotplugError(400, "failed to map DAX device") from exc
+                raise L2ReconfigureError(400, "failed to map DAX device") from exc
 
             index = self._devices.index(entry)
             return {
@@ -749,7 +840,7 @@ class DaxL2Adapter(L2AdapterInterface):
             JSON-serializable operation result.
 
         Raises:
-            L2HotplugError: If the request is invalid, blocked, or lacks
+            L2ReconfigureError: If the request is invalid, blocked, or lacks
                 destination capacity.
         """
         self._ensure_hotplug_enabled()
@@ -773,7 +864,7 @@ class DaxL2Adapter(L2AdapterInterface):
             try:
                 blocked = self._blocked_payload_locked(source)
                 if blocked is not None and not force:
-                    raise L2HotplugError(
+                    raise L2ReconfigureError(
                         409,
                         "device has locked or borrowed slots",
                         payload=blocked,
@@ -842,16 +933,16 @@ class DaxL2Adapter(L2AdapterInterface):
             JSON-serializable operation result.
 
         Raises:
-            L2HotplugError: If the request is invalid, blocked, or lacks
+            L2ReconfigureError: If the request is invalid, blocked, or lacks
                 destination capacity.
         """
         self._ensure_hotplug_enabled()
         self._validate_resize_mode(mode)
         if size_bytes <= 0:
-            raise L2HotplugError(400, "size_bytes must be > 0")
+            raise L2ReconfigureError(400, "size_bytes must be > 0")
         new_max_slots = size_bytes // self._config.slot_bytes
         if new_max_slots <= 0:
-            raise L2HotplugError(400, "size_bytes does not fit one slot")
+            raise L2ReconfigureError(400, "size_bytes does not fit one slot")
 
         with self._device_lock:
             device_index, entry = self._get_device_for_path_locked(device_path)
@@ -879,17 +970,20 @@ class DaxL2Adapter(L2AdapterInterface):
                 entry.max_dax_size_bytes = size_bytes
                 entry.state = "active" if old_state == "active" else old_state
                 self._recalculate_capacity_locked()
-            except L2HotplugError:
+            except L2ReconfigureError:
                 entry.state = old_state
                 raise
             except ValueError as exc:
                 entry.state = old_state
                 logger.exception("Invalid DAX hotplug resize request")
-                raise L2HotplugError(409, "invalid DAX hotplug resize request") from exc
+                raise L2ReconfigureError(
+                    409,
+                    "invalid DAX hotplug resize request",
+                ) from exc
             except RuntimeError as exc:
                 entry.state = old_state
                 logger.exception("Failed to remap DAX hotplug device")
-                raise L2HotplugError(400, "failed to remap DAX device") from exc
+                raise L2ReconfigureError(400, "failed to remap DAX device") from exc
 
             return {
                 "status": "ok",
@@ -1120,7 +1214,7 @@ class DaxL2Adapter(L2AdapterInterface):
     ) -> tuple[int, DaxDeviceEntry]:
         normalized_path = device_path.strip()
         if not normalized_path:
-            raise L2HotplugError(400, "device_path must be non-empty")
+            raise L2ReconfigureError(400, "device_path must be non-empty")
 
         matches: list[tuple[int, DaxDeviceEntry]] = []
         for index, entry in enumerate(self._devices):
@@ -1131,7 +1225,7 @@ class DaxL2Adapter(L2AdapterInterface):
             matches.append((index, entry))
 
         if len(matches) > 1:
-            raise L2HotplugError(
+            raise L2ReconfigureError(
                 409,
                 "multiple active DAX devices have the same device_path",
                 payload={
@@ -1151,7 +1245,7 @@ class DaxL2Adapter(L2AdapterInterface):
         if matches:
             return matches[0]
 
-        raise L2HotplugError(404, "DAX device not found")
+        raise L2ReconfigureError(404, "DAX device not found")
 
     def _blocked_payload_locked(
         self,
@@ -1180,7 +1274,7 @@ class DaxL2Adapter(L2AdapterInterface):
         if not self._writable_devices_by_usage_locked(
             exclude_device_id=source.device_id
         ):
-            raise L2HotplugError(507, "no active destination DAX capacity")
+            raise L2ReconfigureError(507, "no active destination DAX capacity")
 
         reservations = source.core.reserve_reads_for_keys(keys)
         moved_keys: list[ObjectKey] = []
@@ -1196,7 +1290,7 @@ class DaxL2Adapter(L2AdapterInterface):
             source.core.finalize_reads(reservations, touched_keys)
 
         if len(moved_keys) != len(keys):
-            raise L2HotplugError(507, "insufficient destination DAX capacity")
+            raise L2ReconfigureError(507, "insufficient destination DAX capacity")
         return moved_keys, moved_bytes
 
     def _assert_no_destination_duplicates_locked(
@@ -1217,7 +1311,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 continue
 
             sample = list(duplicates)[:8]
-            raise L2HotplugError(
+            raise L2ReconfigureError(
                 409,
                 "migration target already contains source keys",
                 payload={
@@ -1253,7 +1347,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 DaxPutFromPtrResult.ALREADY_EXISTS,
                 DaxPutFromPtrResult.INFLIGHT,
             }:
-                raise L2HotplugError(
+                raise L2ReconfigureError(
                     409,
                     "migration destination already contains key",
                     payload={
@@ -1264,7 +1358,7 @@ class DaxL2Adapter(L2AdapterInterface):
                     },
                 )
             if result is not DaxPutFromPtrResult.NO_SPACE:
-                raise L2HotplugError(
+                raise L2ReconfigureError(
                     409,
                     "migration destination copy failed",
                     payload={
@@ -1285,7 +1379,7 @@ class DaxL2Adapter(L2AdapterInterface):
         deleted = source.core.delete_many(keys, force=force)
         failed = [key for key, ok in zip(keys, deleted, strict=True) if not ok]
         if failed:
-            raise L2HotplugError(
+            raise L2ReconfigureError(
                 409,
                 "source device still has locked migrated keys",
                 payload={
@@ -1315,7 +1409,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 failed_keys.append(key)
 
         if failed_keys:
-            raise L2HotplugError(
+            raise L2ReconfigureError(
                 409,
                 "device has externally locked or borrowed slots",
                 payload={
@@ -1336,7 +1430,7 @@ class DaxL2Adapter(L2AdapterInterface):
     ) -> None:
         blocked = self._blocked_payload_locked(entry)
         if blocked is not None and not force:
-            raise L2HotplugError(
+            raise L2ReconfigureError(
                 409,
                 "device has locked or borrowed slots",
                 payload=blocked,
@@ -1356,7 +1450,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 if high_reservations and not self._writable_devices_by_usage_locked(
                     exclude_device_id=entry.device_id
                 ):
-                    raise L2HotplugError(507, "no active destination DAX capacity")
+                    raise L2ReconfigureError(507, "no active destination DAX capacity")
                 self._assert_no_destination_duplicates_locked(
                     entry,
                     [reservation.key for reservation in high_reservations],
@@ -1364,7 +1458,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 moved_keys: list[ObjectKey] = []
                 for reservation in high_reservations:
                     if not self._copy_reservation_to_target_locked(entry, reservation):
-                        raise L2HotplugError(
+                        raise L2ReconfigureError(
                             507,
                             "insufficient destination DAX capacity",
                         )
@@ -1384,7 +1478,7 @@ class DaxL2Adapter(L2AdapterInterface):
                         [self._config.slot_bytes] * len(deleted_keys),
                     )
             else:
-                raise L2HotplugError(
+                raise L2ReconfigureError(
                     409,
                     "resize shrink would drop live keys without migration",
                 )
@@ -1392,7 +1486,7 @@ class DaxL2Adapter(L2AdapterInterface):
             entry.core.finalize_reads(reservations, touched_keys)
 
         if not entry.core.can_shrink_to(new_max_slots):
-            raise L2HotplugError(409, "resize shrink still has live high slots")
+            raise L2ReconfigureError(409, "resize shrink still has live high slots")
 
     def _recalculate_capacity_locked(self) -> None:
         self._max_capacity_bytes = sum(
@@ -1403,17 +1497,17 @@ class DaxL2Adapter(L2AdapterInterface):
 
     def _ensure_hotplug_enabled(self) -> None:
         if not self._hotplug_enabled:
-            raise L2HotplugError(403, "DAX hotplug is disabled")
+            raise L2ReconfigureError(403, "DAX hotplug is disabled")
 
     @staticmethod
     def _validate_remove_mode(mode: str) -> None:
         if mode not in {"migrate", "evict", "drain"}:
-            raise L2HotplugError(400, "mode must be migrate, evict, or drain")
+            raise L2ReconfigureError(400, "mode must be migrate, evict, or drain")
 
     @staticmethod
     def _validate_resize_mode(mode: str) -> None:
         if mode not in {"migrate", "evict"}:
-            raise L2HotplugError(400, "mode must be migrate or evict")
+            raise L2ReconfigureError(400, "mode must be migrate or evict")
 
 
 register_l2_adapter_type("dax", DaxL2AdapterConfig)

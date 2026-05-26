@@ -5,7 +5,7 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
-from typing import Iterator, Literal, Optional, cast
+from typing import Iterator, Literal, Optional
 import time
 
 # First Party
@@ -20,11 +20,9 @@ from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
-from lmcache.v1.distributed.l2_adapters.hotplug import (
-    HotplugRemoveMode,
-    HotplugResizeMode,
-    L2HotplugAdapter,
-    L2HotplugError,
+from lmcache.v1.distributed.l2_adapters.reconfiguration import (
+    L2ReconfigurableAdapter,
+    L2ReconfigureError,
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
@@ -632,103 +630,43 @@ class StorageManager:
                 totals[salt] = totals.get(salt, 0) + used
         return totals
 
-    def dax_hotplug_status(self) -> dict:
-        """Return status for all runtime-manageable DAX L2 adapters.
+    def get_l2_adapter_reconfigure_status(self) -> dict:
+        """Return status for all runtime-reconfigurable L2 adapters.
 
         Returns:
-            JSON-serializable DAX hotplug status. If no DAX adapter is
-            configured, ``enabled`` is ``False`` and the adapter list is empty.
+            JSON-serializable status. If no reconfigurable adapter is configured,
+            ``enabled`` is ``False`` and the adapter list is empty.
         """
         adapters = []
-        for dax_index, adapter in enumerate(self._dax_hotplug_adapters()):
-            status = adapter.hotplug_status()
-            status["adapter_index"] = dax_index
+        for adapter_index, adapter in enumerate(self._reconfigurable_l2_adapters()):
+            status = adapter.reconfigure_status()
+            status["adapter_index"] = adapter_index
             adapters.append(status)
 
         return {
             "enabled": bool(adapters),
-            "hotplug_enabled": any(
-                bool(status.get("hotplug_enabled", False)) for status in adapters
-            ),
-            "num_dax_adapters": len(adapters),
+            "num_adapters": len(adapters),
             "adapters": adapters,
         }
 
-    def dax_hotplug_add(
+    def reconfigure_l2_adapter(
         self,
         adapter_index: int,
-        device_path: str,
-        size_bytes: int,
+        operation: str,
+        payload: dict[str, object],
     ) -> dict:
-        """Add a DAX device to a hotplug-enabled adapter.
+        """Route a runtime reconfiguration request to one L2 adapter.
 
         Args:
-            adapter_index: Zero-based DAX-adapter index.
-            device_path: Path to an existing readable and writable DAX device.
-            size_bytes: Number of bytes to map.
+            adapter_index: Zero-based reconfigurable-adapter index.
+            operation: Adapter-specific operation name.
+            payload: Adapter-specific operation payload.
 
         Returns:
             JSON-serializable operation result.
         """
-        adapter = self._get_dax_hotplug_adapter(adapter_index)
-        result = adapter.hotplug_add_device(device_path, size_bytes)
-        result["adapter_index"] = adapter_index
-        return result
-
-    def dax_hotplug_remove(
-        self,
-        adapter_index: int,
-        device_path: str,
-        mode: HotplugRemoveMode,
-        force: bool = False,
-    ) -> dict:
-        """Remove, evict, or drain a DAX device.
-
-        Args:
-            adapter_index: Zero-based DAX-adapter index.
-            device_path: Device path to remove.
-            mode: ``migrate``, ``evict``, or ``drain``.
-            force: Whether destructive removal may delete locked entries.
-
-        Returns:
-            JSON-serializable operation result.
-        """
-        adapter = self._get_dax_hotplug_adapter(adapter_index)
-        result = adapter.hotplug_remove_device(
-            device_path,
-            mode,
-            force,
-        )
-        result["adapter_index"] = adapter_index
-        return result
-
-    def dax_hotplug_resize(
-        self,
-        adapter_index: int,
-        device_path: str,
-        size_bytes: int,
-        mode: HotplugResizeMode,
-        force: bool = False,
-    ) -> dict:
-        """Resize a DAX device in a hotplug-enabled adapter.
-
-        Args:
-            adapter_index: Zero-based DAX-adapter index.
-            device_path: Device path to resize.
-            size_bytes: New mapped byte size.
-            mode: ``migrate`` or ``evict`` for shrink handling.
-            force: Whether destructive shrink may evict locked entries.
-
-        Returns:
-            JSON-serializable operation result.
-        """
-        adapter = self._get_dax_hotplug_adapter(adapter_index)
-        result = adapter.hotplug_resize_device(
-            device_path,
-            size_bytes,
-            mode,
-            force,
-        )
+        adapter = self._get_reconfigurable_l2_adapter(adapter_index)
+        result = adapter.reconfigure(operation, payload)
         result["adapter_index"] = adapter_index
         return result
 
@@ -788,32 +726,32 @@ class StorageManager:
         """
         return self._l1_manager.memcheck()
 
-    def _unwrap_hotplug_adapter(
+    def _unwrap_reconfigurable_l2_adapter(
         self,
         adapter: L2AdapterInterface,
-    ) -> Optional[L2HotplugAdapter]:
-        if callable(getattr(adapter, "hotplug_status", None)):
-            return cast(L2HotplugAdapter, adapter)
+    ) -> Optional[L2ReconfigurableAdapter]:
+        if isinstance(adapter, L2ReconfigurableAdapter):
+            return adapter
 
         inner = getattr(adapter, "inner_adapter", None)
-        if inner is not None and callable(getattr(inner, "hotplug_status", None)):
-            return cast(L2HotplugAdapter, inner)
+        if inner is not None and isinstance(inner, L2ReconfigurableAdapter):
+            return inner
 
         return None
 
-    def _dax_hotplug_adapters(self) -> list[L2HotplugAdapter]:
-        adapters: list[L2HotplugAdapter] = []
+    def _reconfigurable_l2_adapters(self) -> list[L2ReconfigurableAdapter]:
+        adapters: list[L2ReconfigurableAdapter] = []
         for adapter in self._l2_adapters:
-            hotplug_adapter = self._unwrap_hotplug_adapter(adapter)
-            if hotplug_adapter is not None:
-                adapters.append(hotplug_adapter)
+            reconfigurable_adapter = self._unwrap_reconfigurable_l2_adapter(adapter)
+            if reconfigurable_adapter is not None:
+                adapters.append(reconfigurable_adapter)
         return adapters
 
-    def _get_dax_hotplug_adapter(
+    def _get_reconfigurable_l2_adapter(
         self,
         adapter_index: int,
-    ) -> L2HotplugAdapter:
-        adapters = self._dax_hotplug_adapters()
+    ) -> L2ReconfigurableAdapter:
+        adapters = self._reconfigurable_l2_adapters()
         if adapter_index < 0 or adapter_index >= len(adapters):
-            raise L2HotplugError(404, "DAX adapter not found")
+            raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
         return adapters[adapter_index]

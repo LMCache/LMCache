@@ -11,57 +11,43 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.l2_adapters.hotplug import L2HotplugError
+from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
 from lmcache.v1.multiprocess.http_apis.dax_hotplug_api import router
 
 
 @dataclass
 class _FakeStorageManager:
     calls: list[tuple[str, tuple[object, ...]]] = field(default_factory=list)
-    raise_error: Optional[L2HotplugError] = None
+    raise_error: Optional[L2ReconfigureError] = None
+    status: Optional[dict] = None
 
-    def dax_hotplug_status(self) -> dict:
+    def get_l2_adapter_reconfigure_status(self) -> dict:
         self.calls.append(("status", ()))
+        if self.status is not None:
+            return self.status
         return {
             "enabled": True,
-            "hotplug_enabled": True,
-            "num_dax_adapters": 1,
-            "adapters": [],
+            "num_adapters": 1,
+            "adapters": [
+                {
+                    "type": "dax",
+                    "hotplug_enabled": True,
+                    "devices": [],
+                    "adapter_index": 0,
+                }
+            ],
         }
 
-    def dax_hotplug_add(
+    def reconfigure_l2_adapter(
         self,
         adapter_index: int,
-        device_path: str,
-        size_bytes: int,
+        operation: str,
+        payload: dict[str, object],
     ) -> dict:
-        self.calls.append(("add", (adapter_index, device_path, size_bytes)))
+        self.calls.append(("reconfigure", (adapter_index, operation, payload)))
         if self.raise_error is not None:
             raise self.raise_error
-        return {"status": "ok", "operation": "add"}
-
-    def dax_hotplug_remove(
-        self,
-        adapter_index: int,
-        device_path: str,
-        mode: str,
-        force: bool,
-    ) -> dict:
-        self.calls.append(("remove", (adapter_index, device_path, mode, force)))
-        return {"status": "ok", "operation": "drain" if mode == "drain" else "remove"}
-
-    def dax_hotplug_resize(
-        self,
-        adapter_index: int,
-        device_path: str,
-        size_bytes: int,
-        mode: str,
-        force: bool,
-    ) -> dict:
-        self.calls.append(
-            ("resize", (adapter_index, device_path, size_bytes, mode, force))
-        )
-        return {"status": "ok", "operation": "resize"}
+        return {"status": "ok", "operation": operation}
 
 
 @dataclass
@@ -84,7 +70,7 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
     add_resp = client.post(
         "/dax/add",
         json={
-            "adapter_index": 2,
+            "adapter_index": 0,
             "device_path": "/dev/daxX.X",
             "size": "2GiB",
         },
@@ -92,7 +78,7 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
     remove_resp = client.post(
         "/dax/remove",
         json={
-            "adapter_index": 2,
+            "adapter_index": 0,
             "device_path": "/dev/daxX.X",
             "mode": "drain",
             "force": True,
@@ -101,7 +87,7 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
     resize_resp = client.post(
         "/dax/resize",
         json={
-            "adapter_index": 2,
+            "adapter_index": 0,
             "device_path": "/dev/daxX.X",
             "size": "1536MiB",
             "mode": "migrate",
@@ -113,11 +99,105 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
     assert add_resp.status_code == 200
     assert remove_resp.status_code == 200
     assert resize_resp.status_code == 200
+    assert status_resp.json()["num_dax_adapters"] == 1
     assert sm.calls == [
         ("status", ()),
-        ("add", (2, "/dev/daxX.X", 2 * 1024**3)),
-        ("remove", (2, "/dev/daxX.X", "drain", True)),
-        ("resize", (2, "/dev/daxX.X", int(1.5 * 1024**3), "migrate", False)),
+        ("status", ()),
+        (
+            "reconfigure",
+            (0, "add", {"device_path": "/dev/daxX.X", "size_bytes": 2 * 1024**3}),
+        ),
+        ("status", ()),
+        (
+            "reconfigure",
+            (
+                0,
+                "remove",
+                {"device_path": "/dev/daxX.X", "mode": "drain", "force": True},
+            ),
+        ),
+        ("status", ()),
+        (
+            "reconfigure",
+            (
+                0,
+                "resize",
+                {
+                    "device_path": "/dev/daxX.X",
+                    "size_bytes": int(1.5 * 1024**3),
+                    "mode": "migrate",
+                    "force": False,
+                },
+            ),
+        ),
+    ]
+
+
+def test_status_filters_non_dax_reconfigurable_adapters():
+    sm = _FakeStorageManager(
+        status={
+            "enabled": True,
+            "num_adapters": 2,
+            "adapters": [
+                {"type": "fake", "ready": True, "adapter_index": 0},
+                {
+                    "type": "dax",
+                    "hotplug_enabled": True,
+                    "devices": [],
+                    "adapter_index": 1,
+                },
+            ],
+        }
+    )
+
+    resp = _client(sm).get("/dax/status")
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "enabled": True,
+        "hotplug_enabled": True,
+        "num_dax_adapters": 1,
+        "adapters": [
+            {
+                "type": "dax",
+                "hotplug_enabled": True,
+                "devices": [],
+                "adapter_index": 0,
+            }
+        ],
+    }
+
+
+def test_add_resolves_public_dax_index_to_generic_reconfigure_index():
+    sm = _FakeStorageManager(
+        status={
+            "enabled": True,
+            "num_adapters": 2,
+            "adapters": [
+                {"type": "fake", "ready": True, "adapter_index": 0},
+                {
+                    "type": "dax",
+                    "hotplug_enabled": True,
+                    "devices": [],
+                    "adapter_index": 1,
+                },
+            ],
+        }
+    )
+
+    resp = _client(sm).post(
+        "/dax/add",
+        json={
+            "adapter_index": 0,
+            "device_path": "/dev/daxX.X",
+            "size": 1024,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert sm.calls == [
+        ("status", ()),
+        ("reconfigure", (1, "add", {"device_path": "/dev/daxX.X", "size_bytes": 1024})),
     ]
 
 
@@ -174,7 +254,7 @@ def test_rejects_removed_fields_and_invalid_resize_mode(
 
 def test_hotplug_error_status_code_is_preserved():
     sm = _FakeStorageManager(
-        raise_error=L2HotplugError(
+        raise_error=L2ReconfigureError(
             507,
             "no active destination DAX capacity",
         )
