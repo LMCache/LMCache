@@ -432,7 +432,7 @@ class TestStoreInterface:
 
         completed = adapter.pop_completed_store_tasks()
         assert task_id in completed
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
     def test_pop_clears_completed_tasks(self, adapter):
         key = create_object_key(1)
@@ -465,7 +465,7 @@ class TestStoreInterface:
             completed.update(adapter.pop_completed_store_tasks())
 
         for tid in task_ids:
-            assert completed[tid] is True
+            assert completed[tid].is_successful()
 
     def test_batch_store(self, adapter):
         keys = [create_object_key(i) for i in range(3)]
@@ -476,7 +476,7 @@ class TestStoreInterface:
         assert wait_for_event_fd(store_fd, timeout=5.0)
 
         completed = adapter.pop_completed_store_tasks()
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
 
 # =============================================================================
@@ -670,7 +670,7 @@ class TestEndToEndWorkflow:
         # Store
         store_tid = adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd, timeout=5.0)
-        assert adapter.pop_completed_store_tasks()[store_tid] is True
+        assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup
         lookup_tid = adapter.submit_lookup_and_lock_task([key])
@@ -703,7 +703,7 @@ class TestEndToEndWorkflow:
         # Store all
         store_tid = adapter.submit_store_task(keys, store_objs)
         assert wait_for_event_fd(store_fd, timeout=5.0)
-        assert adapter.pop_completed_store_tasks()[store_tid] is True
+        assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup all
         lookup_tid = adapter.submit_lookup_and_lock_task(keys)

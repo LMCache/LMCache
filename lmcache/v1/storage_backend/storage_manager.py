@@ -289,13 +289,10 @@ class StorageManager:
         self._setup_metrics()
 
     def _setup_metrics(self) -> None:
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is None:
-            logger.warning(
-                "PrometheusLogger is not initialized, "
-                "event metrics will not be collected"
-            )
-            return
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            self.metadata,
+            config=self.config,
+        )
 
         metric_map = {
             "storage_events_ongoing_count": EventStatus.ONGOING,

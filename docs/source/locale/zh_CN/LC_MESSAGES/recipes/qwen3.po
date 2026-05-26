@@ -21,130 +21,130 @@ msgstr ""
 
 #: ../../source/recipes/qwen3.rst:4
 msgid "Qwen3MoeForCausalLM"
-msgstr ""
+msgstr "Qwen3MoeForCausalLM"
 
 #: ../../source/recipes/qwen3.rst:7
 msgid "Validated models"
-msgstr ""
+msgstr "验证过的模型"
 
 #: ../../source/recipes/qwen3.rst:9
 msgid "`Qwen/Qwen3-235B-A22B <https://huggingface.co/Qwen/Qwen3-235B-A22B>`_"
-msgstr ""
+msgstr "`Qwen/Qwen3-235B-A22B <https://huggingface.co/Qwen/Qwen3-235B-A22B>`_"
 
 #: ../../source/recipes/qwen3.rst:10
 msgid "`Qwen/Qwen3-30B-A3B <https://huggingface.co/Qwen/Qwen3-30B-A3B>`_"
-msgstr ""
+msgstr "`Qwen/Qwen3-30B-A3B <https://huggingface.co/Qwen/Qwen3-30B-A3B>`_"
 
 #: ../../source/recipes/qwen3.rst:11
 msgid ""
 "`Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 "
 "<https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8>`_"
-msgstr ""
+msgstr "`Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 <https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8>`_"
 
 #: ../../source/recipes/qwen3.rst:12
 msgid ""
 "`Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3"
 "-Coder-30B-A3B-Instruct>`_"
-msgstr ""
+msgstr "`Qwen/Qwen3-Coder-30B-A3B-Instruct <https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct>`_"
 
 #: ../../source/recipes/qwen3.rst
 msgid "vLLM"
-msgstr ""
+msgstr "vLLM"
 
 #: ../../source/recipes/qwen3.rst:19
 msgid ""
 "**Engine documentation:** `Qwen3 MoE in vLLM supported models "
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
 "generation>`_ (architecture ``Qwen3MoeForCausalLM``)."
-msgstr ""
+msgstr "**引擎文档:** `vLLM 支持的 Qwen3 MoE 模型 <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ (架构 ``Qwen3MoeForCausalLM``)。"
 
 #: ../../source/recipes/qwen3.rst:24
 msgid "**Status:** Validated with LMCache."
-msgstr ""
+msgstr "**状态：** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/qwen3.rst:26
 msgid "Start the LMCache MP server:"
-msgstr ""
+msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/qwen3.rst:34
 msgid "**Qwen3-235B-A22B** (4 GPUs, expert parallel):"
-msgstr ""
+msgstr "**Qwen3-235B-A22B** (4 GPUs, 专家并行):"
 
 #: ../../source/recipes/qwen3.rst:49
 msgid "**Qwen3-30B-A3B** (1 GPU):"
-msgstr ""
+msgstr "**Qwen3-30B-A3B** (1 GPU):"
 
 #: ../../source/recipes/qwen3.rst:62
 msgid "**Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs, expert parallel):"
-msgstr ""
+msgstr "**Qwen3-Coder-480B-A35B-Instruct-FP8** (8 个 GPU，专家并行)："
 
 #: ../../source/recipes/qwen3.rst:76
 msgid "**Qwen3-Coder-30B-A3B-Instruct** (1 GPU):"
-msgstr ""
+msgstr "**Qwen3-Coder-30B-A3B-Instruct** (1 GPU):"
 
 #: ../../source/recipes/qwen3.rst:88
 msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts, in-process mode), see "
 ":doc:`../mp/quickstart`."
-msgstr ""
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机、进程内模式），请参见 :doc:`../mp/quickstart`。"
 
 #: ../../source/recipes/qwen3.rst:92
 msgid ""
 "If there are any issues with vLLM setup, please refer to the `vLLM "
 "Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
 "for more details."
-msgstr ""
+msgstr "如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
 
 #: ../../source/recipes/qwen3.rst
 msgid "SGLang"
-msgstr ""
+msgstr "SGLang"
 
 #: ../../source/recipes/qwen3.rst:98
 msgid "**Status:** Not validated with LMCache."
-msgstr ""
+msgstr "**状态：** 未通过 LMCache 验证。"
 
 #: ../../source/recipes/qwen3.rst
 msgid "TRT-LLM"
-msgstr ""
+msgstr "TRT-LLM"
 
 #: ../../source/recipes/qwen3.rst:102
 msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr ""
+msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 
 #: ../../source/recipes/qwen3.rst:105
 msgid "CacheBlend support"
-msgstr ""
+msgstr "CacheBlend 支持"
 
 #: ../../source/recipes/qwen3.rst:108
 msgid "Compression support"
-msgstr ""
+msgstr "压缩支持"
 
 #: ../../source/recipes/qwen3.rst:114
 msgid "Method"
-msgstr ""
+msgstr "方法"
 
 #: ../../source/recipes/qwen3.rst:115
 msgid "Status"
-msgstr ""
+msgstr "状态"
 
 #: ../../source/recipes/qwen3.rst:116
 msgid "Notes"
-msgstr ""
+msgstr "笔记"
 
 #: ../../source/recipes/qwen3.rst:117
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
-msgstr ""
+msgstr ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
 
 #: ../../source/recipes/qwen3.rst:118
 msgid "Not validated"
-msgstr ""
+msgstr "未验证"
 
 #: ../../source/recipes/qwen3.rst:122
 msgid "Caveats"
-msgstr ""
+msgstr "注意事项"
 
 #: ../../source/recipes/qwen3.rst:124
 msgid "None known."
-msgstr ""
+msgstr "没有已知的问题。"
 

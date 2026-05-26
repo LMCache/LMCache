@@ -37,9 +37,15 @@ WORKDIR /workspace
 
 # Install small non-torch runtime dependencies; torch is installed in lmcache-build
 # against the exact CUDA version so the compiled C extensions match at runtime.
+# The CLI requirements (e.g. ``openai`` for the bench client) are also installed
+# here so ``lmcache`` subcommand discovery in ``lmcache.cli.commands`` -- which
+# eagerly imports every command module -- does not crash with
+# ``ModuleNotFoundError: No module named 'openai'`` when the standalone image
+# boots ``lmcache server``. See LMCache#3353.
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=requirements/cli.txt,target=/tmp/cli.txt \
     . /opt/venv/bin/activate && \
-    uv pip install ray nvidia-ml-py
+    uv pip install ray nvidia-ml-py -r /tmp/cli.txt
 
 # CUDA arch list used by torch
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX'

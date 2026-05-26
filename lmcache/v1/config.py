@@ -75,6 +75,11 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     "max_local_cpu_size": {"type": float, "default": 5.0, "env_converter": float},
+    "local_cpu_use_hugepages": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    },
     "reserve_local_cpu_size": {"type": float, "default": 0.0, "env_converter": float},
     "local_disk": {
         "type": Optional[str],

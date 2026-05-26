@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 import enum
 import os
 import threading
@@ -13,7 +13,8 @@ import zmq
 
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
-from lmcache.utils import EngineType, _lmcache_nvtx_annotate, init_logger
+from lmcache.integration.vllm.utils import vllm_layout_hints
+from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
@@ -22,6 +23,10 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.transfer_context import (
+    TransferContext,
+    create_transfer_context,
+)
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
 
 logger = init_logger(__name__)
@@ -162,6 +167,36 @@ def get_lmcache_chunk_size(
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
     chunk_size = future.result(timeout=timeout)
     return chunk_size
+
+
+def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
+    """Raise a verbose ConnectionError when the LMCache MP server is
+    unreachable.
+
+    The message intentionally spells out the most common cause (the
+    standalone ``lmcache server`` process is not running), the URL that
+    was being dialed, and the exact command to start it -- so that users
+    landing here via ``vllm serve --kv-offloading-backend lmcache`` are
+    not left guessing.
+    """
+    hint = (
+        "Cannot reach the LMCache MP server at "
+        f"'{server_url}' within {timeout}s.\n"
+        "This usually means the standalone LMCache server is not "
+        "running, or it is listening on a different host/port.\n"
+        "To start one locally with the default port (5555):\n"
+        "    lmcache server --l1-size-gb 20 --eviction-policy LRU\n"
+        "To target a different host/port, override via "
+        "kv_connector_extra_config (lmcache.mp.host / lmcache.mp.port), "
+        "e.g.:\n"
+        '    --kv-transfer-config \'{"kv_connector":'
+        '"LMCacheMPConnector","kv_role":"kv_both",'
+        '"kv_connector_extra_config":{"lmcache.mp.host":'
+        '"tcp://localhost","lmcache.mp.port":5555}}\'\n'
+        "See https://docs.lmcache.ai/mp/quickstart.html for details."
+    )
+    logger.warning(hint)
+    raise ConnectionError(hint) from None
 
 
 def send_ping(
@@ -447,10 +482,7 @@ class LMCacheMPSchedulerAdapter:
             )
         except TimeoutError:
             self.mq_client.close()
-            raise ConnectionError(
-                f"LMCache server did not respond within {self._mq_timeout}s. "
-                "Is the server running?"
-            ) from None
+            _raise_server_unreachable(server_url, self._mq_timeout)
         assert self.chunk_size % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
@@ -803,6 +835,9 @@ class LMCacheMPWorkerAdapter:
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
 
+        # Transport context for transfer operations.
+        self.transfer_ctx: TransferContext | None = None
+
         # Request futures
         self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
         # request_id -> (future, block_ids)
@@ -832,10 +867,7 @@ class LMCacheMPWorkerAdapter:
             )
         except TimeoutError:
             self.mq_client.close()
-            raise ConnectionError(
-                f"LMCache server did not respond within {self._mq_timeout}s. "
-                "Is the server running?"
-            ) from None
+            _raise_server_unreachable(server_url, self._mq_timeout)
         assert chunk_size % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
@@ -939,27 +971,24 @@ class LMCacheMPWorkerAdapter:
             ConnectionError: if the server does not respond within
                 mq_timeout.
         """
-        # First Party
-        from lmcache.integration.vllm.utils import vllm_layout_hints
-
+        self.kv_caches = kv_caches
+        self.transfer_ctx = create_transfer_context(kv_caches)
         layout_hints = vllm_layout_hints()
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
         )
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.REGISTER_KV_CACHE,
-            [
+        try:
+            self.transfer_ctx.register(
                 self.instance_id,
-                wrap_kv_caches(kv_caches),
+                kv_caches,
                 self.model_name,
                 self.world_size,
-                EngineType.VLLM,
-                layout_hints,
-            ],
-        )
-        try:
-            future.result(timeout=self._mq_timeout)
+                self.blocks_in_chunk,
+                self.mq_client,
+                self._mq_timeout,
+                send_request=send_lmcache_request,
+                layout_hints=layout_hints,
+            )
         except TimeoutError:
             raise ConnectionError(
                 "LMCache server did not respond to "
@@ -1049,11 +1078,20 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.STORE,
-            [key, self.instance_id, op.block_ids, event.ipc_handle()],
-        ).to_cuda_future()
+        if self.transfer_ctx is None:
+            raise RuntimeError(
+                "Transfer context is not initialized. "
+                "Call register_kv_caches() before submitting store requests."
+            )
+        future = self.transfer_ctx.submit_store(
+            request_id,
+            key,
+            self.instance_id,
+            self.kv_caches,
+            op.block_ids,
+            event,
+            self.blocks_in_chunk,
+        )
         self.store_futures[request_id] = future
 
     @_lmcache_nvtx_annotate
@@ -1088,17 +1126,21 @@ class LMCacheMPWorkerAdapter:
             request_id=request_id,
             cache_salt=cache_salt,
         )
-        future = send_lmcache_request(
-            self.mq_client,
-            RequestType.RETRIEVE,
-            [
-                key,
-                self.instance_id,
-                op.block_ids,
-                event.ipc_handle(),
-                op.skip_first_n_tokens,
-            ],
-        ).to_cuda_future()
+        if self.transfer_ctx is None:
+            raise RuntimeError(
+                "Transfer context is not initialized. "
+                "Call register_kv_caches() before submitting retrieve requests."
+            )
+        future = self.transfer_ctx.submit_retrieve(
+            request_id,
+            key,
+            self.instance_id,
+            self.kv_caches,
+            op.block_ids,
+            event,
+            self.blocks_in_chunk,
+            skip_first_n_tokens=op.skip_first_n_tokens,
+        )
         self.retrieve_futures[request_id] = (future, list(op.block_ids))
 
     @_lmcache_nvtx_annotate
@@ -1308,6 +1350,10 @@ class LMCacheMPWorkerAdapter:
                 "Proceeding with shutdown.",
                 self._mq_timeout,
             )
+
+        if self.transfer_ctx is not None:
+            self.transfer_ctx.close()
+            self.transfer_ctx = None
 
         self.mq_client.close()
         self.request_telemetry.close()

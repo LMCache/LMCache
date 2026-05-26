@@ -21,11 +21,11 @@ msgstr ""
 
 #: ../../source/mp/index.rst:54
 msgid "Contents"
-msgstr ""
+msgstr "目录"
 
 #: ../../source/mp/index.rst:2
 msgid "Multiprocess Mode"
-msgstr ""
+msgstr "多进程模式"
 
 #: ../../source/mp/index.rst:4
 msgid ""
@@ -33,18 +33,18 @@ msgid ""
 "that vLLM instances connect to over ZMQ.  One LMCache server per node can"
 " serve multiple vLLM pods, providing process isolation, shared caching, "
 "and independent resource scaling."
-msgstr ""
+msgstr "LMCache 多进程 (MP) 模式将 LMCache 作为一个 **独立服务** 运行，vLLM 实例通过 ZMQ 连接到该服务。每个节点的 LMCache 服务器可以为多个 vLLM pod 提供服务，提供进程隔离、共享缓存和独立资源扩展。"
 
 #: ../../source/mp/index.rst:10
 msgid "Key Benefits"
-msgstr ""
+msgstr "关键好处"
 
 #: ../../source/mp/index.rst:12
 msgid ""
 "**Process isolation** -- LMCache and vLLM run in separate processes (or "
 "containers), so a cache-related issue does not crash the inference "
 "engine."
-msgstr ""
+msgstr "**进程隔离** -- LMCache 和 vLLM 在独立的进程（或容器）中运行，因此与缓存相关的问题不会导致推理引擎崩溃。"
 
 #: ../../source/mp/index.rst:14
 msgid ""
@@ -52,63 +52,63 @@ msgid ""
 "running LMCache in a separate process, its Python GIL and CPU work "
 "(hashing, memory management, L2 I/O) do not compete with vLLM's inference"
 " threads."
-msgstr ""
+msgstr "**推理路径上没有 GIL 争用或 Python 开销** -- 通过在单独的进程中运行 LMCache，它的 Python GIL 和 CPU 工作（哈希、内存管理、L2 I/O）不会与 vLLM 的推理线程竞争。"
 
 #: ../../source/mp/index.rst:17
 msgid ""
 "**Shared caching across pods** -- Multiple vLLM instances on the same "
 "node share a single L1 cache, maximizing KV reuse."
-msgstr ""
+msgstr "**跨 Pod 共享缓存** -- 同一节点上的多个 vLLM 实例共享一个 L1 缓存，最大化 KV 重用。"
 
 #: ../../source/mp/index.rst:19
 msgid ""
 "**Independent resource scaling** -- Allocate CPU memory for caching "
 "independently of GPU memory for inference."
-msgstr ""
+msgstr "**独立资源扩展** -- 为缓存分配 CPU 内存，与用于推理的 GPU 显存独立。"
 
 #: ../../source/mp/index.rst:21
 msgid ""
 "**Multi-tier storage (L1 + L2)** -- In-memory L1 cache backed by "
 "persistent L2 storage via NIXL (GDS, POSIX, HF3FS, and more)."
-msgstr ""
+msgstr "**多层存储 (L1 + L2)** -- 由持久化 L2 存储通过 NIXL (GDS、POSIX、HF3FS 等) 支持的内存 L1 缓存。"
 
 #: ../../source/mp/index.rst:23
 msgid ""
 "**Built-in observability** -- Prometheus metrics and a telemetry event "
 "system out of the box."
-msgstr ""
+msgstr "**内置可观察性** -- 开箱即用的 Prometheus 指标和遥测事件系统。"
 
 #: ../../source/mp/index.rst:27
 msgid "Prerequisites"
-msgstr ""
+msgstr "先决条件"
 
 #: ../../source/mp/index.rst:29
 msgid "**vLLM** latest version is recommended for best compatibility"
-msgstr ""
+msgstr "**建议使用最新版本的 vLLM 以获得最佳兼容性**"
 
 #: ../../source/mp/index.rst:30
 msgid "**LMCache** latest dev branch"
-msgstr ""
+msgstr "**LMCache** 最新开发分支"
 
 #: ../../source/mp/index.rst:33
 msgid "Server Variants"
-msgstr ""
+msgstr "服务器变体"
 
 #: ../../source/mp/index.rst:35
 msgid "LMCache ships three server entry points:"
-msgstr ""
+msgstr "LMCache 提供三个服务器入口点："
 
 #: ../../source/mp/index.rst:41
 msgid "Entry Point"
-msgstr ""
+msgstr "入口点"
 
 #: ../../source/mp/index.rst:42
 msgid "Description"
-msgstr ""
+msgstr "描述"
 
 #: ../../source/mp/index.rst:43
 msgid "``lmcache server``"
-msgstr ""
+msgstr "``lmcache server``"
 
 #: ../../source/mp/index.rst:44
 msgid ""
@@ -116,25 +116,25 @@ msgid ""
 "K8s probes, ``/clear-cache``, ``/status`` — see :doc:`http_api`). Use "
 "``--engine-type blend`` to enable BlendEngineV2 for cross-request KV "
 "reuse."
-msgstr ""
+msgstr "**推荐。** ZMQ + FastAPI HTTP 前端（为 K8s 探针添加 ``/healthcheck``、``/clear-cache``、``/status`` — 参见 :doc:`http_api`）。使用 ``--engine-type blend`` 启用 BlendEngineV2 以实现跨请求的 KV 重用。"
 
 #: ../../source/mp/index.rst:48
 msgid "``python3 -m lmcache.v1.multiprocess.server``"
-msgstr ""
+msgstr "``python3 -m lmcache.v1.multiprocess.server``"
 
 #: ../../source/mp/index.rst:49
 msgid ""
 "(Legacy) ZMQ-only server using MPCacheEngine (no HTTP endpoints). Prefer "
 "``lmcache server``."
-msgstr ""
+msgstr "(遗留) 仅使用 MPCacheEngine 的 ZMQ 服务器（没有 HTTP 端点）。请使用 ``lmcache server``。"
 
 #: ../../source/mp/index.rst:51
 msgid "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
-msgstr ""
+msgstr "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
 
 #: ../../source/mp/index.rst:52
 msgid ""
 "(Legacy) CacheBlend-enabled server. Prefer ``lmcache server --engine-type"
 " blend``."
-msgstr ""
+msgstr "（遗留）启用 CacheBlend 的服务器。建议使用 ``lmcache server --engine-type blend``。"
 

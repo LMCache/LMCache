@@ -21,9 +21,9 @@ msgstr ""
 
 #: ../../source/kv_cache_management/check_finish.rst:4
 msgid "Check finish of a control event"
-msgstr ""
+msgstr "检查控制事件的完成情况"
 
 #: ../../source/kv_cache_management/check_finish.rst:6
 msgid "Coming soon..."
-msgstr ""
+msgstr "敬请期待..."
 

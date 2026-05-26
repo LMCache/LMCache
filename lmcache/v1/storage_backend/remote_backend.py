@@ -96,23 +96,21 @@ class RemoteBackend(StorageBackendInterface):
         # health monitoring. The HealthMonitor in LMCacheEngine will
         # register RemoteBackendHealthCheck for each RemoteBackend.
 
-        self._setup_metrics()
-
         self._get_blocking_failed_count = 0
         self._put_failed_count = 0
 
-    def _setup_metrics(self):
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.remote_put_task_num.set_function(
-                lambda: len(self.put_tasks)
-            )
-            prometheus_logger.get_blocking_failed_count.set_function(
-                lambda: self._get_blocking_failed_count
-            )
-            prometheus_logger.put_failed_count.set_function(
-                lambda: self._put_failed_count
-            )
+        self._setup_metrics()
+
+    def _setup_metrics(self) -> None:
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            self.metadata,
+            config=self.config,
+        )
+        prometheus_logger.remote_put_task_num.set_function(lambda: len(self.put_tasks))
+        prometheus_logger.get_blocking_failed_count.set_function(
+            lambda: self._get_blocking_failed_count
+        )
+        prometheus_logger.put_failed_count.set_function(lambda: self._put_failed_count)
 
     def __str__(self):
         return self.__class__.__name__

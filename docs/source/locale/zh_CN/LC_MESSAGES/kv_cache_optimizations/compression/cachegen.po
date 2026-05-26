@@ -21,33 +21,33 @@ msgstr ""
 
 #: ../../source/kv_cache_optimizations/compression/cachegen.rst:4
 msgid "CacheGen"
-msgstr ""
+msgstr "CacheGen"
 
 #: ../../source/kv_cache_optimizations/compression/cachegen.rst:6
 msgid ""
 "Cachegen leverages KV cache's distributional properties to encode a KV "
 "cache into more compact bitstream representations with negligible "
 "decoding overhead."
-msgstr ""
+msgstr "Cachegen 利用 KV Cache 的分布特性，将 KV Cache 编码为更紧凑的比特流表示，解码开销可以忽略不计。"
 
 #: ../../source/kv_cache_optimizations/compression/cachegen.rst:10
 msgid "Configuring CacheGen in LMCache"
-msgstr ""
+msgstr "在 LMCache 中配置 CacheGen"
 
 #: ../../source/kv_cache_optimizations/compression/cachegen.rst:12
 msgid ""
 "The settings should be very similar to :ref:`naive KV cache sharing "
 "<share_kv_cache>`. Only minor configurations need to be done to enable "
 "CacheGen."
-msgstr ""
+msgstr "设置应该与 :ref:`naive KV cache sharing <share_kv_cache>` 非常相似。只需进行少量配置即可启用 CacheGen。"
 
 #: ../../source/kv_cache_optimizations/compression/cachegen.rst:15
 msgid "To enable CacheGen in offline inference, we need to set:"
-msgstr ""
+msgstr "要在离线推理中启用 CacheGen，我们需要设置："
 
 #: ../../source/kv_cache_optimizations/compression/cachegen.rst:22
 msgid ""
 "To enable CacheGen in online inference, we need to set the "
 "``remote_serde`` in the configuration yaml:"
-msgstr ""
+msgstr "要在在线推理中启用 CacheGen，我们需要在配置 yaml 中设置 ``remote_serde``："
 

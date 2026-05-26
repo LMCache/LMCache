@@ -58,7 +58,7 @@ jobs:
 
           extract_torch_version() {
             local file="$1"
-            sed -nE 's/.*torch[[:space:]]*==[[:space:]]*"?([0-9]+(\.[0-9]+){1,2})"?.*/\1/p' "$file"
+            sed -nE 's/.*torch[[:space:]]*==[[:space:]]*([0-9]+(\.[0-9]+){1,2}).*/\1/p' "$file"
           }
 
           mapfile -t upstream_matches < <(extract_torch_version "$tmp_upstream")
@@ -96,8 +96,8 @@ jobs:
           awk -v new_ver="$upstream" '
             BEGIN { updated = 0 }
             {
-              if ($0 ~ /torch[[:space:]]*==[[:space:]]*"?[0-9]+(\.[0-9]+){1,2}"?/) {
-                sub(/torch[[:space:]]*==[[:space:]]*"?[0-9]+(\.[0-9]+){1,2}"?/, "torch == \"" new_ver "\"")
+              if ($0 ~ /torch[[:space:]]*==[[:space:]]*[0-9]+(\.[0-9]+){1,2}/) {
+                sub(/torch[[:space:]]*==[[:space:]]*[0-9]+(\.[0-9]+){1,2}/, "torch==" new_ver)
                 updated++
               }
               print
