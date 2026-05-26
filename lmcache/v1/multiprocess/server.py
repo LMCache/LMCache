@@ -522,14 +522,30 @@ class MPCacheEngine:
         key: IPCCacheEngineKey,
         instance_id: int,
     ) -> PrepareStoreResponse:
-        """Prepare a store operation. For pickle mode, returns empty slots.
+        """Prepare writable memory slots on the server side for a store operation.
+
+        This method is the first phase of the non-GPU store protocol. It tells
+        the server that the serving engine is about to transfer KV data for the
+        requested token range and asks the server to reserve the destination
+        storage needed for that transfer. The serving engine must call
+        :meth:`commit_store` after this method, even when no slots are returned,
+        so the server can finalize or release the reservation.
+
+        After this call returns, the serving engine may begin writing KV data
+        into the prepared transport buffers.
+
+        For SHM mode: returns slot descriptors (offset, length, shape, dtype)
+            pointing into the shared memory pool.
+        For pickle mode: returns an empty context; data will be sent as
+            serialized bytes in the subsequent :meth:`commit_store` call.
 
         Args:
             key: Cache key for the token range to store.
             instance_id: Worker instance identifier.
 
         Returns:
-            PrepareStoreResponse with empty slots for pickle mode.
+            PrepareStoreResponse containing writable slot references for the
+            transfer context, or an empty context for pickle mode.
         """
 
         if not self._is_shm_active_for(instance_id):
@@ -584,17 +600,30 @@ class MPCacheEngine:
         instance_id: int,
         cpu_data: bytes,
     ) -> bool:
-        """Commit serialized CPU chunks to storage.
+        """Finalize a store operation after :meth:`prepare_store`.
+
+        This method is the second phase of the non-GPU store protocol. It
+        signals that the serving engine has finished the transfer initiated by
+        :meth:`prepare_store` and that the server may make the reserved objects
+        durable in L1. The two calls must be paired: ``prepare_store`` reserves
+        the destination, and ``commit_store`` either finalizes the completed
+        transfer or reports failure.
+
+        For SHM mode, data is already in place when this method is called and
+        only write-lock finalization is required. For pickle mode, ``cpu_data``
+        carries the serialized tensor payload that is copied into the reserved
+        L1 buffers during this call.
 
         Args:
             key: Cache key for the token range to store.
             instance_id: Worker instance identifier.
-            cpu_data: Pickled list of CPU tensors produced by the worker.
-                In SHM mode, empty bytes (``b""``) indicate data is already
-                written to SHM and only lock finalization is required.
+            cpu_data: Pickled list of CPU tensors (pickle mode), or empty bytes
+                ``b""`` (SHM mode) indicating data is already written to the
+                shared memory pool.
 
         Returns:
-            ``True`` when all reserved objects are written, otherwise ``False``.
+            ``True`` when all reserved objects are successfully committed,
+            ``False`` otherwise.
         """
         if cpu_data == b"" and self._is_shm_active_for(instance_id):
             transfer_key = self._make_non_gpu_transfer_key(key, instance_id)
@@ -648,14 +677,31 @@ class MPCacheEngine:
         key: IPCCacheEngineKey,
         instance_id: int,
     ) -> PrepareRetrieveResponse:
-        """Retrieve prefetched chunks and return serialized CPU tensors.
+        """Prepare readable memory slots on the server side for a retrieve operation.
+
+        This method is the first phase of the non-GPU retrieve protocol. It
+        tells the server that the serving engine is ready to consume prefetched
+        KV data for the requested token range and asks the server to expose that
+        data through the active transport. The serving engine must call
+        :meth:`commit_retrieve` after it finishes consuming the response so the
+        server can release any read-side resources associated with the transfer.
+
+        After this call returns, the serving engine may begin reading KV data
+        from the referenced transport buffers.
+
+        For SHM mode: returns slot descriptors (offset, length, shape, dtype)
+            pointing into the shared memory pool where data resides.
+        For pickle mode: returns serialized tensor data directly in the
+            response.
 
         Args:
             key: Cache key for the token range to retrieve.
             instance_id: Worker instance identifier.
 
         Returns:
-            PrepareRetrieveResponse with serialized data on hit.
+            PrepareRetrieveResponse with readable slot references (SHM mode)
+            or serialized data (pickle mode). ``success=False`` if data is
+            unavailable.
         """
 
         obj_keys = self._resolve_obj_keys(key)
@@ -728,11 +774,21 @@ class MPCacheEngine:
         key: IPCCacheEngineKey,
         instance_id: int,
     ) -> bool:
-        """Finalize a retrieve operation. No-op for pickle mode.
+        """Finalize a retrieve operation after :meth:`prepare_retrieve`.
+
+        This method is the second phase of the non-GPU retrieve protocol. It
+        signals that the serving engine has finished reading the data exposed by
+        :meth:`prepare_retrieve`, allowing the server to release any locks or
+        bookkeeping that kept the referenced objects alive during the transfer.
+
+        For SHM mode: releases pending read locks acquired during
+            :meth:`prepare_retrieve`.
+        For pickle mode: no-op because the data was already copied out during
+            :meth:`prepare_retrieve`.
 
         Args:
-            key: Cache key (unused for pickle).
-            instance_id: Worker instance identifier (unused for pickle).
+            key: Cache key for the token range that was retrieved.
+            instance_id: Worker instance identifier.
 
         Returns:
             Always ``True``.
