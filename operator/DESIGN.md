@@ -288,6 +288,7 @@ For `LMCacheEngine` named `production-cache`:
 ```json
 {
   "kv_connector": "LMCacheMPConnector",
+  "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
   "kv_role": "kv_both",
   "kv_connector_extra_config": {
     "lmcache.mp.host": "tcp://<name>.<namespace>.svc.cluster.local",
@@ -296,7 +297,7 @@ For `LMCacheEngine` named `production-cache`:
 }
 ```
 
-The ConfigMap uses the lookup Service's cluster DNS name. Because the Service has `internalTrafficPolicy=Local`, kube-proxy routes traffic only to the LMCache pod on the same node as the vLLM pod. vLLM pods mount this ConfigMap and pass the JSON to `--kv-transfer-config` — no downward API or shell variable substitution required. vLLM pods should also set `PYTHONHASHSEED=0` for deterministic token hashing.
+The ConfigMap uses the lookup Service's cluster DNS name. Because the Service has `internalTrafficPolicy=Local`, kube-proxy routes traffic only to the LMCache pod on the same node as the vLLM pod. vLLM pods mount this ConfigMap and pass the JSON to `--kv-transfer-config` — no downward API or shell variable substitution required. The explicit `kv_connector_module_path` makes the external LMCache MP connector path load-bearing and avoids silent fallback to an older vendored builtin connector path.
 
 ---
 
@@ -340,7 +341,19 @@ OnEvent(LMCacheEngine create/update/delete):
 
 **Secondary watches:** DaemonSet, Pods (readiness changes → update endpoints), Nodes (new GPU node → DaemonSet auto-schedules)
 
-**Finalizer** `lmcache.ai/cleanup`: on CR deletion, cascading delete of owned resources.
+**Deletion / cleanup**: every child resource the operator creates
+(DaemonSet, lookup Service, metrics Service, connection ConfigMap,
+managed RESP auth Secret, optional ServiceMonitor) carries an
+`ownerReference` to the LMCacheEngine, so Kubernetes garbage
+collection cascade-deletes them when the CR goes away. **No finalizer
+is used.** An earlier design added a `lmcache.ai/cleanup` finalizer
+to mirror that GC behavior, but it was a no-op that only created
+deadlocks when the controller pod was not running (e.g. during
+cluster issues or a single-step `kubectl delete -k config/default`).
+The reconciler now actively strips that legacy finalizer from any CR
+it sees, so migration from older operator versions is automatic.
+Finalizers will return when we need to clean up state K8s GC cannot
+reach (Redis L2 keys, federation deregistration, etc.).
 
 ---
 

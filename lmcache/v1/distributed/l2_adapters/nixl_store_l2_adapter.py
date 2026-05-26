@@ -24,7 +24,7 @@ from nixl._api import (
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -457,7 +457,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         # Task ID management
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()  # lock for all shared state
@@ -511,15 +511,13 @@ class NixlStoreL2Adapter(L2AdapterInterface):
 
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
-        """
-        Pop all the completed store tasks with a flag indicating
-        whether the task is successful or not.
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
+        """Pop all completed store tasks.
 
         Returns:
-            dict[L2TaskId, bool]: a dictionary mapping the task id to a boolean flag
-            indicating whether the task is successful or not. True means
-            successful, and False means failed.
+            dict[L2TaskId, L2StoreResult]: a dictionary mapping the task
+            id to an ``L2StoreResult`` that encodes both the success flag
+            and the bytes actually transferred.
         """
         with self._lock:
             completed = self._completed_store_tasks
@@ -765,7 +763,7 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             if not mem_indices_flat:
                 # Nothing to store (all keys already existed or pool empty)
                 with self._lock:
-                    self._completed_store_tasks[task_id] = True
+                    self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
                 self._signal_store_event()
                 return
 
@@ -787,17 +785,21 @@ class NixlStoreL2Adapter(L2AdapterInterface):
             if stored_keys:
                 stored_sizes = [obj.size for obj in storage_objs]
                 self._notify_keys_stored(stored_keys, stored_sizes)
+            bytes_transferred = sum(obj.size for obj in storage_objs)
 
         # success is only set to false for transfer failures
         except Exception:
             logger.exception("NIXL store task %d failed", task_id)
             success = False
+            bytes_transferred = 0
 
             # free storage indices if transfer fails
             self.nixl_agent.pool.batched_free(storage_indices_flat)
 
         with self._lock:
-            self._completed_store_tasks[task_id] = success
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
 
         self._signal_store_event()
 

@@ -139,6 +139,10 @@ Source: ``lmcache/v1/distributed/config.py``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
        ``--no-l1-use-lazy`` to explicitly disable.
+       Lazy allocation relies on ``cudart`` host-pinned memory, so on
+       non-CUDA backends (where ``lmcache.torch_dev`` exposes no
+       ``cudart`` attribute) it is automatically downgraded to eager
+       allocation with a logged warning, regardless of the flag value.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
@@ -185,7 +189,7 @@ Source: ``lmcache/v1/distributed/config.py``
        write buffer (data is deleted from L1 after L2 store).
        ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
        and requires per-``cache_salt`` quotas to be configured at
-       runtime via the ``/api/quota`` HTTP endpoints
+       runtime via the ``/quota`` HTTP endpoints
        (see :ref:`mp-http-quota-api`); a ``cache_salt`` with no
        registered quota has an effective limit of ``0`` bytes,
        so its data is evicted at the next eviction cycle

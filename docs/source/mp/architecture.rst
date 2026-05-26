@@ -253,7 +253,7 @@ Periodically checks L1 memory usage against the watermark threshold.  When
 triggered, evicts objects using the configured policy (``LRU``,
 ``IsolatedLRU``, or ``noop``) until usage drops below the target.
 ``IsolatedLRU`` evicts per ``cache_salt`` against limits registered through
-the ``/api/quota`` HTTP endpoints; see :ref:`mp-http-quota-api`.
+the ``/quota`` HTTP endpoints; see :ref:`mp-http-quota-api`.
 
 **PrefetchController** (``storage_controllers/prefetch_controller.py``):
 Handles L2 lookup and load requests submitted by ``StorageManager`` during

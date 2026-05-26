@@ -65,7 +65,6 @@ def _create_multi_group_metadata(chunk_size: int = 16) -> LMCacheMetadata:
         kv_caches,
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=1,
-        block_size=chunk_size,
     )
     return metadata
 
