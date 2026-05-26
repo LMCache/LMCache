@@ -287,11 +287,11 @@ class GdsBackend(AllocatorBackendInterface):
             elif self.gds_backend == "hipfile":
                 # HACK: hipfile import may be buggy on some hardware
                 # (e.g., without GPUDirect), so it's temporarily put here.
-                # Third Party
-                import hipfile
+                # First Party
+                from lmcache.v1.storage_backend import hipfile_shim
 
                 self.cudart = None
-                self.gds_module = hipfile
+                self.gds_module = hipfile_shim
                 self._gds_driver = self.gds_module.CuFileDriver()
             else:
                 raise ValueError(f"Unsupported gds_backend '{self.gds_backend}'")
