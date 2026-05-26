@@ -293,7 +293,6 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
         xpu_connectors.VLLMPagedMemLayerwiseXPUConnector,
         xpu_connectors.VLLMBufferLayerwiseXPUConnector,
         xpu_connectors.SGLangLayerwiseXPUConnector,
-        xpu_connectors.SGLangXPUConnector,
     )
 
     assert isinstance(gpu_connector, valid_connectors)
