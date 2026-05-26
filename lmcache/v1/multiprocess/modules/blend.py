@@ -328,6 +328,11 @@ class BlendModule:
         self._token_range_matcher = BlendTokenRangeMatcher(ctx.chunk_size)
         self._gpu_copy_lock = threading.Lock()
 
+    @property
+    def context(self) -> MPCacheEngineContext:
+        """Return the shared engine context. Exposed for testing only."""
+        return self._ctx
+
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
 
@@ -1021,7 +1026,8 @@ class BlendModule:
                 # We should consider not unlocking objects in read_prefetched_results
                 # if error happens.
                 gpu_context.cupy_stream.launch_host_func(
-                    self._ctx.storage_manager.finish_read_prefetched, all_obj_keys
+                    self._ctx.storage_manager.finish_read_prefetched,
+                    all_obj_keys,
                 )
 
         logger.info(

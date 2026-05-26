@@ -135,6 +135,11 @@ class GPUTransferModule:
         )
         self._device_host_func_dispatcher.start()
 
+    @property
+    def context(self) -> MPCacheEngineContext:
+        """Return the shared engine context. Exposed for testing only."""
+        return self._ctx
+
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
 

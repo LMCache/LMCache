@@ -93,10 +93,11 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
-    module = MagicMock()
-    module._ctx.token_hasher = MagicMock()
-    module._ctx.token_hasher.chunk_size = 256
-    module._ctx.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
+    ctx = MagicMock()
+    ctx.token_hasher.chunk_size = 256
+    ctx.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
+
+    module = LookupModule(ctx)
 
     # Build a key
     key = create_cache_key(0).no_worker_id_version()
@@ -106,10 +107,9 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
         return_value=sentinel_obj_keys,
     ):
-        # Call the real method on the mock
-        LookupModule.free_lookup_locks(module, key, 1)
+        module.free_lookup_locks(key, 1)
 
-    module._ctx.storage_manager.finish_read_prefetched.assert_called_once_with(
+    module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
         sentinel_obj_keys, extra_count=0
     )
 
@@ -119,11 +119,11 @@ def test_server_free_lookup_locks_no_matching_chunks():
     # First Party
     from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
-    module = MagicMock()
-    module._ctx.token_hasher = MagicMock()
-    module._ctx.token_hasher.chunk_size = 256
-    # start=end=0 is passed to compute_chunk_hashes, which returns no hashes
-    module._ctx.token_hasher.compute_chunk_hashes.return_value = []
+    ctx = MagicMock()
+    ctx.token_hasher.chunk_size = 256
+    ctx.token_hasher.compute_chunk_hashes.return_value = []
+
+    module = LookupModule(ctx)
 
     # Key with start == end means no chunks to free
     key = IPCCacheEngineKey(
@@ -136,9 +136,9 @@ def test_server_free_lookup_locks_no_matching_chunks():
         request_id="req-empty",
     )
 
-    LookupModule.free_lookup_locks(module, key, 1)
+    module.free_lookup_locks(key, 1)
 
-    module._ctx.storage_manager.finish_read_prefetched.assert_not_called()
+    module.context.storage_manager.finish_read_prefetched.assert_not_called()
 
 
 def test_server_handler_registered():

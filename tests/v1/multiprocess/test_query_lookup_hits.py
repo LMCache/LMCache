@@ -6,7 +6,6 @@ protocol definition, message-queue round-trip, and server handler.
 
 # Standard
 from unittest.mock import MagicMock
-import threading
 import time
 
 # First Party
@@ -109,14 +108,15 @@ def test_mq_query_prefetch_lookup_hits_none_response():
 
 def _make_module_with_job(
     world_size: int, storage_return: int | None
-) -> tuple[MagicMock, str]:
-    """Create a mock LookupModule with a single prefetch job.
+) -> tuple[LookupModule, str]:
+    """Create a LookupModule with a mock context and a single prefetch job.
 
     Returns:
-        (module_mock, request_id)
+        (module, request_id)
     """
-    module = MagicMock()
-    module._prefetch_job_lock = threading.Lock()
+    ctx = MagicMock()
+    ctx.token_hasher.chunk_size = 256
+    module = LookupModule(ctx)
 
     handle = PrefetchHandle(
         prefetch_request_id=0,
@@ -132,8 +132,8 @@ def _make_module_with_job(
         request_id=request_id,
         requested_tokens=0,
     )
-    module._prefetch_jobs = {request_id: job}
-    module._ctx.storage_manager.query_prefetch_lookup_hits.return_value = storage_return
+    module._prefetch_jobs[request_id] = job
+    ctx.storage_manager.query_prefetch_lookup_hits.return_value = storage_return
 
     return module, request_id
 
@@ -142,17 +142,17 @@ def test_server_lookup_hits_returns_count():
     """query_prefetch_lookup_hits returns chunk count when lookup is done."""
     module, request_id = _make_module_with_job(world_size=1, storage_return=5)
 
-    result = LookupModule.query_prefetch_lookup_hits(module, request_id)
+    result = module.query_prefetch_lookup_hits(request_id)
 
     assert result == 5
-    module._ctx.storage_manager.query_prefetch_lookup_hits.assert_called_once()
+    module.context.storage_manager.query_prefetch_lookup_hits.assert_called_once()
 
 
 def test_server_lookup_hits_divides_by_world_size():
     """Result should be divided by world_size for tensor parallelism."""
     module, request_id = _make_module_with_job(world_size=2, storage_return=10)
 
-    result = LookupModule.query_prefetch_lookup_hits(module, request_id)
+    result = module.query_prefetch_lookup_hits(request_id)
 
     assert result == 5  # 10 // 2
 
@@ -161,21 +161,21 @@ def test_server_lookup_hits_returns_none_when_in_progress():
     """Returns None when storage manager lookup is still in progress."""
     module, request_id = _make_module_with_job(world_size=1, storage_return=None)
 
-    result = LookupModule.query_prefetch_lookup_hits(module, request_id)
+    result = module.query_prefetch_lookup_hits(request_id)
 
     assert result is None
 
 
 def test_server_lookup_hits_returns_zero_for_invalid_request():
     """Returns 0 for a request_id that doesn't exist (prevents infinite spin)."""
-    module = MagicMock()
-    module._prefetch_job_lock = threading.Lock()
-    module._prefetch_jobs = {}
+    ctx = MagicMock()
+    ctx.token_hasher.chunk_size = 256
+    module = LookupModule(ctx)
 
-    result = LookupModule.query_prefetch_lookup_hits(module, "nonexistent-req")
+    result = module.query_prefetch_lookup_hits("nonexistent-req")
 
     assert result == 0
-    module._ctx.storage_manager.query_prefetch_lookup_hits.assert_not_called()
+    ctx.storage_manager.query_prefetch_lookup_hits.assert_not_called()
 
 
 def test_server_lookup_hits_returns_zero_after_prefetch_consumed():
@@ -186,9 +186,9 @@ def test_server_lookup_hits_returns_zero_after_prefetch_consumed():
     module, request_id = _make_module_with_job(world_size=1, storage_return=5)
 
     # Simulate query_prefetch_status consuming the job
-    del module._prefetch_jobs[request_id]
+    module._prefetch_jobs.pop(request_id)
 
-    result = LookupModule.query_prefetch_lookup_hits(module, request_id)
+    result = module.query_prefetch_lookup_hits(request_id)
 
     assert result == 0
 
@@ -197,7 +197,7 @@ def test_server_lookup_hits_zero_count():
     """Returns 0 when no keys matched (not None)."""
     module, request_id = _make_module_with_job(world_size=1, storage_return=0)
 
-    result = LookupModule.query_prefetch_lookup_hits(module, request_id)
+    result = module.query_prefetch_lookup_hits(request_id)
 
     assert result == 0
     assert result is not None

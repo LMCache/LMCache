@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Protocol and types for pluggable engine modules."""
 
+# Future
+from __future__ import annotations
+
 # Standard
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Callable, Protocol
 
 # First Party
 from lmcache.v1.multiprocess.protocol import RequestType
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 
 
 class ThreadPoolType(Enum):
@@ -39,6 +46,11 @@ class EngineModule(Protocol):
     Each module owns its internal state and exposes handlers
     that the compositor registers with the message queue server.
     """
+
+    @property
+    def context(self) -> MPCacheEngineContext:
+        """Return the shared engine context. Exposed for testing only."""
+        ...
 
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves."""

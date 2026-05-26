@@ -64,6 +64,11 @@ class NonGPUTransferModule:
         self._ctx = ctx
         self._non_gpu_contexts: dict[int, NonGPUContextEntry] = {}
 
+    @property
+    def context(self) -> MPCacheEngineContext:
+        """Return the shared engine context. Exposed for testing only."""
+        return self._ctx
+
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
 
