@@ -28,7 +28,8 @@ Available Commands
      - Liveness check for LMCache or vLLM servers.
    * - ``bench``
      - Run sustained performance benchmarks against an inference engine,
-       or an end-to-end sanity test against an LMCache MP server.
+       an end-to-end sanity test against an LMCache MP server, or a
+       throughput/latency benchmark against an L2 cache adapter.
    * - ``kvcache``
      - Manage KV cache state (e.g. clear L1 cache).
    * - ``server``
@@ -41,4 +42,5 @@ For a comprehensive guide with examples, see :doc:`/getting_started/cli`.
 
    bench
    bench_kvcache
+   bench_l2
    kvcache

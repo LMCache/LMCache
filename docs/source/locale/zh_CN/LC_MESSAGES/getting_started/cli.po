@@ -1,0 +1,478 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/cli.rst:2
+msgid "CLI Reference"
+msgstr "CLI 参考"
+
+#: ../../source/getting_started/cli.rst:4
+msgid ""
+"LMCache provides a unified ``lmcache`` command-line interface for "
+"interacting with KV cache servers, running benchmarks, and inspecting "
+"cache state."
+msgstr "LMCache 提供了一个统一的 ``lmcache`` 命令行接口，用于与 KV Cache 服务器交互、运行基准测试和检查缓存状态。"
+
+#: ../../source/getting_started/cli.rst:12
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/getting_started/cli.rst:14
+msgid "The ``lmcache`` CLI is available in two packages:"
+msgstr "``lmcache`` CLI 可在两个软件包中使用："
+
+#: ../../source/getting_started/cli.rst:20
+msgid "Package"
+msgstr "包"
+
+#: ../../source/getting_started/cli.rst:21
+msgid "Install"
+msgstr "安装"
+
+#: ../../source/getting_started/cli.rst:22
+msgid "When to use"
+msgstr "何时使用"
+
+#: ../../source/getting_started/cli.rst:23
+msgid "``lmcache``"
+msgstr "``lmcache``"
+
+#: ../../source/getting_started/cli.rst:24
+msgid "``pip install lmcache``"
+msgstr "``pip install lmcache``"
+
+#: ../../source/getting_started/cli.rst:25
+msgid "Full install: server, CLI, and CUDA extensions. Requires Linux + GPU."
+msgstr "完整安装：服务器、CLI 和 CUDA 扩展。需要 Linux + GPU。"
+
+#: ../../source/getting_started/cli.rst:26
+msgid "``lmcache-cli``"
+msgstr "``lmcache-cli``"
+
+#: ../../source/getting_started/cli.rst:27
+msgid "``pip install lmcache-cli``"
+msgstr "``pip install lmcache-cli``"
+
+#: ../../source/getting_started/cli.rst:28
+msgid "CLI only: query, ping, bench, describe. No GPU required, any OS."
+msgstr "仅限 CLI：查询、ping、基准测试、描述。无需 GPU，任何操作系统均可。"
+
+#: ../../source/getting_started/cli.rst:32
+msgid ""
+"Do not install both packages in the same environment — they both provide "
+"the ``lmcache`` entry point."
+msgstr "请勿在同一环境中安装这两个软件包 — 它们都提供 ``lmcache`` 入口点。"
+
+#: ../../source/getting_started/cli.rst:36
+msgid "Quick Start"
+msgstr "快速开始"
+
+#: ../../source/getting_started/cli.rst:38
+msgid "After installing LMCache, the ``lmcache`` command is available:"
+msgstr "安装 LMCache 后，可以使用 ``lmcache`` 命令："
+
+#: ../../source/getting_started/cli.rst:63
+msgid "Available Commands"
+msgstr "可用命令"
+
+#: ../../source/getting_started/cli.rst:69
+msgid "Command"
+msgstr "命令"
+
+#: ../../source/getting_started/cli.rst:70
+#: ../../source/getting_started/cli.rst:193
+#: ../../source/getting_started/cli.rst:336
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/getting_started/cli.rst:71
+msgid "``describe``"
+msgstr "``describe``"
+
+#: ../../source/getting_started/cli.rst:72
+msgid ""
+"Show detailed status of a running LMCache service, including cache "
+"health, L1 storage, registered models, and L2 adapters."
+msgstr "显示正在运行的 LMCache 服务的详细状态，包括缓存健康状况、L1 存储、注册的模型和 L2 适配器。"
+
+#: ../../source/getting_started/cli.rst:74
+#: ../../source/getting_started/cli.rst:280
+msgid "``query``"
+msgstr "``query``"
+
+#: ../../source/getting_started/cli.rst:75
+msgid ""
+"Single-shot query interface for both the serving engine and KV cache "
+"worker."
+msgstr "用于服务引擎和 KV Cache 工作线程的单次查询接口。"
+
+#: ../../source/getting_started/cli.rst:76
+msgid "``server``"
+msgstr "``server``"
+
+#: ../../source/getting_started/cli.rst:77
+msgid "Launch the LMCache server (ZMQ + HTTP). Requires full ``lmcache`` install."
+msgstr "启动 LMCache 服务器（ZMQ + HTTP）。需要完整的 ``lmcache`` 安装。"
+
+#: ../../source/getting_started/cli.rst:78
+msgid "``ping``"
+msgstr "``ping``"
+
+#: ../../source/getting_started/cli.rst:79
+msgid "Liveness check for LMCache or vLLM servers."
+msgstr "LMCache 或 vLLM 服务器的存活检查。"
+
+#: ../../source/getting_started/cli.rst:80
+msgid "``bench``"
+msgstr "``bench``"
+
+#: ../../source/getting_started/cli.rst:81
+msgid "Run sustained performance benchmarks against an inference engine."
+msgstr "对推理引擎运行持续性能基准测试。"
+
+#: ../../source/getting_started/cli.rst:82
+#: ../../source/getting_started/cli.rst:194
+msgid "``kvcache``"
+msgstr "``kvcache``"
+
+#: ../../source/getting_started/cli.rst:83
+msgid "Manage KV cache state (e.g. clear L1 cache) on a running server."
+msgstr "在运行的服务器上管理 KV Cache 状态（例如，清除 L1 缓存）。"
+
+#: ../../source/getting_started/cli.rst:87
+msgid "``bench`` — Engine Benchmarking"
+msgstr "``bench`` — 引擎基准测试"
+
+#: ../../source/getting_started/cli.rst:89
+msgid ""
+"Run sustained benchmarks against an inference engine with multiple "
+"workload types:"
+msgstr "对推理引擎运行持续基准测试，使用多种工作负载类型："
+
+#: ../../source/getting_started/cli.rst:121
+msgid "Five workloads are available:"
+msgstr "提供五种工作负载："
+
+#: ../../source/getting_started/cli.rst:123
+msgid ""
+"**long-doc-qa** -- repeated Q&A over long documents (tests KV cache "
+"reuse)."
+msgstr "**long-doc-qa** -- 在长文档上进行重复的问答（测试 KV Cache 重用）。"
+
+#: ../../source/getting_started/cli.rst:124
+msgid "**multi-round-chat** -- multi-turn chat with stateful sessions."
+msgstr "**多轮聊天** -- 带有状态会话的多轮聊天。"
+
+#: ../../source/getting_started/cli.rst:125
+msgid ""
+"**long-doc-permutator** -- permutations of context documents (blended "
+"cache reuse stress test)."
+msgstr "**long-doc-permutator** -- 上下文文档的排列组合（混合缓存重用压力测试）。"
+
+#: ../../source/getting_started/cli.rst:127
+msgid ""
+"**prefix-suffix-tuner** -- two-pass sequential workload demonstrating "
+"tiered KV-cache reuse (L0/L1/L2)."
+msgstr "**prefix-suffix-tuner** -- 两次传递的顺序工作负载，演示分层 KV Cache 重用 (L0/L1/L2)。"
+
+#: ../../source/getting_started/cli.rst:129
+msgid "**random-prefill** -- prefill-only requests fired simultaneously."
+msgstr "**随机预填** -- 同时发起的仅预填请求。"
+
+#: ../../source/getting_started/cli.rst:131
+msgid ""
+"See :doc:`/cli/bench` for full documentation including all workload "
+"options, interactive mode details, and config file format."
+msgstr "请参阅 :doc:`/cli/bench` 以获取完整文档，包括所有工作负载选项、交互模式详细信息和配置文件格式。"
+
+#: ../../source/getting_started/cli.rst:136
+msgid "``describe`` — Service Status Dashboard"
+msgstr "``describe`` — 服务状态仪表板"
+
+#: ../../source/getting_started/cli.rst:138
+msgid "Inspect the state of a running LMCache KV cache server:"
+msgstr "检查正在运行的 LMCache KV Cache 服务器的状态："
+
+#: ../../source/getting_started/cli.rst:177
+msgid "The output shows:"
+msgstr "输出显示："
+
+#: ../../source/getting_started/cli.rst:179
+msgid "**Overview** — health status, engine type, chunk size."
+msgstr "**概述** — 健康状态、引擎类型、块大小。"
+
+#: ../../source/getting_started/cli.rst:180
+msgid "**L1 storage** — capacity, usage, eviction policy, cached object count."
+msgstr "**L1 存储** — 容量、使用情况、逐出策略、缓存对象数量。"
+
+#: ../../source/getting_started/cli.rst:181
+msgid ""
+"**Registered models** — per-model KV cache layout including the GPU KV "
+"tensor shape (symbolic and concrete), attention backend, and layer "
+"details."
+msgstr "**注册模型** — 每个模型的 KV Cache 布局，包括 GPU KV 张量形状（符号和具体）、注意力后端和层详细信息。"
+
+#: ../../source/getting_started/cli.rst:183
+msgid "**L2 adapters** — type, health, backend, stored objects, and utilization."
+msgstr "**L2 适配器** — 类型、健康状况、后端、存储对象和利用率。"
+
+#: ../../source/getting_started/cli.rst:186
+msgid "Arguments"
+msgstr "参数"
+
+#: ../../source/getting_started/cli.rst:192
+#: ../../source/getting_started/cli.rst:335
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/getting_started/cli.rst:195
+msgid "Target to describe (currently only ``kvcache`` is supported)."
+msgstr "描述的目标（目前仅支持 ``kvcache``）。"
+
+#: ../../source/getting_started/cli.rst:196
+#: ../../source/getting_started/cli.rst:339
+msgid "``--url``"
+msgstr "``--url``"
+
+#: ../../source/getting_started/cli.rst:197
+msgid "LMCache HTTP server URL (default: ``http://localhost:8080``)."
+msgstr "LMCache HTTP 服务器 URL（默认：``http://localhost:8080``）。"
+
+#: ../../source/getting_started/cli.rst:198
+#: ../../source/getting_started/cli.rst:342
+msgid "``--format``"
+msgstr "``--format``"
+
+#: ../../source/getting_started/cli.rst:199
+#: ../../source/getting_started/cli.rst:343
+msgid "Output format: ``terminal`` (default) or ``json``."
+msgstr "输出格式：``terminal``（默认）或``json``。"
+
+#: ../../source/getting_started/cli.rst:200
+#: ../../source/getting_started/cli.rst:344
+msgid "``--output PATH``"
+msgstr "``--output PATH``"
+
+#: ../../source/getting_started/cli.rst:201
+#: ../../source/getting_started/cli.rst:345
+msgid "Save metrics to a file (format follows ``--format``)."
+msgstr "将指标保存到文件中（格式遵循 ``--format``）。"
+
+#: ../../source/getting_started/cli.rst:204
+#: ../../source/getting_started/cli.rst:395
+msgid "JSON Output"
+msgstr "JSON 输出"
+
+#: ../../source/getting_started/cli.rst:206
+msgid ""
+"Use ``--format json`` for machine-readable output. Models and L2 adapters"
+" are collected into lists for easy programmatic access:"
+msgstr "使用 ``--format json`` 以机器可读的输出格式。模型和 L2 适配器被收集到列表中，以便于程序访问："
+
+#: ../../source/getting_started/cli.rst:256
+msgid "GPU KV Shape Abbreviations"
+msgstr "GPU KV 形状缩写"
+
+#: ../../source/getting_started/cli.rst:258
+msgid "The ``gpu_kv_shape`` field uses short names from the ``GPUKVFormat`` enum:"
+msgstr "``gpu_kv_shape`` 字段使用 ``GPUKVFormat`` 枚举中的简短名称："
+
+#: ../../source/getting_started/cli.rst:264
+msgid "Abbrev"
+msgstr "缩写"
+
+#: ../../source/getting_started/cli.rst:265
+#: ../../source/getting_started/cli.rst:357
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/getting_started/cli.rst:266
+msgid "NB"
+msgstr "注意事项"
+
+#: ../../source/getting_started/cli.rst:267
+msgid "num_blocks"
+msgstr "num_blocks"
+
+#: ../../source/getting_started/cli.rst:268
+msgid "NL"
+msgstr "NL"
+
+#: ../../source/getting_started/cli.rst:269
+msgid "num_layers"
+msgstr "num_layers"
+
+#: ../../source/getting_started/cli.rst:270
+msgid "BS"
+msgstr "批量大小"
+
+#: ../../source/getting_started/cli.rst:271
+msgid "block_size"
+msgstr "块大小"
+
+#: ../../source/getting_started/cli.rst:272
+msgid "NH"
+msgstr "NH"
+
+#: ../../source/getting_started/cli.rst:273
+msgid "num_heads"
+msgstr "num_heads"
+
+#: ../../source/getting_started/cli.rst:274
+msgid "HS"
+msgstr "HS"
+
+#: ../../source/getting_started/cli.rst:275
+msgid "head_size"
+msgstr "head_size"
+
+#: ../../source/getting_started/cli.rst:276
+msgid "PBS"
+msgstr "PBS"
+
+#: ../../source/getting_started/cli.rst:277
+msgid "page_buffer_size (NB × BS)"
+msgstr "页面缓冲区大小 (NB × BS)"
+
+#: ../../source/getting_started/cli.rst:282
+#, python-brace-format
+msgid ""
+"The ``query engine`` subcommand sends one request to the engine API and "
+"reports metrics. ``--prompt`` supports placeholders: ``{lmcache}`` loads "
+"``lmcache/cli/documents/lmcache.txt``, and custom documents can be passed"
+" with ``--documents NAME=PATH``. The prompt token count is taken directly"
+" from the usage data reported by the engine (``stream_options: "
+"{include_usage: true}``)."
+msgstr "``query engine`` 子命令向引擎 API 发送一个请求并报告指标。 ``--prompt`` 支持占位符： ``{lmcache}`` 加载 ``lmcache/cli/documents/lmcache.txt``，自定义文档可以通过 ``--documents NAME=PATH`` 传递。提示的令牌计数直接来自引擎报告的使用数据 (``stream_options: {include_usage: true}``)。"
+
+#: ../../source/getting_started/cli.rst:309
+msgid "``ping`` — Liveness Check"
+msgstr "``ping`` — 存活检查"
+
+#: ../../source/getting_started/cli.rst:311
+msgid ""
+"Check whether an LMCache KV cache server or a vLLM serving engine is "
+"reachable:"
+msgstr "检查 LMCache KV Cache 服务器或 vLLM 服务引擎是否可达："
+
+#: ../../source/getting_started/cli.rst:329
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/getting_started/cli.rst:337
+msgid "``kvcache`` | ``engine``"
+msgstr "``kvcache`` | ``engine``"
+
+#: ../../source/getting_started/cli.rst:338
+msgid "Target to ping (positional, required)."
+msgstr "要 ping 的目标（位置参数，必填）。"
+
+#: ../../source/getting_started/cli.rst:340
+msgid ""
+"Server URL. Defaults to ``http://localhost:8080`` for ``kvcache``, "
+"``http://localhost:8000`` for ``engine``."
+msgstr "服务器 URL。默认值为 ``http://localhost:8080`` 用于 ``kvcache``，``http://localhost:8000`` 用于 ``engine``。"
+
+#: ../../source/getting_started/cli.rst:346
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/getting_started/cli.rst:347
+msgid "Suppress stdout output. Exit code only."
+msgstr "抑制标准输出。仅返回退出代码。"
+
+#: ../../source/getting_started/cli.rst:350
+msgid "Exit Codes"
+msgstr "退出代码"
+
+#: ../../source/getting_started/cli.rst:356
+msgid "Code"
+msgstr "代码"
+
+#: ../../source/getting_started/cli.rst:358
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/getting_started/cli.rst:359
+msgid "Server is reachable (HTTP 200)."
+msgstr "服务器可达（HTTP 200）。"
+
+#: ../../source/getting_started/cli.rst:360
+msgid "``1``"
+msgstr "``1``"
+
+#: ../../source/getting_started/cli.rst:361
+msgid "Connection failure or non-200 response."
+msgstr "连接失败或非 200 响应。"
+
+#: ../../source/getting_started/cli.rst:364
+msgid "``kvcache`` — KV Cache Management"
+msgstr "``kvcache`` — KV Cache 管理"
+
+#: ../../source/getting_started/cli.rst:366
+msgid ""
+"Manage KV cache state on a running LMCache server. See "
+":doc:`/cli/kvcache` for full documentation including examples, options, "
+"and common patterns."
+msgstr "在运行中的 LMCache 服务器上管理 KV Cache 状态。有关完整文档，包括示例、选项和常见模式，请参见 :doc:`/cli/kvcache`。"
+
+#: ../../source/getting_started/cli.rst:369
+msgid "Quick example:"
+msgstr "快速示例："
+
+#: ../../source/getting_started/cli.rst:378
+msgid "Metrics Output"
+msgstr "指标输出"
+
+#: ../../source/getting_started/cli.rst:380
+msgid "All commands that produce metrics support two output formats:"
+msgstr "所有生成指标的命令支持两种输出格式："
+
+#: ../../source/getting_started/cli.rst:383
+msgid "Terminal Output"
+msgstr "终端输出"
+
+#: ../../source/getting_started/cli.rst:385
+msgid "Human-readable ASCII table:"
+msgstr "可读的 ASCII 表："
+
+#: ../../source/getting_started/cli.rst:397
+msgid ""
+"Machine-readable output with structured keys, available via ``--format "
+"json`` (stdout) or ``--output`` (file):"
+msgstr "机器可读的输出，带有结构化的键，可以通过 ``--format json``（标准输出）或 ``--output``（文件）获得："
+
+#: ../../source/getting_started/cli.rst:414
+msgid ""
+"The terminal output uses human-readable labels (e.g., ``\"Round trip time"
+" (ms)\"``), while the JSON output uses machine-readable keys (e.g., "
+"``\"round_trip_time_ms\"``)."
+msgstr "终端输出使用人类可读的标签（例如，``\"往返时间（毫秒）\"``），而 JSON 输出使用机器可读的键（例如，``\"round_trip_time_ms\"``）。"
+
+#: ../../source/getting_started/cli.rst:419
+msgid "Adding New Commands"
+msgstr "添加新命令"
+
+#: ../../source/getting_started/cli.rst:421
+msgid ""
+"New CLI subcommands can be added by creating a ``BaseCommand`` subclass "
+"and registering it. See :doc:`/developer_guide/cli` for details."
+msgstr "可以通过创建 ``BaseCommand`` 子类并注册它来添加新的 CLI 子命令。有关详细信息，请参见 :doc:`/developer_guide/cli`。"
+

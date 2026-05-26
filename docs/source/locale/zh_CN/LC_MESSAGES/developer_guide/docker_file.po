@@ -1,0 +1,58 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/developer_guide/docker_file.rst:2
+msgid "Dockerfile"
+msgstr "Dockerfile"
+
+#: ../../source/developer_guide/docker_file.rst:4
+msgid ""
+"We provide a Dockerfile to help you build a container image for LMCache "
+"integrated with vLLM. More information about deploying LMCache image "
+"using Docker can be found here - :ref:`Docker deployment guide "
+"<docker_deployment>`."
+msgstr "我们提供了一个 Dockerfile，帮助您构建一个与 vLLM 集成的 LMCache 容器镜像。有关使用 Docker 部署 LMCache 镜像的更多信息，请参见这里 - :ref:`Docker deployment guide <docker_deployment>`。"
+
+#: ../../source/developer_guide/docker_file.rst:8
+msgid "Building the container image"
+msgstr "构建容器镜像"
+
+#: ../../source/developer_guide/docker_file.rst:10
+msgid ""
+"You can build the LMCache (integrated with vLLM) image using Docker from "
+"source via the provided Dockerfile. The Dockerfile is located at `docker "
+"<https://github.com/LMCache/LMCache/tree/dev/docker>`_."
+msgstr "您可以通过提供的 Dockerfile 使用 Docker 从源代码构建集成了 vLLM 的 LMCache 镜像。Dockerfile 位于 `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_。"
+
+#: ../../source/developer_guide/docker_file.rst:13
+msgid ""
+"To build the container image, run the following command from the root "
+"directory of the LMCache repository:"
+msgstr "要构建容器镜像，请在 LMCache 仓库的根目录下运行以下命令："
+
+#: ../../source/developer_guide/docker_file.rst:19
+msgid ""
+"Replace `<IMAGE_NAME>` and `<TAG>` with your desired image name and tag. "
+"See example build file in `docker "
+"<https://github.com/LMCache/LMCache/tree/dev/docker>`_ for explanation of"
+" all arguments."
+msgstr "将 `<IMAGE_NAME>` 和 `<TAG>` 替换为您想要的镜像名称和标签。有关所有参数的说明，请参见 `docker <https://github.com/LMCache/LMCache/tree/dev/docker>`_ 中的示例构建文件。"
+

@@ -68,28 +68,29 @@ div.highlight button.copybtn + button.copybtn {
     font-size: 10px;
   }
 
+/* Language switcher (中文 | Eng) — lives in the top nav bar,
+   or floats at top-right if the nav bar isn't found. */
 .lmcache-language-switcher {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 0 6px;
+    padding: 4px 10px;
+    white-space: nowrap;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--foreground);
+    border-radius: 8px;
+}
+
+/* When there's no nav bar, float at top-right instead */
+.lmcache-language-switcher--fallback {
     position: fixed;
     top: 10px;
     right: 72px;
     z-index: 60;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 36px;
-    padding: 0 8px;
-    white-space: nowrap;
-    font-size: 18px;
-    font-weight: 700;
-    line-height: 1;
-    color: var(--foreground);
-}
-
-@media (max-width: 640px) {
-    .lmcache-language-switcher {
-        right: 56px;
-        font-size: 15px;
-    }
 }
 
 .lmcache-language-switcher a {
