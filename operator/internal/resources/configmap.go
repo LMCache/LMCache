@@ -37,8 +37,9 @@ func BuildConnectionConfigMap(engine *lmcachev1alpha1.LMCacheEngine) *corev1.Con
 	svcHost := fmt.Sprintf("%s.%s.svc.cluster.local", LookupServiceName(engine.Name), engine.Namespace)
 
 	config := map[string]any{
-		"kv_connector": "LMCacheMPConnector",
-		"kv_role":      "kv_both",
+		"kv_connector":             "LMCacheMPConnector",
+		"kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
+		"kv_role":                  "kv_both",
 		"kv_connector_extra_config": map[string]any{
 			"lmcache.mp.host": fmt.Sprintf("tcp://%s", svcHost),
 			"lmcache.mp.port": fmt.Sprintf("%d", port),
