@@ -82,17 +82,11 @@ compatibility with the vLLM-embedded API server.
      - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
-     - ``/dax/status``
-     - Report runtime-manageable Device-DAX L2 adapters and devices.
+     - ``/reconfigure/{backend}/status``
+     - Report runtime-manageable L2 adapters for one backend type.
    * - POST
-     - ``/dax/add``
-     - Add an existing Device-DAX path to a hotplug-enabled DAX adapter.
-   * - POST
-     - ``/dax/remove``
-     - Migrate, evict, or drain one Device-DAX path from a DAX adapter.
-   * - POST
-     - ``/dax/resize``
-     - Grow or shrink one Device-DAX mapping.
+     - ``/reconfigure/{backend}/{operation}``
+     - Apply one runtime reconfiguration operation to a backend adapter.
    * - GET
      - ``/quota``
      - List every registered ``cache_salt`` quota with live usage.
@@ -313,20 +307,21 @@ The request body is ignored.
 
 .. _mp-http-dax-api:
 
-``/dax/*`` — Device-DAX runtime hotplug
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``/reconfigure/{backend}`` — runtime L2 adapter reconfiguration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These endpoints are available when the server has a hotplug-enabled
-``dax`` L2 adapter. They only change LMCache runtime mappings; the DAX
-device paths must already exist and be readable and writable by the server.
-The endpoints translate request bodies into the generic L2 adapter
-reconfiguration API, while DAX-specific validation and migration semantics stay
-inside the DAX adapter.
+These endpoints are available when the server has a runtime-reconfigurable L2
+adapter. They only change LMCache runtime mappings and metadata; backend
+resources such as DAX device paths must already exist and be readable and
+writable by the server. The endpoint routes ``backend``, ``operation``, and the
+JSON request body into the generic L2 adapter reconfiguration API, while
+backend-specific validation and migration semantics stay inside the adapter.
 
-Use JSON request bodies because DAX paths contain slashes. ``add`` and
-``resize`` accept ``size`` as an integer byte count or a string such as
-``"100GiB"``. ``remove`` supports ``migrate``, ``evict``, and ``drain``;
-``resize`` supports ``migrate`` and ``evict``.
+For Device-DAX, use ``backend=dax``. DAX operations use JSON request bodies
+because DAX paths contain slashes. ``add`` and ``resize`` accept ``size`` as an
+integer byte count or a string such as ``"100GiB"``. ``remove`` supports
+``migrate``, ``evict``, and ``drain``; ``resize`` supports ``migrate`` and
+``evict``.
 
 See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
 mode semantics, and validation guidance.

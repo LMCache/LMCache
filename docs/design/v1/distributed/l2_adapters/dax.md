@@ -29,20 +29,20 @@ self-registers adapter type `dax`, owns separate event notifiers and worker
 pools for store, lookup, and load operations, and uses one or more
 `DaxCore[ObjectKey]` instances behind a stable facade.
 
-`lmcache/v1/multiprocess/http_apis/dax_hotplug_api.py` exposes runtime
-management endpoints:
+`lmcache/v1/multiprocess/http_apis/reconfigure_api.py` exposes runtime
+reconfiguration endpoints:
 
-- `GET /dax/status`
-- `POST /dax/add`
-- `POST /dax/remove`
-- `POST /dax/resize`
+- `GET /reconfigure/dax/status`
+- `POST /reconfigure/dax/add`
+- `POST /reconfigure/dax/remove`
+- `POST /reconfigure/dax/resize`
 
-The HTTP layer translates these DAX requests into the generic L2 adapter
-reconfiguration API on `StorageManager`. `StorageManager` only routes
-`operation` plus adapter-specific payload to a reconfigurable adapter; DAX path,
-mode, and migration semantics stay inside `DaxL2Adapter`. The same interface is
-intended for future adapters such as P2P, so the HTTP layer does not inspect
-private adapter lists or DAX core state directly.
+The HTTP layer routes `backend`, `operation`, and adapter-specific JSON payloads
+into the generic L2 adapter reconfiguration API on `StorageManager`.
+`StorageManager` only routes `operation` plus payload to a reconfigurable
+adapter; DAX path, mode, and migration semantics stay inside `DaxL2Adapter`.
+The same interface is intended for future adapters such as P2P, so the HTTP
+layer does not inspect private adapter lists or DAX core state directly.
 
 ## Slot State
 

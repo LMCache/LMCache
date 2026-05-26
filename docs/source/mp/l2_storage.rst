@@ -223,7 +223,8 @@ the DAX device, but they are unreachable after the LMCache server restarts.
 **Optional fields:**
 
 - ``hotplug_enabled`` (bool, default ``false``): Enables runtime
-  ``/dax/status``, ``/dax/add``, ``/dax/remove``, and ``/dax/resize``.
+  ``/reconfigure/dax/status``, ``/reconfigure/dax/add``,
+  ``/reconfigure/dax/remove``, and ``/reconfigure/dax/resize``.
 - ``num_store_workers`` (int, default ``1``): Store worker threads.
 - ``num_lookup_workers`` (int, default ``1``): Lookup worker threads.
 - ``num_load_workers`` (int, default ``min(4, os.cpu_count())``): Load worker
@@ -270,14 +271,15 @@ the DAX device, but they are unreachable after the LMCache server restarts.
 Runtime management uses JSON bodies because DAX paths contain slashes. See the
 :doc:`Device-DAX backend guide </kv_cache/storage_backends/dax>` for complete
 examples.
-These DAX routes use StorageManager's generic L2 adapter reconfiguration API;
-the DAX adapter interprets the operation payload, and the same interface can be
-reused by future adapters such as P2P.
+These routes use StorageManager's generic L2 adapter reconfiguration API; the
+HTTP path selects the backend and operation, the DAX adapter interprets the
+operation payload, and the same interface can be reused by future adapters such
+as P2P.
 
 .. code-block:: bash
 
-    curl http://127.0.0.1:9000/dax/status
-    curl -X POST http://127.0.0.1:9000/dax/add \
+    curl http://127.0.0.1:9000/reconfigure/dax/status
+    curl -X POST http://127.0.0.1:9000/reconfigure/dax/add \
       -H 'Content-Type: application/json' \
       -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
 

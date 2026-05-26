@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for MP DAX hotplug HTTP endpoints."""
+"""Tests for MP runtime reconfiguration HTTP endpoints."""
 
 # Standard
 from dataclasses import dataclass, field
@@ -12,7 +12,7 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
-from lmcache.v1.multiprocess.http_apis.dax_hotplug_api import router
+from lmcache.v1.multiprocess.http_apis.reconfigure_api import router
 
 
 @dataclass
@@ -66,9 +66,9 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
     sm = _FakeStorageManager()
     client = _client(sm)
 
-    status_resp = client.get("/dax/status")
+    status_resp = client.get("/reconfigure/dax/status")
     add_resp = client.post(
-        "/dax/add",
+        "/reconfigure/dax/add",
         json={
             "adapter_index": 0,
             "device_path": "/dev/daxX.X",
@@ -76,7 +76,7 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
         },
     )
     remove_resp = client.post(
-        "/dax/remove",
+        "/reconfigure/dax/remove",
         json={
             "adapter_index": 0,
             "device_path": "/dev/daxX.X",
@@ -85,7 +85,7 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
         },
     )
     resize_resp = client.post(
-        "/dax/resize",
+        "/reconfigure/dax/resize",
         json={
             "adapter_index": 0,
             "device_path": "/dev/daxX.X",
@@ -99,7 +99,8 @@ def test_calls_storage_manager_without_timeout_and_without_accepted_response():
     assert add_resp.status_code == 200
     assert remove_resp.status_code == 200
     assert resize_resp.status_code == 200
-    assert status_resp.json()["num_dax_adapters"] == 1
+    assert status_resp.json()["backend"] == "dax"
+    assert status_resp.json()["num_adapters"] == 1
     assert sm.calls == [
         ("status", ()),
         ("status", ()),
@@ -150,13 +151,13 @@ def test_status_filters_non_dax_reconfigurable_adapters():
         }
     )
 
-    resp = _client(sm).get("/dax/status")
+    resp = _client(sm).get("/reconfigure/dax/status")
 
     assert resp.status_code == 200
     assert resp.json() == {
         "enabled": True,
-        "hotplug_enabled": True,
-        "num_dax_adapters": 1,
+        "backend": "dax",
+        "num_adapters": 1,
         "adapters": [
             {
                 "type": "dax",
@@ -186,7 +187,7 @@ def test_add_resolves_public_dax_index_to_generic_reconfigure_index():
     )
 
     resp = _client(sm).post(
-        "/dax/add",
+        "/reconfigure/dax/add",
         json={
             "adapter_index": 0,
             "device_path": "/dev/daxX.X",
@@ -212,7 +213,7 @@ def test_add_rejects_invalid_size_payloads(
     payload: dict[str, object],
     status_code: int,
 ):
-    resp = _client(_FakeStorageManager()).post("/dax/add", json=payload)
+    resp = _client(_FakeStorageManager()).post("/reconfigure/dax/add", json=payload)
     assert resp.status_code == status_code
 
 
@@ -221,7 +222,7 @@ def test_add_rejects_pathological_size_string_without_echoing_input():
     bad_size = "9" + " " * 5000 + "x"
 
     resp = _client(sm).post(
-        "/dax/add",
+        "/reconfigure/dax/add",
         json={"device_path": "/dev/daxX.X", "size": bad_size},
     )
 
@@ -233,13 +234,16 @@ def test_add_rejects_pathological_size_string_without_echoing_input():
 @pytest.mark.parametrize(
     ("path", "payload"),
     [
-        ("/dax/remove", {"device_path": "/dev/daxX.X", "timeout_s": 1}),
         (
-            "/dax/resize",
+            "/reconfigure/dax/remove",
+            {"device_path": "/dev/daxX.X", "timeout_s": 1},
+        ),
+        (
+            "/reconfigure/dax/resize",
             {"device_path": "/dev/daxX.X", "size": 1024, "timeout_s": 1},
         ),
         (
-            "/dax/resize",
+            "/reconfigure/dax/resize",
             {"device_path": "/dev/daxX.X", "size": 1024, "mode": "drain"},
         ),
     ],
@@ -260,7 +264,7 @@ def test_hotplug_error_status_code_is_preserved():
         )
     )
     resp = _client(sm).post(
-        "/dax/add",
+        "/reconfigure/dax/add",
         json={
             "device_path": "/dev/daxX.X",
             "size": 1024,
@@ -268,3 +272,47 @@ def test_hotplug_error_status_code_is_preserved():
     )
     assert resp.status_code == 507
     assert resp.json() == {"error": "no active destination DAX capacity"}
+
+
+def test_generic_backend_routes_payload_to_matching_reconfigurable_adapter():
+    sm = _FakeStorageManager(
+        status={
+            "enabled": True,
+            "num_adapters": 2,
+            "adapters": [
+                {"type": "fake", "ready": True, "adapter_index": 0},
+                {"type": "dax", "hotplug_enabled": True, "adapter_index": 1},
+            ],
+        }
+    )
+
+    resp = _client(sm).post(
+        "/reconfigure/fake/flip",
+        json={"adapter_index": 0, "enabled": True},
+    )
+
+    assert resp.status_code == 200
+    assert sm.calls == [
+        ("status", ()),
+        ("reconfigure", (0, "flip", {"enabled": True})),
+    ]
+
+
+def test_reconfigure_post_rejects_missing_backend_adapter():
+    sm = _FakeStorageManager(
+        status={
+            "enabled": True,
+            "num_adapters": 1,
+            "adapters": [{"type": "dax", "hotplug_enabled": True, "adapter_index": 0}],
+        }
+    )
+
+    resp = _client(sm).post("/reconfigure/fake/flip", json={"enabled": True})
+
+    assert resp.status_code == 404
+    assert resp.json() == {"error": "fake adapter not found"}
+
+
+def test_old_dax_routes_are_not_registered():
+    resp = _client(_FakeStorageManager()).get("/dax/status")
+    assert resp.status_code == 404
