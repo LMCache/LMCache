@@ -182,11 +182,8 @@ class InFlightStoreTask:
     l2_store_result: bool | None = None
     """L2 outcome (True=success, False=failure, None=still in flight)."""
 
-    l2_bytes_transferred: int | None = None
-    """Bytes actually transferred by the adapter for this task.  ``None``
-    means the adapter does not track per-task transfer bytes (default
-    behavior for non fast-path adapters); consumers fall back to the
-    submitted-bytes count from the SUBMITTED event."""
+    l2_bytes_transferred: int = 0
+    """Bytes actually transferred by the adapter for this task."""
 
 
 # Main class
@@ -528,8 +525,7 @@ class StoreController(StorageControllerInterface):
         for adapter_index in signaled_adapters:
             adapter = self._l2_adapters[adapter_index]
             completed = adapter.pop_completed_store_tasks()
-            bytes_map = adapter.pop_completed_store_task_bytes()
-            for task_id, success in completed.items():
+            for task_id, result in completed.items():
                 task = self._in_flight_tasks.get((adapter_index, task_id))
                 if task is None:
                     logger.warning(
@@ -538,9 +534,8 @@ class StoreController(StorageControllerInterface):
                         adapter_index,
                     )
                     continue
-                task.l2_store_result = success
-                if task_id in bytes_map:
-                    task.l2_bytes_transferred = bytes_map[task_id]
+                task.l2_store_result = result.is_successful()
+                task.l2_bytes_transferred = result.bytes_transferred()
 
     def _advance_request(
         self,
@@ -570,20 +565,12 @@ class StoreController(StorageControllerInterface):
         self._status_in_flight_count -= 1
 
         l2_name = self._adapter_descriptors[adapter_index].type_name
-        # Adapters that fast-path duplicate keys report ``bytes_transferred``
-        # so the L2 throughput subscriber can use real-work bytes for the
-        # histogram instead of submitted bytes (which inflates dt-based
-        # throughput when the adapter skipped the write).  Adapters that
-        # don't report bytes leave this at ``None`` -- the field is then
-        # omitted from the event so consumers fall back to the submitted
-        # bytes carried on the SUBMITTED event.
         completion_meta: dict[str, object] = {
             "adapter_index": adapter_index,
             "task_id": task_id,
             "l2_name": l2_name,
+            "bytes_transferred": task.l2_bytes_transferred,
         }
-        if task.l2_bytes_transferred is not None:
-            completion_meta["bytes_transferred"] = task.l2_bytes_transferred
         if success:
             self._event_bus.publish(
                 Event(

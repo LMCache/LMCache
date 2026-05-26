@@ -63,6 +63,10 @@ from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueServer
+from lmcache.v1.multiprocess.native_completion import (
+    DeviceHostFuncDispatcher,
+    submit_callback_to_stream,
+)
 from lmcache.v1.multiprocess.non_gpu_context import NonGpuContextMetadata
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -248,6 +252,21 @@ class MPCacheEngine:
 
         # EventBus for observability
         self._event_bus = get_event_bus()
+
+        # Route finish_write / finish_read_prefetched through a C++ host
+        # callback so the driver thread doesn't acquire the GIL.
+        self._device_host_func_dispatcher = DeviceHostFuncDispatcher()
+        self._device_host_func_dispatcher.register(
+            "finish_write",
+            self.storage_manager.finish_write,
+            payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.register(
+            "finish_read_prefetched",
+            self.storage_manager.finish_read_prefetched,
+            payload_type=list[ObjectKey],
+        )
+        self._device_host_func_dispatcher.start()
 
         # Prefetch job tracking for two-phase lookup, keyed by request_id.
         # TODO: implement periodic cleanup of stale _prefetch_jobs entries
@@ -679,8 +698,9 @@ class MPCacheEngine:
             finally:
                 event.record()
                 if reserved_dict:
-                    gpu_context.cupy_stream.launch_host_func(
-                        self.storage_manager.finish_write,
+                    submit_callback_to_stream(
+                        gpu_context.cupy_stream,
+                        "finish_write",
                         list(reserved_dict.keys()),
                     )
                 # All reserved MemoryObjs share one layout_desc, so per-object
@@ -889,8 +909,9 @@ class MPCacheEngine:
             finally:
                 event.record()
                 if retrieve_succeeded:
-                    gpu_context.cupy_stream.launch_host_func(
-                        self.storage_manager.finish_read_prefetched,
+                    submit_callback_to_stream(
+                        gpu_context.cupy_stream,
+                        "finish_read_prefetched",
                         prefetched_keys,
                     )
                 self._event_bus.publish_on_stream(
@@ -1343,6 +1364,10 @@ class MPCacheEngine:
         """
         Closes the MPCacheEngine and releases all resources.
         """
+        # Stop the drain thread before storage_manager.close() so any
+        # in-flight completions reach a live storage manager.
+        self._device_host_func_dispatcher.stop()
+
         # Close storage manager
         self.storage_manager.close()
         logger.info("MPCacheEngine closed")
