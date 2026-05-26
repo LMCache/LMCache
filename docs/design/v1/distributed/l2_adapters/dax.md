@@ -37,8 +37,12 @@ management endpoints:
 - `POST /dax/remove`
 - `POST /dax/resize`
 
-`StorageManager` forwards those calls through public DAX hotplug methods. The
-HTTP layer does not inspect private adapter lists or DAX core state directly.
+The HTTP layer translates these DAX requests into the generic L2 adapter
+reconfiguration API on `StorageManager`. `StorageManager` only routes
+`operation` plus adapter-specific payload to a reconfigurable adapter; DAX path,
+mode, and migration semantics stay inside `DaxL2Adapter`. The same interface is
+intended for future adapters such as P2P, so the HTTP layer does not inspect
+private adapter lists or DAX core state directly.
 
 ## Slot State
 

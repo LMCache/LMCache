@@ -115,6 +115,10 @@ Runtime Hotplug API
 Runtime hotplug is disabled unless ``hotplug_enabled`` is ``true``. The API
 changes only LMCache runtime mappings and metadata; the ``/dev/dax*`` device
 must already exist and be readable and writable by the LMCache server process.
+The DAX endpoints are implemented through StorageManager's generic L2 adapter
+reconfiguration interface, which routes an operation name and adapter-specific
+payload to the selected adapter. DAX owns the path, mode, migration, and resize
+semantics; the generic interface is reusable by other adapters such as P2P.
 Use JSON bodies because DAX paths contain slashes:
 
 .. code-block:: bash

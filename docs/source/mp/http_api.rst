@@ -319,6 +319,9 @@ The request body is ignored.
 These endpoints are available when the server has a hotplug-enabled
 ``dax`` L2 adapter. They only change LMCache runtime mappings; the DAX
 device paths must already exist and be readable and writable by the server.
+The endpoints translate request bodies into the generic L2 adapter
+reconfiguration API, while DAX-specific validation and migration semantics stay
+inside the DAX adapter.
 
 Use JSON request bodies because DAX paths contain slashes. ``add`` and
 ``resize`` accept ``size`` as an integer byte count or a string such as

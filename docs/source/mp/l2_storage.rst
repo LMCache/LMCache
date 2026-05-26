@@ -270,6 +270,9 @@ the DAX device, but they are unreachable after the LMCache server restarts.
 Runtime management uses JSON bodies because DAX paths contain slashes. See the
 :doc:`Device-DAX backend guide </kv_cache/storage_backends/dax>` for complete
 examples.
+These DAX routes use StorageManager's generic L2 adapter reconfiguration API;
+the DAX adapter interprets the operation payload, and the same interface can be
+reused by future adapters such as P2P.
 
 .. code-block:: bash
 
