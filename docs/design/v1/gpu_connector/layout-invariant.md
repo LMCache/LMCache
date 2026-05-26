@@ -66,9 +66,22 @@ cannot take the registry down.
 
 ## Adding a new format
 
-Pure additive. **No existing file needs to be edited.**
+The **Python** `kv_format` package is purely additive — no existing
+`.py` file under `kv_format/` needs to be edited. The C extension
+enum and kernel dispatch must be updated in the files listed in step 1.
 
-1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
+1. Edit the following C files (all changes are mechanical additions,
+   no existing logic is altered):
+   - `csrc/mem_kernels.cuh` — add the new enum value to `GPUKVFormat`.
+   - `csrc/pybind.cpp` — expose the new value via pybind11.
+   - `csrc/sycl/pybind_sycl.cpp` — same for the XPU path.
+   - `csrc/mp_mem_kernels.cu` — add a `case` in `DISPATCH_FORMAT` and
+     the corresponding `if constexpr` branch(es) in
+     `calculate_engine_global_offset` (and `calculate_engine_local_offset`
+     if the new format uses a different within-block token ordering).
+   - `lmcache/python_ops_fallback.py` — add the value to the Python
+     fallback `GPUKVFormat(IntEnum)` so CPU-only environments stay in
+     sync.
 2. Drop a new file under `lmcache/v1/gpu_connector/kv_format/specs/`
    with one `KVFormatSpec` subclass. If the axis layout matches an
    existing family, inherit from `PerLayer5DSpec` /

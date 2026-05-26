@@ -24,7 +24,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.kv_format import (
     DiscoverableKVCache,
     LayoutHints,
-    all_gpu_kv_formats,
     detect_format,
     get_spec,
     get_spec_class,
@@ -515,17 +514,6 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
 # any padded tensor of that format will fail loudly via the
 # non-block-axis dim-0-padding check below. Revisit and add a
 # properly-tested branch when a concrete use case lands.
-def _block_axis_formats() -> frozenset:
-    return frozenset(
-        fmt
-        for fmt in all_gpu_kv_formats()
-        if (cls := get_spec_class(fmt)) is not None and cls.is_block_axis_dim0
-    )
-
-
-_BLOCK_AXIS_FORMATS: frozenset = _block_axis_formats()
-
-
 def resolve_block_stride_and_log_layout(
     kv_caches: DiscoverableKVCache,
     gpu_kv_format: "lmc_ops.GPUKVFormat",
@@ -539,7 +527,7 @@ def resolve_block_stride_and_log_layout(
     a one-shot layout audit line. All ``GPUKVFormat``-aware reasoning is
     kept here so callers never touch a "representative KV cache" tensor.
 
-    * Block-axis formats (:data:`_BLOCK_AXIS_FORMATS`): ``stride(0)`` is
+    * Block-axis formats (``spec.is_block_axis_dim0 == True``): ``stride(0)`` is
       the per-block step and is returned as-is. A value larger than the
       tight stride indicates dim-0 padding (e.g. DeepSeek V4 compressor
       caches sharing a KV pool with larger attn groups).
@@ -564,7 +552,7 @@ def resolve_block_stride_and_log_layout(
     rep = spec.layout_probe_tensor(layer_idx)
 
     block_stride_elems: Optional[int]
-    if gpu_kv_format in _BLOCK_AXIS_FORMATS and rep.ndim > 0:
+    if spec.is_block_axis_dim0 and rep.ndim > 0:
         block_stride_elems = int(rep.stride(0))
     else:
         # Non-block-axis format: detect forbidden dim-0 padding.
