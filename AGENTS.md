@@ -30,8 +30,11 @@ uv pip install -e . --no-build-isolation
 # Standard install with CUDA extensions (requires torch pre-installed)
 pip install -e . --no-build-isolation
 
-# Source-only (no CUDA extensions)
-NO_CUDA_EXT=1 pip install -e .
+# Source-only (no native extensions)
+NO_NATIVE_EXT=1 pip install -e .
+
+# CPU-only (common C++ extensions, no GPU backend)
+NO_GPU_EXT=1 pip install -e . --no-build-isolation
 
 # HIP/ROCm build
 BUILD_WITH_HIP=1 pip install -e .

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_dev
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -327,10 +327,7 @@ def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     Note: NUMA node selection is not supported on non-CUDA."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    # On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
-    # host allocation, enabling fast DMA for XPU<->CPU transfers.
-    pin_memory = torch_device_type == "xpu"
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=pin_memory)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)
@@ -358,10 +355,7 @@ def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     fast DMA transfers. On other non-CUDA platforms, pinning is not supported."""
 
     # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    # On XPU (Intel GPU), PyTorch 2.4+ supports pin_memory=True via SYCL USM
-    # host allocation, enabling fast DMA for XPU<->CPU transfers.
-    pin_memory = torch_device_type == "xpu"
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=pin_memory)
+    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
 
     # First-touch initialization (forces physical allocation)
     tensor.fill_(0)

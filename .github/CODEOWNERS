@@ -9,21 +9,24 @@
 /lmcache/v1/memory_management.py       @sammshen @deng451e @chunxiaozheng @DongDongJu @ApostaC
 
 # Multiprocess
-/lmcache/v1/multiprocess/              @ApostaC @OasisGit
+/lmcache/v1/multiprocess/              @ApostaC @OasisGit @hlin99
 /lmcache/v1/multiprocess/protocols/observability.py  @royyhuang @ApostaC
 /lmcache/v1/multiprocess/http_server.py              @royyhuang @ApostaC @OasisGit
-/lmcache/v1/mp_observability             @royyhuang @ApostaC @OasisGit @sammshen
+/lmcache/v1/mp_observability/            @yoo-kumaneko @royyhuang @ApostaC @OasisGit @sammshen
 
 # Distributed / L2
 /lmcache/v1/distributed/               @ApostaC @maobaolong @chunxiaozheng
-/lmcache/v1/distributed/eviction.py                              @YaoJiayi
-/lmcache/v1/distributed/eviction_policy/                         @YaoJiayi
-/lmcache/v1/distributed/storage_controllers/eviction_controller.py @YaoJiayi
+/lmcache/v1/distributed/eviction.py                              @YaoJiayi @hlin99
+/lmcache/v1/distributed/eviction_policy/                         @YaoJiayi @hlin99
+/lmcache/v1/distributed/storage_controllers/eviction_controller.py @YaoJiayi @hlin99
 /lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py  @maobaolong
 /lmcache/v1/distributed/l2_adapters/resp_l2_adapter.py           @sammshen
 
 # GPU connector
-/lmcache/v1/gpu_connector/             @sammshen @ApostaC
+/lmcache/v1/gpu_connector/             @sammshen @ApostaC @hlin99
+
+# Platform
+/lmcache/v1/platform/                  @maobaolong @hlin99
 
 # Lookup client
 /lmcache/v1/lookup_client/             @maobaolong @YaoJiayi @sammshen
@@ -41,13 +44,13 @@
 /lmcache/v1/storage_backend/connector/fs_adapter.py            @maobaolong @chunxiaozheng
 /lmcache/v1/storage_backend/connector/audit_connector.py       @maobaolong @chunxiaozheng
 /lmcache/v1/storage_backend/connector/audit_adapter.py         @maobaolong @chunxiaozheng
-/lmcache/v1/storage_backend/connector/redis_connector.py      @sammshen
-/lmcache/v1/storage_backend/connector/redis_adapter.py        @sammshen
-/lmcache/v1/storage_backend/connector/lm_connector.py         @sammshen
-/lmcache/v1/storage_backend/connector/lm_adapter.py           @sammshen
+/lmcache/v1/storage_backend/connector/redis_connector.py      @sammshen @hlin99
+/lmcache/v1/storage_backend/connector/redis_adapter.py        @sammshen @hlin99
+/lmcache/v1/storage_backend/connector/lm_connector.py         @sammshen @hlin99
+/lmcache/v1/storage_backend/connector/lm_adapter.py           @sammshen @hlin99
 
 # Integration
-/lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e
+/lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
 /lmcache/integration/sglang/           @OasisGit @DongDongJu @sammshen
 /lmcache/integration/tensorrt_llm/     @sammshen
 
@@ -56,12 +59,15 @@
 
 # C extensions
 /csrc/                                 @ApostaC @YaoJiayi @sammshen
-/csrc/storage_backends/                @sammshen
+/csrc/storage_backends/                @sammshen @hlin99
 
 # Native connector L2 adapters
-/lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py  @sammshen
-/lmcache/v1/distributed/l2_adapters/native_plugin_l2_adapter.py     @sammshen
-/lmcache/v1/distributed/l2_adapters/fs_native_l2_adapter.py         @sammshen
+/lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py  @sammshen @hlin99
+/lmcache/v1/distributed/l2_adapters/native_plugin_l2_adapter.py     @sammshen @hlin99
+/lmcache/v1/distributed/l2_adapters/fs_native_l2_adapter.py         @sammshen @hlin99
+
+# Offline analysis tools
+/lmcache/tools/                        @yoo-kumaneko
 
 # Tests
 /tests/                                @hickeyma @sammshen @ApostaC @deng451e

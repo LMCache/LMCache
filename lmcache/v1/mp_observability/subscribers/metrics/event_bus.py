@@ -2,10 +2,8 @@
 
 """EventBus self-metrics subscriber.
 
-Surfaces four metrics describing the EventBus's own health (per #3108):
+Surfaces two metrics describing the EventBus's own health (per #3108):
 
-- ``lmcache_mp.event_bus.queue_depth`` (gauge)
-- ``lmcache_mp.event_bus.drain_lag_seconds`` (gauge)
 - ``lmcache_mp.event_bus.dropped_events_total`` (observable counter)
 - ``lmcache_mp.event_bus.subscriber_exceptions`` (observable counter,
   attr ``subscriber_name``)
@@ -37,22 +35,6 @@ class EventBusSelfMetricsSubscriber(EventSubscriber):
     def __init__(self, bus: EventBus) -> None:
         meter = metrics.get_meter("lmcache.event_bus")
 
-        meter.create_observable_gauge(
-            "lmcache_mp.event_bus.queue_depth",
-            callbacks=[lambda _o: [metrics.Observation(bus.queue_depth())]],
-            description="Events currently queued in the EventBus.",
-        )
-        meter.create_observable_gauge(
-            "lmcache_mp.event_bus.drain_lag_seconds",
-            callbacks=[
-                lambda _o: [metrics.Observation(bus.oldest_event_lag_seconds())]
-            ],
-            description=(
-                "Seconds since the oldest queued event was published; "
-                "0.0 when empty.  Rising values mean the drain thread is "
-                "falling behind."
-            ),
-        )
         meter.create_observable_counter(
             "lmcache_mp.event_bus.dropped_events_total",
             callbacks=[lambda _o: [metrics.Observation(bus.dropped_events_count())]],

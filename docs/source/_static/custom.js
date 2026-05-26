@@ -150,10 +150,35 @@ function addLanguageSwitcher() {
   switcher.appendChild(chineseLink);
   switcher.appendChild(divider);
   switcher.appendChild(englishLink);
-  document.body.appendChild(switcher);
+
+  // Place the switcher in the top nav bar with the other icons.
+  // If the nav bar isn't there, show it as a floating button instead.
+  var navbar = findDocsNavbar();
+  if (navbar) {
+    navbar.appendChild(switcher);
+  } else {
+    switcher.classList.add("lmcache-language-switcher--fallback");
+    document.body.appendChild(switcher);
+  }
 
   fallbackMissingLanguagePage(chineseLink, "zh_CN");
   fallbackMissingLanguagePage(englishLink, "en");
+}
+
+/**
+ * Locate the top nav bar that holds the GitHub / profile / theme-toggle
+ * icons. Prefers the structural `header nav` selector; falls back to
+ * the GitHub link's parent if the theme markup differs.
+ *
+ * @returns {HTMLElement | null} The nav bar element, or null if not found.
+ */
+function findDocsNavbar() {
+  var navbar = document.querySelector("header nav");
+  if (navbar) {
+    return navbar;
+  }
+  var githubLink = document.querySelector('a[title="Visit GitHub"]');
+  return githubLink ? githubLink.parentElement : null;
 }
 
 /**
