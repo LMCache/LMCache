@@ -463,6 +463,18 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
 ``"mooncake_store"``) — enabling per-backend slicing in Prometheus (e.g.
 ``lmcache_mp_l2_store_throughput_GB_per_second{l2_name="nixl_store"}``).
 
+.. note::
+   **Store-path fast-path accounting.** Some adapters skip the write
+   when a key is already present in the backend.  That fast-path
+   collapses ``(completed_ts - submitted_ts)`` to near-zero while the
+   submitted ``total_bytes`` stays unchanged, which would inflate the
+   store throughput samples.  The ``L2StoreResult`` returned by
+   ``pop_completed_store_tasks()`` carries the bytes actually written
+   via ``bytes_transferred()``, and the throughput subscriber uses that
+   value instead of the submitted bytes.  Tasks where every key was
+   fast-pathed report ``0`` bytes and the corresponding samples are
+   dropped (no useful throughput data) rather than recorded as a spike.
+
 .. list-table::
    :header-rows: 1
    :widths: 40 15 45
@@ -472,7 +484,9 @@ attribute — the registered adapter type (e.g. ``"fs"``, ``"nixl_store"``,
      - Description
    * - ``lmcache_mp.l2_store_throughput``
      - Histogram
-     - L1→L2 store throughput in GB/s per request.
+     - L1→L2 store throughput in GB/s per task.  Uses adapter-reported
+       transferred bytes when available; otherwise the submitted
+       ``total_bytes``.  Tasks with zero transferred bytes are dropped.
    * - ``lmcache_mp.l2_load_throughput``
      - Histogram
      - L2→L1 load throughput in GB/s per (request, adapter) pair.
@@ -540,6 +554,18 @@ Adapters with no in-flight work emit no datapoint for that scrape.
        the callback never raises during a scrape. Compare against the
        eviction watermark (default ``0.8``) to read whether the
        eviction loop is below or above its trigger threshold.
+   * - ``lmcache_mp.l2_usage_bytes``
+     - ObservableGauge (attr: ``l2_name``)
+     - Bytes currently held in each L2 adapter, sampled at scrape time
+       from ``adapter.get_usage()``.  One observation per configured
+       adapter, tagged by ``l2_name`` (the adapter type, e.g. ``"fs"``,
+       ``"nixl_store"``, ``"mooncake_store"``).  Parallel to
+       ``l1_memory_usage_bytes`` for the L2 tier — use it to see how
+       much each L2 backend currently holds.  Adapters whose
+       ``get_usage()`` raises are skipped silently rather than poisoning
+       the observation, so a missing datapoint for one ``l2_name`` can
+       mean either "not configured" or "adapter errored on this
+       scrape" — cross-check with the L2 store/load counters.
    * - ``lmcache_mp.num_inflight_l2_stores``
      - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
      - L2 store tasks currently executing, per adapter.  Sustained
