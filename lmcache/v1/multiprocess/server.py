@@ -6,6 +6,8 @@ from itertools import islice
 from typing import Generator
 import argparse
 import pickle
+import shutil
+import sys
 import threading
 import time
 
@@ -246,7 +248,10 @@ class MPCacheEngine:
         self.lock = threading.Lock()
 
         # storage manager
-        self.storage_manager = StorageManager(storage_manager_config)
+        self._storage_manager_config = storage_manager_config
+        self._resolve_shm_config(self._storage_manager_config)
+        self.storage_manager = StorageManager(self._storage_manager_config)
+        self._shm_pool_info = self._compute_shm_pool_info(self._storage_manager_config)
 
         # Token hasher and session manager for token-based operations
         self.token_hasher = TokenHasher(
@@ -411,7 +416,7 @@ class MPCacheEngine:
             )
         )
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
-        shm_pool_info = self.storage_manager.get_shm_pool_info()
+        shm_pool_info = self.get_shm_pool_info()
         shm_active = False
         if not isinstance(shm_pool_info, dict):
             logger.info(
@@ -475,13 +480,83 @@ class MPCacheEngine:
             uses SHM transport, or an empty response otherwise.
         """
         if existing_context.shm_active:
-            pool_info = self.storage_manager.get_shm_pool_info()
+            pool_info = self.get_shm_pool_info()
             if isinstance(pool_info, dict):
                 return RegisterNonGpuContextResponse(
                     shm_name=str(pool_info.get("shm_name", "")),
                     pool_size=int(pool_info.get("pool_size", 0)),
                 )
         return RegisterNonGpuContextResponse()
+
+    def get_shm_pool_info(self) -> dict:
+        """Return shared-memory pool metadata for non-GPU SHM transport."""
+        return dict(self._shm_pool_info)
+
+    @staticmethod
+    def _resolve_shm_config(config: StorageManagerConfig) -> None:
+        """Resolve SHM configuration in place before storage-manager creation.
+
+        Args:
+            config: Storage-manager config to mutate in place.
+
+        Notes:
+            Clears ``config.l1_manager_config.memory_config.shm_name`` when SHM
+            transport should be disabled:
+            - lazy allocation is enabled
+            - /dev/shm free space is insufficient on Linux
+            - /dev/shm capacity cannot be queried on Linux
+        """
+        mem_cfg = config.l1_manager_config.memory_config
+        if not mem_cfg.shm_name or mem_cfg.use_lazy:
+            return
+
+        if sys.platform.startswith("linux"):
+            try:
+                free_bytes = shutil.disk_usage("/dev/shm").free
+                if free_bytes < mem_cfg.size_in_bytes:
+                    logger.warning(
+                        "Insufficient /dev/shm capacity: need %d bytes, have %d bytes. "
+                        "Disabling SHM transport.",
+                        mem_cfg.size_in_bytes,
+                        free_bytes,
+                    )
+                    mem_cfg.shm_name = ""
+            except OSError:
+                logger.warning(
+                    "Cannot verify /dev/shm capacity required for SHM transport; "
+                    "disabling SHM mode.",
+                    exc_info=True,
+                )
+                mem_cfg.shm_name = ""
+        else:
+            logger.debug(
+                "Skipping /dev/shm capacity pre-check on non-Linux platform %s",
+                sys.platform,
+            )
+
+    @staticmethod
+    def _compute_shm_pool_info(config: StorageManagerConfig) -> dict:
+        """Compute effective SHM pool metadata from storage manager config.
+
+        Returns:
+            A dict with:
+            - ``shm_name`` (str): Effective SHM segment name, normalized to include
+              ``lmcache_l1_pool_`` prefix when non-empty.
+            - ``pool_size`` (int): SHM pool size in bytes.
+
+            Returns ``{"shm_name": "", "pool_size": 0}`` when lazy allocation is
+            enabled or SHM is disabled.
+        """
+        mem_cfg = config.l1_manager_config.memory_config
+        shm_name = mem_cfg.shm_name or ""
+        if not shm_name or mem_cfg.use_lazy:
+            return {"shm_name": "", "pool_size": 0}
+
+        stripped_name = shm_name.lstrip("/")
+        if not stripped_name.startswith("lmcache_l1_pool_"):
+            shm_name = f"lmcache_l1_pool_{stripped_name}"
+
+        return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
 
     @staticmethod
     def _make_non_gpu_transfer_key(

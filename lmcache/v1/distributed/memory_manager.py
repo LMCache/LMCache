@@ -2,8 +2,6 @@
 
 # Standard
 from multiprocessing import shared_memory
-import shutil
-import sys
 
 # First Party
 from lmcache.logging import init_logger
@@ -51,6 +49,12 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
+    if config.shm_name and config.use_lazy:
+        raise ValueError(
+            "Shared memory mode (shm_name) is incompatible with lazy allocation "
+            "(--l1-use-lazy). Please pass --no-l1-use-lazy when using shm_name."
+        )
+
     if config.use_lazy:
         logger.debug(
             "use lazy memory allocator, init size is %d bytes, "
@@ -71,34 +75,17 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
         )
         shm_name = config.shm_name
         if shm_name:
-            # Ensure the segment always carries the lmcache_l1_pool_ prefix so
-            # that _unlink_stale_shm can recognise user-supplied names too.
+            # Keep the lmcache_l1_pool_ prefix in normalized SHM names so
+            # stale-segment cleanup can recognize and unlink user-provided names.
             bare = shm_name.lstrip("/")
             if not bare.startswith("lmcache_l1_pool_"):
                 shm_name = f"lmcache_l1_pool_{bare}"
-            try:
-                # /dev/shm capacity is only meaningful on Linux, where POSIX shm
-                # is backed by a tmpfs mount with a bounded free-space view.
-                if sys.platform.startswith("linux"):
-                    free_bytes = shutil.disk_usage("/dev/shm").free
-                    if free_bytes < config.size_in_bytes:
-                        raise RuntimeError(
-                            "insufficient /dev/shm capacity: "
-                            f"need {config.size_in_bytes} bytes, "
-                            f"have {free_bytes} bytes"
-                        )
-                _unlink_stale_shm(shm_name)
-                return MixedMemoryAllocator(
-                    config.size_in_bytes,
-                    align_bytes=config.align_bytes,
-                    shm_name=shm_name,
-                )
-            except (RuntimeError, OSError, ValueError):
-                logger.warning(
-                    "Failed to initialize SHM pool (%s), falling back to pickle path",
-                    shm_name,
-                    exc_info=True,
-                )
+            _unlink_stale_shm(shm_name)
+            return MixedMemoryAllocator(
+                config.size_in_bytes,
+                align_bytes=config.align_bytes,
+                shm_name=shm_name,
+            )
         return MixedMemoryAllocator(
             config.size_in_bytes,
             align_bytes=config.align_bytes,
@@ -119,13 +106,6 @@ class L1MemoryManager:
         self._allocator = create_memory_allocator(config)
         self._size_in_bytes = config.size_in_bytes
         self._align_bytes = config.align_bytes
-        self._shm_pool_info = {"shm_name": "", "pool_size": 0}
-        if isinstance(self._allocator, MixedMemoryAllocator):
-            if self._allocator.shm_name:
-                self._shm_pool_info = {
-                    "shm_name": self._allocator.shm_name,
-                    "pool_size": self._size_in_bytes,
-                }
 
     def allocate(
         self, layout_desc: MemoryLayoutDesc, count: int
@@ -234,10 +214,6 @@ class L1MemoryManager:
         Close the memory manager and release all resources.
         """
         self._allocator.close()
-
-    def get_shm_pool_info(self) -> dict:
-        """Return SHM pool metadata for non-GPU SHM transport."""
-        return dict(self._shm_pool_info)
 
     # Debugging APIs
     def memcheck(self):

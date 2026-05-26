@@ -572,10 +572,6 @@ class StorageManager:
         """
         self._l1_manager.touch_keys(keys)
 
-    def get_shm_pool_info(self) -> dict:
-        """Return SHM pool metadata from the L1 memory manager."""
-        return self._l1_manager.get_shm_pool_info()
-
     def unsafe_read(
         self, keys: list[ObjectKey]
     ) -> tuple[list[ObjectKey], list[MemoryObj]]:

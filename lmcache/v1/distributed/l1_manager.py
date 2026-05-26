@@ -803,10 +803,6 @@ class L1Manager:
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
 
-    def get_shm_pool_info(self) -> dict:
-        """Return SHM pool metadata for non-GPU SHM transport."""
-        return self._memory_manager.get_shm_pool_info()
-
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
         with self._lock:
