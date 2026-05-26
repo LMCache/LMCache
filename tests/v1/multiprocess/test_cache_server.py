@@ -38,7 +38,7 @@ SERVER_PORT = 5599
 SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
-DEFAULT_TIMEOUT = 5.0
+DEFAULT_TIMEOUT = 10.0
 
 
 def _has_working_new_shared_cuda() -> bool:
