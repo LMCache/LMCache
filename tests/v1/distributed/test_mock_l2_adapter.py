@@ -202,7 +202,7 @@ class TestStoreInterface:
         completed = adapter.pop_completed_store_tasks()
 
         assert task_id in completed
-        assert completed[task_id] is True  # Should be successful
+        assert completed[task_id].is_successful()  # Should be successful
 
     def test_pop_completed_store_tasks_clears_completed(self, adapter):
         """pop_completed_store_tasks should clear the completed tasks."""
@@ -244,7 +244,7 @@ class TestStoreInterface:
         # All tasks should be completed
         for task_id in task_ids:
             assert task_id in completed
-            assert completed[task_id] is True
+            assert completed[task_id].is_successful()
 
     def test_store_batch_of_objects(self, adapter):
         """A single store task can store multiple key-object pairs."""
@@ -258,7 +258,7 @@ class TestStoreInterface:
 
         completed = adapter.pop_completed_store_tasks()
         assert task_id in completed
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
 
 # =============================================================================
@@ -516,7 +516,7 @@ class TestEndToEndWorkflow:
         store_task_id = adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd, timeout=5.0)
         completed = adapter.pop_completed_store_tasks()
-        assert completed[store_task_id] is True
+        assert completed[store_task_id].is_successful()
 
         # Step 2: Lookup and lock
         lookup_task_id = adapter.submit_lookup_and_lock_task([key])
@@ -556,7 +556,7 @@ class TestEndToEndWorkflow:
         store_task_id = adapter.submit_store_task(keys, store_objs)
         assert wait_for_event_fd(store_fd, timeout=5.0)
         completed = adapter.pop_completed_store_tasks()
-        assert completed[store_task_id] is True
+        assert completed[store_task_id].is_successful()
 
         # Lookup all
         lookup_task_id = adapter.submit_lookup_and_lock_task(keys)

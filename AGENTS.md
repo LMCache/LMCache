@@ -47,11 +47,10 @@ BUILD_WITH_HIP=1 pip install -e .
 ```bash
 # Run standard test suite (mirrors CI)
 pytest -xvs --ignore=tests/disagg \
-  --ignore=tests/v1/test_nixl_storage.py \
-  --ignore=tests/v1/multiprocess/ \
-  --ignore=tests/v1/distributed/ \
-  --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+ --ignore=tests/v1/multiprocess/ \
+ --ignore=tests/v1/distributed/ \
+ --ignore=tests/skipped \
+ --ignore=tests/v1/storage_backend/test_eic.py
 
 # Run a single test file
 pytest -xvs tests/v1/test_cache_engine.py
