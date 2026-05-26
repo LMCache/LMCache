@@ -285,6 +285,13 @@ except ImportError:
 
 
 def get_version():
+    """Return a human-readable version string.
+
+    Returns:
+        ``"<version>-<commit-id>"``, with ``"NA"`` substituted when the
+        package version or commit id is not available (e.g. when running
+        from a source checkout without a tag).
+    """
     version_display = VERSION if VERSION else "NA"
     commit_id_display = COMMIT_ID if COMMIT_ID else "NA"
     return f"{version_display}-{commit_id_display}"
@@ -676,6 +683,15 @@ _shared_observability_lock = threading.Lock()
 
 
 def thread_safe(func):
+    """Wrap a callable with the shared observability lock.
+
+    Args:
+        func: Callable to execute while holding the lock.
+
+    Returns:
+        A wrapper that serializes calls to ``func`` using the shared lock.
+    """
+
     def wrapper(*args, **kwargs):
         with _shared_observability_lock:
             result = func(*args, **kwargs)
@@ -686,12 +702,22 @@ def thread_safe(func):
 
 #### Thread/asyncio-related utilities ####
 def handle_thread_exception(args):
+    """Handle an uncaught exception reported by ``threading``.
+
+    Args:
+        args: Thread exception information provided by ``threading``.
+    """
     logger.error(
         f"Thread {args.thread.name} crashed: {args.exc_type.__name__}: {args.exc_value}"
     )
 
 
 def start_loop_in_thread_with_exceptions(loop: asyncio.AbstractEventLoop):
+    """Run an event loop forever with an exception handler.
+
+    Args:
+        loop: Event loop to bind to the current thread and run.
+    """
     # The loop must be set in the *same* thread where it runs.
     asyncio.set_event_loop(loop)
 

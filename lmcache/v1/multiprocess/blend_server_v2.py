@@ -631,9 +631,6 @@ class BlendEngineV2(MPCacheEngine):
                 if found_count is not None:
                     break
 
-                # Standard
-                import time
-
                 time.sleep(0.001)
 
             # Real found count after dedup the TP

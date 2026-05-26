@@ -71,7 +71,7 @@ Producers:
 | EventType | Metadata keys | Types |
 |---|---|---|
 | `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `bytes_transferred`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int`, `int` |
 
 ---
 
