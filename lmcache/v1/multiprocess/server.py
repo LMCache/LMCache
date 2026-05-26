@@ -3,9 +3,8 @@
 from dataclasses import dataclass
 from functools import partial
 from itertools import islice
-from typing import Any, Generator
+from typing import Generator
 import argparse
-import pickle
 import shutil
 import sys
 import threading
@@ -81,8 +80,12 @@ from lmcache.v1.multiprocess.protocols.engine import (
 )
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.multiprocess.transfer_strategy import (
+    PickleTransferStrategy,
+    ShmTransferStrategy,
+    TransferStrategy,
+)
 from lmcache.v1.multiprocess.transport.base import NonGpuContextMetadata
-from lmcache.v1.multiprocess.transport.shm_types import ShmSlotDescriptor
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -168,11 +171,6 @@ def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None
     it = iter(lst)
     while batch := tuple(islice(it, batch_size)):
         yield batch
-
-
-def _dtype_to_name(dtype: torch.dtype) -> str:
-    """Return a stable torch dtype name without module prefix."""
-    return str(dtype).split(".")[-1]
 
 
 @dataclass
@@ -297,6 +295,7 @@ class MPCacheEngine:
             tuple[int, IPCCacheEngineKey], list[ObjectKey]
         ] = {}
         self._pending_shm_lock = threading.Lock()
+        self._strategies: dict[int, TransferStrategy] = {}
 
         self._setup_metrics()
 
@@ -395,6 +394,7 @@ class MPCacheEngine:
         for prefetched_keys in stale_reads.values():
             if prefetched_keys:
                 self.storage_manager.finish_read_prefetched(prefetched_keys)
+        self._strategies.pop(instance_id, None)
 
     def register_kv_cache_non_gpu_context(
         self,
@@ -438,6 +438,7 @@ class MPCacheEngine:
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
         shm_pool_info = self.get_shm_pool_info()
         shm_active = False
+        strategy: TransferStrategy = PickleTransferStrategy(self.storage_manager)
         if not isinstance(shm_pool_info, dict):
             logger.info(
                 "Instance %s non-GPU context using pickle transport "
@@ -454,6 +455,14 @@ class MPCacheEngine:
                 pool_size=pool_size,
             )
             if shm_active:
+                strategy = ShmTransferStrategy(
+                    storage_manager=self.storage_manager,
+                    pending_writes=self._pending_shm_writes,
+                    pending_reads=self._pending_shm_reads,
+                    pending_lock=self._pending_shm_lock,
+                    transfer_key_factory=self._make_non_gpu_transfer_key,
+                    fallback_strategy=PickleTransferStrategy(self.storage_manager),
+                )
                 logger.info(
                     "Instance %s non-GPU context using SHM transport "
                     "(shm_name=%s, pool_size=%d)",
@@ -485,6 +494,7 @@ class MPCacheEngine:
                 ),
                 shm_active=shm_active,
             )
+            self._strategies[payload.instance_id] = strategy
         return response
 
     def _build_existing_non_gpu_context_response(
@@ -585,10 +595,49 @@ class MPCacheEngine:
         """Build a unique key for pending SHM write/read transfer tracking."""
         return (instance_id, key)
 
-    def _is_shm_active_for(self, instance_id: int) -> bool:
+    def _get_non_gpu_context_metadata(self, instance_id: int) -> NonGpuContextMetadata:
+        """Return non-GPU context metadata for a registered instance.
+
+        Args:
+            instance_id: Worker instance identifier.
+
+        Raises:
+            ValueError: If the non-GPU context is not registered.
+        """
         with self._contexts_lock:
             context = self.contexts.get(instance_id)
-            return context is not None and context.shm_active
+        if context is None or context.non_cuda_metadata is None:
+            raise ValueError(
+                f"non-CUDA context not registered for instance ID {instance_id}"
+            )
+        return context.non_cuda_metadata
+
+    def _validate_non_gpu_context_exists(self, instance_id: int) -> None:
+        """Validate that a non-GPU context exists for a worker instance.
+
+        Args:
+            instance_id: Worker instance identifier.
+
+        Raises:
+            ValueError: If the non-GPU context is not registered.
+        """
+        self._get_non_gpu_context_metadata(instance_id)
+
+    def _get_transfer_strategy(self, instance_id: int) -> TransferStrategy:
+        """Return the registered transfer strategy for a worker instance.
+
+        Args:
+            instance_id: Worker instance identifier.
+
+        Raises:
+            ValueError: If no transfer strategy is registered for the instance.
+        """
+        strategy = self._strategies.get(instance_id)
+        if strategy is None:
+            raise ValueError(
+                f"transfer strategy not registered for instance ID {instance_id}"
+            )
+        return strategy
 
     def _resolve_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
         """Resolve object keys from an IPC cache key.
@@ -643,49 +692,13 @@ class MPCacheEngine:
             transfer context, or an empty context for pickle mode.
         """
 
-        if not self._is_shm_active_for(instance_id):
-            return PrepareStoreResponse(context={})
-
-        obj_keys = self._resolve_obj_keys(key)
-        with self._contexts_lock:
-            context = self.contexts.get(instance_id)
-        if context is None or context.non_cuda_metadata is None:
-            raise ValueError(
-                f"non-CUDA context not registered for instance ID {instance_id}"
-            )
-        reserved = self.storage_manager.reserve_write(
-            obj_keys, context.non_cuda_metadata.layout_desc, "new"
-        )
-        slots: list[dict[str, Any]] = []
-        chunk_indices: list[int] = []
-        reserved_keys: list[ObjectKey] = []
-        try:
-            for idx, obj_key in enumerate(obj_keys):
-                memory_obj = reserved.get(obj_key)
-                if memory_obj is None or memory_obj.tensor is None:
-                    continue
-                slots.append(
-                    ShmSlotDescriptor(
-                        offset=memory_obj.shm_offset,
-                        length=memory_obj.shm_byte_length,
-                        shape=list(memory_obj.tensor.shape),
-                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                    ).to_dict()
-                )
-                chunk_indices.append(idx)
-                reserved_keys.append(obj_key)
-        finally:
-            reserved_keys_set = set(reserved_keys)
-            unused_keys = [k for k in reserved if k not in reserved_keys_set]
-            if unused_keys:
-                self.storage_manager.finish_write(unused_keys)
-        if not reserved_keys:
-            return PrepareStoreResponse(context={"slots": [], "chunk_indices": []})
-        transfer_key = self._make_non_gpu_transfer_key(key, instance_id)
-        with self._pending_shm_lock:
-            self._pending_shm_writes[transfer_key] = reserved_keys
-        return PrepareStoreResponse(
-            context={"slots": slots, "chunk_indices": chunk_indices}
+        strategy = self._get_transfer_strategy(instance_id)
+        context = self._get_non_gpu_context_metadata(instance_id)
+        return strategy.prepare_store(
+            key=key,
+            instance_id=instance_id,
+            context=context,
+            resolve_obj_keys=self._resolve_obj_keys,
         )
 
     @_lmcache_nvtx_annotate
@@ -720,51 +733,15 @@ class MPCacheEngine:
             ``True`` when all reserved objects are successfully committed,
             ``False`` otherwise.
         """
-        if cpu_data == b"" and self._is_shm_active_for(instance_id):
-            transfer_key = self._make_non_gpu_transfer_key(key, instance_id)
-            with self._pending_shm_lock:
-                reserved_keys = self._pending_shm_writes.pop(transfer_key, None)
-            # Missing transfer key means COMMIT arrived without matching PREPARE.
-            if reserved_keys is None:
-                return False
-            # Empty reservation is a valid no-op when all objects already exist.
-            if reserved_keys:
-                self.storage_manager.finish_write(reserved_keys)
-            return True
-
-        obj_keys = self._resolve_obj_keys(key)
-
-        with self._contexts_lock:
-            context = self.contexts.get(instance_id)
-        if context is None or context.non_cuda_metadata is None:
-            raise ValueError(
-                f"non-CUDA context not registered for instance ID {instance_id}"
-            )
-        ctx = context.non_cuda_metadata
-        chunks: list[torch.Tensor] = pickle.loads(cpu_data)
-        reserved_dict = self.storage_manager.reserve_write(
-            obj_keys, ctx.layout_desc, "new"
+        strategy = self._get_transfer_strategy(instance_id)
+        context = self._get_non_gpu_context_metadata(instance_id)
+        return strategy.commit_store(
+            key=key,
+            instance_id=instance_id,
+            cpu_data=cpu_data,
+            context=context,
+            resolve_obj_keys=self._resolve_obj_keys,
         )
-        written_keys: list[ObjectKey] = []
-        try:
-            for idx, obj_key in enumerate(obj_keys):
-                if obj_key not in reserved_dict:
-                    continue
-                if idx >= len(chunks):
-                    continue
-                memory_obj = reserved_dict[obj_key]
-                if memory_obj.tensor is None:
-                    continue
-                chunk_cpu = chunks[idx]
-                if chunk_cpu.shape != memory_obj.tensor.shape:
-                    continue
-                memory_obj.tensor.copy_(chunk_cpu)
-                written_keys.append(obj_key)
-        finally:
-            if written_keys:
-                self.storage_manager.finish_write(written_keys)
-
-        return len(written_keys) == len(reserved_dict)
 
     @_lmcache_nvtx_annotate
     def prepare_retrieve(
@@ -799,69 +776,13 @@ class MPCacheEngine:
             unavailable.
         """
 
-        obj_keys = self._resolve_obj_keys(key)
-
-        with self._contexts_lock:
-            context = self.contexts.get(instance_id)
-        if context is None or context.non_cuda_metadata is None:
-            raise ValueError(
-                f"non-CUDA context not registered for instance ID {instance_id}"
-            )
-
-        if self._is_shm_active_for(instance_id):
-            # Precondition: read locks for these keys were acquired during the
-            # lookup/prefetch phase before this retrieve call.
-            shm_prefetched_keys, shm_memory_objs = self.storage_manager.unsafe_read(
-                obj_keys
-            )
-            if (
-                not shm_memory_objs
-                or len(shm_prefetched_keys) != len(obj_keys)
-                or len(shm_memory_objs) != len(obj_keys)
-            ):
-                if shm_prefetched_keys:
-                    self.storage_manager.finish_read_prefetched(shm_prefetched_keys)
-                return PrepareRetrieveResponse(success=False, data=b"", context={})
-            slots: list[dict[str, Any]] = []
-            for memory_obj in shm_memory_objs:
-                if memory_obj.tensor is None:
-                    self.storage_manager.finish_read_prefetched(shm_prefetched_keys)
-                    return PrepareRetrieveResponse(success=False, data=b"", context={})
-                slots.append(
-                    ShmSlotDescriptor(
-                        offset=memory_obj.shm_offset,
-                        length=memory_obj.shm_byte_length,
-                        shape=list(memory_obj.tensor.shape),
-                        dtype=_dtype_to_name(memory_obj.tensor.dtype),
-                    ).to_dict()
-                )
-            transfer_key = self._make_non_gpu_transfer_key(key, instance_id)
-            with self._pending_shm_lock:
-                self._pending_shm_reads[transfer_key] = shm_prefetched_keys
-            return PrepareRetrieveResponse(
-                success=True, data=b"", context={"slots": slots}
-            )
-
-        prefetched_keys_pickle: list[ObjectKey] = []
-        try:
-            read_ctx = self.storage_manager.read_prefetched_results(obj_keys)
-            with read_ctx as maybe_memory_objs:
-                if not maybe_memory_objs or len(maybe_memory_objs) != len(obj_keys):
-                    return PrepareRetrieveResponse(success=False, data=b"", context={})
-                prefetched_keys_pickle = obj_keys[: len(maybe_memory_objs)]
-                chunks = []
-                for memory_obj in maybe_memory_objs:
-                    if memory_obj.tensor is None:
-                        return PrepareRetrieveResponse(
-                            success=False, data=b"", context={}
-                        )
-                    chunks.append(memory_obj.tensor.cpu().clone())
-                return PrepareRetrieveResponse(
-                    success=True, data=pickle.dumps(chunks), context={}
-                )
-        finally:
-            if prefetched_keys_pickle:
-                self.storage_manager.finish_read_prefetched(prefetched_keys_pickle)
+        strategy = self._get_transfer_strategy(instance_id)
+        self._validate_non_gpu_context_exists(instance_id)
+        return strategy.prepare_retrieve(
+            key=key,
+            instance_id=instance_id,
+            resolve_obj_keys=self._resolve_obj_keys,
+        )
 
     @_lmcache_nvtx_annotate
     def commit_retrieve(
@@ -888,14 +809,9 @@ class MPCacheEngine:
         Returns:
             Always ``True``.
         """
-        if self._is_shm_active_for(instance_id):
-            transfer_key = self._make_non_gpu_transfer_key(key, instance_id)
-            with self._pending_shm_lock:
-                prefetched_keys = self._pending_shm_reads.pop(transfer_key, [])
-            if prefetched_keys:
-                self.storage_manager.finish_read_prefetched(prefetched_keys)
-            return True
-        return True
+        strategy = self._get_transfer_strategy(instance_id)
+        self._validate_non_gpu_context_exists(instance_id)
+        return strategy.commit_retrieve(key=key, instance_id=instance_id)
 
     @_lmcache_nvtx_annotate
     def store(
