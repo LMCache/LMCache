@@ -21,76 +21,76 @@ msgstr ""
 
 #: ../../source/recipes/minimax_m2.rst:4
 msgid "MiniMaxM2ForCausalLM"
-msgstr ""
+msgstr "MiniMaxM2ForCausalLM"
 
 #: ../../source/recipes/minimax_m2.rst:7
 msgid "Validated models"
-msgstr ""
+msgstr "验证过的模型"
 
 #: ../../source/recipes/minimax_m2.rst:9
 msgid "`MiniMaxAI/MiniMax-M2 <https://huggingface.co/MiniMaxAI/MiniMax-M2>`_"
-msgstr ""
+msgstr "`MiniMaxAI/MiniMax-M2 <https://huggingface.co/MiniMaxAI/MiniMax-M2>`_"
 
 #: ../../source/recipes/minimax_m2.rst:10
 msgid "`MiniMaxAI/MiniMax-M2.5 <https://huggingface.co/MiniMaxAI/MiniMax-M2.5>`_"
-msgstr ""
+msgstr "`MiniMaxAI/MiniMax-M2.5 <https://huggingface.co/MiniMaxAI/MiniMax-M2.5>`_"
 
 #: ../../source/recipes/minimax_m2.rst:11
 msgid "`MiniMaxAI/MiniMax-M2.7 <https://huggingface.co/MiniMaxAI/MiniMax-M2.7>`_"
-msgstr ""
+msgstr "`MiniMaxAI/MiniMax-M2.7 <https://huggingface.co/MiniMaxAI/MiniMax-M2.7>`_"
 
 #: ../../source/recipes/minimax_m2.rst
 msgid "vLLM"
-msgstr ""
+msgstr "vLLM"
 
 #: ../../source/recipes/minimax_m2.rst:18
 msgid ""
 "**Engine documentation:** `MiniMax-M2 in vLLM supported models "
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
 "generation>`_ (architecture ``MiniMaxM2ForCausalLM``)."
-msgstr ""
+msgstr "**引擎文档：** `vLLM 支持的模型中的 MiniMax-M2 <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ （架构 ``MiniMaxM2ForCausalLM``）。"
 
 #: ../../source/recipes/minimax_m2.rst:23
 msgid "**Status:** Validated with LMCache."
-msgstr ""
+msgstr "**状态:** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/minimax_m2.rst:25
 msgid "Start the LMCache MP server:"
-msgstr ""
+msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/minimax_m2.rst:33
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr ""
+msgstr "启动 vLLM 与 LMCache MP 连接器："
 
 #: ../../source/recipes/minimax_m2.rst:35
 msgid "**MiniMax-M2** (8 GPUs):"
-msgstr ""
+msgstr "**MiniMax-M2** (8 GPUs):"
 
 #: ../../source/recipes/minimax_m2.rst:47
 msgid "**MiniMax-M2.5** (4 GPUs):"
-msgstr ""
+msgstr "**MiniMax-M2.5** (4 GPUs):"
 
 #: ../../source/recipes/minimax_m2.rst:62
 msgid "**MiniMax-M2.7** (4 GPUs):"
-msgstr ""
+msgstr "**MiniMax-M2.7** (4 GPUs):"
 
 #: ../../source/recipes/minimax_m2.rst:77
 msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts, in-process mode), see "
 ":doc:`../mp/quickstart`."
-msgstr ""
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机、进程内模式），请参见 :doc:`../mp/quickstart`。"
 
 #: ../../source/recipes/minimax_m2.rst:81
 msgid ""
 "If there are any issues with vLLM setup, please refer to the `vLLM "
 "Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
 "for more details."
-msgstr ""
+msgstr "如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
 
 #: ../../source/recipes/minimax_m2.rst
 msgid "SGLang"
-msgstr ""
+msgstr "SGLang"
 
 #: ../../source/recipes/minimax_m2.rst:87
 msgid ""
@@ -98,53 +98,53 @@ msgid ""
 "<https://docs.sglang.io/cookbook/autoregressive/MiniMax/MiniMax-M2>`_, "
 "`MiniMax M2.5/M2.1/M2 usage guide "
 "<https://docs.sglang.io/docs/basic_usage/minimax_m2>`_."
-msgstr ""
+msgstr "**引擎文档：** `MiniMax-M2 SGLang 食谱 <https://docs.sglang.io/cookbook/autoregressive/MiniMax/MiniMax-M2>`_，`MiniMax M2.5/M2.1/M2 使用指南 <https://docs.sglang.io/docs/basic_usage/minimax_m2>`_。"
 
 #: ../../source/recipes/minimax_m2.rst:93
 msgid "**Status:** Not validated with LMCache."
-msgstr ""
+msgstr "**状态:** 未通过 LMCache 验证。"
 
 #: ../../source/recipes/minimax_m2.rst
 msgid "TRT-LLM"
-msgstr ""
+msgstr "TRT-LLM"
 
 #: ../../source/recipes/minimax_m2.rst:97
 msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr ""
+msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 
 #: ../../source/recipes/minimax_m2.rst:100
 msgid "CacheBlend support"
-msgstr ""
+msgstr "CacheBlend 支持"
 
 #: ../../source/recipes/minimax_m2.rst:103
 msgid "Compression support"
-msgstr ""
+msgstr "压缩支持"
 
 #: ../../source/recipes/minimax_m2.rst:109
 msgid "Method"
-msgstr ""
+msgstr "方法"
 
 #: ../../source/recipes/minimax_m2.rst:110
 msgid "Status"
-msgstr ""
+msgstr "状态"
 
 #: ../../source/recipes/minimax_m2.rst:111
 msgid "Notes"
-msgstr ""
+msgstr "笔记"
 
 #: ../../source/recipes/minimax_m2.rst:112
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
-msgstr ""
+msgstr ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
 
 #: ../../source/recipes/minimax_m2.rst:113
 msgid "Not validated"
-msgstr ""
+msgstr "未验证"
 
 #: ../../source/recipes/minimax_m2.rst:117
 msgid "Caveats"
-msgstr ""
+msgstr "注意事项"
 
 #: ../../source/recipes/minimax_m2.rst:119
 msgid "None known."
-msgstr ""
+msgstr "没有已知的问题。"
 

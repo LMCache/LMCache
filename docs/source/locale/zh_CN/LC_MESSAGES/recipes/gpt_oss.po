@@ -21,110 +21,110 @@ msgstr ""
 
 #: ../../source/recipes/gpt_oss.rst:4
 msgid "GptOssForCausalLM"
-msgstr ""
+msgstr "GptOssForCausalLM"
 
 #: ../../source/recipes/gpt_oss.rst:7
 msgid "Validated models"
-msgstr ""
+msgstr "验证模型"
 
 #: ../../source/recipes/gpt_oss.rst:9
 msgid "`openai/gpt-oss-120b <https://huggingface.co/openai/gpt-oss-120b>`_"
-msgstr ""
+msgstr "`openai/gpt-oss-120b <https://huggingface.co/openai/gpt-oss-120b>`_"
 
 #: ../../source/recipes/gpt_oss.rst:10
 msgid "`openai/gpt-oss-20b <https://huggingface.co/openai/gpt-oss-20b>`_"
-msgstr ""
+msgstr "`openai/gpt-oss-20b <https://huggingface.co/openai/gpt-oss-20b>`_"
 
 #: ../../source/recipes/gpt_oss.rst
 msgid "vLLM"
-msgstr ""
+msgstr "vLLM"
 
 #: ../../source/recipes/gpt_oss.rst:17
 msgid ""
 "**Engine documentation:** `GPT-OSS in vLLM supported models "
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
 "generation>`_ (architecture ``GptOssForCausalLM``)."
-msgstr ""
+msgstr "**引擎文档：** `vLLM 支持的模型中的 GPT-OSS <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ （架构 ``GptOssForCausalLM``）。"
 
 #: ../../source/recipes/gpt_oss.rst:22
 msgid "**Status:** Validated with LMCache."
-msgstr ""
+msgstr "**状态:** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/gpt_oss.rst:24
 msgid "Start the LMCache MP server:"
-msgstr ""
+msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/gpt_oss.rst:32
 msgid "**gpt-oss-120b** (2 GPUs):"
-msgstr ""
+msgstr "**gpt-oss-120b** (2 GPUs):"
 
 #: ../../source/recipes/gpt_oss.rst:45
 msgid "**gpt-oss-20b** (1 GPU):"
-msgstr ""
+msgstr "**gpt-oss-20b** (1 GPU):"
 
 #: ../../source/recipes/gpt_oss.rst:57
 msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts, in-process mode), see "
 ":doc:`../mp/quickstart`."
-msgstr ""
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机、进程内模式），请参见 :doc:`../mp/quickstart`。"
 
 #: ../../source/recipes/gpt_oss.rst:61
 msgid ""
 "If there are any issues with vLLM setup, please refer to the `vLLM "
 "Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
 "for more details."
-msgstr ""
+msgstr "如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
 
 #: ../../source/recipes/gpt_oss.rst
 msgid "SGLang"
-msgstr ""
+msgstr "SGLang"
 
 #: ../../source/recipes/gpt_oss.rst:67
 msgid "**Status:** Not validated with LMCache."
-msgstr ""
+msgstr "**状态：** 未通过 LMCache 验证。"
 
 #: ../../source/recipes/gpt_oss.rst
 msgid "TRT-LLM"
-msgstr ""
+msgstr "TRT-LLM"
 
 #: ../../source/recipes/gpt_oss.rst:71
 msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr ""
+msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 
 #: ../../source/recipes/gpt_oss.rst:74
 msgid "CacheBlend support"
-msgstr ""
+msgstr "CacheBlend 支持"
 
 #: ../../source/recipes/gpt_oss.rst:77
 msgid "Compression support"
-msgstr ""
+msgstr "压缩支持"
 
 #: ../../source/recipes/gpt_oss.rst:83
 msgid "Method"
-msgstr ""
+msgstr "方法"
 
 #: ../../source/recipes/gpt_oss.rst:84
 msgid "Status"
-msgstr ""
+msgstr "状态"
 
 #: ../../source/recipes/gpt_oss.rst:85
 msgid "Notes"
-msgstr ""
+msgstr "笔记"
 
 #: ../../source/recipes/gpt_oss.rst:86
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
-msgstr ""
+msgstr ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
 
 #: ../../source/recipes/gpt_oss.rst:87
 msgid "Not validated"
-msgstr ""
+msgstr "未验证"
 
 #: ../../source/recipes/gpt_oss.rst:91
 msgid "Caveats"
-msgstr ""
+msgstr "注意事项"
 
 #: ../../source/recipes/gpt_oss.rst:93
 msgid "None known."
-msgstr ""
+msgstr "没有已知的问题。"
 

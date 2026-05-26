@@ -21,15 +21,15 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/index.rst:2
 msgid "Using Different Storage Backends"
-msgstr ""
+msgstr "使用不同的存储后端"
 
 #: ../../source/kv_cache/storage_backends/index.rst:4
 msgid ""
 "LMCache supports various storage backends to offload and share KV cache "
 "data."
-msgstr ""
+msgstr "LMCache 支持多种存储后端以卸载和共享 KV Cache 数据。"
 
 #: ../../source/kv_cache/storage_backends/index.rst:7
 msgid "Supported Backends"
-msgstr ""
+msgstr "支持的后端"
 
