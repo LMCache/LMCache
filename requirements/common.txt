@@ -19,6 +19,9 @@ opentelemetry-exporter-prometheus >= 0.50b0, <= 0.61b0
 prometheus_client >= 0.18.0, <= 0.24.1
 psutil
 py-cpuinfo
+# cupy.testing._random unconditionally imports pytest at module level;
+# torch._dynamo triggers this via inspect.getmodule() during compilation.
+pytest
 pyyaml
 pyzmq >= 25.0.0
 redis
