@@ -22,7 +22,7 @@ def _get_allowed_imports(request: Request) -> List[str]:
     if adapter is not None:
         return getattr(adapter.config, "script_allowed_imports", None) or []
     configs = getattr(request.app.state, "configs", None)
-    if configs is not None:
+    if isinstance(configs, dict):
         mp_cfg = configs.get("mp")
         return getattr(mp_cfg, "script_allowed_imports", None) or []
     return []
