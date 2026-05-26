@@ -138,7 +138,7 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     fake_future = MagicMock()
     transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
-    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[0], start=0, end=4)
+    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
 
     adapter.submit_store_request("req-1", op, event=MagicMock())
 
@@ -160,7 +160,7 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
         token_ids=[1, 2, 3, 4],
-        block_ids=[0],
+        block_ids=[[0]],
         start=0,
         end=4,
         skip_first_n_tokens=1,
