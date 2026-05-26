@@ -78,14 +78,14 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareStoreResponse,
     RegisterNonGpuContextResponse,
 )
-from lmcache.v1.multiprocess.session import SessionManager
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
-from lmcache.v1.multiprocess.transfer_strategy import (
+from lmcache.v1.multiprocess.server_transfer import (
     PickleTransferStrategy,
     ShmTransferStrategy,
     TransferStrategy,
 )
-from lmcache.v1.multiprocess.transport.base import NonGpuContextMetadata
+from lmcache.v1.multiprocess.session import SessionManager
+from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.multiprocess.worker_transfer.base import NonGpuContextMetadata
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)

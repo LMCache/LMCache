@@ -19,12 +19,12 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
-from lmcache.v1.multiprocess.transport.base import (
+from lmcache.v1.multiprocess.worker_transfer.base import (
     NonGpuContextMetadata,
     create_non_gpu_context,
 )
-from lmcache.v1.multiprocess.transport.pickle import NonGpuContextPickle
-from lmcache.v1.multiprocess.transport.shm import NonGpuContextShm
+from lmcache.v1.multiprocess.worker_transfer.pickle import NonGpuContextPickle
+from lmcache.v1.multiprocess.worker_transfer.shm import NonGpuContextShm
 
 
 def _make_kv_caches(
@@ -130,7 +130,7 @@ def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
 def test_compute_kv_layout_and_gather_scatter_roundtrip() -> None:
     """Validate layout extraction and gather/scatter round-trip on CPU tensors."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import (
+    from lmcache.v1.multiprocess.worker_transfer.base import (
         compute_kv_layout,
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
@@ -173,7 +173,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
 ) -> None:
     """Validate gather/scatter round-trip for HND vLLM KV layout."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import (
+    from lmcache.v1.multiprocess.worker_transfer.base import (
         compute_kv_layout,
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
@@ -225,7 +225,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
 def test_scatter_respects_skip_first_n_tokens() -> None:
     """Ensure scatter honors skip_first_n_tokens and preserves skipped blocks."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import (
+    from lmcache.v1.multiprocess.worker_transfer.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
@@ -253,7 +253,7 @@ def test_scatter_respects_skip_first_n_tokens() -> None:
 def test_compute_kv_layout_and_gather_scatter_roundtrip_mla() -> None:
     """Validate gather/scatter round-trip for MLA KV tensors."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import (
+    from lmcache.v1.multiprocess.worker_transfer.base import (
         compute_kv_layout,
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
@@ -288,7 +288,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip_mla() -> None:
 def test_compute_kv_layout_empty_raises_value_error() -> None:
     """Ensure compute_kv_layout rejects empty KV cache input."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import compute_kv_layout
+    from lmcache.v1.multiprocess.worker_transfer.base import compute_kv_layout
 
     with pytest.raises(ValueError, match="kv_caches is empty"):
         compute_kv_layout({})
@@ -297,7 +297,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 def test_scatter_mla_respects_skip_first_n_tokens() -> None:
     """Ensure MLA scatter honors skip_first_n_tokens and preserves skipped blocks."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import (
+    from lmcache.v1.multiprocess.worker_transfer.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
@@ -327,7 +327,7 @@ def test_scatter_mla_respects_skip_first_n_tokens() -> None:
 def test_scatter_mla_skip_past_chunk_keeps_destination_unchanged() -> None:
     """Ensure MLA scatter is a no-op when skip_first_n_tokens exceeds chunk tokens."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import (
+    from lmcache.v1.multiprocess.worker_transfer.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
@@ -855,7 +855,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     in cache.
     """
     # First Party
-    from lmcache.v1.multiprocess.transport.base import gather_paged_kv_to_cpu
+    from lmcache.v1.multiprocess.worker_transfer.base import gather_paged_kv_to_cpu
 
     # 3 chunks (6 blocks, 2 blocks per chunk), but we only want chunks 0 and 2
     source = _make_kv_caches(num_layers=2, num_blocks=6, block_size=4)
@@ -891,7 +891,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
 def test_gather_paged_kv_chunk_indices_none_is_backward_compatible() -> None:
     """chunk_indices=None gathers all chunks, same as before the fix."""
     # First Party
-    from lmcache.v1.multiprocess.transport.base import gather_paged_kv_to_cpu
+    from lmcache.v1.multiprocess.worker_transfer.base import gather_paged_kv_to_cpu
 
     source = _make_kv_caches(num_layers=2, num_blocks=4, block_size=4)
     out_all = gather_paged_kv_to_cpu(

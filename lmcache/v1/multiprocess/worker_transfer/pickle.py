@@ -10,7 +10,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-from lmcache.v1.multiprocess.transport.base import (
+from lmcache.v1.multiprocess.worker_transfer.base import (
     NonGpuContext,
     NonGpuContextMetadata,
 )

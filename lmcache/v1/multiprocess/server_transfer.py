@@ -19,8 +19,8 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
-from lmcache.v1.multiprocess.transport.base import NonGpuContextMetadata
-from lmcache.v1.multiprocess.transport.shm_types import ShmSlotDescriptor
+from lmcache.v1.multiprocess.worker_transfer.base import NonGpuContextMetadata
+from lmcache.v1.multiprocess.worker_transfer.shm_types import ShmSlotDescriptor
 
 
 def _dtype_to_name(dtype: torch.dtype) -> str:
