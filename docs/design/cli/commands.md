@@ -16,7 +16,7 @@ lmcache
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
 ├── query    {kvcache,engine}       # Single-shot query with metrics
-├── bench    {engine,kvcache,l2}    # Sustained performance benchmarking
+├── bench    {engine,server,l2}    # Sustained performance benchmarking
 └── kvcache  {clear,end-session}    # KV cache management actions
 ```
 
@@ -285,10 +285,10 @@ lmcache/cli/
 │   ├── describe.py      # lmcache describe {kvcache,engine}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
 │   ├── query.py         # lmcache query {kvcache,engine}
-│   ├── bench/           # lmcache bench {engine,kvcache,l2}
+│   ├── bench/           # lmcache bench {engine,server,l2}
 │   │   ├── __init__.py          # BenchCommand + dispatch
 │   │   ├── engine_bench/        # lmcache bench engine
-│   │   ├── kvcache_bench/       # lmcache bench kvcache
+│   │   ├── server_bench/        # lmcache bench server
 │   │   └── l2_adapter_bench/    # lmcache bench l2
 │   └── kvcache.py       # lmcache kvcache {clear,end-session}
 ├── config.py            # CLIConfig (centralized config system)
@@ -309,7 +309,7 @@ lmcache/cli/
 |-------|-------|
 | **0** | CLI framework (explicit registration, `Metrics`), `mock` example command, entry point — see [framework-and-metrics.md](framework-and-metrics.md) |
 | **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
-| **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench kvcache`, `bench l2`, `describe engine`, corpora |
+| **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench server`, `bench l2`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
 
 Existing `lmcache_server` entry point kept as a deprecated alias for 2 minor releases.

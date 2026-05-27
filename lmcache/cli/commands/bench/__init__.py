@@ -11,13 +11,13 @@ from lmcache.cli.commands.bench.engine_bench.command import (
     register_engine_parser,
     run_engine_bench,
 )
-from lmcache.cli.commands.bench.kvcache_bench.command import (
-    register_kvcache_parser,
-    run_kvcache_bench,
-)
 from lmcache.cli.commands.bench.l2_adapter_bench.command import (
     register_l2_parser,
     run_l2_adapter_bench,
+)
+from lmcache.cli.commands.bench.server_bench.command import (
+    register_server_parser,
+    run_server_bench,
 )
 from lmcache.logging import init_logger
 
@@ -45,16 +45,16 @@ class BenchCommand(BaseCommand):
         inner = parser.add_subparsers(
             dest="bench_target",
             required=True,
-            metavar="{engine,kvcache,l2}",
+            metavar="{engine,server,l2}",
         )
         register_engine_parser(inner, self.execute)
-        register_kvcache_parser(inner, self.execute)
+        register_server_parser(inner, self.execute)
         register_l2_parser(inner, self.execute)
 
     def execute(self, args: argparse.Namespace) -> None:
         handlers = {
             "engine": lambda a: run_engine_bench(self, a),
-            "kvcache": lambda a: run_kvcache_bench(self, a),
+            "server": lambda a: run_server_bench(self, a),
             "l2": lambda a: run_l2_adapter_bench(self, a),
         }
         handler = handlers.get(args.bench_target)

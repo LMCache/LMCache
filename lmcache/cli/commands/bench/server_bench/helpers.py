@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Internal helpers for ``lmcache bench kvcache``.
+"""Internal helpers for ``lmcache bench server``.
 
 This module owns the heavy runtime imports (``torch`` / ``zmq`` /
 ``lmcache.v1.*``) and all pure / low-level helper functions used by
-the ``kvcache`` bench target. The CLI registration and execute
-orchestration live in :mod:`lmcache.cli.commands.bench.kvcache_bench.command`.
+the ``server`` bench target. The CLI registration and execute
+orchestration live in :mod:`lmcache.cli.commands.bench.server_bench.command`.
 
 Splitting the module this way keeps the public command surface in line
 with the ``engine_bench`` and ``l2_adapter_bench`` siblings, while
@@ -28,7 +28,7 @@ import urllib.request
 # First Party
 from lmcache import torch_dev, torch_device_type
 
-# ``lmcache bench kvcache`` allocates real CUDA tensors and talks to
+# ``lmcache bench server`` allocates real CUDA tensors and talks to
 # the MP server via ZMQ, both of which are absent from the thin
 # ``lmcache-cli`` distribution (no torch, no zmq, no lmcache.v1.*).
 # Importing them unconditionally would kill the *entire* ``lmcache``
@@ -68,7 +68,7 @@ except ImportError as _exc:
 def _require_full_install() -> None:
     """Exit with an install hint if the full LMCache runtime is missing.
 
-    ``lmcache bench kvcache`` needs torch, zmq and ``lmcache.v1.*``
+    ``lmcache bench server`` needs torch, zmq and ``lmcache.v1.*``
     (MP client, KV layer-group parser). When those imports failed at
     module load — almost always because the user installed
     ``lmcache-cli`` instead of the full package — print the shortest
@@ -78,7 +78,7 @@ def _require_full_install() -> None:
     if _IMPORT_ERROR is None:
         return
     print(
-        "ERROR: `lmcache bench kvcache` needs the full LMCache package "
+        "ERROR: `lmcache bench server` needs the full LMCache package "
         "(torch, zmq, MP runtime), but only the `lmcache-cli` shell "
         "appears to be installed.\n"
         "  Install the full package with `pip install lmcache` and try "

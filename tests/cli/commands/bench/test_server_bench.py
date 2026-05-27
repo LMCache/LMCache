@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the ``lmcache bench kvcache`` CLI command.
+"""Tests for the ``lmcache bench server`` CLI command.
 
 Covers:
 - Sub-command registration under ``lmcache bench``
@@ -21,7 +21,7 @@ import zmq
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
-from lmcache.cli.commands.bench.kvcache_bench.helpers import (
+from lmcache.cli.commands.bench.server_bench.helpers import (
     _allocate_gpu_kv_cache,
     _build_token_ids,
     _make_key,
@@ -44,7 +44,7 @@ def cmd() -> BenchCommand:
 
 @pytest.fixture
 def parser(cmd: BenchCommand) -> argparse.ArgumentParser:
-    """Parser with ``bench kvcache`` subcommand registered."""
+    """Parser with ``bench server`` subcommand registered."""
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="command")
     cmd.register(sub)
@@ -63,21 +63,21 @@ class TestCommandMetadata:
     def test_help(self, cmd: BenchCommand) -> None:
         assert "benchmark" in cmd.help().lower()
 
-    def test_kvcache_helpers_live_under_kvcache_bench_package(self) -> None:
-        """Helpers backing ``bench kvcache`` must live inside the
-        ``kvcache_bench`` sub-package, mirroring the engine / l2 layout.
+    def test_server_helpers_live_under_server_bench_package(self) -> None:
+        """Helpers backing ``bench server`` must live inside the
+        ``server_bench`` sub-package, mirroring the engine / l2 layout.
         """
         # First Party
-        from lmcache.cli.commands.bench.kvcache_bench import command as kv_cmd
-        from lmcache.cli.commands.bench.kvcache_bench import helpers as kv_helpers
+        from lmcache.cli.commands.bench.server_bench import command as sv_cmd
+        from lmcache.cli.commands.bench.server_bench import helpers as sv_helpers
 
-        assert kv_cmd.__name__ == ("lmcache.cli.commands.bench.kvcache_bench.command")
-        assert kv_helpers.__name__ == (
-            "lmcache.cli.commands.bench.kvcache_bench.helpers"
+        assert sv_cmd.__name__ == ("lmcache.cli.commands.bench.server_bench.command")
+        assert sv_helpers.__name__ == (
+            "lmcache.cli.commands.bench.server_bench.helpers"
         )
         # Public command surface mirrors the sibling subpackages.
-        assert callable(kv_cmd.register_kvcache_parser)
-        assert callable(kv_cmd.run_kvcache_bench)
+        assert callable(sv_cmd.register_server_parser)
+        assert callable(sv_cmd.run_server_bench)
 
 
 # ------------------------------------------------------------------ #
@@ -90,15 +90,15 @@ class TestCommandArguments:
         self,
         parser: argparse.ArgumentParser,
     ) -> None:
-        args = parser.parse_args(["bench", "kvcache"])
+        args = parser.parse_args(["bench", "server"])
         assert hasattr(args, "func")
-        assert args.bench_target == "kvcache"
+        assert args.bench_target == "server"
 
     def test_default_values(
         self,
         parser: argparse.ArgumentParser,
     ) -> None:
-        args = parser.parse_args(["bench", "kvcache"])
+        args = parser.parse_args(["bench", "server"])
         assert args.rpc_url == "tcp://localhost:5555"
         assert args.mode == "gpu"
         assert args.num_tokens == 512
@@ -116,7 +116,7 @@ class TestCommandArguments:
         args = parser.parse_args(
             [
                 "bench",
-                "kvcache",
+                "server",
                 "--rpc-url",
                 "tcp://host:9999",
                 "--num-tokens",
@@ -148,7 +148,7 @@ class TestCommandArguments:
         self,
         parser: argparse.ArgumentParser,
     ) -> None:
-        args = parser.parse_args(["bench", "kvcache"])
+        args = parser.parse_args(["bench", "server"])
         assert "float16" in args.kvcache_shape_spec
 
     def test_kvcache_shape_spec_custom(
@@ -158,7 +158,7 @@ class TestCommandArguments:
         args = parser.parse_args(
             [
                 "bench",
-                "kvcache",
+                "server",
                 "--kvcache-shape-spec",
                 "(2,512,8,4,64):bfloat16:16",
             ],

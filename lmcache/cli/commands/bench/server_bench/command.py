@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``lmcache bench kvcache`` subcommand implementation.
+"""``lmcache bench server`` subcommand implementation.
 
 This module owns the full registration + execution flow for the
 end-to-end LMCache MP cache-server sanity test. ``BenchCommand`` only
-forwards CLI dispatch to :func:`run_kvcache_bench` and parser
-registration to :func:`register_kvcache_parser`.
+forwards CLI dispatch to :func:`run_server_bench` and parser
+registration to :func:`register_server_parser`.
 
 The command exercises the full store / retrieve data path:
 
@@ -18,15 +18,15 @@ The command exercises the full store / retrieve data path:
 Usage examples::
 
     # GPU mode: real CUDA tensors + IPC
-    lmcache bench kvcache --rpc-url tcp://localhost:5555 \\
+    lmcache bench server --rpc-url tcp://localhost:5555 \\
         --num-tokens 512 --start 0 --end 3
 
     # Custom KV cache shape (multi-group spec)
-    lmcache bench kvcache --rpc-url tcp://localhost:5555 \\
+    lmcache bench server --rpc-url tcp://localhost:5555 \\
         --kvcache-shape-spec '(2,32,1024,8,128):float16:32'
 
     # Run forever starting from sequence 0
-    lmcache bench kvcache --rpc-url tcp://localhost:5555
+    lmcache bench server --rpc-url tcp://localhost:5555
 """
 
 # Future
@@ -47,7 +47,7 @@ from lmcache import torch_dev
 # time. On a slim install these symbols are placeholders; the
 # ``_require_full_install`` guard inside the helpers module keeps
 # orchestration safe.
-from lmcache.cli.commands.bench.kvcache_bench.helpers import (
+from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
     _IMPORT_ERROR,
     DTYPE_MAP,
@@ -66,8 +66,8 @@ if TYPE_CHECKING:
 # Stash the original (full-install) ImportError so the parser-stub
 # branch and the orchestrator branch can both surface it verbatim.
 __all__ = (
-    "register_kvcache_parser",
-    "run_kvcache_bench",
+    "register_server_parser",
+    "run_server_bench",
 )
 
 
@@ -76,16 +76,16 @@ __all__ = (
 # ---------------------------------------------------------------------------
 
 
-def register_kvcache_parser(
+def register_server_parser(
     subparsers: argparse._SubParsersAction,
     dispatch_func,
 ) -> argparse.ArgumentParser:
-    """Register the ``lmcache bench kvcache`` subcommand parser.
+    """Register the ``lmcache bench server`` subcommand parser.
 
     On a slim ``lmcache-cli`` install (where torch / zmq / the MP
     runtime are absent) this still registers a *stub* parser so
     ``lmcache bench --help`` keeps working; the stub defers to
-    :func:`run_kvcache_bench`, which prints an actionable install
+    :func:`run_server_bench`, which prints an actionable install
     hint and exits with status ``1``.
 
     Args:
@@ -93,7 +93,7 @@ def register_kvcache_parser(
         dispatch_func: Function to bind via ``set_defaults(func=...)``.
             Typically ``BenchCommand.execute`` so that the outer
             dispatcher can route the call back into
-            :func:`run_kvcache_bench`.
+            :func:`run_server_bench`.
 
     Returns:
         The created ``ArgumentParser`` (mostly for testing).
@@ -101,7 +101,7 @@ def register_kvcache_parser(
     if _IMPORT_ERROR is not None:
         # Slim install — register a stub parser only.
         stub = subparsers.add_parser(
-            "kvcache",
+            "server",
             help="(requires full lmcache install)",
             description=(
                 "End-to-end sanity test for the LMCache MP cache server. "
@@ -113,7 +113,7 @@ def register_kvcache_parser(
         return stub
 
     parser = subparsers.add_parser(
-        "kvcache",
+        "server",
         help="End-to-end test for LMCache MP cache server (GPU mode).",
         description=(
             "End-to-end sanity test for the LMCache MP cache server: "
@@ -213,19 +213,19 @@ def register_kvcache_parser(
 # ---------------------------------------------------------------------------
 
 
-def run_kvcache_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
+def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
     command: "BaseCommand",
     args: argparse.Namespace,
 ) -> None:
-    """Centralized orchestrator: run the kvcache bench loop.
+    """Centralized orchestrator: run the server bench loop.
 
     Args:
         command: The outer ``BenchCommand`` instance. Currently unused
-            (kvcache prints directly), but kept for signature
+            (server prints directly), but kept for signature
             symmetry with :func:`run_engine_bench` /
             :func:`run_l2_adapter_bench` and to allow future migration
             to ``command.create_metrics``.
-        args: Parsed CLI arguments for ``lmcache bench kvcache``.
+        args: Parsed CLI arguments for ``lmcache bench server``.
     """
     _require_full_install()
 
