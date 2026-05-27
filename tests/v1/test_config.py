@@ -926,3 +926,89 @@ class TestNixlBufferDeviceCpuValidation:
             nixl_buffer_device="cuda", nixl_buffer_size=2**30
         )
         config.validate()  # Should not raise
+
+
+class TestNixlUseHugepagesDeprecation:
+    """Validate the deprecation alias for extra_config.nixl_use_hugepages.
+
+    The flag is replaced by the top-level local_cpu_use_hugepages: hugepages
+    have never applied to GPU buffers, and in CPU mode the NIXL pool is now
+    owned by LocalCPUBackend. validate() must alias the value into
+    local_cpu_use_hugepages in CPU mode, warn in GPU mode, and pop the
+    deprecated key in both cases (see review item #2).
+    """
+
+    @staticmethod
+    def _nixl_cpu_defaults(**overrides: Any) -> LMCacheEngineConfig:
+        config = LMCacheEngineConfig.from_defaults()
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+        }
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        return config
+
+    def test_cpu_mode_aliases_to_local_cpu_use_hugepages(self):
+        config = self._nixl_cpu_defaults()
+        config.extra_config["nixl_use_hugepages"] = True
+        assert config.local_cpu_use_hugepages is False  # default
+        config.validate()
+        assert config.local_cpu_use_hugepages is True
+        assert "nixl_use_hugepages" not in config.extra_config
+
+    def test_cpu_mode_conflicting_values_raise(self):
+        config = LMCacheEngineConfig.from_defaults(local_cpu_use_hugepages=False)
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+            "nixl_use_hugepages": True,
+        }
+        with pytest.raises(ValueError, match="Conflicting hugepage settings"):
+            config.validate()
+
+    def test_cpu_mode_agreeing_values_no_conflict(self):
+        config = LMCacheEngineConfig.from_defaults(local_cpu_use_hugepages=True)
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+            "nixl_use_hugepages": True,
+        }
+        config.validate()
+        assert config.local_cpu_use_hugepages is True
+        assert "nixl_use_hugepages" not in config.extra_config
+
+    def test_gpu_mode_drops_flag_without_aliasing(self):
+        """In GPU mode the flag was always a no-op; alias would be misleading
+        (LocalCPUBackend's hugepages should not be toggled by a NIXL knob in
+        a GPU-only deployment). Just drop it with a warning."""
+        config = self._nixl_cpu_defaults(
+            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+        )
+        config.extra_config["nixl_use_hugepages"] = True
+        config.validate()
+        assert config.local_cpu_use_hugepages is False  # unchanged
+        assert "nixl_use_hugepages" not in config.extra_config
+
+    def test_flag_absent_is_noop(self):
+        """No-op when the deprecated flag isn't set; local_cpu_use_hugepages
+        keeps whatever value the user set."""
+        config = LMCacheEngineConfig.from_defaults(local_cpu_use_hugepages=True)
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+        }
+        config.validate()
+        assert config.local_cpu_use_hugepages is True

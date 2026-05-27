@@ -726,6 +726,43 @@ def _validate_config(self):
         else:
             assert self.nixl_buffer_size is not None
 
+        # Deprecation: extra_config.nixl_use_hugepages → local_cpu_use_hugepages.
+        # The flag was always a no-op for GPU buffers (hugepages don't apply);
+        # in CPU mode the pinned pool is now owned by LocalCPUBackend, so
+        # local_cpu_use_hugepages is the only effective knob. Alias the value
+        # in CPU mode, warn in GPU mode, then pop the deprecated key so
+        # downstream readers see a single source of truth.
+        if "nixl_use_hugepages" in self.extra_config:
+            nixl_huge = bool(self.extra_config["nixl_use_hugepages"])
+            user_set = getattr(self, "_user_set_keys", set())
+            if self.nixl_buffer_device == "cpu":
+                if (
+                    "local_cpu_use_hugepages" in user_set
+                    and self.local_cpu_use_hugepages != nixl_huge
+                ):
+                    raise ValueError(
+                        f"Conflicting hugepage settings: "
+                        f"extra_config.nixl_use_hugepages={nixl_huge!r} vs "
+                        f"local_cpu_use_hugepages={self.local_cpu_use_hugepages!r}. "
+                        "extra_config.nixl_use_hugepages is deprecated; "
+                        "remove it and set local_cpu_use_hugepages only."
+                    )
+                logger.warning(
+                    "extra_config.nixl_use_hugepages is deprecated; applying "
+                    "value (%r) to local_cpu_use_hugepages. Update your "
+                    "config to set local_cpu_use_hugepages directly.",
+                    nixl_huge,
+                )
+                self.local_cpu_use_hugepages = nixl_huge
+            else:
+                logger.warning(
+                    "extra_config.nixl_use_hugepages is deprecated and has no "
+                    "effect for nixl_buffer_device=%r (hugepages apply only to "
+                    "the CPU shared pool, controlled by local_cpu_use_hugepages).",
+                    self.nixl_buffer_device,
+                )
+            del self.extra_config["nixl_use_hugepages"]
+
     return self
 
 

@@ -95,7 +95,6 @@ def _nixl_cpu_config(pool_size: int = 0) -> LMCacheEngineConfig:
         "nixl_async_put": False,
         "use_direct_io": False,
         "nixl_path": None,
-        "nixl_use_hugepages": False,
         "nixl_enable_prog_thread": True,
     }
     return config

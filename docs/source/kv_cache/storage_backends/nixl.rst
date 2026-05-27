@@ -30,15 +30,14 @@ Example ``lmcache-config.yaml`` for POSIX backend:
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    local_cpu_use_hugepages: true  # optional, requires pre-allocated hugepages
     extra_config:
       enable_nixl_storage: true
       nixl_backend: POSIX
       nixl_pool_size: 64
       nixl_path: /mnt/nixl/cache/
       use_direct_io: true
-      nixl_use_hugepages: true  # optional, requires pre-allocated hugepages
 
 Key settings:
 
@@ -54,7 +53,7 @@ Key settings:
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
-- ``nixl_use_hugepages``: whether to use Linux hugepages (2 MiB) for the NIXL CPU buffer. Not supported for GPU buffers. Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``.
+- ``local_cpu_use_hugepages``: whether to use Linux hugepages (2 MiB) for ``LocalCPUBackend``'s pinned pool (which NIXL shares in CPU mode). Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``. **Deprecated alias:** ``extra_config.nixl_use_hugepages`` — accepted with a warning and copied into this field; will be removed in a future release.
 
 .. note::
 
