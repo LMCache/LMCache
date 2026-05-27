@@ -852,9 +852,35 @@ class LMCacheEngine:
         if len(reordered_chunks) > 0:
             with retrieve_stats.profile_to_gpu():
                 _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+                # When save_only_first_rank is enabled, the leader rank's
+                # memory_objs from L1 are CPU-resident. The broadcast above
+                # already created GPU-resident copies on the leader to use as
+                # the NCCL send buffer. Substitute those here so this kernel
+                # reads from HBM rather than re-reading the same L1 bytes
+                # over PCIe via zero-copy mapped pinned memory. Without this
+                # swap, batched_to_gpu on the leader takes ~9 ms (PCIe-bound)
+                # while passive ranks take ~0.5 ms (HBM-bound) — a structural
+                # asymmetry on the critical path of every retrieve.
+                memory_objs_for_togpu = list(memory_objs)
+                if (
+                    self.save_only_first_rank
+                    and self.metadata.is_first_rank()
+                    and len(getattr(self, "_leader_gpu_substitute_objs", []))
+                    == len(memory_objs_for_togpu)
+                ):
+                    memory_objs_for_togpu = self._leader_gpu_substitute_objs
                 self.gpu_connector.batched_to_gpu(
-                    list(memory_objs), list(starts), list(ends), **kwargs
+                    memory_objs_for_togpu, list(starts), list(ends), **kwargs
                 )
+                # Release GPU substitute references so the temporary buffers
+                # can be freed; original memory_objs in reordered_chunks are
+                # still tracked for the cleanup loop below.
+                if (
+                    self.save_only_first_rank
+                    and self.metadata.is_first_rank()
+                    and hasattr(self, "_leader_gpu_substitute_objs")
+                ):
+                    self._leader_gpu_substitute_objs = []
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
@@ -1763,6 +1789,11 @@ class LMCacheEngine:
             chunk_count = len(reordered_chunks)
             self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
 
+            # Save GPU-resident copies created during broadcast so the
+            # caller's subsequent batched_to_gpu can read from HBM instead
+            # of re-reading the same CPU L1 buffer over PCIe.
+            self._leader_gpu_substitute_objs: List[TensorMemoryObj] = []
+
             # Broadcast each chunk's data
             for key, memory_obj, start, end in reordered_chunks:
                 # Combine (start, end) and metadata into single broadcast
@@ -1777,6 +1808,16 @@ class LMCacheEngine:
                     f"{torch_device_type}:{self.metadata.worker_id}"
                 )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
+
+                # Keep this GPU-resident copy alive so the subsequent
+                # batched_to_gpu can read from HBM rather than re-reading
+                # the L1 buffer over PCIe.
+                gpu_mo = TensorMemoryObj(
+                    raw_data=tensor_to_broadcast,
+                    metadata=memory_obj.metadata,
+                    parent_allocator=None,
+                )
+                self._leader_gpu_substitute_objs.append(gpu_mo)
         else:
             # Receive total chunk count
             chunk_count = self.broadcast_object_fn(None, self.metadata.first_rank)
