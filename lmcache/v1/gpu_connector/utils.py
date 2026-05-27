@@ -1249,7 +1249,10 @@ def resolve_block_stride_and_log_layout(
                     f"torch.Tensor, got {type(kv_caches).__name__}."
                 )
             return kv_caches
-        if gpu_kv_format == lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS:
+        if gpu_kv_format in (
+            lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS,
+            lmc_ops.GPUKVFormat.TWO_X_NL_X_NB_BS_NH_HS,
+        ):
             return kv_caches[0][layer_idx]  # type: ignore[index]
         return kv_caches[layer_idx]  # type: ignore[index]
 
