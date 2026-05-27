@@ -33,10 +33,7 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.integration.vllm.hma_utils import (
-    build_engine_group_layout_hints,
-    get_num_engine_groups,
-)
+from lmcache.integration.vllm.kv_cache_groups import lmcache_kv_cache_groups_from_vllm
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
@@ -571,7 +568,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.vllm_block_size = vllm_config.cache_config.block_size
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        self._num_engine_groups = get_num_engine_groups(kv_cache_config)
+        lmc_kv_cache_groups = lmcache_kv_cache_groups_from_vllm(kv_cache_config)
+        self._num_engine_groups = lmc_kv_cache_groups.num_engine_kv_cache_groups
 
     @property
     def role(self) -> KVConnectorRole:
@@ -604,8 +602,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        extra_layout_hints = build_engine_group_layout_hints(
-            kv_cache_config, kv_caches
+        lmc_kv_cache_groups = lmcache_kv_cache_groups_from_vllm(kv_cache_config)
+        extra_layout_hints = lmc_kv_cache_groups.to_layout_hints(
+            tuple(kv_caches.keys())
         )
         self.worker_adapter.register_kv_caches(
             kv_caches, extra_layout_hints=extra_layout_hints
