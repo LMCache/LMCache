@@ -578,15 +578,12 @@ class LMCacheConnectorV1Impl:
         # exhaustion at high concurrency with long contexts.
         # Configurable via kv_connector_extra_config:
         #   "lmcache.max_tokens_per_load": <int>
-        # Default: max_model_len // 2, capped at 128K tokens.
-        # Set 0 to disable (original behavior, all matched tokens
-        # reported at once).
-        default_cap = min(
-            vllm_config.model_config.max_model_len // 2, 131072
-        )
+        # Default 0 (no cap — original behavior, all matched tokens
+        # reported at once). Set to a positive value (e.g. 131072)
+        # to enable chunked loading.
         self._max_tokens_per_load: int = int(
             vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.max_tokens_per_load", default_cap
+                "lmcache.max_tokens_per_load", 0
             )
         )
         self._invalid_block_ids: set[int] = set()
