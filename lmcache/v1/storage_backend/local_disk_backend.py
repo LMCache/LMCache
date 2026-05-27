@@ -3,8 +3,9 @@
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Sequence
 import asyncio
+import json
 import os
-import pickle
+import tempfile
 import threading
 import time
 
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_METADATA_INDEX_FILENAME = ".lmcache_local_disk_metadata.pkl"
+_METADATA_INDEX_FILENAME = ".lmcache_local_disk_metadata.json"
 _METADATA_INDEX_VERSION = 1
 
 
@@ -763,9 +764,9 @@ class LocalDiskBackend(StorageBackendInterface):
             return
 
         try:
-            with open(self._metadata_index_path, "rb") as handle:
-                payload = pickle.load(handle)
-        except (OSError, pickle.UnpicklingError, EOFError) as exc:
+            with open(self._metadata_index_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as exc:
             logger.warning(
                 "Failed to load local disk metadata index %s: %s",
                 self._metadata_index_path,
@@ -806,16 +807,13 @@ class LocalDiskBackend(StorageBackendInterface):
             if deserialized is None:
                 continue
             key, meta = deserialized
-            try:
-                size = os.path.getsize(meta.path)
-            except OSError:
+            if not os.path.exists(meta.path):
                 continue
-            meta.size = size
             meta.pin_count = 0
             self.dict[key] = meta
             self.cache_policy.update_on_put(key)
             loaded_count += 1
-            restored_size += size
+            restored_size += meta.size
 
         self.current_cache_size = restored_size
 
@@ -855,12 +853,8 @@ class LocalDiskBackend(StorageBackendInterface):
 
         persisted_entries: list[dict[str, Any]] = []
         for key, meta in entries:
-            path = self._key_to_path(key)
-            try:
-                size = os.path.getsize(path)
-            except OSError:
+            if not os.path.exists(meta.path):
                 continue
-            meta.size = size
             persisted_entries.append(self._serialize_metadata_entry(key, meta))
 
         if not persisted_entries:
@@ -876,18 +870,28 @@ class LocalDiskBackend(StorageBackendInterface):
             return
 
         payload = {"version": _METADATA_INDEX_VERSION, "entries": persisted_entries}
-        tmp_path = f"{self._metadata_index_path}.tmp"
+        index_dir = os.path.dirname(self._metadata_index_path)
+        tmp_path: Optional[str] = None
         try:
-            with open(tmp_path, "wb") as handle:
-                pickle.dump(payload, handle)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=index_dir,
+                prefix=os.path.basename(self._metadata_index_path) + ".",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                tmp_path = handle.name
+                json.dump(payload, handle)
             os.replace(tmp_path, self._metadata_index_path)
-        except (OSError, pickle.PickleError) as exc:
+        except OSError as exc:
             logger.warning(
                 "Failed to persist local disk metadata index %s: %s",
                 self._metadata_index_path,
                 exc,
             )
-            if os.path.exists(tmp_path):
+        finally:
+            if tmp_path is not None and os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
                 except OSError as cleanup_exc:
