@@ -94,6 +94,7 @@ class MPCacheEngineContext:
         hash_algorithm: str = "blake3",
     ) -> None:
         self._chunk_size = chunk_size
+        self._storage_manager_config = storage_manager_config
         self._storage_manager = StorageManager(storage_manager_config)
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
@@ -111,6 +112,11 @@ class MPCacheEngineContext:
     def storage_manager(self) -> StorageManager:
         """The storage manager instance."""
         return self._storage_manager
+
+    @property
+    def storage_manager_config(self) -> StorageManagerConfig:
+        """The storage manager configuration."""
+        return self._storage_manager_config
 
     @property
     def token_hasher(self) -> TokenHasher:
