@@ -227,7 +227,7 @@ class ClientPollingLoop:
             if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
                 self._notifier.consume()
                 for client in self._socket_to_client.values():
-                    client._process_outbound_task()
+                    client.process_outbound_task()
 
             # Inbound: dispatch each ready DEALER socket to its client.
             for sock, event in socks.items():
@@ -236,7 +236,7 @@ class ClientPollingLoop:
                 if event & zmq.POLLIN:
                     owner = self._socket_to_client.get(sock)
                     if owner is not None:
-                        owner._process_inbound()
+                        owner.process_inbound()
 
         # Drain remaining ops so any waiting threads unblock.
         self._process_ops()
@@ -268,7 +268,7 @@ class MessageQueueClient:
         self._polling_loop = ClientPollingLoop.get_instance()
         self._polling_loop.register(self)
 
-    def _process_outbound_task(self):
+    def process_outbound_task(self):
         try:
             while wrapped_request := self.input_queue.get_nowait():
                 # wrapped_request = self.input_queue.get_nowait()
@@ -298,7 +298,7 @@ class MessageQueueClient:
         except queue.Empty:
             pass
 
-    def _process_inbound(self) -> None:
+    def process_inbound(self) -> None:
         """Process one inbound response from the server.
 
         Called by the shared ClientPollingLoop when the DEALER socket
@@ -307,10 +307,12 @@ class MessageQueueClient:
         """
         msg = self.socket.recv_multipart()
         if len(msg) < 2:
-            raise ValueError(
-                "Expected at least 2 message parts "
-                "[request_uid, request_type, *response]"
+            logger.error(
+                "Malformed response: expected at least 2 message parts "
+                "[request_uid, request_type, *response], got %d",
+                len(msg),
             )
+            return
         b_request_uid, b_request_type, *b_response = msg
         request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
         request_type = msgspec_decode(b_request_type, cls=RequestType)
