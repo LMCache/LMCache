@@ -5,6 +5,7 @@ from unittest.mock import patch
 import os
 import select
 import tempfile
+import threading
 
 # Third Party
 import pytest
@@ -634,5 +635,79 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
                 load_bitmap = adapter.query_load_result(load_task_id)
             assert load_bitmap is not None
             assert str(load_bitmap) == "00"
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_delete_indexed_key_deducts_slot_bytes():
+    """delete() on an indexed key must deduct exactly slot_bytes from usage.
+
+    This verifies the was_indexed=True accounting path: _notify_keys_stored
+    added slot_bytes when the key committed; _notify_keys_deleted must subtract
+    the same amount so usage returns to zero.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        slot_bytes = 64 * 1024
+        adapter = RawBlockL2Adapter(_make_config(dev_path, slot_bytes=slot_bytes))
+        try:
+            key = _create_object_key(51)
+            obj = _create_memory_obj()
+
+            _run_store(adapter, [key], [obj])
+            assert adapter.get_usage().total_bytes_used == slot_bytes
+
+            adapter.delete([key])
+            assert adapter.get_usage().total_bytes_used == 0
+        finally:
+            adapter.close()
+
+
+@requires_raw_block_ext
+def test_raw_block_l2_adapter_delete_inflight_key_keeps_usage_at_zero():
+    """delete() on an inflight (not yet indexed) key must leave usage at zero.
+
+    The key is canceled before its write completes, so _notify_keys_stored is
+    never called.  delete() must report size 0 (was_indexed=False) so usage
+    is not over-decremented from zero.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        adapter = RawBlockL2Adapter(_make_config(dev_path))
+        try:
+            key = _create_object_key(52)
+            obj = _create_memory_obj()
+
+            # Intercept at _write_one: the key is already in _inflight at this
+            # point (put_many added it under the lock just before calling
+            # _write_one) but has not yet been committed to _index.
+            write_started = threading.Event()
+            write_proceed = threading.Event()
+            original_write = adapter._core._write_one
+
+            def paused_write(*args, **kwargs):
+                write_started.set()
+                write_proceed.wait(timeout=5.0)
+                return original_write(*args, **kwargs)
+
+            with patch.object(adapter._core, "_write_one", side_effect=paused_write):
+                adapter.submit_store_task([key], [obj])
+                assert write_started.wait(timeout=5.0), "_write_one did not start"
+
+                # Key is in _inflight but not in _index; cancel it via delete
+                adapter.delete([key])
+
+                write_proceed.set()
+                assert _wait_event_fd(adapter.get_store_event_fd())
+                adapter.pop_completed_store_tasks()
+
+            assert adapter.get_usage().total_bytes_used == 0
         finally:
             adapter.close()
