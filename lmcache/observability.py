@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from contextlib import contextmanager
+from copy import copy
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -848,6 +849,11 @@ class LMCStatsMonitor:
 
 
 class PrometheusLogger:
+    lmcache_is_healthy: prometheus_client.Gauge
+    periodic_threads_total_count: prometheus_client.Gauge
+    periodic_threads_running_count: prometheus_client.Gauge
+    periodic_threads_active_count: prometheus_client.Gauge
+
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
@@ -900,17 +906,21 @@ class PrometheusLogger:
         self._histograms.append(histogram)
         return histogram
 
+    @staticmethod
+    def _ensure_multiprocess_dir() -> None:
+        multiprocess_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+        if not multiprocess_dir:
+            multiprocess_dir = "/tmp/lmcache_prometheus"
+            os.environ["PROMETHEUS_MULTIPROC_DIR"] = multiprocess_dir
+        os.makedirs(multiprocess_dir, exist_ok=True)
+
     def __init__(
         self,
         metadata: LMCacheMetadata,
         config: Optional["LMCacheEngineConfig"] = None,
     ):
         # Ensure PROMETHEUS_MULTIPROC_DIR is set before any metric registration
-        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
-            default_dir = "/tmp/lmcache_prometheus"
-            os.environ["PROMETHEUS_MULTIPROC_DIR"] = default_dir
-            if not os.path.exists(default_dir):
-                os.makedirs(default_dir, exist_ok=True)
+        PrometheusLogger._ensure_multiprocess_dir()
 
         self.metadata = metadata
         self.config = config
@@ -1454,125 +1464,153 @@ class PrometheusLogger:
         )
         self._dynamic_metrics(labelnames)
 
-    def _dynamic_metrics(self, labelnames):
+    def _create_dynamic_gauge(
+        self,
+        name: str,
+        documentation: str,
+        labelnames: List[str],
+        multiprocess_mode: str,
+    ) -> None:
+        metric_attr = name.removeprefix("lmcache:")
+        if metric_attr == name or not metric_attr.isidentifier():
+            raise ValueError(f"Invalid dynamic metric name: {name}")
+
+        gauge = self._gauge_cls(
+            name=name,
+            documentation=documentation,
+            labelnames=labelnames,
+            multiprocess_mode=multiprocess_mode,
+        )
+        # Store the shared collector separately from the labeled child.
+        # Shallow-copied label views reuse the collector, then call labels()
+        # with their own labels so set_function callbacks publish to that view.
+        self._dynamic_gauge_collectors[metric_attr] = gauge
+        setattr(self, metric_attr, gauge.labels(**self.labels))
+
+    def _bind_dynamic_metric_children(self) -> None:
+        PrometheusLogger._ensure_multiprocess_dir()
+        for metric_attr, gauge in self._dynamic_gauge_collectors.items():
+            setattr(self, metric_attr, gauge.labels(**self.labels))
+
+    def _dynamic_metrics(self, labelnames: List[str]) -> None:
         """
         Dynamically get value by lambda function while capture
         """
-        self.local_cpu_hot_cache_count = self._gauge_cls(
+        self._dynamic_gauge_collectors: Dict[str, prometheus_client.Gauge] = {}
+        self._create_dynamic_gauge(
             name="lmcache:local_cpu_hot_cache_count",
             documentation="The size of the hot_cache",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.local_cpu_keys_in_request_count = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:local_cpu_keys_in_request_count",
             documentation="The size of the keys_in_request",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.kv_msg_queue_size = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:kv_msg_queue_size",
             documentation="The size of the KV message queue in BatchedMessageSender",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.remote_put_task_num = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:remote_put_task_num",
             documentation="The number of remote put tasks",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.pin_monitor_pinned_objects_count = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:pin_monitor_pinned_objects_count",
             documentation="The number of pinned objects in PinMonitor",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.lmcache_is_healthy = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:lmcache_is_healthy",
             documentation="The health status of LMCache (1=healthy, 0=unhealthy)",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.get_blocking_failed_count = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:get_blocking_failed_count",
             documentation="The number of get blocking failed",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.put_failed_count = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:put_failed_count",
             documentation="The number of put failed",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
+        )
 
         event_statuses = ["ongoing", "done", "not_found"]
         for status in event_statuses:
             metric_name = f"storage_events_{status}_count"
-            gauge = self._gauge_cls(
+            self._create_dynamic_gauge(
                 name=f"lmcache:{metric_name}",
                 documentation=f"The number of {status.replace('_', ' ')} events",
                 labelnames=labelnames,
                 multiprocess_mode="sum",
-            ).labels(**self.labels)
-            setattr(self, metric_name, gauge)
+            )
 
         # Chunk statistics metrics (dynamic)
-        self.chunk_statistics_enabled = self._gauge_cls(
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_enabled",
             documentation="Whether chunk statistics collection is enabled",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_total_requests = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_total_requests",
             documentation="Total number of requests processed by chunk statistics",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_total_chunks = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_total_chunks",
             documentation="Total number of chunks processed",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_unique_chunks = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_unique_chunks",
             documentation="Number of unique chunks (estimated)",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_reuse_rate = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_reuse_rate",
             documentation="Chunk reuse rate (0.0 to 1.0)",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_bloom_filter_size_mb = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_bloom_filter_size_mb",
             documentation="Bloom Filter memory usage in MB",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_bloom_filter_fill_rate = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_bloom_filter_fill_rate",
             documentation="Bloom Filter fill rate (0.0 to 1.0)",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_file_count = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_file_count",
             documentation="Number of files created for file_hash strategy",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.chunk_statistics_current_file_size = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_current_file_size",
             documentation="Current file size in bytes for file_hash strategy",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
+        )
 
         # Connector metrics
         connector_metrics = [
@@ -1586,59 +1624,55 @@ class PrometheusLogger:
         ]
 
         for metric_name in connector_metrics:
-            gauge = self._gauge_cls(
+            self._create_dynamic_gauge(
                 name=f"lmcache:{metric_name}",
                 documentation=f"The count of {metric_name.replace('_', ' ')}",
                 labelnames=labelnames,
                 multiprocess_mode="livemostrecent",
-            ).labels(**self.labels)
-            setattr(self, metric_name, gauge)
+            )
 
         # PeriodicThread metrics
-        self.periodic_threads_total_count = self._gauge_cls(
+        self._create_dynamic_gauge(
             name="lmcache:periodic_threads_total_count",
             documentation="Total number of registered periodic threads",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.periodic_threads_running_count = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:periodic_threads_running_count",
             documentation="Number of running periodic threads",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
-        self.periodic_threads_active_count = self._gauge_cls(
+        )
+        self._create_dynamic_gauge(
             name="lmcache:periodic_threads_active_count",
             documentation="Number of active periodic threads (recently executed)",
             labelnames=labelnames,
             multiprocess_mode="livemostrecent",
-        ).labels(**self.labels)
+        )
 
         # Per-level metrics for periodic threads
         for level_name in ["critical", "high", "medium", "low"]:
-            total_gauge = self._gauge_cls(
+            self._create_dynamic_gauge(
                 name=f"lmcache:periodic_threads_{level_name}_total",
                 documentation=f"Total number of {level_name} level periodic threads",
                 labelnames=labelnames,
                 multiprocess_mode="livemostrecent",
-            ).labels(**self.labels)
-            setattr(self, f"periodic_threads_{level_name}_total", total_gauge)
+            )
 
-            running_gauge = self._gauge_cls(
+            self._create_dynamic_gauge(
                 name=f"lmcache:periodic_threads_{level_name}_running",
                 documentation=f"Number of running {level_name} level periodic threads",
                 labelnames=labelnames,
                 multiprocess_mode="livemostrecent",
-            ).labels(**self.labels)
-            setattr(self, f"periodic_threads_{level_name}_running", running_gauge)
+            )
 
-            active_gauge = self._gauge_cls(
+            self._create_dynamic_gauge(
                 name=f"lmcache:periodic_threads_{level_name}_active",
                 documentation=f"Number of active {level_name} level periodic threads",
                 labelnames=labelnames,
                 multiprocess_mode="livemostrecent",
-            ).labels(**self.labels)
-            setattr(self, f"periodic_threads_{level_name}_active", active_gauge)
+            )
 
     def _log_gauge(self, gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
@@ -1810,50 +1844,36 @@ class PrometheusLogger:
             self.gauge_pinned_memory_objs_count, stats.pinned_memory_objs_count
         )
 
-    @staticmethod
-    def _metadata_to_labels(metadata: LMCacheMetadata):
-        labels = {
-            "model_name": metadata.model_name,
-            "worker_id": metadata.worker_id,
-            "role": metadata.role,
-        }
-        if metadata.served_model_name:
-            labels["served_model_name"] = metadata.served_model_name
-        return labels
-
-    _instance = None
+    _instances: Dict[tuple[tuple[str, str], ...], "PrometheusLogger"] = {}
 
     @staticmethod
+    @thread_safe
     def GetOrCreate(
         metadata: LMCacheMetadata,
         config: Optional["LMCacheEngineConfig"] = None,
     ) -> "PrometheusLogger":
-        if PrometheusLogger._instance is None:
-            PrometheusLogger._instance = PrometheusLogger(metadata, config=config)
-        # assert PrometheusLogger._instance.metadata == metadata, \
-        #    "PrometheusLogger instance already created with different metadata"
-        if PrometheusLogger._instance.metadata != metadata:
-            logger.error(
-                "PrometheusLogger instance already created with "
-                "different metadata. This should not happen except "
-                "in test"
+        metadata_key = PrometheusLogger._metadata_to_key(metadata)
+        if metadata_key in PrometheusLogger._instances:
+            return PrometheusLogger._instances[metadata_key]
+
+        base_logger = PrometheusLogger._get_base_logger()
+        if base_logger is None:
+            logger_instance = PrometheusLogger(metadata, config=config)
+        else:
+            logger_instance = PrometheusLogger._create_label_view(
+                base_logger,
+                metadata,
             )
-        return PrometheusLogger._instance
+
+        PrometheusLogger._instances[metadata_key] = logger_instance
+        return logger_instance
 
     @staticmethod
-    def GetInstance() -> "PrometheusLogger":
-        assert PrometheusLogger._instance is not None, (
-            "PrometheusLogger instance not created yet"
-        )
-        return PrometheusLogger._instance
-
-    @staticmethod
-    def GetInstanceOrNone() -> Optional["PrometheusLogger"]:
+    def _get_base_logger() -> Optional["PrometheusLogger"]:
         """
-        Returns the singleton instance of PrometheusLogger if it exists,
-        otherwise returns None.
+        Return an existing logger to reuse registered Prometheus collectors.
         """
-        return PrometheusLogger._instance
+        return next(iter(PrometheusLogger._instances.values()), None)
 
     @thread_safe
     def reset_counters(self) -> None:
@@ -1861,10 +1881,12 @@ class PrometheusLogger:
         Reset all Prometheus Counter metrics by calling clear().
         After clearing, re-initialize with labels so metrics remain visible.
         """
+        label_views = self._reset_label_views()
         for counter in self._counters:
             counter.clear()
-            # Re-initialize with labels to make metric visible again
-            counter.labels(**self.labels)
+            # Re-initialize all known label views to keep each series visible.
+            for label_view in label_views:
+                counter.labels(**label_view.labels)
 
     @thread_safe
     def reset_histograms(self) -> None:
@@ -1872,10 +1894,50 @@ class PrometheusLogger:
         Reset all Prometheus Histogram metrics by calling clear().
         After clearing, re-initialize with labels so metrics remain visible.
         """
+        label_views = self._reset_label_views()
         for histogram in self._histograms:
             histogram.clear()
-            # Re-initialize with labels to make metric visible again
-            histogram.labels(**self.labels)
+            # Re-initialize all known label views to keep each series visible.
+            for label_view in label_views:
+                histogram.labels(**label_view.labels)
+
+    @staticmethod
+    def _metadata_to_labels(metadata: LMCacheMetadata) -> Dict[str, Any]:
+        labels = {
+            "model_name": metadata.model_name,
+            "worker_id": metadata.worker_id,
+            "role": metadata.role,
+            "served_model_name": metadata.served_model_name or "",
+        }
+        return labels
+
+    @staticmethod
+    def _metadata_to_key(metadata: LMCacheMetadata) -> tuple[tuple[str, str], ...]:
+        labels = PrometheusLogger._metadata_to_labels(metadata)
+        return tuple(sorted((name, str(value)) for name, value in labels.items()))
+
+    @staticmethod
+    def _create_label_view(
+        base_logger: "PrometheusLogger",
+        metadata: LMCacheMetadata,
+    ) -> "PrometheusLogger":
+        """Reuse registered collectors with a different metadata/label view."""
+        label_view = copy(base_logger)
+        label_view.metadata = metadata
+        label_view.labels = PrometheusLogger._metadata_to_labels(metadata)
+        label_view._bind_dynamic_metric_children()
+        return label_view
+
+    def _reset_label_views(self) -> List["PrometheusLogger"]:
+        """Return label views whose children must be restored after clear().
+
+        Counter.clear() and Histogram.clear() remove every child from the
+        shared collector, so reset must recreate children for all known labels.
+        """
+        views = list(PrometheusLogger._instances.values())
+        if self not in views:
+            views.append(self)
+        return views
 
 
 def reset_observability_metrics() -> None:
@@ -1883,7 +1945,7 @@ def reset_observability_metrics() -> None:
     Reset observability metrics to their initial state.
     """
 
-    prometheus_logger = PrometheusLogger.GetInstanceOrNone()
+    prometheus_logger = PrometheusLogger._get_base_logger()
     if prometheus_logger is not None:
         prometheus_logger.reset_counters()
         prometheus_logger.reset_histograms()

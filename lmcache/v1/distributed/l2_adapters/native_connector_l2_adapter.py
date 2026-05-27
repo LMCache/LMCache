@@ -30,6 +30,7 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -133,7 +134,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         ] = {}
 
         # Completed results (same pattern as MockL2Adapter)
-        self._completed_stores: dict[L2TaskId, bool] = {}
+        self._completed_stores: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookups: dict[L2TaskId, Bitmap] = {}
         self._completed_loads: dict[L2TaskId, Bitmap] = {}
 
@@ -215,7 +216,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
     def pop_completed_store_tasks(
         self,
-    ) -> dict[L2TaskId, bool]:
+    ) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             completed = self._completed_stores
             self._completed_stores = {}
@@ -451,8 +452,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                     ) = entry
 
                     if op_type == self._OP_STORE:
-                        self._completed_stores[task_id] = ok
                         store_info = self._pending_store_sizes.pop(fid, None)
+                        task_bytes = 0
                         if ok and store_info is not None:
                             store_keys, sizes = store_info
                             for key, size in zip(store_keys, sizes, strict=True):
@@ -467,9 +468,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     self._key_sizes[key] = size
                                     keys_stored.append(key)
                                     sizes_stored.append(size)
+                                    task_bytes += size
                                 else:
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
+                        self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
                         self._store_efd.notify()
 
                     elif op_type == self._OP_LOOKUP:

@@ -90,6 +90,7 @@ class NixlStorageConfig:
     enable_async_put: bool
     use_direct_io: bool
     path: str
+    use_hugepages: bool
     enable_prog_thread: bool
     sync_mode: Optional[Any]  # nixl_thread_sync_t, None if unsupported
 
@@ -149,6 +150,7 @@ class NixlStorageConfig:
                 len(endpoint_list),
             )
         path = extra_config.get("nixl_path")
+        use_hugepages = extra_config.get("nixl_use_hugepages", False)
         enable_prog_thread = extra_config.get("nixl_enable_prog_thread", True)
         sync_mode_str = extra_config.get("nixl_sync_mode", None)
         if sync_mode_str is not None and not _NIXL_SYNC_MODE_SUPPORTED:
@@ -215,6 +217,7 @@ class NixlStorageConfig:
             enable_async_put=enable_async_put,
             use_direct_io=use_direct_io,
             path=path,
+            use_hugepages=use_hugepages,
             enable_prog_thread=enable_prog_thread,
             sync_mode=sync_mode,
         )
@@ -706,6 +709,7 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         self.progress_lock = threading.RLock()
         self.progress_set: Set[CacheEngineKey] = set()
 
+        self.nixl_config = nixl_config
         self.memory_allocator = self.initialize_allocator(config, metadata)
 
     def initialize_allocator(
@@ -718,15 +722,23 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
             "enable_nixl_storage"
         )
         assert enable_nixl_storage
+
         corrected_device = get_correct_device(
             config.nixl_buffer_device,
             metadata.worker_id,
         )
 
+        self.use_hugepages = self.nixl_config.use_hugepages
+        self.buffer_size = config.nixl_buffer_size
         if corrected_device == "cpu":
-            self.buffer = _allocate_cpu_memory(config.nixl_buffer_size)
+            self.buffer = _allocate_cpu_memory(
+                config.nixl_buffer_size, use_hugepages=self.use_hugepages
+            )
             self.free_pinned_buffer = True
         else:
+            if self.use_hugepages:
+                logger.warning("Hugepages are not supported for GPU memory allocation")
+                self.use_hugepages = False
             base_buffer, self.buffer = _allocate_gpu_memory(
                 config.nixl_buffer_size, corrected_device
             )
@@ -1141,7 +1153,9 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         self.memory_allocator.close()
 
         if self.free_pinned_buffer:
-            _free_cpu_memory(self.buffer)
+            _free_cpu_memory(
+                self.buffer, self.buffer_size, use_hugepages=self.use_hugepages
+            )
 
 
 class NixlDynamicStorageBackend(NixlStorageBackend):
@@ -1862,4 +1876,6 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self.memory_allocator.close()
 
         if self.free_pinned_buffer:
-            _free_cpu_memory(self.buffer)
+            _free_cpu_memory(
+                self.buffer, self.buffer_size, use_hugepages=self.use_hugepages
+            )
