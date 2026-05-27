@@ -194,10 +194,12 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
 
 def test_store_keeps_event_until_future_finishes(fake_adapter):
     """Store requests keep the exported CUDA event alive while pending."""
-    adapter, _send_mock, future = fake_adapter
+    adapter, _send_mock, _future = fake_adapter
     cuda_future = MagicMock(name="cuda_future")
     cuda_future.query.return_value = False
-    future.to_cuda_future.return_value = cuda_future
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_store.return_value = cuda_future
+    adapter.transfer_ctx = transfer_ctx
 
     event = FakeCudaEvent()
     event_ref = weakref.ref(event)
@@ -220,10 +222,12 @@ def test_store_keeps_event_until_future_finishes(fake_adapter):
 
 def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
     """Retrieve requests keep the exported CUDA event alive while pending."""
-    adapter, _send_mock, future = fake_adapter
+    adapter, _send_mock, _future = fake_adapter
     cuda_future = MagicMock(name="cuda_future")
     cuda_future.query.return_value = False
-    future.to_cuda_future.return_value = cuda_future
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_retrieve.return_value = cuda_future
+    adapter.transfer_ctx = transfer_ctx
 
     event = FakeCudaEvent()
     event_ref = weakref.ref(event)
