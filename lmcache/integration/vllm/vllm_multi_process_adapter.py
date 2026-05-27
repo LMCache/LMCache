@@ -480,24 +480,17 @@ class LMCacheMPSchedulerAdapter:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
-        self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
         # Lookup state tracking (multi-server aware, N>=1):
         # - _pending_lookups: request_ids submitted but not yet resolved
         #   (resolved == results from ALL servers have been merged).
-        # - _finished_lookup_results: aggregated chunk count keyed by
-        #   request_id, computed as the min hit across servers so a chunk
-        #   only counts as "hit" when every server has it. Cached so that
-        #   repeated calls to check_lookup_result return the same value
-        #   even after the servers have popped the job (exactly-once).
-        # - _per_server_hits: per-server raw hit counts keyed by request_id,
-        #   kept for debugging and consistency reporting.
-        #
-        # Single-server compatibility: when len(server_urls) == 1, min() over
-        # a single value is a no-op, so the aggregated result is identical to
-        # the legacy single-server behavior -- this class is a drop-in
-        # replacement for the original single-server lookup.
+        # - _per_server_hits: {request_id: {server_url: hit_chunks}}.
+        #   Accumulated across polls; entries are final once written.
+        #   Popped by `cleanup_lookup_result`.
+        # - _finished_lookup_results: aggregated token count keyed by
+        #   request_id (min hit across servers, in tokens). Popped by
+        #   `cleanup_lookup_result`.
 
         # One worker thread per server so all lookups can be fired off at once.
 
@@ -507,10 +500,10 @@ class LMCacheMPSchedulerAdapter:
         )
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
+        self._per_server_hits: dict[str, dict[str, int]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
-        self._per_server_hits: dict[str, dict[str, int]] = {}
 
         # Fetch chunk_size from every server and verify they all agree.
         chunk_sizes: dict[str, int] = {}
@@ -691,11 +684,14 @@ class LMCacheMPSchedulerAdapter:
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         """
-        Check the result of a previously submitted lookup request.
+        Return the number of tokens matched in LMCache for ``request_id``,
+        or ``None`` if the lookup is still in progress on at least one
+        server.
 
-        Sends a QUERY_PREFETCH_STATUS request to the server and blocks
-        until the server responds.  Returns the matched token count
-        when the prefetch is complete, or None if still in progress.
+        On the first poll where every server has reported, the aggregate
+        is written to ``_finished_lookup_results`` and returned. Repeat
+        calls return the cached aggregate verbatim until
+        ``cleanup_lookup_result`` is invoked.
 
         Args:
             request_id: The ID of the lookup request submitted in
@@ -708,7 +704,7 @@ class LMCacheMPSchedulerAdapter:
         """
         if request_id not in self._pending_lookups:
             # No job — either unhealthy at submit time or already cleaned up.
-            # If we have a cached result, return it to handle repeated calls.
+            # Return the cached aggregate if any, otherwise 0.
             return self._finished_lookup_results.get(request_id, 0)
 
         if not self.is_healthy:
@@ -716,9 +712,12 @@ class LMCacheMPSchedulerAdapter:
             return 0
 
         if request_id in self._finished_lookup_results:
-            # Return cached result if the job is already finished
+            # Aggregation already done; return the cached value.
             return self._finished_lookup_results[request_id]
 
+        # Each server is polled at most once per request_id: the server
+        # pops the job after its first non-None reply (re-asking would
+        # return 0, indistinguishable from a true zero-hit).
         def _query_one(url: str) -> tuple[str, int | None]:
             client = self.mq_clients[url]
             try:
@@ -734,21 +733,32 @@ class LMCacheMPSchedulerAdapter:
                     url,
                 )
                 self._health_events[url].clear()
-                return url, 0
+                return url, None
             except Exception as e:
                 logger.error(
                     "QUERY_PREFETCH_STATUS to %s failed: %s", url, e, exc_info=True
                 )
                 self._health_events[url].clear()
-                return url, 0
+                return url, None
 
-        results = list(self._executor.map(_query_one, self._server_urls))
+        # Persistent accumulator for this request. A server present in
+        # the dict has already handed over its final hit count and must
+        # not be polled again; absence means "not yet observed".
+        per_server = self._per_server_hits.setdefault(request_id, {})
+        unresolved_urls = [u for u in self._server_urls if u not in per_server]
 
-        per_server: dict[str, int] = {}
+        if unresolved_urls:
+            results = list(self._executor.map(_query_one, unresolved_urls))
+        else:
+            results = []
+
         for url, r in results:
             if r is None:
-                return None
+                continue
             per_server[url] = int(r)
+
+        if len(per_server) < len(self._server_urls):
+            return None
 
         min_chunks = min(per_server.values())
         max_chunks = max(per_server.values())
@@ -756,10 +766,10 @@ class LMCacheMPSchedulerAdapter:
             logger.warning(
                 "[req=%s] LMCache hit mismatch across servers: %s → take min=%d",
                 request_id,
-                per_server,
+                dict(per_server),
                 min_chunks,
             )
-        self._per_server_hits[request_id] = per_server
+
         token_count = min_chunks * self.chunk_size
         self._finished_lookup_results[request_id] = token_count
         self._pending_lookups.discard(request_id)
