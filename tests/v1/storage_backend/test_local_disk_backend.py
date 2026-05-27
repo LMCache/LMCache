@@ -2,7 +2,6 @@
 # Standard
 from unittest.mock import MagicMock, patch
 import asyncio
-import json
 import os
 import shutil
 import tempfile
@@ -115,6 +114,14 @@ def wait_for_disk_store(
         if time.time() - start > timeout:
             raise TimeoutError(f"Timed out waiting for disk cache entry {key}")
         time.sleep(0.01)
+
+
+def list_manifest_files(path: str) -> list[str]:
+    return [
+        name
+        for name in os.listdir(path)
+        if name.startswith(".lmcache-local-disk-manifest-")
+    ]
 
 
 @pytest.fixture
@@ -247,10 +254,10 @@ class TestLocalDiskBackend:
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
-    def test_manifest_roundtrip_persists_across_restart(
+    def test_contains_recovers_after_restart_using_filename(
         self, temp_disk_path, loop_in_thread, memory_allocator
     ):
-        """Test local disk cache restoration across backend restarts."""
+        """Test local disk cache recovery across backend restarts."""
         config = create_test_config(temp_disk_path)
         metadata = create_test_metadata()
         local_cpu_backend = LocalCPUBackend(
@@ -290,8 +297,10 @@ class TestLocalDiskBackend:
                 metadata=metadata,
             )
             try:
-                assert os.path.exists(backend2.manifest_path)
+                assert key not in backend2.dict
+                assert list_manifest_files(temp_disk_path) == []
                 assert backend2.contains(key)
+                assert key in backend2.dict
                 restored = backend2.get_blocking(key)
                 assert restored is not None
                 assert bytes(restored.byte_array) == expected
@@ -301,10 +310,10 @@ class TestLocalDiskBackend:
         finally:
             local_cpu_backend.memory_allocator.close()
 
-    def test_close_skips_manifest_write_when_cache_dir_missing(
-        self, temp_disk_path, loop_in_thread, memory_allocator, capsys
+    def test_batched_async_contains_recovers_consecutive_files(
+        self, temp_disk_path, loop_in_thread, memory_allocator
     ):
-        """Test close() skips manifest persistence after cache dir deletion."""
+        """Test batched lookup lazily recovers files until the first miss."""
         config = create_test_config(temp_disk_path)
         metadata = create_test_metadata()
         local_cpu_backend = LocalCPUBackend(
@@ -320,19 +329,109 @@ class TestLocalDiskBackend:
             dst_device="cpu",
             metadata=metadata,
         )
+        key1 = create_test_key(21)
+        key2 = create_test_key(22)
+        missing_key = create_test_key(23)
+        memory_obj1 = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=1,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        memory_obj2 = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=2,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        memory_obj1_released = False
+        memory_obj2_released = False
 
         try:
-            shutil.rmtree(temp_disk_path)
-            backend.close()
-            captured = capsys.readouterr()
-            assert "Failed to persist local disk manifest" not in captured.err
+            with open(backend._key_to_path(key1), "wb") as f:
+                f.write(memory_obj1.byte_array)
+            with open(backend._key_to_path(key2), "wb") as f:
+                f.write(memory_obj2.byte_array)
+            memory_obj1.ref_count_down()
+            memory_obj1_released = True
+            memory_obj2.ref_count_down()
+            memory_obj2_released = True
+
+            assert len(backend.dict) == 0
+            future = asyncio.run_coroutine_threadsafe(
+                backend.batched_async_contains(
+                    "lookup",
+                    [key1, key2, missing_key],
+                ),
+                loop_in_thread,
+            )
+            hits = future.result(timeout=5)
+
+            assert hits == 2
+            assert key1 in backend.dict
+            assert key2 in backend.dict
+            assert missing_key not in backend.dict
+            assert list_manifest_files(temp_disk_path) == []
         finally:
+            backend.close()
+            if not memory_obj1_released:
+                memory_obj1.ref_count_down()
+            if not memory_obj2_released:
+                memory_obj2.ref_count_down()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_contains_handles_file_disappearing_before_getsize(
+        self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
+    ):
+        """Test stale files racing with lazy recovery degrade to a miss."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(24)
+        path = backend._key_to_path(key)
+
+        try:
+            with open(path, "wb") as f:
+                f.write(b"stale")
+
+            original_getsize = local_disk_backend_module.os.path.getsize
+
+            def disappearing_getsize(target_path: str) -> int:
+                if target_path == path:
+                    os.remove(path)
+                    raise FileNotFoundError(path)
+                return original_getsize(target_path)
+
+            monkeypatch.setattr(
+                local_disk_backend_module.os.path,
+                "getsize",
+                disappearing_getsize,
+            )
+
+            assert not backend.contains(key)
+            assert key not in backend.dict
+        finally:
+            backend.close()
             local_cpu_backend.memory_allocator.close()
 
     def test_get_blocking_prunes_missing_file(
         self, temp_disk_path, loop_in_thread, memory_allocator
     ):
-        """Test missing disk files degrade to a cache miss and manifest prune."""
+        """Test missing disk files degrade to a cache miss."""
         config = create_test_config(temp_disk_path)
         metadata = create_test_metadata()
         local_cpu_backend = LocalCPUBackend(
@@ -367,18 +466,17 @@ class TestLocalDiskBackend:
 
             assert backend.get_blocking(key) is None
             assert key not in backend.dict
-
-            with open(backend.manifest_path, encoding="utf-8") as f:
-                manifest_data = json.load(f)
-            assert key.to_string() not in manifest_data["entries"]
+            assert backend.current_cache_size == 0
+            assert backend.usage == 0
+            assert list_manifest_files(temp_disk_path) == []
         finally:
             backend.close()
             local_cpu_backend.memory_allocator.close()
 
-    def test_manifest_write_cleans_temp_file_when_close_fails(
-        self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
+    def test_no_manifest_file_created_for_put_remove_close(
+        self, temp_disk_path, loop_in_thread, memory_allocator
     ):
-        """Test close() removes manifest temp files when persistence fails."""
+        """Test local disk operations do not persist a manifest file."""
         config = create_test_config(temp_disk_path)
         metadata = create_test_metadata()
         local_cpu_backend = LocalCPUBackend(
@@ -387,7 +485,7 @@ class TestLocalDiskBackend:
             dst_device="cpu",
             memory_allocator=memory_allocator,
         )
-        local_disk_backend = LocalDiskBackend(
+        backend = LocalDiskBackend(
             config=config,
             loop=loop_in_thread,
             local_cpu_backend=local_cpu_backend,
@@ -402,96 +500,16 @@ class TestLocalDiskBackend:
             fill_value=3,
             fmt=MemoryFormat.KV_2LTD,
         )
-        created_tmp_paths: list[str] = []
-
-        def failing_dump(obj, fp, *args, **kwargs):
-            created_tmp_paths.append(fp.name)
-            fp.write("{")
-            fp.flush()
-            raise OSError("disk full")
-
-        monkeypatch.setattr(local_disk_backend_module.json, "dump", failing_dump)
 
         try:
-            local_disk_backend.submit_put_task(key, memory_obj)
-            wait_for_disk_store(local_disk_backend, key)
+            backend.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend, key)
             memory_obj.ref_count_down()
-            local_disk_backend.close()
-
-            assert created_tmp_paths
-            assert not os.path.exists(created_tmp_paths[0])
-            assert not os.path.exists(local_disk_backend.manifest_path)
+            assert backend.remove(key)
+            backend.close()
+            assert list_manifest_files(temp_disk_path) == []
         finally:
-            local_disk_backend.close()
-            local_cpu_backend.memory_allocator.close()
-
-    def test_manifest_restore_skips_usage_recompute_stat_race(
-        self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
-    ):
-        """Test restart restore tolerates getsize racing with file removal."""
-        config = create_test_config(temp_disk_path)
-        metadata = create_test_metadata()
-        local_cpu_backend = LocalCPUBackend(
-            config=config,
-            metadata=metadata,
-            dst_device="cpu",
-            memory_allocator=memory_allocator,
-        )
-        backend1 = LocalDiskBackend(
-            config=config,
-            loop=loop_in_thread,
-            local_cpu_backend=local_cpu_backend,
-            dst_device="cpu",
-            metadata=metadata,
-        )
-        key = create_test_key(32)
-        memory_obj = create_memory_obj(
-            local_cpu_backend,
-            metadata.get_shapes()[0],
-            metadata.get_dtypes()[0],
-            fill_value=4,
-            fmt=MemoryFormat.KV_2LTD,
-        )
-
-        try:
-            backend1.submit_put_task(key, memory_obj)
-            wait_for_disk_store(backend1, key)
-            memory_obj.ref_count_down()
-            backend1.close()
-
-            path = os.path.join(
-                temp_disk_path, key.to_string().replace("/", "-") + ".pt"
-            )
-            original_getsize = local_disk_backend_module.os.path.getsize
-            getsize_calls = 0
-
-            def flaky_getsize(target_path: str) -> int:
-                nonlocal getsize_calls
-                if target_path == path:
-                    getsize_calls += 1
-                    if getsize_calls >= 2:
-                        raise FileNotFoundError(target_path)
-                return original_getsize(target_path)
-
-            monkeypatch.setattr(
-                local_disk_backend_module.os.path,
-                "getsize",
-                flaky_getsize,
-            )
-
-            backend2 = LocalDiskBackend(
-                config=config,
-                loop=loop_in_thread,
-                local_cpu_backend=local_cpu_backend,
-                dst_device="cpu",
-                metadata=metadata,
-            )
-            try:
-                assert backend2.contains(key)
-                assert backend2.usage == 0
-            finally:
-                backend2.close()
-        finally:
+            backend.close()
             local_cpu_backend.memory_allocator.close()
 
 
