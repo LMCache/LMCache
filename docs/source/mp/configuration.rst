@@ -48,10 +48,17 @@ Source: ``lmcache/v1/multiprocess/config.py``
        Choices: ``builtin``, ``sha256_cbor``, ``blake3``.
    * - ``--engine-type``
      - ``default``
-     - Cache engine backend type.
-       ``default`` uses MPCacheEngine; ``blend`` uses BlendEngineV2
-       for cross-request KV reuse.
+     - Cache engine backend type. ``default`` uses standard prefix
+       caching; ``blend`` enables CacheBlend cross-request KV reuse
+       (composes a ``BlendModule`` into the engine and requires
+       ``--transfer-mode gpu``).
        Choices: ``default``, ``blend``.
+   * - ``--transfer-mode``
+     - ``gpu``
+     - KV transfer mode. ``gpu`` uses GPU-based IPC transfer
+       (``STORE``/``RETRIEVE``); ``non_gpu`` uses non-GPU-based transfer
+       (``PREPARE``/``COMMIT``). ``--engine-type blend`` requires ``gpu``.
+       Choices: ``gpu``, ``non_gpu``.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to

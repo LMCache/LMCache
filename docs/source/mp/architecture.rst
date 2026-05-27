@@ -42,18 +42,23 @@ High-Level Architecture
 Server Variants
 ---------------
 
-All three server entry points share the same ``MPCacheEngine`` and
+Both server entry points share the same ``MPCacheEngine`` and
 ``StorageManager`` core.
 
-**``server.py``** -- The default ZMQ-only server.  Creates an ``MPCacheEngine``
-and a ``MessageQueueServer``, registers handlers for all core
-``RequestType`` values, and blocks in a keep-alive loop.
+**``server.py``** -- The default ZMQ-only server.  ``MPCacheEngine`` is a
+compositor that assembles pluggable ``EngineModule`` instances
+(``LookupModule``, ``ManagementModule``, and a ``GPUTransferModule`` or
+``NonGPUTransferModule`` depending on ``--transfer-mode``).
+``run_cache_server()`` registers every module's handlers with a
+``MessageQueueServer`` and blocks in a keep-alive loop.
 
-**``blend_server_v2.py``** -- Extends ``MPCacheEngine`` with ``BlendEngineV2``,
-which adds CacheBlend operations (``CB_REGISTER_KV_CACHE``,
+**CacheBlend** -- Passing ``--engine-type blend`` composes an additional
+``BlendModule`` (``lmcache/v1/multiprocess/modules/blend.py``) into the
+engine, adding CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 ``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
-``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL``).  Enables non-prefix KV
-cache reuse across document paragraphs.
+``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL``) for non-prefix KV cache
+reuse across document paragraphs.  It is no longer a separate server entry
+point and requires ``--transfer-mode gpu``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
@@ -181,7 +186,7 @@ Each config module exposes a composable triple:
       # which internally calls add_l2_adapters_args(parser)
     add_observability_args(parser)    # from mp_observability/config.py
 
-Both ``blend_server_v2.py`` and ``http_server.py`` reuse this pattern, adding
+``http_server.py`` reuses this pattern, adding
 ``add_http_frontend_args()`` for the HTTP variant.
 
 Distributed Storage
@@ -390,8 +395,11 @@ Adding a new request type
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``, or
    ``blend_v2``) and add the request name to that module's ``REQUEST_NAMES``.
-3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``).
-4. Register the handler in ``run_cache_server()`` via ``add_handler_helper()``.
+3. Implement the handler on the relevant ``EngineModule``
+   (e.g. ``LookupModule``, ``GPUTransferModule``, or ``BlendModule``) and
+   return a ``HandlerSpec`` for it from that module's ``get_handlers()``.
+4. The ``MPCacheEngine`` compositor collects every module's handlers in
+   ``run_cache_server()`` and registers them via ``add_handler_helper()``.
 
 Key Source Files
 ----------------
@@ -403,11 +411,16 @@ Key Source Files
    * - File
      - Purpose
    * - ``lmcache/v1/multiprocess/server.py``
-     - MPCacheEngine + ZMQ server entry point
+     - ``MPCacheEngine`` compositor + ZMQ server entry point
+   * - ``lmcache/v1/multiprocess/engine_module.py``
+     - ``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType``
+   * - ``lmcache/v1/multiprocess/modules/``
+     - Pluggable engine modules (lookup, management, gpu_transfer,
+       non_gpu_transfer, blend)
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
-   * - ``lmcache/v1/multiprocess/blend_server_v2.py``
-     - BlendEngineV2 (extends MPCacheEngine)
+   * - ``lmcache/v1/multiprocess/modules/blend.py``
+     - ``BlendModule`` (CacheBlend, enabled via ``--engine-type blend``)
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``
