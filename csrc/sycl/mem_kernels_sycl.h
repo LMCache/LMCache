@@ -126,19 +126,19 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
 
 // SGLang MHA single-layer transfer using separate K and V paged tensors.
 void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
-                  torch::Tensor& sgl_key_cache,
-                  torch::Tensor& sgl_value_cache,
-                  torch::Tensor& slot_mapping,
-                  const TransferDirection direction,
-                  const bool token_major = false);
+                                  torch::Tensor& sgl_key_cache,
+                                  torch::Tensor& sgl_value_cache,
+                                  torch::Tensor& slot_mapping,
+                                  const TransferDirection direction,
+                                  const bool token_major = false);
 
 // SGLang unilateral multi-layer transfer.
 // For MLA formats this collapses to multi_layer_kv_transfer.
 void multi_layer_kv_transfer_unilateral(
-  torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
-  const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
-  const int page_buffer_size, const TransferDirection direction,
-  const GPUKVFormat gpu_kv_format);
+    torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
+    const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const GPUKVFormat gpu_kv_format);
 
 // Asynchronous memory copy between host and device buffers.
 // The `direction` parameter is retained for API compatibility but is unused:

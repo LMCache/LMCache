@@ -679,7 +679,8 @@ void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
                                   const bool token_major) {
   int64_t* lmc_key_value_cache_ptr =
       get_kernel_ptr<int64_t, torch::Tensor>(lmc_key_value_cache);
-  int64_t* sgl_key_cache_ptr = get_kernel_ptr<int64_t, torch::Tensor>(sgl_key_cache);
+  int64_t* sgl_key_cache_ptr =
+      get_kernel_ptr<int64_t, torch::Tensor>(sgl_key_cache);
   int64_t* sgl_value_cache_ptr =
       get_kernel_ptr<int64_t, torch::Tensor>(sgl_value_cache);
   const int64_t* slot_mapping_ptr =
@@ -735,10 +736,11 @@ void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
 // multi_layer_kv_transfer_unilateral -- helper template
 // ---------------------------------------------------------------------------
 template <typename T, bool IS_D2H>
-void submit_multi_layer_kernel_unilateral(
-    sycl::queue& queue, T* key_value_ptr, T** page_buffer_ptrs,
-    const int64_t* slot_mapping_ptr, int scalars_per_token, int num_tokens,
-    int num_layers, int wg_size) {
+void submit_multi_layer_kernel_unilateral(sycl::queue& queue, T* key_value_ptr,
+                                          T** page_buffer_ptrs,
+                                          const int64_t* slot_mapping_ptr,
+                                          int scalars_per_token, int num_tokens,
+                                          int num_layers, int wg_size) {
   if (num_tokens <= 0 || num_layers <= 0) return;
 
   sycl::range<3> global_range(
@@ -838,11 +840,11 @@ void multi_layer_kv_transfer_unilateral(
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 
-#define LAUNCH_MULTI_LAYER_KV_TRANSFER_UNILATERAL(type)                      \
-  do {                                                                        \
-    multi_layer_kv_transfer_unilateral_templated<type>(                       \
-        key_value, key_value_ptrs, slot_mapping, paged_memory_device,        \
-        direction);                                                           \
+#define LAUNCH_MULTI_LAYER_KV_TRANSFER_UNILATERAL(type)               \
+  do {                                                                \
+    multi_layer_kv_transfer_unilateral_templated<type>(               \
+        key_value, key_value_ptrs, slot_mapping, paged_memory_device, \
+        direction);                                                   \
   } while (0)
   if (copy_size % 8 == 0) {
     LAUNCH_MULTI_LAYER_KV_TRANSFER_UNILATERAL(int64_t);

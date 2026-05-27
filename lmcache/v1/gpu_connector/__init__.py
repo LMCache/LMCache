@@ -94,8 +94,8 @@ def CreateGPUConnector(
         if torch_device_type == "xpu":
             # First Party
             from lmcache.v1.gpu_connector.xpu_connectors import (
-                SGLangXPUConnector,
                 SGLangLayerwiseXPUConnector,
+                SGLangXPUConnector,
             )
             if config.use_layerwise:
                 return SGLangLayerwiseXPUConnector(

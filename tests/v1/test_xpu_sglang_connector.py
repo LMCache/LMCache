@@ -43,8 +43,9 @@ def _pack_slot_mapping(
     )
 
 
-def _check_kv_equal(kvcaches_src, kvcaches_dst, slot_mapping, num_heads, head_size,
-                    use_mla):
+def _check_kv_equal(
+    kvcaches_src, kvcaches_dst, slot_mapping, num_heads, head_size, use_mla
+):
     """Dispatch to the correct comparison helper based on MLA mode."""
     if use_mla:
         check_paged_kv_cache_equal_with_mla(
@@ -52,8 +53,11 @@ def _check_kv_equal(kvcaches_src, kvcaches_dst, slot_mapping, num_heads, head_si
         )
     else:
         check_sglang_paged_kv_cache_equal(
-            kvcaches_src, kvcaches_dst, slot_mapping,
-            num_heads=num_heads, head_size=head_size,
+            kvcaches_src,
+            kvcaches_dst,
+            slot_mapping,
+            num_heads=num_heads,
+            head_size=head_size,
         )
 
 
@@ -75,6 +79,7 @@ def _as_flat_sglang_mha(kvcaches):
 
 def _flat_to_nested_sglang_mha(kvcaches_flat, num_layers: int):
     return [kvcaches_flat[:num_layers], kvcaches_flat[num_layers:]]
+
 
 # --------------------------------------------------------------------------- #
 # Non-layerwise (SGLangXPUConnector)
@@ -157,8 +162,12 @@ def test_sglang_xpu_connector_roundtrip(use_xpu: bool, use_mla: bool):
         )
 
         _check_kv_equal(
-            kvcaches, kvcaches_dst, slot_mapping,
-            num_heads=num_heads, head_size=head_size, use_mla=use_mla,
+            kvcaches,
+            kvcaches_dst,
+            slot_mapping,
+            num_heads=num_heads,
+            head_size=head_size,
+            use_mla=use_mla,
         )
     finally:
         memobj.ref_count_down()
@@ -248,8 +257,12 @@ def test_sglang_xpu_connector_roundtrip_multi_chunk(use_xpu: bool, use_mla: bool
             )
 
         _check_kv_equal(
-            kvcaches, kvcaches_dst, packed_slot_mapping,
-            num_heads=num_heads, head_size=head_size, use_mla=use_mla,
+            kvcaches,
+            kvcaches_dst,
+            packed_slot_mapping,
+            num_heads=num_heads,
+            head_size=head_size,
+            use_mla=use_mla,
         )
     finally:
         for _, _, memobj in memobjs:
@@ -298,7 +311,9 @@ def test_sglang_xpu_connector_roundtrip_flat_mha_kvcaches(use_xpu: bool):
     )
 
     pin_alloc = PinMemoryAllocator(size=1024 * 1024 * 64)
-    memobj = pin_alloc.allocate(conn.get_shape(num_tokens), torch.bfloat16, MemoryFormat.KV_2LTD)
+    memobj = pin_alloc.allocate(
+        conn.get_shape(num_tokens), torch.bfloat16, MemoryFormat.KV_2LTD
+    )
 
     try:
         conn.from_gpu(
@@ -341,6 +356,7 @@ def test_sglang_xpu_connector_roundtrip_flat_mha_kvcaches(use_xpu: bool):
     finally:
         memobj.ref_count_down()
         pin_alloc.close()
+
 
 # --------------------------------------------------------------------------- #
 # Layerwise (SGLangLayerwiseXPUConnector)
@@ -441,8 +457,12 @@ def test_sglang_xpu_connector_roundtrip_layerwise(use_xpu: bool, use_mla: bool):
         next(gen2)  # final yield
 
         _check_kv_equal(
-            kvcaches, kvcaches_dst, slot_mapping,
-            num_heads=num_heads, head_size=head_size, use_mla=use_mla,
+            kvcaches,
+            kvcaches_dst,
+            slot_mapping,
+            num_heads=num_heads,
+            head_size=head_size,
+            use_mla=use_mla,
         )
     finally:
         for layer in memobjs_by_layer:
@@ -453,7 +473,9 @@ def test_sglang_xpu_connector_roundtrip_layerwise(use_xpu: bool, use_mla: bool):
 
 @pytest.mark.parametrize("use_xpu", [False, True])
 @pytest.mark.parametrize("use_mla", [False, True])
-def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(use_xpu: bool, use_mla: bool):
+def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(
+    use_xpu: bool, use_mla: bool
+):
     """Layerwise multi-chunk roundtrip."""
     _skip_if_no_xpu()
     device = torch.device("xpu:0")
@@ -550,8 +572,12 @@ def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(use_xpu: bool, use
         next(consumer)
 
         _check_kv_equal(
-            kvcaches, kvcaches_dst, packed_slot_mapping,
-            num_heads=num_heads, head_size=head_size, use_mla=use_mla,
+            kvcaches,
+            kvcaches_dst,
+            packed_slot_mapping,
+            num_heads=num_heads,
+            head_size=head_size,
+            use_mla=use_mla,
         )
     finally:
         for layer in memobjs_by_layer:

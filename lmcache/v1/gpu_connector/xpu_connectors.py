@@ -1266,7 +1266,9 @@ class SGLangXPUConnector(GPUConnectorInterface):
 
         if use_gpu:
             if "chunk_size" not in kwargs:
-                raise ValueError("chunk_size should be provided to create a GPU buffer.")
+                raise ValueError(
+                    "chunk_size should be provided to create a GPU buffer."
+                )
             if "device" not in kwargs:
                 raise ValueError("device should be provided to create a GPU buffer.")
             shape = self.get_shape(kwargs["chunk_size"])
