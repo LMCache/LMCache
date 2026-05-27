@@ -33,6 +33,10 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
+from lmcache.integration.vllm.hma_utils import (
+    build_engine_group_layout_hints,
+    get_num_engine_groups,
+)
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
@@ -567,8 +571,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.vllm_block_size = vllm_config.cache_config.block_size
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        kv_cache_groups = getattr(kv_cache_config, "kv_cache_groups", None)
-        self._num_engine_groups = len(kv_cache_groups) if kv_cache_groups else 1
+        self._num_engine_groups = get_num_engine_groups(kv_cache_config)
 
     @property
     def role(self) -> KVConnectorRole:
@@ -600,34 +603,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_caches: dictionary of layer names, kv cache
         """
         logger.info("Registering kv caches!")
-        extra_layout_hints: dict[str, object] | None = None
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        kv_cache_groups = getattr(kv_cache_config, "kv_cache_groups", None)
-        layer_to_pos = {name: idx for idx, name in enumerate(kv_caches)}
-        if kv_cache_groups and layer_to_pos:
-            per_layer_engine_group_idx = [0] * len(layer_to_pos)
-            matched_layers: set[str] = set()
-            for engine_group_idx, group in enumerate(kv_cache_groups):
-                for name in group.layer_names:
-                    pos = layer_to_pos.get(name)
-                    if pos is not None:
-                        per_layer_engine_group_idx[pos] = engine_group_idx
-                        matched_layers.add(name)
-            if matched_layers:
-                missing_layers = set(layer_to_pos) - matched_layers
-                if missing_layers:
-                    raise ValueError(
-                        "vLLM kv_cache_groups did not cover registered KV "
-                        f"cache layers: {sorted(missing_layers)[:8]}"
-                    )
-                extra_layout_hints = {
-                    "per_layer_engine_group_idx": per_layer_engine_group_idx
-                }
-            elif len(kv_cache_groups) > 1:
-                raise ValueError(
-                    "Unable to map registered KV cache layers to vLLM "
-                    "kv_cache_groups for HMA."
-                )
+        extra_layout_hints = build_engine_group_layout_hints(
+            kv_cache_config, kv_caches
+        )
         self.worker_adapter.register_kv_caches(
             kv_caches, extra_layout_hints=extra_layout_hints
         )
