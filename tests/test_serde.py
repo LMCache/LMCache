@@ -4,16 +4,19 @@ import pytest
 import torch
 
 # First Party
-from lmcache import torch_dev, torch_device_type
+from lmcache import torch_device_type
 from lmcache.storage_backend.serde.cachegen_basics import CacheGenEncoderOutput
 from lmcache.storage_backend.serde.cachegen_decoder import CacheGenDeserializer
 from lmcache.storage_backend.serde.cachegen_encoder import CacheGenSerializer
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
 
-# CacheGen has hand-written CUDA and SYCL kernels.  Skip when neither GPU
-# backend is available (e.g. CPU-only CI).
-_GPU_AVAILABLE = torch_dev.is_available()
+# CacheGen has hand-written CUDA and SYCL kernels only; gate the test on
+# those backends explicitly (whitelist), so HPU / CPU-only CI / future
+# backends without a CacheGen kernel are skipped automatically.
+# torch_device_type is set to "cuda"/"xpu" only after is_available() passes
+# in lmcache.__init__, so no extra availability check is needed here.
+_GPU_AVAILABLE = torch_device_type == "cuda" or torch_device_type == "xpu"
 
 
 def generate_kv_cache(num_tokens, device):
