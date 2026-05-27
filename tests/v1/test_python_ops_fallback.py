@@ -50,6 +50,7 @@ def _build_backend_params() -> list:
     - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
     - cuda_py_ops: uses lmcache.python_ops_fallback with GPU visible
     - cpy_py_ops: uses lmcache.python_ops_fallback with GPU mocked away
+    - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
     - xpu_py_ops: uses lmcache.python_ops_fallback with XPU visible
     """
     params = []
@@ -78,6 +79,16 @@ def _build_backend_params() -> list:
             )
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
+        try:
+            # First Party
+            import lmcache.xpu_ops as xpu_sycl_ops
+
+            params.append(
+                pytest.param(("xpu_sycl_ops", xpu_sycl_ops, "xpu"), id="xpu_sycl_ops")
+            )
+        except ImportError:
+            pass
+
         params.append(pytest.param(("xpu_py_ops", _py_ops, "xpu"), id="xpu_py_ops"))
 
     return params
