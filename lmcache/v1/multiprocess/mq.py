@@ -8,7 +8,6 @@ import inspect
 import itertools
 import queue
 import threading
-import uuid
 
 # Third Party
 import msgspec
@@ -61,23 +60,6 @@ def unwrap_request_payloads(
         for payload, cls in zip(b_payloads, payload_clss, strict=False)
     ]
     return decoded_payloads
-
-
-def prepare_internal_push_pull_sockets(
-    ctx: zmq.Context,
-) -> tuple[zmq.Socket, zmq.Socket]:
-    """Create 2 inproc socket pair for the zmq-poller compatible task
-    queue
-
-    Returns:
-        tuple[zmq.Socket, zmq.Socket]: The (push_socket, pull_socket)
-    """
-    inproc_url = "inproc://mq_internal_push_pull/" + str(uuid.uuid4())
-    push_socket = ctx.socket(zmq.PUSH)
-    pull_socket = ctx.socket(zmq.PULL)
-    pull_socket.bind(inproc_url)
-    push_socket.connect(inproc_url)
-    return push_socket, pull_socket
 
 
 _SPECIAL_ENCODER_DECODERS = {
