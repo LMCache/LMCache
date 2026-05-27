@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from copy import deepcopy
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import os
 import random
 import shlex
@@ -1912,8 +1912,6 @@ def test_compress_decompress_unpin_not_pinned() -> None:
     This prevents negative pin counts and double unpin warnings on backends like
     Remote/S3.
     """
-    from unittest.mock import patch
-
     # Create mock memory objects
     mock_mem_obj = MagicMock()
     mock_mem_obj.is_pinned = False  # Not pinned (e.g. from Remote/S3 backend)
@@ -2006,8 +2004,6 @@ def test_compress_decompress_unpin_not_pinned() -> None:
 
 def test_compress_decompress_unpin_when_pinned() -> None:
     """Verify that compress and decompress call unpin() if is_pinned is True"""
-    from unittest.mock import patch
-
     # Create mock memory objects
     mock_mem_obj = MagicMock()
     mock_mem_obj.is_pinned = True
