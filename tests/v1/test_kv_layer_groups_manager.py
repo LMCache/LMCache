@@ -4,6 +4,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     KVLayerGroupsManager,
@@ -20,6 +21,7 @@ def _build_manager(
     tensors: list[torch.Tensor],
     *,
     num_blocks: int,
+    layout_hints: LayoutHints | None = None,
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
@@ -35,6 +37,7 @@ def _build_manager(
         tensors,
         gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
+        layout_hints=layout_hints,
     )
 
 
@@ -72,6 +75,41 @@ class TestKVLayerGroupsManager:
         assert group.layer_indices == [0, 1, 2]
         assert group.shape_desc.nl == 3
         assert group.shape_desc.nh == 8
+        assert group.engine_group_idx == 0
+
+    def test_build_splits_same_shape_by_engine_group_idx(self):
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(4)
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            layout_hints={"per_layer_engine_group_idx": [0, 1, 0, 1]},
+        )
+
+        assert len(manager.kv_layer_groups) == 2
+        groups_by_engine_group_idx = {
+            group.engine_group_idx: group for group in manager.kv_layer_groups
+        }
+        assert groups_by_engine_group_idx[0].layer_indices == [0, 2]
+        assert groups_by_engine_group_idx[1].layer_indices == [1, 3]
+
+    def test_build_rejects_bad_engine_group_idx_hint(self):
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(2)
+        ]
+        with pytest.raises(ValueError, match="length"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_engine_group_idx": [0]},
+            )
+        with pytest.raises(ValueError, match="negative"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                layout_hints={"per_layer_engine_group_idx": [0, -1]},
+            )
 
     def test_build_different_shapes(self):
         tensors = [

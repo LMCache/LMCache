@@ -377,6 +377,36 @@ class GPUCacheContext:
         buf.copy_(cpu_tensor, non_blocking=True)
         return buf
 
+    def stage_engine_group_block_ids(
+        self, block_ids_per_engine_group: list[list[int]]
+    ) -> list[torch.Tensor]:
+        """Stage block IDs for each engine-side KV cache group.
+
+        The outer list is indexed by ``engine_group_idx``. All inner
+        lists are packed into the shared GPU buffer once, and this returns one
+        non-overlapping tensor view per engine group.
+        """
+        offsets = [0]
+        flat: array.array = array.array("l")
+        for engine_group_block_ids in block_ids_per_engine_group:
+            flat.extend(engine_group_block_ids)
+            offsets.append(len(flat))
+
+        total = offsets[-1]
+        if total > self.block_ids_buffer_.shape[0]:
+            raise ValueError(
+                f"block ID total {total} exceeds the pre-allocated buffer "
+                f"size {self.block_ids_buffer_.shape[0]}"
+            )
+        if total:
+            cpu_tensor = torch.frombuffer(flat, dtype=torch.long)
+            self.block_ids_buffer_[:total].copy_(cpu_tensor, non_blocking=True)
+
+        return [
+            self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
+            for i in range(len(block_ids_per_engine_group))
+        ]
+
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0
     ) -> torch.Size:

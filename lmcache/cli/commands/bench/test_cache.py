@@ -356,7 +356,7 @@ def _send_store(
     num_tokens = key.end - key.start
     num_blocks = num_tokens // block_size
     block_ids = list(range(block_offset, block_offset + num_blocks))
-    payloads = [key, _INSTANCE_ID, block_ids, _make_event_handle()]
+    payloads = [key, _INSTANCE_ID, [block_ids], _make_event_handle()]
     result = _call(client, RequestType.STORE, payloads)
     if result is _TIMEOUT:
         return "timeout"
@@ -378,7 +378,7 @@ def _send_retrieve(
     payloads = [
         key,
         _INSTANCE_ID,
-        block_ids,
+        [block_ids],
         _make_event_handle(),
         0,  # skip_first_n_tokens
     ]

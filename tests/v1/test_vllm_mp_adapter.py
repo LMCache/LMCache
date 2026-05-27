@@ -144,6 +144,7 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
 
     assert transfer_ctx.submit_store.called
     assert transfer_ctx.submit_store.call_args.kwargs == {}
+    assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
     assert adapter.store_futures["req-1"] is fake_future
 
 
@@ -170,4 +171,18 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
 
     assert transfer_ctx.submit_retrieve.called
     assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
+    assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
+
+
+def test_load_store_op_accepts_per_group_block_ids():
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[[0, 1], [10, 11]],
+        start=0,
+        end=4,
+    )
+
+    assert op.block_ids_per_engine_group == [[0, 1], [10, 11]]
+    assert op.flat_block_ids == [0, 1, 10, 11]
+    assert len(op) == 2

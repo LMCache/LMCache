@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, cast
 import enum
 import os
 import threading
@@ -395,8 +395,14 @@ class LoadStoreOp:
     token_ids: list[int]
     """Token IDs for the load/store operation"""
 
-    block_ids: list[int]
-    """Block ids for the load/store operation"""
+    block_ids: list[int] | list[list[int]]
+    """Block IDs for the load/store operation.
+
+    New HMA-capable callers pass ``list[list[int]]`` indexed by
+    ``engine_group_idx``. Legacy single-group callers may still pass the
+    prior flat ``list[int]`` shape; adapter submit paths normalize it before
+    sending the request to the server.
+    """
 
     start: int = 0
     """Start token index"""
@@ -408,8 +414,27 @@ class LoadStoreOp:
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
+    @property
+    def block_ids_per_engine_group(self) -> list[list[int]]:
+        """Return block IDs in the per-engine-group wire shape."""
+        if not self.block_ids:
+            return [[]]
+        first = self.block_ids[0]
+        if isinstance(first, list):
+            return cast(list[list[int]], self.block_ids)
+        return [cast(list[int], self.block_ids)]
+
+    @property
+    def flat_block_ids(self) -> list[int]:
+        """Return all block IDs flattened for engine-group-blind error paths."""
+        return [
+            block_id
+            for engine_group_block_ids in self.block_ids_per_engine_group
+            for block_id in engine_group_block_ids
+        ]
+
     def __len__(self) -> int:
-        return len(self.block_ids)
+        return len(self.block_ids_per_engine_group[0])
 
 
 StoreResult = bool
@@ -834,6 +859,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self.extra_layout_hints: dict[str, object] | None = None
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -940,13 +966,19 @@ class LMCacheMPWorkerAdapter:
             == 0
         )
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        extra_layout_hints: dict[str, object] | None = None,
+    ) -> None:
         """
         Register the kv caches with LMCache server.
 
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
+            extra_layout_hints: Optional engine-provided hints to merge into
+                the vLLM layout hints before registration.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -954,6 +986,7 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
+        self.extra_layout_hints = extra_layout_hints
         self._send_register_kv_caches_request(kv_caches)
 
     def _send_register_kv_caches_request(
@@ -977,6 +1010,8 @@ class LMCacheMPWorkerAdapter:
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
         )
+        if self.extra_layout_hints:
+            layout_hints.update(self.extra_layout_hints)  # type: ignore[typeddict-item]
         try:
             self.transfer_ctx.register(
                 self.instance_id,
@@ -1088,7 +1123,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            op.block_ids,
+            op.block_ids_per_engine_group,
             event,
             self.blocks_in_chunk,
         )
@@ -1115,7 +1150,7 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            self.error_block_ids.update(op.block_ids)
+            self.error_block_ids.update(op.flat_block_ids)
             return
 
         assert op.token_ids is not None
@@ -1136,12 +1171,12 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            op.block_ids,
+            op.block_ids_per_engine_group,
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
-        self.retrieve_futures[request_id] = (future, list(op.block_ids))
+        self.retrieve_futures[request_id] = (future, op.flat_block_ids)
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(

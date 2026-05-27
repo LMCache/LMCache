@@ -448,13 +448,13 @@ def test_mq_unregister_kv_cache_multiple_clients():
 def test_mq_store():
     """
     Test MessageQueue with STORE request type.
-    STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    STORE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]],
     event_ipc_handle: bytes) and returns (bytes, bool).
     """
     # Create test key
     key = create_cache_key(0)
     gpu_id = 0
-    gpu_block_ids = [0, 1, 2]
+    gpu_block_ids = [[0, 1, 2]]
     test_handle = b"\x00" * 64
 
     # Create test helper and register handler
@@ -473,13 +473,13 @@ def test_mq_store():
 def test_mq_retrieve():
     """
     Test MessageQueue with RETRIEVE request type.
-    RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[int],
+    RETRIEVE takes (key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]],
     event_ipc_handle: bytes) and returns (bytes, bool).
     """
     # Create test key
     key = create_cache_key(0)
     gpu_id = 0
-    gpu_block_ids = [0, 1, 2]
+    gpu_block_ids = [[0, 1, 2]]
     test_handle = b"\x00" * 64
 
     # Create test helper and register handler

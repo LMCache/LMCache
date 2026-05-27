@@ -196,7 +196,7 @@ def store_keys(
         block_ids = gpu_block_ids[start:end]
         future = client.submit_request(
             RequestType.STORE,
-            [key, instance_id, block_ids, event.ipc_handle()],
+            [key, instance_id, [block_ids], event.ipc_handle()],
             get_response_class(RequestType.STORE),
         )
         result = future.to_cuda_future().result(timeout=timeout)
@@ -219,7 +219,7 @@ def retrieve_keys(
         block_ids = gpu_block_ids[start:end]
         future = client.submit_request(
             RequestType.RETRIEVE,
-            [key, instance_id, block_ids, event.ipc_handle(), 0],
+            [key, instance_id, [block_ids], event.ipc_handle(), 0],
             get_response_class(RequestType.RETRIEVE),
         )
         result = future.to_cuda_future().result(timeout=timeout)

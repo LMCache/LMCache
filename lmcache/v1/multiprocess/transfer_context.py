@@ -39,6 +39,13 @@ class IPCEvent(Protocol):
 SendRequest = Callable[[MessageQueueClient, RequestType, list[object]], MessagingFuture]
 
 
+def _single_engine_group_block_ids(block_ids: list[list[int]]) -> list[int]:
+    """Return the flat block-id list for transports without HMA support."""
+    if len(block_ids) != 1:
+        raise RuntimeError("non-GPU transfer does not support hybrid KV cache groups")
+    return block_ids[0]
+
+
 class TransferContext(ABC):
     """Abstract transport layer for worker-side KV transfer.
 
@@ -87,7 +94,7 @@ class TransferContext(ABC):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -98,7 +105,7 @@ class TransferContext(ABC):
             key: LMCache key object for the store range.
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store.
+            block_ids: vLLM block IDs to store, indexed by KV cache group id.
             event: Synchronization event object.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
 
@@ -116,7 +123,7 @@ class TransferContext(ABC):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -128,7 +135,7 @@ class TransferContext(ABC):
             key: LMCache key object for the retrieve range.
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to retrieve into.
+            block_ids: vLLM block IDs to retrieve into, indexed by KV cache group id.
             event: Synchronization event object.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
@@ -189,7 +196,7 @@ class HandleTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -210,7 +217,7 @@ class HandleTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -306,7 +313,7 @@ class DataTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         _event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -320,7 +327,7 @@ class DataTransferContext(TransferContext):
         out_buffers = self._non_gpu_context.prepare_store(key, instance_id)
         cpu_chunks = gather_paged_kv_to_cpu(
             kv_caches,
-            block_ids,
+            _single_engine_group_block_ids(block_ids),
             blocks_in_chunk,
             layout_hints=self._layout_hints,
             gpu_kv_format=self._gpu_kv_format,
@@ -338,7 +345,7 @@ class DataTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         _event: IPCEvent,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -355,7 +362,7 @@ class DataTransferContext(TransferContext):
             try:
                 scatter_cpu_to_paged_kv(
                     kv_caches,
-                    block_ids,
+                    _single_engine_group_block_ids(block_ids),
                     src_buffers,
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,
