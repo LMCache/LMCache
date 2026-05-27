@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, Protocol
 import enum
 import os
 import threading
@@ -105,6 +105,10 @@ def _resolve_extra_config(
             )
         resolved[item.name] = value
     return resolved
+
+
+class _IpcEvent(Protocol):
+    def ipc_handle(self) -> Any: ...
 
 
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
@@ -846,8 +850,8 @@ class LMCacheMPWorkerAdapter:
         ] = {}
         # The IPC handle is not enough by itself; CUDA needs the exporting
         # event object to stay alive until the consumer is done with it.
-        self.store_events: dict[str, torch.cuda.Event] = {}
-        self.retrieve_events: dict[str, torch.cuda.Event] = {}
+        self.store_events: dict[str, _IpcEvent] = {}
+        self.retrieve_events: dict[str, _IpcEvent] = {}
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
@@ -1056,7 +1060,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: Any,
+        event: _IpcEvent,
         cache_salt: str = "",
     ):
         """
@@ -1104,7 +1108,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: Any,
+        event: _IpcEvent,
         cache_salt: str = "",
     ):
         """
@@ -1154,7 +1158,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: Any,
+        event: _IpcEvent,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1180,7 +1184,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: Any,
+        event: _IpcEvent,
         cache_salts: list[str] | None = None,
     ):
         """

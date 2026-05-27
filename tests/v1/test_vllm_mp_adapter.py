@@ -54,7 +54,7 @@ def fake_adapter(monkeypatch):
 
     class FakeHeartbeatThread:
         def __init__(self, *args: object, **kwargs: object) -> None:
-            self.recover_callback = None
+            self.recover_callback: object | None = None
 
         def register_recover_callback(self, callback: object) -> None:
             self.recover_callback = callback
