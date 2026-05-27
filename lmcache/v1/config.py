@@ -706,8 +706,25 @@ def _validate_config(self):
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
         assert self.extra_config.get("nixl_pool_size") is not None
-        assert self.nixl_buffer_size is not None
         assert self.nixl_buffer_device is not None
+        if self.nixl_buffer_device == "cpu":
+            # CPU mode shares LocalCPUBackend's pinned pool; nixl_buffer_size
+            # has no effect there. Reject the combo so users don't silently
+            # carry a stale GPU-mode value into a CPU-mode deployment.
+            if self.nixl_buffer_size is not None:
+                raise ValueError(
+                    "nixl_buffer_size must not be set when "
+                    "nixl_buffer_device='cpu'. In CPU mode NIXL shares "
+                    "LocalCPUBackend's pinned pool, which is sized by "
+                    "max_local_cpu_size."
+                )
+            if self.max_local_cpu_size <= 0:
+                raise ValueError(
+                    "nixl_buffer_device='cpu' requires max_local_cpu_size > 0 "
+                    "(LocalCPUBackend's pinned pool is the NIXL staging buffer)."
+                )
+        else:
+            assert self.nixl_buffer_size is not None
 
     return self
 

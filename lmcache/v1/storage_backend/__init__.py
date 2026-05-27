@@ -156,7 +156,11 @@ def CreateStorageBackends(
     if metadata.role == "scheduler":
         # For scheduler role, local_cpu_backend is None
         pass
-    elif not config.enable_pd or config.local_cpu:
+    elif (
+        not config.enable_pd
+        or config.local_cpu
+        or (enable_nixl_storage and config.nixl_buffer_device == "cpu")
+    ):
         if "LocalCPUBackend" in _skip:
             pass  # Skipped — already exists
         elif config.max_local_cpu_size > 0:
@@ -191,7 +195,9 @@ def CreateStorageBackends(
         )
 
         storage_backends["NixlStorageBackend"] = (
-            NixlStorageBackend.CreateNixlStorageBackend(config, loop, metadata)
+            NixlStorageBackend.CreateNixlStorageBackend(
+                config, loop, metadata, local_cpu_backend
+            )
         )
 
     if (

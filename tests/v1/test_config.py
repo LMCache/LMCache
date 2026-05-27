@@ -882,3 +882,47 @@ class TestControllerConfigValidation:
         )
         # All controller fields are None by default; should not raise
         config.validate()
+
+
+class TestNixlBufferDeviceCpuValidation:
+    """Validate the rejection of nixl_buffer_size in CPU mode and the
+    max_local_cpu_size requirement (see review item #1)."""
+
+    @staticmethod
+    def _nixl_cpu_defaults(**overrides: Any) -> LMCacheEngineConfig:
+        config = LMCacheEngineConfig.from_defaults()
+        config.nixl_buffer_device = "cpu"
+        config.extra_config = {
+            "enable_nixl_storage": True,
+            "nixl_backend": "POSIX",
+            "nixl_pool_size": 2,
+            "nixl_path": "/tmp/nixl/cache",
+        }
+        for key, value in overrides.items():
+            setattr(config, key, value)
+        return config
+
+    def test_cpu_mode_rejects_nixl_buffer_size(self):
+        config = self._nixl_cpu_defaults(nixl_buffer_size=2**30)
+        with pytest.raises(ValueError, match="nixl_buffer_size must not be set"):
+            config.validate()
+
+    def test_cpu_mode_requires_max_local_cpu_size_positive(self):
+        config = self._nixl_cpu_defaults(max_local_cpu_size=0.0)
+        with pytest.raises(ValueError, match="max_local_cpu_size > 0"):
+            config.validate()
+
+    def test_cpu_mode_valid_when_buffer_size_unset(self):
+        config = self._nixl_cpu_defaults()
+        config.validate()  # Should not raise
+
+    def test_gpu_mode_still_requires_nixl_buffer_size(self):
+        config = self._nixl_cpu_defaults(nixl_buffer_device="cuda")
+        with pytest.raises(AssertionError):
+            config.validate()
+
+    def test_gpu_mode_accepts_nixl_buffer_size(self):
+        config = self._nixl_cpu_defaults(
+            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+        )
+        config.validate()  # Should not raise

@@ -124,7 +124,7 @@ def _make_obj_config(
 ) -> LMCacheEngineConfig:
     """Create a minimal OBJ-backend config for endpoint-list tests."""
     config = LMCacheEngineConfig()
-    config.nixl_buffer_size = 2**30  # 1 GB
+    # CPU mode: nixl_buffer_size is rejected; the pool comes from LocalCPUBackend.
     config.nixl_buffer_device = "cpu"
     config.extra_config = {
         "enable_nixl_storage": True,
