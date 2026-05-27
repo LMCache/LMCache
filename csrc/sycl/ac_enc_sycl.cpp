@@ -275,6 +275,26 @@ void encode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& input_sym,
     throw std::runtime_error("encode_fast_new_xpu: all tensors must be on XPU");
   }
 
+  TORCH_CHECK(cdf.scalar_type() == at::kShort,
+              "encode_fast_new_xpu: cdf must be int16");
+  TORCH_CHECK(input_sym.scalar_type() == at::kByte ||
+                  input_sym.scalar_type() == at::kChar,
+              "encode_fast_new_xpu: input_sym must be uint8 or int8");
+  TORCH_CHECK(output_buffer.scalar_type() == at::kByte,
+              "encode_fast_new_xpu: output_buffer must be uint8");
+  TORCH_CHECK(output_lengths.scalar_type() == at::kInt,
+              "encode_fast_new_xpu: output_lengths must be int32");
+
+  TORCH_CHECK(cdf.dim() == 3,
+              "encode_fast_new_xpu: cdf must be 3-D [nlayers, nchannels, lp]");
+  TORCH_CHECK(input_sym.dim() == 3,
+              "encode_fast_new_xpu: input_sym must be 3-D [nlayers, ntokens, "
+              "nchannels]");
+  TORCH_CHECK(output_buffer.dim() == 3,
+              "encode_fast_new_xpu: output_buffer must be 3-D");
+  TORCH_CHECK(output_lengths.dim() == 2,
+              "encode_fast_new_xpu: output_lengths must be 2-D");
+
   const auto cdf_shape = cdf.sizes();
   const auto input_shape = input_sym.sizes();
   const auto output_shape = output_buffer.sizes();
@@ -283,6 +303,8 @@ void encode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& input_sym,
   const int nchannels = static_cast<int>(cdf_shape[1]);
   const int lp = static_cast<int>(cdf_shape[2]);
   const int ntokens = static_cast<int>(input_shape[1]);
+
+  TORCH_CHECK(lp >= 2, "encode_fast_new_xpu: cdf last dim (lp) must be >= 2");
 
   if (ntokens > MAX_TOKENS_PER_THREAD) {
     throw std::runtime_error(

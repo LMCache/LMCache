@@ -404,12 +404,45 @@ void decode_fast_new_xpu(const at::Tensor& cdf, const at::Tensor& bytestreams,
       !lengths.device().is_xpu() || !output.device().is_xpu()) {
     throw std::runtime_error("decode_fast_new_xpu: tensors must be on XPU");
   }
+
+  TORCH_CHECK(cdf.scalar_type() == at::kShort,
+              "decode_fast_new_xpu: cdf must be int16");
+  TORCH_CHECK(bytestreams.scalar_type() == at::kByte,
+              "decode_fast_new_xpu: bytestreams must be uint8");
+  TORCH_CHECK(lengths.scalar_type() == at::kInt,
+              "decode_fast_new_xpu: lengths must be int32");
+  TORCH_CHECK(
+      output.scalar_type() == at::kByte || output.scalar_type() == at::kChar,
+      "decode_fast_new_xpu: output must be uint8 or int8");
+
+  TORCH_CHECK(cdf.dim() == 3,
+              "decode_fast_new_xpu: cdf must be 3-D [nlayers, nchannels, lp]");
+  TORCH_CHECK(bytestreams.dim() == 3,
+              "decode_fast_new_xpu: bytestreams must be 3-D "
+              "[nlayers, nchannels, OUTPUT_BUFFER_LENGTH_PER_THREAD]");
+  TORCH_CHECK(lengths.dim() == 2,
+              "decode_fast_new_xpu: lengths must be 2-D [nlayers, nchannels]");
+  TORCH_CHECK(
+      output.dim() == 3,
+      "decode_fast_new_xpu: output must be 3-D [nlayers, ntokens, nchannels]");
+
+  TORCH_CHECK(bytestreams.size(2) == OUTPUT_BUFFER_LENGTH_PER_THREAD,
+              "decode_fast_new_xpu: bytestreams last dim must equal "
+              "OUTPUT_BUFFER_LENGTH_PER_THREAD (256)");
+
+  TORCH_CHECK(lengths.numel() == 0 || lengths.max().item<int32_t>() <=
+                                          OUTPUT_BUFFER_LENGTH_PER_THREAD,
+              "decode_fast_new_xpu: per-channel length exceeds "
+              "OUTPUT_BUFFER_LENGTH_PER_THREAD (256)");
+
   const auto cdf_shape = cdf.sizes();
   const auto out_shape = output.sizes();
   const int nlayers = static_cast<int>(cdf_shape[0]);
   const int nchannels = static_cast<int>(cdf_shape[1]);
   const int lp = static_cast<int>(cdf_shape[2]);
   const int ntokens = static_cast<int>(out_shape[1]);
+
+  TORCH_CHECK(lp >= 2, "decode_fast_new_xpu: cdf last dim (lp) must be >= 2");
 
   if (ntokens > MAX_TOKENS_PER_THREAD) {
     throw std::runtime_error(
@@ -452,12 +485,36 @@ void decode_fast_prefsum_xpu(const at::Tensor& cdf,
       !lengths_prefsum.device().is_xpu() || !output.device().is_xpu()) {
     throw std::runtime_error("decode_fast_prefsum_xpu: tensors must be on XPU");
   }
+
+  TORCH_CHECK(cdf.scalar_type() == at::kShort,
+              "decode_fast_prefsum_xpu: cdf must be int16");
+  TORCH_CHECK(bytestreams.scalar_type() == at::kByte,
+              "decode_fast_prefsum_xpu: bytestreams must be uint8");
+  TORCH_CHECK(lengths_prefsum.scalar_type() == at::kLong,
+              "decode_fast_prefsum_xpu: lengths_prefsum must be int64");
+  TORCH_CHECK(
+      output.scalar_type() == at::kByte || output.scalar_type() == at::kChar,
+      "decode_fast_prefsum_xpu: output must be uint8 or int8");
+
+  TORCH_CHECK(
+      cdf.dim() == 3,
+      "decode_fast_prefsum_xpu: cdf must be 3-D [nlayers, nchannels, lp]");
+  TORCH_CHECK(lengths_prefsum.dim() == 2,
+              "decode_fast_prefsum_xpu: lengths_prefsum must be 2-D "
+              "[nlayers, nchannels]");
+  TORCH_CHECK(output.dim() == 3,
+              "decode_fast_prefsum_xpu: output must be 3-D "
+              "[nlayers, ntokens, nchannels]");
+
   const auto cdf_shape = cdf.sizes();
   const auto out_shape = output.sizes();
   const int nlayers = static_cast<int>(cdf_shape[0]);
   const int nchannels = static_cast<int>(cdf_shape[1]);
   const int lp = static_cast<int>(cdf_shape[2]);
   const int ntokens = static_cast<int>(out_shape[1]);
+
+  TORCH_CHECK(lp >= 2,
+              "decode_fast_prefsum_xpu: cdf last dim (lp) must be >= 2");
 
   if (ntokens > MAX_TOKENS_PER_THREAD) {
     throw std::runtime_error(
