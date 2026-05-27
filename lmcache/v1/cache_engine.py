@@ -869,18 +869,23 @@ class LMCacheEngine:
                     == len(memory_objs_for_togpu)
                 ):
                     memory_objs_for_togpu = self._leader_gpu_substitute_objs
-                self.gpu_connector.batched_to_gpu(
-                    memory_objs_for_togpu, list(starts), list(ends), **kwargs
-                )
-                # Release GPU substitute references so the temporary buffers
-                # can be freed; original memory_objs in reordered_chunks are
-                # still tracked for the cleanup loop below.
-                if (
-                    self.save_only_first_rank
-                    and self.metadata.is_first_rank()
-                    and hasattr(self, "_leader_gpu_substitute_objs")
-                ):
-                    self._leader_gpu_substitute_objs = []
+                try:
+                    self.gpu_connector.batched_to_gpu(
+                        memory_objs_for_togpu, list(starts), list(ends), **kwargs
+                    )
+                finally:
+                    # Release GPU substitute references so the temporary
+                    # buffers can be freed; original memory_objs in
+                    # reordered_chunks are still tracked for the cleanup
+                    # loop below. Done in `finally` so a raise from
+                    # batched_to_gpu (e.g. CUDA OOM) does not leave the
+                    # references dangling on this long-lived engine.
+                    if (
+                        self.save_only_first_rank
+                        and self.metadata.is_first_rank()
+                        and hasattr(self, "_leader_gpu_substitute_objs")
+                    ):
+                        self._leader_gpu_substitute_objs = []
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
