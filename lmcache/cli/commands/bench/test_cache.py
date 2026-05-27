@@ -66,6 +66,7 @@ try:
         check_interprocess_event_support,
         compress_slot_mapping,
     )
+    from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
     from lmcache.v1.kv_layer_groups import (
         DTYPE_MAP,
         KVLayerGroupInfo,
@@ -293,6 +294,7 @@ def _send_register_kv_cache(
         world_size,
         EngineType.VLLM,
         hints,
+        LMCKVCacheGroups().serialize(),
     ]
     result = _call(client, RequestType.REGISTER_KV_CACHE, payloads)
     return result is not _TIMEOUT

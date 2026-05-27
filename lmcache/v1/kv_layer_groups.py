@@ -14,6 +14,7 @@ import lmcache.c_ops as lmc_ops
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.utils import DiscoverableKVCache, LayoutHints
+    from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 
 logger = init_logger(__name__)
 
@@ -154,6 +155,7 @@ class KVLayerGroupsManager:
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_blocks: int,
         layout_hints: "LayoutHints | None" = None,
+        lmc_kv_cache_groups: "LMCKVCacheGroups | None" = None,
         lmcache_logical_chunk_size: int = 256,
     ) -> None:
         """Partition layers into groups keyed by
@@ -181,13 +183,12 @@ class KVLayerGroupsManager:
                 ``inference_engine_logical_block_size`` (logical tokens
                 per inference-engine block) from it to derive each
                 group's ``compress_ratio`` and ``physical_chunk_size``.
-                It also accepts ``per_layer_engine_group_idx`` to keep
-                layers from different engine block-ID spaces in
-                separate LMCache groups.
-                ``None`` (or a hints dict without that key — e.g.
-                non-vLLM engines, or vLLM deployments with no mixed
-                compression) means every group is treated as
-                non-compressed (``compress_ratio == 1``) and engine group 0.
+                ``None`` means every group is treated as non-compressed
+                (``compress_ratio == 1``).
+            lmc_kv_cache_groups: LMCache-owned engine KV cache group
+                metadata. When present, it is used to keep layers from
+                different engine block-ID spaces in separate LMCache
+                transfer groups.
             lmcache_logical_chunk_size: Logical tokens per LMCache chunk
                 (one logical token = one inference-engine token).
                 Together with ``compress_ratio`` it determines each
@@ -223,27 +224,11 @@ class KVLayerGroupsManager:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
 
-        per_layer_engine_group_idx: list[int] | None = None
-        if layout_hints is not None:
-            engine_group_hint = layout_hints.get("per_layer_engine_group_idx")
-            if engine_group_hint is not None:
-                if len(engine_group_hint) != num_layers:
-                    raise ValueError(
-                        "per_layer_engine_group_idx length "
-                        f"({len(engine_group_hint)}) does not match "
-                        f"num_layers ({num_layers})"
-                    )
-                bad = [
-                    i for i, engine_group_idx in enumerate(engine_group_hint)
-                    if engine_group_idx < 0
-                ]
-                if bad:
-                    raise ValueError(
-                        "per_layer_engine_group_idx has invalid negative "
-                        f"entries at positions {bad[:8]}"
-                        + ("..." if len(bad) > 8 else "")
-                    )
-                per_layer_engine_group_idx = list(engine_group_hint)
+        per_layer_engine_group_idx = (
+            lmc_kv_cache_groups.per_layer_engine_group_indices(num_layers)
+            if lmc_kv_cache_groups is not None
+            else None
+        )
 
         groups_dict = self._group_layers_by_identity(
             kv_caches, gpu_kv_format, num_layers, per_layer_engine_group_idx

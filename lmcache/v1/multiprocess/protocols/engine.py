@@ -85,9 +85,10 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - engine_type: EngineType - Which serving engine produced the
         #     caches (vLLM, SGLang, ...). Drives format detection.
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
+        #   - lmc_kv_cache_groups: str - Serialized LMCKVCacheGroups.
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int, EngineType, LayoutHints],
+            payload_classes=[int, KVCache, str, int, EngineType, LayoutHints, str],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

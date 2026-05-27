@@ -9,6 +9,7 @@ and passed between processes during multiprocessing tests.
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord, KVCache
 from lmcache.v1.multiprocess.protocol import KeyType
 
@@ -37,6 +38,7 @@ def register_kv_cache_handler(
     world_size: int,
     engine_type: EngineType,
     layout_hints: LayoutHints,
+    serialized_lmc_kv_cache_groups: str,
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -51,6 +53,7 @@ def register_kv_cache_handler(
             ``layout_hints["inference_engine_logical_block_size"]``
             carries the logical tokens-per-engine-block (previously a
             standalone argument).
+        serialized_lmc_kv_cache_groups: Serialized LMCKVCacheGroups.
 
     Returns:
         None
@@ -79,6 +82,11 @@ def register_kv_cache_handler(
         "Expected layout_hints['inference_engine_logical_block_size'] to be int, got "
         f"{type(ie_logical_block_size)}"
     )
+    assert isinstance(serialized_lmc_kv_cache_groups, str), (
+        "Expected serialized_lmc_kv_cache_groups to be str, got "
+        f"{type(serialized_lmc_kv_cache_groups)}"
+    )
+    LMCKVCacheGroups.deserialize(serialized_lmc_kv_cache_groups)
     # No return value (returns None implicitly)
 
 

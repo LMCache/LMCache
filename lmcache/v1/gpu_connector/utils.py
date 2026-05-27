@@ -81,11 +81,6 @@ class LayoutHints(TypedDict, total=False):
             KV layer groups compress multiple logical tokens into a
             single physical slot
             (``shape_desc.bs < inference_engine_logical_block_size``).
-        per_layer_engine_group_idx: Optional length-``num_layers`` list
-            of engine-side KV cache group indices. Engines with hybrid KV
-            cache groups use one block-ID space per group; physically
-            identical layers from different engine groups must not share an
-            LMCache transfer group.
     """
 
     kv_layout: Literal["NHD", "HND"]
@@ -93,7 +88,6 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     head_dim: int
     inference_engine_logical_block_size: int
-    per_layer_engine_group_idx: list[int]
 
 
 def attempt_permute_to_contiguous_view(

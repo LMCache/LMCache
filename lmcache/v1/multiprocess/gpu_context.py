@@ -36,6 +36,7 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
+from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
@@ -73,6 +74,7 @@ class GPUCacheContext:
         kv_caches: KVCache,
         lmcache_logical_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
+        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
@@ -92,6 +94,7 @@ class GPUCacheContext:
             gpu_kv_format=self.gpu_kv_format_,
             num_blocks=self.num_blocks_,
             layout_hints=layout_hints,
+            lmc_kv_cache_groups=lmc_kv_cache_groups,
             lmcache_logical_chunk_size=lmcache_logical_chunk_size,
         )
 

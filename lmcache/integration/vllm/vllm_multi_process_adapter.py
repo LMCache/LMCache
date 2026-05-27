@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
 )
+from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
@@ -859,7 +860,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self.extra_layout_hints: dict[str, object] | None = None
+        self.lmc_kv_cache_groups: LMCKVCacheGroups | None = None
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -969,7 +970,7 @@ class LMCacheMPWorkerAdapter:
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
-        extra_layout_hints: dict[str, object] | None = None,
+        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -977,8 +978,7 @@ class LMCacheMPWorkerAdapter:
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
-            extra_layout_hints: Optional engine-provided hints to merge into
-                the vLLM layout hints before registration.
+            lmc_kv_cache_groups: LMCache-owned engine KV cache group metadata.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -986,7 +986,7 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
-        self.extra_layout_hints = extra_layout_hints
+        self.lmc_kv_cache_groups = lmc_kv_cache_groups
         self._send_register_kv_caches_request(kv_caches)
 
     def _send_register_kv_caches_request(
@@ -1010,8 +1010,6 @@ class LMCacheMPWorkerAdapter:
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
         )
-        if self.extra_layout_hints:
-            layout_hints.update(self.extra_layout_hints)  # type: ignore[typeddict-item]
         try:
             self.transfer_ctx.register(
                 self.instance_id,
@@ -1023,6 +1021,7 @@ class LMCacheMPWorkerAdapter:
                 self._mq_timeout,
                 send_request=send_lmcache_request,
                 layout_hints=layout_hints,
+                lmc_kv_cache_groups=self.lmc_kv_cache_groups,
             )
         except TimeoutError:
             raise ConnectionError(

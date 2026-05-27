@@ -30,10 +30,9 @@ def test_vllm_kv_cache_groups_conversion_preserves_group_layers():
                 MockKVCacheGroup(["layer.0", "layer.2"]),
                 MockKVCacheGroup(["layer.1", "layer.3"]),
             ]
-        )
+        ),
+        registered_layer_names=("layer.0", "layer.1", "layer.2", "layer.3"),
     )
 
     assert groups.num_engine_kv_cache_groups == 2
-    assert groups.to_layout_hints(("layer.0", "layer.1", "layer.2", "layer.3")) == {
-        "per_layer_engine_group_idx": [0, 1, 0, 1]
-    }
+    assert groups.per_layer_engine_group_indices(4) == [0, 1, 0, 1]

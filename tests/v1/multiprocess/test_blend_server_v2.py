@@ -34,6 +34,7 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType
+from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -834,6 +835,7 @@ def registered_instance(
             1,
             EngineType.VLLM,
             {"inference_engine_logical_block_size": 16},
+            LMCKVCacheGroups().serialize(),
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )

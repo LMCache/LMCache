@@ -602,12 +602,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        lmc_kv_cache_groups = lmcache_kv_cache_groups_from_vllm(kv_cache_config)
-        extra_layout_hints = lmc_kv_cache_groups.to_layout_hints(
-            tuple(kv_caches.keys())
+        lmc_kv_cache_groups = lmcache_kv_cache_groups_from_vllm(
+            kv_cache_config,
+            tuple(kv_caches.keys()),
         )
         self.worker_adapter.register_kv_caches(
-            kv_caches, extra_layout_hints=extra_layout_hints
+            kv_caches, lmc_kv_cache_groups=lmc_kv_cache_groups
         )
         return
 

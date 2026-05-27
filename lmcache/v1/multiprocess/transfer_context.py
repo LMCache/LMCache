@@ -13,6 +13,7 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
+from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -67,6 +68,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -80,6 +82,7 @@ class TransferContext(ABC):
             mq_timeout: Timeout in seconds for synchronous request wait.
             send_request: Request sender callable used to issue MQ requests.
             layout_hints: Optional inference-engine-provided layout hints.
+            lmc_kv_cache_groups: LMCache-owned engine KV cache group metadata.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -170,6 +173,7 @@ class HandleTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
     ) -> None:
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
@@ -186,6 +190,7 @@ class HandleTransferContext(TransferContext):
                 world_size,
                 EngineType.VLLM,
                 layout_hints,
+                (lmc_kv_cache_groups or LMCKVCacheGroups()).serialize(),
             ],
         )
         future.result(timeout=mq_timeout)
@@ -257,6 +262,7 @@ class DataTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
     ) -> None:
         # TODO: inference_engine_logical_block_size is currently used by
         # DeepSeek V4 on the CUDA path. The non-CUDA path is yet to be

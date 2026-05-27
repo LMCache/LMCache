@@ -34,6 +34,7 @@ import zmq
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, check_interprocess_event_support
+from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     RawCudaIPCWrapper,
@@ -368,6 +369,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                 self._world_size,
                 EngineType.TRTLLM,
                 layout_hints,
+                LMCKVCacheGroups().serialize(),
             ],
         )
         try:

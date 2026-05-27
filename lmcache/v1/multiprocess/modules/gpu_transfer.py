@@ -24,6 +24,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -229,6 +230,7 @@ class GPUTransferModule:
         world_size: int,
         engine_type: EngineType,
         layout_hints: LayoutHints,
+        serialized_lmc_kv_cache_groups: str,
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -242,6 +244,7 @@ class GPUTransferModule:
                 Forwarded to GPUCacheContext for format detection.
             layout_hints: See LayoutHints.  Forwarded to
                 GPUCacheContext for GPU KV format detection.
+            serialized_lmc_kv_cache_groups: Serialized LMCKVCacheGroups.
         """
         if instance_id in self._gpu_contexts:
             logger.warning(
@@ -251,10 +254,14 @@ class GPUTransferModule:
             )
             return
 
+        lmc_kv_cache_groups = LMCKVCacheGroups.deserialize(
+            serialized_lmc_kv_cache_groups
+        )
         gpu_context = GPUCacheContext(
             kv_caches,
             self._ctx.chunk_size,
             layout_hints=layout_hints or None,
+            lmc_kv_cache_groups=lmc_kv_cache_groups,
             engine_type=engine_type,
         )
         self._gpu_contexts[instance_id] = GPUContextEntry(

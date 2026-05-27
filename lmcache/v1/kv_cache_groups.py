@@ -12,8 +12,10 @@ belongs in the corresponding ``lmcache.integration.<engine>`` package.
 """
 
 # Standard
-from collections.abc import Iterable, Sequence
+import json
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,27 @@ class LMCKVCacheGroup:
 
     layer_names: tuple[str, ...]
     """Layer names assigned to this engine KV cache group."""
+
+    layer_indices: tuple[int, ...] = ()
+    """Registered KV tensor indices assigned to this engine KV cache group."""
+
+    def to_serializable(self) -> list[Any]:
+        return [
+            self.engine_kv_cache_group_id,
+            list(self.layer_names),
+            list(self.layer_indices),
+        ]
+
+    @classmethod
+    def from_serializable(cls, payload: list[Any]) -> "LMCKVCacheGroup":
+        if len(payload) != 3:
+            raise ValueError(f"Invalid LMCKVCacheGroup payload: {payload}")
+        engine_kv_cache_group_id, layer_names, layer_indices = payload
+        return cls(
+            engine_kv_cache_group_id=int(engine_kv_cache_group_id),
+            layer_names=tuple(str(name) for name in layer_names),
+            layer_indices=tuple(int(idx) for idx in layer_indices),
+        )
 
 
 @dataclass(frozen=True)
@@ -47,6 +70,27 @@ class LMCKVCacheGroups:
             )
         return cls(groups_tuple)
 
+    def serialize(self) -> str:
+        """Serialize to a stable JSON string for ZMQ transport."""
+        payload = {
+            "version": 1,
+            "groups": [group.to_serializable() for group in self.groups],
+        }
+        return json.dumps(payload, separators=(",", ":"))
+
+    @classmethod
+    def deserialize(cls, serialized: str | None) -> "LMCKVCacheGroups":
+        """Deserialize the JSON string produced by :meth:`serialize`."""
+        if not serialized:
+            return cls()
+        payload = json.loads(serialized)
+        if payload.get("version") != 1:
+            raise ValueError(f"Unsupported LMCKVCacheGroups payload: {payload}")
+        return cls.from_groups(
+            LMCKVCacheGroup.from_serializable(group)
+            for group in payload.get("groups", [])
+        )
+
     @property
     def num_engine_kv_cache_groups(self) -> int:
         """Number of engine block-id lists expected on each transfer request."""
@@ -54,37 +98,39 @@ class LMCKVCacheGroups:
             return 1
         return max(group.engine_kv_cache_group_id for group in self.groups) + 1
 
-    def to_layout_hints(
+    def per_layer_engine_group_indices(
         self,
-        registered_layer_names: Sequence[str],
-    ) -> dict[str, object] | None:
-        """Build layout hints for the current registered KV cache order."""
-        if not self.groups or not registered_layer_names:
+        num_registered_layers: int,
+    ) -> list[int] | None:
+        """Return engine group index per registered KV tensor."""
+        if not self.groups or num_registered_layers == 0:
             return None
 
-        layer_to_pos = {name: idx for idx, name in enumerate(registered_layer_names)}
-        per_layer_engine_group_idx = [0] * len(layer_to_pos)
-        matched_layers: set[str] = set()
+        per_layer_engine_group_idx = [0] * num_registered_layers
+        matched_indices: set[int] = set()
 
         for group in self.groups:
-            for layer_name in group.layer_names:
-                pos = layer_to_pos.get(layer_name)
-                if pos is not None:
-                    per_layer_engine_group_idx[pos] = group.engine_kv_cache_group_id
-                    matched_layers.add(layer_name)
+            for layer_idx in group.layer_indices:
+                if layer_idx < 0 or layer_idx >= num_registered_layers:
+                    raise ValueError(
+                        f"Layer index {layer_idx} is outside registered layer "
+                        f"range [0, {num_registered_layers})"
+                    )
+                per_layer_engine_group_idx[layer_idx] = group.engine_kv_cache_group_id
+                matched_indices.add(layer_idx)
 
-        if matched_layers:
-            missing_layers = set(layer_to_pos) - matched_layers
-            if missing_layers:
+        if matched_indices:
+            missing_indices = set(range(num_registered_layers)) - matched_indices
+            if missing_indices:
                 raise ValueError(
-                    "Engine KV cache groups did not cover registered KV cache "
-                    f"layers: {sorted(missing_layers)[:8]}"
+                    "Engine KV cache groups did not cover registered KV "
+                    f"cache layer indices: {sorted(missing_indices)[:8]}"
                 )
-            return {"per_layer_engine_group_idx": per_layer_engine_group_idx}
+            return per_layer_engine_group_idx
 
         if self.num_engine_kv_cache_groups > 1:
             raise ValueError(
-                "Unable to map registered KV cache layers to engine KV cache "
+                "Unable to map registered KV cache tensors to engine KV cache "
                 "groups for HMA."
             )
 
