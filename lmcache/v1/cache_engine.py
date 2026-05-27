@@ -1277,6 +1277,12 @@ class LMCacheEngine:
         if search_range is None:
             search_range = self.retrieve_locations
 
+        # When layerwise is enabled, store_layer writes per-layer keys
+        # (LayerCacheEngineKey, chunk_hash + layer_id). Async lookup must
+        # split each chunk key into num_layers per-layer keys so the
+        # storage backend hot_cache lookups match the same key type.
+        keys_per_chunk = self.num_layers if self.use_layerwise else 1
+
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -1285,12 +1291,20 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            keys.append(key)
+            if self.use_layerwise:
+                keys.extend(key.split_layers(self.num_layers))
+            else:
+                keys.append(key)
             cum_chunk_lengths.append(end)
 
         asyncio.run_coroutine_threadsafe(
             self.storage_manager.async_lookup_and_prefetch(
-                lookup_id, keys, cum_chunk_lengths, search_range, pin
+                lookup_id,
+                keys,
+                cum_chunk_lengths,
+                search_range,
+                pin,
+                keys_per_chunk=keys_per_chunk,
             ),
             self.storage_manager.loop,
         )
