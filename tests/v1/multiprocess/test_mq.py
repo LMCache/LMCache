@@ -637,6 +637,51 @@ def test_shared_loop_lifecycle():
     assert ClientPollingLoop._instance is None
 
 
+def test_shared_loop_dispatch():
+    """
+    Test that the shared polling loop correctly dispatches responses
+    to multiple clients connected to the same server.
+
+    Server and clients run in the same process (different threads),
+    so both clients share one ClientPollingLoop.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.mq import ClientPollingLoop
+
+    server_url = "tcp://127.0.0.1:16020"
+    context = zmq.Context.instance()
+
+    # Start server in-process
+    server = MessageQueueServer(server_url, context)
+    add_handler_helper(server, RequestType.NOOP, test_mq_handler_helpers.noop_handler)
+    server.start()
+
+    try:
+        # Create two clients sharing the same polling loop
+        client_a = MessageQueueClient(server_url, context)
+        client_b = MessageQueueClient(server_url, context)
+
+        loop = ClientPollingLoop._instance
+        assert loop is not None
+        assert loop._ref_count == 2
+
+        # Both clients submit requests concurrently
+        futures_a = [client_a.submit_request(RequestType.NOOP, []) for _ in range(5)]
+        futures_b = [client_b.submit_request(RequestType.NOOP, []) for _ in range(5)]
+
+        # All futures should resolve with the correct response
+        for future in futures_a:
+            assert future.result(timeout=5) == "NOOP_OK"
+        for future in futures_b:
+            assert future.result(timeout=5) == "NOOP_OK"
+
+        client_a.close()
+        client_b.close()
+        assert ClientPollingLoop._instance is None
+    finally:
+        server.close()
+
+
 def test_shared_loop_recreate():
     """
     Test that closing all clients and creating new ones starts a fresh loop.
