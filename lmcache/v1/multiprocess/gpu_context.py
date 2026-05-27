@@ -377,10 +377,10 @@ class GPUCacheContext:
         buf.copy_(cpu_tensor, non_blocking=True)
         return buf
 
-    def stage_engine_group_block_ids(
+    def copy_engine_group_block_ids_to_gpu(
         self, block_ids_per_engine_group: list[list[int]]
     ) -> list[torch.Tensor]:
-        """Stage block IDs for each engine-side KV cache group.
+        """Copy block IDs for each engine-side KV cache group to GPU.
 
         The outer list is indexed by ``engine_group_idx``. All inner
         lists are packed into the shared GPU buffer once, and this returns one

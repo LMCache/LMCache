@@ -342,8 +342,8 @@ class GPUTransferModule:
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            block_ids_per_engine_group_gpu = gpu_context.stage_engine_group_block_ids(
-                gpu_block_ids
+            block_ids_per_engine_group_gpu = (
+                gpu_context.copy_engine_group_block_ids_to_gpu(gpu_block_ids)
             )
 
             if not hasattr(torch_dev.Event, "from_ipc_handle"):
@@ -649,9 +649,9 @@ class GPUTransferModule:
             torch_dev.device(gpu_context.device),
             torch_dev.stream(gpu_context.stream),
         ):
-            # Stage all block_ids to GPU once before the loop
-            block_ids_per_engine_group_gpu = gpu_context.stage_engine_group_block_ids(
-                gpu_block_ids
+            # Copy all block_ids to GPU once before the loop
+            block_ids_per_engine_group_gpu = (
+                gpu_context.copy_engine_group_block_ids_to_gpu(gpu_block_ids)
             )
 
             check_interprocess_event_support()
