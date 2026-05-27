@@ -10,6 +10,7 @@ This module provides GPU-side KV cache management functionality, including:
 # Standard
 from typing import TYPE_CHECKING, Any
 import array
+import os
 
 # Third Party
 import torch
@@ -123,7 +124,18 @@ class GPUCacheContext:
         # This lets callers copy an entire chunk to/from a MemoryObj with a
         # single memcpy, without needing to know the per-group layout.
         # max_batch_size is the max number of chunks processed concurrently.
-        self.max_batch_size = 4
+        #
+        # GDS L1 path: keep 4 so each chunk-slot can be registered with
+        # cuFile as its own ≤16 MiB region. With per-slot registration,
+        # the nvidia-fs 16 MiB-per-registration cap binds *per chunk*,
+        # not per-buffer, so chunk_size can be sized for one slab while
+        # we still get 4-way cuFile concurrency on read/write.
+        # Override via ``LMCACHE_GPU_CONTEXT_MAX_BATCH_SIZE`` for
+        # experiments that probe the effect of batch size on cuFile/NVMe
+        # queue depth — leaves the default unchanged for production.
+        self.max_batch_size = int(
+            os.environ.get("LMCACHE_GPU_CONTEXT_MAX_BATCH_SIZE", "4")
+        )
         # Byte size of one chunk entry (= one chunk across all groups).
         # tmp_chunk_group_offsets_[g] is the byte offset of group g within
         # a single chunk; tmp_chunk_group_offsets_[num_groups] ==
@@ -147,14 +159,21 @@ class GPUCacheContext:
             device=self.device_,
         )
 
-        # GDS L1: register tmp_gpu_buffer_ with cuFile so cuFile.read/write
-        # can DMA between disk and this staging buffer without a CPU bounce.
-        # The allocator hard-errors here if the buffer is not 4 KiB aligned;
-        # with the default lmcache_logical_chunk_size=256 and typical model dims
-        # the constraint holds. Deregistration happens at GdsL1Backend.close().
+        # GDS L1: register each chunk-slot of tmp_gpu_buffer_ with cuFile
+        # as its own ≤16 MiB region, so the nvidia-fs 16 MiB-per-
+        # registration cap binds per slot, not per overall buffer. This
+        # gives us up to ``max_batch_size``-way cuFile concurrency on
+        # reads/writes (each slot claims its own slab from the 16 MB tier
+        # of the host's slab pool). The allocator hard-errors at
+        # registration if a slot is not 4 KiB aligned or > 16 MiB.
+        # Deregistration happens at GdsL1Backend.close().
         self.gds_scratch_allocator_ = gds_scratch_allocator
         if gds_scratch_allocator is not None:
-            gds_scratch_allocator.register_gpu_buffer(self.tmp_gpu_buffer_)
+            for slot in range(self.max_batch_size):
+                slot_view = self.tmp_gpu_buffer_[
+                    slot * self.tmp_chunk_bytes_ : (slot + 1) * self.tmp_chunk_bytes_
+                ]
+                gds_scratch_allocator.register_gpu_buffer(slot_view)
 
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)

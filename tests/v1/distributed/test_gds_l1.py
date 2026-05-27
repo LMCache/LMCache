@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the GDS L1 backend module.
+"""Unit tests for the slab-file GDS L1 backend.
 
-Focus is on the parts that do not require cuFile or a real GPU:
-metadata header round-trip, disk-path mapping, ``GdsMemoryObj``
-surface, handle-cache LRU semantics, and the startup scan + lookup
-flow. End-to-end read/write tests against actual cuFile hardware
-live in the buildkite GDS lane (see ``.buildkite/k3_tests``).
+Focus is on the parts that do not require a real cuFile driver:
+
+- :class:`SlabAddressManager` — allocator semantics, coalescing,
+  OOM, ``mark_used`` overlap rejection.
+- :class:`GdsL1Backend` — lookup / create_memory_obj / free_entry,
+  ``get_memory_usage``, index persistence + reload.
+- :class:`GdsMemoryObj` — disk-anchored surface (``tensor`` is None,
+  ``byte_array`` / ``data_ptr`` raise).
+
+Tests skip themselves on hosts without CUDA. Where I/O is exercised
+end-to-end we force ``use_gds=False`` so the backend takes the POSIX
+fallback path; that path uses the same address manager and the same
+``GdsScratchAllocator`` surface, so it's a meaningful cross-check
+without needing nvidia-fs loaded in CI.
 """
 
 # Standard
-from unittest import mock
 import asyncio
 import os
 import shutil
@@ -23,16 +31,12 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.gds_l1 import (
-    _METADATA_MAX_SIZE,
-    CuFileHandleCache,
     GdsL1Backend,
     GdsMemoryObj,
-    GdsScratchAllocator,
-    key_to_disk_path,
-    pack_metadata,
-    unpack_metadata,
+    SlabAddressManager,
+    _CUFILE_ALIGNMENT,
 )
-from lmcache.v1.memory_management import MemoryFormat, MemoryObjMetadata
+from lmcache.v1.memory_management import MemoryFormat
 
 # --- Fixtures --------------------------------------------------------
 
@@ -50,8 +54,9 @@ def gds_root(tmp_path):
 def loop():
     """A fresh asyncio event loop running in a background thread.
 
-    ``GdsL1Backend`` requires a running loop to schedule its async
-    metadata scan; tests get a real one to mirror production.
+    The slab design doesn't use the loop today, but the constructor
+    still requires one to preserve API compatibility with the previous
+    async-scan design.
     """
     new_loop = asyncio.new_event_loop()
     thread = threading.Thread(target=new_loop.run_forever, daemon=True)
@@ -62,17 +67,25 @@ def loop():
     new_loop.close()
 
 
-def _make_config(gds_path: str) -> GdsL1Config:
-    """Construct a minimal :class:`GdsL1Config` for GDS L1 tests.
+def _make_config(gds_path: str, slab_size_gb: float = 0.25) -> GdsL1Config:
+    """Construct a minimal :class:`GdsL1Config` for tests.
 
-    Forces ``use_gds=False`` so tests run through the POSIX fallback
-    (mmap + cudaMemcpy), which doesn't require a working cuFile driver.
+    Forces ``use_gds=False`` so tests run through the POSIX fallback;
+    that path exercises the same allocator + memory-obj contract as
+    the cuFile path but doesn't need nvidia-fs loaded.
+
+    Args:
+        gds_path: Test scratch directory.
+        slab_size_gb: Slab size to allocate. Default 0.25 GiB
+            (256 MiB) — small enough to keep tests fast but big enough
+            for multiple-chunk scenarios.
     """
     return GdsL1Config(
         gds_path=gds_path,
         gds_path_sharding="by_gpu",
         use_gds=False,
         use_direct_io=False,
+        slab_size_gb=slab_size_gb,
     )
 
 
@@ -85,378 +98,274 @@ def _object_key(seed: int = 0) -> ObjectKey:
     )
 
 
-# --- pack/unpack metadata --------------------------------------------
+def _layout(shape: torch.Size, dtype: torch.dtype = torch.float16) -> MemoryLayoutDesc:
+    return MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
 
 
-def test_pack_metadata_roundtrip():
-    """``pack_metadata`` -> ``unpack_metadata`` reproduces the inputs."""
-    shape = torch.Size([2, 4, 256, 128])
-    dtype = torch.float16
-    nbytes = shape.numel() * dtype.itemsize
-    fmt = MemoryFormat.KV_2LTD
-
-    packed = pack_metadata(
-        nbytes=nbytes,
-        shape=shape,
-        dtype=dtype,
-        fmt=fmt,
-        lmcache_version="1",
-    )
-
-    assert len(packed) == _METADATA_MAX_SIZE
-    out_shape, out_dtype, out_nbytes, out_fmt, extra = unpack_metadata(packed)
-    assert out_shape == shape
-    assert out_dtype == dtype
-    assert out_nbytes == nbytes
-    assert out_fmt == fmt
-    assert extra["lmcache_version"] == "1"
+# --- SlabAddressManager ---------------------------------------------
 
 
-def test_pack_metadata_rejects_unsupported_dtype():
-    """``pack_metadata`` raises when handed an unmapped dtype."""
-    with pytest.raises(RuntimeError, match="Unsupported dtype"):
-        pack_metadata(
-            nbytes=4,
-            shape=torch.Size([1]),
-            dtype=torch.complex64,
-            fmt=MemoryFormat.BINARY,
-        )
+class TestSlabAddressManager:
+    """Allocator behaves like a first-fit free-list."""
 
+    def test_allocate_basic(self):
+        sm = SlabAddressManager(total_size=64 * 1024)
+        off = sm.allocate(4096)
+        assert off == 0
+        assert sm.used_bytes() == 4096
+        assert sm.free_bytes() == 64 * 1024 - 4096
 
-# --- key_to_disk_path ------------------------------------------------
+    def test_allocate_aligns_up(self):
+        sm = SlabAddressManager(total_size=64 * 1024)
+        # Request below the 4 KiB alignment rounds up.
+        sm.allocate(100)
+        assert sm.used_bytes() == 4096
 
+    def test_allocate_returns_none_on_oom(self):
+        sm = SlabAddressManager(total_size=4096)
+        first = sm.allocate(4096)
+        assert first == 0
+        assert sm.allocate(4096) is None
 
-def test_key_to_disk_path_uses_two_level_hashing(tmp_path):
-    """Filenames live under ``<hash[:2]>/<hash[2:4]>/<urlquoted_key>.<suffix>``."""
-    key = _object_key(seed=0xCAFEBABE)
-    full_path, subdir_key, l1, l2 = key_to_disk_path(
-        key, base_path=str(tmp_path), data_suffix=".kvcache.safetensors"
-    )
+    def test_free_coalesces_adjacent_regions(self):
+        sm = SlabAddressManager(total_size=64 * 1024)
+        a = sm.allocate(8192)
+        b = sm.allocate(8192)
+        c = sm.allocate(8192)
+        sm.free(a, 8192)
+        sm.free(c, 8192)
+        # Two disjoint free regions plus the tail: free_bytes = 16K + tail.
+        sm.free(b, 8192)
+        # Everything coalesced back to a single region.
+        assert sm.used_bytes() == 0
+        # And the next big allocation should fit at offset 0.
+        assert sm.allocate(64 * 1024) == 0
 
-    hash_hex = key.chunk_hash.hex()
-    assert l1 == hash_hex[:2]
-    assert l2 == hash_hex[2:4]
-    assert subdir_key == l1 + l2
-    assert full_path.startswith(os.path.join(str(tmp_path), l1, l2))
-    assert full_path.endswith(".kvcache.safetensors")
+    def test_mark_used_carves_region(self):
+        sm = SlabAddressManager(total_size=64 * 1024)
+        sm.mark_used(8192, 4096)
+        # Allocation should skip past [8192, 12288).
+        off = sm.allocate(16 * 1024)
+        # First-fit picks [0, 8192) which isn't big enough — moves on
+        # and picks the tail region.
+        assert off == 12288
+
+    def test_mark_used_rejects_overlap(self):
+        sm = SlabAddressManager(total_size=64 * 1024)
+        sm.allocate(4096)
+        with pytest.raises(RuntimeError):
+            sm.mark_used(0, 4096)
 
 
 # --- GdsMemoryObj surface --------------------------------------------
 
 
-def _make_scratch_allocator() -> GdsScratchAllocator:
-    """Build a scratch allocator without touching the backend.
+class TestGdsMemoryObjSurface:
+    """``.tensor`` is None, ``.byte_array`` / ``.data_ptr`` raise."""
 
-    For tests that only exercise the ``GdsMemoryObj`` ↔ allocator
-    relationship; the allocator's I/O paths are not invoked.
+    @pytest.fixture
+    def backend(self, gds_root, loop):
+        b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+        yield b
+        b.close()
+
+    def test_tensor_is_none(self, backend):
+        mo = backend.create_memory_obj(
+            key=_object_key(seed=1),
+            layout_desc=_layout(torch.Size([128, 64])),
+        )
+        assert mo is not None
+        assert mo.tensor is None
+        assert mo.raw_tensor is None
+        assert mo.get_tensor(0) is None
+
+    def test_byte_array_raises(self, backend):
+        mo = backend.create_memory_obj(
+            key=_object_key(seed=2),
+            layout_desc=_layout(torch.Size([128, 64])),
+        )
+        with pytest.raises(NotImplementedError):
+            _ = mo.byte_array
+
+    def test_data_ptr_raises(self, backend):
+        mo = backend.create_memory_obj(
+            key=_object_key(seed=3),
+            layout_desc=_layout(torch.Size([128, 64])),
+        )
+        with pytest.raises(NotImplementedError):
+            _ = mo.data_ptr
+
+
+# --- GdsL1Backend lookup / create / free -----------------------------
+
+
+class TestGdsL1BackendIndex:
+    """``lookup`` / ``create_memory_obj`` / ``record_entry`` / ``free_entry``."""
+
+    @pytest.fixture
+    def backend(self, gds_root, loop):
+        b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+        yield b
+        b.close()
+
+    def test_lookup_empty(self, backend):
+        keys = [_object_key(seed=i) for i in range(3)]
+        assert backend.lookup(keys) == [False, False, False]
+
+    def test_create_and_record(self, backend):
+        key = _object_key(seed=42)
+        mo = backend.create_memory_obj(
+            key=key, layout_desc=_layout(torch.Size([4096]), torch.uint8)
+        )
+        assert mo is not None
+        assert mo.size == 4096
+        # Not yet recorded.
+        assert backend.lookup([key]) == [False]
+        backend.record_entry(mo)
+        assert backend.lookup([key]) == [True]
+        assert backend.get_hot_cache_size() == 1
+
+    def test_free_drops_index_entry(self, backend):
+        key = _object_key(seed=7)
+        mo = backend.create_memory_obj(
+            key=key, layout_desc=_layout(torch.Size([4096]), torch.uint8)
+        )
+        backend.record_entry(mo)
+        backend.free_entry(mo)
+        assert backend.lookup([key]) == [False]
+
+    def test_create_memory_obj_from_index(self, backend):
+        key = _object_key(seed=8)
+        mo = backend.create_memory_obj(
+            key=key, layout_desc=_layout(torch.Size([4096]), torch.uint8)
+        )
+        backend.record_entry(mo)
+        resurrected = backend.create_memory_obj_from_index(key)
+        assert resurrected is not None
+        assert resurrected.slab_offset == mo.slab_offset
+        assert resurrected.size == mo.size
+
+    def test_oom_returns_none(self, gds_root, loop):
+        # Tiny slab — one 4 KiB chunk fits, the second must OOM.
+        b = GdsL1Backend(
+            _make_config(gds_root, slab_size_gb=4096 / (1 << 30)),
+            loop=loop,
+            dst_device="cuda:0",
+        )
+        try:
+            mo1 = b.create_memory_obj(
+                key=_object_key(seed=1), layout_desc=_layout(torch.Size([4096]), torch.uint8)
+            )
+            assert mo1 is not None
+            mo2 = b.create_memory_obj(
+                key=_object_key(seed=2), layout_desc=_layout(torch.Size([4096]), torch.uint8)
+            )
+            assert mo2 is None
+        finally:
+            b.close()
+
+    def test_get_memory_usage(self, backend):
+        used, total = backend.get_memory_usage()
+        assert used == 0
+        assert total >= _CUFILE_ALIGNMENT
+        mo = backend.create_memory_obj(
+            key=_object_key(seed=99),
+            layout_desc=_layout(torch.Size([4096]), torch.uint8),
+        )
+        backend.record_entry(mo)
+        used2, total2 = backend.get_memory_usage()
+        assert used2 == 4096
+        assert total2 == total
+
+
+# --- Index persistence ------------------------------------------------
+
+
+class TestGdsL1BackendPersistence:
+    """Index survives backend close + reopen."""
+
+    def test_persist_and_reload(self, gds_root, loop):
+        b1 = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+        try:
+            key = _object_key(seed=123)
+            mo = b1.create_memory_obj(
+                key=key,
+                layout_desc=_layout(torch.Size([8192]), torch.uint8),
+                fmt=MemoryFormat.KV_2LTD,
+            )
+            b1.record_entry(mo)
+            slab_offset = mo.slab_offset
+        finally:
+            b1.close()
+
+        # New backend over the same path — index loads, the region is
+        # still marked used, and lookup succeeds.
+        b2 = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+        try:
+            assert b2.lookup([key]) == [True]
+            resurrected = b2.create_memory_obj_from_index(key)
+            assert resurrected is not None
+            assert resurrected.slab_offset == slab_offset
+            assert resurrected.size == 8192
+            used, _ = b2.get_memory_usage()
+            assert used == 8192
+        finally:
+            b2.close()
+
+    def test_corrupt_index_starts_empty(self, gds_root, loop):
+        # Write a deliberately-broken index file.
+        with open(os.path.join(gds_root, "lmcache_gds_index.json"), "w") as f:
+            f.write("not a json document")
+        b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+        try:
+            assert b.get_hot_cache_size() == 0
+        finally:
+            b.close()
+
+
+# --- POSIX round-trip (CUDA required) --------------------------------
+
+cuda_required = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="POSIX round-trip uses cudaMemcpy and needs a CUDA device",
+)
+
+
+@cuda_required
+class TestPosixRoundTrip:
+    """End-to-end write→read via the POSIX fallback.
+
+    Same ``GdsScratchAllocator`` code path the production cuFile path
+    uses; ``use_gds=False`` swaps the bottom layer for pread/pwrite +
+    cudaMemcpy so this can run on any CUDA host (no nvidia-fs needed).
     """
-    return GdsScratchAllocator(backend=mock.Mock())
 
+    def test_write_then_read_matches(self, gds_root, loop):
+        b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+        try:
+            chunk_bytes = 8192
+            buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda:0")
+            b.scratch_allocator.register_gpu_buffer(buf)
+            try:
+                buf.fill_(0xAB)
+                torch.cuda.synchronize()
 
-def _make_gds_mem_obj(disk_path: str = "/tmp/fake.safetensors") -> GdsMemoryObj:
-    """Construct a ``GdsMemoryObj`` for surface tests."""
-    meta = MemoryObjMetadata(
-        shape=torch.Size([2, 256, 64]),
-        dtype=torch.float16,
-        address=0,
-        phy_size=2 * 256 * 64 * 2,
-        ref_count=0,
-        pin_count=0,
-        fmt=MemoryFormat.KV_2LTD,
-    )
-    return GdsMemoryObj(
-        key=_object_key(),
-        disk_path=disk_path,
-        file_offset=_METADATA_MAX_SIZE,
-        metadata=meta,
-        parent_allocator=_make_scratch_allocator(),
-    )
+                key = _object_key(seed=777)
+                mo = b.create_memory_obj(
+                    key=key,
+                    layout_desc=_layout(torch.Size([chunk_bytes]), torch.uint8),
+                )
+                b.scratch_allocator.cufile_write_from(mo, buf)
 
-
-def test_gds_memory_obj_tensor_is_none_at_rest():
-    """The disk-anchored object has no live tensor body."""
-    mo = _make_gds_mem_obj()
-    assert mo.tensor is None
-    assert mo.raw_tensor is None
-    assert mo.get_tensor(0) is None
-
-
-def test_gds_memory_obj_byte_array_raises():
-    """byte_array is not supported — bytes are on disk, not in memory."""
-    mo = _make_gds_mem_obj()
-    with pytest.raises(NotImplementedError, match="byte_array"):
-        _ = mo.byte_array
-
-
-def test_gds_memory_obj_data_ptr_raises():
-    """data_ptr is not supported — gpu_ops uses gpu_buffer.data_ptr directly."""
-    mo = _make_gds_mem_obj()
-    with pytest.raises(NotImplementedError, match="data_ptr"):
-        _ = mo.data_ptr
-
-
-def test_gds_memory_obj_parent_returns_scratch_allocator():
-    """``parent()`` returns the allocator so gpu_ops can isinstance-dispatch."""
-    mo = _make_gds_mem_obj()
-    assert isinstance(mo.parent(), GdsScratchAllocator)
-
-
-def test_gds_memory_obj_ref_count_lifecycle():
-    """Ref-counting works the same as ``TensorMemoryObj``."""
-    mo = _make_gds_mem_obj()
-    assert mo.get_ref_count() == 0
-    mo.ref_count_up()
-    mo.ref_count_up()
-    assert mo.get_ref_count() == 2
-    mo.ref_count_down()
-    assert mo.get_ref_count() == 1
-    mo.ref_count_down()
-    assert mo.get_ref_count() == 0
-
-
-def test_gds_memory_obj_pin_unpin_lifecycle():
-    """Pin/unpin track pin_count without breaking invariants."""
-    mo = _make_gds_mem_obj()
-    assert not mo.is_pinned
-    assert mo.can_evict
-    mo.pin()
-    assert mo.is_pinned
-    assert not mo.can_evict
-    mo.unpin()
-    assert not mo.is_pinned
-
-
-# --- CuFileHandleCache -----------------------------------------------
-
-
-def test_handle_cache_acquire_without_gds_module_raises():
-    """Acquire raises clearly when no gds_module is configured."""
-    cache = CuFileHandleCache(max_handles=4, gds_module=None)
-    with pytest.raises(RuntimeError, match="cuFile not configured"):
-        cache.acquire("/tmp/fake", "r")
-
-
-def _mock_gds_module_with_counter() -> tuple[mock.Mock, dict]:
-    """Build a mock gds_module whose ``CuFile`` returns trackable mocks."""
-    counter = {"opens": 0, "closes": 0}
-
-    def _make_handle(path, mode):
-        # kvikio.CuFile opens and registers the handle in its
-        # constructor — count the open here.
-        counter["opens"] += 1
-
-        def _close():
-            counter["closes"] += 1
-
-        handle = mock.Mock(spec=["close", "raw_read_async", "raw_write_async"])
-        handle.close = mock.Mock(side_effect=_close)
-        return handle
-
-    gds_module = mock.Mock()
-    gds_module.CuFile = mock.Mock(side_effect=_make_handle)
-    return gds_module, counter
-
-
-def test_handle_cache_reuses_handles_for_same_key():
-    """Two acquires for the same (path, mode) share one handle."""
-    gds_module, counter = _mock_gds_module_with_counter()
-    cache = CuFileHandleCache(max_handles=4, gds_module=gds_module)
-
-    h1 = cache.acquire("/tmp/a", "r")
-    h2 = cache.acquire("/tmp/a", "r")
-    assert h1 is h2
-    assert counter["opens"] == 1
-    cache.release("/tmp/a", "r")
-    cache.release("/tmp/a", "r")
-
-
-def test_handle_cache_evicts_lru_idle_entry_when_full():
-    """The oldest idle entry is dropped when capacity is exceeded."""
-    gds_module, counter = _mock_gds_module_with_counter()
-    cache = CuFileHandleCache(max_handles=2, gds_module=gds_module)
-
-    cache.acquire("/tmp/a", "r")
-    cache.release("/tmp/a", "r")
-    cache.acquire("/tmp/b", "r")
-    cache.release("/tmp/b", "r")
-    # Capacity now at 2; inserting a third should evict /tmp/a (oldest idle).
-    cache.acquire("/tmp/c", "r")
-    cache.release("/tmp/c", "r")
-
-    assert counter["opens"] == 3
-    assert counter["closes"] == 1  # /tmp/a was closed
-
-
-def test_handle_cache_close_drops_all():
-    """``close()`` closes every cached handle."""
-    gds_module, counter = _mock_gds_module_with_counter()
-    cache = CuFileHandleCache(max_handles=4, gds_module=gds_module)
-    cache.acquire("/tmp/a", "r")
-    cache.release("/tmp/a", "r")
-    cache.acquire("/tmp/b", "r")
-    cache.release("/tmp/b", "r")
-    cache.close()
-    assert counter["closes"] == 2
-
-
-# --- GdsScratchAllocator alignment -----------------------------------
-
-
-def test_scratch_allocator_rejects_misaligned_buffer():
-    """A buffer whose byte size is not a 4 KiB multiple is rejected."""
-    backend_mock = mock.Mock()
-    backend_mock.use_gds = False
-    backend_mock.gds_module = None
-    alloc = GdsScratchAllocator(backend=backend_mock)
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    buf = torch.empty(4097, dtype=torch.uint8, device="cuda")
-    with pytest.raises(ValueError, match="4 KiB"):
-        alloc.register_gpu_buffer(buf)
-
-
-def test_scratch_allocator_accepts_aligned_buffer_under_posix():
-    """An aligned buffer is accepted in POSIX-fallback mode (no cuFile call)."""
-    backend_mock = mock.Mock()
-    backend_mock.use_gds = False
-    backend_mock.gds_module = None
-    alloc = GdsScratchAllocator(backend=backend_mock)
-
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
-    buf = torch.empty(8192, dtype=torch.uint8, device="cuda")
-    alloc.register_gpu_buffer(buf)  # no raise
-    alloc.deregister_gpu_buffer()
-
-
-# --- GdsL1Backend scan + lookup --------------------------------------
-
-
-def _write_pretend_disk_chunk(
-    backend: GdsL1Backend,
-    key: ObjectKey,
-    shape: torch.Size,
-    dtype: torch.dtype,
-    fmt: MemoryFormat,
-) -> str:
-    """Write a fake data file + metadata sidecar for ``key``.
-
-    Used to seed the backend's startup scan in tests that don't
-    actually issue a write through the cuFile/POSIX path.
-    """
-    nbytes = shape.numel() * dtype.itemsize
-    metadata_bytes = pack_metadata(
-        nbytes=nbytes,
-        shape=shape,
-        dtype=dtype,
-        fmt=fmt,
-        lmcache_version="1",
-    )
-    data_path, _, _, _ = key_to_disk_path(
-        key, base_path=backend.gds_path, data_suffix=backend.data_suffix
-    )
-    os.makedirs(os.path.dirname(data_path), exist_ok=True)
-    # Data file: metadata header followed by zeroed payload.
-    with open(data_path, "wb") as f:
-        f.write(metadata_bytes)
-        f.write(b"\x00" * nbytes)
-    # Sidecar metadata file — what the scan reads.
-    with open(data_path + ".metadata", "wb") as f:
-        f.write(metadata_bytes)
-    return data_path
-
-
-def test_backend_scan_picks_up_existing_keys(gds_root, loop):
-    """Pre-existing on-disk chunks appear in the hot index after scan."""
-    config = _make_config(gds_root)
-    backend = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
-    try:
-        # Wait for the initial (empty) scan to complete.
-        backend.wait_for_scan(timeout=5.0)
-        assert backend.get_hot_cache_size() == 0
-
-        # Drop a fake chunk on disk, then construct a fresh backend so
-        # its scan sees it.
-        seed_key = _object_key(seed=42)
-        _write_pretend_disk_chunk(
-            backend,
-            seed_key,
-            shape=torch.Size([2, 64]),
-            dtype=torch.float16,
-            fmt=MemoryFormat.KV_2LTD,
-        )
-    finally:
-        backend.close()
-
-    backend2 = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
-    try:
-        backend2.wait_for_scan(timeout=5.0)
-        assert backend2.get_hot_cache_size() == 1
-        assert backend2.lookup([seed_key]) == [True]
-        assert backend2.lookup([_object_key(seed=999)]) == [False]
-    finally:
-        backend2.close()
-
-
-def test_backend_create_memory_obj_from_index_returns_disk_anchored(gds_root, loop):
-    """A scanned entry resolves to a ``GdsMemoryObj`` pointing at its file."""
-    config = _make_config(gds_root)
-    seed_key = _object_key(seed=7)
-    backend = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
-    try:
-        backend.wait_for_scan(timeout=5.0)
-        data_path = _write_pretend_disk_chunk(
-            backend,
-            seed_key,
-            shape=torch.Size([2, 128]),
-            dtype=torch.float16,
-            fmt=MemoryFormat.KV_2LTD,
-        )
-    finally:
-        backend.close()
-
-    backend2 = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
-    try:
-        backend2.wait_for_scan(timeout=5.0)
-        gds_obj = backend2.create_memory_obj_from_index(seed_key)
-        assert gds_obj is not None
-        assert gds_obj.disk_path == data_path
-        assert gds_obj.file_offset == _METADATA_MAX_SIZE
-        assert gds_obj.tensor is None
-        assert isinstance(gds_obj.parent(), GdsScratchAllocator)
-    finally:
-        backend2.close()
-
-
-def test_backend_create_memory_obj_for_new_write_is_disk_anchored(gds_root, loop):
-    """``create_memory_obj`` mints a fresh disk-anchored entry for writes."""
-    config = _make_config(gds_root)
-    backend = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
-    try:
-        backend.wait_for_scan(timeout=5.0)
-        layout = MemoryLayoutDesc(
-            shapes=[torch.Size([2, 64])],
-            dtypes=[torch.float16],
-        )
-        new_key = _object_key(seed=123)
-        gds_obj = backend.create_memory_obj(new_key, layout, fmt=MemoryFormat.KV_2LTD)
-        assert gds_obj.disk_path.startswith(gds_root) or (
-            gds_obj.disk_path.startswith(backend.gds_path)
-        )
-        assert gds_obj.file_offset == _METADATA_MAX_SIZE
-        assert gds_obj.get_size() == 2 * 64 * 2
-    finally:
-        backend.close()
-
-
-def test_backend_lookup_returns_false_for_unknown(gds_root, loop):
-    """``lookup`` returns ``False`` for keys not in the hot index."""
-    config = _make_config(gds_root)
-    backend = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
-    try:
-        backend.wait_for_scan(timeout=5.0)
-        result = backend.lookup([_object_key(seed=1), _object_key(seed=2)])
-        assert result == [False, False]
-    finally:
-        backend.close()
+                buf.zero_()
+                torch.cuda.synchronize()
+                b.scratch_allocator.cufile_read_into(mo, buf)
+                torch.cuda.synchronize()
+                expected = torch.full(
+                    (chunk_bytes,), 0xAB, dtype=torch.uint8
+                )
+                assert torch.equal(buf.cpu(), expected)
+            finally:
+                b.scratch_allocator.deregister_gpu_buffer()
+        finally:
+            b.close()

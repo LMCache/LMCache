@@ -2,10 +2,5 @@
 # LMCACHE_CUDA_MAJOR=12. The cu13 default lives in cuda13_core.txt.
 
 cupy-cuda12x
-# kvikio: NVIDIA RAPIDS Python wrapper around libcufile. Exposes the
-# async cuFile APIs (IOFuture-backed pread/pwrite, stream-ordered
-# raw_read_async/raw_write_async) that the bare ``cufile`` Python
-# package omits. Used by the GDS L1 backend in v1/distributed/gds_l1.py.
-kvikio-cu12
 # nixl on PyPI is a meta-package that pulls nixl-cu12 (CUDA-only).
 nixl; python_version < "3.13"

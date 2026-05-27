@@ -4,36 +4,42 @@
 Three phases, each independently skippable from the CLI:
 
 - ``info``: read-only host inspection — fstype under ``gds_path``,
-  whether ``nvidia-fs`` is loaded, kvikio's compat-mode preference,
-  cuFile 4 KiB alignment compatibility for the requested chunk size.
-  Catches setup mistakes before any I/O happens.
-- ``verify``: write a known pattern through ``GdsScratchAllocator.
-  cufile_write_from``, read it back through ``cufile_read_into``,
-  byte-compare the result. Same code path as the production data
-  path; if this passes, the GDS L1 backend works on this host.
+  whether ``nvidia-fs`` is loaded, cuFile 4 KiB alignment
+  compatibility for the requested chunk size. Catches setup mistakes
+  before any I/O happens.
+- ``verify``: write a known pattern through
+  ``GdsScratchAllocator.cufile_write_from``, read it back through
+  ``cufile_read_into``, byte-compare the result. Same code path as
+  the production data path; if this passes, the GDS L1 backend works
+  on this host.
 - ``bench``: store + retrieve N × chunk MiB and report MiB/s for
   each direction. Useful for comparing hardware (the absolute numbers
   matter much less than the delta between a compat-mode host and an
   ``nvidia-fs``-enabled one).
+
+All chunk allocations route through the backend's single slab file,
+so the bench measures the production path exactly: one cuFile handle
+register at backend startup, per-chunk reads/writes as offset I/O
+inside that slab.
 """
 
 # Standard
-from dataclasses import dataclass
 import asyncio
 import os
 import shutil
 import threading
 import time
+from dataclasses import dataclass
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
-from lmcache.v1.distributed.gds_l1 import GdsL1Backend, key_to_disk_path
-from lmcache.v1.memory_management import MemoryFormat, MemoryObjMetadata
+from lmcache.v1.distributed.gds_l1 import GdsL1Backend
+from lmcache.v1.memory_management import MemoryFormat
 
 logger = init_logger(__name__)
 
@@ -45,7 +51,6 @@ class HostInfo:
     gds_path: str
     fstype: str
     nvidia_fs_loaded: bool
-    kvikio_compat_mode_preferred: bool
     chunk_bytes: int
     chunk_aligned_4kib: bool
 
@@ -66,9 +71,8 @@ class BenchResult:
 def _start_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread]:
     """Spin up an asyncio loop on a background daemon thread.
 
-    ``GdsL1Backend`` schedules its startup metadata scan on this loop.
-    The thread is daemon so an unclean exit doesn't block the
-    interpreter; :func:`_stop_loop` joins it cleanly on success.
+    The backend takes an event loop for API compatibility with prior
+    versions; the slab design does not run any async tasks itself.
     """
     loop = asyncio.new_event_loop()
     thread = threading.Thread(
@@ -94,6 +98,12 @@ def _object_key(seed: int) -> ObjectKey:
     )
 
 
+def _layout_for(chunk_bytes: int) -> MemoryLayoutDesc:
+    """Build a 1-D uint8 layout descriptor of ``chunk_bytes`` bytes."""
+    shape = torch.Size([chunk_bytes])
+    return MemoryLayoutDesc(shapes=[shape], dtypes=[torch.uint8])
+
+
 def probe_host(gds_path: str, chunk_bytes: int) -> HostInfo:
     """Inspect the host's GDS readiness without touching disk.
 
@@ -111,25 +121,12 @@ def probe_host(gds_path: str, chunk_bytes: int) -> HostInfo:
 
     os.makedirs(gds_path, exist_ok=True)
     fstype = get_fstype(gds_path)
-
     nvidia_fs_loaded = os.path.exists("/proc/driver/nvidia-fs/stats")
-
-    try:
-        # Third Party
-        import kvikio.defaults
-
-        compat = bool(kvikio.defaults.is_compat_mode_preferred())
-    except Exception:
-        # kvikio not importable on this host. The backend would have
-        # failed to load anyway; we surface that as "compat-mode
-        # preferred" because that's the practical outcome.
-        compat = True
 
     return HostInfo(
         gds_path=gds_path,
         fstype=fstype,
         nvidia_fs_loaded=nvidia_fs_loaded,
-        kvikio_compat_mode_preferred=compat,
         chunk_bytes=chunk_bytes,
         chunk_aligned_4kib=(chunk_bytes % 4096 == 0),
     )
@@ -140,7 +137,9 @@ def verify_round_trip(
 ) -> None:
     """Write a deterministic pattern, read it back, fail loudly on mismatch.
 
-    Uses the same ``GdsScratchAllocator`` code path as production.
+    Uses the same ``GdsScratchAllocator`` code path as production —
+    ``create_memory_obj`` reserves a slab region, ``cufile_write_from``
+    DMAs into it, ``cufile_read_into`` DMAs back.
 
     Args:
         backend: An already-constructed :class:`GdsL1Backend`.
@@ -150,7 +149,7 @@ def verify_round_trip(
 
     Raises:
         RuntimeError: If the bytes read back do not match what was
-            written.
+            written, or if the slab is too small for ``chunk_bytes``.
     """
     allocator = backend.scratch_allocator
     buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda:0")
@@ -160,30 +159,16 @@ def verify_round_trip(
         torch.cuda.synchronize()
 
         key = _object_key(seed=0xCAFE)
-        layout_path, _, _, _ = key_to_disk_path(
-            key, backend.gds_path, backend.data_suffix
-        )
-        meta = MemoryObjMetadata(
-            shape=torch.Size([chunk_bytes]),
-            dtype=torch.uint8,
-            address=0,
-            phy_size=chunk_bytes,
-            ref_count=0,
-            pin_count=0,
-            fmt=MemoryFormat.KV_2LTD,
-            shapes=[torch.Size([chunk_bytes])],
-            dtypes=[torch.uint8],
-        )
-        # First Party
-        from lmcache.v1.distributed.gds_l1 import _METADATA_MAX_SIZE, GdsMemoryObj
-
-        mo = GdsMemoryObj(
+        mo = backend.create_memory_obj(
             key=key,
-            disk_path=layout_path,
-            file_offset=_METADATA_MAX_SIZE,
-            metadata=meta,
-            parent_allocator=allocator,
+            layout_desc=_layout_for(chunk_bytes),
+            fmt=MemoryFormat.KV_2LTD,
         )
+        if mo is None:
+            raise RuntimeError(
+                f"GDS round-trip verify: slab too small to allocate {chunk_bytes} "
+                "bytes. Increase --gds-l1-slab-size-gb."
+            )
         allocator.cufile_write_from(mo, buf)
 
         buf.zero_()
@@ -191,9 +176,10 @@ def verify_round_trip(
         allocator.cufile_read_into(mo, buf)
         torch.cuda.synchronize()
 
-        if not torch.equal(
-            buf.cpu(), torch.full((chunk_bytes,), pattern_val, dtype=torch.uint8)
-        ):
+        expected = torch.full(
+            (chunk_bytes,), pattern_val, dtype=torch.uint8
+        )
+        if not torch.equal(buf.cpu(), expected):
             raise RuntimeError(
                 "GDS round-trip mismatch: bytes read back do not match the "
                 f"written pattern (0x{pattern_val:02x}). Most likely a "
@@ -204,12 +190,17 @@ def verify_round_trip(
 
 
 def benchmark(
-    backend: GdsL1Backend, num_chunks: int, chunk_bytes: int, max_batch_size: int = 4
+    backend: GdsL1Backend,
+    num_chunks: int,
+    chunk_bytes: int,
+    max_batch_size: int = 4,
 ) -> tuple[BenchResult, BenchResult]:
     """Store then retrieve ``num_chunks × chunk_bytes`` and report timings.
 
-    The store / retrieve loop mirrors ``benchmarks/storage_backend_io/
-    gds_l1_e2e.py`` — same dispatch shape as the MP server.
+    The store / retrieve loop mirrors the MP server's dispatch shape:
+    a small registered staging buffer with ``max_batch_size`` slots,
+    one ``cufile_write_from`` / ``cufile_read_into`` per chunk, single
+    ``cudaStreamSynchronize`` at the end.
 
     Args:
         backend: An already-constructed :class:`GdsL1Backend`.
@@ -231,41 +222,28 @@ def benchmark(
     try:
         # Deterministic payload — content doesn't matter, just needs
         # to be on the GPU so cuFile sees a registered source.
-        pattern = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8, device="cuda:0")
+        pattern = torch.full(
+            (chunk_bytes,), 0xAB, dtype=torch.uint8, device="cuda:0"
+        )
 
         slot_views = [
             tmp_buf[i * chunk_bytes : (i + 1) * chunk_bytes]
             for i in range(max_batch_size)
         ]
-        # First Party
-        from lmcache.v1.distributed.gds_l1 import _METADATA_MAX_SIZE, GdsMemoryObj
-
-        mem_objs: list[GdsMemoryObj] = []
+        layout = _layout_for(chunk_bytes)
+        mem_objs = []
         for i in range(num_chunks):
             key = _object_key(seed=i)
-            path, _, _, _ = key_to_disk_path(key, backend.gds_path, backend.data_suffix)
-            meta = MemoryObjMetadata(
-                shape=torch.Size([chunk_bytes]),
-                dtype=torch.uint8,
-                address=0,
-                phy_size=chunk_bytes,
-                ref_count=0,
-                pin_count=0,
-                fmt=MemoryFormat.KV_2LTD,
-                shapes=[torch.Size([chunk_bytes])],
-                dtypes=[torch.uint8],
+            mo = backend.create_memory_obj(
+                key=key, layout_desc=layout, fmt=MemoryFormat.KV_2LTD
             )
-            mem_objs.append(
-                GdsMemoryObj(
-                    key=key,
-                    disk_path=path,
-                    file_offset=_METADATA_MAX_SIZE,
-                    metadata=meta,
-                    parent_allocator=allocator,
+            if mo is None:
+                raise RuntimeError(
+                    f"GDS bench: slab exhausted after {i} of {num_chunks} chunks. "
+                    f"Increase --gds-l1-slab-size-gb or reduce the workload."
                 )
-            )
+            mem_objs.append(mo)
 
-        # --- STORE phase ---
         torch.cuda.synchronize()
         t0 = time.perf_counter()
         for i, mo in enumerate(mem_objs):
@@ -275,7 +253,6 @@ def benchmark(
         torch.cuda.synchronize()
         store_secs = time.perf_counter() - t0
 
-        # --- RETRIEVE phase ---
         for s in slot_views:
             s.zero_()
         torch.cuda.synchronize()
@@ -304,7 +281,6 @@ def run_gds_check(
     large_chunk_bytes: int,
     use_gds: bool,
     use_direct_io: bool,
-    use_async_ctypes: bool,
     skip_verify: bool,
     skip_bench: bool,
 ) -> None:
@@ -315,19 +291,26 @@ def run_gds_check(
     back-to-back:
 
     - **small chunks** (default 64 × 2 MiB): per-call-overhead-dominated.
-      Tells you how much time is spent in kvikio / Python dispatch
-      relative to the actual I/O — relevant for KV-cache-shaped
-      access patterns.
+      Tells you how much time is spent in Python dispatch relative to
+      the actual I/O — relevant for KV-cache-shaped access patterns.
     - **large chunks** (default 8 × 256 MiB): bandwidth-dominated.
       Tells you how close the path gets to peak NVMe / cuFile
       throughput once per-call overhead is amortized.
 
     The verify phase uses the small chunk size (faster) and is the
     same byte-for-byte round-trip check as before.
+
+    Args:
+        gds_path: Directory to use as the slab root. Wiped fresh.
+        small_num_chunks: Chunk count for the small phase.
+        small_chunk_bytes: Per-chunk size for the small phase (4 KiB aligned).
+        large_num_chunks: Chunk count for the large phase.
+        large_chunk_bytes: Per-chunk size for the large phase (4 KiB aligned).
+        use_gds: If ``False``, force the POSIX fallback.
+        use_direct_io: If ``True``, open the slab with ``O_DIRECT``.
+        skip_verify: Skip the round-trip correctness check.
+        skip_bench: Skip the throughput benchmark.
     """
-    # Probe with the small chunk size — alignment check only needs
-    # one chunk_bytes value, and both phases use 4 KiB multiples so
-    # either would do.
     info = probe_host(gds_path, small_chunk_bytes)
 
     print("=" * 60)
@@ -336,7 +319,6 @@ def run_gds_check(
     print(f"  gds_path             : {info.gds_path}")
     print(f"  fstype               : {info.fstype}")
     print(f"  nvidia-fs loaded     : {info.nvidia_fs_loaded}")
-    print(f"  kvikio compat mode   : {info.kvikio_compat_mode_preferred}")
     print(f"  chunk size           : {info.chunk_bytes} bytes")
     print(f"  4 KiB-aligned chunk  : {info.chunk_aligned_4kib}")
     if not info.nvidia_fs_loaded:
@@ -354,34 +336,44 @@ def run_gds_check(
     if skip_verify and skip_bench:
         return
 
-    # Wipe the gds_path so verify/bench start fresh (avoid stale files
-    # from a prior run inflating disk-cache hits).
+    # Wipe the gds_path so verify/bench start fresh.
     if os.path.isdir(gds_path):
         shutil.rmtree(gds_path)
     os.makedirs(gds_path, exist_ok=True)
+
+    # Slab must be big enough for the largest phase we'll run.
+    needed_bytes = max(
+        small_num_chunks * small_chunk_bytes if not skip_bench else 0,
+        large_num_chunks * large_chunk_bytes if not skip_bench else 0,
+        small_chunk_bytes if not skip_verify else 0,
+    )
+    # Round up to GiB and add 10% headroom for alignment padding.
+    slab_size_gb = max(1.0, (needed_bytes * 1.1) / (1 << 30))
 
     config = GdsL1Config(
         gds_path=gds_path,
         gds_path_sharding="by_gpu",
         use_gds=use_gds,
         use_direct_io=use_direct_io,
-        use_async_ctypes=use_async_ctypes,
+        slab_size_gb=slab_size_gb,
     )
     loop, thread = _start_loop()
     backend = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
     try:
-        backend.wait_for_scan(timeout=10.0)
-
         if not skip_verify:
             print()
             print("--- VERIFY round-trip ---")
             verify_round_trip(backend, chunk_bytes=small_chunk_bytes)
             print("  PASS: bytes read back match the pattern.")
+            # Free the verify chunk so its slab region returns to the
+            # pool — otherwise the large-chunk bench can hit a stale
+            # allocation overlap.
+            for k in list(backend._index.keys()):  # noqa: SLF001
+                mo = backend.create_memory_obj_from_index(k)
+                if mo is not None:
+                    backend.free_entry(mo)
 
         if not skip_bench:
-            # Small chunks: per-call overhead dominates. Use the
-            # production max_batch_size=4 so the scratch buffer
-            # matches what GPUCacheContext registers.
             _run_bench_phase(
                 backend,
                 label="small chunks (overhead-dominated)",
@@ -389,10 +381,12 @@ def run_gds_check(
                 chunk_bytes=small_chunk_bytes,
                 max_batch_size=4,
             )
-            # Large chunks: bandwidth-dominated. max_batch_size=1
-            # keeps the scratch buffer at one chunk, which matters
-            # when chunks are GB-sized (4 × 2 GiB = 8 GiB VRAM is
-            # often impractical).
+            # Free everything written by the small phase before the
+            # large phase, so the slab has room.
+            for k in list(backend._index.keys()):  # noqa: SLF001
+                mo = backend.create_memory_obj_from_index(k)
+                if mo is not None:
+                    backend.free_entry(mo)
             _run_bench_phase(
                 backend,
                 label="large chunks (bandwidth-dominated)",
@@ -413,19 +407,30 @@ def _run_bench_phase(
     chunk_bytes: int,
     max_batch_size: int,
 ) -> None:
-    """Run one bench phase and print its results."""
+    """Run one bench phase and print its results.
+
+    Catches ``ValueError`` raised by ``register_gpu_buffer`` when the
+    requested staging buffer exceeds the nvidia-fs slab cap (16 MiB
+    on the reference host). The phase is skipped with a printed note
+    rather than aborting the whole run — the small-chunks phase
+    still produces a useful number on the same invocation.
+    """
     chunk_mib = chunk_bytes / 1024 / 1024
     chunk_label = (
         f"{chunk_mib:.0f} MiB" if chunk_mib < 1024 else f"{chunk_mib / 1024:.1f} GiB"
     )
     print()
     print(f"--- BENCH {label}: {num_chunks} × {chunk_label} ---")
-    store_r, retrieve_r = benchmark(
-        backend,
-        num_chunks=num_chunks,
-        chunk_bytes=chunk_bytes,
-        max_batch_size=max_batch_size,
-    )
+    try:
+        store_r, retrieve_r = benchmark(
+            backend,
+            num_chunks=num_chunks,
+            chunk_bytes=chunk_bytes,
+            max_batch_size=max_batch_size,
+        )
+    except ValueError as e:
+        print(f"  SKIPPED: {e}")
+        return
     print(
         f"  STORE   : {store_r.total_mib:8.1f} MiB in {store_r.seconds:6.3f}s "
         f"= {store_r.mibs:8.1f} MiB/s"

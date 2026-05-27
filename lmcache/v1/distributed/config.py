@@ -105,41 +105,21 @@ class GdsL1Config:
     use_gds: bool = True
     """If ``False``, fall back to POSIX (``mmap`` + ``cudaMemcpy``)."""
 
-    use_direct_io: bool = False
-    """Pass ``O_DIRECT`` through cuFile when opening files."""
+    use_direct_io: bool = True
+    """Open the slab file with ``O_DIRECT``. Required for cuFile to
+    take the GDS DMA fast path on ext4. Default ``True`` because the
+    GDS L1 backend without DMA is roughly worthless — operators who
+    explicitly need the page-cache-mediated path can flip this off."""
 
-    io_threads: int = 4
-    """Thread pool size for cuFile read/write calls."""
-
-    handle_cache_size: int = 1024
-    """LRU capacity for the ``CuFileHandleCache``."""
-
-    disk_max_bytes: int = 0
-    """Advertised disk capacity for the L1 eviction signal. ``0`` means
-    "no global eviction" — disk grows unbounded until external cleanup."""
-
-    use_async_ctypes: bool = False
-    """Use the direct-ctypes ``cuFileReadAsync`` / ``cuFileWriteAsync``
-    path (``lmcache.v1.distributed._cufile_async``) instead of kvikio's
-    ``raw_read_async`` / ``raw_write_async``. The ctypes path enqueues a
-    batch of cuFile ops on a CUDA stream and relies on stream ordering
-    for the wait — kvikio's Python wrapper forces a sync per call and
-    adds enough dispatch overhead to leave ~3x read throughput on the
-    table on hosts with nvidia-fs loaded.
-
-    Trade-offs vs kvikio:
-
-    - ``cuFileBufRegister`` is capped at the host's nvidia-fs slab
-      size (16 MiB on the reference host). The current implementation
-      requires ``tmp_chunk_bytes * max_batch_size <= 16 MiB`` and
-      raises at registration time otherwise.
-    - Per-call error reporting is lost — failures only surface at the
-      next stream sync (kvikio reports per-call via ``IOFuture``).
-    - cuFile compat mode rejects the async API with ``-EIO``, so this
-      flag is only useful when ``nvidia-fs`` is loaded.
-
-    Default ``False`` keeps the kvikio path so existing deployments
-    are unaffected.
+    slab_size_gb: float = 32.0
+    """Size of the GDS L1 slab file in GiB. One file at
+    ``<gds_path>/lmcache_gds_slab.bin`` is preallocated to this size
+    at startup and registered with cuFile once; per-chunk reads and
+    writes are then just ``cuFileReadAsync`` / ``cuFileWriteAsync``
+    at the right ``file_offset`` within the slab. The slab is the
+    disk-side analogue of CPU L1's pinned-DRAM slab — one allocation,
+    one handle, sub-allocations live as offset ranges inside it.
+    Default 32 GiB.
     """
 
 
@@ -349,36 +329,16 @@ def add_storage_manager_args(
     gds_l1_group.add_argument(
         "--gds-l1-use-direct-io",
         action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Open files with O_DIRECT via cuFile.",
+        default=True,
+        help="Open the slab file with O_DIRECT. Required for the GDS DMA "
+        "fast path on ext4. Default True.",
     )
     gds_l1_group.add_argument(
-        "--gds-l1-io-threads",
-        type=int,
-        default=4,
-        help="Thread pool size for cuFile read/write calls. Default 4.",
-    )
-    gds_l1_group.add_argument(
-        "--gds-l1-handle-cache-size",
-        type=int,
-        default=1024,
-        help="LRU capacity for the cuFile handle cache. Default 1024.",
-    )
-    gds_l1_group.add_argument(
-        "--gds-l1-disk-max-bytes",
-        type=int,
-        default=0,
-        help="Advertised disk capacity for the L1 eviction signal in bytes. "
-        "0 means no global eviction (unbounded disk).",
-    )
-    gds_l1_group.add_argument(
-        "--gds-l1-use-async-ctypes",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use direct-ctypes cuFileReadAsync/WriteAsync instead of kvikio. "
-        "Faster on hosts with nvidia-fs loaded (avoids kvikio's per-call "
-        "dispatch overhead) but caps the registered tmp buffer at 16 MiB. "
-        "Off by default.",
+        "--gds-l1-slab-size-gb",
+        type=float,
+        default=32.0,
+        help="Size of the GDS L1 slab file (preallocated at startup) in "
+        "GiB. Default 32.",
     )
 
     # Adapter config
@@ -444,10 +404,7 @@ def parse_args_to_config(
             gds_path_sharding=args.gds_l1_path_sharding,
             use_gds=args.gds_l1_use_gds,
             use_direct_io=args.gds_l1_use_direct_io,
-            io_threads=args.gds_l1_io_threads,
-            handle_cache_size=args.gds_l1_handle_cache_size,
-            disk_max_bytes=args.gds_l1_disk_max_bytes,
-            use_async_ctypes=args.gds_l1_use_async_ctypes,
+            slab_size_gb=args.gds_l1_slab_size_gb,
         )
 
     return StorageManagerConfig(

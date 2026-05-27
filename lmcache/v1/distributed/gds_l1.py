@@ -1,57 +1,69 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GDS L1 backend for MP mode.
+"""Slab-file GDS L1 backend for MP mode.
 
-This module makes NVMe disk the durable L1 medium, with cuFile DMA
-between disk files and the GPU staging buffer that ``GPUCacheContext``
-already owns. There is no in-VRAM warm cache: every L1 access goes
-through ``kvikio.CuFile.pread`` / ``pwrite`` directly into the existing
-``tmp_gpu_buffer_``.
+This module turns NVMe disk into the durable L1 medium in MP mode by
+pre-allocating one large *slab file* on disk and treating it the same
+way ``L1MemoryManager`` treats its pinned-DRAM slab today: a single
+allocation, a single cuFile handle registration, and per-chunk
+sub-allocations as ``(offset, size)`` pairs inside the slab.
 
-We use kvikio (NVIDIA RAPIDS) as the cuFile wrapper rather than the
-bare ``cufile`` Python bindings because kvikio exposes the async
-APIs that the bare bindings omit (``IOFuture`` + future-based wait,
-plus a ``raw_read_async`` variant that's stream-ordered). Today we
-use ``pread``/``pwrite`` (thread-pool async); ``raw_read_async`` is a
-follow-up when the caller can submit a batch of reads before waiting.
+The motivation for the single-slab design is throughput. cuFile's per-
+file ``cuFileHandleRegister`` is the dominant cost when chunks are
+small; the prior file-per-chunk layout paid it on every read and
+write. With one slab handle held for the lifetime of the backend,
+per-chunk I/O cost collapses to a single ``cuFileWriteAsync`` /
+``cuFileReadAsync`` submit plus the stream-side DMA.
 
 See ``docs/design/v1/distributed/gds_l1_backend.md`` for the full
-architecture and ``gds_l1_backend_plan.md`` for the decision log.
+architecture and the slab-design decision log.
 
 Surface this module exposes:
 
-- :class:`GdsL1Backend` — owns the hot index, the cuFile handle cache,
-  the metadata scan, and the :class:`GdsScratchAllocator`.
-  ``L1Manager`` consumes this via an optional hook.
+- :class:`SlabAddressManager` — first-fit free-list allocator over
+  byte offsets within the slab file. Mirrors the role of
+  ``TensorMemoryAllocator`` for the slab file.
+- :class:`GdsL1Backend` — owns the slab file, the cuFile handle, the
+  address manager, and the persisted index of resident keys.
 - :class:`GdsScratchAllocator` — tag class used for ``isinstance``
   dispatch in ``gpu_ops.py``; also the home for
   :meth:`cufile_read_into` and :meth:`cufile_write_from`.
-- :class:`GdsMemoryObj` — disk-anchored ``MemoryObj``. ``.tensor`` is
-  ``None`` always; ``.byte_array`` and ``.data_ptr`` raise. Under the
-  exclusive-L2 mode that GDS L1 enforces, neither field is read on
-  the GDS path — the data path is gpu_ops dispatch + the gpu_buffer
-  parameter, not field access on the MemoryObj.
+- :class:`GdsMemoryObj` — slab-anchored ``MemoryObj``. Carries
+  ``slab_offset + size`` instead of a per-chunk path. ``.tensor`` is
+  always ``None``; ``.byte_array`` / ``.data_ptr`` raise.
+
+cuFile DMA fast path is engaged by:
+
+1. Opening the slab file once with ``O_DIRECT``
+   (``GdsL1Config.use_direct_io``, default ``True``).
+2. Registering it with ``cuFileHandleRegister`` once and keeping the
+   handle alive for the backend's lifetime.
+3. Pre-allocating the slab with ``posix_fallocate`` so cuFile writes
+   never have to grow the file underneath us.
+
+The slab medium itself is the durable cache. Eviction frees a slab
+region back to the address manager. The on-disk slab survives
+restart; an index file (JSON) at ``<gds_path>/lmcache_gds_index.json``
+lets a fresh backend instance recover the
+``ObjectKey → (offset, size)`` map.
 """
 
 # Standard
-from collections import OrderedDict
-from typing import Optional, Union
 import asyncio
+import bisect
 import ctypes
-import mmap
+import json
 import os
-import struct
 import threading
 import time
-import urllib.parse
-import uuid
+from collections import OrderedDict
+from typing import Optional, Union
 
 # Third Party
-import numpy as np
 import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import DiskCacheMetadata
+from lmcache.v1.distributed import _cufile_async as ca
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.memory_management import (
@@ -65,19 +77,13 @@ from lmcache.v1.storage_backend.path_sharder import PathSharder
 logger = init_logger(__name__)
 
 
-# --- Constants (kept compatible with storage_backend/gds_backend.py
-#     so the disk layout is shared across MP and non-MP modes) -----
+# --- Constants ------------------------------------------------------
 
-_METADATA_FILE_SUFFIX = ".metadata"
-_DATA_FILE_SUFFIX = ".kvcache.safetensors"
-_WEKA_DATA_FILE_SUFFIX = ".weka1"
-_METADATA_VERSION = 1
-_METADATA_MAX_SIZE = 4096  # 4 KiB reserved header inside the data file
-
+_SLAB_FILENAME = "lmcache_gds_slab.bin"
+_INDEX_FILENAME = "lmcache_gds_index.json"
+_INDEX_VERSION = 1
 _CUFILE_ALIGNMENT = 4096
-_DEFAULT_HANDLE_CACHE_SIZE = 1024
-
-_TORCH_DTYPES = {
+_TORCH_DTYPE_TO_STR = {
     torch.half: "F16",
     torch.bfloat16: "BF16",
     torch.float32: "F32",
@@ -93,94 +99,44 @@ _TORCH_DTYPES = {
     torch.float8_e4m3fn: "F8E4M3FN",
     torch.float8_e5m2: "F8E5M2",
 }
-_TORCH_DTYPES_INVERSE = {v: k for k, v in _TORCH_DTYPES.items()}
+_STR_TO_TORCH_DTYPE = {v: k for k, v in _TORCH_DTYPE_TO_STR.items()}
 
 
-class UnsupportedMetadataVersion(Exception):
-    """Raised when a metadata file carries an unrecognised version."""
+# --- Helpers --------------------------------------------------------
 
 
-# --- Module-level helpers --------------------------------------------
+def _round_up(n: int, align: int) -> int:
+    """Round ``n`` up to the nearest multiple of ``align``."""
+    return (n + align - 1) // align * align
 
 
-def pack_metadata(
-    nbytes: int,
-    shape: torch.Size,
-    dtype: torch.dtype,
-    fmt: MemoryFormat,
-    **extra_metadata: object,
-) -> bytes:
-    """Encode a 4 KiB metadata header for a kvcache file.
+def _object_key_to_string(key: ObjectKey) -> str:
+    """Stable string form of an ObjectKey for index serialisation."""
+    return (
+        f"{key.model_name}@{key.kv_rank}@{key.chunk_hash.hex()}@{key.cache_salt}"
+    )
 
-    Args:
-        nbytes: Size of the data payload in bytes.
-        shape: Logical tensor shape.
-        dtype: Logical tensor dtype.
-        fmt: Memory format of the chunk.
-        **extra_metadata: Free-form metadata stored under ``__metadata__``.
 
-    Returns:
-        Exactly ``_METADATA_MAX_SIZE`` bytes: an 8-byte length prefix
-        plus a space-padded JSON blob.
-
-    Raises:
-        RuntimeError: If ``dtype`` is not one of the supported dtypes.
-    """
-    # Standard
-    import json
-
-    if dtype not in _TORCH_DTYPES:
-        raise RuntimeError(f"Unsupported dtype for GDS L1: {dtype}")
-    tensor_meta = {
-        "dtype": _TORCH_DTYPES[dtype],
-        "shape": list(shape),
-        "data_offsets": [0, nbytes],
-        "fmt": fmt.value,
-        "__metadata__": extra_metadata,
-    }
-    str_meta = json.dumps({"kvcache": tensor_meta}).encode("utf-8")
-    if len(str_meta) > _METADATA_MAX_SIZE - 8:
-        raise RuntimeError(
-            f"GDS L1 metadata header overflowed budget: "
-            f"{len(str_meta)} > {_METADATA_MAX_SIZE - 8}"
+def _string_to_object_key(s: str) -> Optional[ObjectKey]:
+    """Inverse of :func:`_object_key_to_string`. ``None`` on parse error."""
+    parts = s.split("@")
+    if len(parts) != 4:
+        return None
+    model_name, kv_rank_str, hash_hex, cache_salt = parts
+    try:
+        kv_rank = int(kv_rank_str)
+        chunk_hash = bytes.fromhex(hash_hex)
+    except ValueError:
+        return None
+    try:
+        return ObjectKey(
+            chunk_hash=chunk_hash,
+            model_name=model_name,
+            kv_rank=kv_rank,
+            cache_salt=cache_salt,
         )
-    str_meta += b" " * (_METADATA_MAX_SIZE - 8 - len(str_meta))
-    return struct.pack("<Q", len(str_meta)) + str_meta
-
-
-def unpack_metadata(
-    buffer: bytes,
-) -> tuple[torch.Size, torch.dtype, int, MemoryFormat, dict]:
-    """Decode a metadata header produced by :func:`pack_metadata`.
-
-    Args:
-        buffer: At least ``_METADATA_MAX_SIZE`` bytes from the file head.
-
-    Returns:
-        ``(shape, dtype, nbytes, fmt, extra_metadata)``.
-
-    Raises:
-        UnsupportedMetadataVersion: If ``__metadata__.lmcache_version``
-            does not match :data:`_METADATA_VERSION`.
-    """
-    # Standard
-    import json
-
-    meta_len = struct.unpack("<Q", buffer[:8])[0]
-    json_meta = buffer[8 : 8 + meta_len].rstrip(b" ")
-    meta = json.loads(json_meta.decode("utf-8"))
-    tensor_meta = meta["kvcache"]
-    shape = torch.Size(tensor_meta["shape"])
-    dtype = _TORCH_DTYPES_INVERSE[tensor_meta["dtype"]]
-    data_offsets = tensor_meta["data_offsets"]
-    nbytes = data_offsets[1] - data_offsets[0]
-    fmt = MemoryFormat(tensor_meta["fmt"])
-    extra = tensor_meta.get("__metadata__", {})
-    if str(extra.get("lmcache_version")) != str(_METADATA_VERSION):
-        raise UnsupportedMetadataVersion(
-            f"GDS L1 metadata version mismatch: got {extra.get('lmcache_version')!r}"
-        )
-    return shape, dtype, nbytes, fmt, extra
+    except (ValueError, TypeError):
+        return None
 
 
 def get_fstype(path: str) -> str:
@@ -211,261 +167,206 @@ def get_fstype(path: str) -> str:
     return best_fstype
 
 
-def key_to_disk_path(
-    key: ObjectKey,
-    base_path: str,
-    data_suffix: str = _DATA_FILE_SUFFIX,
-) -> tuple[str, str, str, str]:
-    """Map an ``ObjectKey`` to its on-disk file path.
-
-    Layout mirrors ``storage_backend/gds_backend.py`` so the same
-    directory tree can be shared across MP and non-MP modes:
-    ``<base>/<hash[:2]>/<hash[2:4]>/<urlquote(key)>.kvcache.safetensors``.
-
-    Args:
-        key: The object key to map.
-        base_path: Root directory for the cache (post-sharding).
-        data_suffix: File suffix; ``_WEKA_DATA_FILE_SUFFIX`` for wekafs,
-            else ``_DATA_FILE_SUFFIX``.
-
-    Returns:
-        ``(full_path, subdir_key, l1_dir, l2_dir)``. ``subdir_key`` is
-        the concatenation ``l1_dir + l2_dir`` used as the dedup key
-        for directory creation.
-    """
-    hash_str = _hash_str(key)
-    l1_dir = hash_str[:2]
-    l2_dir = hash_str[2:4]
-    key_str = _object_key_to_string(key)
-    full_path = os.path.join(
-        base_path,
-        l1_dir,
-        l2_dir,
-        urllib.parse.quote(key_str, safe="") + data_suffix,
-    )
-    return full_path, l1_dir + l2_dir, l1_dir, l2_dir
+def _compute_layout_bytes(layout_desc: MemoryLayoutDesc) -> int:
+    """Total byte size of a ``MemoryLayoutDesc`` (sum across groups)."""
+    total = 0
+    for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=True):
+        total += shape.numel() * dtype.itemsize
+    return total
 
 
-def _hash_str(key: ObjectKey) -> str:
-    """Convert an ObjectKey's chunk_hash bytes to a hex string."""
-    return key.chunk_hash.hex()
+# --- Slab address manager -------------------------------------------
 
 
-def _object_key_to_string(key: ObjectKey) -> str:
-    """Stable string form of an ObjectKey for filename embedding.
+class SlabAddressManager:
+    """First-fit free-list allocator over a fixed-size byte offset space.
 
-    Format mirrors the L2 fs adapter so the on-disk layout is
-    cross-mode portable.
-    """
-    return f"{key.model_name}@{key.kv_rank}@{_hash_str(key)}@{key.cache_salt}"
-
-
-def _rand_suffix(n: int = 8) -> str:
-    """Generate ``n`` hex chars of randomness for tmp-file suffixes."""
-    return uuid.uuid4().hex[:n]
-
-
-# --- cuFile handle cache --------------------------------------------
-
-
-class CuFileHandleCache:
-    """Thread-safe LRU cache of opened cuFile handles.
-
-    Each entry maps ``(disk_path, mode)`` to a context-managed
-    ``cufile.CuFile`` object. Entries are reference-counted: an entry
-    in active use will not be evicted out from under a caller. The LRU
-    bound caps fd usage; idle entries are evicted at insert time when
-    the cache is full.
-
-    This is a v1 implementation. It does not currently honor the
-    handle's idle time — once the cache is at capacity, the
-    least-recently-used idle handle is closed.
+    Used by :class:`GdsL1Backend` to track which byte ranges of the
+    slab file are in use. Same data structure pattern as the
+    ``TensorMemoryAllocator`` that backs CPU L1's pinned slab, but
+    operating on file offsets instead of pointers.
 
     Args:
-        max_handles: LRU capacity. Default 1024.
-        gds_module: The imported ``kvikio`` module; passed in so the
-            cache doesn't import it at module load time. ``None``
-            disables the cache (acquire raises).
+        total_size: Total addressable space in bytes.
+        align: Allocation alignment; every ``allocate`` and ``free``
+            rounds up to this multiple. Default 4 KiB to match
+            cuFile's alignment requirement on ext4.
+
+    Raises:
+        ValueError: If ``total_size`` <= 0 or ``align`` is not a
+            positive power of two.
+
+    Thread-safe: all public methods take an internal lock.
     """
 
-    def __init__(
-        self,
-        max_handles: int = _DEFAULT_HANDLE_CACHE_SIZE,
-        gds_module: Optional[object] = None,
-    ) -> None:
-        if max_handles <= 0:
-            raise ValueError(f"max_handles must be positive, got {max_handles}")
-        self._max = max_handles
-        self._gds_module = gds_module
+    def __init__(self, total_size: int, align: int = _CUFILE_ALIGNMENT) -> None:
+        if total_size <= 0:
+            raise ValueError(
+                f"SlabAddressManager: total_size must be > 0, got {total_size}"
+            )
+        if align <= 0 or (align & (align - 1)) != 0:
+            raise ValueError(
+                f"SlabAddressManager: align must be a positive power of two, got {align}"
+            )
+        self._total = total_size
+        self._align = align
         self._lock = threading.Lock()
-        # entries are (file_obj, in_use_count); LRU order is dict order
-        self._entries: OrderedDict[tuple[str, str], list] = OrderedDict()
+        # Sorted list of (offset, size) free regions. Starts as one
+        # region covering the whole slab.
+        self._free: list[tuple[int, int]] = [(0, total_size)]
+        self._used = 0
 
-    def acquire(self, disk_path: str, mode: str) -> object:
-        """Borrow a cuFile handle for ``(disk_path, mode)``.
+    @property
+    def total_bytes(self) -> int:
+        return self._total
 
-        The handle is reference-counted while in use so a concurrent
-        :meth:`acquire` for the same key shares it without re-opening,
-        and a concurrent capacity-driven eviction will not close it.
+    def used_bytes(self) -> int:
+        """Total bytes currently reserved by callers."""
+        with self._lock:
+            return self._used
+
+    def free_bytes(self) -> int:
+        """Bytes still available for ``allocate``."""
+        with self._lock:
+            return self._total - self._used
+
+    def allocate(self, size: int) -> Optional[int]:
+        """Reserve ``size`` bytes and return the offset, or ``None`` on OOM.
+
+        First-fit: scans the free list for the first region big enough.
 
         Args:
-            disk_path: File to open.
-            mode: ``"r"``, ``"r+"``, etc. — passed to ``CuFile``.
+            size: Number of bytes to reserve. Rounded up to ``align``.
 
         Returns:
-            The open ``cufile.CuFile`` instance. **Caller must call
-            :meth:`release` when done.**
+            Byte offset of the allocation, or ``None`` if no region
+            is big enough.
 
         Raises:
-            RuntimeError: If cuFile is not configured on this backend.
+            ValueError: If ``size`` <= 0.
         """
-        if self._gds_module is None:
-            raise RuntimeError(
-                "CuFileHandleCache: gds_module is None; cuFile not configured"
+        if size <= 0:
+            raise ValueError(
+                f"SlabAddressManager.allocate: size must be > 0, got {size}"
             )
-        cache_key = (disk_path, mode)
+        size = _round_up(size, self._align)
         with self._lock:
-            entry = self._entries.get(cache_key)
-            if entry is not None:
-                self._entries.move_to_end(cache_key)
-                entry[1] += 1
-                return entry[0]
-            # Cache miss: open under the lock to keep races simple.
-            # ``kvikio.CuFile(path, flags)`` opens the file and
-            # registers the handle with cuFile in the constructor, so
-            # there is no separate ``.open()`` step.
-            file_obj = self._gds_module.CuFile(disk_path, mode)
-            self._entries[cache_key] = [file_obj, 1]
-            self._evict_idle_if_full_locked()
-            return file_obj
+            for i, (off, free_size) in enumerate(self._free):
+                if free_size >= size:
+                    if free_size == size:
+                        del self._free[i]
+                    else:
+                        self._free[i] = (off + size, free_size - size)
+                    self._used += size
+                    return off
+            return None
 
-    def release(self, disk_path: str, mode: str) -> None:
-        """Return a previously-acquired handle. Decrements ref count.
+    def free(self, offset: int, size: int) -> None:
+        """Return ``[offset, offset + size)`` to the free list.
+
+        Adjacent regions are coalesced so the free list stays compact.
 
         Args:
-            disk_path: File path passed to :meth:`acquire`.
-            mode: Mode passed to :meth:`acquire`.
+            offset: Start of the region returned by :meth:`allocate`.
+            size: Size of the region (will be rounded up to ``align``).
         """
-        cache_key = (disk_path, mode)
-        with self._lock:
-            entry = self._entries.get(cache_key)
-            if entry is None:
-                logger.warning("CuFileHandleCache.release on unknown key %r", cache_key)
-                return
-            entry[1] -= 1
-            if entry[1] < 0:
-                logger.warning(
-                    "CuFileHandleCache: release underflow for %r, clamping to 0",
-                    cache_key,
-                )
-                entry[1] = 0
-
-    def invalidate(self, disk_path: str, mode: Optional[str] = None) -> None:
-        """Forcibly drop the cached handle(s) for ``disk_path``.
-
-        Used when a file is deleted or rewritten so subsequent calls
-        re-open. Idle handles are closed; in-use handles are left to
-        be closed by :meth:`release` semantics on completion (though
-        we drop the cache entry so no new acquirer reuses it).
-
-        Args:
-            disk_path: File whose cached handle(s) should be dropped.
-            mode: If given, only invalidate this specific mode.
-        """
-        with self._lock:
-            keys_to_drop = [
-                k
-                for k in self._entries
-                if k[0] == disk_path and (mode is None or k[1] == mode)
-            ]
-            for k in keys_to_drop:
-                entry = self._entries.pop(k)
-                if entry[1] == 0:
-                    self._safe_close(entry[0], k)
-
-    def close(self) -> None:
-        """Close every cached handle. Called at backend shutdown."""
-        with self._lock:
-            for cache_key, entry in self._entries.items():
-                self._safe_close(entry[0], cache_key)
-            self._entries.clear()
-
-    def _evict_idle_if_full_locked(self) -> None:
-        """Drop the LRU idle entry if the cache is over capacity.
-
-        Must be called with ``self._lock`` held.
-        """
-        if len(self._entries) <= self._max:
+        if size <= 0:
             return
-        # Walk from oldest to newest; close the first idle one.
-        for cache_key in list(self._entries.keys()):
-            entry = self._entries[cache_key]
-            if entry[1] == 0:
-                self._entries.pop(cache_key)
-                self._safe_close(entry[0], cache_key)
-                return
-        # No idle entries: cache is fully busy. Log and keep going
-        # (we will exceed capacity briefly rather than block).
-        logger.debug(
-            "CuFileHandleCache: capacity %d exceeded but all entries busy",
-            self._max,
-        )
+        size = _round_up(size, self._align)
+        with self._lock:
+            self._used = max(0, self._used - size)
+            offsets = [o for o, _ in self._free]
+            idx = bisect.bisect_left(offsets, offset)
+            self._free.insert(idx, (offset, size))
+            if idx + 1 < len(self._free):
+                nxt_off, nxt_size = self._free[idx + 1]
+                if offset + size == nxt_off:
+                    self._free[idx] = (offset, size + nxt_size)
+                    del self._free[idx + 1]
+            if idx > 0:
+                prev_off, prev_size = self._free[idx - 1]
+                cur_off, cur_size = self._free[idx]
+                if prev_off + prev_size == cur_off:
+                    self._free[idx - 1] = (prev_off, prev_size + cur_size)
+                    del self._free[idx]
 
-    @staticmethod
-    def _safe_close(file_obj: object, cache_key: tuple) -> None:
-        """Close ``file_obj`` swallowing errors so shutdown is robust."""
-        try:
-            file_obj.close()
-        except Exception as e:
-            logger.warning("CuFileHandleCache: error closing %r: %s", cache_key, e)
+    def mark_used(self, offset: int, size: int) -> None:
+        """Mark ``[offset, offset + size)`` as already in use.
+
+        Called during startup index replay so the free list reflects
+        regions occupied by entries we recovered from the index file.
+
+        Args:
+            offset: Start of the resident region.
+            size: Size of the resident region.
+
+        Raises:
+            RuntimeError: If the range overlaps an already-used region
+                or extends beyond the slab.
+        """
+        if size <= 0:
+            return
+        size = _round_up(size, self._align)
+        with self._lock:
+            for i, (off, free_size) in enumerate(self._free):
+                if off <= offset and offset + size <= off + free_size:
+                    head = (off, offset - off)
+                    tail = (offset + size, off + free_size - (offset + size))
+                    del self._free[i]
+                    insertions = []
+                    if head[1] > 0:
+                        insertions.append(head)
+                    if tail[1] > 0:
+                        insertions.append(tail)
+                    for j, r in enumerate(insertions):
+                        self._free.insert(i + j, r)
+                    self._used += size
+                    return
+            raise RuntimeError(
+                f"SlabAddressManager.mark_used: range [{offset}, {offset + size}) "
+                f"is not free (slab is corrupted or index is stale)"
+            )
 
 
-# --- GdsMemoryObj -----------------------------------------------------
+# --- GdsMemoryObj ---------------------------------------------------
 
 
 class GdsMemoryObj(MemoryObj):
-    """Disk-anchored ``MemoryObj`` for the GDS L1 backend.
+    """Slab-anchored ``MemoryObj`` for the GDS L1 backend.
 
-    A ``GdsMemoryObj`` carries the disk location and the logical
-    metadata of a cached chunk. It owns no live in-memory body:
-    ``.tensor`` is always ``None``, ``.byte_array`` always raises,
-    and ``.data_ptr`` always raises. Bytes move between disk and the
-    GPU staging buffer via the dispatch in ``gpu_ops.py``, which
-    receives the staging buffer as a separate ``gpu_buffer`` argument
-    and does not read these fields.
+    Carries ``(slab_offset, size)`` within the backend's single slab
+    file plus the standard ``MemoryObjMetadata``. ``.tensor`` is
+    always ``None``; ``.byte_array`` and ``.data_ptr`` raise. Under
+    the exclusive-L2 mode that GDS L1 enforces, neither field is read
+    on the GDS path — the data path is the ``gpu_ops`` dispatch + the
+    ``gpu_buffer`` parameter, not field access on the MemoryObj.
 
     Args:
-        key: The ObjectKey this MemoryObj represents. Carried alongside
-            the disk path so the backend's hot index can be updated on
-            successful writes without re-parsing the path.
-        disk_path: Absolute path to the kvcache data file.
-        file_offset: Byte offset within the file where the payload
-            starts; always :data:`_METADATA_MAX_SIZE` for the v1
-            layout.
-        metadata: Standard :class:`MemoryObjMetadata` for the chunk.
-        parent_allocator: The :class:`GdsScratchAllocator` that
-            handles cuFile I/O on this object's behalf. Returned by
-            :meth:`parent` and used by ``gpu_ops`` ``isinstance``
-            dispatch.
+        key: The ObjectKey this MemoryObj represents.
+        slab_offset: Byte offset into the slab file where this chunk's
+            payload starts.
+        size: Payload size in bytes.
+        metadata: Standard :class:`MemoryObjMetadata`.
+        parent_allocator: The :class:`GdsScratchAllocator` returned by
+            :meth:`parent` so ``gpu_ops``'s ``isinstance`` dispatch
+            picks the cuFile path.
     """
 
     def __init__(
         self,
         key: ObjectKey,
-        disk_path: str,
-        file_offset: int,
+        slab_offset: int,
+        size: int,
         metadata: MemoryObjMetadata,
         parent_allocator: "GdsScratchAllocator",
     ) -> None:
         super().__init__(metadata)
         self.key = key
-        self.disk_path = disk_path
-        self.file_offset = file_offset
+        self.slab_offset = slab_offset
+        self.size = size
         self._parent_allocator = parent_allocator
         self._lock = threading.Lock()
         self._valid = True
-
-    # --- Standard MemoryObj surface ------------------------------------
 
     def invalidate(self) -> None:
         self._valid = False
@@ -474,7 +375,7 @@ class GdsMemoryObj(MemoryObj):
         return self._valid
 
     def get_size(self) -> int:
-        return self.meta.get_size()
+        return self.size
 
     def get_shape(self) -> torch.Size:
         return self.meta.shape
@@ -528,8 +429,8 @@ class GdsMemoryObj(MemoryObj):
             self.meta.ref_count -= 1
             if self.meta.ref_count < 0:
                 logger.warning(
-                    "GdsMemoryObj for %s: ref_count went negative (%d), clamping",
-                    self.disk_path,
+                    "GdsMemoryObj for key %s: ref_count went negative (%d), clamping",
+                    self.key,
                     self.meta.ref_count,
                 )
                 self.meta.ref_count = 0
@@ -566,15 +467,16 @@ class GdsMemoryObj(MemoryObj):
     @property
     def byte_array(self) -> bytes:
         raise NotImplementedError(
-            f"GdsMemoryObj({self.disk_path}).byte_array is not supported; "
-            "bytes live on disk and the GPU staging is registered VRAM."
+            f"GdsMemoryObj(slab_offset={self.slab_offset}).byte_array is not "
+            "supported; bytes live in the GDS slab file and the staging "
+            "buffer is registered VRAM (no buffer protocol)."
         )
 
     @property
     def data_ptr(self) -> int:
         raise NotImplementedError(
-            f"GdsMemoryObj({self.disk_path}).data_ptr is not supported; "
-            "GDS reads/writes use gpu_buffer.data_ptr() directly via the "
+            f"GdsMemoryObj(slab_offset={self.slab_offset}).data_ptr is not "
+            "supported; GDS reads/writes use gpu_buffer.data_ptr() via the "
             "gpu_ops dispatch, never the MemoryObj's data_ptr."
         )
 
@@ -582,412 +484,227 @@ class GdsMemoryObj(MemoryObj):
         return self._parent_allocator
 
 
-# --- GdsScratchAllocator ---------------------------------------------
+# --- GdsScratchAllocator -------------------------------------------
 
 
 class GdsScratchAllocator(MemoryAllocatorInterface):
-    """Tag class for ``gpu_ops`` ``isinstance`` dispatch, and the home
-    for ``cufile_read_into`` / ``cufile_write_from``.
+    """Tag class for ``gpu_ops`` dispatch + home of cuFile I/O helpers.
 
-    This allocator does **not** participate in :meth:`allocate` /
-    :meth:`free` the way ``MixedMemoryAllocator`` does. Allocation
-    happens at the :class:`GdsL1Backend` level (which knows the
-    ``ObjectKey`` and so can derive the disk path);
-    ``GdsScratchAllocator``'s public role is:
+    Holds one or more cuFile-registered ``tmp_gpu_buffer`` regions and
+    routes every I/O through the backend's single slab handle. The
+    actual ``cuFileReadAsync`` / ``cuFileWriteAsync`` call uses the
+    chunk's ``slab_offset`` as ``file_offset``, the slot's offset
+    inside its containing registered region as ``dev_offset``, and
+    that region's base pointer as ``buf_base``.
 
-    1. Hold a reference to the cuFile-registered GPU staging buffer
-       (``GPUCacheContext.tmp_gpu_buffer_``) and its base pointer, so
-       ``cufile.read`` / ``cufile.write`` can pass the registered
-       address + a computed ``dev_offset``.
-    2. Be the return value of ``GdsMemoryObj.parent()`` so the
-       ``isinstance(..., GdsScratchAllocator)`` branch in
-       ``gpu_ops.py`` selects the cuFile path instead of memcpy.
+    Multi-registration striping (path #2 from the design notes):
+    cuFile on ext4 caps a single ``cuFileBufRegister`` at the host's
+    nvidia-fs slab size (16 MiB on the reference host). To stage more
+    concurrent in-flight I/Os without P2P mode, ``register_gpu_buffer``
+    is called multiple times, each with a ≤16 MiB sub-view of the
+    overall ``tmp_gpu_buffer_``. Each registration claims its own
+    nvidia-fs slab, allowing N concurrent ``cuFileReadAsync`` /
+    ``cuFileWriteAsync`` submissions before the next stream sync.
 
     Args:
-        backend: The owning :class:`GdsL1Backend`. The allocator calls
-            back into it for the cuFile handle cache and config.
+        backend: The owning :class:`GdsL1Backend`. The allocator
+            reaches back into it for the slab handle and the address
+            manager.
     """
 
     def __init__(self, backend: "GdsL1Backend") -> None:
         self._backend = backend
-        self._registered_base_ptr: Optional[int] = None
-        self._registered_buffer: Optional[torch.Tensor] = None
-        self._registered_nbytes: int = 0
-        # ctypes-async path state. Populated only when
-        # ``backend.config.use_async_ctypes`` is True.
-        self._use_async_ctypes: bool = bool(
-            getattr(backend.config, "use_async_ctypes", False)
-        )
-        # Submission objects keep host-side ctypes storage alive until
-        # the CUDA stream actually executes the cuFile op. We hold them
-        # here for the lifetime of the allocator; freed at
-        # ``deregister_gpu_buffer``.
-        self._inflight_subs: list[object] = []
-        # Per-disk_path cache of opened ``AsyncHandle``s so we don't pay
-        # the cuFileHandleRegister cost on every chunk.
-        self._async_handles: dict[str, object] = {}
-        self._registered_stream: Optional[int] = None
+        # Parallel lists; index i describes one registered region.
+        # Sorted by ``_base_ptrs`` ascending so ``_resolve_buffer``
+        # can binary-search.
+        self._buffers: list[torch.Tensor] = []
+        self._base_ptrs: list[int] = []
+        self._nbytes: list[int] = []
+        # Cached scalar for callers that want a single representative
+        # pointer (e.g. logs). Not used in the hot path.
+        self._first_base_ptr: int = 0
 
-    # --- Buffer registration -----------------------------------------
+    @property
+    def registered_base_ptr(self) -> int:
+        """Base pointer of the first registered slot (legacy accessor).
+
+        Multi-registration consumers should use the ``buf_base``
+        carried into :meth:`cufile_read_into` / :meth:`cufile_write_from`
+        via the gpu_buffer's residency, not this scalar.
+        """
+        return self._first_base_ptr
+
+    @property
+    def registered_nbytes(self) -> int:
+        """Total bytes across all registered regions."""
+        return sum(self._nbytes)
+
+    @property
+    def num_registered_buffers(self) -> int:
+        """How many distinct cuFile registrations the allocator holds."""
+        return len(self._buffers)
+
+    @property
+    def has_registered_buffer(self) -> bool:
+        """``True`` once at least one ``register_gpu_buffer`` succeeded."""
+        return len(self._buffers) > 0
+
+
+    # --- Buffer registration ----------------------------------------
 
     def register_gpu_buffer(self, buffer: torch.Tensor) -> None:
-        """Register ``buffer`` with cuFile for zero-copy DMA.
+        """Register ``buffer`` with cuFile and the backend's CUDA stream.
 
-        Called once per ``GPUCacheContext`` when GDS L1 is enabled.
-        ``buffer`` must be a contiguous CUDA tensor whose byte size is
-        a multiple of :data:`_CUFILE_ALIGNMENT` (4 KiB) — the L1
-        backend hard-errors at this call site if not, since silently
-        misaligned slot offsets would corrupt cuFile reads.
+        Can be called multiple times; each call adds one more
+        registered region. nvidia-fs caps each call at 16 MiB, but
+        multiple registrations stripe across the slab pool's 16 MiB
+        tier and unlock N-way cuFile concurrency.
 
         Args:
-            buffer: GPU tensor to register. Must be the underlying
-                contiguous buffer (not a slice).
+            buffer: Must be contiguous, on CUDA, 4 KiB-aligned in size,
+                and no larger than 16 MiB (single nvidia-fs slab).
 
         Raises:
-            ValueError: If the buffer is not on CUDA, not contiguous,
-                or its size is not a 4 KiB multiple.
-            RuntimeError: If cuFile is not configured on this backend.
+            ValueError: If ``buffer`` violates the contiguity, device,
+                alignment, or size constraints.
+            RuntimeError: If ``buffer``'s pointer range overlaps an
+                already-registered region. Overlapping registrations
+                would make ``_resolve_buffer`` ambiguous.
         """
         if not buffer.is_cuda:
-            raise ValueError(
-                "GdsScratchAllocator.register_gpu_buffer: buffer must be on CUDA"
-            )
+            raise ValueError("register_gpu_buffer: buffer must be on CUDA")
         if not buffer.is_contiguous():
-            raise ValueError(
-                "GdsScratchAllocator.register_gpu_buffer: buffer must be contiguous"
-            )
+            raise ValueError("register_gpu_buffer: buffer must be contiguous")
         nbytes = buffer.numel() * buffer.element_size()
         if nbytes % _CUFILE_ALIGNMENT != 0:
             raise ValueError(
-                f"GdsScratchAllocator.register_gpu_buffer: buffer size "
-                f"{nbytes} is not a multiple of {_CUFILE_ALIGNMENT} (cuFile "
-                "requires 4 KiB alignment). Adjust lmcache_chunk_size or "
-                "max_batch_size, or disable GDS L1."
+                f"register_gpu_buffer: buffer size {nbytes} is not a multiple of "
+                f"{_CUFILE_ALIGNMENT} (cuFile requires 4 KiB alignment)."
             )
-        if not self._backend.use_gds:
-            # POSIX fallback path doesn't need cuFile registration.
-            self._registered_buffer = buffer
-            self._registered_base_ptr = buffer.data_ptr()
-            self._registered_nbytes = nbytes
-            return
-        gds_module = self._backend.gds_module
-        if gds_module is None:
-            raise RuntimeError(
-                "GdsScratchAllocator.register_gpu_buffer: gds_module is None"
+        if nbytes > 16 * 1024 * 1024:
+            raise ValueError(
+                f"register_gpu_buffer: a single cuFileBufRegister is capped at "
+                f"16 MiB on hosts with the standard nvidia-fs slab config; got "
+                f"{nbytes} bytes. Reduce lmcache_chunk_size or split into "
+                "multiple smaller registrations."
             )
-        if self._use_async_ctypes:
-            # Direct-ctypes path: cuFileBufRegister via libcufile.
-            # See class docstring for the trade-offs.
-            # First Party
-            from lmcache.v1.distributed import _cufile_async as ca
-
-            # cuFile on this host caps a single registration at the
-            # largest nvidia-fs slab (16 MiB). Bigger buffers would
-            # need to be split across multiple registrations + a
-            # per-slot base-pointer table; that's deferred.
-            if nbytes > 16 * 1024 * 1024:
-                raise ValueError(
-                    f"GdsScratchAllocator: use_async_ctypes requires the "
-                    f"staging buffer to fit in a single cuFile registration "
-                    f"(<= 16 MiB on this host); got {nbytes} bytes. "
-                    f"Reduce lmcache_chunk_size or max_batch_size, or set "
-                    f"use_async_ctypes=False."
+        base = buffer.data_ptr()
+        for existing_base, existing_n in zip(
+            self._base_ptrs, self._nbytes, strict=True
+        ):
+            if base < existing_base + existing_n and existing_base < base + nbytes:
+                raise RuntimeError(
+                    f"register_gpu_buffer: new region [0x{base:x}, "
+                    f"0x{base + nbytes:x}) overlaps existing region "
+                    f"[0x{existing_base:x}, 0x{existing_base + existing_n:x})"
                 )
+        if self._backend.use_gds:
             ca.register_buffer(buffer)
-            raw_stream = torch.cuda.current_stream().cuda_stream
-            ca.register_stream(raw_stream)
-            self._registered_stream = raw_stream
-            log_label = "cuFile (ctypes async)"
+            # Stream registration is backend-owned (see backend.close
+            # for why) — the first registered buffer triggers it.
+            self._backend.ensure_stream_registered()
+            log_label = "cuFile"
         else:
-            # kvikio path: memory_register takes the buffer-like
-            # directly and auto-discovers the underlying CUDA
-            # allocation.
-            gds_module.memory_register(buffer)
-            log_label = "kvikio"
-        self._registered_buffer = buffer
-        self._registered_base_ptr = buffer.data_ptr()
-        self._registered_nbytes = nbytes
+            log_label = "POSIX fallback (no cuFile registration)"
+        # Insert keeping ``_base_ptrs`` sorted so ``_resolve_buffer``
+        # can use ``bisect``.
+        idx = bisect.bisect_left(self._base_ptrs, base)
+        self._buffers.insert(idx, buffer)
+        self._base_ptrs.insert(idx, base)
+        self._nbytes.insert(idx, nbytes)
+        if not self._first_base_ptr:
+            self._first_base_ptr = base
         logger.info(
-            "GdsScratchAllocator: registered %d bytes at 0x%x with %s",
+            "GdsScratchAllocator: registered %d bytes at 0x%x via %s "
+            "(total registrations: %d)",
             nbytes,
-            buffer.data_ptr(),
+            base,
             log_label,
+            len(self._buffers),
         )
 
     def deregister_gpu_buffer(self) -> None:
-        """Deregister the previously-registered buffer. Safe to call
-        when no buffer was ever registered."""
-        if self._registered_base_ptr is None:
+        """Deregister every previously-registered region + stream.
+
+        Idempotent: safe to call from ``GdsL1Backend.close`` even if
+        registration never happened.
+        """
+        if not self._buffers:
             return
-        # Sync the CUDA stream first so any in-flight cuFile async ops
-        # complete and won't write into ctypes storage we're about to
-        # release.
-        if self._use_async_ctypes and self._registered_buffer is not None:
-            torch.cuda.synchronize(device=self._registered_buffer.device)
-        # Close any cached AsyncHandles (ctypes path only).
-        for h in list(self._async_handles.values()):
-            try:
-                h.close()
-            except Exception as e:
-                logger.warning("GdsScratchAllocator: AsyncHandle close failed: %s", e)
-        self._async_handles.clear()
-        self._inflight_subs.clear()
-        if (
-            self._backend.use_gds
-            and self._backend.gds_module is not None
-            and self._registered_buffer is not None
-        ):
-            try:
-                if self._use_async_ctypes:
-                    # First Party
-                    from lmcache.v1.distributed import _cufile_async as ca
+        if self._backend.use_gds:
+            torch.cuda.synchronize(device=self._buffers[0].device)
+            for buf in self._buffers:
+                try:
+                    ca.deregister_buffer(buf)
+                except Exception as e:
+                    logger.warning("deregister_gpu_buffer: %s", e)
+        # Stream stays registered for the backend's lifetime; the
+        # backend's close() deregisters it once on shutdown.
+        self._buffers.clear()
+        self._base_ptrs.clear()
+        self._nbytes.clear()
+        self._first_base_ptr = 0
 
-                    ca.deregister_buffer(self._registered_buffer)
-                    if self._registered_stream is not None:
-                        ca.deregister_stream(self._registered_stream)
-                        self._registered_stream = None
-                else:
-                    self._backend.gds_module.memory_deregister(self._registered_buffer)
-            except Exception as e:
-                logger.warning(
-                    "GdsScratchAllocator: deregister failed: %s",
-                    e,
-                )
-        self._registered_buffer = None
-        self._registered_base_ptr = None
-        self._registered_nbytes = 0
-
-    # --- cuFile I/O for gpu_ops dispatch ----------------------------
+    # --- cuFile I/O (dispatch target for gpu_ops) -------------------
 
     def cufile_read_into(
         self,
-        memory_obj: GdsMemoryObj,
+        memory_obj: "GdsMemoryObj",
         gpu_buffer: torch.Tensor,
     ) -> None:
-        """Read ``memory_obj``'s disk payload into ``gpu_buffer``.
+        """Submit a ``cuFileReadAsync`` from the slab → registered slot.
 
-        ``gpu_buffer`` is a slice of (or alias for) the registered
-        staging buffer; this method computes the device offset from
-        ``gpu_buffer.data_ptr() - registered_base_ptr`` and submits
-        the read via the cuFile handle cache.
-
-        Runs on the backend's thread pool when called from
-        ``gpu_ops``; in PR 1 we expose it as a synchronous helper for
-        unit tests and the future dispatch call site.
+        No per-call sync: the read is enqueued on the current torch
+        CUDA stream and the subsequent kernel on the same stream
+        (``multi_layer_block_kv_transfer``) auto-waits via stream
+        ordering.
 
         Args:
-            memory_obj: The disk-anchored MemoryObj.
-            gpu_buffer: Destination GPU tensor (slice of registered
-                staging buffer).
+            memory_obj: The :class:`GdsMemoryObj` to read.
+            gpu_buffer: A view into one of the registered staging
+                regions; the matching registration is resolved by
+                pointer comparison.
 
         Raises:
-            ValueError: If ``gpu_buffer`` is not within the registered
-                region, or sizes mismatch.
-            RuntimeError: If the read returns short.
+            RuntimeError: If no buffer has been registered.
+            ValueError: If ``gpu_buffer`` lies outside every registered
+                region or is smaller than the chunk.
         """
-        dev_offset = self._dev_offset(gpu_buffer)
-        nbytes = memory_obj.get_size()
+        base_ptr, dev_offset = self._resolve_buffer(gpu_buffer)
+        nbytes = memory_obj.size
         if nbytes > gpu_buffer.numel() * gpu_buffer.element_size():
             raise ValueError(
-                f"cufile_read_into: memory_obj size {nbytes} exceeds "
-                f"gpu_buffer capacity "
-                f"{gpu_buffer.numel() * gpu_buffer.element_size()}"
+                f"cufile_read_into: chunk size {nbytes} exceeds gpu_buffer "
+                f"capacity {gpu_buffer.numel() * gpu_buffer.element_size()}"
             )
-        if self._registered_buffer is None:
-            raise RuntimeError("cufile_read_into: no GPU buffer has been registered")
-        if self._use_async_ctypes:
-            self._ctypes_read(memory_obj, dev_offset, nbytes)
-            return
-        ret = self._backend.do_load(
-            memory_obj.disk_path,
-            file_offset=memory_obj.file_offset,
-            buf=self._registered_buffer,
-            dev_offset=dev_offset,
-            size_in_bytes=nbytes,
-        )
-        if ret != nbytes:
-            raise RuntimeError(
-                f"cufile_read_into: short read for {memory_obj.disk_path} — "
-                f"got {ret} bytes, expected {nbytes}"
-            )
+        self._backend.slab_read(memory_obj.slab_offset, nbytes, dev_offset, base_ptr)
 
     def cufile_write_from(
         self,
-        memory_obj: GdsMemoryObj,
+        memory_obj: "GdsMemoryObj",
         gpu_buffer: torch.Tensor,
     ) -> None:
-        """Write ``gpu_buffer`` to ``memory_obj``'s disk file.
+        """Submit a ``cuFileWriteAsync`` from registered slot → slab.
 
-        Creates the file (atomically via tmp + rename), writes the
-        metadata header and payload, and registers the entry in the
-        backend's hot index.
+        Same stream-ordered semantics as :meth:`cufile_read_into`.
+        Registers the chunk in the backend's in-memory index after
+        the submit; persistence to the index file happens at backend
+        close (or on next periodic flush).
 
         Args:
-            memory_obj: The disk-anchored MemoryObj to populate.
-            gpu_buffer: Source GPU tensor (slice of registered
-                staging buffer).
-
-        Raises:
-            ValueError: If sizes mismatch.
-            RuntimeError: If the write fails.
+            memory_obj: The :class:`GdsMemoryObj` to write.
+            gpu_buffer: A view into one of the registered staging
+                regions.
         """
-        dev_offset = self._dev_offset(gpu_buffer)
-        nbytes = memory_obj.get_size()
+        base_ptr, dev_offset = self._resolve_buffer(gpu_buffer)
+        nbytes = memory_obj.size
         if nbytes > gpu_buffer.numel() * gpu_buffer.element_size():
             raise ValueError(
-                f"cufile_write_from: memory_obj size {nbytes} exceeds "
-                f"gpu_buffer capacity "
-                f"{gpu_buffer.numel() * gpu_buffer.element_size()}"
+                f"cufile_write_from: chunk size {nbytes} exceeds gpu_buffer "
+                f"capacity {gpu_buffer.numel() * gpu_buffer.element_size()}"
             )
-        if self._registered_buffer is None:
-            raise RuntimeError("cufile_write_from: no GPU buffer has been registered")
-        if self._use_async_ctypes:
-            self._ctypes_write(memory_obj, dev_offset, nbytes)
-            return
-        self._backend.do_save(
-            memory_obj=memory_obj,
-            buf=self._registered_buffer,
-            dev_offset=dev_offset,
-            nbytes=nbytes,
-        )
-
-    # --- direct-ctypes cuFile async path ---------------------------
-
-    def _ctypes_read(
-        self, memory_obj: GdsMemoryObj, dev_offset: int, nbytes: int
-    ) -> None:
-        """Submit a cuFileReadAsync on the current torch stream.
-
-        No per-call sync — the submission is kept alive in
-        ``_inflight_subs`` and the bytes land in the registered VRAM
-        before any subsequent kernel on the same stream runs (CUDA
-        stream ordering). Callers wanting to see ``Submission.
-        bytes_done`` must first synchronise the stream.
-        """
-        # First Party
-
-        handle = self._get_or_open_async_handle(memory_obj.disk_path, writable=False)
-        raw_stream = torch.cuda.current_stream().cuda_stream
-        sub = handle.read_async(
-            self._registered_base_ptr,
-            nbytes,
-            memory_obj.file_offset,
-            dev_offset,
-            raw_stream,
-        )
-        self._inflight_subs.append(sub)
-
-    def _ctypes_write(
-        self, memory_obj: GdsMemoryObj, dev_offset: int, nbytes: int
-    ) -> None:
-        """Submit a cuFileWriteAsync on the current torch stream.
-
-        The file is pre-allocated to the chunk's payload size + the
-        4 KiB metadata header before submitting, then the metadata
-        sidecar + hot-index entry are written synchronously. Same
-        no-per-call-sync pattern as :meth:`_ctypes_read`.
-        """
-        # First Party
-        from lmcache.v1.distributed import _cufile_async as ca
-
-        disk_path = memory_obj.disk_path
-        os.makedirs(os.path.dirname(disk_path), exist_ok=True)
-        tmp_path = disk_path + ".tmp" + _rand_suffix(8)
-
-        metadata_bytes = pack_metadata(
-            nbytes=nbytes,
-            shape=memory_obj.meta.shape,
-            dtype=memory_obj.meta.dtype,
-            fmt=memory_obj.meta.fmt,
-            lmcache_version=str(_METADATA_VERSION),
-        )
-        # Lay down the metadata header on a regular fd (O_DIRECT
-        # writes need aligned sizes/offsets and a 4 KiB header isn't
-        # the world; let the kernel write it normally), then re-open
-        # via the ctypes AsyncHandle to write the GDS payload.
-        try:
-            with open(tmp_path, "wb") as f:
-                f.write(metadata_bytes)
-            payload_size = nbytes
-            # Pre-allocate the full file (header + payload) so the
-            # cuFile write doesn't have to grow the file.
-            fd = os.open(tmp_path, os.O_RDWR)
-            try:
-                os.posix_fallocate(fd, 0, _METADATA_MAX_SIZE + payload_size)
-            finally:
-                os.close(fd)
-            with ca.AsyncHandle(tmp_path, writable=True) as handle:
-                raw_stream = torch.cuda.current_stream().cuda_stream
-                sub = handle.write_async(
-                    self._registered_base_ptr,
-                    payload_size,
-                    _METADATA_MAX_SIZE,
-                    dev_offset,
-                    raw_stream,
-                )
-                # The AsyncHandle context manager calls close() on exit;
-                # the cuFile handle deregister implicitly waits for
-                # in-flight ops on it (kernel-side ref counting). Force
-                # a stream sync here too so the bytes_done we read is
-                # actually settled.
-                torch.cuda.current_stream().synchronize()
-                actual = sub.bytes_done
-            if actual != payload_size:
-                raise RuntimeError(
-                    f"_ctypes_write: short write for {disk_path} — "
-                    f"got {actual} bytes, expected {payload_size}"
-                )
-            os.rename(tmp_path, disk_path)
-            for mode in ("r", "r+"):
-                self.handle_cache_invalidate(disk_path, mode)
-            self._backend._record_save(memory_obj, disk_path, nbytes)  # noqa: SLF001
-            self._backend._write_metadata_sidecar(disk_path, metadata_bytes)  # noqa: SLF001
-        except Exception:
-            try:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            except OSError:
-                pass
-            logger.exception("_ctypes_write failed for %s", disk_path)
-            raise
-
-    def _get_or_open_async_handle(self, disk_path: str, writable: bool) -> object:
-        """Cache opened ``AsyncHandle``s per disk_path.
-
-        cuFileHandleRegister is non-trivial; opening once per file and
-        keeping the handle alive across reads/writes is a meaningful
-        speedup for the chunk-heavy access pattern.
-        """
-        # First Party
-        from lmcache.v1.distributed import _cufile_async as ca
-
-        cache_key = (disk_path, writable)
-        h = self._async_handles.get(cache_key)
-        if h is None:
-            h = ca.AsyncHandle(disk_path, writable=writable)
-            self._async_handles[cache_key] = h
-        return h
-
-    def handle_cache_invalidate(self, disk_path: str, mode: str) -> None:
-        """Forward to the kvikio handle cache.
-
-        Exposed so ``_ctypes_write`` (and any external caller that
-        replaces a file under us) can drop stale fds — see the
-        analogous call in ``GdsL1Backend.do_save``.
-        """
-        # First Party
-        # The async path doesn't share the kvikio handle cache, but a
-        # mode-flagged ``AsyncHandle`` for the same path would be
-        # stale after a rename; drop it from our own cache too.
-        for cache_key in [(disk_path, True), (disk_path, False)]:
-            h = self._async_handles.pop(cache_key, None)
-            if h is not None:
-                try:
-                    h.close()
-                except Exception:
-                    pass
-        if self._backend.handle_cache is not None:
-            self._backend.handle_cache.invalidate(disk_path, mode)
+        self._backend.slab_write(memory_obj.slab_offset, nbytes, dev_offset, base_ptr)
+        self._backend.record_entry(memory_obj)
 
     # --- MemoryAllocatorInterface (mostly no-ops) -------------------
 
@@ -998,15 +715,6 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
-        """Not supported — GDS L1 allocates via ``GdsL1Backend``.
-
-        Callers should use :meth:`GdsL1Backend.create_memory_obj`
-        instead, which takes the ``ObjectKey`` needed to derive the
-        disk path.
-
-        Raises:
-            NotImplementedError: Always.
-        """
         raise NotImplementedError(
             "GdsScratchAllocator.allocate: use "
             "GdsL1Backend.create_memory_obj(key, layout_desc) instead"
@@ -1020,10 +728,9 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[list[MemoryObj]]:
-        """Not supported — see :meth:`allocate`."""
         raise NotImplementedError(
             "GdsScratchAllocator.batched_allocate: use "
-            "GdsL1Backend.create_memory_objs(keys, layout_desc) instead"
+            "GdsL1Backend.create_memory_obj(key, layout_desc) instead"
         )
 
     def free(
@@ -1031,8 +738,8 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         memory_obj: MemoryObj,
         allocator_type: Optional[str] = None,
     ) -> None:
-        """No-op. ``GdsMemoryObj`` carries no in-memory allocation."""
-        return
+        if isinstance(memory_obj, GdsMemoryObj):
+            self._backend.free_entry(memory_obj)
 
     def batched_free(
         self,
@@ -1040,55 +747,111 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
     ) -> None:
-        """No-op. See :meth:`free`."""
-        return
+        for mo in memory_objs:
+            self.free(mo)
 
-    # --- Private -----------------------------------------------------
+    def _resolve_buffer(self, gpu_buffer: torch.Tensor) -> tuple[int, int]:
+        """Find which registered region ``gpu_buffer`` belongs to.
 
-    def _dev_offset(self, gpu_buffer: torch.Tensor) -> int:
-        """Compute the offset of ``gpu_buffer`` within the registered base.
+        Returns:
+            ``(base_ptr, dev_offset)`` where ``base_ptr`` is the
+            matching registration's base pointer (used as the
+            ``buf_base`` argument to ``cuFileReadAsync`` /
+            ``cuFileWriteAsync``) and ``dev_offset`` is
+            ``gpu_buffer.data_ptr() - base_ptr``.
 
         Raises:
-            ValueError: If no buffer has been registered, or
-                ``gpu_buffer`` does not lie within the registered region.
+            RuntimeError: If no buffer has been registered.
+            ValueError: If ``gpu_buffer`` does not lie entirely inside
+                any single registered region.
         """
-        if self._registered_base_ptr is None:
-            raise ValueError(
+        if not self._base_ptrs:
+            raise RuntimeError(
                 "GdsScratchAllocator: no GPU buffer has been registered yet"
             )
-        offset = gpu_buffer.data_ptr() - self._registered_base_ptr
-        if offset < 0 or offset >= self._registered_nbytes:
+        ptr = gpu_buffer.data_ptr()
+        # ``_base_ptrs`` is sorted ascending. The candidate region is
+        # the rightmost one whose base ≤ ptr.
+        idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
+        if idx < 0:
             raise ValueError(
-                f"GdsScratchAllocator: gpu_buffer pointer 0x{gpu_buffer.data_ptr():x} "
-                f"is outside the registered region "
-                f"[0x{self._registered_base_ptr:x}, "
-                f"0x{self._registered_base_ptr + self._registered_nbytes:x})"
+                f"GdsScratchAllocator: gpu_buffer pointer 0x{ptr:x} is below "
+                f"the lowest registered base 0x{self._base_ptrs[0]:x}"
             )
-        return offset
+        base = self._base_ptrs[idx]
+        nbytes = self._nbytes[idx]
+        offset = ptr - base
+        if offset < 0 or offset >= nbytes:
+            raise ValueError(
+                f"GdsScratchAllocator: gpu_buffer pointer 0x{ptr:x} is "
+                f"outside every registered region (closest candidate: "
+                f"[0x{base:x}, 0x{base + nbytes:x}))"
+            )
+        return base, offset
 
 
 # --- GdsL1Backend ---------------------------------------------------
 
 
+class _IndexEntry:
+    """One record in the on-disk index.
+
+    Small enough to keep as a tiny class rather than a full dataclass
+    so it serialises cheaply to JSON.
+    """
+
+    __slots__ = ("slab_offset", "size", "shape", "dtype", "fmt")
+
+    def __init__(
+        self,
+        slab_offset: int,
+        size: int,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat,
+    ) -> None:
+        self.slab_offset = slab_offset
+        self.size = size
+        self.shape = shape
+        self.dtype = dtype
+        self.fmt = fmt
+
+
 class GdsL1Backend:
-    """The GDS L1 backend: disk-resident L1 with cuFile DMA to GPU.
+    """Slab-file GDS L1 backend.
 
-    Owns the in-memory hot index of disk-resident keys, the cuFile
-    handle cache, an I/O thread pool, and the
-    :class:`GdsScratchAllocator` that tags
-    :class:`GdsMemoryObj` instances.
+    Owns the slab file, the cuFile handle for it, the address
+    manager, and the in-memory ``ObjectKey → _IndexEntry`` map. All
+    per-chunk I/O routes through this single handle — no per-chunk
+    open/close, no per-chunk ``cuFileHandleRegister``.
 
-    Construction kicks off an async filesystem scan that populates
-    the hot index; ``lookup`` calls during the scan window may miss
-    keys that have not yet been indexed. This matches the non-MP
-    ``GdsBackend`` behaviour.
+    Lifecycle:
+
+    1. ``__init__``:
+       - Resolves ``gds_path`` via :class:`PathSharder`.
+       - Opens or creates ``<gds_path>/lmcache_gds_slab.bin``,
+         ``posix_fallocate``s it to ``slab_size_gb`` GiB.
+       - Registers the slab fd with cuFile (single
+         ``cuFileHandleRegister``).
+       - Loads ``<gds_path>/lmcache_gds_index.json`` if present and
+         replays the recorded entries into the address manager.
+    2. Steady state:
+       - ``lookup`` checks the index.
+       - ``create_memory_obj`` ``allocate``s a slab region and
+         returns a :class:`GdsMemoryObj`.
+       - ``slab_read`` / ``slab_write`` submit one ``cuFileReadAsync``
+         / ``WriteAsync`` per call, no sync.
+       - ``record_entry`` / ``free_entry`` keep the index in sync.
+    3. ``close``: stream-syncs, writes the index file, deregisters
+       the cuFile handle, closes the slab fd.
 
     Args:
-        config: :class:`GdsL1Config` with the GDS-specific knobs.
-            ``gds_path`` is required; everything else has defaults.
-        loop: An asyncio event loop on which the metadata scan runs.
-        dst_device: Target GPU device string (``"cuda:N"``); used by
-            :class:`PathSharder` for multi-path sharding.
+        config: :class:`GdsL1Config` with ``gds_path``,
+            ``slab_size_gb``, ``use_direct_io``, etc.
+        loop: An asyncio event loop. Currently unused — preserved for
+            API stability with previous versions.
+        dst_device: Target GPU device string used by
+            :class:`PathSharder`.
     """
 
     def __init__(
@@ -1101,9 +864,8 @@ class GdsL1Backend:
             raise ValueError("GdsL1Backend requires gds_path to be set")
         if not dst_device.startswith("cuda"):
             raise ValueError(
-                f"GdsL1Backend requires a cuda dst_device, got {dst_device}"
+                f"GdsL1Backend requires cuda dst_device, got {dst_device}"
             )
-
         self.config = config
         self._loop = loop
         self.dst_device = dst_device
@@ -1124,121 +886,98 @@ class GdsL1Backend:
             len(self.gds_paths),
         )
 
-        # Resolve cuFile vs POSIX fallback. Auto-disable cuFile on
-        # filesystems that don't support GDS (e.g. tmpfs, overlayfs)
-        # unless the user explicitly asked for cuFile.
         self.use_gds: bool = config.use_gds
         if self.fstype in ("tmpfs", "overlayfs") and config.use_gds:
-            logger.info("GdsL1Backend: auto-disabling cuFile on fstype=%r", self.fstype)
+            logger.info(
+                "GdsL1Backend: auto-disabling cuFile on fstype=%r", self.fstype
+            )
             self.use_gds = False
 
-        self.data_suffix = _DATA_FILE_SUFFIX
-        if self.fstype == "wekafs":
-            self.data_suffix = _WEKA_DATA_FILE_SUFFIX
+        self._slab_path = os.path.join(self.gds_path, _SLAB_FILENAME)
+        self._index_path = os.path.join(self.gds_path, _INDEX_FILENAME)
+        self._slab_size = _round_up(
+            int(config.slab_size_gb * (1 << 30)), _CUFILE_ALIGNMENT
+        )
 
-        self.gds_module: Optional[object] = None
-        self.cudart: Optional[object] = None
+        self._slab_handle: Optional[ca.AsyncHandle] = None
+        self._posix_fd: int = -1
+        self._cudart: Optional[ctypes.CDLL] = None
+        # cuFile requires the stream that ``cuFileReadAsync`` /
+        # ``cuFileWriteAsync`` will run on to be registered exactly
+        # once via ``cuFileStreamRegister``. We register the caller's
+        # current torch CUDA stream on first use and keep it for the
+        # backend's lifetime. cuFile + the scatter kernel share this
+        # one stream — same pattern CPU L1 uses with
+        # ``cudaMemcpyAsync`` — so stream-ordering naturally
+        # serialises the per-batch ``cuFile reads → kernel`` chain
+        # without needing CUDA-event barriers.
+        self._registered_stream: Optional[int] = None
+        self._stream_lock = threading.Lock()
+        # cuFileReadAsync/WriteAsync writes through host-side
+        # ctypes storage held by each Submission. The store has to
+        # outlive the async op — cuFile dereferences these pointers
+        # when the CUDA stream eventually executes the op, not at
+        # submit time. We keep every Submission alive for the
+        # backend's lifetime; each one is ~40 bytes so even a
+        # million-chunk run is sub-megabyte.
+        self._pending_submissions: list[ca.Submission] = []
+        self._submissions_lock = threading.Lock()
         if self.use_gds:
-            # Third Party
-            import kvikio  # noqa: WPS433 — lazy import to avoid load-time failures
-            import kvikio._lib.defaults as _kvikio_defaults
-            import kvikio.defaults
-
-            self.gds_module = kvikio
-            # cuFile's GDS fast path on ext4 (and most local FSes
-            # other than wekafs) requires the file to be opened with
-            # ``O_DIRECT``. kvikio's ``CuFile`` constructor doesn't
-            # accept that flag directly, but it does expose
-            # ``auto_direct_io_read`` / ``auto_direct_io_write``
-            # process-wide defaults that add ``O_DIRECT`` to its
-            # internal open(). Flip both when the operator passes
-            # ``use_direct_io=True`` so GDS DMA can actually engage.
-            if config.use_direct_io:
-                _kvikio_defaults.set_auto_direct_io_read(True)
-                _kvikio_defaults.set_auto_direct_io_write(True)
-            logger.info(
-                "GdsL1Backend: kvikio loaded "
-                "(compat_mode_preferred=%s, "
-                "auto_direct_io_read=%s, auto_direct_io_write=%s)",
-                kvikio.defaults.is_compat_mode_preferred(),
-                _kvikio_defaults.auto_direct_io_read(),
-                _kvikio_defaults.auto_direct_io_write(),
-            )
+            self._open_and_register_slab(config.use_direct_io)
         else:
-            self.cudart = ctypes.CDLL("libcudart.so")
-            logger.info("GdsL1Backend: cuFile disabled, using POSIX fallback")
+            self._open_slab_posix()
 
-        self.handle_cache = CuFileHandleCache(
-            max_handles=config.handle_cache_size,
-            gds_module=self.gds_module,
+        self._address_manager = SlabAddressManager(
+            total_size=self._slab_size, align=_CUFILE_ALIGNMENT
         )
+        self._index_lock = threading.Lock()
+        self._index: OrderedDict[ObjectKey, _IndexEntry] = OrderedDict()
+        self._load_index()
 
-        self._hot_lock = threading.Lock()
-        self._hot_cache: OrderedDict[ObjectKey, DiskCacheMetadata] = OrderedDict()
-        self._metadata_dirs: set[str] = set()
-
-        self._max_bytes: int = config.disk_max_bytes
-        self._disk_bytes: int = 0
-
-        # Public allocator: used by L1Manager via the gds_backend hook
-        # and by gpu_ops via ``isinstance(memory_obj.parent(), ...)``.
         self.scratch_allocator = GdsScratchAllocator(self)
-
-        # Kick off the async metadata scan. Misses during the scan
-        # window are acceptable; see class docstring.
-        self._scan_future = asyncio.run_coroutine_threadsafe(
-            self._scan_metadata(), self._loop
+        logger.info(
+            "GdsL1Backend: slab=%s size=%.1f GiB, %d resident entries",
+            self._slab_path,
+            config.slab_size_gb,
+            len(self._index),
         )
 
-    # --- Public API ----------------------------------------------------
+    # --- Public API -------------------------------------------------
 
     def lookup(self, keys: list[ObjectKey]) -> list[bool]:
-        """Return whether each key is present in the hot index.
-
-        Args:
-            keys: Object keys to test.
-
-        Returns:
-            ``[True if key resident else False, ...]`` in the same
-            order as ``keys``.
-        """
-        with self._hot_lock:
-            return [key in self._hot_cache for key in keys]
+        """Return whether each key is in the slab's index."""
+        with self._index_lock:
+            return [k in self._index for k in keys]
 
     def create_memory_obj(
         self,
         key: ObjectKey,
         layout_desc: MemoryLayoutDesc,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-    ) -> GdsMemoryObj:
-        """Construct a ``GdsMemoryObj`` for a *new* write.
-
-        Used by ``L1Manager.reserve_write`` to mint the MemoryObj
-        before the data is written. The disk file does not exist yet
-        at this point; it is created via
-        :meth:`GdsScratchAllocator.cufile_write_from` when the MP
-        server completes the store.
+    ) -> Optional[GdsMemoryObj]:
+        """Reserve a slab region for ``key`` and return a fresh MemoryObj.
 
         Args:
-            key: The ObjectKey to be stored.
-            layout_desc: Logical layout for the chunk.
-            fmt: Memory format for the chunk.
+            key: The ObjectKey being inserted.
+            layout_desc: Layout descriptor for the chunk's payload.
+            fmt: The chunk's memory format.
 
         Returns:
-            A new disk-anchored ``GdsMemoryObj``. Not yet registered
-            in the hot index — that happens on successful write.
+            A :class:`GdsMemoryObj` pointing at a freshly-reserved
+            slab region, or ``None`` if the slab is full (caller
+            should treat this as an L1 OOM and trigger eviction).
         """
-        disk_path, _, _, _ = key_to_disk_path(
-            key, base_path=self.gds_path, data_suffix=self.data_suffix
-        )
         shape = layout_desc.shapes[0]
         dtype = layout_desc.dtypes[0]
         nbytes = _compute_layout_bytes(layout_desc)
+        slab_offset = self._address_manager.allocate(nbytes)
+        if slab_offset is None:
+            return None
         meta = MemoryObjMetadata(
             shape=shape,
             dtype=dtype,
-            address=0,
-            phy_size=nbytes,
+            address=slab_offset,
+            phy_size=_round_up(nbytes, _CUFILE_ALIGNMENT),
             ref_count=0,
             pin_count=0,
             fmt=fmt,
@@ -1247,521 +986,421 @@ class GdsL1Backend:
         )
         return GdsMemoryObj(
             key=key,
-            disk_path=disk_path,
-            file_offset=_METADATA_MAX_SIZE,
+            slab_offset=slab_offset,
+            size=nbytes,
             metadata=meta,
             parent_allocator=self.scratch_allocator,
         )
 
     def create_memory_obj_from_index(self, key: ObjectKey) -> Optional[GdsMemoryObj]:
-        """Construct a ``GdsMemoryObj`` for a *resident* (on-disk) key.
+        """Synthesise a :class:`GdsMemoryObj` for an already-resident key.
 
-        Used by ``L1Manager.reserve_read`` on the fill-on-miss path:
-        the key is in the hot index, so we synthesise a MemoryObj
-        from the recorded :class:`DiskCacheMetadata`.
+        Used by ``L1Manager.reserve_read`` on the fill-on-miss path —
+        the key is in the durable index, so we return a fresh
+        ``GdsMemoryObj`` pointing at the recorded slab region.
 
         Args:
-            key: The key to resolve.
+            key: The ObjectKey to look up.
 
         Returns:
-            ``None`` if the key is not in the hot index, otherwise a
-            new ``GdsMemoryObj`` referencing the existing disk file.
+            A fresh :class:`GdsMemoryObj` if ``key`` is resident; ``None``
+            otherwise.
         """
-        with self._hot_lock:
-            entry = self._hot_cache.get(key)
+        with self._index_lock:
+            entry = self._index.get(key)
         if entry is None:
-            return None
-        if entry.shape is None or entry.dtype is None or entry.fmt is None:
-            logger.warning(
-                "GdsL1Backend: hot-index entry for %s missing shape/dtype/fmt",
-                entry.path,
-            )
             return None
         meta = MemoryObjMetadata(
             shape=entry.shape,
             dtype=entry.dtype,
-            address=0,
-            phy_size=entry.size,
+            address=entry.slab_offset,
+            phy_size=_round_up(entry.size, _CUFILE_ALIGNMENT),
             ref_count=0,
             pin_count=0,
             fmt=entry.fmt,
         )
         return GdsMemoryObj(
             key=key,
-            disk_path=entry.path,
-            file_offset=_METADATA_MAX_SIZE,
+            slab_offset=entry.slab_offset,
+            size=entry.size,
             metadata=meta,
             parent_allocator=self.scratch_allocator,
         )
 
     def get_memory_usage(self) -> tuple[int, int]:
-        """Return ``(disk_bytes_used, disk_bytes_total)`` for the L1
-        eviction signal.
+        """Return ``(used_bytes, total_bytes)`` of the slab.
 
-        ``disk_bytes_total`` is ``gds_disk_max_bytes`` from extra
-        config; ``0`` means no capacity advertised, which the
-        eviction controller treats as "no global eviction signal."
+        Feeds the existing L1 eviction-controller signal.
         """
-        with self._hot_lock:
-            return self._disk_bytes, self._max_bytes
+        return self._address_manager.used_bytes(), self._slab_size
 
-    def get_hot_cache_size(self) -> int:
-        """Return the number of resident keys. Useful for tests."""
-        with self._hot_lock:
-            return len(self._hot_cache)
+    def record_entry(self, memory_obj: GdsMemoryObj) -> None:
+        """Insert ``memory_obj`` into the in-memory index.
 
-    def wait_for_scan(self, timeout: float = 30.0) -> None:
-        """Block until the startup metadata scan completes.
-
-        Optional helper for tests and callers that want deterministic
-        startup; production code should rely on the async scan.
+        Called by ``GdsScratchAllocator.cufile_write_from`` after the
+        async write submit. Persistence to the on-disk index file is
+        deferred to :meth:`close`.
 
         Args:
-            timeout: Seconds to wait. ``0`` waits indefinitely.
-
-        Raises:
-            TimeoutError: If the scan does not complete in time.
+            memory_obj: The freshly-written :class:`GdsMemoryObj`.
         """
-        try:
-            self._scan_future.result(timeout=timeout if timeout > 0 else None)
-        except Exception as e:
-            logger.warning("GdsL1Backend: scan failed or timed out: %s", e)
-            raise
-
-    def close(self) -> None:
-        """Flush and release all resources."""
-        # Best-effort: wait for an in-flight scan to settle before
-        # tearing down the handle cache and registered buffer.
-        try:
-            self._scan_future.result(timeout=30)
-        except Exception as e:
-            logger.warning("GdsL1Backend.close: scan wait failed: %s", e)
-        self.handle_cache.close()
-        self.scratch_allocator.deregister_gpu_buffer()
-        logger.info("GdsL1Backend: closed")
-
-    # --- I/O methods used by GdsScratchAllocator ----------------------
-
-    def do_load(
-        self,
-        disk_path: str,
-        file_offset: int,
-        buf: torch.Tensor,
-        dev_offset: int,
-        size_in_bytes: int,
-    ) -> int:
-        """Read ``size_in_bytes`` from ``disk_path`` into ``buf`` at
-        ``dev_offset`` bytes from the start of the registered region.
-
-        Returns:
-            Number of bytes read, or a negative value on failure
-            (mirrors :class:`GdsBackend` semantics so callers can
-            log and drop the hot-index entry).
-        """
-        if self.gds_module is not None:
-            return self._gds_read(
-                disk_path, file_offset, buf, dev_offset, size_in_bytes
+        if memory_obj.meta.dtype is None:
+            raise RuntimeError(
+                f"GdsL1Backend.record_entry: memory_obj.meta.dtype is None for "
+                f"key {memory_obj.key}"
             )
-        return self._posix_read(
-            disk_path, file_offset, buf.data_ptr(), dev_offset, size_in_bytes
-        )
-
-    def do_save(
-        self,
-        memory_obj: GdsMemoryObj,
-        buf: torch.Tensor,
-        dev_offset: int,
-        nbytes: int,
-    ) -> None:
-        """Write ``nbytes`` from ``buf`` at ``dev_offset`` to
-        ``memory_obj.disk_path``.
-
-        On success, registers the key in the hot index. On failure,
-        logs and re-raises so the caller can handle.
-        """
-        disk_path = memory_obj.disk_path
-        # Late create the parent dirs so we tolerate first writes per
-        # subdir cleanly without preallocating the full tree.
-        os.makedirs(os.path.dirname(disk_path), exist_ok=True)
-
-        tmp_suffix = ".tmp" + _rand_suffix(8)
-        tmp_path = disk_path + tmp_suffix
-
-        metadata_bytes = pack_metadata(
-            nbytes=nbytes,
+        entry = _IndexEntry(
+            slab_offset=memory_obj.slab_offset,
+            size=memory_obj.size,
             shape=memory_obj.meta.shape,
             dtype=memory_obj.meta.dtype,
             fmt=memory_obj.meta.fmt,
-            lmcache_version=str(_METADATA_VERSION),
         )
-        try:
-            with open(tmp_path, "wb") as f:
-                f.write(metadata_bytes)
-            if self.gds_module is not None:
-                self._gds_write(
-                    tmp_path,
-                    file_offset=_METADATA_MAX_SIZE,
-                    buf=buf,
-                    dev_offset=dev_offset,
-                    nbytes=nbytes,
-                )
-            else:
-                self._posix_write(
-                    tmp_path,
-                    file_offset=_METADATA_MAX_SIZE,
-                    base_pointer=buf.data_ptr(),
-                    dev_offset=dev_offset,
-                    nbytes=nbytes,
-                )
-            os.rename(tmp_path, disk_path)
-            # Invalidate any cached "r"/"r+" cuFile handles for the
-            # old inode at this path. ``os.rename`` replaces the
-            # directory entry but doesn't disturb the previously
-            # opened fd, so a stale handle would happily keep reading
-            # the unlinked inode (whose size is the old write's
-            # nbytes, not the new one). This shows up as short reads
-            # immediately after an overwrite.
-            for mode in ("r", "r+"):
-                self.handle_cache.invalidate(disk_path, mode)
-            self._record_save(memory_obj, disk_path, nbytes)
-            # Write the sibling metadata file atomically.
-            self._write_metadata_sidecar(disk_path, metadata_bytes)
-        except Exception:
-            # Clean up the half-written tmp file if it still exists.
+        with self._index_lock:
+            existing = self._index.get(memory_obj.key)
+            if existing is not None:
+                self._address_manager.free(existing.slab_offset, existing.size)
+            self._index[memory_obj.key] = entry
+
+    def free_entry(self, memory_obj: GdsMemoryObj) -> None:
+        """Free the slab region and drop the index entry."""
+        with self._index_lock:
+            entry = self._index.pop(memory_obj.key, None)
+        if entry is not None:
+            self._address_manager.free(entry.slab_offset, entry.size)
+
+    def slab_read(
+        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
+    ) -> None:
+        """Submit one ``cuFileReadAsync`` against the slab handle.
+
+        Stream-ordered: no per-call sync. The bytes land in the
+        registered GPU buffer at ``buf_base + dev_offset`` before any
+        subsequent kernel on the same stream runs.
+
+        Args:
+            slab_offset: Byte offset within the slab file.
+            size: Bytes to read.
+            dev_offset: Byte offset within the registered region whose
+                base is ``buf_base``.
+            buf_base: Base pointer of the cuFile-registered region the
+                read should land in. Picked by
+                ``GdsScratchAllocator._resolve_buffer`` so multi-
+                registration striping ends up at the correct region.
+        """
+        if not self.use_gds:
+            self._posix_slab_read(slab_offset, size, dev_offset, buf_base)
+            return
+        if self._slab_handle is None:
+            raise RuntimeError("GdsL1Backend.slab_read: slab handle not open")
+        if self._registered_stream is None:
+            raise RuntimeError(
+                "GdsL1Backend.slab_read: cuFile stream not registered; "
+                "call register_gpu_buffer first"
+            )
+        sub = self._slab_handle.read_async(
+            buf_base,
+            size,
+            slab_offset,
+            dev_offset,
+            self._registered_stream,
+        )
+        with self._submissions_lock:
+            self._pending_submissions.append(sub)
+
+    def slab_write(
+        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
+    ) -> None:
+        """Submit one ``cuFileWriteAsync`` against the slab handle.
+
+        Args:
+            slab_offset: Byte offset within the slab file.
+            size: Bytes to write.
+            dev_offset: Byte offset within the registered region whose
+                base is ``buf_base``.
+            buf_base: Base pointer of the cuFile-registered region the
+                write should read from.
+        """
+        if not self.use_gds:
+            self._posix_slab_write(slab_offset, size, dev_offset, buf_base)
+            return
+        if self._slab_handle is None:
+            raise RuntimeError("GdsL1Backend.slab_write: slab handle not open")
+        if self._registered_stream is None:
+            raise RuntimeError(
+                "GdsL1Backend.slab_write: cuFile stream not registered; "
+                "call register_gpu_buffer first"
+            )
+        sub = self._slab_handle.write_async(
+            buf_base,
+            size,
+            slab_offset,
+            dev_offset,
+            self._registered_stream,
+        )
+        with self._submissions_lock:
+            self._pending_submissions.append(sub)
+
+    def close(self) -> None:
+        """Sync stream, persist index, deregister cuFile state, close slab."""
+        if self.scratch_allocator._buffers:  # noqa: SLF001
+            torch.cuda.synchronize(
+                device=self.scratch_allocator._buffers[0].device  # noqa: SLF001
+            )
+        self._persist_index()
+        self.scratch_allocator.deregister_gpu_buffer()
+        with self._stream_lock:
+            if self._registered_stream is not None and self.use_gds:
+                try:
+                    ca.deregister_stream(self._registered_stream)
+                except Exception as e:
+                    logger.warning("GdsL1Backend.close: deregister_stream: %s", e)
+                self._registered_stream = None
+        if self._slab_handle is not None:
             try:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+                self._slab_handle.close()
+            except Exception as e:
+                logger.warning("GdsL1Backend.close: slab handle close failed: %s", e)
+            self._slab_handle = None
+        if self._posix_fd != -1:
+            try:
+                os.close(self._posix_fd)
             except OSError:
                 pass
-            logger.exception("GdsL1Backend.do_save failed for %s", disk_path)
-            raise
+            self._posix_fd = -1
+        logger.info("GdsL1Backend: closed")
 
-    # --- Private internals --------------------------------------------
+    def ensure_stream_registered(self) -> None:
+        """Register the caller's current torch CUDA stream with cuFile.
 
-    async def _scan_metadata(self) -> None:
-        """Async startup scan over all gds_paths.
+        Idempotent: the first call records the stream that
+        ``cuFileReadAsync`` / ``cuFileWriteAsync`` will run on; later
+        calls are no-ops. cuFile mis-handles repeated register /
+        deregister cycles on the same stream (assertion
+        ``tmp == sinfo`` in ``putStreamOp``), so we register exactly
+        once and keep it for the backend's lifetime.
 
-        Populates :attr:`_hot_cache` and :attr:`_disk_bytes`. Logs
-        elapsed time and entry count on completion.
+        Sharing the kernel's stream (rather than using a dedicated
+        cuFile stream) is intentional: cuFile + scatter kernel share
+        the GPU's SMs anyway because ``cuFileCopyGpu`` (cuFile's
+        internal bounce-buffer copy kernel) saturates the SMs while
+        running. Putting them on different streams couldn't unlock
+        SM parallelism that doesn't exist, so we save the
+        cross-stream event handshake cost by keeping one stream.
         """
+        if not self.use_gds:
+            return
+        with self._stream_lock:
+            if self._registered_stream is not None:
+                return
+            raw_stream = torch.cuda.current_stream().cuda_stream
+            ca.register_stream(raw_stream)
+            self._registered_stream = raw_stream
+
+    def get_hot_cache_size(self) -> int:
+        """Number of resident keys. Used by tests + ``gds-check``."""
+        with self._index_lock:
+            return len(self._index)
+
+    def wait_for_scan(self, timeout: float = 0.0) -> None:
+        """Compat stub: the slab design has no async scan to wait for."""
+        return
+
+    # --- Internal ---------------------------------------------------
+
+    def _open_and_register_slab(self, use_direct_io: bool) -> None:
+        """Create / open the slab file and register it with cuFile.
+
+        Pre-allocates to ``self._slab_size`` so subsequent
+        ``cuFileWriteAsync``s don't have to grow the file.
+
+        Args:
+            use_direct_io: If ``True``, opens with ``O_DIRECT`` (required
+                for the cuFile GDS DMA fast path on ext4).
+        """
+        # Create the file first with a regular fd so posix_fallocate
+        # works even when we'd otherwise open with O_DIRECT (some
+        # kernels disallow fallocate via O_DIRECT fds).
+        creator_fd = os.open(self._slab_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            current_size = os.fstat(creator_fd).st_size
+            if current_size < self._slab_size:
+                os.posix_fallocate(creator_fd, 0, self._slab_size)
+        finally:
+            os.close(creator_fd)
+        flags = os.O_RDWR
+        if use_direct_io:
+            flags |= os.O_DIRECT
+        fd = os.open(self._slab_path, flags)
+        try:
+            from cufile.bindings import cuFileHandleRegister
+
+            handle = cuFileHandleRegister(fd)
+        except Exception:
+            os.close(fd)
+            raise
+        # Build an AsyncHandle by hand so we share the same close/
+        # read_async/write_async surface as elsewhere in this module.
+        self._slab_handle = ca.AsyncHandle.__new__(ca.AsyncHandle)
+        self._slab_handle._fd = fd  # noqa: SLF001
+        self._slab_handle._handle = handle  # noqa: SLF001
+        self._slab_handle.path = self._slab_path
+        self._slab_handle.writable = True
+        logger.info(
+            "GdsL1Backend: slab opened at %s (O_DIRECT=%s), cuFile handle registered",
+            self._slab_path,
+            use_direct_io,
+        )
+
+    def _open_slab_posix(self) -> None:
+        """POSIX fallback: open the slab without cuFile registration."""
+        creator_fd = os.open(self._slab_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            current_size = os.fstat(creator_fd).st_size
+            if current_size < self._slab_size:
+                os.posix_fallocate(creator_fd, 0, self._slab_size)
+        finally:
+            os.close(creator_fd)
+        self._posix_fd = os.open(self._slab_path, os.O_RDWR)
+        logger.info(
+            "GdsL1Backend: slab opened at %s (POSIX fallback)", self._slab_path
+        )
+
+    def _posix_slab_read(
+        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
+    ) -> None:
+        """POSIX fallback read: pread + cudaMemcpy H2D into ``buf_base``."""
+        if self._cudart is None:
+            self._cudart = ctypes.CDLL("libcudart.so")
+        host_bytes = os.pread(self._posix_fd, size, slab_offset)
+        if len(host_bytes) != size:
+            raise RuntimeError(
+                f"POSIX slab_read: short read at offset {slab_offset}, "
+                f"got {len(host_bytes)} expected {size}"
+            )
+        host_buf = ctypes.create_string_buffer(host_bytes, size)
+        res = self._cudart.cudaMemcpy(
+            ctypes.c_void_p(buf_base + dev_offset),
+            ctypes.cast(host_buf, ctypes.c_void_p),
+            ctypes.c_size_t(size),
+            ctypes.c_int(1),  # cudaMemcpyHostToDevice
+        )
+        if res != 0:
+            raise RuntimeError(f"POSIX slab_read cudaMemcpy failed: {res}")
+
+    def _posix_slab_write(
+        self, slab_offset: int, size: int, dev_offset: int, buf_base: int
+    ) -> None:
+        """POSIX fallback write: cudaMemcpy D2H from ``buf_base`` + pwrite."""
+        if self._cudart is None:
+            self._cudart = ctypes.CDLL("libcudart.so")
+        host_buf = ctypes.create_string_buffer(size)
+        res = self._cudart.cudaMemcpy(
+            ctypes.cast(host_buf, ctypes.c_void_p),
+            ctypes.c_void_p(buf_base + dev_offset),
+            ctypes.c_size_t(size),
+            ctypes.c_int(2),  # cudaMemcpyDeviceToHost
+        )
+        if res != 0:
+            raise RuntimeError(f"POSIX slab_write cudaMemcpy failed: {res}")
+        written = os.pwrite(self._posix_fd, host_buf.raw[:size], slab_offset)
+        if written != size:
+            raise RuntimeError(
+                f"POSIX slab_write: short write at offset {slab_offset}"
+            )
+
+    def _load_index(self) -> None:
+        """Read the on-disk index and replay it into the address manager.
+
+        Missing or corrupted index → start empty (the slab data is
+        effectively orphaned). This is best-effort: production
+        deployments should manage the slab + index as a unit.
+        """
+        if not os.path.exists(self._index_path):
+            return
         start = time.perf_counter()
-        tasks = []
-        for p in self.gds_paths:
-            try:
-                entries = os.scandir(p)
-            except FileNotFoundError:
+        try:
+            with open(self._index_path, "rb") as f:
+                doc = json.loads(f.read())
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                "GdsL1Backend: failed to read index %s: %s — starting empty",
+                self._index_path,
+                e,
+            )
+            return
+        if doc.get("version") != _INDEX_VERSION:
+            logger.warning(
+                "GdsL1Backend: index version mismatch (got %r, want %d) — ignoring",
+                doc.get("version"),
+                _INDEX_VERSION,
+            )
+            return
+        if doc.get("slab_size") != self._slab_size:
+            logger.warning(
+                "GdsL1Backend: index slab_size mismatch (got %d, want %d) — ignoring",
+                doc.get("slab_size"),
+                self._slab_size,
+            )
+            return
+        loaded = 0
+        for key_str, raw in doc.get("entries", {}).items():
+            key = _string_to_object_key(key_str)
+            if key is None:
                 continue
-            with entries as it:
-                for entry in it:
-                    if not entry.is_dir():
-                        continue
-                    l1_dir = os.path.basename(entry.name)
-                    if len(l1_dir) != 2:
-                        continue
-                    tasks.append(
-                        asyncio.to_thread(
-                            self._scan_metadata_subdir,
-                            os.path.join(p, l1_dir),
-                            l1_dir,
-                        )
-                    )
-        await asyncio.gather(*tasks, return_exceptions=True)
+            try:
+                shape = torch.Size(raw["shape"])
+                dtype = _STR_TO_TORCH_DTYPE[raw["dtype"]]
+                fmt = MemoryFormat(raw["fmt"])
+                slab_offset = int(raw["offset"])
+                size = int(raw["size"])
+            except (KeyError, ValueError):
+                continue
+            entry = _IndexEntry(
+                slab_offset=slab_offset,
+                size=size,
+                shape=shape,
+                dtype=dtype,
+                fmt=fmt,
+            )
+            try:
+                self._address_manager.mark_used(slab_offset, size)
+            except RuntimeError as e:
+                logger.warning("GdsL1Backend._load_index: %s", e)
+                continue
+            self._index[key] = entry
+            loaded += 1
         elapsed = time.perf_counter() - start
         logger.info(
-            "GdsL1Backend: scan complete (%d resident, %.2fs)",
-            self.get_hot_cache_size(),
-            elapsed,
+            "GdsL1Backend: loaded %d index entries in %.2fs", loaded, elapsed
         )
 
-    def _scan_metadata_subdir(self, path: str, l1_dir: str) -> None:
-        """Scan a single first-level directory.
-
-        Picks up every ``*<data_suffix>.metadata`` file under
-        ``path/<l2_dir>/`` and feeds them through
-        :meth:`_read_metadata`.
-        """
-        target_suffix = self.data_suffix + _METADATA_FILE_SUFFIX
+    def _persist_index(self) -> None:
+        """Write the current in-memory index to ``self._index_path``."""
+        with self._index_lock:
+            entries = {
+                _object_key_to_string(k): {
+                    "offset": e.slab_offset,
+                    "size": e.size,
+                    "shape": list(e.shape),
+                    "dtype": _TORCH_DTYPE_TO_STR.get(e.dtype, "F16"),
+                    "fmt": e.fmt.value,
+                }
+                for k, e in self._index.items()
+            }
+        doc = {
+            "version": _INDEX_VERSION,
+            "slab_size": self._slab_size,
+            "entries": entries,
+        }
+        tmp = self._index_path + ".tmp"
         try:
-            l2_entries = os.scandir(path)
-        except FileNotFoundError:
-            return
-        with l2_entries as it:
-            for entry in it:
-                if not entry.is_dir():
-                    continue
-                l2_dir = os.path.basename(entry.name)
-                if len(l2_dir) != 2:
-                    continue
-                try:
-                    file_entries = os.scandir(os.path.join(path, l2_dir))
-                except FileNotFoundError:
-                    continue
-                with file_entries as it2:
-                    for fentry in it2:
-                        if not fentry.is_file() or not fentry.name.endswith(
-                            target_suffix
-                        ):
-                            continue
-                        filename = os.path.basename(fentry.name)
-                        key_str = urllib.parse.unquote(filename[: -len(target_suffix)])
-                        key = _parse_object_key(key_str)
-                        if key is None:
-                            continue
-                        try:
-                            self._read_metadata(key, fentry.path, l1_dir + l2_dir)
-                        except UnsupportedMetadataVersion:
-                            logger.error(
-                                "Unsupported metadata version for %s, ignoring",
-                                fentry.path,
-                            )
-                        except Exception as e:
-                            logger.error(
-                                "Failed to read metadata for %s: %s",
-                                fentry.path,
-                                e,
-                            )
-
-    def _read_metadata(
-        self, key: ObjectKey, metadata_path: str, subdir_key: str
-    ) -> DiskCacheMetadata:
-        """Read a single metadata sidecar file and register the entry."""
-        with open(metadata_path, "rb") as f:
-            buf = f.read(_METADATA_MAX_SIZE)
-        shape, dtype, nbytes, fmt, _ = unpack_metadata(buf)
-        data_path = metadata_path.removesuffix(_METADATA_FILE_SUFFIX)
-        meta = DiskCacheMetadata(data_path, nbytes, shape, dtype, None, fmt)
-        with self._hot_lock:
-            self._metadata_dirs.add(subdir_key)
-            self._hot_cache[key] = meta
-            self._disk_bytes += nbytes
-        return meta
-
-    def _write_metadata_sidecar(self, data_path: str, metadata_bytes: bytes) -> None:
-        """Atomically write the ``.metadata`` sidecar next to ``data_path``."""
-        sidecar = data_path + _METADATA_FILE_SUFFIX
-        tmp = sidecar + ".tmp" + _rand_suffix(8)
-        with open(tmp, "wb") as f:
-            f.write(metadata_bytes)
-        os.rename(tmp, sidecar)
-
-    def _record_save(
-        self, memory_obj: GdsMemoryObj, disk_path: str, nbytes: int
-    ) -> None:
-        """Insert a fresh write into the hot index.
-
-        Called from the I/O worker thread on the store path; holds
-        ``_hot_lock`` only briefly.
-        """
-        entry = DiskCacheMetadata(
-            disk_path,
-            nbytes,
-            memory_obj.meta.shape,
-            memory_obj.meta.dtype,
-            None,
-            memory_obj.meta.fmt,
-        )
-        with self._hot_lock:
-            existing = self._hot_cache.get(memory_obj.key)
-            if existing is not None:
-                # Overwrite: account for the size delta only.
-                self._disk_bytes += nbytes - existing.size
-            else:
-                self._disk_bytes += nbytes
-            self._hot_cache[memory_obj.key] = entry
-
-    def _gds_read(
-        self,
-        disk_path: str,
-        file_offset: int,
-        buf: torch.Tensor,
-        dev_offset: int,
-        size_in_bytes: int,
-    ) -> int:
-        """CUDA-stream-aware cuFile read into the registered region.
-
-        Uses ``kvikio.CuFile.raw_read_async`` so the read is enqueued
-        on the current torch CUDA stream — the same dispatch shape as
-        ``multi_layer_block_kv_transfer`` and the existing
-        ``cudaMemcpyAsync`` in ``lmcache_memcpy_async_h2d``. When
-        ``nvidia-fs`` is loaded the read is truly stream-ordered and
-        the next kernel on the same stream waits for it implicitly;
-        in compat mode kvikio fakes the stream semantics with an
-        internal thread + completion callback, so
-        ``check_bytes_done()`` forces the wait to keep the API
-        behaving consistently across environments.
-
-        Trade-off: ``raw_read_async`` is the peer of
-        ``multi_layer_block_kv_transfer`` in the stream-ordering
-        model and is the right primitive once we can defer the sync.
-        Today we still call ``check_bytes_done()`` here because
-        callers invoke ``_gds_read`` one chunk at a time — batching
-        the deferred sync requires a downstream API change.
-        """
-        try:
-            handle = self.handle_cache.acquire(disk_path, "r")
-            try:
-                stream = torch.cuda.current_stream().cuda_stream
-                future = handle.raw_read_async(
-                    buf, stream, size_in_bytes, file_offset, dev_offset
-                )
-                return future.check_bytes_done()
-            finally:
-                self.handle_cache.release(disk_path, "r")
-        except Exception as e:
-            logger.error("GDS read failed for %s: %s", disk_path, e, exc_info=True)
-            return -1
-
-    def _gds_write(
-        self,
-        disk_path: str,
-        file_offset: int,
-        buf: torch.Tensor,
-        dev_offset: int,
-        nbytes: int,
-    ) -> None:
-        """CUDA-stream-aware cuFile write from the registered region.
-
-        Uses ``raw_write_async`` for the same reasons as
-        :meth:`_gds_read` — see that method's docstring.
-        """
-        handle = self.handle_cache.acquire(disk_path, "r+")
-        try:
-            stream = torch.cuda.current_stream().cuda_stream
-            future = handle.raw_write_async(
-                buf, stream, nbytes, file_offset, dev_offset
+            with open(tmp, "wb") as f:
+                f.write(json.dumps(doc).encode("utf-8"))
+            os.rename(tmp, self._index_path)
+        except OSError as e:
+            logger.warning(
+                "GdsL1Backend._persist_index: failed to write %s: %s",
+                self._index_path,
+                e,
             )
-            future.check_bytes_done()
-        finally:
-            self.handle_cache.release(disk_path, "r+")
-
-    def _posix_read(
-        self,
-        disk_path: str,
-        file_offset: int,
-        base_pointer: int,
-        dev_offset: int,
-        size_in_bytes: int,
-    ) -> int:
-        """Fallback read path: mmap + cudaMemcpy. Mirrors GdsBackend."""
-        if self.cudart is None:
-            raise RuntimeError("GdsL1Backend._posix_read: cudart not loaded")
-        try:
-            fd = os.open(disk_path, os.O_RDONLY)
-            file_size = os.fstat(fd).st_size
-            if file_size < file_offset + size_in_bytes:
-                os.close(fd)
-                logger.error(
-                    "POSIX read: %s too small (size=%d, need=%d)",
-                    disk_path,
-                    file_size,
-                    file_offset + size_in_bytes,
-                )
-                return -1
-            mm = mmap.mmap(
-                fd,
-                file_size,
-                prot=mmap.PROT_READ,
-                flags=mmap.MAP_PRIVATE | mmap.MAP_POPULATE,
-            )
-            os.close(fd)
-            arr = np.frombuffer(mm, dtype=np.uint8)
-            src_addr = arr.__array_interface__["data"][0]
-            res = self.cudart.cudaMemcpy(
-                ctypes.c_void_p(base_pointer + dev_offset),
-                ctypes.c_void_p(src_addr + file_offset),
-                ctypes.c_size_t(size_in_bytes),
-                ctypes.c_int(1),  # cudaMemcpyHostToDevice
-            )
-            del arr
-            mm.close()
-            if res != 0:
-                logger.error("cudaMemcpy failed for %s with code %d", disk_path, res)
-                return -1
-            return size_in_bytes
-        except Exception as e:
-            logger.error("POSIX read failed for %s: %s", disk_path, e, exc_info=True)
-            return -1
-
-    def _posix_write(
-        self,
-        disk_path: str,
-        file_offset: int,
-        base_pointer: int,
-        dev_offset: int,
-        nbytes: int,
-    ) -> None:
-        """Fallback write path: ftruncate + mmap + cudaMemcpy."""
-        if self.cudart is None:
-            raise RuntimeError("GdsL1Backend._posix_write: cudart not loaded")
-        fd = os.open(disk_path, os.O_RDWR)
-        try:
-            os.ftruncate(fd, nbytes + file_offset)
-            mm = mmap.mmap(
-                fd,
-                nbytes + file_offset,
-                prot=mmap.PROT_WRITE,
-                flags=mmap.MAP_SHARED,
-            )
-        finally:
-            os.close(fd)
-        try:
-            arr = np.frombuffer(mm, dtype=np.uint8)
-            dst_addr = arr.__array_interface__["data"][0]
-            res = self.cudart.cudaMemcpy(
-                ctypes.c_void_p(dst_addr + file_offset),
-                ctypes.c_void_p(base_pointer + dev_offset),
-                ctypes.c_size_t(nbytes),
-                ctypes.c_int(2),  # cudaMemcpyDeviceToHost
-            )
-            if res != 0:
-                raise RuntimeError(f"cudaMemcpy D2H failed with code {res}")
-            del arr
-        finally:
-            mm.close()
-
-
-# --- helpers --------------------------------------------------------
-
-
-def _parse_object_key(key_str: str) -> Optional[ObjectKey]:
-    """Parse the filename-embedded ObjectKey string back into an ``ObjectKey``.
-
-    Args:
-        key_str: String produced by :func:`_object_key_to_string`.
-
-    Returns:
-        ``ObjectKey`` on success, ``None`` on parse failure (with a log).
-    """
-    parts = key_str.split("@")
-    if len(parts) != 4:
-        logger.warning(
-            "GdsL1Backend: cannot parse ObjectKey from %r (got %d parts)",
-            key_str,
-            len(parts),
-        )
-        return None
-    model_name, kv_rank_str, hash_hex, cache_salt = parts
-    try:
-        kv_rank = int(kv_rank_str)
-        chunk_hash = bytes.fromhex(hash_hex)
-    except ValueError as e:
-        logger.warning("GdsL1Backend: invalid kv_rank/chunk_hash in %r: %s", key_str, e)
-        return None
-    try:
-        return ObjectKey(
-            chunk_hash=chunk_hash,
-            model_name=model_name,
-            kv_rank=kv_rank,
-            cache_salt=cache_salt,
-        )
-    except ValueError as e:
-        logger.warning("GdsL1Backend: invalid ObjectKey fields in %r: %s", key_str, e)
-        return None
-
-
-def _compute_layout_bytes(layout_desc: MemoryLayoutDesc) -> int:
-    """Total byte size of a MemoryLayoutDesc (sum across groups)."""
-    total = 0
-    for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=True):
-        total += shape.numel() * dtype.itemsize
-    return total

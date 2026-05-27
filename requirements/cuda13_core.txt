@@ -3,6 +3,4 @@
 # The cu12 analogue lives in cuda12_core.txt.
 
 cupy-cuda13x
-# See cuda12_core.txt for why kvikio is needed.
-kvikio-cu13
 nixl-cu13; python_version < "3.13"

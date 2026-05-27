@@ -3,7 +3,7 @@
 
 Implementation lives in :mod:`lmcache.tools.gds_check`. This file
 only defines flags and dispatches to it. Imports of heavy deps
-(torch, kvikio) are deferred to execution time so ``lmcache -h``
+(torch, libcufile) are deferred to execution time so ``lmcache -h``
 stays fast even when GDS deps aren't installed.
 """
 
@@ -24,11 +24,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Probe + benchmark the GDS L1 backend on this host.",
         description=(
             "Inspect host readiness for the GDS L1 backend (fstype, "
-            "nvidia-fs, kvikio compat mode, cuFile alignment), verify "
-            "a byte-for-byte round-trip through the same code path the "
-            "MP server uses, and report store/retrieve throughput. Use "
-            "this to compare hardware before enabling GDS L1 in "
-            "production."
+            "nvidia-fs, cuFile alignment), verify a byte-for-byte "
+            "round-trip through the same code path the MP server uses, "
+            "and report store/retrieve throughput. Use this to compare "
+            "hardware before enabling GDS L1 in production."
         ),
     )
     parser.add_argument(
@@ -72,28 +71,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--no-gds",
         action="store_true",
-        help="Force the POSIX (mmap + cudaMemcpy) fallback path. Use "
-        "this to compare the fallback against the kvikio cuFile path "
-        "on the same host.",
+        help="Force the POSIX (pread/pwrite + cudaMemcpy) fallback path. "
+        "Use this to compare the fallback against the cuFile path on "
+        "the same host.",
     )
     parser.add_argument(
-        "--use-direct-io",
+        "--no-direct-io",
         action="store_true",
-        help="Open the test files with O_DIRECT. Required for true GDS "
-        "DMA on ext4 — without it, libcufile routes the I/O through "
-        "its compat path even when nvidia-fs is loaded. Combine this "
-        "with the ``Ops: Read/Write`` counters in "
-        "``/proc/driver/nvidia-fs/stats`` to confirm DMA is actually "
-        "firing.",
-    )
-    parser.add_argument(
-        "--use-async-ctypes",
-        action="store_true",
-        help="Use the direct-ctypes cuFileReadAsync/WriteAsync path "
-        "instead of kvikio. ~3x faster reads on hosts with nvidia-fs "
-        "loaded; requires the staging buffer to fit in a single "
-        "cuFile registration (<=16 MiB on the reference host). Off "
-        "by default to preserve the kvikio behaviour for comparison.",
+        help="Open the slab file without O_DIRECT. The default opens "
+        "with O_DIRECT, which is required for true GDS DMA on ext4 — "
+        "disable only when investigating page-cache-mediated behaviour. "
+        "Combine the default with the ``Ops: Read/Write`` counters in "
+        "``/proc/driver/nvidia-fs/stats`` to confirm DMA is firing.",
     )
     parser.add_argument(
         "--skip-verify",
@@ -111,7 +100,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def _run(args: argparse.Namespace) -> None:
     """Dispatch into the prober implementation."""
     # First Party
-    # Lazy import — keeps `lmcache -h` fast on hosts without torch/kvikio.
+    # Lazy import — keeps `lmcache -h` fast on hosts without torch/libcufile.
     from lmcache.tools.gds_check.prober import run_gds_check
 
     run_gds_check(
@@ -121,8 +110,7 @@ def _run(args: argparse.Namespace) -> None:
         large_num_chunks=args.large_num_chunks,
         large_chunk_bytes=args.large_chunk_mib * 1024 * 1024,
         use_gds=not args.no_gds,
-        use_direct_io=args.use_direct_io,
-        use_async_ctypes=args.use_async_ctypes,
+        use_direct_io=not args.no_direct_io,
         skip_verify=args.skip_verify,
         skip_bench=args.skip_bench,
     )

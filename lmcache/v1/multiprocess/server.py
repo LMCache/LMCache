@@ -678,7 +678,10 @@ class MPCacheEngine:
                             gpu_context.gpu_kv_format_,
                             0,
                         )
-                    # Store is not batched, so we always use chunk_idx=0 (single slot)
+                    # Store is not batched, so we always use chunk_idx=0
+                    # (single slot). Both CPU L1 and GDS L1 submit the
+                    # gather kernel and the chunk write on the caller's
+                    # cupy stream — stream-ordering serialises them.
                     lmcache_memcpy_async_d2h(
                         gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=0), memory_obj
                     )
@@ -836,8 +839,12 @@ class MPCacheEngine:
                     start_chunk_id * blocks_per_chunk : end_chunk_id * blocks_per_chunk
                 ]
 
-                # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
-                # H2D copy: each memory_obj maps to its own batch slot
+                # Copy into the tmp_gpu_buffer slots, then scatter into
+                # paged KV. CPU L1 and GDS L1 both share the caller's
+                # cupy stream — cuFile reads and the scatter kernel are
+                # both submitted on it, so stream-ordering naturally
+                # serialises ``reads → kernel`` without an event
+                # handshake.
                 for chunk_idx, memory_obj in enumerate(memory_obj_batch):
                     lmcache_memcpy_async_h2d(
                         memory_obj,
