@@ -957,3 +957,91 @@ def _create_metadata(use_mla, kv_caches, engine_kv_format):
         engine_kv_formats=[engine_kv_format] * len(kv_list),
     )
     return metadata
+
+
+def test_vllm_paged_connector_active_concurrency_race():
+    """
+    Actively races a Loader thread (calling to_gpu) and an Eviction thread
+    (invalidating memory_obj.valid to False) to demonstrate the concurrency crash
+    and verify the graceful recovery.
+    """
+    # Standard
+    import time
+
+    num_blocks = 10
+    block_size = 16
+    num_layers = 4
+    num_heads = 8
+    head_size = 64
+    device = "cuda"
+    dtype = torch.float16
+    start, end = 0, 32
+
+    slot_mapping = torch.arange(32, dtype=torch.long, device=device)
+    gpu_kv_dst = generate_kv_cache_paged_list_tensors(
+        num_blocks=num_blocks,
+        device=device,
+        block_size=block_size,
+        gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    )
+
+    allocator = PinMemoryAllocator(10 * 1024 * 1024)
+    hidden_dim = num_heads * head_size
+    connector = VLLMPagedMemGPUConnectorV2(
+        hidden_dim_size=hidden_dim,
+        num_layers=num_layers,
+        use_gpu=True,
+        chunk_size=256,
+        dtype=dtype,
+        device=device,
+    )
+
+    shape = connector.get_shape(end - start)
+    memory_obj = allocator.allocate(shape, dtype)
+
+    stop_event = threading.Event()
+    exceptions = []
+
+    # --- THREAD 1: The Loader ---
+    def loader_worker():
+        while not stop_event.is_set():
+            try:
+                connector.to_gpu(
+                    memory_obj,
+                    start,
+                    end,
+                    kvcaches=gpu_kv_dst,
+                    slot_mapping=slot_mapping,
+                    offset=0,
+                )
+            except Exception as e:
+                exceptions.append(e)
+                stop_event.set()
+                break
+            time.sleep(0.0001)
+
+    # --- THREAD 2: The Evictor ---
+    def evictor_worker():
+        while not stop_event.is_set():
+            memory_obj.valid = False
+            time.sleep(0.0005)
+            memory_obj.valid = True
+            time.sleep(0.0005)
+
+    t1 = threading.Thread(target=loader_worker)
+    t2 = threading.Thread(target=evictor_worker)
+
+    t1.start()
+    t2.start()
+
+    time.sleep(0.5)
+    stop_event.set()
+
+    t1.join()
+    t2.join()
+
+    allocator.free(memory_obj)
+    allocator.close()
+
+    if exceptions:
+        raise exceptions[0]

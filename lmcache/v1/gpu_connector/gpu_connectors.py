@@ -282,7 +282,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        if memory_obj.tensor is None:
+            logger.debug("LMCache Warning: memory_obj.tensor is None. Skipping.")
+            return
 
         self.initialize_kvcaches_ptr(**kwargs)
 
@@ -348,7 +350,9 @@ class VLLMPagedMemGPUConnectorV2(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        if memory_obj.tensor is None:
+            logger.debug("LMCache Warning: memory_obj.tensor is None. Skipping.")
+            return
 
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
@@ -531,7 +535,9 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
 
     @_lmcache_nvtx_annotate
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
-        assert memory_obj.raw_tensor is not None
+        if memory_obj.raw_tensor is None:
+            logger.debug("LMCache Warning: memory_obj.raw_tensor is None. Skipping.")
+            return
         assert "slot_mapping" in kwargs
         if self.use_mla:
             assert memory_obj.metadata.fmt == MemoryFormat.KV_MLA_FMT
@@ -1519,7 +1525,9 @@ class SGLangGPUConnector(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        if memory_obj.tensor is None:
+            logger.debug("LMCache Warning: memory_obj.tensor is None. Skipping.")
+            return
 
         if self.use_mla:
             if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
@@ -1575,7 +1583,9 @@ class SGLangGPUConnector(GPUConnectorInterface):
         :raises AssertionError: If the memory object does not have a tensor.
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        assert memory_obj.tensor is not None
+        if memory_obj.tensor is None:
+            logger.debug("LMCache Warning: memory_obj.tensor is None. Skipping.")
+            return
 
         if "kvcaches" not in kwargs:
             raise ValueError("'kvcaches' should be provided in kwargs.")
