@@ -42,17 +42,23 @@ Example ``lmcache-config.yaml`` for POSIX backend:
 
 Key settings:
 
-- ``nixl_buffer_size``: buffer size for NIXL transfers.
+- ``nixl_buffer_size``: buffer size for NIXL transfers. **GPU mode only** (``nixl_buffer_device: cuda``). Setting this with ``nixl_buffer_device: cpu`` is a configuration error and will be rejected — in CPU mode NIXL shares ``LocalCPUBackend``'s pinned pool, which is sized by ``max_local_cpu_size``.
+
+- ``max_local_cpu_size``: size of ``LocalCPUBackend``'s pinned pool in GiB. In CPU mode, this pool is shared with NIXL and must accommodate both the hot cache and concurrent NIXL I/O in flight. Must be > 0 when ``nixl_buffer_device: cpu``. Default: ``5.0``.
 
 - ``nixl_pool_size``: number of descriptors opened at init time for nixl backend. Set to 0 for dynamic mode.
 
 - ``nixl_path``: directory under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file.
 
-- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu".
+- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu". In CPU mode, NIXL shares ``LocalCPUBackend``'s pinned buffer; ``LocalCPUBackend`` is always created when ``nixl_buffer_device: cpu``, regardless of the ``local_cpu`` setting. ``local_cpu: false`` still suppresses hot-cache promotions — the backend acts as a staging buffer only, mirroring how ``local_disk`` already uses ``LocalCPUBackend``.
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
 - ``nixl_use_hugepages``: whether to use Linux hugepages (2 MiB) for the NIXL CPU buffer. Not supported for GPU buffers. Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``.
+
+.. note::
+
+    In CPU mode, the shared paged allocator consumes one full page per object. With ``save_unfull_chunk: true`` (only valid in static mode — dynamic mode rejects it; see "Dynamic Mode" → "Restrictions" below), partial chunks still occupy a full page each, so effective capacity degrades proportionally to the fraction of unfull last chunks across active sequences.
 
 .. note::
 
