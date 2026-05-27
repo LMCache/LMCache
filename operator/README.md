@@ -88,11 +88,7 @@ spec:
       hostIPC: true
       containers:
         - name: vllm
-          image: lmcache/vllm-openai:latest
-          env:
-            # Deterministic hashing required by LMCache
-            - name: PYTHONHASHSEED
-              value: "0"
+          image: lmcache/vllm-openai:<pinned-tag>
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -120,9 +116,12 @@ spec:
 Key points for vLLM pods:
 
 - **`hostIPC: true` is required** — CUDA IPC (`cudaIpcOpenMemHandle`) needs a shared IPC namespace between vLLM and LMCache. Without this, GPU memory mapping fails.
-- **`PYTHONHASHSEED=0`** — ensures deterministic token hashing so vLLM and LMCache produce consistent cache keys.
 - **ConfigMap mount** — the `$(cat ...)` pattern reads the connection JSON and passes it inline to `--kv-transfer-config`. The ConfigMap name is always `<LMCacheEngine name>-connection`.
+- **External LMCache connector required** — the operator-generated config now sets `kv_connector_module_path=lmcache.integration.vllm.lmcache_mp_connector` so vLLM loads the external LMCache MP connector instead of silently resolving a vendored builtin path.
 - **No `hostNetwork` needed** — the operator creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy routes traffic to the LMCache pod on the same node automatically. The ConfigMap points to the service DNS name, so neither LMCache nor vLLM pods need `hostNetwork`.
+
+> [!IMPORTANT]
+> Use a pinned vLLM image that is new enough to honor `kv_connector_module_path` for KV connector loading. In practice, that means a build that includes the external-module selection fix from vLLM PR #38301 (merged April 7, 2026). Builds that also include vLLM PR #42596 (merged May 15, 2026) are preferred because they default LMCache MP to the external connector with builtin fallback. If your existing vLLM build predates those changes or you are unsure, upgrade it before enabling this operator path.
 
 > [!WARNING]
 > **Do NOT mount an emptyDir at `/dev/shm`** on either LMCache or vLLM pods. With `hostIPC: true`, both pods share the host's `/dev/shm`. Mounting an emptyDir (even with `medium: Memory`) shadows it with a private tmpfs, breaking CUDA IPC — `cudaIpcOpenMemHandle` fails because IPC handles from one pod become invisible to the other.

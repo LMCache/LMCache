@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Union
+import ctypes
+import os
 import unittest.mock
 
 # Third Party
@@ -1830,3 +1832,38 @@ class TestScenarios:
                         pytest.fail(
                             f"{name}/{key}: '{bid}'={val} != '{base_bid}'={base_val}"
                         )
+
+
+# ==========================================
+# Allocation page alignment
+# ==========================================
+#
+# Rust raw-block backend with O_DIRECT requires page-aligned buffer
+# pointers; CUDA path gets this for free via cudaHostAlloc, and the
+# non-CUDA fallback in lmcache.non_cuda_equivalents shall mirror the same
+# guarantee.
+
+_PINNED_ALLOC_SIZES = [1, 4095, 4096, 8192, 1024 * 1024]
+
+
+@pytest.mark.parametrize("size", _PINNED_ALLOC_SIZES)
+def test_alloc_pinned_ptr_is_page_aligned(size: int) -> None:
+    page_size = os.sysconf("SC_PAGESIZE")
+    ptr = _py_ops.alloc_pinned_ptr(size)
+    try:
+        assert ptr != 0
+        if ptr % page_size != 0:
+            raise AssertionError(
+                f"alloc_pinned_ptr({size}) returned non-page-aligned ptr "
+                f"{hex(ptr)} (page size {page_size})"
+            )
+        # Touch every byte in the requested region through the raw pointer
+        # to confirm the registered view covers the full requested size
+        # (an undersized view would corrupt adjacent memory or segfault).
+        buf = (ctypes.c_uint8 * size).from_address(ptr)
+        for i in range(size):
+            buf[i] = (i & 0xFF) ^ 0xA5
+        for i in range(size):
+            assert buf[i] == ((i & 0xFF) ^ 0xA5)
+    finally:
+        _py_ops.free_pinned_ptr(ptr)

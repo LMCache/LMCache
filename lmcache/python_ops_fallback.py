@@ -10,6 +10,7 @@ from multiprocessing import shared_memory
 from typing import Optional, Tuple
 import ctypes
 import ctypes.util
+import os
 import warnings
 
 # Third Party
@@ -322,25 +323,48 @@ class PageBufferShapeDesc:
         self.block_stride_elems: int = 0
 
 
+# Cuda path goes through func cudaHostAlloc, which is
+# already page aligned by CUDA spec. This fallback shim mirrors that
+# guarantee so consumers that require page-aligned host buffers, in
+# particular the Rust raw-block backend when O_DIRECT is enabled, which
+# requires page-aligned buffer pointer
+try:
+    _PAGE_SIZE = os.sysconf("SC_PAGESIZE")
+except (AttributeError, ValueError, OSError):
+    _PAGE_SIZE = 4096
+
+
+def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
+    """
+    Allocate a pinned CPU buffer whose first usable byte is page-aligned,
+    and return a torch view of ``size`` bytes plus its base pointer.
+
+    Internally over-allocates one extra page on a backing tensor, then
+    slices the aligned region out. The slice shares storage with the
+    backing tensor, so keeping the slice alive keeps the underlying
+    memory alive (no need to track the backing tensor separately).
+    """
+    backing = torch.empty(size + _PAGE_SIZE, dtype=torch.uint8, pin_memory=False)
+    # First-touch initialization on the entire backing region
+    backing.fill_(0)
+    base = backing.data_ptr()
+    # Distance from `base` to the next page boundary (0..PAGE_SIZE-1).
+    offset = (-base) % _PAGE_SIZE
+    aligned_view = backing[offset : offset + size]
+    return aligned_view, aligned_view.data_ptr()
+
+
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating pinned memory with NUMA awareness.
     On XPU, uses pin_memory=True (SYCL USM host allocation) for fast transfers.
     Note: NUMA node selection is not supported on non-CUDA."""
 
-    # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
-
-    # First-touch initialization (forces physical allocation)
-    tensor.fill_(0)
-
-    # Get a pointer to the start of the tensor object as this is what is
-    # returned by the CUDA equivalent function
-    ptr = tensor.data_ptr()
-
-    # Store the tensor so it can be accessed outide this function scope
-    _tensor_registry[ptr] = tensor
-
-    return ptr
+    view, aligned_ptr = _alloc_page_aligned_pinned_view(size)
+    # view shares storage with its over-allocated backing tensor;
+    # holding the view in the registry transitively keeps the underlying
+    # memory alive.
+    _tensor_registry[aligned_ptr] = view
+    return aligned_ptr
 
 
 def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
@@ -355,20 +379,9 @@ def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     to it. On XPU, uses pin_memory=True (SYCL USM host allocation) for
     fast DMA transfers. On other non-CUDA platforms, pinning is not supported."""
 
-    # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
-
-    # First-touch initialization (forces physical allocation)
-    tensor.fill_(0)
-
-    # Get a pointer to the start of the tensor object as this is what is
-    # returned by the CUDA equivalent function
-    ptr = tensor.data_ptr()
-
-    # Store the tensor so it can be accessed outide this function scope
-    _tensor_registry[ptr] = tensor
-
-    return ptr
+    view, aligned_ptr = _alloc_page_aligned_pinned_view(size)
+    _tensor_registry[aligned_ptr] = view
+    return aligned_ptr
 
 
 def free_pinned_ptr(ptr: int) -> None:

@@ -38,6 +38,7 @@ import (
 // Field tags mirror the JSON keys that vLLM's --kv-transfer-config expects.
 type KvTransferConfig struct {
 	KVConnector            string                 `json:"kv_connector"`
+	KVConnectorModulePath  string                 `json:"kv_connector_module_path"`
 	KVRole                 string                 `json:"kv_role"`
 	KVConnectorExtraConfig KvConnectorExtraConfig `json:"kv_connector_extra_config"`
 }

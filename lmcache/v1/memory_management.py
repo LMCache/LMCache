@@ -2545,9 +2545,8 @@ class HipFileMemoryAllocator(GPUMemoryAllocator):
         # HACK: hipfile import is placed here to avoid import errors on
         # hardware without GPUDirect Storage / hipFile support.
         # Third Party
-        from hipfile.bindings import hipFileBufDeregister, hipFileBufRegister
+        from hipfile import Buffer
 
-        self.hipFileBufDeregister = hipFileBufDeregister
         if device is None:
             if torch_dev.is_available():
                 # TODO: On ROCm, PyTorch still uses the CUDA API internally
@@ -2557,10 +2556,14 @@ class HipFileMemoryAllocator(GPUMemoryAllocator):
 
         super().__init__(size, device, align_bytes=4096)
         self.base_pointer = self.tensor.data_ptr()
-        hipFileBufRegister(ctypes.c_void_p(self.base_pointer), size, flags=0)
+        self.hipfile_buffer = Buffer(self.base_pointer, size, flags=0)
+        self.hipfile_buffer.register()
 
     def __del__(self):
-        self.hipFileBufDeregister(ctypes.c_void_p(self.base_pointer))
+        try:
+            self.hipfile_buffer.deregister()
+        except Exception:
+            pass
 
     def __str__(self):
         return "HipFileMemoryAllocator"
