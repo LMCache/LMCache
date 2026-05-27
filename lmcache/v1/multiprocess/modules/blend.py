@@ -1,41 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-Overview
---------
-This server enables KV cache reuse across requests that share token
-sub-sequences at *arbitrary positions*, not only at a common prefix.
-
-Workflow (example: chunk_size = 3)
------------------------------------
-1. cb_store_pre_computed([1,2,3,4,5,6])
-   Tokens are split into full chunks ([1,2,3] and [4,5,6]).  Each chunk
-   is stored in the underlying storage under its normal rolling prefix
-   hash, and the chunk fingerprints are registered in
-   BlendTokenRangeMatcher for fast sub-sequence lookup.  Because normal
-   hashes are used, these chunks are also accessible via the standard
-   lookup/retrieve path.
-
-2. cb_lookup_pre_computed([x,y,z, a,b,c, 4,5,6, m,n,p])
-   BlendTokenRangeMatcher slides a rolling polynomial hash over the new
-   request's tokens and detects that the window at positions [6, 9)
-   matches the stored chunk [4,5,6].  A prefetch task is submitted for
-   that chunk using its stored hash as the storage key.  Only chunks
-   confirmed present in storage are returned as CBMatchResult objects
-   (with cur_st/cur_ed pointing to their location in the new request).
-
-3. cb_retrieve_pre_computed(...)
-   The (prefetched) KV cache for each matched chunk is copied (CPU→GPU)
-   into the correct slot of the new request's KV cache buffer (at
-   cur_st + offset), so the LLM can skip recomputing those tokens.
-
-4. cb_store_final([x,y,z, a,b,c, 4,5,6, m,n,p])
-   After inference completes on the new request, all its chunks are
-   stored under normal prefix hashes.  Future requests sharing
-   any prefix of the new request will get standard prefix-cache hits.
-   Future requests sharing any prefix of the first request will also
-   get hits because cb_store_pre_computed already stored those chunks
-   under normal hashes.
-"""
+"""Blend (context-blend / cross-request KV reuse) module for MPCacheEngine."""
 
 # Standard
 from typing import Any
@@ -44,7 +8,6 @@ import time
 
 # Third Party
 import numpy as np
-import zmq
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -53,44 +16,26 @@ from lmcache.utils import check_interprocess_event_support
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
+    PrefetchHandle,
     ipc_key_to_object_keys,
 )
-from lmcache.v1.distributed.config import (
-    StorageManagerConfig,
-    parse_args_to_config,
-)
-from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
 )
-from lmcache.v1.mp_observability.config import (
-    ObservabilityConfig,
-    init_observability,
-    parse_args_to_observability_config,
-)
 from lmcache.v1.mp_observability.event import Event, EventType
-from lmcache.v1.mp_observability.event_bus import get_event_bus
-from lmcache.v1.mp_observability.trace import maybe_initialize_trace_recorder
-from lmcache.v1.multiprocess.config import (
-    MPServerConfig,
-    parse_args_to_mp_server_config,
-)
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     IPCCacheEngineKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.gpu_context import (
-    PlainGPUCacheContext,
+from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_module import (
+    HandlerSpec,
+    ThreadPoolType,
 )
-from lmcache.v1.multiprocess.mq import MessageQueueServer
-from lmcache.v1.multiprocess.protocol import (
-    RequestType,
-    get_handler_type,
-    get_payload_classes,
-)
-from lmcache.v1.multiprocess.server import MPCacheEngine, parse_args
+from lmcache.v1.multiprocess.gpu_context import PlainGPUCacheContext
+from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
     chunk_hash_windows_numba,
     rolling_hash_windows_numba,
@@ -105,43 +50,46 @@ class BlendTokenRangeMatcher:
     """Fast token-range matcher using polynomial rolling/chunk hashes and a
     direct-address lookup table.
 
-    Table layout: poly_chunk_hash (u64) → compact_chunk_id (i64, sequential 0…N-1).
+    Table layout: poly_chunk_hash (u64) -> compact_chunk_id (i64, sequential 0...N-1).
 
     Because compact IDs are bounded by _TABLE_SIZE, unique_hits_direct_id_numba
-    can use a fixed `seen` array of _TABLE_SIZE bytes (~1 MB) rather than one
-    sized by an arbitrary max hash — no memory explosion.
+    can use a fixed ``seen`` array of _TABLE_SIZE bytes (~1 MB) rather than one
+    sized by an arbitrary max hash -- no memory explosion.
 
     Auxiliary storage:
       _chunk_token_hash[i]      : token_hash for chunk i (None if evicted)
-      _token_hash_to_start      : token_hash → start position in seq
+      _token_hash_to_start      : token_hash -> start position in seq
       _compact_id_to_slot[i]    : table slot for compact_id i
-      _token_hash_to_compact_id : token_hash → compact_chunk_id
+      _token_hash_to_compact_id : token_hash -> compact_chunk_id
 
     Methods:
-      on_new_token_hashes  – register a sequence; builds fingerprints
-                             and writes compact IDs.
-      match_sub_sequence   – sliding-window probe → compact IDs →
-                             token_hash → start. Skips evicted entries.
-      remove_chunks        – lazily evict stale entries. Clears the
-                             table slot and auxiliary maps.
+      on_new_token_hashes  -- register a sequence; builds fingerprints
+                              and writes compact IDs.
+      match_sub_sequence   -- sliding-window probe -> compact IDs ->
+                              token_hash -> start. Skips evicted entries.
+      remove_chunks        -- lazily evict stale entries. Clears the
+                              table slot and auxiliary maps.
+
+    Args:
+        chunk_size: Number of tokens per chunk for fingerprint computation.
     """
 
-    _TABLE_BITS: int = 20  # 2^20 ≈ 1 M entries
+    _TABLE_BITS: int = 20  # 2^20 ~ 1 M entries
     _TABLE_SIZE: int = 1 << _TABLE_BITS
     _BASE: np.uint64 = np.uint64(0x9E3779B97F4A7C15)  # Fibonacci-hashing constant
 
     def __init__(self, chunk_size: int = 256):
         self.chunk_size = chunk_size
-        # poly_chunk_hash → compact_chunk_id; -1 = empty
+        # poly_chunk_hash -> compact_chunk_id; -1 = empty
         self._table_id = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
         self._mask = np.uint64(self._TABLE_SIZE - 1)
-        # compact_chunk_id → caller-supplied token_hash (full bytes)
+        # compact_chunk_id -> caller-supplied token_hash (full bytes)
         self._chunk_token_hash: list[bytes | None] = []
-        # token_hash → start position in its registered sequence
+        # token_hash -> start position in its registered sequence
         self._token_hash_to_start: dict[bytes, int] = {}
-        # compact_chunk_id → table slot index (for reverse lookup during eviction)
+        # compact_chunk_id -> table slot index (for reverse lookup during eviction)
         self._compact_id_to_slot = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
-        # token_hash → compact_chunk_id (for eviction lookup)
+        # token_hash -> compact_chunk_id (for eviction lookup)
         self._token_hash_to_compact_id: dict[bytes, int] = {}
         self._lock = threading.Lock()
 
@@ -149,7 +97,7 @@ class BlendTokenRangeMatcher:
         self,
         token_ids: list[int],
         token_hashes: list[bytes],
-    ):
+    ) -> None:
         """Register a new token sequence and index its non-overlapping chunks.
 
         Args:
@@ -207,10 +155,10 @@ class BlendTokenRangeMatcher:
                 )
             compact_ids = np.arange(base_id, base_id + n_new, dtype=np.int64)
 
-            # Write table: poly_chunk_hash → compact_chunk_id
+            # Write table: poly_chunk_hash -> compact_chunk_id
             update_table_id_numba(new_chunk_hashes, self._table_id, compact_ids)
 
-            # Persist compact_id → token_hash, token_hash → start, and reverse maps
+            # Persist compact_id -> token_hash, token_hash -> start, and reverse maps
             for k, orig_i in enumerate(new_idxs):
                 th = token_hashes[orig_i]
                 cid = int(compact_ids[k])
@@ -363,80 +311,75 @@ def _unique_token_coverage(results: list[CBMatchResult]) -> int:
     return coverage
 
 
-# Main class and main functions
-class BlendEngineV2(MPCacheEngine):
-    def __init__(
-        self,
-        storage_manager_config: StorageManagerConfig,
-        chunk_size: int = 256,
-        hash_algorithm: str = "blake3",
-    ):
-        super().__init__(
-            storage_manager_config, chunk_size, hash_algorithm=hash_algorithm
-        )
+class BlendModule:
+    """Handles blend (context-blend / cross-request KV reuse) operations.
 
+    Owns CB-specific GPU context registrations and the token range matcher.
+    Provides handlers for CB register, unregister, store, retrieve, and lookup.
+
+    Args:
+        ctx: The shared engine context.
+    """
+
+    def __init__(self, ctx: MPCacheEngineContext) -> None:
+        self._ctx = ctx
         self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
-
-        # CB GPU ID -> (model name, world size) as metadata
-        # NOTE: This is mainly for determining the layout desc during prefetch
         self._cb_gpu_context_meta: dict[int, tuple[str, int]] = {}
+        self._token_range_matcher = BlendTokenRangeMatcher(ctx.chunk_size)
+        self._gpu_copy_lock = threading.Lock()
 
-        # Fast local matcher: indexes pre-computed chunk hashes for sub-sequence lookup
-        self._token_range_matcher = BlendTokenRangeMatcher(chunk_size)
+    @property
+    def context(self) -> MPCacheEngineContext:
+        """Return the shared engine context. Exposed for testing only."""
+        return self._ctx
 
-        self._event_bus = get_event_bus()
+    def get_handlers(self) -> list[HandlerSpec]:
+        """Return handler specs for all request types this module serves.
 
-    def cb_register_kv_cache(
-        self,
-        instance_id: int,
-        kv_caches: KVCache,
-        model_name: str,
-        world_size: int,
-    ) -> None:
+        Returns:
+            A list of HandlerSpec entries mapping request types to
+            their handler callables and thread pool assignments.
         """
-        Register the KV cache buffer from the blend engine
-
-        Args:
-            instance_id: Unique identifier for the blend engine instance
-            kv_caches: KVCache object containing the GPU buffer pointers
-            model_name: The name of the model associated with this KV cache.
-            world_size: The world size associated with this KV cache.
-        """
-        gpu_context = PlainGPUCacheContext(kv_caches, self.chunk_size)
-        self._cb_gpu_contexts[instance_id] = gpu_context
-        self._cb_gpu_context_meta[instance_id] = (model_name, world_size)
-        logger.info(
-            "Registered CB KV cache for instance_id %d with %d layers",
-            instance_id,
-            gpu_context.num_layers,
-        )
-
-    def cb_unregister_kv_cache(self, instance_id: int) -> None:
-        """
-        Unregister the KV cache buffer for the given instance_id
-
-        Args:
-            instance_id: Unique identifier for the blend engine instance to unregister
-        """
-        if instance_id in self._cb_gpu_contexts:
-            del self._cb_gpu_contexts[instance_id]
-            del self._cb_gpu_context_meta[instance_id]
-            logger.info("Unregistered CB KV cache for instance_id %d", instance_id)
-        else:
-            logger.warning(
-                "Attempted to unregister non-existent CB KV cache for instance_id %d",
-                instance_id,
-            )
+        return [
+            HandlerSpec(
+                RequestType.CB_REGISTER_KV_CACHE,
+                self.cb_register_kv_cache,
+                ThreadPoolType.SYNC,
+            ),
+            HandlerSpec(
+                RequestType.CB_UNREGISTER_KV_CACHE,
+                self.cb_unregister_kv_cache,
+                ThreadPoolType.SYNC,
+            ),
+            HandlerSpec(
+                RequestType.CB_STORE_PRE_COMPUTED,
+                self.cb_store_pre_computed,
+                ThreadPoolType.AFFINITY,
+            ),
+            HandlerSpec(
+                RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
+                self.cb_retrieve_pre_computed,
+                ThreadPoolType.AFFINITY,
+            ),
+            HandlerSpec(
+                RequestType.CB_STORE_FINAL,
+                self.cb_store_final,
+                ThreadPoolType.AFFINITY,
+            ),
+            HandlerSpec(
+                RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
+                self.cb_lookup_pre_computed,
+                ThreadPoolType.NORMAL,
+            ),
+        ]
 
     def report_status(self) -> dict:
-        """Return a status dict for the entire cache engine.
+        """Return blend module status information.
 
-        Extends the base dict with ``registered_cb_gpu_ids`` and
-        ``cb_gpu_context_meta`` so CB-only deployments are distinguishable
-        from "no engine connected" to ``/api/status`` clients.
+        Returns:
+            A dict containing registered CB GPU instance IDs and
+            per-instance KV cache layout metadata.
         """
-        status = super().report_status()
-
         cb_gpu_context_meta: dict[str, dict] = {}
         for gpu_id, meta in self._cb_gpu_context_meta.items():
             model_name, world_size = meta
@@ -461,13 +404,66 @@ class BlendEngineV2(MPCacheEngine):
                 }
             cb_gpu_context_meta[str(gpu_id)] = entry
 
-        status["registered_cb_gpu_ids"] = list(self._cb_gpu_contexts.keys())
-        status["cb_gpu_context_meta"] = cb_gpu_context_meta
-        return status
+        return {
+            "registered_cb_gpu_ids": list(self._cb_gpu_contexts.keys()),
+            "cb_gpu_context_meta": cb_gpu_context_meta,
+        }
+
+    def close(self) -> None:
+        """Release resources owned by this module."""
+        self._cb_gpu_contexts.clear()
+        self._cb_gpu_context_meta.clear()
+
+    def cb_register_kv_cache(
+        self,
+        instance_id: int,
+        kv_caches: KVCache,
+        model_name: str,
+        world_size: int,
+    ) -> None:
+        """Register the KV cache buffer from the blend engine.
+
+        Args:
+            instance_id: Unique identifier for the blend engine instance.
+            kv_caches: KVCache object containing the GPU buffer pointers.
+            model_name: The name of the model associated with this KV cache.
+            world_size: The world size associated with this KV cache.
+        """
+        gpu_context = PlainGPUCacheContext(kv_caches, self._ctx.chunk_size)
+        self._cb_gpu_contexts[instance_id] = gpu_context
+        self._cb_gpu_context_meta[instance_id] = (model_name, world_size)
+
+        layout_desc = MemoryLayoutDesc(
+            shapes=[gpu_context.get_kv_buffer_shape(self._ctx.chunk_size)],
+            dtypes=[gpu_context.dtype],
+        )
+        self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
+
+        logger.info(
+            "Registered CB KV cache for instance_id %d with %d layers",
+            instance_id,
+            gpu_context.num_layers,
+        )
+
+    def cb_unregister_kv_cache(self, instance_id: int) -> None:
+        """Unregister the KV cache buffer for the given instance_id.
+
+        Args:
+            instance_id: Unique identifier for the blend engine instance
+                to unregister.
+        """
+        if instance_id in self._cb_gpu_contexts:
+            del self._cb_gpu_contexts[instance_id]
+            del self._cb_gpu_context_meta[instance_id]
+            logger.info("Unregistered CB KV cache for instance_id %d", instance_id)
+        else:
+            logger.warning(
+                "Attempted to unregister non-existent CB KV cache for instance_id %d",
+                instance_id,
+            )
 
     def cb_lookup_pre_computed(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
-        """
-        Lookup the pre-computed chunks in the underlying storage.
+        """Lookup the pre-computed chunks in the underlying storage.
 
         Uses BlendTokenRangeMatcher for a fast local pre-filter, then submits
         prefetch tasks for matched chunks using their stored hashes directly.
@@ -475,20 +471,20 @@ class BlendEngineV2(MPCacheEngine):
         storage are lazily evicted from the matcher via remove_chunks.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids to lookup
+            key: IPCCacheEngineKey containing the token ids to lookup.
 
         Returns:
             List of CBMatchResult for chunks that were actually found in storage,
             ready to be passed to cb_retrieve_pre_computed.
         """
         num_tokens = len(key.token_ids)
-        self._event_bus.publish(
+        self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.CB_REQUEST_START,
                 session_id=key.request_id,
             )
         )
-        self._event_bus.publish(
+        self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.CB_LOOKUP_START,
                 session_id=key.request_id,
@@ -496,18 +492,11 @@ class BlendEngineV2(MPCacheEngine):
             )
         )
 
-        # Sub-sequence fingerprint match: find CB-stored chunks anywhere in the
-        # query using polynomial rolling hashes (context-independent, so a chunk
-        # stored at position 0 is found even when it appears at CHUNK_SIZE in the
-        # query).  Only chunks registered via cb_store_pre_computed / cb_store_final
-        # are in the fingerprint table, which gives CB isolation for free — chunks
-        # stored via the normal STORE path are never registered and therefore
-        # never returned here.
         cb_match_result = self._token_range_matcher.match_sub_sequence(
             list(key.token_ids)
         )
         if not cb_match_result:
-            self._event_bus.publish(
+            self._ctx.event_bus.publish(
                 Event(
                     event_type=EventType.CB_LOOKUP_END,
                     session_id=key.request_id,
@@ -519,12 +508,12 @@ class BlendEngineV2(MPCacheEngine):
                         "stale_chunks": 0,
                         "no_gpu_context": False,
                         "hit_tokens": 0,
-                        "requested_tokens": (num_tokens // self.chunk_size)
-                        * self.chunk_size,
+                        "requested_tokens": (num_tokens // self._ctx.chunk_size)
+                        * self._ctx.chunk_size,
                     },
                 )
             )
-            self._event_bus.publish(
+            self._ctx.event_bus.publish(
                 Event(
                     event_type=EventType.CB_REQUEST_END,
                     session_id=key.request_id,
@@ -564,7 +553,7 @@ class BlendEngineV2(MPCacheEngine):
             if m_name == model_name and w_size == world_size:
                 cb_ctx = self._cb_gpu_contexts[gpu_id]
                 layout_desc = MemoryLayoutDesc(
-                    shapes=[cb_ctx.get_kv_buffer_shape(self.chunk_size)],
+                    shapes=[cb_ctx.get_kv_buffer_shape(self._ctx.chunk_size)],
                     dtypes=[cb_ctx.dtype],
                 )
                 break
@@ -576,7 +565,7 @@ class BlendEngineV2(MPCacheEngine):
                 model_name,
                 world_size,
             )
-            self._event_bus.publish(
+            self._ctx.event_bus.publish(
                 Event(
                     event_type=EventType.CB_LOOKUP_END,
                     session_id=key.request_id,
@@ -588,12 +577,12 @@ class BlendEngineV2(MPCacheEngine):
                         "stale_chunks": 0,
                         "no_gpu_context": True,
                         "hit_tokens": 0,
-                        "requested_tokens": (num_tokens // self.chunk_size)
-                        * self.chunk_size,
+                        "requested_tokens": (num_tokens // self._ctx.chunk_size)
+                        * self._ctx.chunk_size,
                     },
                 )
             )
-            self._event_bus.publish(
+            self._ctx.event_bus.publish(
                 Event(
                     event_type=EventType.CB_REQUEST_END,
                     session_id=key.request_id,
@@ -607,7 +596,7 @@ class BlendEngineV2(MPCacheEngine):
         for group in groups:
             chunk_hashes = [r.hash for r in group]
             obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
-            handle = self.storage_manager.submit_prefetch_task(
+            handle = self._ctx.storage_manager.submit_prefetch_task(
                 obj_keys,
                 layout_desc,
                 external_request_id=key.request_id,
@@ -620,17 +609,14 @@ class BlendEngineV2(MPCacheEngine):
                 group[0].cur_st,
             )
 
-        # TODO(Jiayi): We need to follow how lookup is handled in server.py
-        # to optimize performance.
         # Collect only the CBMatchResults for chunks actually found in storage
         stale_hashes: list[bytes] = []
         for handle, group in zip(prefetch_handles, groups, strict=False):
             found_count = None
             while True:
-                found_count = self.storage_manager.query_prefetch_status(handle)
+                found_count = self._ctx.storage_manager.query_prefetch_status(handle)
                 if found_count is not None:
                     break
-
                 time.sleep(0.001)
 
             # Real found count after dedup the TP
@@ -664,14 +650,14 @@ class BlendEngineV2(MPCacheEngine):
                 "Evicted %d stale chunks from fingerprint table",
                 len(stale_hashes),
             )
-            self._event_bus.publish(
+            self._ctx.event_bus.publish(
                 Event(
                     event_type=EventType.CB_CHUNKS_EVICTED,
                     metadata={"num_chunks": len(stale_hashes)},
                 )
             )
 
-        self._event_bus.publish(
+        self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.CB_LOOKUP_END,
                 session_id=key.request_id,
@@ -683,8 +669,8 @@ class BlendEngineV2(MPCacheEngine):
                     "stale_chunks": len(stale_hashes),
                     "no_gpu_context": False,
                     "hit_tokens": _unique_token_coverage(found_cb_match_result),
-                    "requested_tokens": (num_tokens // self.chunk_size)
-                    * self.chunk_size,
+                    "requested_tokens": (num_tokens // self._ctx.chunk_size)
+                    * self._ctx.chunk_size,
                 },
             )
         )
@@ -698,8 +684,7 @@ class BlendEngineV2(MPCacheEngine):
         event_ipc_handle: bytes,
         start_event: Event | None = None,
     ) -> tuple[Any, dict]:
-        """
-        Helper function to perform GPU-to-CPU copy operations for storing chunks.
+        """Helper function to perform GPU-to-CPU copy operations for storing chunks.
 
         Args:
             obj_keys: List of object keys to store.
@@ -736,16 +721,18 @@ class BlendEngineV2(MPCacheEngine):
             vllm_event.wait(stream=gpu_context.stream)
 
             if start_event is not None:
-                self._event_bus.publish_on_stream(gpu_context.cupy_stream, start_event)
+                self._ctx.event_bus.publish_on_stream(
+                    gpu_context.cupy_stream, start_event
+                )
 
             # Prepare for the copy
-            num_tokens = self.chunk_size
+            num_tokens = self._ctx.chunk_size
             cpu_shape = gpu_context.get_kv_buffer_shape(num_tokens)
             layout_desc = MemoryLayoutDesc(
                 shapes=[cpu_shape], dtypes=[gpu_context.dtype]
             )
 
-            reserved_dict = self.storage_manager.reserve_write(
+            reserved_dict = self._ctx.storage_manager.reserve_write(
                 obj_keys, layout_desc, "new"
             )
 
@@ -755,22 +742,22 @@ class BlendEngineV2(MPCacheEngine):
                 else:
                     continue
 
-                offset_start = idx * self.chunk_size + offset
-                offset_end = offset_start + self.chunk_size
+                offset_start = idx * self._ctx.chunk_size + offset
+                offset_end = offset_start + self._ctx.chunk_size
 
                 # Copy from GPU to CPU
                 tmp_buffer = gpu_context.get_tmp_gpu_buffer(offset_end - offset_start)
                 gpu_kv_slice = gpu_context.slice_kv_cache_on_tokens(
                     offset_start, offset_end
                 )
-                with self.lock:
+                with self._gpu_copy_lock:
                     tmp_buffer.copy_(gpu_kv_slice, non_blocking=True)
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
         # Call finish_write after the copy is done
         gpu_context.cupy_stream.launch_host_func(
-            self.storage_manager.finish_write,
+            self._ctx.storage_manager.finish_write,
             list(reserved_dict.keys()),
         )
 
@@ -783,46 +770,49 @@ class BlendEngineV2(MPCacheEngine):
         instance_id: int,
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """
-        Store the pre-computed chunks in the underlying storage for later retrieval.
+        """Store the pre-computed chunks in the underlying storage for later retrieval.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the pre-computed
-                chunks are stored.
+            key: IPCCacheEngineKey containing the token ids for which the
+                pre-computed chunks are stored.
             offset: The starting offset in the CB KV cache buffer where the
-                pre-computed
-            instance_id: The instance_id of the blend engine instance to store the
-                pre-computed chunks for.
+                pre-computed chunks begin.
+            instance_id: The instance_id of the blend engine instance to store
+                the pre-computed chunks for.
             event_ipc_handle: The IPC handle for the CUDA event that signals the
                 completion of LLM inference.
 
         Returns:
-            IPC handle bytes for the event that signals the completion of storing the
-            pre-computed chunks, and a boolean flag indicating if the store is
-            successful.
+            IPC handle bytes for the event that signals the completion of storing
+            the pre-computed chunks, and a boolean flag indicating if the store
+            is successful.
+
+        Raises:
+            ValueError: If instance_id is not registered for CB KV cache.
 
         Note:
-            The input tokens should not have any separator in it. It should just be
-            one "paragraph".
-            This function will discard the last partial chunk and only store the full
-            chunks
+            The input tokens should not have any separator in it. It should just
+            be one "paragraph".
+            This function will discard the last partial chunk and only store the
+            full chunks.
         """
         num_tokens = key.end - key.start
 
-        assert instance_id in self._cb_gpu_contexts, (
-            f"Instance ID {instance_id} not registered for CB KV cache"
-        )
+        if instance_id not in self._cb_gpu_contexts:
+            raise ValueError(
+                f"Instance ID {instance_id} not registered for CB KV cache"
+            )
         gpu_context = self._cb_gpu_contexts[instance_id]
 
         # CPU-synchronous sentinel: GPU store is about to be enqueued.
-        self._event_bus.publish(
+        self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.CB_STORE_PRE_COMPUTED_SUBMITTED,
                 session_id=key.request_id,
                 metadata={"instance_id": instance_id},
             )
         )
-        self._event_bus.publish_on_stream(
+        self._ctx.event_bus.publish_on_stream(
             gpu_context.cupy_stream,
             Event(
                 event_type=EventType.CB_STORE_PRE_COMPUTED_START,
@@ -833,7 +823,7 @@ class BlendEngineV2(MPCacheEngine):
 
         # Compute normal prefix hashes so these chunks are accessible both via
         # the CB lookup path and via the standard lookup/retrieve path.
-        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         # convert to object key
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
@@ -852,7 +842,7 @@ class BlendEngineV2(MPCacheEngine):
                 self._token_range_matcher.on_new_token_hashes(
                     list(key.token_ids), token_hashes
                 )
-                self._event_bus.publish(
+                self._ctx.event_bus.publish(
                     Event(
                         event_type=EventType.CB_FINGERPRINTS_REGISTERED,
                         session_id=key.request_id,
@@ -870,7 +860,7 @@ class BlendEngineV2(MPCacheEngine):
             )
         except Exception:
             logger.exception("Cannot store pre-computed chunks due to exception")
-            self._event_bus.publish_on_stream(
+            self._ctx.event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
                     event_type=EventType.CB_STORE_PRE_COMPUTED_END,
@@ -885,7 +875,7 @@ class BlendEngineV2(MPCacheEngine):
             )
             raise
 
-        self._event_bus.publish_on_stream(
+        self._ctx.event_bus.publish_on_stream(
             gpu_context.cupy_stream,
             Event(
                 event_type=EventType.CB_STORE_PRE_COMPUTED_END,
@@ -908,33 +898,37 @@ class BlendEngineV2(MPCacheEngine):
         instance_id: int,
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """
-        Retrieve the pre-computed chunks from the underlying storage and copy them to
-        the CB KV cache buffer.
+        """Retrieve pre-computed chunks from storage and copy them to the CB KV buffer.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the pre-computed
-                chunks are retrieved.
-            cb_match_result: List of CBMatchResult returned by cb_lookup_pre_computed,
-                containing the per-chunk hashes and query positions.
-            offset: The starting offset in the CB KV cache buffer to copy the retrieved
-                chunks to.
-            instance_id: The instance_id of the blend engine instance to retrieve the
-                pre-computed chunks for.
-            event_ipc_handle: The IPC handle for the CUDA event that signals the
-                completion of LLM inference.
+            key: IPCCacheEngineKey containing the token ids for which the
+                pre-computed chunks are retrieved.
+            cb_match_result: List of CBMatchResult returned by
+                cb_lookup_pre_computed, containing the per-chunk hashes and
+                query positions.
+            offset: The starting offset in the CB KV cache buffer to copy the
+                retrieved chunks to.
+            instance_id: The instance_id of the blend engine instance to
+                retrieve the pre-computed chunks for.
+            event_ipc_handle: The IPC handle for the CUDA event that signals
+                the completion of LLM inference.
 
         Returns:
-            IPC handle bytes for the event that signals the completion of retrieving the
-            pre-computed chunks, and a boolean flag indicating if the retrieval is
-            successful.
+            IPC handle bytes for the event that signals the completion of
+            retrieving the pre-computed chunks, and a boolean flag indicating
+            if the retrieval is successful.
+
+        Raises:
+            ValueError: If instance_id is not registered for CB KV cache.
 
         Note:
-            We must call `cb_lookup_pre_computed` first before calling this function
+            cb_lookup_pre_computed must be called first before calling this
+            function.
         """
-        assert instance_id in self._cb_gpu_contexts, (
-            f"Instance ID {instance_id} not registered for CB KV cache"
-        )
+        if instance_id not in self._cb_gpu_contexts:
+            raise ValueError(
+                f"Instance ID {instance_id} not registered for CB KV cache"
+            )
         gpu_context = self._cb_gpu_contexts[instance_id]
 
         # One obj_key per match_result, in cur_st order
@@ -944,7 +938,7 @@ class BlendEngineV2(MPCacheEngine):
         all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
 
         # CPU-synchronous sentinel: GPU retrieve is about to be enqueued.
-        self._event_bus.publish(
+        self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.CB_RETRIEVE_SUBMITTED,
                 session_id=key.request_id,
@@ -962,22 +956,25 @@ class BlendEngineV2(MPCacheEngine):
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            self._event_bus.publish_on_stream(
+            self._ctx.event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
                     event_type=EventType.CB_RETRIEVE_START,
                     session_id=key.request_id,
-                    metadata={"instance_id": instance_id, "num_chunks": num_chunks},
+                    metadata={
+                        "instance_id": instance_id,
+                        "num_chunks": num_chunks,
+                    },
                 ),
             )
 
             try:
-                with self.storage_manager.read_prefetched_results(
+                with self._ctx.storage_manager.read_prefetched_results(
                     all_obj_keys
                 ) as memory_objs:
                     if memory_objs is None:
                         logger.error("Some keys not found during CB retrieve!")
-                        self._event_bus.publish_on_stream(
+                        self._ctx.event_bus.publish_on_stream(
                             gpu_context.cupy_stream,
                             Event(
                                 event_type=EventType.CB_RETRIEVE_END,
@@ -995,18 +992,20 @@ class BlendEngineV2(MPCacheEngine):
                         cb_match_result, memory_objs, strict=False
                     ):
                         gpu_st = r.cur_st + offset
-                        gpu_ed = gpu_st + self.chunk_size
-                        tmp_buffer = gpu_context.get_tmp_gpu_buffer(self.chunk_size)
+                        gpu_ed = gpu_st + self._ctx.chunk_size
+                        tmp_buffer = gpu_context.get_tmp_gpu_buffer(
+                            self._ctx.chunk_size
+                        )
                         target_buffer = gpu_context.slice_kv_cache_on_tokens(
                             gpu_st, gpu_ed
                         )
-                        with self.lock:
+                        with self._gpu_copy_lock:
                             lmcache_memcpy_async_h2d(memory_obj, tmp_buffer)
                             target_buffer.copy_(tmp_buffer, non_blocking=True)
 
             except Exception:
                 logger.exception("Error during retrieving prefetched results")
-                self._event_bus.publish_on_stream(
+                self._ctx.event_bus.publish_on_stream(
                     gpu_context.cupy_stream,
                     Event(
                         event_type=EventType.CB_RETRIEVE_END,
@@ -1027,7 +1026,8 @@ class BlendEngineV2(MPCacheEngine):
                 # We should consider not unlocking objects in read_prefetched_results
                 # if error happens.
                 gpu_context.cupy_stream.launch_host_func(
-                    self.storage_manager.finish_read_prefetched, all_obj_keys
+                    self._ctx.storage_manager.finish_read_prefetched,
+                    all_obj_keys,
                 )
 
         logger.info(
@@ -1035,7 +1035,7 @@ class BlendEngineV2(MPCacheEngine):
             len(cb_match_result),
             offset,
         )
-        self._event_bus.publish_on_stream(
+        self._ctx.event_bus.publish_on_stream(
             gpu_context.cupy_stream,
             Event(
                 event_type=EventType.CB_RETRIEVE_END,
@@ -1056,43 +1056,48 @@ class BlendEngineV2(MPCacheEngine):
         instance_id: int,
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """
-        Store the final chunks in the underlying storage after processing. The stored
-        chunk should be accessible for normal mode LLMs.
+        """Store the final chunks in the underlying storage after processing.
+
+        The stored chunks should be accessible for normal mode LLMs.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the final chunks
-                are stored.
-            offset: The starting offset in the CB KV cache buffer where the final
-                chunks are stored.
-            instance_id: The instance_id of the blend engine instance to store the final
-                chunks for.
-            event_ipc_handle: The IPC handle for the CUDA event that signals the
-                completion of LLM inference.
+            key: IPCCacheEngineKey containing the token ids for which the
+                final chunks are stored.
+            offset: The starting offset in the CB KV cache buffer where the
+                final chunks are stored.
+            instance_id: The instance_id of the blend engine instance to
+                store the final chunks for.
+            event_ipc_handle: The IPC handle for the CUDA event that signals
+                the completion of LLM inference.
 
         Returns:
-            IPC handle bytes for the event that signals the completion of storing the
-            final chunks, and a boolean flag indicating if the store is successful.
+            IPC handle bytes for the event that signals the completion of
+            storing the final chunks, and a boolean flag indicating if the
+            store is successful.
+
+        Raises:
+            ValueError: If instance_id is not registered for CB KV cache.
         """
         num_tokens = key.end - key.start
 
         # Get GPU context
-        assert instance_id in self._cb_gpu_contexts, (
-            f"Instance ID {instance_id} not registered for CB KV cache"
-        )
+        if instance_id not in self._cb_gpu_contexts:
+            raise ValueError(
+                f"Instance ID {instance_id} not registered for CB KV cache"
+            )
         gpu_context = self._cb_gpu_contexts[instance_id]
 
         # CPU-synchronous sentinels: SUBMITTED before SESSION_END so the
         # tracing subscriber's in-flight counter is non-zero when SESSION_END
         # arrives and correctly defers root span closure.
-        self._event_bus.publish(
+        self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.CB_STORE_FINAL_SUBMITTED,
                 session_id=key.request_id,
                 metadata={"instance_id": instance_id},
             )
         )
-        self._event_bus.publish(
+        self._ctx.event_bus.publish(
             Event(
                 event_type=EventType.CB_REQUEST_END,
                 session_id=key.request_id,
@@ -1100,7 +1105,7 @@ class BlendEngineV2(MPCacheEngine):
         )
 
         # Compute normal hash for the keys
-        chunk_hashes = self.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
 
         # convert to object key
         obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
@@ -1115,7 +1120,10 @@ class BlendEngineV2(MPCacheEngine):
                 start_event=Event(
                     event_type=EventType.CB_STORE_FINAL_START,
                     session_id=key.request_id,
-                    metadata={"instance_id": instance_id, "num_tokens": num_tokens},
+                    metadata={
+                        "instance_id": instance_id,
+                        "num_tokens": num_tokens,
+                    },
                 ),
             )
 
@@ -1126,7 +1134,7 @@ class BlendEngineV2(MPCacheEngine):
                 self._token_range_matcher.on_new_token_hashes(
                     list(key.token_ids), list(chunk_hashes)
                 )
-                self._event_bus.publish(
+                self._ctx.event_bus.publish(
                     Event(
                         event_type=EventType.CB_FINGERPRINTS_REGISTERED,
                         session_id=key.request_id,
@@ -1144,7 +1152,7 @@ class BlendEngineV2(MPCacheEngine):
             )
         except Exception:
             logger.exception("Cannot store final chunks due to exception")
-            self._event_bus.publish_on_stream(
+            self._ctx.event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
                 Event(
                     event_type=EventType.CB_STORE_FINAL_END,
@@ -1159,7 +1167,7 @@ class BlendEngineV2(MPCacheEngine):
             )
             raise
 
-        self._event_bus.publish_on_stream(
+        self._ctx.event_bus.publish_on_stream(
             gpu_context.cupy_stream,
             Event(
                 event_type=EventType.CB_STORE_FINAL_END,
@@ -1173,172 +1181,3 @@ class BlendEngineV2(MPCacheEngine):
             ),
         )
         return event.ipc_handle(), True
-
-
-def add_handler_helper(
-    server: MessageQueueServer, request_type: RequestType, handler_function
-):
-    payload_classes = get_payload_classes(request_type)
-    handler_type = get_handler_type(request_type)
-    server.add_handler(
-        request_type,
-        payload_classes,
-        handler_type,
-        handler_function,
-    )
-
-
-def run_cache_server(
-    mp_config: MPServerConfig,
-    storage_manager_config: StorageManagerConfig,
-    obs_config: ObservabilityConfig,
-    return_engine: bool = False,
-    start_prometheus_http_server: bool = True,
-):
-    """
-    Run the LMCache cache server with ZMQ message queue.
-
-    Args:
-        mp_config: Configuration for the ZMQ multiprocess server
-        storage_manager_config: Configuration for the storage manager
-        obs_config: Configuration for the observability stack
-        return_engine: If True, return (server, engine) after starting;
-                       if False, run blocking loop to keep server alive
-        start_prometheus_http_server: Whether to start a standalone
-            Prometheus HTTP server in a background thread.  Set to
-            ``False`` when an external HTTP framework already serves
-            ``/metrics`` to avoid port conflicts or redundant servers.
-
-    Returns:
-        If return_engine is True: tuple of (MessageQueueServer, BlendEngineV2)
-        If return_engine is False: None (blocks until interrupted)
-    """
-    event_bus = init_observability(
-        obs_config, start_prometheus_http_server=start_prometheus_http_server
-    )
-
-    # Wire up the trace recorder (no-op when --trace-level is unset).
-    maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
-
-    # Initialize the engine (loggers self-register with the global controller)
-    engine = BlendEngineV2(
-        storage_manager_config=storage_manager_config,
-        chunk_size=mp_config.chunk_size,
-        hash_algorithm=mp_config.hash_algorithm,
-    )
-
-    # Initialize the message queue server
-    context = zmq.Context.instance()
-    server = MessageQueueServer(
-        bind_url=f"tcp://{mp_config.host}:{mp_config.port}",
-        context=context,
-    )
-
-    # Add handlers for original server
-    add_handler_helper(server, RequestType.REGISTER_KV_CACHE, engine.register_kv_cache)
-    add_handler_helper(
-        server, RequestType.UNREGISTER_KV_CACHE, engine.unregister_kv_cache
-    )
-    add_handler_helper(server, RequestType.STORE, engine.store)
-    add_handler_helper(server, RequestType.LOOKUP, engine.lookup)
-    add_handler_helper(
-        server, RequestType.QUERY_PREFETCH_STATUS, engine.query_prefetch_status
-    )
-    add_handler_helper(server, RequestType.FREE_LOOKUP_LOCKS, engine.free_lookup_locks)
-    add_handler_helper(server, RequestType.RETRIEVE, engine.retrieve)
-    add_handler_helper(server, RequestType.CLEAR, engine.clear)
-    add_handler_helper(server, RequestType.GET_CHUNK_SIZE, engine.get_chunk_size)
-    add_handler_helper(server, RequestType.END_SESSION, engine.end_session)
-    add_handler_helper(server, RequestType.NOOP, engine.debug)
-    add_handler_helper(
-        server,
-        RequestType.REPORT_BLOCK_ALLOCATION,
-        engine.report_block_allocations,
-    )
-    # Add handler for blend operations
-    add_handler_helper(
-        server, RequestType.CB_REGISTER_KV_CACHE, engine.cb_register_kv_cache
-    )
-    add_handler_helper(
-        server, RequestType.CB_UNREGISTER_KV_CACHE, engine.cb_unregister_kv_cache
-    )
-    add_handler_helper(
-        server, RequestType.CB_LOOKUP_PRE_COMPUTED_V2, engine.cb_lookup_pre_computed
-    )
-    add_handler_helper(
-        server, RequestType.CB_STORE_PRE_COMPUTED, engine.cb_store_pre_computed
-    )
-    add_handler_helper(
-        server, RequestType.CB_RETRIEVE_PRE_COMPUTED_V2, engine.cb_retrieve_pre_computed
-    )
-    add_handler_helper(server, RequestType.CB_STORE_FINAL, engine.cb_store_final)
-    add_handler_helper(server, RequestType.PING, engine.ping)
-
-    # Assign thread pools
-    server.add_affinity_thread_pool(
-        [
-            RequestType.STORE,
-            RequestType.RETRIEVE,
-            RequestType.CB_STORE_PRE_COMPUTED,
-            RequestType.CB_RETRIEVE_PRE_COMPUTED_V2,
-            RequestType.CB_STORE_FINAL,
-        ],
-        max_workers=mp_config.max_gpu_workers,
-    )
-    server.add_normal_thread_pool(
-        [
-            RequestType.LOOKUP,
-            RequestType.QUERY_PREFETCH_STATUS,
-            RequestType.FREE_LOOKUP_LOCKS,
-            RequestType.END_SESSION,
-            RequestType.CLEAR,
-            RequestType.CB_LOOKUP_PRE_COMPUTED_V2,
-            RequestType.PING,
-            RequestType.REPORT_BLOCK_ALLOCATION,
-        ],
-        max_workers=mp_config.max_cpu_workers,
-    )
-
-    logger.info(
-        "LMCache ZMQ cache server is running on tcp://%s:%d",
-        mp_config.host,
-        mp_config.port,
-    )
-    # Start the ZMQ server
-    # Not all backends expose init(); some auto-initialize on first use
-    if not hasattr(torch_dev, "init"):
-        logger.warning(
-            "Backend '%s' does not support init(), skipping device init",
-            torch_device_type,
-        )
-    else:
-        torch_dev.init()
-    server.start()
-
-    logger.info("LMCache cache blend v2 server is running...")
-
-    # Return server and engine if requested (for HTTP server integration)
-    if return_engine:
-        return server, engine
-
-    # Dummy loop to keep the server running
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Shutting down server...")
-        event_bus.stop()
-        server.close()
-        engine.close()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    mp_config = parse_args_to_mp_server_config(args)
-    storage_manager_config = parse_args_to_config(args)
-    obs_config = parse_args_to_observability_config(args)
-    run_cache_server(
-        mp_config=mp_config,
-        storage_manager_config=storage_manager_config,
-        obs_config=obs_config,
-    )

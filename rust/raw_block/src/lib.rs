@@ -20,6 +20,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::io;
 use std::os::unix::io::RawFd;
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -297,6 +298,174 @@ impl IoCompletion {
     }
 }
 
+/// Manages io_uring worker thread notification, using one `epoll` instance
+/// over two eventfds to wait on two event sources at once: a producer-side
+/// eventfd signalled when Python pushes a new submission, and a CQ-side
+/// eventfd signalled by the kernel when a completion is posted.
+struct UringNotify {
+    /// Epoll instance watching both `producer_efd` and `cq_efd`. A single
+    /// `epoll_wait` on this fd blocks until either eventfd becomes readable,
+    /// so the worker can react to user-space queue pushes and kernel CQE
+    /// posts from the same call site.
+    epoll_fd: RawFd,
+    /// Eventfd written by Python producer threads after pushing into the
+    /// submission queue. Replaces the `Condvar::notify_one` used in the
+    /// pre-eventfd design. Also written by `do_close` so the worker can
+    /// break out of `epoll_wait` and observe the shutdown flag.
+    producer_efd: RawFd,
+    /// Eventfd registered with the io_uring instance via
+    /// `Submitter::register_eventfd`. The kernel writes to it whenever a
+    /// CQE is posted, so the worker is woken without having to drain the
+    /// completion queue speculatively.
+    cq_efd: RawFd,
+}
+
+impl UringNotify {
+    /// Builds the three fds (two eventfds + one epoll) and wires the
+    /// eventfds into the epoll instance. Cleans up partially-built state
+    /// on any error path so no fd leaks if construction fails midway.
+    fn new() -> io::Result<Self> {
+        // Producer-side eventfd. Counter starts at 0 (no pending events).
+        // EFD_CLOEXEC prevents leaking the fd into a child process via
+        // execve. EFD_NONBLOCK makes read() return EAGAIN (instead of
+        // blocking) when the counter is already 0; wait() relies on this
+        // non-blocking behaviour to drain safely without hanging.
+        let producer_efd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if producer_efd < 0 {
+            // Nothing else has been allocated yet -- just bubble the error.
+            return Err(io::Error::last_os_error());
+        }
+
+        // CQ-side eventfd. The kernel writes to this one after
+        // register_eventfd() is called on the io_uring instance.
+        let cq_efd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+        if cq_efd < 0 {
+            // producer_efd is live -- close it before bubbling the error.
+            let e = io::Error::last_os_error();
+            unsafe { libc::close(producer_efd) };
+            return Err(e);
+        }
+
+        // Epoll instance fd. EPOLL_CLOEXEC for the same hygiene reason as
+        // EFD_CLOEXEC above.
+        let epoll_fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+        if epoll_fd < 0 {
+            // Both eventfds are live; close them before returning.
+            let e = io::Error::last_os_error();
+            unsafe {
+                libc::close(producer_efd);
+                libc::close(cq_efd);
+            }
+            return Err(e);
+        }
+
+        // Register both eventfds with the epoll instance so epoll_wait
+        // can block on either source.
+        //
+        // We use EPOLLIN: wake when the counter becomes non-zero
+        // (someone signalled). Alternatives we deliberately don't use:
+        //   - EPOLLOUT (writable): pointless -- eventfd is effectively
+        //     always writable, so it would just busy-loop epoll_wait.
+        //   - EPOLLET (edge-triggered): would require fully draining
+        //     every wake-up in one go to avoid missing edges. Default
+        //     level-triggered fits our drain pattern in wait().
+        //   - EPOLLONESHOT: would auto-disarm after each fire and force
+        //     us to re-register; not worth the complexity.
+        // u64 stores the fd value itself so wait() can identify which
+        // fd fired without keeping a side map.
+        for fd in [producer_efd, cq_efd] {
+            let mut ev = libc::epoll_event {
+                events: libc::EPOLLIN as u32,
+                u64: fd as u64,
+            };
+            let rc = unsafe { libc::epoll_ctl(epoll_fd, libc::EPOLL_CTL_ADD, fd, &mut ev) };
+            if rc < 0 {
+                // All three fds are live; clean up all of them.
+                let e = io::Error::last_os_error();
+                unsafe {
+                    libc::close(epoll_fd);
+                    libc::close(producer_efd);
+                    libc::close(cq_efd);
+                }
+                return Err(e);
+            }
+        }
+
+        // Ownership of all three fds moves into Self; Drop handles the
+        // happy-path close.
+        Ok(Self {
+            epoll_fd,
+            producer_efd,
+            cq_efd,
+        })
+    }
+
+    /// Wakes the worker thread by writing 1 to `producer_efd`. Called by
+    /// producers after pushing a submission into the queue and by `do_close`
+    /// to break the worker out of `epoll_wait` for shutdown.
+    fn signal_producer(&self) {
+        let v: u64 = 1;
+        // Given EFD_NONBLOCK and counter < u64::MAX - 1, the 8-byte write
+        // always succeeds, so the return value is intentionally ignored.
+        unsafe {
+            libc::write(
+                self.producer_efd,
+                &v as *const u64 as *const libc::c_void,
+                8,
+            );
+        }
+    }
+
+    /// Blocks the worker until either eventfd is readable, then drains
+    /// each fired fd. Drain is required because epoll is level-triggered:
+    /// without consuming the counter, the next epoll_wait would return
+    /// immediately on the same already-handled signal.
+    fn wait(&self) {
+        // A capacity of 2 is enough: only two fds are registered with this
+        // epoll instance, so at most two events can come back per call.
+        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2];
+
+        // Timeout = -1 means "block indefinitely". Shutdown wakes us by
+        // writing producer_efd from do_close, so we never need a timeout.
+        let n = unsafe { libc::epoll_wait(self.epoll_fd, events.as_mut_ptr(), 2, -1) };
+
+        // n < 0 is usually EINTR (signal interruption); we just return and
+        // the worker's outer loop will call wait() again. n == 0 should
+        // not happen with timeout=-1 but is handled defensively.
+        if n <= 0 {
+            return;
+        }
+
+        // For each event reported, read 8 bytes from the corresponding
+        // eventfd to reset its counter to 0. The fd value was stashed in
+        // ev.u64 during epoll_ctl registration. We discard the read value
+        // (we only care that a signal arrived, not how many).
+        let mut buf = [0u8; 8];
+        for ev in &events[..n as usize] {
+            let fd = ev.u64 as RawFd;
+            // Discard the result. The wake-up was already delivered by
+            // epoll_wait; this read only exists to reset the eventfd
+            // counter so epoll stops reporting the fd as readable. If it
+            // fails, the worst case is one spurious wake-up next
+            // iteration. No work is lost, because the real submissions
+            // live in the queue and CQ, not in the bytes we just read.
+            unsafe {
+                libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 8);
+            }
+        }
+    }
+}
+
+impl Drop for UringNotify {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.epoll_fd);
+            libc::close(self.producer_efd);
+            libc::close(self.cq_efd);
+        }
+    }
+}
+
 /// Represents a single I/O submission to io_uring.
 ///
 /// This struct is sent from Python threads to the worker thread via a queue.
@@ -381,8 +550,10 @@ struct RawBlockDevice {
     // Per-batch in-flight count tracking
     // Maps batch_id -> (in_flight_count, condition_variable)
     batch_in_flight: Arc<Mutex<HashMap<u64, BatchTracking>>>,
-    // Signal to wake up worker when new requests are available
-    batch_ready: Option<Arc<Condvar>>,
+    // Worker wake-up: producer eventfd + ring CQ eventfd, both polled via
+    // a single epoll_fd. Replaces the previous `Arc<Condvar>` which couldn't
+    // be signaled from the kernel-side completion queue.
+    batch_ready: Option<Arc<UringNotify>>,
     // Store Python buffer objects for writes, reads to keep them alive until they complete
     // This prevents premature garbage collection while io_uring is using the buffers
     // Keyed by batch_id to isolate concurrent batches
@@ -392,6 +563,42 @@ struct RawBlockDevice {
     batched_completions: Arc<Mutex<HashMap<u64, Vec<Arc<IoCompletion>>>>>,
     // Counter for generating unique batch IDs
     next_batch_id: Arc<AtomicU64>,
+}
+
+/// RAII guard for a raw file descriptor
+struct FdGuard {
+    fd: RawFd,
+}
+
+impl FdGuard {
+    /// Takes ownership of an open file descriptor.
+    ///
+    /// Args:
+    /// - `fd`: a descriptor returned by a successful `open()`.
+    fn new(fd: RawFd) -> Self {
+        FdGuard { fd }
+    }
+
+    /// Releases ownership of the fd to the caller, disarming the guard so the
+    /// descriptor is not closed on drop.
+    ///
+    /// Returns the raw descriptor, now owned by the caller.
+    fn disarm(self) -> RawFd {
+        let fd = self.fd;
+        std::mem::forget(self);
+        fd
+    }
+}
+
+impl Drop for FdGuard {
+    fn drop(&mut self) {
+        // SAFETY: `fd` was returned by a successful `open()` and ownership has
+        // not been released via `disarm()`, so this is the only close of this
+        // descriptor.
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
 }
 
 impl RawBlockDevice {
@@ -421,6 +628,10 @@ impl RawBlockDevice {
         if fd < 0 {
             return Err(os_err("open failed"));
         }
+        // Take ownership of the fd so it is closed if any fallible setup step
+        // below returns early before the fd is moved into the RawBlockDevice.
+        // Disarmed once the struct is successfully constructed.
+        let fd_guard = FdGuard::new(fd);
         let size = fd_size_bytes(fd)?;
 
         let (
@@ -438,10 +649,18 @@ impl RawBlockDevice {
         ) = if use_iouring {
             let ring = IoUring::new(iouring_queue_depth as u32)
                 .map_err(|e| PyRuntimeError::new_err(format!("io_uring init failed: {}", e)))?;
+            let notify = UringNotify::new()
+                .map_err(|e| PyRuntimeError::new_err(format!("UringNotify init failed: {}", e)))?;
+            // Register the CQ eventfd with the ring so the kernel writes to it
+            // whenever a CQE is posted. Must happen before the ring is wrapped
+            // in a Mutex / handed to the worker.
+            ring.submitter()
+                .register_eventfd(notify.cq_efd)
+                .map_err(|e| PyRuntimeError::new_err(format!("register_eventfd failed: {}", e)))?;
             let ring = Arc::new(Mutex::new(ring));
             let queue = Arc::new(Mutex::new(Vec::<IoSubmission>::new()));
             let shutdown = Arc::new(AtomicBool::new(false));
-            let batch_ready = Arc::new(Condvar::new());
+            let batch_ready = Arc::new(notify);
             let in_flight_count = Arc::new(AtomicU64::new(0));
             let in_flight_cvar = Arc::new(Condvar::new());
             let batched_buffer_objs = Arc::new(Mutex::new(HashMap::<u64, Vec<Py<PyAny>>>::new()));
@@ -476,21 +695,374 @@ impl RawBlockDevice {
             // - Reads from the submission queue
             // - Submits to io_uring
             // - Processes completions
-            let worker = thread::spawn(move || {
-                let mut in_flight: HashMap<u64, IoSubmission> = HashMap::new();
-                let mut next_user_data: u64 = 1;
+            let worker = thread::Builder::new()
+                .name("rust-rawblock-uring".into())
+                .spawn(move || {
+                    let mut in_flight: HashMap<u64, IoSubmission> = HashMap::new();
+                    let mut next_user_data: u64 = 1;
 
-                while !shutdown_clone.load(Ordering::Relaxed) {
-                    // This drains all completed I/O operations from the completion queue (CQ).
-                    // For each completion:
-                    //   - Remove the request from our in_flight tracking HashMap
-                    //   - Signal the waiting Python thread via IoCompletion
-                    //   - Decrement the in_flight_count atomic
-                    //   - Wake up any threads waiting for all I/O to complete
+                    while !shutdown_clone.load(Ordering::Relaxed) {
+                        // This drains all completed I/O operations from the completion queue (CQ).
+                        // For each completion:
+                        //   - Remove the request from our in_flight tracking HashMap
+                        //   - Signal the waiting Python thread via IoCompletion
+                        //   - Decrement the in_flight_count atomic
+                        //   - Wake up any threads waiting for all I/O to complete
+                        {
+                            let mut ring = ring_clone.lock().unwrap();
+                            let completions: Vec<_> = ring.completion().collect();
+                            for cqe in completions {
+                                let user_data = cqe.user_data();
+                                if let Some(mut sub) = in_flight.remove(&user_data) {
+                                    let batch_id = sub.batch_id;
+                                    if cqe.result() < 0 {
+                                        let code = -cqe.result();
+                                        // Drop any bounce buffer associated with this submission.
+                                        let _ = sub.bounce.take();
+                                        sub.completion.set(Err(PyOSError::new_err((
+                                            code,
+                                            "io_uring I/O error",
+                                        ))));
+                                    } else {
+                                        let bytes_transferred = cqe.result() as usize;
+                                        if bytes_transferred < sub.len {
+                                            // Short read/write: update offset and length, then resubmit
+                                            sub.offset += bytes_transferred as u64;
+                                            sub.len -= bytes_transferred;
+                                            // Update buffer pointer for writes and direct reads
+                                            if sub.is_write || sub.bounce.is_none() {
+                                                sub.ptr_addr += bytes_transferred;
+                                            }
+                                            // For read with bounce buffer, copy partial data back
+                                            if !sub.is_write {
+                                                if let (
+                                                    Some(bounce),
+                                                    Some(orig_ptr),
+                                                    Some(payload_len),
+                                                ) = (
+                                                    sub.bounce.as_ref(),
+                                                    sub.original_ptr,
+                                                    sub.payload_len,
+                                                ) {
+                                                    unsafe {
+                                                        libc::memcpy(
+                                                            orig_ptr as *mut libc::c_void,
+                                                            bounce.as_ptr() as *const libc::c_void,
+                                                            bytes_transferred.min(payload_len),
+                                                        );
+                                                    }
+                                                    sub.original_ptr =
+                                                        Some(orig_ptr + bytes_transferred);
+                                                    sub.payload_len = Some(
+                                                        payload_len
+                                                            .saturating_sub(bytes_transferred),
+                                                    );
+                                                }
+                                            }
+                                            // Re-insert into in_flight with updated values
+                                            // Don't decrement in_flight_count since we're resubmitting
+                                            in_flight.insert(user_data, sub.clone());
+                                            // Push a new SQE for the remaining data
+                                            let ptr = sub.ptr_addr as *mut u8;
+                                            let sqe = if sub.is_write {
+                                                if let Some(idx) = sub.fixed_buffer_idx {
+                                                    opcode::WriteFixed::new(
+                                                        Fd(sub.fd),
+                                                        ptr as *const u8,
+                                                        sub.len as u32,
+                                                        idx,
+                                                    )
+                                                    .offset(sub.offset)
+                                                    .build()
+                                                } else {
+                                                    opcode::Write::new(
+                                                        Fd(sub.fd),
+                                                        ptr as *const u8,
+                                                        sub.len as u32,
+                                                    )
+                                                    .offset(sub.offset)
+                                                    .build()
+                                                }
+                                            } else if let Some(idx) = sub.fixed_buffer_idx {
+                                                opcode::ReadFixed::new(
+                                                    Fd(sub.fd),
+                                                    ptr,
+                                                    sub.len as u32,
+                                                    idx,
+                                                )
+                                                .offset(sub.offset)
+                                                .build()
+                                            } else {
+                                                opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
+                                                    .offset(sub.offset)
+                                                    .build()
+                                            };
+                                            let sqe = sqe.user_data(user_data);
+                                            unsafe {
+                                                ring.submission().push(&sqe).expect(
+                                                    "failed to push sqe for short read/write",
+                                                );
+                                            }
+                                            // Submit the new SQE to the kernel
+                                            let _ = ring.submitter().submit();
+                                            continue;
+                                        }
+                                        // Full completion
+                                        // For reads with bounce buffer, copy data back to original buffer
+                                        if !sub.is_write {
+                                            if let (
+                                                Some(bounce),
+                                                Some(orig_ptr),
+                                                Some(payload_len),
+                                            ) = (
+                                                sub.bounce.take(),
+                                                sub.original_ptr,
+                                                sub.payload_len,
+                                            ) {
+                                                unsafe {
+                                                    libc::memcpy(
+                                                        orig_ptr as *mut libc::c_void,
+                                                        bounce.as_ptr() as *const libc::c_void,
+                                                        payload_len,
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            // Drop any bounce buffer associated with this submission.
+                                            let _ = sub.bounce.take();
+                                        }
+                                        sub.completion.set(Ok(()));
+                                    }
+                                    let prev =
+                                        in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
+                                    if prev == 1 {
+                                        in_flight_cvar_clone.notify_all();
+                                    }
+                                    // Decrement per-batch in-flight count and notify if batch is complete
+                                    if batch_id != 0 {
+                                        let batch_map = batch_in_flight_clone.lock().unwrap();
+                                        if let Some((batch_count, batch_cvar)) =
+                                            batch_map.get(&batch_id)
+                                        {
+                                            let prev_batch =
+                                                batch_count.fetch_sub(1, Ordering::Relaxed);
+                                            if prev_batch == 1 {
+                                                batch_cvar.notify_all();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ring.submission().sync();
+                        }
+
+                        // Block on epoll only if there's truly nothing pending. The empty +
+                        // shutdown checks short-circuit so we don't sleep when a producer or
+                        // do_close() already left work for us. Race-free against a late
+                        // signal_producer(): eventfd is a counter, so a wake-up between the
+                        // check and wait() is buffered, not lost.
+                        if !shutdown_clone.load(Ordering::Relaxed)
+                            && queue_clone.lock().unwrap().is_empty()
+                        {
+                            batch_ready_clone.wait();
+                        }
+
+                        let mut q = queue_clone.lock().unwrap();
+                        if !q.is_empty() {
+                            // Take all pending requests from our queue and submit them to io_uring.
+                            //
+                            // - Remove all pending requests from queue
+                            // - Check how much space is available in the ring (max 256 entries)
+                            // - If batch is larger than available space, put excess back in queue
+                            // - Increment in_flight_count for each request we're about to submit
+                            // - Build SQE (Submission Queue Entry) for each request
+                            // - Push SQEs to the ring
+                            // - Call submit() to send them to the kernel
+                            //
+                            // Fixed Buffer Support:
+                            // - If the buffer was pre-registered with register_fixed_buffers(),
+                            //   we use ReadFixed/WriteFixed for true zero-copy I/O
+                            // - Otherwise we use regular Read/Write with user-space pointers
+                            let mut batch: Vec<IoSubmission> = std::mem::take(&mut *q);
+                            let batch_len = batch.len();
+
+                            let mut ring = ring_clone.lock().unwrap();
+
+                            let available = ring_size - ring.submission().len();
+                            let to_submit_count = std::cmp::min(available, batch_len);
+
+                            if to_submit_count < batch_len {
+                                let remaining: Vec<_> = batch[to_submit_count..].to_vec();
+                                if !remaining.is_empty() {
+                                    q.extend(remaining);
+                                }
+                            }
+
+                            drop(q);
+
+                            // Track user_data values for each submission to clean up in_flight entries
+                            // if submit() fails or returns partial count
+                            let mut user_data_list: Vec<u64> = Vec::with_capacity(to_submit_count);
+                            for sub in batch.iter().take(to_submit_count) {
+                                let user_data = next_user_data;
+                                next_user_data = next_user_data.wrapping_add(1);
+                                user_data_list.push(user_data);
+                                in_flight.insert(user_data, sub.clone());
+
+                                let ptr = sub.ptr_addr as *mut u8;
+                                let sqe = if sub.is_write {
+                                    if let Some(idx) = sub.fixed_buffer_idx {
+                                        opcode::WriteFixed::new(
+                                            Fd(sub.fd),
+                                            ptr as *const u8,
+                                            sub.len as u32,
+                                            idx,
+                                        )
+                                        .offset(sub.offset)
+                                        .build()
+                                    } else {
+                                        opcode::Write::new(
+                                            Fd(sub.fd),
+                                            ptr as *const u8,
+                                            sub.len as u32,
+                                        )
+                                        .offset(sub.offset)
+                                        .build()
+                                    }
+                                } else if let Some(idx) = sub.fixed_buffer_idx {
+                                    opcode::ReadFixed::new(Fd(sub.fd), ptr, sub.len as u32, idx)
+                                        .offset(sub.offset)
+                                        .build()
+                                } else {
+                                    opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
+                                        .offset(sub.offset)
+                                        .build()
+                                };
+                                let sqe = sqe.user_data(user_data);
+                                unsafe {
+                                    ring.submission().push(&sqe).expect("failed to push sqe");
+                                }
+                            }
+
+                            let submit_result = ring.submitter().submit();
+                            // Handle EAGAIN (ring full) and EINTR (interrupted syscall)
+                            match submit_result {
+                                Ok(submitted) => {
+                                    // Any remaining requests in batch that weren't submitted
+                                    // will be retried in the next iteration of the loop
+                                    if submitted < to_submit_count {
+                                        // Remove in_flight entries for unsubmitted requests
+                                        for user_data in user_data_list[submitted..].iter() {
+                                            in_flight.remove(user_data);
+                                        }
+                                        // Put unsubmitted requests back in the queue for retry
+                                        let unsubmitted: Vec<_> =
+                                            batch[submitted..to_submit_count].to_vec();
+                                        if !unsubmitted.is_empty() {
+                                            drop(ring);
+                                            let mut q = queue_clone.lock().unwrap();
+                                            // Insert unsubmitted requests back at the front preserving order
+                                            q.splice(0..0, unsubmitted);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    // Handle submission errors
+                                    let error_code = e.raw_os_error();
+                                    match error_code {
+                                        Some(libc::EAGAIN) | Some(libc::EINTR) => {
+                                            // Ring is full, or the operation was interrupted due
+                                            // to signal. We need to wait for completions and then retry
+                                            // Remove in_flight entries for all submissions in this batch
+                                            for user_data in user_data_list.iter() {
+                                                in_flight.remove(user_data);
+                                            }
+                                            // Put unsubmitted requests back in queue for next iteration
+                                            if to_submit_count > 0 {
+                                                let unsubmitted: Vec<_> =
+                                                    batch[..to_submit_count].to_vec();
+                                                drop(ring);
+                                                let mut q = queue_clone.lock().unwrap();
+                                                // Insert unsubmitted requests back at the front preserving order
+                                                q.splice(0..0, unsubmitted);
+                                            }
+                                        }
+                                        _ => {
+                                            // Error: fail all pending submissions in this batch.
+                                            // Remove in_flight entries since these won't generate completions
+                                            for user_data in user_data_list.iter() {
+                                                in_flight.remove(user_data);
+                                            }
+                                            for sub in batch.iter_mut().take(to_submit_count) {
+                                                let batch_id = sub.batch_id;
+                                                sub.completion.set(Err(PyRuntimeError::new_err(
+                                                    format!("io_uring submit error: {:?}", e),
+                                                )));
+                                                let _ = sub.bounce.take();
+                                                let prev = in_flight_count_clone
+                                                    .fetch_sub(1, Ordering::Relaxed);
+                                                if prev == 1 {
+                                                    in_flight_cvar_clone.notify_all();
+                                                }
+                                                // Decrement per-batch in-flight count and notify if batch is complete
+                                                if batch_id != 0 {
+                                                    let batch_map =
+                                                        batch_in_flight_clone.lock().unwrap();
+                                                    if let Some((batch_count, batch_cvar)) =
+                                                        batch_map.get(&batch_id)
+                                                    {
+                                                        let prev_batch = batch_count
+                                                            .fetch_sub(1, Ordering::Relaxed);
+                                                        if prev_batch == 1 {
+                                                            batch_cvar.notify_all();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // SHUTDOWN: Wake up all waiting Python threads
+                    // Drain the queue and wake up all waiting threads with error
                     {
-                        let mut ring = ring_clone.lock().unwrap();
-                        let completions: Vec<_> = ring.completion().collect();
-                        for cqe in completions {
+                        let mut q = queue_clone
+                            .lock()
+                            .expect("Worker: queue mutex poisoned during shutdown");
+                        while let Some(mut sub) = q.pop() {
+                            let batch_id = sub.batch_id;
+                            // Drop any bounce buffer associated with this submission.
+                            let _ = sub.bounce.take();
+                            in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
+                            sub.completion.set(Err(PyRuntimeError::new_err(
+                                "io_uring worker shutting down",
+                            )));
+                            // Decrement per-batch in-flight count and notify if batch is complete
+                            if batch_id != 0 {
+                                let batch_map = batch_in_flight_clone.lock().unwrap();
+                                if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
+                                    let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
+                                    if prev_batch == 1 {
+                                        batch_cvar.notify_all();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Process any remaining in-flight requests
+                    // Wait for kernel to complete the requests or force-cancel them
+                    // Note: This 1000 milliseconds is a rough estimate
+                    let graceful_shutdown = Duration::from_millis(1000);
+                    thread::sleep(graceful_shutdown);
+                    {
+                        let mut ring = ring_clone
+                            .lock()
+                            .expect("Worker: ring mutex poisoned during shutdown");
+                        for cqe in ring.completion() {
                             let user_data = cqe.user_data();
                             if let Some(mut sub) = in_flight.remove(&user_data) {
                                 let batch_id = sub.batch_id;
@@ -503,21 +1075,24 @@ impl RawBlockDevice {
                                 } else {
                                     let bytes_transferred = cqe.result() as usize;
                                     if bytes_transferred < sub.len {
-                                        // Short read/write: update offset and length, then resubmit
-                                        sub.offset += bytes_transferred as u64;
-                                        sub.len -= bytes_transferred;
-                                        // Update buffer pointer for writes and direct reads
-                                        if sub.is_write || sub.bounce.is_none() {
-                                            sub.ptr_addr += bytes_transferred;
-                                        }
-                                        // For read with bounce buffer, copy partial data back
+                                        // Short read/write during shutdown: fail the request
+                                        // We cannot resubmit because the worker is about to exit
+                                        // Drop any bounce buffer associated with this submission.
+                                        let _ = sub.bounce.take();
+                                        sub.completion.set(Err(PyRuntimeError::new_err(
+                                        "io_uring worker shutting down - short I/O during shutdown",
+                                    )));
+                                        // Continue to decrement in_flight_count below
+                                    } else {
+                                        // Full completion
+                                        // For reads with bounce buffer, copy data back to original buffer
                                         if !sub.is_write {
                                             if let (
                                                 Some(bounce),
                                                 Some(orig_ptr),
                                                 Some(payload_len),
                                             ) = (
-                                                sub.bounce.as_ref(),
+                                                sub.bounce.take(),
                                                 sub.original_ptr,
                                                 sub.payload_len,
                                             ) {
@@ -525,83 +1100,16 @@ impl RawBlockDevice {
                                                     libc::memcpy(
                                                         orig_ptr as *mut libc::c_void,
                                                         bounce.as_ptr() as *const libc::c_void,
-                                                        bytes_transferred.min(payload_len),
+                                                        payload_len,
                                                     );
                                                 }
-                                                sub.original_ptr =
-                                                    Some(orig_ptr + bytes_transferred);
-                                                sub.payload_len = Some(
-                                                    payload_len.saturating_sub(bytes_transferred),
-                                                );
                                             }
-                                        }
-                                        // Re-insert into in_flight with updated values
-                                        // Don't decrement in_flight_count since we're resubmitting
-                                        in_flight.insert(user_data, sub.clone());
-                                        // Push a new SQE for the remaining data
-                                        let ptr = sub.ptr_addr as *mut u8;
-                                        let sqe = if sub.is_write {
-                                            if let Some(idx) = sub.fixed_buffer_idx {
-                                                opcode::WriteFixed::new(
-                                                    Fd(sub.fd),
-                                                    ptr as *const u8,
-                                                    sub.len as u32,
-                                                    idx,
-                                                )
-                                                .offset(sub.offset)
-                                                .build()
-                                            } else {
-                                                opcode::Write::new(
-                                                    Fd(sub.fd),
-                                                    ptr as *const u8,
-                                                    sub.len as u32,
-                                                )
-                                                .offset(sub.offset)
-                                                .build()
-                                            }
-                                        } else if let Some(idx) = sub.fixed_buffer_idx {
-                                            opcode::ReadFixed::new(
-                                                Fd(sub.fd),
-                                                ptr,
-                                                sub.len as u32,
-                                                idx,
-                                            )
-                                            .offset(sub.offset)
-                                            .build()
                                         } else {
-                                            opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
-                                                .offset(sub.offset)
-                                                .build()
-                                        };
-                                        let sqe = sqe.user_data(user_data);
-                                        unsafe {
-                                            ring.submission()
-                                                .push(&sqe)
-                                                .expect("failed to push sqe for short read/write");
+                                            // Drop any bounce buffer associated with this submission.
+                                            let _ = sub.bounce.take();
                                         }
-                                        // Submit the new SQE to the kernel
-                                        let _ = ring.submitter().submit();
-                                        continue;
+                                        sub.completion.set(Ok(()));
                                     }
-                                    // Full completion
-                                    // For reads with bounce buffer, copy data back to original buffer
-                                    if !sub.is_write {
-                                        if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
-                                            (sub.bounce.take(), sub.original_ptr, sub.payload_len)
-                                        {
-                                            unsafe {
-                                                libc::memcpy(
-                                                    orig_ptr as *mut libc::c_void,
-                                                    bounce.as_ptr() as *const libc::c_void,
-                                                    payload_len,
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        // Drop any bounce buffer associated with this submission.
-                                        let _ = sub.bounce.take();
-                                    }
-                                    sub.completion.set(Ok(()));
                                 }
                                 let prev = in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
                                 if prev == 1 {
@@ -625,186 +1133,15 @@ impl RawBlockDevice {
                         ring.submission().sync();
                     }
 
-                    // We use a condition variable with a short timeout (10 microseconds).
-                    // This allows us to:
-                    //   - Quickly respond to new requests (batched from Python)
-                    //   - Periodically check for shutdown signal
-                    //   - Not spin aggressively (which would waste CPU)
-                    let timeout = Duration::from_micros(10);
-                    let q = queue_clone.lock().unwrap();
-                    let (mut q, _) = batch_ready_clone
-                        .wait_timeout_while(q, timeout, |q| {
-                            q.is_empty() && !shutdown_clone.load(Ordering::Relaxed)
-                        })
-                        .unwrap();
-
-                    if !q.is_empty() {
-                        // Take all pending requests from our queue and submit them to io_uring.
-                        //
-                        // - Remove all pending requests from queue
-                        // - Check how much space is available in the ring (max 256 entries)
-                        // - If batch is larger than available space, put excess back in queue
-                        // - Increment in_flight_count for each request we're about to submit
-                        // - Build SQE (Submission Queue Entry) for each request
-                        // - Push SQEs to the ring
-                        // - Call submit() to send them to the kernel
-                        //
-                        // Fixed Buffer Support:
-                        // - If the buffer was pre-registered with register_fixed_buffers(),
-                        //   we use ReadFixed/WriteFixed for true zero-copy I/O
-                        // - Otherwise we use regular Read/Write with user-space pointers
-                        let mut batch: Vec<IoSubmission> = std::mem::take(&mut *q);
-                        let batch_len = batch.len();
-
-                        let mut ring = ring_clone.lock().unwrap();
-
-                        let available = ring_size - ring.submission().len();
-                        let to_submit_count = std::cmp::min(available, batch_len);
-
-                        if to_submit_count < batch_len {
-                            let remaining: Vec<_> = batch[to_submit_count..].to_vec();
-                            if !remaining.is_empty() {
-                                q.extend(remaining);
-                            }
-                        }
-
-                        drop(q);
-
-                        // Track user_data values for each submission to clean up in_flight entries
-                        // if submit() fails or returns partial count
-                        let mut user_data_list: Vec<u64> = Vec::with_capacity(to_submit_count);
-                        for sub in batch.iter().take(to_submit_count) {
-                            let user_data = next_user_data;
-                            next_user_data = next_user_data.wrapping_add(1);
-                            user_data_list.push(user_data);
-                            in_flight.insert(user_data, sub.clone());
-
-                            let ptr = sub.ptr_addr as *mut u8;
-                            let sqe = if sub.is_write {
-                                if let Some(idx) = sub.fixed_buffer_idx {
-                                    opcode::WriteFixed::new(
-                                        Fd(sub.fd),
-                                        ptr as *const u8,
-                                        sub.len as u32,
-                                        idx,
-                                    )
-                                    .offset(sub.offset)
-                                    .build()
-                                } else {
-                                    opcode::Write::new(Fd(sub.fd), ptr as *const u8, sub.len as u32)
-                                        .offset(sub.offset)
-                                        .build()
-                                }
-                            } else if let Some(idx) = sub.fixed_buffer_idx {
-                                opcode::ReadFixed::new(Fd(sub.fd), ptr, sub.len as u32, idx)
-                                    .offset(sub.offset)
-                                    .build()
-                            } else {
-                                opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
-                                    .offset(sub.offset)
-                                    .build()
-                            };
-                            let sqe = sqe.user_data(user_data);
-                            unsafe {
-                                ring.submission().push(&sqe).expect("failed to push sqe");
-                            }
-                        }
-
-                        let submit_result = ring.submitter().submit();
-                        // Handle EAGAIN (ring full) and EINTR (interrupted syscall)
-                        match submit_result {
-                            Ok(submitted) => {
-                                // Any remaining requests in batch that weren't submitted
-                                // will be retried in the next iteration of the loop
-                                if submitted < to_submit_count {
-                                    // Remove in_flight entries for unsubmitted requests
-                                    for user_data in user_data_list[submitted..].iter() {
-                                        in_flight.remove(user_data);
-                                    }
-                                    // Put unsubmitted requests back in the queue for retry
-                                    let unsubmitted: Vec<_> =
-                                        batch[submitted..to_submit_count].to_vec();
-                                    if !unsubmitted.is_empty() {
-                                        drop(ring);
-                                        let mut q = queue_clone.lock().unwrap();
-                                        // Insert unsubmitted requests back at the front preserving order
-                                        q.splice(0..0, unsubmitted);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                // Handle submission errors
-                                let error_code = e.raw_os_error();
-                                match error_code {
-                                    Some(libc::EAGAIN) | Some(libc::EINTR) => {
-                                        // Ring is full, or the operation was interrupted due
-                                        // to signal. We need to wait for completions and then retry
-                                        // Remove in_flight entries for all submissions in this batch
-                                        for user_data in user_data_list.iter() {
-                                            in_flight.remove(user_data);
-                                        }
-                                        // Put unsubmitted requests back in queue for next iteration
-                                        if to_submit_count > 0 {
-                                            let unsubmitted: Vec<_> =
-                                                batch[..to_submit_count].to_vec();
-                                            drop(ring);
-                                            let mut q = queue_clone.lock().unwrap();
-                                            // Insert unsubmitted requests back at the front preserving order
-                                            q.splice(0..0, unsubmitted);
-                                        }
-                                    }
-                                    _ => {
-                                        // Error: fail all pending submissions in this batch.
-                                        // Remove in_flight entries since these won't generate completions
-                                        for user_data in user_data_list.iter() {
-                                            in_flight.remove(user_data);
-                                        }
-                                        for sub in batch.iter_mut().take(to_submit_count) {
-                                            let batch_id = sub.batch_id;
-                                            sub.completion.set(Err(PyRuntimeError::new_err(
-                                                format!("io_uring submit error: {:?}", e),
-                                            )));
-                                            let _ = sub.bounce.take();
-                                            let prev = in_flight_count_clone
-                                                .fetch_sub(1, Ordering::Relaxed);
-                                            if prev == 1 {
-                                                in_flight_cvar_clone.notify_all();
-                                            }
-                                            // Decrement per-batch in-flight count and notify if batch is complete
-                                            if batch_id != 0 {
-                                                let batch_map =
-                                                    batch_in_flight_clone.lock().unwrap();
-                                                if let Some((batch_count, batch_cvar)) =
-                                                    batch_map.get(&batch_id)
-                                                {
-                                                    let prev_batch =
-                                                        batch_count.fetch_sub(1, Ordering::Relaxed);
-                                                    if prev_batch == 1 {
-                                                        batch_cvar.notify_all();
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // SHUTDOWN: Wake up all waiting Python threads
-                // Drain the queue and wake up all waiting threads with error
-                {
-                    let mut q = queue_clone
-                        .lock()
-                        .expect("Worker: queue mutex poisoned during shutdown");
-                    while let Some(mut sub) = q.pop() {
+                    // Any remaining in_flight requests, force wake with error
+                    // (these were submitted to kernel but won't get completions)
+                    for (_user_data, mut sub) in in_flight.drain() {
                         let batch_id = sub.batch_id;
                         // Drop any bounce buffer associated with this submission.
                         let _ = sub.bounce.take();
                         in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
                         sub.completion.set(Err(PyRuntimeError::new_err(
-                            "io_uring worker shutting down",
+                            "io_uring worker shutting down - request cancelled",
                         )));
                         // Decrement per-batch in-flight count and notify if batch is complete
                         if batch_id != 0 {
@@ -817,104 +1154,11 @@ impl RawBlockDevice {
                             }
                         }
                     }
-                }
 
-                // Process any remaining in-flight requests
-                // Wait for kernel to complete the requests or force-cancel them
-                // Note: This 1000 milliseconds is a rough estimate
-                let graceful_shutdown = Duration::from_millis(1000);
-                thread::sleep(graceful_shutdown);
-                {
-                    let mut ring = ring_clone
-                        .lock()
-                        .expect("Worker: ring mutex poisoned during shutdown");
-                    for cqe in ring.completion() {
-                        let user_data = cqe.user_data();
-                        if let Some(mut sub) = in_flight.remove(&user_data) {
-                            let batch_id = sub.batch_id;
-                            if cqe.result() < 0 {
-                                let code = -cqe.result();
-                                // Drop any bounce buffer associated with this submission.
-                                let _ = sub.bounce.take();
-                                sub.completion
-                                    .set(Err(PyOSError::new_err((code, "io_uring I/O error"))));
-                            } else {
-                                let bytes_transferred = cqe.result() as usize;
-                                if bytes_transferred < sub.len {
-                                    // Short read/write during shutdown: fail the request
-                                    // We cannot resubmit because the worker is about to exit
-                                    // Drop any bounce buffer associated with this submission.
-                                    let _ = sub.bounce.take();
-                                    sub.completion.set(Err(PyRuntimeError::new_err(
-                                        "io_uring worker shutting down - short I/O during shutdown",
-                                    )));
-                                    // Continue to decrement in_flight_count below
-                                } else {
-                                    // Full completion
-                                    // For reads with bounce buffer, copy data back to original buffer
-                                    if !sub.is_write {
-                                        if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
-                                            (sub.bounce.take(), sub.original_ptr, sub.payload_len)
-                                        {
-                                            unsafe {
-                                                libc::memcpy(
-                                                    orig_ptr as *mut libc::c_void,
-                                                    bounce.as_ptr() as *const libc::c_void,
-                                                    payload_len,
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        // Drop any bounce buffer associated with this submission.
-                                        let _ = sub.bounce.take();
-                                    }
-                                    sub.completion.set(Ok(()));
-                                }
-                            }
-                            let prev = in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
-                            if prev == 1 {
-                                in_flight_cvar_clone.notify_all();
-                            }
-                            // Decrement per-batch in-flight count and notify if batch is complete
-                            if batch_id != 0 {
-                                let batch_map = batch_in_flight_clone.lock().unwrap();
-                                if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
-                                    let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
-                                    if prev_batch == 1 {
-                                        batch_cvar.notify_all();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ring.submission().sync();
-                }
-
-                // Any remaining in_flight requests, force wake with error
-                // (these were submitted to kernel but won't get completions)
-                for (_user_data, mut sub) in in_flight.drain() {
-                    let batch_id = sub.batch_id;
-                    // Drop any bounce buffer associated with this submission.
-                    let _ = sub.bounce.take();
-                    in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
-                    sub.completion.set(Err(PyRuntimeError::new_err(
-                        "io_uring worker shutting down - request cancelled",
-                    )));
-                    // Decrement per-batch in-flight count and notify if batch is complete
-                    if batch_id != 0 {
-                        let batch_map = batch_in_flight_clone.lock().unwrap();
-                        if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
-                            let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
-                            if prev_batch == 1 {
-                                batch_cvar.notify_all();
-                            }
-                        }
-                    }
-                }
-
-                // Final notification in case any thread is waiting on in_flight_count
-                in_flight_cvar_clone.notify_all();
-            });
+                    // Final notification in case any thread is waiting on in_flight_count
+                    in_flight_cvar_clone.notify_all();
+                })
+                .expect("spawn rust-rawblock-uring worker");
 
             (
                 Some(ring),
@@ -934,6 +1178,11 @@ impl RawBlockDevice {
                 None, None, None, None, None, None, None, None, None, None, None,
             )
         };
+
+        // All fallible setup succeeded: hand the fd over to the struct, whose
+        // Drop is now responsible for closing it. Disarm so the guard does not
+        // close the same descriptor a second time.
+        let fd = fd_guard.disarm();
 
         Ok(Self {
             fd,
@@ -1235,7 +1484,7 @@ impl RawBlockDevice {
                     let mut q = queue.lock().unwrap();
                     q.push(sub);
                 }
-                batch_ready.notify_one();
+                batch_ready.signal_producer();
 
                 // Store completion for error checking in wait_iouring
                 {
@@ -1455,7 +1704,7 @@ impl RawBlockDevice {
                 q.push(sub);
             }
             if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.notify_one();
+                batch_ready.signal_producer();
             }
             py.allow_threads(move || comp.wait())
         } else {
@@ -1483,7 +1732,7 @@ impl RawBlockDevice {
                 q.push(sub);
             }
             if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.notify_one();
+                batch_ready.signal_producer();
             }
             py.allow_threads(move || comp.wait())
         };
@@ -1671,7 +1920,7 @@ impl RawBlockDevice {
                     let mut q = queue.lock().unwrap();
                     q.push(sub);
                 }
-                batch_ready.notify_one();
+                batch_ready.signal_producer();
 
                 // Store completion for error checking in wait_iouring
                 {
@@ -1971,7 +2220,7 @@ impl RawBlockDevice {
                 shutdown.store(true, Ordering::Relaxed);
             }
             if let Some(batch_ready) = &self.batch_ready {
-                batch_ready.notify_all();
+                batch_ready.signal_producer();
             }
 
             let mutex = Mutex::new(());
