@@ -6,7 +6,6 @@ import contextlib
 import functools
 import os
 import shutil
-import sys
 import tempfile
 import threading
 import uuid

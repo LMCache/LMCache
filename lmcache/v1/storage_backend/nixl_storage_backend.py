@@ -91,6 +91,7 @@ class NixlStorageConfig:
     enable_async_put: bool
     use_direct_io: bool
     path: Union[str, List[str]]
+    use_hugepages: bool
     enable_prog_thread: bool
     sync_mode: Optional[Any]  # nixl_thread_sync_t, None if unsupported
     path_sharding: str
@@ -151,6 +152,7 @@ class NixlStorageConfig:
                 len(endpoint_list),
             )
         path = extra_config.get("nixl_path")
+        use_hugepages = extra_config.get("nixl_use_hugepages", False)
         enable_prog_thread = extra_config.get("nixl_enable_prog_thread", True)
         sync_mode_str = extra_config.get("nixl_sync_mode", None)
         if sync_mode_str is not None and not _NIXL_SYNC_MODE_SUPPORTED:
