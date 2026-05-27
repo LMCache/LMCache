@@ -284,7 +284,20 @@ class MessageQueueClient:
                 )
                 payload_classes = get_payload_classes(wrapped_request.request_type)
                 if len(payload_classes) != len(wrapped_request.request_payloads):
-                    raise ValueError("Payload count does not match expected count")
+                    expected_classes = [cls.__name__ for cls in payload_classes]
+                    actual_classes = [
+                        type(p).__name__ for p in wrapped_request.request_payloads
+                    ]
+                    raise ValueError(
+                        f"Payload count mismatch for request "
+                        f"{wrapped_request.request_type}: "
+                        f"expected {len(payload_classes)} payloads "
+                        f"{expected_classes}, "
+                        f"got {len(wrapped_request.request_payloads)} payloads "
+                        f"{actual_classes}. "
+                        f"This is likely caused by a version mismatch between "
+                        f"the lmcache client and lmcache server."
+                    )
 
                 b_payloads = [
                     msgspec_encode(payload, cls=cls)
