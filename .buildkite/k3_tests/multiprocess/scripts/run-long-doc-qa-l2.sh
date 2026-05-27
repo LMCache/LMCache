@@ -43,9 +43,12 @@ L2_MAX_SIZE_GB="${L2_MAX_SIZE_GB:-80}"
 L2_BANDWIDTH_GB="${L2_BANDWIDTH_GB:-4}"
 
 # L2 performance thresholds
-MIN_L2_SPEEDUP="${MIN_L2_SPEEDUP:-1.0}"
-MIN_L2_TTFT_SPEEDUP="${MIN_L2_TTFT_SPEEDUP:-1.0}"
-MAX_WARMUP_OVERHEAD="${MAX_WARMUP_OVERHEAD:-2.0}"
+# Recent CI runs show ~1.51-1.67x query speedup, ~1.77-2.02x TTFT speedup,
+# and ~0.87-0.99x warmup overhead. Tighten from the previous pass-anything
+# thresholds (1.0x/1.0x/2.0x) while leaving headroom for variance.
+MIN_L2_SPEEDUP="${MIN_L2_SPEEDUP:-1.3}"
+MIN_L2_TTFT_SPEEDUP="${MIN_L2_TTFT_SPEEDUP:-1.5}"
+MAX_WARMUP_OVERHEAD="${MAX_WARMUP_OVERHEAD:-1.2}"
 
 L2_RESULTS_DIR="$RESULTS_DIR/long_doc_qa_l2"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
