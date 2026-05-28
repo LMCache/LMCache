@@ -4,7 +4,7 @@
 # Standard
 from _thread import LockType
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import abc
 import pickle
 
@@ -12,8 +12,8 @@ import pickle
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
@@ -22,14 +22,68 @@ from lmcache.v1.multiprocess.protocols.engine import (
 from lmcache.v1.multiprocess.worker_transfer.base import NonGpuContextMetadata
 from lmcache.v1.multiprocess.worker_transfer.shm_types import ShmSlotDescriptor
 
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.storage_manager import StorageManager
+
+logger = init_logger(__name__)
+
 
 def _dtype_to_name(dtype: torch.dtype) -> str:
     """Return a stable torch dtype name without module prefix."""
     return str(dtype).split(".")[-1]
 
 
+def create_transfer_strategy(
+    storage_manager: "StorageManager",
+    *,
+    shm_name: str,
+    pool_size: int,
+    pending_writes: dict[tuple[int, IPCCacheEngineKey], list[ObjectKey]],
+    pending_reads: dict[tuple[int, IPCCacheEngineKey], list[ObjectKey]],
+    pending_lock: LockType,
+    transfer_key_factory: Callable[
+        [IPCCacheEngineKey, int], tuple[int, IPCCacheEngineKey]
+    ],
+) -> "TransferStrategy":
+    """Create the non-GPU transfer strategy for a registered context.
+
+    Args:
+        storage_manager: Storage manager used by the selected strategy.
+        shm_name: Shared-memory pool name advertised to workers.
+        pool_size: Shared-memory pool size in bytes.
+        pending_writes: Map of pending SHM write reservations keyed by transfer key.
+        pending_reads: Map of pending SHM read reservations keyed by transfer key.
+        pending_lock: Lock guarding shared pending SHM reservation state.
+        transfer_key_factory: Factory that builds the `(instance_id, key)` lookup key
+            used in the pending SHM reservation maps.
+
+    Returns:
+        ``ShmTransferStrategy`` when SHM is configured with a non-empty pool name and
+        positive pool size, otherwise ``PickleTransferStrategy``.
+    """
+    if shm_name and pool_size > 0:
+        logger.info("Using shm non-GPU transfer strategy")
+        return ShmTransferStrategy(
+            storage_manager=storage_manager,
+            pending_writes=pending_writes,
+            pending_reads=pending_reads,
+            pending_lock=pending_lock,
+            transfer_key_factory=transfer_key_factory,
+            fallback_strategy=PickleTransferStrategy(storage_manager),
+        )
+
+    logger.info("Using pickle non-GPU transfer strategy")
+    return PickleTransferStrategy(storage_manager)
+
+
 class TransferStrategy(abc.ABC):
-    """Abstract strategy for non-GPU data transfer operations."""
+    """Contract for non-GPU transport backends used by the server.
+
+    Implementations encapsulate the transport-specific prepare/commit lifecycle for
+    store and retrieve operations, allowing the server to use either pickle-based or
+    shared-memory-based transfers behind a common interface.
+    """
 
     @abc.abstractmethod
     def prepare_store(
@@ -109,9 +163,18 @@ class TransferStrategy(abc.ABC):
 
 
 class PickleTransferStrategy(TransferStrategy):
-    """Pickle/ZMQ non-GPU transfer implementation."""
+    """Pickle-based transport for non-GPU transfer requests.
 
-    def __init__(self, storage_manager: StorageManager) -> None:
+    This is the default transport when SHM is unavailable, and it is also used as a
+    fallback by the SHM strategy when the worker sends an inline serialized payload.
+    ``prepare_store`` returns an empty context, while ``commit_store`` deserializes
+    the pickle payload and writes the resulting tensors into reserved objects.
+    """
+
+    def __init__(
+        self,
+        storage_manager: "StorageManager",
+    ) -> None:
         """Initialize pickle transfer strategy.
 
         Args:
@@ -210,11 +273,17 @@ class PickleTransferStrategy(TransferStrategy):
 
 
 class ShmTransferStrategy(TransferStrategy):
-    """Shared-memory non-GPU transfer implementation."""
+    """Shared-memory transport for non-GPU transfer requests.
+
+    This strategy exposes SHM slot descriptors during ``prepare_store`` and
+    ``prepare_retrieve`` so workers can access storage buffers directly. It tracks
+    pending SHM reservations until the matching commit step releases them, and it
+    falls back to pickle-based commit handling when ``cpu_data`` is non-empty.
+    """
 
     def __init__(
         self,
-        storage_manager: StorageManager,
+        storage_manager: "StorageManager",
         pending_writes: dict[tuple[int, IPCCacheEngineKey], list[ObjectKey]],
         pending_reads: dict[tuple[int, IPCCacheEngineKey], list[ObjectKey]],
         pending_lock: LockType,

@@ -31,12 +31,13 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareStoreResponse,
     RegisterNonGpuContextResponse,
 )
-from lmcache.v1.multiprocess.server_transfer import (
-    PickleTransferStrategy,
-    ShmTransferStrategy,
-    TransferStrategy,
-)
 from lmcache.v1.multiprocess.worker_transfer.base import NonGpuContextMetadata
+
+# Local
+from .server_transfer import (
+    TransferStrategy,
+    create_transfer_strategy,
+)
 
 logger = init_logger(__name__)
 
@@ -232,26 +233,22 @@ class NonGPUTransferModule:
             model_name=payload.model_name,
             world_size=payload.world_size,
         )
-        strategy: TransferStrategy = PickleTransferStrategy(self._ctx.storage_manager)
-        if shm_name and pool_size > 0:
-            strategy = ShmTransferStrategy(
-                storage_manager=self._ctx.storage_manager,
-                pending_writes=self._pending_shm_writes,
-                pending_reads=self._pending_shm_reads,
-                pending_lock=self._pending_shm_lock,
-                transfer_key_factory=self._make_transfer_key,
-                fallback_strategy=PickleTransferStrategy(self._ctx.storage_manager),
-            )
+        strategy: TransferStrategy = create_transfer_strategy(
+            self._ctx.storage_manager,
+            shm_name=shm_name,
+            pool_size=pool_size,
+            pending_writes=self._pending_shm_writes,
+            pending_reads=self._pending_shm_reads,
+            pending_lock=self._pending_shm_lock,
+            transfer_key_factory=self._make_transfer_key,
+        )
         self._strategies[payload.instance_id] = strategy
 
-        transfer_mode = "shm" if shm_name and pool_size > 0 else "pickle"
         logger.info(
-            "Registered non-GPU context for instance %d "
-            "(model=%s, world_size=%d, mode=%s)",
+            "Registered non-GPU context for instance %d (model=%s, world_size=%d)",
             payload.instance_id,
             payload.model_name,
             payload.world_size,
-            transfer_mode,
         )
 
         self._ctx.layout_desc_registry.register(
