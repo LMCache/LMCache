@@ -4,7 +4,8 @@ Engine protocol definitions for core KV cache operations.
 
 This module defines the protocol for:
 - REGISTER_KV_CACHE: Register a KV cache instance with the server
-- UNREGISTER_KV_CACHE: Unregister a KV cache instance
+- UNREGISTER_KV_CACHE: Unregister a KV cache instance (GPU path)
+- UNREGISTER_KV_CACHE_NON_GPU_CONTEXT: Unregister a non-GPU KV cache context
 - STORE: Store KV cache blocks to the server
 - RETRIEVE: Retrieve KV cache blocks from the server
 - LOOKUP: Submit a prefix lookup and return a prefetch job ID
@@ -66,6 +67,7 @@ REQUEST_NAMES = [
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
     "REGISTER_KV_CACHE_NON_GPU_CONTEXT",
+    "UNREGISTER_KV_CACHE_NON_GPU_CONTEXT",
     "PREPARE_STORE",
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
@@ -183,6 +185,15 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[str],
             response_class=None,
             handler_type=HandlerType.BLOCKING,
+        ),
+        # Unregister non-GPU KV cache context
+        # Payload:
+        #   - instance_id: int - Unique identifier for the vLLM instance
+        # Returns: None
+        "UNREGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
         ),
         # Register non-GPU KV cache context
         # Payload:

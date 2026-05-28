@@ -106,7 +106,7 @@ class NonGPUTransferModule:
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE,
+                RequestType.UNREGISTER_KV_CACHE_NON_GPU_CONTEXT,
                 self.unregister_kv_cache,
                 ThreadPoolType.SYNC,
             ),
