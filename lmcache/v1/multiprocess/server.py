@@ -137,7 +137,7 @@ def _build_modules(
         List of initialized engine modules.
 
     Raises:
-        ValueError: If blend engine is requested with non-GPU transfer mode.
+        ValueError: If blend engine is requested with transfer_mode="non_gpu".
     """
     modules: list[EngineModule] = [
         LookupModule(ctx),
@@ -146,13 +146,20 @@ def _build_modules(
 
     if mp_config.transfer_mode == "gpu":
         modules.append(GPUTransferModule(ctx))
-    else:
+    elif mp_config.transfer_mode == "non_gpu":
         modules.append(NonGPUTransferModule(ctx))
+    elif mp_config.transfer_mode == "auto":
+        modules.append(GPUTransferModule(ctx))
+        modules.append(NonGPUTransferModule(ctx))
+    else:
+        raise ValueError(f"Unsupported transfer_mode '{mp_config.transfer_mode}'")
+
+    logger.info("Transfer mode: %s", mp_config.transfer_mode)
 
     if mp_config.engine_type == "blend":
-        if mp_config.transfer_mode != "gpu":
+        if mp_config.transfer_mode == "non_gpu":
             raise ValueError(
-                "Blend engine requires transfer_mode='gpu', "
+                "Blend engine requires transfer_mode to be 'gpu' or 'auto', "
                 f"got '{mp_config.transfer_mode}'"
             )
         # First Party
@@ -194,10 +201,12 @@ def run_cache_server(
     maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
     # For non-GPU transfer: apply shm_name from mp_config and verify capacity
-    if mp_config.transfer_mode == "non_gpu" and mp_config.shm_name is not None:
+    if mp_config.transfer_mode != "gpu":
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
-        mem_cfg.shm_name = mp_config.shm_name
+        if mp_config.shm_name is not None:
+            mem_cfg.shm_name = mp_config.shm_name
         if mem_cfg.shm_name and sys.platform.startswith("linux"):
+            logger.info("Checking if shm capacity is larger than L1 request")
             try:
                 free_bytes = shutil.disk_usage("/dev/shm").free
                 if free_bytes < mem_cfg.size_in_bytes:
