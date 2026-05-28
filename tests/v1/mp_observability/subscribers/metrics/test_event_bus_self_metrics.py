@@ -36,16 +36,52 @@ def _counter_callbacks(meter: MagicMock) -> dict:
     }
 
 
+def _gauge_callbacks(meter: MagicMock) -> dict:
+    return {
+        c.args[0]: c.kwargs["callbacks"][0]
+        for c in meter.create_observable_gauge.call_args_list
+    }
+
+
 class TestRegistration:
-    def test_registers_two_counters(self):
+    def test_registers_health_gauges_and_counters(self):
         bus = EventBus(EventBusConfig(enabled=True))
         mock_metrics, meter = _make_mock_metrics()
         with patch(_PATCH_TARGET, mock_metrics):
             EventBusSelfMetricsSubscriber(bus)
+            assert set(_gauge_callbacks(meter)) == {
+                "lmcache_mp.event_bus.queue_depth",
+                "lmcache_mp.event_bus.drain_lag_seconds",
+            }
             assert set(_counter_callbacks(meter)) == {
                 "lmcache_mp.event_bus.dropped_events_total",
                 "lmcache_mp.event_bus.subscriber_exceptions",
             }
+
+    def test_queue_depth_gauge_callback_reflects_bus(self):
+        bus = EventBus(EventBusConfig(enabled=True))
+        bus.publish(Event(event_type=EventType.L1_READ_FINISHED, session_id="s1"))
+        bus.publish(Event(event_type=EventType.L1_READ_FINISHED, session_id="s2"))
+
+        mock_metrics, meter = _make_mock_metrics()
+        with patch(_PATCH_TARGET, mock_metrics):
+            EventBusSelfMetricsSubscriber(bus)
+            cb = _gauge_callbacks(meter)["lmcache_mp.event_bus.queue_depth"]
+            assert cb(None) == [(2, None)]
+
+    def test_drain_lag_gauge_reports_oldest_queued_event_age(self):
+        bus = EventBus(EventBusConfig(enabled=True))
+        event = Event(event_type=EventType.L1_READ_FINISHED, session_id="s1")
+        event.timestamp = time.time() - 2.0
+        bus._queue.append(event)
+
+        mock_metrics, meter = _make_mock_metrics()
+        with patch(_PATCH_TARGET, mock_metrics):
+            EventBusSelfMetricsSubscriber(bus)
+            cb = _gauge_callbacks(meter)["lmcache_mp.event_bus.drain_lag_seconds"]
+            [(lag, attrs)] = cb(None)
+            assert lag >= 2.0
+            assert attrs is None
 
     def test_dropped_counter_callback_reflects_drops(self):
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=2))
