@@ -20,21 +20,16 @@ LMCache groups directly.
 
 ## Motivation
 
-The community DeepSeek V4 PR attempted to handle several concerns together:
+Serving engines may expose multiple KV cache groups. Those groups can represent
+different block-id spaces, cache policies, or layer families. LMCache must keep
+those engine block-id spaces separate while also grouping layers by the physical
+properties required by its transfer kernels.
 
-- hybrid memory allocator support;
-- DeepSeek V4 logical block ID vs physical block ID handling;
-- sliding-window load behavior;
-- performance-oriented transfer optimizations.
-
-That made the implementation difficult to review because the regrouping problem
-was mixed with model-specific cache semantics.
-
-For the first step, LMCache only needs minimal HMA support: layers from
-different engine KV cache groups must not be merged into one LMCache transfer
-group, because their block IDs come from different engine block-id spaces.
-DeepSeek V4 compression logic, sliding-window trimming, and performance
-optimizations are follow-up work.
+This design focuses on the minimal HMA contract: layers from different engine
+KV cache groups must not be merged into one LMCache transfer group, because
+their block IDs come from different engine block-id spaces. Model-specific
+logical/physical block mapping, sliding-window trimming, and transfer
+optimizations are separate concerns layered on top of this contract.
 
 ## Goals
 
@@ -279,7 +274,7 @@ contract.
 
 ### Fully Remove `layout_hints`
 
-This was rejected for the minimal HMA PR. `layout_hints` still serve tensor
+This is not part of the minimal HMA design. `layout_hints` still serve tensor
 layout and reshape purposes for vLLM and TRT-LLM. Removing them would be a
 separate API migration.
 
