@@ -244,6 +244,16 @@ class NonGPUTransferModule:
             )
         self._strategies[payload.instance_id] = strategy
 
+        transfer_mode = "shm" if shm_name and pool_size > 0 else "pickle"
+        logger.info(
+            "Registered non-GPU context for instance %d "
+            "(model=%s, world_size=%d, mode=%s)",
+            payload.instance_id,
+            payload.model_name,
+            payload.world_size,
+            transfer_mode,
+        )
+
         self._ctx.layout_desc_registry.register(
             payload.model_name, payload.world_size, layout_desc
         )

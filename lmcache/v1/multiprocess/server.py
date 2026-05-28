@@ -3,6 +3,8 @@
 
 # Standard
 import argparse
+import shutil
+import sys
 import time
 
 # Third Party
@@ -190,6 +192,28 @@ def run_cache_server(
     )
 
     maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
+
+    # For non-GPU transfer: apply shm_name from mp_config and verify capacity
+    if mp_config.transfer_mode == "non_gpu" and mp_config.shm_name is not None:
+        mem_cfg = storage_manager_config.l1_manager_config.memory_config
+        mem_cfg.shm_name = mp_config.shm_name
+        if mem_cfg.shm_name and sys.platform.startswith("linux"):
+            try:
+                free_bytes = shutil.disk_usage("/dev/shm").free
+                if free_bytes < mem_cfg.size_in_bytes:
+                    logger.warning(
+                        "Insufficient /dev/shm capacity: need %d bytes, have %d bytes. "
+                        "Disabling SHM, falling back to pickle.",
+                        mem_cfg.size_in_bytes,
+                        free_bytes,
+                    )
+                    mem_cfg.shm_name = ""
+            except OSError:
+                logger.warning(
+                    "Cannot verify /dev/shm capacity; disabling SHM.",
+                    exc_info=True,
+                )
+                mem_cfg.shm_name = ""
 
     ctx = MPCacheEngineContext(
         storage_manager_config=storage_manager_config,
