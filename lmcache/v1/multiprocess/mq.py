@@ -103,6 +103,8 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
     if cls in _SPECIAL_ENCODER_DECODERS:
         _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
         return decoder.decode(b_obj)
+    if cls in (bool, int):
+        return cls(msgspec.msgpack.decode(b_obj))
     return msgspec.msgpack.decode(b_obj, type=cls)
 
 
