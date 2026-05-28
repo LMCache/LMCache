@@ -116,7 +116,7 @@ helper.
 | Helper | Returns | Notes |
 |---|---|---|
 | `get_group_data_ptrs(kv, fmt, layer_indices)` | `list[int]` | Pointer array in **kernel-expected order**: `[base]` for cross-layer (`layer_indices` ignored), `[K_0…K_N, V_0…V_N]` for SGLang MHA, per-layer flat elsewhere. Matches the dispatch in `csrc/mp_mem_kernels.cu:161-169`. The pointer-array shape is a property of the format — callers never ask "does this format have per-layer pointers?". |
-| `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size)` | `PageBufferShapeDesc` | The kernel-facing shape struct. |
+| `make_page_buffer_shape_desc(kv, fmt, layer_idx, num_layers_in_group, num_blocks, block_size, block_stride_elems)` | `PageBufferShapeDesc` | The kernel-facing shape struct. ``block_stride_elems`` carries the per-block dim-0 element stride; pass the value returned by `resolve_block_stride_and_log_layout` so groups with different physical block sizes (e.g. a compressed DeepSeek V4 indexer group alongside dense layers) share a single GPU pool. |
 
 ### Contiguity
 
@@ -151,12 +151,17 @@ helper.
 ## Consumers
 
 - **`lmcache/v1/kv_layer_groups.py::KVLayerGroupsManager.__init__`** —
-  partitions layers by the 4-tuple `(kv_size, num_heads, head_size,
-  dtype)` using `is_mla`, `get_num_heads`, `get_head_size`, and
-  `get_dtype` with each layer's index. Builds a `PageBufferShapeDesc`
-  per group via `make_page_buffer_shape_desc`. The real constructor is
-  the only way in — no test-only shortcuts, no cached topology fields;
-  the manager exposes only `kv_layer_groups`, `num_groups`, and
+  partitions layers by the 5-tuple `(kv_size, num_heads, head_size,
+  block_size, dtype)` using `is_mla`, `get_num_heads`, `get_head_size`,
+  `get_block_size`, and `get_dtype` with each layer's index. Including
+  `block_size` in the identity lets compressed groups (e.g. a DeepSeek
+  V4 indexer with a smaller physical slot count) sit alongside
+  non-compressed groups under a single `GPUCacheContext`. Builds a
+  `PageBufferShapeDesc` per group via `make_page_buffer_shape_desc`,
+  passing the `block_stride_elems` resolved by
+  `resolve_block_stride_and_log_layout`. The real constructor is the
+  only way in — no test-only shortcuts, no cached topology fields; the
+  manager exposes only `kv_layer_groups`, `num_groups`, and
   `get_shape_desc`.
 - **`lmcache/v1/multiprocess/gpu_context.py::GPUCacheContext`** —
   constructs the manager directly at init, delegates

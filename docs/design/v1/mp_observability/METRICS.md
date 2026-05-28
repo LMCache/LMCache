@@ -280,10 +280,21 @@ registered adapter type (e.g. `"fs"`, `"nixl_store"`, `"mooncake_store"`)
 — enabling per-adapter-type slicing in Prometheus (e.g.
 `lmcache_mp_l2_store_throughput_gbs{l2_name="nixl_store"}`).
 
+**Store-path fast-path accounting.** Some adapters skip the write when
+a key is already present in the backend, collapsing
+`(completed_ts - submitted_ts)` to near-zero while the submitted
+`total_bytes` count stays unchanged. To avoid inflated throughput
+samples, the `L2StoreResult` returned by `pop_completed_store_tasks()`
+carries `bytes_transferred()` covering only the bytes actually written.
+The `L2_STORE_COMPLETED` event propagates this value, and the store
+throughput subscriber records `bytes_transferred / dt`; when
+`bytes_transferred <= 0` (every key fast-pathed) the sample is dropped
+entirely. The load path continues to use the submitted `total_bytes`.
+
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GBs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per task |
-| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair |
+| `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GBs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `bytes_transferred / (completed_ts - submitted_ts) / 1e9` per task. `bytes_transferred` is read from the `L2_STORE_COMPLETED` event (populated from the `L2StoreResult` returned by `pop_completed_store_tasks()`); samples where `bytes_transferred <= 0` (e.g. duplicate-key fast paths that skip the write) are dropped, so the histogram reflects real work, not submitted-but-skipped bytes. |
+| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
 
 **What it answers:** What end-to-end throughput is each L2 adapter
 delivering? Which backends are keeping up with demand, and which are
@@ -348,19 +359,25 @@ point-in-time state snapshots that do not correspond to discrete events.
 
 ## L1 / L2 State Metrics
 
-Live state of the L1 memory pool and the in-flight L2 store / prefetch-load
-queues.  These metrics are useful for capacity planning, sizing L1, and
-spotting backpressure on individual L2 adapters.
+Live state of the L1 memory pool, the per-adapter L2 byte usage, and the
+in-flight L2 store / prefetch-load queues.  These metrics are useful for
+capacity planning, sizing L1, watching L2 fullness, and spotting
+backpressure on individual L2 adapters.
 
-All four metrics are OTel `ObservableGauge` instruments registered via the
+All five metrics are OTel `ObservableGauge` instruments registered via the
 shared `register_gauge` helper.  At scrape time, OTel invokes the
-registered callback, which iterates the controller's live in-flight state
-and returns one observation per adapter that currently has work.
-Adapters with no in-flight work emit no datapoint for that scrape.
+registered callback, which iterates the controller's live state and
+returns one observation per adapter (for `l2_usage_bytes`, one per
+configured adapter; for the in-flight gauges, only adapters with work).
+Adapters with no in-flight work emit no datapoint for the three
+in-flight gauges.
 
-The three in-flight metrics carry two attributes that disambiguate
-adapters even when more than one is registered with the same backend type
-— same shape as the existing `lmcache_mp.l2_store_completed` counter:
+`lmcache_mp.l2_usage_bytes` carries a single `l2_name` attribute — the
+adapter's registered type name (e.g. `"fs"`, `"mock"`,
+`"nixl_store"`).  The three in-flight metrics carry two attributes
+that disambiguate adapters even when more than one is registered with
+the same backend type — same shape as the existing
+`lmcache_mp.l2_store_completed` counter:
 
 - `l2_name` — the registered adapter type (e.g. `"fs"`, `"mock"`,
   `"nixl_store"`).
@@ -371,6 +388,7 @@ adapters even when more than one is registered with the same backend type
 | OTel metric name | Prometheus name | Type | Source of truth | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l1_memory_usage_bytes` | `lmcache_mp_l1_memory_usage_bytes` | ObservableGauge | `L1Manager.get_memory_usage()` | Bytes currently held in L1 at scrape time |
+| `lmcache_mp.l2_usage_bytes` | `lmcache_mp_l2_usage_bytes` | ObservableGauge (attr: `l2_name`) | `StorageManager.get_l2_usages()` (calls `L2AdapterInterface.get_usage().total_bytes_used`) | Per-adapter bytes currently held in L2 at scrape time; one observation per configured adapter.  Adapters whose `get_usage()` raises are skipped silently. |
 | `lmcache_mp.num_inflight_l2_stores` | `lmcache_mp_num_inflight_l2_stores` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `StoreController.get_inflight_count_by_adapter()` | Snapshot of in-flight L2 store tasks grouped by adapter |
 | `lmcache_mp.num_inflight_l2_loads` | `lmcache_mp_num_inflight_l2_loads` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter count from the same snapshot |
 | `lmcache_mp.inflight_load_memory_usage_bytes` | `lmcache_mp_inflight_load_memory_usage_bytes` | ObservableGauge (attrs: `l2_name`, `adapter_index`) | `PrefetchController.get_inflight_load_state_by_adapter()` | Per-adapter reserved bytes from the same snapshot |
@@ -378,6 +396,12 @@ adapters even when more than one is registered with the same backend type
 **What `l1_memory_usage_bytes` answers:** How full is the L1 cache? Helps
 size L1 against working set and detect leaks (steadily climbing without
 plateauing).
+
+**What `l2_usage_bytes` answers:** How full is each L2 backend? Lets
+operators query how much each L2 tier currently holds, decide whether
+an adapter needs eviction or purge, and spot per-backend asymmetries
+when more than one L2 is configured.  Parallel to `l1_memory_usage_bytes`
+on the L2 tier.
 
 **What `num_inflight_l2_stores` answers:** Are L2 stores piling up on a
 particular adapter? Sustained non-zero values indicate the adapter cannot

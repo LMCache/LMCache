@@ -434,7 +434,7 @@ def parse_kvcache_shape_spec(
       group's geometry. Groups are concatenated in declaration order;
       ``layer_indices`` are assigned sequentially starting from 0.
 
-    When consumed by the ``lmcache bench kvcache`` CLI, ``NB``/``BS``
+    When consumed by the ``lmcache bench server`` CLI, ``NB``/``BS``
     from the spec take precedence over ``--num-blocks`` / ``--block-size``
     CLI flags when set to a positive value.
 
@@ -536,7 +536,7 @@ def format_kvcache_shape_spec(groups: list[KVLayerGroupInfo]) -> str:
     ``x`` that ``parse`` would produce).
 
     The returned string is also human-readable and is used by the
-    ``lmcache bench kvcache`` CLI to echo the resolved KV cache
+    ``lmcache bench server`` CLI to echo the resolved KV cache
     geometry at startup, so operators can verify that their spec was
     interpreted as intended.
 

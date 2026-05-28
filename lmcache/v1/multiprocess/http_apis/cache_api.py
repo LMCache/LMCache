@@ -75,7 +75,7 @@ async def kvcache_check(
     ``STORE``/``RETRIEVE``), so this endpoint is fully block-centric:
     ``block_ids`` enumerates the target blocks and ``chunk_size`` counts
     blocks per hashed chunk. Intended for diagnostics / round-trip
-    integrity checks from ``lmcache bench kvcache``.
+    integrity checks from ``lmcache bench server``.
 
     Args:
         request: FastAPI request.
