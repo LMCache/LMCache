@@ -204,9 +204,6 @@ class LocalDiskBackend(StorageBackendInterface):
             return MemoryFormat.KV_2TD
         return MemoryFormat.KV_T2D
 
-    def _shape_size_bytes(self, shape: torch.Size, dtype: torch.dtype) -> int:
-        return shape.numel() * dtype.itemsize
-
     def _layerwise_shape_from_metadata(self, fmt: MemoryFormat) -> Optional[torch.Size]:
         if self.metadata is None:
             return None
@@ -221,6 +218,32 @@ class LocalDiskBackend(StorageBackendInterface):
             return torch.Size([chunk_size, kv_size, hidden_dim])
         return None
 
+    def _infer_shape_from_size(
+        self,
+        shape: torch.Size,
+        dtype: torch.dtype,
+        fmt: MemoryFormat,
+        size: int,
+        token_dim: Optional[int] = None,
+    ) -> Optional[torch.Size]:
+        if token_dim is None:
+            token_dim = fmt.token_dim()
+        num_tokens = shape[token_dim]
+        if num_tokens <= 0:
+            return None
+
+        bytes_per_token = (shape.numel() // num_tokens) * dtype.itemsize
+        if size % bytes_per_token != 0:
+            return None
+
+        inferred_tokens = size // bytes_per_token
+        if inferred_tokens <= 0 or inferred_tokens > num_tokens:
+            return None
+
+        inferred_shape = list(shape)
+        inferred_shape[token_dim] = inferred_tokens
+        return torch.Size(inferred_shape)
+
     def _infer_disk_entry_metadata(
         self,
         key: CacheEngineKey,
@@ -233,18 +256,32 @@ class LocalDiskBackend(StorageBackendInterface):
 
         if self.layerwise:
             shape = self._layerwise_shape_from_metadata(fmt)
-            if shape is not None and self._shape_size_bytes(shape, dtype) == size:
-                return shape, dtype, fmt
+            if shape is not None:
+                token_dim = 1 if fmt == MemoryFormat.KV_2TD else 0
+                inferred_shape = self._infer_shape_from_size(
+                    shape,
+                    dtype,
+                    fmt,
+                    size,
+                    token_dim=token_dim,
+                )
+                if inferred_shape is not None:
+                    return inferred_shape, dtype, fmt
             return None, dtype, fmt
 
         shapes = self.metadata.get_shapes()
         dtypes = self.metadata.get_dtypes()
         for shape, candidate_dtype in zip(shapes, dtypes, strict=False):
-            if (
-                candidate_dtype == dtype
-                and self._shape_size_bytes(shape, candidate_dtype) == size
-            ):
-                return shape, candidate_dtype, fmt
+            if candidate_dtype != dtype:
+                continue
+            inferred_shape = self._infer_shape_from_size(
+                shape,
+                candidate_dtype,
+                fmt,
+                size,
+            )
+            if inferred_shape is not None:
+                return inferred_shape, candidate_dtype, fmt
 
         return None, dtype, fmt
 
@@ -295,6 +332,9 @@ class LocalDiskBackend(StorageBackendInterface):
             return False
 
         shape, dtype, fmt = self._infer_disk_entry_metadata(key, size)
+        if shape is None:
+            return False
+
         self.dict[key] = DiskCacheMetadata(
             path=path,
             size=size,
