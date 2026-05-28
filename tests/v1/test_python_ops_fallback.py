@@ -258,8 +258,13 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
     h2d_dir = ops.TransferDirection.H2D
     d2h_dir = ops.TransferDirection.D2H
 
-    # Tensor mode for non-CUDA/CPU devices (e.g., XPU, HPU)
-    use_tensor_mode = device not in ("cpu", "cuda", "xpu")
+    # Tensor mode for the Python fallback on non-CPU/CUDA devices (e.g.,
+    # XPU, HPU) — the fallback cannot dereference device pointers from
+    # Python, so it must receive torch.Tensor inputs. The native XPU
+    # SYCL backend only accepts uintptr_t pointers, so it stays in
+    # pointer mode.
+    is_py_fallback = getattr(ops, "__name__", "") == "lmcache.python_ops_fallback"
+    use_tensor_mode = is_py_fallback and device not in ("cpu", "cuda")
 
     # (host_buffer_offset, nbytes) boundary test cases:
     #   (0,  64): exactly one aligned block from the start
@@ -1180,9 +1185,15 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
         (ops.GPUKVFormat.NL_X_NBBS_ONE_HS, True, 1),  # SGLang MLA
     ]
 
-    # Decide mode based on device: use pointer mode for CPU/CUDA
-    # tensor list mode for others
-    use_tensor_list = device not in ("cpu", "cuda", "xpu")
+    # Decide mode based on the backend module, not the device.
+    # The native XPU backend (lmcache.xpu_ops) only accepts a tensor of
+    # uint64 pointers, while the Python fallback (lmcache.python_ops_fallback)
+    # additionally supports passing the page buffers as a list[Tensor].
+    # Using pointer mode for CPU/CUDA and the native XPU backend keeps the
+    # SYCL path happy, while the fallback still exercises the tensor-list
+    # path on devices other than CPU/CUDA.
+    is_py_fallback = getattr(ops, "__name__", "") == "lmcache.python_ops_fallback"
+    use_tensor_list = is_py_fallback and device not in ("cpu", "cuda")
 
     for gpu_kv_format, is_mla, bs_arg in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1406,9 +1417,11 @@ def scenario_multi_layer_kv_transfer_unilateral(
         ),  # SGLang MLA (delegates to multi_layer_kv_transfer)
     ]
 
-    # Decide mode based on device: use pointer mode for CPU/CUDA
-    # tensor list mode for others
-    use_tensor_list = device not in ("cpu", "cuda", "xpu")
+    # Decide mode based on the backend module, not the device.
+    # The native XPU backend (lmcache.xpu_ops) only accepts a tensor of
+    # uint64 pointers; only the Python fallback supports list[Tensor].
+    is_py_fallback = getattr(ops, "__name__", "") == "lmcache.python_ops_fallback"
+    use_tensor_list = is_py_fallback and device not in ("cpu", "cuda")
 
     for gpu_kv_format, is_mla in format_cases:
         k_or_v_size = 1 if is_mla else 2
