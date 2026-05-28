@@ -281,6 +281,10 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.keys_in_request.append(key)
             return True
 
+        if self.exists_in_put_tasks(key):
+            # The final path can exist before async write_file() finishes.
+            return False
+
         path = self._key_to_path(key)
         if not os.path.isfile(path):
             return False
