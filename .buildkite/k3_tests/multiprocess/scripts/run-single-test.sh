@@ -94,9 +94,12 @@ case "$TEST_NAME" in
     restart_recovery)
         exec_script="${SCRIPT_DIR}/run-restart-recovery.sh"
         ;;
+    cache_stats)
+        exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
+        ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery"
+        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats"
         exit 1
         ;;
 esac
