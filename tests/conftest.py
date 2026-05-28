@@ -175,6 +175,14 @@ class MockSyncGlideClient:
     def exists(self, keys: list[bytes]) -> int:
         return sum(1 for k in keys if k in self._store)
 
+    def delete(self, keys: list[bytes]) -> int:
+        removed = 0
+        for k in keys:
+            if k in self._store:
+                del self._store[k]
+                removed += 1
+        return removed
+
     @classmethod
     def reset_store(cls) -> None:
         cls._store.clear()
