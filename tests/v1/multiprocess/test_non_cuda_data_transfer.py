@@ -15,17 +15,17 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.multiprocess.adapter_connector.base import (
+    NonGpuContextMetadata,
+    create_non_gpu_context,
+)
+from lmcache.v1.multiprocess.adapter_connector.pickle import NonGpuContextPickle
+from lmcache.v1.multiprocess.adapter_connector.shm import NonGpuContextShm
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
 )
-from lmcache.v1.multiprocess.worker_transfer.base import (
-    NonGpuContextMetadata,
-    create_non_gpu_context,
-)
-from lmcache.v1.multiprocess.worker_transfer.pickle import NonGpuContextPickle
-from lmcache.v1.multiprocess.worker_transfer.shm import NonGpuContextShm
 
 if TYPE_CHECKING:
     # First Party
@@ -232,7 +232,7 @@ def test_wrap_kv_caches_wraps_all_tensors(monkeypatch: Any) -> None:
 def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
     """Ensure transfer context factory returns DataTransferContext for CPU KV."""
     # First Party
-    from lmcache.v1.multiprocess.worker_transfer.transfer_context import (
+    from lmcache.v1.multiprocess.adapter_connector.worker_transfer import (
         DataTransferContext,
         create_transfer_context,
     )
@@ -270,7 +270,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
 ) -> None:
     """Validate layout extraction and gather/scatter round-trip on CPU tensors."""
     # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import (
+    from lmcache.v1.multiprocess.adapter_connector.base import (
         compute_kv_layout,
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
@@ -317,7 +317,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
 ) -> None:
     """Validate gather/scatter round-trip for HND vLLM KV layout."""
     # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import (
+    from lmcache.v1.multiprocess.adapter_connector.base import (
         compute_kv_layout,
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
@@ -369,7 +369,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
 def test_compute_kv_layout_empty_raises_value_error() -> None:
     """Ensure compute_kv_layout rejects empty KV cache input."""
     # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import compute_kv_layout
+    from lmcache.v1.multiprocess.adapter_connector.base import compute_kv_layout
 
     with pytest.raises(ValueError, match="kv_caches is empty"):
         compute_kv_layout({})
@@ -418,7 +418,7 @@ def test_scatter_respects_skip_first_n_tokens(
 ) -> None:
     """Ensure scatter honors skip_first_n_tokens and preserves skipped blocks."""
     # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import (
+    from lmcache.v1.multiprocess.adapter_connector.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
@@ -806,7 +806,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     in cache.
     """
     # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import gather_paged_kv_to_cpu
+    from lmcache.v1.multiprocess.adapter_connector.base import gather_paged_kv_to_cpu
 
     # 3 chunks (6 blocks, 2 blocks per chunk), but we only want chunks 0 and 2
     source = _make_kv_caches(num_layers=2, num_blocks=6, block_size=4)

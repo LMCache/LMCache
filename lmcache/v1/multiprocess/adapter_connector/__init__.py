@@ -2,7 +2,7 @@
 """Transport package for non-GPU KV data transfer in multiprocess mode.
 
 Re-exports all public symbols from the sub-modules so that existing imports
-from ``lmcache.v1.multiprocess.worker_transfer`` work without specifying the
+from ``lmcache.v1.multiprocess.adapter_connector`` work without specifying the
 sub-module.
 """
 
@@ -18,7 +18,7 @@ from .base import (
 from .pickle import NonGpuContextPickle
 from .shm import NonGpuContextShm
 from .shm_types import ShmSlotDescriptor
-from .transfer_context import (
+from .worker_transfer import (
     DataTransferContext,
     HandleTransferContext,
     TransferContext,

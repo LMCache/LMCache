@@ -20,12 +20,12 @@ across non-CUDA backends.
 
 ```text
 Worker adapter (vLLM MP adapter)
-  └─ TransferContext (worker_transfer/transfer_context.py)
+  └─ TransferContext (adapter_connector/worker_transfer.py)
       ├─ HandleTransferContext  (CUDA IPC path)
       └─ DataTransferContext    (non-CUDA data path)
-          └─ NonGpuContext (worker_transfer/base.py)
-             ├─ NonGpuContextPickle (worker_transfer/pickle.py)
-             └─ NonGpuContextShm    (worker_transfer/shm.py)
+          └─ NonGpuContext (adapter_connector/base.py)
+             ├─ NonGpuContextPickle (adapter_connector/pickle.py)
+             └─ NonGpuContextShm    (adapter_connector/shm.py)
 
 MPCacheEngine (server)
   └─ MPCacheEngineContext (engine_context.py)
@@ -178,10 +178,10 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 - `lmcache/v1/multiprocess/modules/non_gpu_transfer.py`: `NonGPUTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
-- `lmcache/v1/multiprocess/worker_transfer/transfer_context.py`: `DataTransferContext`, `HandleTransferContext`
-- `lmcache/v1/multiprocess/worker_transfer/base.py`: `NonGpuContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
-- `lmcache/v1/multiprocess/worker_transfer/pickle.py`: `NonGpuContextPickle`
-- `lmcache/v1/multiprocess/worker_transfer/shm.py`: `NonGpuContextShm`
+- `lmcache/v1/multiprocess/adapter_connector/worker_transfer.py`: `DataTransferContext`, `HandleTransferContext`
+- `lmcache/v1/multiprocess/adapter_connector/base.py`: `NonGpuContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
+- `lmcache/v1/multiprocess/adapter_connector/pickle.py`: `NonGpuContextPickle`
+- `lmcache/v1/multiprocess/adapter_connector/shm.py`: `NonGpuContextShm`
 
 ## 3. Protocol & Data Flow
 
