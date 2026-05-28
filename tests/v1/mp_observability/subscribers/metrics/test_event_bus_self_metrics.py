@@ -71,16 +71,16 @@ class TestRegistration:
 
     def test_drain_lag_gauge_reports_oldest_queued_event_age(self):
         bus = EventBus(EventBusConfig(enabled=True))
-        event = Event(event_type=EventType.L1_READ_FINISHED, session_id="s1")
-        event.timestamp = time.time() - 2.0
-        bus._queue.append(event)
+        with patch("time.time", return_value=100.0):
+            bus.publish(Event(event_type=EventType.L1_READ_FINISHED, session_id="s1"))
 
         mock_metrics, meter = _make_mock_metrics()
         with patch(_PATCH_TARGET, mock_metrics):
             EventBusSelfMetricsSubscriber(bus)
             cb = _gauge_callbacks(meter)["lmcache_mp.event_bus.drain_lag_seconds"]
-            [(lag, attrs)] = cb(None)
-            assert lag >= 2.0
+            with patch("time.time", return_value=102.0):
+                [(lag, attrs)] = cb(None)
+            assert lag == 2.0
             assert attrs is None
 
     def test_dropped_counter_callback_reflects_drops(self):
