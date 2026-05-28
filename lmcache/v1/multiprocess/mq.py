@@ -140,11 +140,9 @@ class ClientPollingLoop:
         Returns:
             ClientPollingLoop: The shared polling loop instance.
         """
-        if cls._instance is None:
-            with cls._instance_lock:
-                if cls._instance is None:
-                    cls._instance = ClientPollingLoop()
         with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = ClientPollingLoop()
             cls._instance._ref_count += 1
             return cls._instance
 
