@@ -23,6 +23,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
+from lmcache.v1.kv_cache_groups import LMCKVCacheGroup, LMCKVCacheGroups
 from lmcache.v1.multiprocess.protocol import RequestType
 
 
@@ -146,6 +147,41 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     assert transfer_ctx.submit_store.call_args.kwargs == {}
     assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
     assert adapter.store_futures["req-1"] is fake_future
+
+
+def test_submit_store_request_expands_block_ids_to_lmc_groups(
+    fake_adapter, monkeypatch
+):
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.kv_caches = {"layer.0": fake_tensor}
+    adapter.lmc_kv_cache_groups = LMCKVCacheGroups.from_groups(
+        [
+            LMCKVCacheGroup(0, ("layer.0", "layer.2"), (0, 2)),
+            LMCKVCacheGroup(0, ("layer.4",), (4,)),
+            LMCKVCacheGroup(1, ("layer.1", "layer.3"), (1, 3)),
+        ]
+    )
+    transfer_ctx = MagicMock()
+    fake_future = MagicMock()
+    transfer_ctx.submit_store.return_value = fake_future
+    adapter.transfer_ctx = transfer_ctx
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[[0, 1], [10, 11]],
+        start=0,
+        end=4,
+    )
+
+    adapter.submit_store_request("req-1", op, event=MagicMock())
+
+    assert transfer_ctx.submit_store.call_args.args[4] == [
+        [0, 1],
+        [0, 1],
+        [10, 11],
+    ]
 
 
 def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatch):

@@ -310,7 +310,8 @@ class GPUTransferModule:
             key: The IPC key for the KV cache blocks.
                 Must have worker_id != None (worker store operation).
             instance_id: The GPU instance ID (such as PID).
-            gpu_block_ids: GPU block IDs to store, indexed by engine_group_idx.
+            gpu_block_ids: GPU block IDs to store, indexed by LMCache KV
+                group index.
             event_ipc_handle: The IPC handle of the event to wait on.
 
         Returns:
@@ -349,8 +350,9 @@ class GPUTransferModule:
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            block_ids_per_engine_group_gpu = (
-                gpu_context.copy_engine_group_block_ids_to_gpu(gpu_block_ids)
+            gpu_block_ids = gpu_context.normalize_lmc_group_block_ids(gpu_block_ids)
+            block_ids_per_lmc_group_gpu = gpu_context.copy_lmc_group_block_ids_to_gpu(
+                gpu_block_ids
             )
 
             if not hasattr(torch_dev.Event, "from_ipc_handle"):
@@ -408,11 +410,10 @@ class GPUTransferModule:
 
                     # Copy from GPU paged buffer to tmp buffer, then to CPU — per group
                     for lmc_group_idx, group in enumerate(groups):
-                        engine_group_idx = group.engine_group_idx
-                        engine_block_ids_gpu = block_ids_per_engine_group_gpu[
-                            engine_group_idx
+                        lmc_group_block_ids_gpu = block_ids_per_lmc_group_gpu[
+                            lmc_group_idx
                         ]
-                        chunk_block_ids_gpu = engine_block_ids_gpu[
+                        chunk_block_ids_gpu = lmc_group_block_ids_gpu[
                             idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
                         ]
                         if chunk_block_ids_gpu.shape[0] != blocks_per_chunk:
@@ -421,14 +422,12 @@ class GPUTransferModule:
                                 "engine_group_idx=%d "
                                 "chunk=%d expected=%d got=%d",
                                 lmc_group_idx,
-                                engine_group_idx,
+                                group.engine_group_idx,
                                 idx,
                                 blocks_per_chunk,
                                 chunk_block_ids_gpu.shape[0],
                             )
-                        tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(
-                            lmc_group_idx
-                        )
+                        tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(lmc_group_idx)
                         group_kv_pointers = gpu_context.get_group_kv_pointers(
                             lmc_group_idx
                         )
@@ -509,8 +508,8 @@ class GPUTransferModule:
             key: The IPC key for the KV cache blocks.
                 Must have worker_id != None (worker retrieve operation).
             instance_id: The GPU instance ID (such as PID).
-            gpu_block_ids: GPU block IDs to retrieve into, indexed by
-                engine_group_idx.
+            gpu_block_ids: GPU block IDs to retrieve into, indexed by LMCache
+                KV group index.
             event_ipc_handle: The IPC handle of the event to wait on.
             skip_first_n_tokens: Number of tokens to skip writing at
                 the start of the retrieve range. This avoids overwriting
@@ -611,11 +610,8 @@ class GPUTransferModule:
                         gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
                     )
                 for lmc_group_idx, group in enumerate(groups):
-                    engine_group_idx = group.engine_group_idx
-                    engine_block_ids_gpu = block_ids_per_engine_group_gpu[
-                        engine_group_idx
-                    ]
-                    chunk_block_ids_gpu = engine_block_ids_gpu[
+                    lmc_group_block_ids_gpu = block_ids_per_lmc_group_gpu[lmc_group_idx]
+                    chunk_block_ids_gpu = lmc_group_block_ids_gpu[
                         start_chunk_id * blocks_per_chunk : end_chunk_id
                         * blocks_per_chunk
                     ]
@@ -625,7 +621,7 @@ class GPUTransferModule:
                             "engine_group_idx=%d "
                             "batch=%d expected=%d got=%d",
                             lmc_group_idx,
-                            engine_group_idx,
+                            group.engine_group_idx,
                             batch_idx,
                             batch_len * blocks_per_chunk,
                             chunk_block_ids_gpu.shape[0],
@@ -633,9 +629,7 @@ class GPUTransferModule:
                     tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
                         batch_len, lmc_group_idx
                     )
-                    group_kv_pointers = gpu_context.get_group_kv_pointers(
-                        lmc_group_idx
-                    )
+                    group_kv_pointers = gpu_context.get_group_kv_pointers(lmc_group_idx)
                     group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
                         lmc_group_idx
                     )
@@ -657,8 +651,9 @@ class GPUTransferModule:
             torch_dev.stream(gpu_context.stream),
         ):
             # Copy all block_ids to GPU once before the loop
-            block_ids_per_engine_group_gpu = (
-                gpu_context.copy_engine_group_block_ids_to_gpu(gpu_block_ids)
+            gpu_block_ids = gpu_context.normalize_lmc_group_block_ids(gpu_block_ids)
+            block_ids_per_lmc_group_gpu = gpu_context.copy_lmc_group_block_ids_to_gpu(
+                gpu_block_ids
             )
 
             check_interprocess_event_support()

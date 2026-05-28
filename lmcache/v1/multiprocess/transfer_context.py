@@ -108,7 +108,7 @@ class TransferContext(ABC):
             key: LMCache key object for the store range.
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store, indexed by KV cache group id.
+            block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
             event: Synchronization event object.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
 
@@ -138,7 +138,8 @@ class TransferContext(ABC):
             key: LMCache key object for the retrieve range.
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to retrieve into, indexed by KV cache group id.
+            block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
+                group id.
             event: Synchronization event object.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.

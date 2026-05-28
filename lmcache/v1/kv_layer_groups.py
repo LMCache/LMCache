@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
+from __future__ import annotations
+
 # Standard
+from collections.abc import Sequence
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -41,6 +45,96 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 # The engine group slot keeps layers with disjoint engine block-ID spaces from
 # sharing one LMCache transfer-kernel launch.
 LayerGroupIdentity = tuple[int, int, int, int, int, torch.dtype]
+
+
+def _layer_names_by_index(
+    lmc_kv_cache_groups: "LMCKVCacheGroups",
+    num_layers: int,
+) -> list[str]:
+    names = [f"{DEFAULT_LAYER_NAME_PREFIX}{idx}" for idx in range(num_layers)]
+    for group in lmc_kv_cache_groups.groups:
+        for layer_idx, layer_name in zip(
+            group.layer_indices, group.layer_names, strict=False
+        ):
+            if 0 <= layer_idx < num_layers:
+                names[layer_idx] = layer_name
+    return names
+
+
+def group_layers_by_identity(
+    kv_caches: "DiscoverableKVCache",
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    num_layers: int,
+    per_layer_engine_group_idx: Sequence[int] | None = None,
+) -> list[tuple[LayerGroupIdentity, list[int]]]:
+    """Partition layer indices by :data:`LayerGroupIdentity`.
+
+    This helper is shared by vLLM-side LMCache group inflation and server-side
+    ``KVLayerGroupInfo`` construction so both sides agree on group order.
+    """
+    # First Party
+    from lmcache.v1.gpu_connector.utils import (
+        get_block_size,
+        get_dtype,
+        get_head_size,
+        get_num_heads,
+        is_mla,
+    )
+
+    mla = is_mla(gpu_kv_format)
+    kv_size = 1 if mla else 2
+    groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
+    for idx in range(num_layers):
+        nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
+        hs = get_head_size(kv_caches, gpu_kv_format, idx)
+        dt = get_dtype(kv_caches, gpu_kv_format, idx)
+        bs = get_block_size(kv_caches, gpu_kv_format, idx)
+        engine_group_idx = (
+            per_layer_engine_group_idx[idx]
+            if per_layer_engine_group_idx is not None
+            else 0
+        )
+        groups_dict[(kv_size, nh, hs, bs, engine_group_idx, dt)].append(idx)
+    return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
+
+
+def inflate_lmc_kv_cache_groups(
+    kv_caches: "DiscoverableKVCache",
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+    lmc_kv_cache_groups: "LMCKVCacheGroups | None" = None,
+) -> "LMCKVCacheGroups":
+    """Inflate engine KV cache groups into LMCache KV layer groups.
+
+    The output group order is the protocol-visible LMCache group order used by
+    store/retrieve block IDs. It is intentionally derived with the same
+    ``group_layers_by_identity`` helper that builds runtime
+    ``KVLayerGroupInfo`` objects.
+    """
+    # First Party
+    from lmcache.v1.gpu_connector.utils import get_num_layers
+    from lmcache.v1.kv_cache_groups import LMCKVCacheGroup, LMCKVCacheGroups
+
+    base_groups = lmc_kv_cache_groups or LMCKVCacheGroups()
+    num_layers = get_num_layers(kv_caches, gpu_kv_format)
+    if num_layers == 0:
+        return LMCKVCacheGroups()
+
+    per_layer_engine_group_idx = base_groups.per_layer_engine_group_indices(num_layers)
+    layer_names = _layer_names_by_index(base_groups, num_layers)
+
+    return LMCKVCacheGroups.from_groups(
+        LMCKVCacheGroup(
+            engine_kv_cache_group_id=identity[4],
+            layer_names=tuple(layer_names[idx] for idx in indices),
+            layer_indices=tuple(indices),
+        )
+        for identity, indices in group_layers_by_identity(
+            kv_caches,
+            gpu_kv_format,
+            num_layers,
+            per_layer_engine_group_idx,
+        )
+    )
 
 
 @dataclass
@@ -230,14 +324,14 @@ class KVLayerGroupsManager:
             else None
         )
 
-        groups_dict = self._group_layers_by_identity(
+        groups_by_identity = group_layers_by_identity(
             kv_caches, gpu_kv_format, num_layers, per_layer_engine_group_idx
         )
 
         # Emit groups in order of their first-appearing layer so that group
         # indices remain deterministic across runs.
         for lmc_group_idx, ((_, _, _, bs, engine_group_idx, dt), indices) in enumerate(
-            sorted(groups_dict.items(), key=lambda kv: kv[1][0])
+            groups_by_identity
         ):
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
@@ -326,45 +420,6 @@ class KVLayerGroupsManager:
                 physical_chunk_size,
             )
         return compress_ratio, physical_chunk_size
-
-    @staticmethod
-    def _group_layers_by_identity(
-        kv_caches: "DiscoverableKVCache",
-        gpu_kv_format: "lmc_ops.GPUKVFormat",
-        num_layers: int,
-        per_layer_engine_group_idx: "list[int] | None" = None,
-    ) -> dict[LayerGroupIdentity, list[int]]:
-        """Partition layer indices by :data:`LayerGroupIdentity`.
-
-        Linear single pass over ``kv_caches``; layers sharing the same
-        ``(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype)``
-        signature land in the same bucket. Absent engine group hints default
-        every layer to engine group 0.
-        """
-        # First Party
-        from lmcache.v1.gpu_connector.utils import (
-            get_block_size,
-            get_dtype,
-            get_head_size,
-            get_num_heads,
-            is_mla,
-        )
-
-        mla = is_mla(gpu_kv_format)
-        kv_size = 1 if mla else 2
-        groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
-        for idx in range(num_layers):
-            nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
-            hs = get_head_size(kv_caches, gpu_kv_format, idx)
-            dt = get_dtype(kv_caches, gpu_kv_format, idx)
-            bs = get_block_size(kv_caches, gpu_kv_format, idx)
-            engine_group_idx = (
-                per_layer_engine_group_idx[idx]
-                if per_layer_engine_group_idx is not None
-                else 0
-            )
-            groups_dict[(kv_size, nh, hs, bs, engine_group_idx, dt)].append(idx)
-        return groups_dict
 
     @property
     def num_groups(self) -> int:

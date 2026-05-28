@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Convert vLLM KV cache group metadata into LMCache's neutral model."""
 
+# Future
+from __future__ import annotations
+
 # Standard
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.gpu_connector.utils import LayoutHints
 
 # First Party
 from lmcache.v1.kv_cache_groups import LMCKVCacheGroup, LMCKVCacheGroups
@@ -46,4 +53,31 @@ def lmcache_kv_cache_groups_from_vllm(
         for engine_kv_cache_group_id, group in enumerate(
             _vllm_kv_cache_groups(kv_cache_config)
         )
+    )
+
+
+def inflated_lmcache_kv_cache_groups_from_vllm(
+    kv_cache_config: Any,
+    kv_caches: Mapping[str, Any],
+    layout_hints: "LayoutHints | None" = None,
+) -> LMCKVCacheGroups:
+    """Build inflated LMCache KV layer groups from vLLM metadata and tensors."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.gpu_connector.utils import normalize_kv_and_discover_format
+    from lmcache.v1.kv_layer_groups import inflate_lmc_kv_cache_groups
+
+    lmc_kv_cache_groups = lmcache_kv_cache_groups_from_vllm(
+        kv_cache_config,
+        tuple(kv_caches.keys()),
+    )
+    gpu_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
+        list(kv_caches.values()),
+        EngineType.VLLM,
+        layout_hints=layout_hints,
+    )
+    return inflate_lmc_kv_cache_groups(
+        normalized_kv_caches,
+        gpu_kv_format,
+        lmc_kv_cache_groups,
     )

@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
+
 try:
     # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
@@ -22,6 +23,7 @@ except ImportError:
     # legacy single-group behavior.
     class SupportsHMA:  # type: ignore[no-redef]
         pass
+
 
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -33,8 +35,11 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.integration.vllm.kv_cache_groups import lmcache_kv_cache_groups_from_vllm
-from lmcache.integration.vllm.utils import mla_enabled
+from lmcache.integration.vllm.kv_cache_groups import (
+    inflated_lmcache_kv_cache_groups_from_vllm,
+    lmcache_kv_cache_groups_from_vllm,
+)
+from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
 
 try:
@@ -602,9 +607,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        lmc_kv_cache_groups = lmcache_kv_cache_groups_from_vllm(
+        lmc_kv_cache_groups = inflated_lmcache_kv_cache_groups_from_vllm(
             kv_cache_config,
-            tuple(kv_caches.keys()),
+            kv_caches,
+            layout_hints=vllm_layout_hints(),
         )
         self.worker_adapter.register_kv_caches(
             kv_caches, lmc_kv_cache_groups=lmc_kv_cache_groups

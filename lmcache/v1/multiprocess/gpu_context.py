@@ -380,19 +380,19 @@ class GPUCacheContext:
         buf.copy_(cpu_tensor, non_blocking=True)
         return buf
 
-    def copy_engine_group_block_ids_to_gpu(
-        self, block_ids_per_engine_group: list[list[int]]
+    def copy_lmc_group_block_ids_to_gpu(
+        self, block_ids_per_lmc_group: list[list[int]]
     ) -> list[torch.Tensor]:
-        """Copy block IDs for each engine-side KV cache group to GPU.
+        """Copy block IDs for each LMCache KV layer group to GPU.
 
-        The outer list is indexed by ``engine_group_idx``. All inner
-        lists are packed into the shared GPU buffer once, and this returns one
-        non-overlapping tensor view per engine group.
+        The outer list is indexed by LMCache KV group index. All inner lists
+        are packed into the shared GPU buffer once, and this returns one
+        non-overlapping tensor view per LMCache group.
         """
         offsets = [0]
         flat: array.array = array.array("l")
-        for engine_group_block_ids in block_ids_per_engine_group:
-            flat.extend(engine_group_block_ids)
+        for lmc_group_block_ids in block_ids_per_lmc_group:
+            flat.extend(lmc_group_block_ids)
             offsets.append(len(flat))
 
         total = offsets[-1]
@@ -407,8 +407,30 @@ class GPUCacheContext:
 
         return [
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
-            for i in range(len(block_ids_per_engine_group))
+            for i in range(len(block_ids_per_lmc_group))
         ]
+
+    def normalize_lmc_group_block_ids(
+        self,
+        block_ids_per_lmc_group: list[list[int]],
+    ) -> list[list[int]]:
+        """Validate block IDs and preserve legacy single-group callers."""
+        num_groups = self.kv_layer_groups_manager_.num_groups
+        if len(block_ids_per_lmc_group) == num_groups:
+            return block_ids_per_lmc_group
+
+        groups = self.kv_layer_groups_manager_.kv_layer_groups
+        if (
+            len(block_ids_per_lmc_group) == 1
+            and num_groups > 1
+            and {group.engine_group_idx for group in groups} == {0}
+        ):
+            return [list(block_ids_per_lmc_group[0]) for _ in range(num_groups)]
+
+        raise ValueError(
+            "Expected block IDs for "
+            f"{num_groups} LMCache KV groups, got {len(block_ids_per_lmc_group)}"
+        )
 
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0

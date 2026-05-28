@@ -106,7 +106,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - key: KeyType - Cache key to store
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - gpu_block_ids: list[list[int]] - GPU block IDs containing the
-        #     data, indexed by engine_group_idx.
+        #     data, indexed by LMCache KV group index.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "STORE": ProtocolDefinition(
@@ -119,7 +119,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - key: KeyType - Cache key to retrieve
         #   - instance_id: int - Unique identifier for the vLLM instance
         #   - gpu_block_ids: list[list[int]] - GPU block IDs to store
-        #     retrieved data, indexed by engine_group_idx.
+        #     retrieved data, indexed by LMCache KV group index.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)

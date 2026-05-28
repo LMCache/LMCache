@@ -399,10 +399,10 @@ class LoadStoreOp:
     block_ids: list[int] | list[list[int]]
     """Block IDs for the load/store operation.
 
-    New HMA-capable callers pass ``list[list[int]]`` indexed by
-    ``engine_group_idx``. Legacy single-group callers may still pass the
-    prior flat ``list[int]`` shape; adapter submit paths normalize it before
-    sending the request to the server.
+    Scheduler-side HMA metadata uses ``list[list[int]]`` indexed by engine
+    KV cache group. Legacy single-group callers may still pass the prior flat
+    ``list[int]`` shape. Worker submit paths expand this to LMCache KV group
+    order before sending requests to the server.
     """
 
     start: int = 0
@@ -417,7 +417,7 @@ class LoadStoreOp:
 
     @property
     def block_ids_per_engine_group(self) -> list[list[int]]:
-        """Return block IDs in the per-engine-group wire shape."""
+        """Return block IDs indexed by engine KV cache group."""
         if not self.block_ids:
             return [[]]
         first = self.block_ids[0]
@@ -989,6 +989,12 @@ class LMCacheMPWorkerAdapter:
         self.lmc_kv_cache_groups = lmc_kv_cache_groups
         self._send_register_kv_caches_request(kv_caches)
 
+    def _block_ids_per_lmc_group(self, op: LoadStoreOp) -> list[list[int]]:
+        lmc_kv_cache_groups = self.lmc_kv_cache_groups or LMCKVCacheGroups()
+        return lmc_kv_cache_groups.expand_engine_block_ids_to_lmc_groups(
+            op.block_ids_per_engine_group
+        )
+
     def _send_register_kv_caches_request(
         self, kv_caches: dict[str, torch.Tensor]
     ) -> None:
@@ -1122,7 +1128,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            op.block_ids_per_engine_group,
+            self._block_ids_per_lmc_group(op),
             event,
             self.blocks_in_chunk,
         )
@@ -1170,7 +1176,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            op.block_ids_per_engine_group,
+            self._block_ids_per_lmc_group(op),
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,

@@ -5,7 +5,9 @@ from lmcache.v1.kv_cache_groups import LMCKVCacheGroup, LMCKVCacheGroups
 
 def test_lmc_kv_cache_groups_default_to_one_engine_group():
     assert LMCKVCacheGroups().num_engine_kv_cache_groups == 1
+    assert LMCKVCacheGroups().num_lmc_kv_cache_groups == 1
     assert LMCKVCacheGroups().per_layer_engine_group_indices(1) is None
+    assert LMCKVCacheGroups().engine_group_ids_by_lmc_group() == (0,)
 
 
 def test_lmc_kv_cache_groups_build_per_layer_engine_group_indices():
@@ -17,7 +19,25 @@ def test_lmc_kv_cache_groups_build_per_layer_engine_group_indices():
     )
 
     assert groups.num_engine_kv_cache_groups == 2
+    assert groups.num_lmc_kv_cache_groups == 2
     assert groups.per_layer_engine_group_indices(4) == [0, 1, 0, 1]
+    assert groups.engine_group_ids_by_lmc_group() == (0, 1)
+
+
+def test_lmc_kv_cache_groups_expand_block_ids_to_lmc_groups():
+    groups = LMCKVCacheGroups.from_groups(
+        [
+            LMCKVCacheGroup(0, ("layer.0", "layer.2"), (0, 2)),
+            LMCKVCacheGroup(0, ("layer.4",), (4,)),
+            LMCKVCacheGroup(1, ("layer.1", "layer.3"), (1, 3)),
+        ]
+    )
+
+    assert groups.expand_engine_block_ids_to_lmc_groups([[10, 11], [20, 21]]) == [
+        [10, 11],
+        [10, 11],
+        [20, 21],
+    ]
 
 
 def test_lmc_kv_cache_groups_serialize_round_trip():
