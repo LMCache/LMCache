@@ -45,6 +45,16 @@ echo ""
 # Tests that handle their own server lifecycle (different GPU/model config)
 SELF_CONTAINED_TESTS=" deadlock "
 
+# Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
+# Only these need the baseline server (and thus a 2-GPU pod); everything
+# else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
+BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
+if [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
+    export LAUNCH_BASELINE=true
+else
+    export LAUNCH_BASELINE=false
+fi
+
 if [[ "$SELF_CONTAINED_TESTS" != *" $TEST_NAME "* ]]; then
     # ── Step 1: Launch native processes ──────────────────────────
     echo "============================================"
