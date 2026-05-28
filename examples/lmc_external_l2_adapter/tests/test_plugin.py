@@ -289,7 +289,8 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task([key], [obj])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         ltid = adapter.submit_lookup_and_lock_task([key])
         assert _wait_event_fd(lookup_fd)
@@ -311,7 +312,8 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task([key], [obj])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         dst = torch.zeros_like(src)
         load_obj = _make_tensor_obj(dst)
@@ -334,7 +336,8 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task(keys, objs)
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         ltid = adapter.submit_lookup_and_lock_task(keys)
         assert _wait_event_fd(lookup_fd)
@@ -387,13 +390,15 @@ class TestPluginRoundTrip:
             tid = adapter.submit_store_task([k], [_create_obj(OBJ_SIZE)])
             assert _wait_event_fd(store_fd)
             done = adapter.pop_completed_store_tasks()
-            assert done.get(tid) is True
+            assert done.get(tid) is not None
+            assert done[tid].is_successful()
 
         # Store k3 -- should evict k1
         tid = adapter.submit_store_task([k3], [_create_obj(OBJ_SIZE)])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         # Lookup all three
         ltid = adapter.submit_lookup_and_lock_task([k1, k2, k3])

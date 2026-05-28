@@ -357,16 +357,18 @@ def test_server_register_and_find_non_cuda_context_layout(
     """Ensure non-CUDA registration stores metadata and lookup finds layout."""
     # First Party
     from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
-    from lmcache.v1.multiprocess.server import MPCacheEngine
+    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
 
     with (
-        patch("lmcache.v1.multiprocess.server.StorageManager"),
-        patch("lmcache.v1.multiprocess.server.TokenHasher"),
-        patch("lmcache.v1.multiprocess.server.SessionManager"),
-        patch("lmcache.v1.multiprocess.server.get_event_bus"),
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
-        engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=16)
-    engine.register_kv_cache_non_gpu_context(
+        ctx = MPCacheEngineContext(storage_manager_config=MagicMock(), chunk_size=16)
+    module = NonGPUTransferModule(ctx)
+    module.register_kv_cache_non_gpu_context(
         RegisterNonGpuContextPayload(
             instance_id=1,
             model_name="m",
@@ -379,7 +381,7 @@ def test_server_register_and_find_non_cuda_context_layout(
         )
     )
 
-    layout = engine._find_layout_desc("m", 1)
+    layout = ctx.layout_desc_registry.find("m", 1)
     assert layout is not None
     assert layout.shapes[0] == torch.Size([2, 2, 16, 16])
 
@@ -391,7 +393,8 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
         IPCCacheEngineKey,
         RegisterNonGpuContextPayload,
     )
-    from lmcache.v1.multiprocess.server import MPCacheEngine
+    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
 
     mock_storage = MagicMock()
     target_tensor = torch.zeros(2, 2, 8, 16)
@@ -408,21 +411,22 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
     mock_session.get_hashes.return_value = [b"h"]
     with (
         patch(
-            "lmcache.v1.multiprocess.server.StorageManager",
+            "lmcache.v1.multiprocess.engine_context.StorageManager",
             return_value=mock_storage,
         ),
-        patch("lmcache.v1.multiprocess.server.TokenHasher"),
-        patch("lmcache.v1.multiprocess.server.SessionManager") as session_cls,
-        patch("lmcache.v1.multiprocess.server.get_event_bus"),
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_cls,
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
         patch(
-            "lmcache.v1.multiprocess.server.ipc_key_to_object_keys",
+            "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
             return_value=["obj"],
         ),
     ):
         session_cls.return_value.get_or_create.return_value = mock_session
-        engine = MPCacheEngine(storage_manager_config=MagicMock(), chunk_size=8)
+        ctx = MPCacheEngineContext(storage_manager_config=MagicMock(), chunk_size=8)
 
-    engine.register_kv_cache_non_gpu_context(
+    module = NonGPUTransferModule(ctx)
+    module.register_kv_cache_non_gpu_context(
         RegisterNonGpuContextPayload(
             instance_id=2,
             model_name="m",
@@ -445,11 +449,11 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
         request_id="req",
     )
     with patch(
-        "lmcache.v1.multiprocess.server.ipc_key_to_object_keys",
+        "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
         return_value=["obj"],
     ):
-        store_ok = engine.commit_store(key, 2, pickle.dumps([payload]))
-        response = engine.prepare_retrieve(key, 2)
+        store_ok = module.commit_store(key, 2, pickle.dumps([payload]))
+        response = module.prepare_retrieve(key, 2)
         success = response.success
         cpu_data = response.data
     assert isinstance(store_ok, bool)

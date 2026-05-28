@@ -3,4 +3,5 @@
 # The cu12 analogue lives in cuda12_core.txt.
 
 cupy-cuda13x
-nixl-cu13; python_version < "3.13"
+# nixl meta-package pulls nixl-cu13 and exposes the top-level `nixl` namespace.
+nixl>=1.1.0; python_version < "3.13"

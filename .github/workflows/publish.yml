@@ -338,6 +338,12 @@ jobs:
                 --tag lmcache/vllm-openai:latest --tag lmcache/vllm-openai:${{ env.LATEST_TAG }} \
                 --file docker/Dockerfile .
 
+            # `lmcache --help` exercises eager CLI subcommand discovery,
+            # so a missing runtime dep fails the build before the image ships.
+            - name: Smoke test lmcache/vllm-openai (cu13)
+              run: |
+                docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }} --help
+
             - name: Push lmcache/vllm-openai container image to DockerHub
               run: |
                 docker push lmcache/vllm-openai:latest
@@ -353,6 +359,10 @@ jobs:
                 docker build \
                 --tag lmcache/vllm-openai:lightweight --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight \
                 --file docker/Dockerfile.lightweight .
+
+            - name: Smoke test lmcache/vllm-openai:lightweight
+              run: |
+                docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }}-lightweight --help
 
             - name: Push lmcache/vllm-openai:lightweight image to DockerHub
               run: |
@@ -374,6 +384,10 @@ jobs:
                 --tag lmcache/standalone:latest --tag lmcache/standalone:${{ env.LATEST_TAG }} \
                 --tag lmcache/standalone:latest-cu130 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu130 \
                 --file docker/Dockerfile.standalone .
+
+            - name: Smoke test lmcache/standalone (cu13)
+              run: |
+                docker run --rm --entrypoint lmcache lmcache/standalone:${{ env.LATEST_TAG }} --help
 
             - name: Push lmcache/standalone container image to DockerHub
               run: |
@@ -398,6 +412,11 @@ jobs:
                 --tag lmcache/vllm-openai:latest-cu129 --tag lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129 \
                 --file docker/Dockerfile .
 
+            - name: Smoke test lmcache/vllm-openai (cu12.9)
+              if: needs.publish-cu129-github-release.result == 'success'
+              run: |
+                docker run --rm --entrypoint lmcache lmcache/vllm-openai:${{ env.LATEST_TAG }}-cu129 --help
+
             - name: Push lmcache/vllm-openai cu129 container image to DockerHub
               if: needs.publish-cu129-github-release.result == 'success'
               run: |
@@ -418,6 +437,11 @@ jobs:
                 --target lmcache-final \
                 --tag lmcache/standalone:latest-cu129 --tag lmcache/standalone:${{ env.LATEST_TAG }}-cu129 \
                 --file docker/Dockerfile.standalone .
+
+            - name: Smoke test lmcache/standalone (cu12.9)
+              if: needs.publish-cu129-github-release.result == 'success'
+              run: |
+                docker run --rm --entrypoint lmcache lmcache/standalone:${{ env.LATEST_TAG }}-cu129 --help
 
             - name: Push lmcache/standalone cu129 container image to DockerHub
               if: needs.publish-cu129-github-release.result == 'success'

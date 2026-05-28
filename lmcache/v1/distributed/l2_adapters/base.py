@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
 logger = init_logger(__name__)
@@ -219,38 +219,17 @@ class L2AdapterInterface(ABC):
         pass
 
     @abstractmethod
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
-        """
-        Pop all the completed store tasks with a flag indicating
-        whether the task is successful or not.
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
+        """Pop all completed store tasks.
 
         Returns:
-            dict[L2TaskId, bool]: a dictionary mapping the task id to a boolean flag
-            indicating whether the task is successful or not. True means
-            successful, and False means failed.
+            dict[L2TaskId, L2StoreResult]: a dictionary mapping the task
+            id to an ``L2StoreResult`` that encodes both the success flag
+            and the bytes actually transferred. Use
+            ``result.is_successful()`` and ``result.bytes_transferred()``
+            to inspect the outcome.
         """
         pass
-
-    def pop_completed_store_task_bytes(self) -> dict[L2TaskId, int]:
-        """Report bytes actually transferred per completed store task.
-
-        Optional. Default returns ``{}``, which leaves the L2 throughput
-        subscriber to fall back on submitted-bytes accounting.
-
-        Adapters that fast-path duplicate keys (e.g. skip the write when
-        the key already exists in the backend) SHOULD override this so
-        the throughput histogram reflects real work, not skipped no-ops.
-        A task with all keys fast-pathed reports ``0`` here, which the
-        subscriber treats as "no useful sample" and skips.
-
-        Returns:
-            dict[L2TaskId, int]: task id -> bytes actually written. Keys
-            present here MUST also appear in the next
-            ``pop_completed_store_tasks`` call (they share the same
-            per-task completion record), and the returned dict should be
-            cleared on read, mirroring ``pop_completed_store_tasks``.
-        """
-        return {}
 
     #####################
     # Lookup and Lock Interface

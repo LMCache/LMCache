@@ -334,7 +334,7 @@ See also
 
 * :doc:`bench` -- ``lmcache bench engine`` for engine-side workload
   benchmarks.
-* :doc:`bench_kvcache` -- end-to-end sanity test against an LMCache MP
+* :doc:`bench_server` -- end-to-end sanity test against an LMCache MP
   server.
 * :doc:`kvcache` -- ``lmcache kvcache`` for managing KV cache state on
   a running server.
