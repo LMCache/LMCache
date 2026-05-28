@@ -473,6 +473,85 @@ class TestLocalDiskBackend:
             backend.close()
             local_cpu_backend.memory_allocator.close()
 
+    def test_contains_ignores_file_while_put_task_is_active(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test in-progress disk writes do not recover as cache hits."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(13)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=5,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        write_started = threading.Event()
+        finish_write = threading.Event()
+        memory_obj_released = False
+        original_write_file = backend.write_file
+        original_remove_put_task = backend.disk_worker.remove_put_task
+        written_paths: list[str] = []
+        remove_put_task_started = threading.Event()
+        finish_remove_put_task = threading.Event()
+
+        def blocking_write_file(buffer: memoryview, path: str) -> None:
+            written_paths.append(path)
+            with open(path, "wb"):
+                pass
+            write_started.set()
+            assert finish_write.wait(timeout=5)
+            original_write_file(buffer, path)
+
+        def blocking_remove_put_task(task_key: CacheEngineKey) -> None:
+            remove_put_task_started.set()
+            assert finish_remove_put_task.wait(timeout=5)
+            original_remove_put_task(task_key)
+
+        backend.write_file = blocking_write_file
+        backend.disk_worker.remove_put_task = blocking_remove_put_task
+
+        try:
+            backend.submit_put_task(key, memory_obj)
+            assert write_started.wait(timeout=5)
+            assert backend.exists_in_put_tasks(key)
+            assert written_paths
+            assert os.path.isfile(written_paths[0])
+
+            assert not backend.contains(key)
+
+            finish_write.set()
+            assert remove_put_task_started.wait(timeout=5)
+            assert backend.exists_in_put_tasks(key)
+            assert backend.contains(key)
+
+            finish_remove_put_task.set()
+            wait_for_disk_store(backend, key)
+            memory_obj.ref_count_down()
+            memory_obj_released = True
+            assert backend.contains(key)
+        finally:
+            finish_write.set()
+            finish_remove_put_task.set()
+            backend.close()
+            if not memory_obj_released:
+                memory_obj.ref_count_down()
+            local_cpu_backend.memory_allocator.close()
+
     def test_no_manifest_file_created_for_put_remove_close(
         self, temp_disk_path, loop_in_thread, memory_allocator
     ):
