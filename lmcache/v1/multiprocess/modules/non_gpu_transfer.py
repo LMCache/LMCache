@@ -3,7 +3,6 @@
 
 # Standard
 from dataclasses import dataclass
-from typing import TypedDict
 import threading
 
 # Third Party
@@ -20,7 +19,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     RegisterNonGpuContextPayload,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
@@ -40,13 +39,6 @@ from .server_transfer import (
 )
 
 logger = init_logger(__name__)
-
-
-class ShmPoolInfo(TypedDict):
-    """Shared-memory pool metadata returned during registration."""
-
-    shm_name: str
-    pool_size: int
 
 
 @dataclass
@@ -86,7 +78,7 @@ class NonGPUTransferModule:
             tuple[int, IPCCacheEngineKey], list[ObjectKey]
         ] = {}
         self._pending_shm_lock = threading.Lock()
-        self._shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info()
+        self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
 
     @property
     def context(self) -> MPCacheEngineContext:
@@ -161,18 +153,6 @@ class NonGPUTransferModule:
         """Release resources owned by this module."""
         self._non_gpu_contexts.clear()
         self._strategies.clear()
-
-    def _compute_shm_pool_info(self) -> ShmPoolInfo:
-        """Compute SHM pool info from storage manager config."""
-        sm_config = self._ctx.storage_manager_config
-        mem_cfg = sm_config.l1_manager_config.memory_config
-        shm_name = mem_cfg.shm_name or ""
-        if not shm_name or mem_cfg.use_lazy:
-            return {"shm_name": "", "pool_size": 0}
-        bare = shm_name.lstrip("/")
-        if not bare.startswith("lmcache_l1_pool_"):
-            shm_name = f"lmcache_l1_pool_{bare}"
-        return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
 
     @staticmethod
     def _make_transfer_key(
