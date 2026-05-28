@@ -61,6 +61,10 @@ Key settings:
 
 .. note::
 
+    ``enable_p2p: true`` is rejected together with ``nixl_buffer_device: cpu``. The combination is structurally supported — both backends share ``LocalCPUBackend``'s pinned pool, each runs its own NIXL agent over it, and allocations route through ``LocalCPUBackend.allocate()`` — but it has not been exercised end-to-end and has no CI coverage. Use ``enable_p2p: true`` with ``nixl_buffer_device: cuda`` instead, or disable ``enable_p2p`` when running the NIXL CPU shared pool.
+
+.. note::
+
     Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AZURE_BLOB", "DOCA_MEMOS"].
 
     Backend specific params should be provided via ``extra_config.nixl_backend_params``. Please refer to NIXL documentation for specifics.

@@ -927,6 +927,45 @@ class TestNixlBufferDeviceCpuValidation:
         )
         config.validate()  # Should not raise
 
+    def test_cpu_mode_rejects_enable_p2p(self):
+        """P2P and the NIXL storage backend would both run NIXL agents over
+        LocalCPUBackend's pinned pool when nixl_buffer_device=cpu. The
+        combination is structurally supported but has no CI coverage and
+        has not been exercised end-to-end; reject until it has been."""
+        config = self._nixl_cpu_defaults()
+        # enable_p2p has its own validate() preconditions (controller URLs,
+        # peer ports, transfer_channel); set them so we hit the NIXL block.
+        config.enable_p2p = True
+        config.enable_controller = True
+        config.controller_pull_url = "tcp://localhost:9001"
+        config.controller_reply_url = "tcp://localhost:9002"
+        config.lmcache_instance_id = "test"
+        config.lmcache_worker_ports = [9000]
+        config.p2p_host = "localhost"
+        config.p2p_init_ports = [9003]
+        config.p2p_lookup_ports = [9004]
+        config.transfer_channel = "nixl"
+        with pytest.raises(ValueError, match="has not been validated end-to-end"):
+            config.validate()
+
+    def test_gpu_mode_accepts_enable_p2p(self):
+        """The P2P + NIXL storage combo is only rejected in CPU mode; the
+        GPU-mode path doesn't touch LocalCPUBackend's allocator."""
+        config = self._nixl_cpu_defaults(
+            nixl_buffer_device="cuda", nixl_buffer_size=2**30
+        )
+        config.enable_p2p = True
+        config.enable_controller = True
+        config.controller_pull_url = "tcp://localhost:9001"
+        config.controller_reply_url = "tcp://localhost:9002"
+        config.lmcache_instance_id = "test"
+        config.lmcache_worker_ports = [9000]
+        config.p2p_host = "localhost"
+        config.p2p_init_ports = [9003]
+        config.p2p_lookup_ports = [9004]
+        config.transfer_channel = "nixl"
+        config.validate()  # Should not raise
+
 
 class TestNixlUseHugepagesDeprecation:
     """Validate the deprecation alias for extra_config.nixl_use_hugepages.

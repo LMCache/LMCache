@@ -723,6 +723,25 @@ def _validate_config(self):
                     "nixl_buffer_device='cpu' requires max_local_cpu_size > 0 "
                     "(LocalCPUBackend's pinned pool is the NIXL staging buffer)."
                 )
+            # With enable_p2p=True, both the P2P backend and the NIXL
+            # storage backend would run their own NIXL agents over
+            # LocalCPUBackend's pinned pool. The pieces are structurally
+            # supported — NIXL allows registering the same memory from
+            # multiple agents, and both backends already allocate via
+            # LocalCPUBackend.allocate() so any contention runs inside
+            # LocalCPUBackend's allocator rather than across backends.
+            # But the combined configuration has no CI coverage and has
+            # not been exercised end-to-end. Reject until it has been.
+            if self.enable_p2p:
+                raise ValueError(
+                    "enable_p2p=True together with enable_nixl_storage=True "
+                    "+ nixl_buffer_device='cpu' has not been validated "
+                    "end-to-end and has no CI coverage. Use enable_p2p=True "
+                    "with nixl_buffer_device='cuda', or disable enable_p2p "
+                    "when using the NIXL CPU shared pool. This rejection "
+                    "can be lifted once the combination is exercised by "
+                    "integration tests."
+                )
         else:
             assert self.nixl_buffer_size is not None
 
