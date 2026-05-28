@@ -2269,3 +2269,287 @@ def test_rust_raw_block_backend_batched_get_with_uring(
 
         finally:
             backend.close()
+
+
+# ---------------------------------------------------------------------------
+# L1 — `put_many` lock coalescing tests
+#
+# Goal: lock the contract that `_write_one` no longer owns its own
+# `_inflight_io_count` accounting, so per-key acquisitions of `core._lock`
+# during `put_many` drop from 4 to 2 while preserving:
+#   - exception safety (counter must reach 0 even when the device throws),
+#   - external visibility of `inflight_io_count()` while I/O is in flight,
+#   - the checkpoint idle gate observed by `_checkpoint_once`.
+# ---------------------------------------------------------------------------
+
+
+class _CountingLock:
+    """Wrapper around `threading.Lock` that records acquire calls.
+
+    Used by L1 tests to assert the lock-acquisition count contract for
+    `put_many`. This is the only public observable for that contract --
+    the internal `_lock` field is reassigned by the test, not read by it,
+    so the test still treats `RawBlockCore` as a black box at the
+    behavioral level.
+    """
+
+    def __init__(self) -> None:
+        self._inner = threading.Lock()
+        self.acquire_count = 0
+
+    def __enter__(self):
+        self.acquire_count += 1
+        self._inner.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._inner.__exit__(exc_type, exc, tb)
+
+    def acquire(self, *args, **kwargs):
+        self.acquire_count += 1
+        return self._inner.acquire(*args, **kwargs)
+
+    def release(self):
+        return self._inner.release()
+
+
+def _make_keys_and_objs(n: int, size: int = 64):
+    keys = [
+        RawBlockKeySpec(encoded=f"l1-key-{i}", slot_identity=1000 + i) for i in range(n)
+    ]
+    objs = [_make_byte_obj(size) for _ in range(n)]
+    return keys, objs
+
+
+def test_put_many_acquires_two_locks_per_key(monkeypatch):
+    """`put_many(N)` must acquire `core._lock` exactly 2*N times.
+
+    Verifies the L1 contract: `_write_one` no longer takes its own lock
+    for `_inflight_io_count` accounting; instead the allocate-lock and
+    commit-lock in `put_many` cover both ends of the counter window.
+    """
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False)
+    try:
+        # The fake device sized in `_make_raw_block_core` (64 KiB total,
+        # 16 KiB metadata, 8 KiB slot) yields 6 usable slots; pick N below
+        # that ceiling so the test never hits a slot-allocation failure.
+        n = 4
+        keys, objs = _make_keys_and_objs(n)
+
+        counting = _CountingLock()
+        # Replace the per-core lock for this test only. We only assert via
+        # `counting.acquire_count`; the test does not read other private state.
+        core._lock = counting
+
+        result = core.put_many(keys, objs)
+        assert result.results == [True] * n
+        assert counting.acquire_count == 2 * n, (
+            f"expected 2*N={2 * n} lock acquisitions for put_many({n}), "
+            f"got {counting.acquire_count}"
+        )
+    finally:
+        core.close()
+
+
+def test_put_many_releases_inflight_count_on_write_failure(monkeypatch):
+    """`inflight_io_count()` must return to 0 when device pwrite raises.
+
+    Regression guard for L1: when the lock pair migrates from
+    `_write_one` into `put_many`, the `try/finally` must still cover the
+    full I/O path so a thrown pwrite does not leak the counter.
+    """
+
+    class FailingDevice(_FakeRawBlockDevice):
+        def pwrite_from_buffer(self, offset, data, payload_len=None, total_len=None):
+            raise OSError("simulated device failure")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "lmcache_rust_raw_block_io",
+        types.SimpleNamespace(
+            RawBlockDevice=lambda path, **kw: FailingDevice(
+                path, size_bytes=64 * 1024, **kw
+            )
+        ),
+    )
+
+    core = _make_raw_block_core(use_odirect=False)
+    try:
+        keys, objs = _make_keys_and_objs(3)
+        result = core.put_many(keys, objs)
+        assert result.results == [False, False, False]
+        assert core.inflight_io_count() == 0
+    finally:
+        core.close()
+
+
+def test_put_many_does_not_stamp_last_io_ts_on_prep_failure(monkeypatch):
+    """`_last_io_ts` must not advance when payload prep raises before any I/O.
+
+    Pre-L1, ``_last_io_ts`` was stamped from inside ``_write_one``'s inner
+    try/finally around the actual pwrite, so a prep-stage failure (e.g. an
+    O_DIRECT payload that overflows the slot capacity) left the gate
+    timestamp untouched. After L1 migrated the lock pair into ``put_many``,
+    the commit-lock's finally would have stamped it unconditionally,
+    delaying the next checkpoint by ``meta_idle_quiet_ms``. The
+    ``if success:`` guard restores the pre-L1 semantics. Reads ``_last_io_ts``
+    directly because the only public observable is ``_checkpoint_once``,
+    which also depends on dirty-state and thus cannot isolate this gate.
+    """
+    _install_fake_raw_block_device(monkeypatch)
+    core = _make_raw_block_core(use_odirect=False)
+    try:
+        original_ts = core._last_io_ts
+
+        def boom(_obj):
+            raise RuntimeError("simulated prep failure")
+
+        # `_prepare_write_payload` runs inside `_write_one` before any
+        # device I/O. Patching it is the most direct way to exercise the
+        # prep-failure branch without rebuilding the real O_DIRECT
+        # capacity-overflow scenario.
+        monkeypatch.setattr(core, "_prepare_write_payload", boom)
+
+        keys, objs = _make_keys_and_objs(1)
+        result = core.put_many(keys, objs)
+
+        assert result.results == [False]
+        assert core._last_io_ts == original_ts
+        assert core.inflight_io_count() == 0
+    finally:
+        core.close()
+
+
+def test_inflight_io_count_visible_during_concurrent_put(monkeypatch):
+    """`inflight_io_count()` must report >=1 while a `put_many` write blocks.
+
+    Locks the docstring contract on `inflight_io_count`: it returns the
+    number of currently active raw-device I/O operations. After L1 the
+    counter window grows slightly (allocate -> commit instead of just
+    around pwrite), but external observers must still see a positive
+    count for the duration of the device I/O.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingDevice(_FakeRawBlockDevice):
+        def pwrite_from_buffer(self, offset, data, payload_len=None, total_len=None):
+            started.set()
+            assert release.wait(timeout=5.0), "test main thread did not release device"
+            super().pwrite_from_buffer(offset, data, payload_len, total_len)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "lmcache_rust_raw_block_io",
+        types.SimpleNamespace(
+            RawBlockDevice=lambda path, **kw: BlockingDevice(
+                path, size_bytes=64 * 1024, **kw
+            )
+        ),
+    )
+
+    core = _make_raw_block_core(use_odirect=False)
+    try:
+        keys, objs = _make_keys_and_objs(1)
+        result_holder: dict[str, object] = {}
+
+        def runner():
+            result_holder["result"] = core.put_many(keys, objs)
+
+        t = threading.Thread(target=runner, name="l1-put-many-runner")
+        t.start()
+        try:
+            assert started.wait(timeout=5.0), "device pwrite never started"
+            assert core.inflight_io_count() >= 1
+        finally:
+            release.set()
+            t.join(timeout=5.0)
+            assert not t.is_alive()
+
+        assert result_holder["result"].results == [True]
+        assert core.inflight_io_count() == 0
+    finally:
+        release.set()
+        core.close()
+
+
+def test_checkpoint_idle_gate_blocks_during_put_many(monkeypatch):
+    """`_checkpoint_once(force=False)` must refuse while a put is in flight.
+
+    Guards the invariant that `_inflight_io_count > 0` keeps the idle gate
+    closed across the full allocate -> write -> commit window. To isolate
+    the inflight check from the dirty short-circuit and the timestamp
+    condition, the test:
+
+    1. Runs a precursor `put_many` so `_meta_dirty_total > _meta_persisted`;
+       without it `_checkpoint_once` returns False on the dirty
+       short-circuit before evaluating the gate at all.
+    2. Pokes `_last_io_ts` far enough in the past that the timestamp
+       condition alone would let the gate pass -- leaving inflight as the
+       only reason the gate can still refuse.
+    3. Blocks the next `put_many` mid-pwrite so `_inflight_io_count == 1`
+       when `_checkpoint_once` runs.
+
+    Reads `_meta_dirty_total` / `_meta_persisted` and writes `_last_io_ts`
+    directly because the gate decision has no public observable; the only
+    callable that exposes it is `_checkpoint_once` itself.
+    """
+    started = threading.Event()
+    release = threading.Event()
+    block_enabled = [False]
+
+    class BlockingDevice(_FakeRawBlockDevice):
+        def pwrite_from_buffer(self, offset, data, payload_len=None, total_len=None):
+            if block_enabled[0]:
+                started.set()
+                assert release.wait(timeout=5.0), (
+                    "test main thread did not release device"
+                )
+            super().pwrite_from_buffer(offset, data, payload_len, total_len)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "lmcache_rust_raw_block_io",
+        types.SimpleNamespace(
+            RawBlockDevice=lambda path, **kw: BlockingDevice(
+                path, size_bytes=64 * 1024, **kw
+            )
+        ),
+    )
+
+    core = _make_raw_block_core(use_odirect=False)
+    try:
+        # (1) Precursor put -> dirty. Without this, `_checkpoint_once`
+        # short-circuits on `not dirty` and the gate never runs.
+        precursor_keys, precursor_objs = _make_keys_and_objs(1)
+        precursor_result = core.put_many(precursor_keys, precursor_objs)
+        assert precursor_result.results == [True]
+        assert core._meta_dirty_total > core._meta_persisted
+
+        # (2) Force the timestamp condition open so only the inflight check
+        # can keep the gate closed.
+        core._last_io_ts = time.monotonic() - 10.0
+
+        # (3) Block the next pwrite so the second put parks with
+        # `_inflight_io_count == 1` when the assertion runs.
+        block_enabled[0] = True
+        blocked_keys = [RawBlockKeySpec(encoded="l1-key-blocked", slot_identity=2000)]
+        blocked_objs = [_make_byte_obj(64)]
+
+        def runner():
+            core.put_many(blocked_keys, blocked_objs)
+
+        t = threading.Thread(target=runner, name="l1-checkpoint-gate-runner")
+        t.start()
+        try:
+            assert started.wait(timeout=5.0), "device pwrite never started"
+            assert core.inflight_io_count() == 1
+            assert core._checkpoint_once(force=False) is False
+        finally:
+            release.set()
+            t.join(timeout=5.0)
+            assert not t.is_alive()
+    finally:
+        release.set()
+        core.close()

@@ -396,7 +396,12 @@ class RawBlockCore:
             return int(self._lock_refcnt.get(encoded_key, 0))
 
     def inflight_io_count(self) -> int:
-        """Return the number of currently active raw-device I/O operations."""
+        """Return the number of put/load operations whose inflight window is open.
+
+        The window spans allocate -> device I/O -> commit for ``put_many`` and
+        the body of ``load_many_into``. Used by the checkpoint idle gate in
+        ``_checkpoint_once``.
+        """
         with self._lock:
             return int(self._inflight_io_count)
 
@@ -437,6 +442,13 @@ class RawBlockCore:
         objs: Sequence[MemoryObj],
     ) -> RawBlockPutManyResult:
         """Persist a batch of memory objects into raw-block slots.
+
+        For each key, this method takes the per-core lock twice: once to
+        allocate a slot and register the in-flight entry, and once after
+        the device write to commit the index entry (or release the slot
+        on failure). The first acquisition also increments
+        ``_inflight_io_count``; the second decrements it and updates
+        ``_last_io_ts``. ``_write_one`` itself does no lock accounting.
 
         Args:
             keys: Ordered raw-block key specs corresponding to ``objs``.
@@ -490,30 +502,41 @@ class RawBlockCore:
                     pin_count=0,
                 )
                 self._inflight[key.encoded] = _Inflight(offset=offset, meta=meta)
+                # Account this key's pending I/O before releasing the lock so
+                # `_checkpoint_once`'s idle gate observes the in-flight write
+                # for the full allocate -> write -> commit window. The matching
+                # decrement is performed in the commit-lock below; together
+                # they replace the per-call lock pair previously held inside
+                # `_write_one`.
+                self._inflight_io_count += 1
 
-            success = self._write_one(key, obj, offset)
-
-            with self._lock:
-                inflight = self._inflight.pop(key.encoded, None)
-                if inflight is None:
-                    results[i] = False
-                    continue
-                if inflight.canceled or not success:
-                    self._append_free_slot_locked(
-                        self._offset_to_slot(int(inflight.offset))
-                    )
-                    self._meta_dirty_total += 1
-                    results[i] = False
-                    continue
-
-                self._index[key.encoded] = _Entry(
-                    offset=inflight.offset,
-                    size=inflight.meta.size,
-                    meta=inflight.meta,
-                )
-                self._meta_dirty_total += 1
-                results[i] = True
-                stored_keys.append(key.encoded)
+            success = False
+            try:
+                success = self._write_one(key, obj, offset)
+            finally:
+                with self._lock:
+                    self._inflight_io_count -= 1
+                    if success:
+                        # Only stamp on completed device I/O. `_write_one`
+                        # returns False when prep raises before any pwrite,
+                        # and a prep-only failure must not push back the
+                        # checkpoint idle gate.
+                        self._last_io_ts = time.monotonic()
+                    inflight = self._inflight.pop(key.encoded, None)
+                    if inflight is not None and (inflight.canceled or not success):
+                        self._append_free_slot_locked(
+                            self._offset_to_slot(int(inflight.offset))
+                        )
+                        self._meta_dirty_total += 1
+                    elif inflight is not None:
+                        self._index[key.encoded] = _Entry(
+                            offset=inflight.offset,
+                            size=inflight.meta.size,
+                            meta=inflight.meta,
+                        )
+                        self._meta_dirty_total += 1
+                        results[i] = True
+                        stored_keys.append(key.encoded)
 
         return RawBlockPutManyResult(
             results=results,
@@ -904,31 +927,29 @@ class RawBlockCore:
 
         Returns:
             True when both header and payload writes complete; false otherwise.
+
+        Note:
+            Pure I/O: takes no `self._lock` and does no `_inflight_io_count`
+            or `_last_io_ts` accounting. See `put_many` for the lock
+            protocol that owns those counters around this call.
         """
         try:
             header = self._encode_header(key.slot_identity, len(memory_obj.byte_array))
             buf, payload_len, total_len = self._prepare_write_payload(memory_obj)
 
-            with self._lock:
-                self._inflight_io_count += 1
-            try:
-                raw_dev = self._rawdev()
-                hdr_total = (
-                    round_up(len(header), self.block_align)
-                    if self.use_odirect
-                    else len(header)
-                )
-                raw_dev.pwrite_from_buffer(offset, header, len(header), hdr_total)
-                raw_dev.pwrite_from_buffer(
-                    offset + self.header_bytes,
-                    buf,
-                    payload_len,
-                    total_len,
-                )
-            finally:
-                with self._lock:
-                    self._inflight_io_count -= 1
-                    self._last_io_ts = time.monotonic()
+            raw_dev = self._rawdev()
+            hdr_total = (
+                round_up(len(header), self.block_align)
+                if self.use_odirect
+                else len(header)
+            )
+            raw_dev.pwrite_from_buffer(offset, header, len(header), hdr_total)
+            raw_dev.pwrite_from_buffer(
+                offset + self.header_bytes,
+                buf,
+                payload_len,
+                total_len,
+            )
             return True
         except Exception as e:
             logger.error("RawBlockCore write failed for %s: %s", key.encoded, e)
