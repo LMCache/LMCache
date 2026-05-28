@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 import os
 
 # First Party
@@ -88,12 +88,18 @@ class RedisConnectorAdapter(ConnectorAdapter):
 
         url = context.url
         if url.startswith("plugin://redis"):
-            extra_config = {}
+            extra_config: Dict[str, Any] = {}
             remote_url = None
             if context.config is not None:
-                extra_config = context.config.extra_config if context.config.extra_config is not None else {}
+                extra_config = (
+                    context.config.extra_config
+                    if context.config.extra_config is not None
+                    else {}
+                )
                 remote_url = context.config.remote_url
-            cfg_redis_url = extra_config.get("remote_storage_plugin.redis.redis_url") or extra_config.get("redis_url")
+            cfg_redis_url = extra_config.get(
+                "remote_storage_plugin.redis.redis_url"
+            ) or extra_config.get("redis_url")
             url = cfg_redis_url or remote_url or "redis://localhost:6379"
 
         logger.info(f"Creating Redis connector for URL: {url}")

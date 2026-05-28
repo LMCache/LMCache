@@ -424,8 +424,8 @@ def _create_local_cpu_backend(memory_allocator, use_mla, config=None):
 
 @patch("lmcache.v1.storage_backend.connector.redis_connector.RedisConnector")
 def test_redis_plugin_custom_url(mock_redis_connector, autorelease_v1) -> None:
-    """Verify that RedisConnectorAdapter successfully extracts custom Redis URL from extra_config
-    when loaded dynamically as a plugin.
+    """Verify that RedisConnectorAdapter extracts custom Redis URL
+    from extra_config when loaded dynamically as a plugin.
     """
     async_loop, async_thread = init_asyncio_loop()
     memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
@@ -434,21 +434,19 @@ def test_redis_plugin_custom_url(mock_redis_connector, autorelease_v1) -> None:
     # Define custom Redis URL inside extra_config
     custom_url = "redis://my-custom-redis-host:6379"
     config = LMCacheEngineConfig.from_defaults(
-        extra_config={
-            "remote_storage_plugin.redis.redis_url": custom_url
-        }
+        extra_config={"remote_storage_plugin.redis.redis_url": custom_url}
     )
-    
+
     # Create connector using dynamic plugin schema URL
     autorelease_v1(
         CreateConnector("plugin://redis", async_loop, local_cpu_backend, config)
     )
-    
+
     mock_redis_connector.assert_called_once_with(
         url=custom_url,
         loop=async_loop,
         local_cpu_backend=local_cpu_backend,
     )
-    
+
     close_asyncio_loop(async_loop, async_thread)
     local_cpu_backend.close()
