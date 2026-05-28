@@ -423,8 +423,12 @@ void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
-    const GPUKVFormat gpu_kv_format, const int block_size,
+    const GPUKVFormat gpu_kv_format, const int block_size, const int head_size,
     const int skip_prefix_n_tokens) {
+  // head_size is currently unused in the SYCL implementation; accepted to
+  // keep ABI parity with the CUDA c_ops binding so callers can pass the
+  // same kwargs to either backend.
+  (void)head_size;
   int num_origin_elements = key_value.size(3);
   int copy_size = num_origin_elements * key_value.element_size();
 

@@ -251,16 +251,15 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
     src_host = torch.randint(0, 256, (buf_size,), dtype=torch.uint8)
     gpu_buffer = torch.zeros(buf_size, dtype=torch.uint8, device=device)
 
-    if torch.cuda.is_available():
-        dst_host = torch.zeros(buf_size, dtype=torch.uint8).pin_memory()
-    else:
-        dst_host = torch.zeros(buf_size, dtype=torch.uint8)
+    dst_host = torch.zeros(buf_size, dtype=torch.uint8)
+    if device in ("cuda", "xpu"):
+        dst_host = dst_host.pin_memory()
 
     h2d_dir = ops.TransferDirection.H2D
     d2h_dir = ops.TransferDirection.D2H
 
     # Tensor mode for non-CUDA/CPU devices (e.g., XPU, HPU)
-    use_tensor_mode = device not in ("cpu", "cuda")
+    use_tensor_mode = device not in ("cpu", "cuda", "xpu")
 
     # (host_buffer_offset, nbytes) boundary test cases:
     #   (0,  64): exactly one aligned block from the start
@@ -383,7 +382,7 @@ def scenario_load_and_reshape_flash(ops: Any, device: str) -> dict[str, torch.Te
         mem_obj_shape = (2, num_layers, len(slot_mapping_temp), num_heads * head_size)
         mem_obj_tensor = torch.zeros(mem_obj_shape, dtype=dtype, device=dst_device)
 
-        if device == "cuda":
+        if device in ("cuda", "xpu"):
             mem_obj_tensor = mem_obj_tensor.pin_memory()
 
         for layer_id in range(num_layers):
@@ -474,7 +473,7 @@ def scenario_reshape_and_cache_back_flash(
         src_buffer[0, :, i, :] = val  # Key
         src_buffer[1, :, i, :] = val + 0.5  # Value
 
-    if device == "cuda":
+    if device in ("cuda", "xpu"):
         src_buffer = src_buffer.pin_memory()
 
     # 3. Prepare Destination (Empty Cache)
@@ -1183,7 +1182,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
 
     # Decide mode based on device: use pointer mode for CPU/CUDA
     # tensor list mode for others
-    use_tensor_list = device not in ("cpu", "cuda")
+    use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
     for gpu_kv_format, is_mla, bs_arg in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1195,7 +1194,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
             key_value = torch.zeros(lmc_shape, dtype=dtype, device="cpu")
-            if device == "cuda":
+            if device in ("cuda", "xpu"):
                 key_value = key_value.pin_memory()
 
             if not direction:  # LMC → Paged
@@ -1261,10 +1260,10 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                 # Tensor list mode: pass the tensor objects directly
                 key_value_ptrs = page_buffers
             else:
-                # Pointer mode: create tensor of int64 pointers
+                # Pointer mode: create tensor of uint64 pointers
                 key_value_ptrs = torch.tensor(
                     [pb.data_ptr() for pb in page_buffers],
-                    dtype=torch.int64,
+                    dtype=torch.uint64,
                     device=device,
                 )
 
@@ -1350,7 +1349,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
         else:
             key_value_ptrs = torch.tensor(
                 [pb.data_ptr() for pb in page_buffers],
-                dtype=torch.int64,
+                dtype=torch.uint64,
                 device=device,
             )
 
@@ -1409,7 +1408,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
 
     # Decide mode based on device: use pointer mode for CPU/CUDA
     # tensor list mode for others
-    use_tensor_list = device not in ("cpu", "cuda")
+    use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
     for gpu_kv_format, is_mla in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1420,7 +1419,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
             lmc_tensor = torch.zeros(lmc_shape, dtype=dtype, device="cpu")
-            if device == "cuda":
+            if device in ("cuda", "xpu"):
                 lmc_tensor = lmc_tensor.pin_memory()
 
             if not direction:  # LMC → Paged
@@ -1462,7 +1461,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
                 else:
                     key_value_ptrs = torch.tensor(
                         [pb.data_ptr() for pb in page_buffers],
-                        dtype=torch.int64,
+                        dtype=torch.uint64,
                         device=device,
                     )
             else:
@@ -1506,7 +1505,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
 
                     key_value_ptrs = torch.tensor(
                         ptr_list,
-                        dtype=torch.int64,
+                        dtype=torch.uint64,
                         device=device,
                     ).contiguous()
 
@@ -1605,7 +1604,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
                 ptr_list.append(buffers[(1, ly)].data_ptr())
             key_value_ptrs = torch.tensor(
                 ptr_list,
-                dtype=torch.int64,
+                dtype=torch.uint64,
                 device=device,
             ).contiguous()
 
@@ -1722,6 +1721,19 @@ def scenario_transfer_direction_enum(ops: Any, device: str) -> dict[str, torch.T
 # ==========================================
 # 3. Registry
 # ==========================================
+# Map scenario name -> attribute on the ops module the scenario needs.
+# When a native backend (e.g. lmcache.xpu_ops) has not implemented the op
+# yet, the scenario is skipped for that backend instead of being run and
+# crashing the device. Scenarios whose name matches the attribute exactly
+# are omitted: the default lookup falls back to the scenario name.
+SCENARIO_REQUIRED_ATTR: dict[str, str] = {
+    "alloc_free_pinned_ptr": "alloc_pinned_ptr",
+    "alloc_free_pinned_numa_ptr": "alloc_pinned_numa_ptr",
+    "alloc_free_numa_ptr": "alloc_numa_ptr",
+    "alloc_free_shm_pinned_ptr": "alloc_shm_pinned_ptr",
+    "transfer_direction_enum": "TransferDirection",
+}
+
 # cover pybind list in csrc/pybind.cpp
 SCENARIO_REGISTRY = {
     "transfer_direction_enum": scenario_transfer_direction_enum,
@@ -1776,6 +1788,14 @@ class TestScenarios:
         by test_2_compare.
         """
         backend_id, ops, device = backend
+        # Skip scenarios whose required op is not exported by this backend.
+        # In particular, lmcache.xpu_ops is still missing several functions
+        # the CUDA c_ops backend exposes; running them anyway would raise
+        # AttributeError/TypeError and on XPU may cascade into
+        # UR_RESULT_ERROR_DEVICE_LOST, poisoning the rest of the session.
+        required_attr = SCENARIO_REQUIRED_ATTR.get(name, name)
+        if not hasattr(ops, required_attr):
+            pytest.skip(f"backend '{backend_id}' does not implement '{required_attr}'")
         result = fn(ops, device)
         if result is not None:
             _results[(name, backend_id)] = result
