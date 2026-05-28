@@ -14,18 +14,3 @@ Two GPU jobs (correctness + performance), ~5 min each — lightweight enough for
 > via the [path filter](../README.md#path-based-skip-auto-pass-on-docs-only-changes).
 > Changes under `.buildkite/` always run. Add the `force-ci` label to a PR to
 > bypass.
-
-## Hardware assumptions
-
-- NVIDIA RTX PRO 6000 Blackwell (SM 12.0). The launch flags in
-  `scripts/common.sh:launch_sglang` include `--disable-cuda-graph`,
-  `--disable-piecewise-cuda-graph`, and `--attention-backend triton` to
-  work around sgl-kernel + flashinfer Blackwell gaps. Drop those flags
-  if running on Ada/Hopper hardware.
-
-## Pre-merge note
-
-`setup-sglang-env.sh` installs SGLang from
-`Shaoting-Feng/sglang.git@shaoting/sglang-lmcache-mp-nonlayerwise` while
-[sgl-project/sglang#24089](https://github.com/sgl-project/sglang/pull/24089) is open.
-Replace with the upstream PyPI install once that PR lands.

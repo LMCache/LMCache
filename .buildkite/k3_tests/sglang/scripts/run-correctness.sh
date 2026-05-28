@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# Correctness: LMCache must not change the output, and must be exercised.
-# A → B → A across the LMCache-enabled server: A populates LMCache, B
-# evicts A from SGLang's radix (their KV sum exceeds --max-total-tokens),
-# the second A is a radix miss / LMCache hit. The cache-hit output is
-# diffed against a no-LMCache reference run.
+# Correctness: LMCache must not change the output, and must be exercised. A → B → flush_cache → A on the LMCache server: A populates LMCache, B is a separate request, /flush_cache clears SGLang's radix (but not LMCache), so the second A is a radix miss / LMCache hit. The cache-hit output is diffed against a no-LMCache reference run. Servers are launched sequentially (kill between phases) so two SGLang processes don't fight for GPU memory.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -15,41 +11,32 @@ NO_SGL_LOG="correctness-sgl-no.log"
 PORT_LMC=30200
 PORT_NO=30201
 
-LMC_PID=""
-NO_PID=""
-DAEMON_PID_LOCAL=""
-
-cleanup_all() {
-    for pid in "${LMC_PID}" "${NO_PID}" "${DAEMON_PID_LOCAL}"; do
-        [[ -n "${pid}" ]] && kill -9 "${pid}" 2>/dev/null || true
-    done
-    pkill -9 -f "sglang::scheduler" 2>/dev/null || true
-    sleep 2
-}
 trap cleanup_all EXIT
 
-echo "--- :rocket: Start daemon + 2 SGLang servers (with/without LMCache)"
+echo "--- :rocket: Start daemon"
 launch_daemon "${DAEMON_LOG}"
-DAEMON_PID_LOCAL="${DAEMON_PID}"
-
-launch_sglang "${PORT_LMC}" "${LMC_SGL_LOG}" "lmcache"
-LMC_PID="${SGLANG_PID}"
-
-SGLANG_PID=""  # don't clobber LMC_PID on the next launch
-launch_sglang "${PORT_NO}" "${NO_SGL_LOG}" "no-lmcache"
-NO_PID="${SGLANG_PID}"
 
 PROMPT_A="$(generate_prompt a)"
 PROMPT_B="$(generate_prompt b)"
 
-echo "--- :test_tube: Drive A → B → A on the LMCache server"
+echo "--- :test_tube: Launch SGLang+LMCache; drive A → B → flush_cache → A"
+launch_sglang "${PORT_LMC}" "${LMC_SGL_LOG}" "lmcache"
 chat_completion "${PORT_LMC}" "${PROMPT_A}" 64 > /tmp/lmc_run1_A.txt
 chat_completion "${PORT_LMC}" "${PROMPT_B}" 64 > /tmp/lmc_run2_B.txt
-RETRIEVALS_BEFORE=$(count_retrievals "${DAEMON_LOG}")
+curl -sf -X POST "http://127.0.0.1:${PORT_LMC}/flush_cache" >/dev/null
+RETRIEVALS_BEFORE=$(count_retrievals)
 chat_completion "${PORT_LMC}" "${PROMPT_A}" 64 > /tmp/lmc_out.txt
-RETRIEVALS_AFTER=$(count_retrievals "${DAEMON_LOG}")
+RETRIEVALS_AFTER=$(count_retrievals)
 RETRIEVAL_DELTA=$((RETRIEVALS_AFTER - RETRIEVALS_BEFORE))
 echo "  daemon retrieval delta on the cache-hit call: ${RETRIEVAL_DELTA}"
+
+echo "--- :recycle: Kill LMCache SGLang, relaunch without LMCache"
+kill -9 "${SGLANG_PID}" 2>/dev/null || true
+pkill -9 -f "sglang::scheduler" 2>/dev/null || true
+wait "${SGLANG_PID}" 2>/dev/null || true
+SGLANG_PID=""
+sleep 3
+launch_sglang "${PORT_NO}" "${NO_SGL_LOG}" "no-lmcache"
 
 echo "--- :mag: Reference call on the no-LMCache server"
 chat_completion "${PORT_NO}" "${PROMPT_A}" 64 > /tmp/no_out.txt

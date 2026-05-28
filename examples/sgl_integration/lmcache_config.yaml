@@ -1,5 +1,0 @@
-# MP mode: SGLang dials the standalone `lmcache server` at this host/port.
-# (chunk_size and other cache parameters are owned by the daemon — pass them
-# to `lmcache server` on its command line, not here.)
-mp_host: 127.0.0.1
-mp_port: 5556

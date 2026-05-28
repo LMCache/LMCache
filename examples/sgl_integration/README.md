@@ -13,6 +13,13 @@ pip install sglang lmcache
 LMCache's MP (multi-process) connector is the default. SGLang dials a
 standalone `lmcache server` daemon over ZMQ at the host/port from the YAML.
 
+Create `lmcache_config.yaml` with:
+```yaml
+# MP mode: SGLang dials the standalone `lmcache server` at this host/port.
+mp_host: 127.0.0.1
+mp_port: 5556
+```
+
 Terminal 1 — start the LMCache daemon (host/port must match
 `mp_host` / `mp_port` in `lmcache_config.yaml`):
 ```bash

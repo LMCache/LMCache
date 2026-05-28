@@ -31,8 +31,8 @@ fi
 protoc --version
 
 echo "--- :package: SGLang + LMCache install"
-SGLANG_FORK_URL="git+https://github.com/Shaoting-Feng/sglang.git@shaoting/sglang-lmcache-mp-nonlayerwise#subdirectory=python"
-uv pip install "${SGLANG_FORK_URL}"
+SGLANG_URL="git+https://github.com/sgl-project/sglang.git@main#subdirectory=python"
+uv pip install "${SGLANG_URL}"
 export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
 
 uv pip uninstall cupy-cuda12x 2>/dev/null || true

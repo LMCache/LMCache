@@ -33,7 +33,7 @@ mp_port: ${DAEMON_PORT}
 EOF
     lmcache server \
         --host 127.0.0.1 --port "${DAEMON_PORT}" --http-port "${DAEMON_HTTP_PORT}" \
-        --chunk-size 256 --l1-size-gb 4 --eviction-policy LRU \
+        --chunk-size 256 --l1-size-gb 20 --eviction-policy LRU \
         > "${log_file}" 2>&1 &
     DAEMON_PID=$!
     for ((i = 0; i < 60; i++)); do
@@ -58,7 +58,6 @@ launch_sglang() {
     python -m sglang.launch_server \
         --model-path "${MODEL}" \
         --host 127.0.0.1 --port "${port}" \
-        --max-total-tokens 4096 \
         "${lmcache_args[@]}" \
         > "${log_file}" 2>&1 &
     SGLANG_PID=$!
@@ -105,20 +104,15 @@ print(resp['choices'][0]['message']['content'], end='')
 "
 }
 
-# Count "Retrieved N tokens" lines in the daemon log. grep -c prints 0 but
-# exits 1 on zero matches, so capture both and always emit one line.
+# Sum LMCache L1 chunk reads from the daemon's /metrics; 0 if unreachable.
 count_retrievals() {
-    local log_file="$1" count
-    if count=$(grep -c "Retrieved [0-9]* tokens" "${log_file}" 2>/dev/null); then
-        echo "${count}"
-    else
-        echo "${count:-0}"
-    fi
+    local val
+    val=$( { curl -sf --max-time 3 "http://127.0.0.1:${DAEMON_HTTP_PORT}/metrics" 2>/dev/null || true; } \
+        | awk '/^lmcache_mp_l1_read_chunks_total[ {]/ { sum += $NF } END { printf "%d", sum + 0 }')
+    echo "${val:-0}"
 }
 
-# Two ~2500-token prompts. Together they exceed --max-total-tokens 4096,
-# so after A→B, A's radix entry is evicted and a follow-up A is a radix
-# miss / LMCache hit. Used by run-correctness.sh.
+# Two distinct ~2500-token prompts for run-correctness.sh.
 generate_prompt() {
     local variant="${1:-a}"
     python3 -c "
@@ -131,21 +125,23 @@ print(sentences[sys.argv[1]] * 80 + 'Summarize the scene above in one short sent
 " "${variant}"
 }
 
-# Run long_doc_qa.py against $1 and echo the Query-round mean TTFT in
-# seconds. 4 distinct ~1500-token docs × 2 tiles — combined KV exceeds
-# --max-total-tokens 4096, so query-round prompts miss the radix and
-# (with LMCache) hit RETRIEVE.
-run_long_doc_qa_query_ttft() {
+# Run lmcache bench engine + long-doc-qa; echo mean TTFT in seconds. Pool > HBM forces LMCache hits on each doc's 2nd query.
+run_long_doc_qa_ttft() {
     local port="$1"
-    local repo_root
-    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-    python3 "${repo_root}/benchmarks/long_doc_qa/long_doc_qa.py" \
-        --num-documents 4 --document-length 1500 --output-len 100 \
-        --repeat-count 2 --repeat-mode tile --max-inflight-requests 1 \
-        --host 127.0.0.1 --port "${port}" \
+    local outdir
+    outdir="$(mktemp -d -t lmc-bench-XXXXXX)"
+    lmcache bench engine \
+        --engine-url "http://127.0.0.1:${port}" \
         --model "${MODEL}" \
-        2>&1 \
-        | tee "perf-bench-${port}.log" \
-        | grep -oE "Query round mean TTFT: [0-9.]+" \
-        | awk '{print $NF}'
+        --workload long-doc-qa \
+        --ldqa-document-length 10000 \
+        --ldqa-query-per-document 2 \
+        --ldqa-shuffle-policy tile \
+        --tokens-per-gb-kvcache 17500 --kv-cache-volume 15 \
+        --json --no-csv --no-interactive --quiet \
+        --output-dir "${outdir}" > "perf-bench-${port}.log" 2>&1
+    python3 -c "
+import json
+print(json.load(open('${outdir}/bench_summary.json'))['results']['mean_ttft_ms'] / 1000)
+"
 }

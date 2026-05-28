@@ -19,10 +19,10 @@ echo "--- :rocket: Phase A — start daemon + LMCache-enabled SGLang"
 launch_daemon "${DAEMON_LOG}"
 launch_sglang "${PORT_LMC}" "${LMC_LOG}" "lmcache"
 
-echo "--- :stopwatch: Phase A — bench, record query-round TTFT"
-RETRIEVALS_BEFORE=$(count_retrievals "${DAEMON_LOG}")
-TTFT_LMC=$(run_long_doc_qa_query_ttft "${PORT_LMC}")
-RETRIEVALS_AFTER=$(count_retrievals "${DAEMON_LOG}")
+echo "--- :stopwatch: Phase A — bench, record mean TTFT"
+RETRIEVALS_BEFORE=$(count_retrievals)
+TTFT_LMC=$(run_long_doc_qa_ttft "${PORT_LMC}")
+RETRIEVALS_AFTER=$(count_retrievals)
 RETRIEVAL_DELTA=$((RETRIEVALS_AFTER - RETRIEVALS_BEFORE))
 echo "  ttft_with_lmcache = ${TTFT_LMC}s, retrieval delta = ${RETRIEVAL_DELTA}"
 
@@ -34,8 +34,8 @@ SGLANG_PID=""
 sleep 3
 launch_sglang "${PORT_NO}" "${NO_LOG}" "no-lmcache"
 
-echo "--- :stopwatch: Phase B — bench, record query-round TTFT"
-TTFT_NO=$(run_long_doc_qa_query_ttft "${PORT_NO}")
+echo "--- :stopwatch: Phase B — bench, record mean TTFT"
+TTFT_NO=$(run_long_doc_qa_ttft "${PORT_NO}")
 echo "  ttft_without_lmcache = ${TTFT_NO}s"
 
 echo "+++ :scales: Verdict"
