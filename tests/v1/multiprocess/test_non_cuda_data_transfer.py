@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, patch
 import mmap
 import os
@@ -25,6 +26,43 @@ from lmcache.v1.multiprocess.worker_transfer.base import (
 )
 from lmcache.v1.multiprocess.worker_transfer.pickle import NonGpuContextPickle
 from lmcache.v1.multiprocess.worker_transfer.shm import NonGpuContextShm
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.config import StorageManagerConfig
+    from lmcache.v1.multiprocess.custom_types import (
+        IPCCacheEngineKey,
+        RegisterNonGpuContextPayload,
+    )
+    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
+
+
+class ServerModuleFactory(Protocol):
+    """Typed callable contract for creating patched server test modules.
+
+    Args:
+        storage_manager_config: Optional engine storage config override.
+        chunk_size: Engine chunk size used to initialize the context.
+        object_keys: Object keys returned by ``ipc_key_to_object_keys``.
+        mock_storage: Optional storage mock; defaults to a new ``MagicMock``.
+        mock_session: Optional session mock; defaults to a new ``MagicMock``.
+
+    Returns a tuple of ``(NonGPUTransferModule, storage MagicMock,
+    session MagicMock, MPCacheEngineContext)``.
+    """
+
+    def __call__(
+        self,
+        *,
+        storage_manager_config: "StorageManagerConfig | None" = None,
+        chunk_size: int = 8,
+        object_keys: list[str] | None = None,
+        mock_storage: MagicMock | None = None,
+        mock_session: MagicMock | None = None,
+    ) -> tuple[
+        "NonGPUTransferModule", MagicMock, MagicMock, "MPCacheEngineContext"
+    ]: ...
 
 
 def _make_kv_caches(
@@ -126,6 +164,55 @@ def _make_storage_manager_config(
     )
 
 
+def _default_register_payload(instance_id: int = 1) -> "RegisterNonGpuContextPayload":
+    """Build a default non-GPU registration payload for server-side tests.
+
+    Args:
+        instance_id: Worker instance id to register. Defaults to ``1``.
+
+    Uses fixed values ``model_name="m"``, ``world_size=1``, ``block_size=4``,
+    ``num_layers=2``, ``hidden_dim_size=16``, ``dtype_str="float32"``, and
+    ``use_mla=False`` for a compact baseline scenario used by most tests.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
+
+    return RegisterNonGpuContextPayload(
+        instance_id=instance_id,
+        model_name="m",
+        world_size=1,
+        block_size=4,
+        num_layers=2,
+        hidden_dim_size=16,
+        dtype_str="float32",
+        use_mla=False,
+    )
+
+
+def _default_key(tokens: int = 8) -> "IPCCacheEngineKey":
+    """Build a default IPC cache key with ``tokens`` contiguous token IDs.
+
+    Args:
+        tokens: Total token count and key end offset. Defaults to ``8``.
+
+    Uses fixed values ``model_name="m"``, ``world_size=1``, ``rank=0``,
+    token IDs of ``[1] * tokens``, ``start=0``, ``end=tokens``,
+    and ``request_id="req"``.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+
+    return IPCCacheEngineKey.from_token_ids(
+        "m",
+        1,
+        0,
+        [1] * tokens,
+        start=0,
+        end=tokens,
+        request_id="req",
+    )
+
+
 def test_wrap_kv_caches_wraps_all_tensors(monkeypatch: Any) -> None:
     """Verify wrap_kv_caches wraps all provided KV tensors."""
     # First Party
@@ -154,7 +241,33 @@ def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
     assert isinstance(context, DataTransferContext)
 
 
-def test_compute_kv_layout_and_gather_scatter_roundtrip() -> None:
+@pytest.mark.parametrize(
+    ("builder_fn", "expected_block_size", "expected_hidden_dim", "layout_hints"),
+    [
+        pytest.param(
+            lambda: _make_kv_caches(num_layers=2, num_blocks=8, block_size=4),
+            4,
+            16,
+            None,
+            id="nhd",
+        ),
+        pytest.param(
+            lambda: _make_mla_kv_caches(
+                num_layers=2, num_blocks=8, block_size=4, hidden_size=16
+            ),
+            4,
+            16,
+            None,
+            id="mla",
+        ),
+    ],
+)
+def test_compute_kv_layout_and_gather_scatter_roundtrip(
+    builder_fn: Callable[[], dict[str, torch.Tensor]],
+    expected_block_size: int,
+    expected_hidden_dim: int,
+    layout_hints: dict[str, str] | None,
+) -> None:
     """Validate layout extraction and gather/scatter round-trip on CPU tensors."""
     # First Party
     from lmcache.v1.multiprocess.worker_transfer.base import (
@@ -163,17 +276,17 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip() -> None:
         scatter_cpu_to_paged_kv,
     )
 
-    source = _make_kv_caches(num_layers=2, num_blocks=8, block_size=4)
+    source = builder_fn()
     (
         block_size,
         num_layers,
         hidden_dim,
         dtype_str,
         detected_kv_format,
-    ) = compute_kv_layout(source)
-    assert block_size == 4
+    ) = compute_kv_layout(source, layout_hints=layout_hints)
+    assert block_size == expected_block_size
     assert num_layers == 2
-    assert hidden_dim == 16
+    assert hidden_dim == expected_hidden_dim
     assert dtype_str == "float32"
     assert detected_kv_format is not None
 
@@ -183,8 +296,12 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip() -> None:
     scatter_cpu_to_paged_kv(destination, [4, 5], gathered, blocks_per_chunk)
 
     for name in source:
-        assert torch.allclose(source[name][:, 0], destination[name][:, 4])
-        assert torch.allclose(source[name][:, 1], destination[name][:, 5])
+        if source[name].dim() == 5:
+            assert torch.allclose(source[name][:, 0], destination[name][:, 4])
+            assert torch.allclose(source[name][:, 1], destination[name][:, 5])
+        else:
+            assert torch.allclose(source[name][0], destination[name][4])
+            assert torch.allclose(source[name][1], destination[name][5])
 
 
 @pytest.mark.parametrize(
@@ -249,69 +366,6 @@ def test_gather_scatter_roundtrip_hnd_layout(
             assert torch.allclose(source[name][1], destination[name][5])
 
 
-def test_scatter_respects_skip_first_n_tokens() -> None:
-    """Ensure scatter honors skip_first_n_tokens and preserves skipped blocks."""
-    # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import (
-        gather_paged_kv_to_cpu,
-        scatter_cpu_to_paged_kv,
-    )
-
-    source = _make_kv_caches(num_layers=2, num_blocks=8, block_size=4)
-    destination = {
-        name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
-    }
-    gathered = gather_paged_kv_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
-    scatter_cpu_to_paged_kv(
-        destination,
-        [0, 1, 2, 3],
-        gathered,
-        blocks_per_chunk=4,
-        skip_first_n_tokens=8,
-    )
-
-    for name in destination:
-        assert torch.all(destination[name][:, 0] == 999.0)
-        assert torch.all(destination[name][:, 1] == 999.0)
-        assert torch.allclose(destination[name][:, 2], source[name][:, 2])
-        assert torch.allclose(destination[name][:, 3], source[name][:, 3])
-
-
-def test_compute_kv_layout_and_gather_scatter_roundtrip_mla() -> None:
-    """Validate gather/scatter round-trip for MLA KV tensors."""
-    # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import (
-        compute_kv_layout,
-        gather_paged_kv_to_cpu,
-        scatter_cpu_to_paged_kv,
-    )
-
-    source = _make_mla_kv_caches(
-        num_layers=2, num_blocks=8, block_size=4, hidden_size=16
-    )
-    (
-        block_size,
-        num_layers,
-        hidden_dim,
-        dtype_str,
-        detected_kv_format,
-    ) = compute_kv_layout(source)
-    assert block_size == 4
-    assert num_layers == 2
-    assert hidden_dim == 16
-    assert dtype_str == "float32"
-    assert detected_kv_format is not None
-
-    blocks_per_chunk = 2
-    gathered = gather_paged_kv_to_cpu(source, [0, 1], blocks_per_chunk)
-    destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
-    scatter_cpu_to_paged_kv(destination, [4, 5], gathered, blocks_per_chunk)
-
-    for name in source:
-        assert torch.allclose(source[name][0], destination[name][4])
-        assert torch.allclose(source[name][1], destination[name][5])
-
-
 def test_compute_kv_layout_empty_raises_value_error() -> None:
     """Ensure compute_kv_layout rejects empty KV cache input."""
     # First Party
@@ -321,17 +375,55 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
         compute_kv_layout({})
 
 
-def test_scatter_mla_respects_skip_first_n_tokens() -> None:
-    """Ensure MLA scatter honors skip_first_n_tokens and preserves skipped blocks."""
+@pytest.mark.parametrize(
+    (
+        "builder_fn",
+        "skip_tokens",
+        "expected_unchanged_blocks",
+        "expected_copied_blocks",
+    ),
+    [
+        pytest.param(
+            lambda: _make_kv_caches(num_layers=2, num_blocks=8, block_size=4),
+            8,
+            [0, 1],
+            [2, 3],
+            id="nhd-skip-two-blocks",
+        ),
+        pytest.param(
+            lambda: _make_mla_kv_caches(
+                num_layers=2, num_blocks=8, block_size=4, hidden_size=16
+            ),
+            8,
+            [0, 1],
+            [2, 3],
+            id="mla-skip-two-blocks",
+        ),
+        pytest.param(
+            lambda: _make_mla_kv_caches(
+                num_layers=2, num_blocks=8, block_size=4, hidden_size=16
+            ),
+            40,
+            [0, 1, 2, 3],
+            [],
+            id="mla-skip-past-chunk",
+        ),
+    ],
+)
+def test_scatter_respects_skip_first_n_tokens(
+    builder_fn: Callable[[], dict[str, torch.Tensor]],
+    skip_tokens: int,
+    expected_unchanged_blocks: list[int],
+    expected_copied_blocks: list[int],
+) -> None:
+    """Ensure scatter honors skip_first_n_tokens and preserves skipped blocks."""
     # First Party
     from lmcache.v1.multiprocess.worker_transfer.base import (
         gather_paged_kv_to_cpu,
         scatter_cpu_to_paged_kv,
     )
 
-    source = _make_mla_kv_caches(
-        num_layers=2, num_blocks=8, block_size=4, hidden_size=16
-    )
+    source = builder_fn()
     destination = {
         name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
     }
@@ -341,41 +433,25 @@ def test_scatter_mla_respects_skip_first_n_tokens() -> None:
         [0, 1, 2, 3],
         gathered,
         blocks_per_chunk=4,
-        skip_first_n_tokens=8,
+        skip_first_n_tokens=skip_tokens,
     )
 
     for name in destination:
-        assert torch.all(destination[name][0] == 999.0)
-        assert torch.all(destination[name][1] == 999.0)
-        assert torch.allclose(destination[name][2], source[name][2])
-        assert torch.allclose(destination[name][3], source[name][3])
-
-
-def test_scatter_mla_skip_past_chunk_keeps_destination_unchanged() -> None:
-    """Ensure MLA scatter is a no-op when skip_first_n_tokens exceeds chunk tokens."""
-    # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import (
-        gather_paged_kv_to_cpu,
-        scatter_cpu_to_paged_kv,
-    )
-
-    source = _make_mla_kv_caches(
-        num_layers=2, num_blocks=8, block_size=4, hidden_size=16
-    )
-    destination = {
-        name: torch.full_like(tensor, 123.0) for name, tensor in source.items()
-    }
-    gathered = gather_paged_kv_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
-    scatter_cpu_to_paged_kv(
-        destination,
-        [0, 1, 2, 3],
-        gathered,
-        blocks_per_chunk=4,
-        skip_first_n_tokens=40,
-    )
-
-    for name in destination:
-        assert torch.all(destination[name] == 123.0)
+        for block_idx in expected_unchanged_blocks:
+            if destination[name].dim() == 5:
+                assert torch.all(destination[name][:, block_idx] == 999.0)
+            else:
+                assert torch.all(destination[name][block_idx] == 999.0)
+        for block_idx in expected_copied_blocks:
+            if destination[name].dim() == 5:
+                assert torch.allclose(
+                    destination[name][:, block_idx], source[name][:, block_idx]
+                )
+            else:
+                assert torch.allclose(
+                    destination[name][block_idx],
+                    source[name][block_idx],
+                )
 
 
 @pytest.fixture
@@ -394,31 +470,102 @@ def stub_native_storage_ops() -> Any:
         yield
 
 
-def test_engine_context_computes_shm_pool_info(stub_native_storage_ops: Any) -> None:
-    """Ensure engine context pre-computes normalized SHM pool metadata."""
+@pytest.fixture
+def server_module_factory(
+    stub_native_storage_ops: Any,
+) -> Iterator[ServerModuleFactory]:
+    """Create a patched server module/context with configurable mocks."""
+    # Standard
+    from contextlib import ExitStack
+
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
 
-    config = _make_storage_manager_config(shm_name="/test_pool", pool_size=1024)
+    stack = ExitStack()
 
-    with (
-        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-    ):
-        ctx = MPCacheEngineContext(storage_manager_config=config, chunk_size=16)
+    def _create(
+        *,
+        storage_manager_config: "StorageManagerConfig | None" = None,
+        chunk_size: int = 8,
+        object_keys: list[str] | None = None,
+        mock_storage: MagicMock | None = None,
+        mock_session: MagicMock | None = None,
+    ) -> tuple["NonGPUTransferModule", MagicMock, MagicMock, "MPCacheEngineContext"]:
+        """Create a patched module/context plus storage/session mocks.
 
-    assert ctx.shm_pool_info == {
-        "shm_name": "lmcache_l1_pool_test_pool",
-        "pool_size": 1024,
-    }
+        Args:
+            storage_manager_config: Optional engine storage config override.
+            chunk_size: Engine chunk size passed to context construction.
+            object_keys: Keys returned from ``ipc_key_to_object_keys`` patch.
+            mock_storage: Optional storage mock instance to inject.
+            mock_session: Optional session mock instance to inject.
+
+        Returns ``(module, mock_storage, mock_session, ctx)``.
+        """
+        mock_storage = mock_storage or MagicMock()
+        if mock_session is None:
+            mock_session = MagicMock()
+            mock_session.get_hashes.return_value = [b"h"]
+
+        stack.enter_context(
+            patch(
+                "lmcache.v1.multiprocess.engine_context.StorageManager",
+                return_value=mock_storage,
+            )
+        )
+        stack.enter_context(patch("lmcache.v1.multiprocess.engine_context.TokenHasher"))
+        session_cls = stack.enter_context(
+            patch("lmcache.v1.multiprocess.engine_context.SessionManager")
+        )
+        stack.enter_context(
+            patch("lmcache.v1.multiprocess.engine_context.get_event_bus")
+        )
+        stack.enter_context(
+            patch(
+                "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
+                return_value=object_keys or ["obj"],
+            )
+        )
+
+        session_cls.return_value.get_or_create.return_value = mock_session
+        ctx = MPCacheEngineContext(
+            storage_manager_config=storage_manager_config or MagicMock(),
+            chunk_size=chunk_size,
+        )
+        module = NonGPUTransferModule(ctx)
+
+        return module, mock_storage, mock_session, ctx
+
+    yield _create  # type: ignore[misc]
+    stack.close()
 
 
-def test_engine_context_disables_shm_pool_info_when_lazy(
+@pytest.mark.parametrize(
+    ("config_kwargs", "expected_pool_info"),
+    [
+        pytest.param(
+            {"shm_name": "/test_pool", "pool_size": 1024},
+            {"shm_name": "lmcache_l1_pool_test_pool", "pool_size": 1024},
+            id="non-lazy",
+        ),
+        pytest.param(
+            {
+                "shm_name": "lmcache_l1_pool_existing",
+                "pool_size": 2048,
+                "use_lazy": True,
+            },
+            {"shm_name": "", "pool_size": 0},
+            id="lazy",
+        ),
+    ],
+)
+def test_engine_context_shm_pool_info(
     stub_native_storage_ops: Any,
+    config_kwargs: dict[str, Any],
+    expected_pool_info: dict[str, Any],
 ) -> None:
-    """Ensure lazy memory mode disables SHM transport metadata."""
+    """Ensure engine context computes SHM pool metadata for lazy and non-lazy modes."""
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 
@@ -426,11 +573,7 @@ def test_engine_context_disables_shm_pool_info_when_lazy(
         "lmcache.v1.distributed.config.torch_dev",
         type("TorchDevStub", (), {"cudart": object()})(),
     ):
-        config = _make_storage_manager_config(
-            shm_name="lmcache_l1_pool_existing",
-            pool_size=2048,
-            use_lazy=True,
-        )
+        config = _make_storage_manager_config(**config_kwargs)
 
     with (
         patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
@@ -440,37 +583,17 @@ def test_engine_context_disables_shm_pool_info_when_lazy(
     ):
         ctx = MPCacheEngineContext(storage_manager_config=config, chunk_size=16)
 
-    assert ctx.shm_pool_info == {"shm_name": "", "pool_size": 0}
+    assert ctx.shm_pool_info == expected_pool_info
 
 
 def test_server_register_and_find_non_cuda_context_layout(
     stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure non-CUDA registration stores metadata and lookup finds layout."""
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
-
-    with (
-        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-    ):
-        ctx = MPCacheEngineContext(storage_manager_config=MagicMock(), chunk_size=16)
-    module = NonGPUTransferModule(ctx)
+    module, _, _, ctx = server_module_factory(chunk_size=16)
     response = module.register_kv_cache_non_gpu_context(
-        RegisterNonGpuContextPayload(
-            instance_id=1,
-            model_name="m",
-            world_size=1,
-            block_size=4,
-            num_layers=2,
-            hidden_dim_size=16,
-            dtype_str="float32",
-            use_mla=False,
-        )
+        _default_register_payload(instance_id=1)
     )
     assert response.shm_name == ""
     assert response.pool_size == 0
@@ -480,16 +603,11 @@ def test_server_register_and_find_non_cuda_context_layout(
     assert layout.shapes[0] == torch.Size([2, 2, 16, 16])
 
 
-def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> None:
+def test_server_store_and_retrieve_cpu_chunks(
+    stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
+) -> None:
     """Validate mocked server-side CPU chunk store and retrieve behavior."""
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheEngineKey,
-        RegisterNonGpuContextPayload,
-    )
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
-
     mock_storage = MagicMock()
     target_tensor = torch.zeros(2, 2, 8, 16)
     mock_memory_obj = MagicMock()
@@ -503,48 +621,17 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
     mock_storage.read_prefetched_results.side_effect = _read_prefetched_results
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
-    with (
-        patch(
-            "lmcache.v1.multiprocess.engine_context.StorageManager",
-            return_value=mock_storage,
-        ),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_cls,
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-        patch(
-            "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-            return_value=["obj"],
-        ),
-    ):
-        session_cls.return_value.get_or_create.return_value = mock_session
-        ctx = MPCacheEngineContext(storage_manager_config=MagicMock(), chunk_size=8)
-        module = NonGPUTransferModule(ctx)
-        module.register_kv_cache_non_gpu_context(
-            RegisterNonGpuContextPayload(
-                instance_id=2,
-                model_name="m",
-                world_size=1,
-                block_size=4,
-                num_layers=2,
-                hidden_dim_size=16,
-                dtype_str="float32",
-                use_mla=False,
-            )
-        )
-        payload = torch.ones(2, 2, 8, 16)
-        key = IPCCacheEngineKey.from_token_ids(
-            "m",
-            1,
-            0,
-            [1] * 8,
-            start=0,
-            end=8,
-            request_id="req",
-        )
-        store_ok = module.commit_store(key, 2, pickle.dumps([payload]))
-        response = module.prepare_retrieve(key, 2)
-        success = response.success
-        cpu_data = response.data
+    module, _, _, _ = server_module_factory(
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=2))
+    payload = torch.ones(2, 2, 8, 16)
+    key = _default_key()
+    store_ok = module.commit_store(key, 2, pickle.dumps([payload]))
+    response = module.prepare_retrieve(key, 2)
+    success = response.success
+    cpu_data = response.data
 
     assert isinstance(store_ok, bool)
     assert torch.allclose(mock_memory_obj.tensor, payload)
@@ -557,6 +644,7 @@ def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> N
 
 def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
     stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
 ) -> None:
     """Regression: repeated prompt after worker restart should no-op-store cleanly.
 
@@ -565,81 +653,35 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
     The worker sees an empty chunk_indices list, skips gather and commit entirely,
     so no entry leaks in ``_pending_shm_writes`` and no spurious error is logged.
     """
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheEngineKey,
-        RegisterNonGpuContextPayload,
-    )
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
-
     mock_storage = MagicMock()
     # Empty reserve_write indicates all object keys already exist in cache.
     mock_storage.reserve_write.return_value = {}
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    with (
-        patch(
-            "lmcache.v1.multiprocess.engine_context.StorageManager",
-            return_value=mock_storage,
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=1024
         ),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_cls,
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-        patch(
-            "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-            return_value=["obj"],
-        ),
-    ):
-        session_cls.return_value.get_or_create.return_value = mock_session
-        ctx = MPCacheEngineContext(
-            storage_manager_config=_make_storage_manager_config(
-                shm_name="lmcache_test_pool", pool_size=1024
-            ),
-            chunk_size=8,
-        )
-        module = NonGPUTransferModule(ctx)
-        module.register_kv_cache_non_gpu_context(
-            RegisterNonGpuContextPayload(
-                instance_id=3,
-                model_name="m",
-                world_size=1,
-                block_size=4,
-                num_layers=2,
-                hidden_dim_size=16,
-                dtype_str="float32",
-                use_mla=False,
-            )
-        )
-        key = IPCCacheEngineKey.from_token_ids(
-            "m",
-            1,
-            0,
-            [1] * 8,
-            start=0,
-            end=8,
-            request_id="req",
-        )
-        prepare_response = module.prepare_store(key, 3)
-        # Server signals all-cached via empty slots list (not missing "slots" key).
-        assert prepare_response.context == {"slots": [], "chunk_indices": []}
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=3))
+    key = _default_key()
+    prepare_response = module.prepare_store(key, 3)
+    # Server signals all-cached via empty slots list (not missing "slots" key).
+    assert prepare_response.context == {"slots": [], "chunk_indices": []}
 
-        # commit_store without a matching prepare must fail (no entry leaked).
-        assert module.commit_store(key, 3, b"") is False
+    # commit_store without a matching prepare must fail (no entry leaked).
+    assert module.commit_store(key, 3, b"") is False
 
 
 def test_server_prepare_store_releases_unused_reserved_write_locks(
     stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure SHM prepare_store releases reserved keys that have no writable tensor."""
     # First Party
-    from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheEngineKey,
-        RegisterNonGpuContextPayload,
-    )
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
     from lmcache.v1.multiprocess.protocols.engine import PrepareStoreResponse
 
     mock_storage = MagicMock()
@@ -651,67 +693,27 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    with (
-        patch(
-            "lmcache.v1.multiprocess.engine_context.StorageManager",
-            return_value=mock_storage,
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=1024
         ),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_cls,
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-        patch(
-            "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-            return_value=["obj"],
-        ),
-    ):
-        session_cls.return_value.get_or_create.return_value = mock_session
-        ctx = MPCacheEngineContext(
-            storage_manager_config=_make_storage_manager_config(
-                shm_name="lmcache_test_pool", pool_size=1024
-            ),
-            chunk_size=8,
-        )
-        module = NonGPUTransferModule(ctx)
-        module.register_kv_cache_non_gpu_context(
-            RegisterNonGpuContextPayload(
-                instance_id=5,
-                model_name="m",
-                world_size=1,
-                block_size=4,
-                num_layers=2,
-                hidden_dim_size=16,
-                dtype_str="float32",
-                use_mla=False,
-            )
-        )
-        key = IPCCacheEngineKey.from_token_ids(
-            "m",
-            1,
-            0,
-            [1] * 8,
-            start=0,
-            end=8,
-            request_id="req",
-        )
-        prepare_response = module.prepare_store(key, 5)
-        assert isinstance(prepare_response, PrepareStoreResponse)
-        assert prepare_response.context == {"slots": [], "chunk_indices": []}
-        reserved_keys = mock_storage.reserve_write.call_args[0][0]
-        mock_storage.finish_write.assert_called_once_with(reserved_keys)
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=5))
+    key = _default_key()
+    prepare_response = module.prepare_store(key, 5)
+    assert isinstance(prepare_response, PrepareStoreResponse)
+    assert prepare_response.context == {"slots": [], "chunk_indices": []}
+    reserved_keys = mock_storage.reserve_write.call_args[0][0]
+    mock_storage.finish_write.assert_called_once_with(reserved_keys)
 
 
 def test_server_shm_transport_uses_engine_level_config(
     stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure all instances share the same engine-level SHM transport setting."""
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheEngineKey,
-        RegisterNonGpuContextPayload,
-    )
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
-
     mock_storage = MagicMock()
     mock_memory_obj = MagicMock()
     mock_memory_obj.tensor = torch.zeros(2, 2, 8, 16)
@@ -723,123 +725,46 @@ def test_server_shm_transport_uses_engine_level_config(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    with (
-        patch(
-            "lmcache.v1.multiprocess.engine_context.StorageManager",
-            return_value=mock_storage,
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=1024
         ),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_cls,
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-        patch(
-            "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-            return_value=["obj"],
-        ),
-    ):
-        session_cls.return_value.get_or_create.return_value = mock_session
-        ctx = MPCacheEngineContext(
-            storage_manager_config=_make_storage_manager_config(
-                shm_name="lmcache_test_pool", pool_size=1024
-            ),
-            chunk_size=8,
-        )
-        module = NonGPUTransferModule(ctx)
-        module.register_kv_cache_non_gpu_context(
-            RegisterNonGpuContextPayload(
-                instance_id=6,
-                model_name="m",
-                world_size=1,
-                block_size=4,
-                num_layers=2,
-                hidden_dim_size=16,
-                dtype_str="float32",
-                use_mla=False,
-            )
-        )
-        module.register_kv_cache_non_gpu_context(
-            RegisterNonGpuContextPayload(
-                instance_id=7,
-                model_name="m",
-                world_size=1,
-                block_size=4,
-                num_layers=2,
-                hidden_dim_size=16,
-                dtype_str="float32",
-                use_mla=False,
-            )
-        )
-        key = IPCCacheEngineKey.from_token_ids(
-            "m",
-            1,
-            0,
-            [1] * 8,
-            start=0,
-            end=8,
-            request_id="req",
-        )
-        assert module.prepare_store(key, 6).context.get("slots")
-        assert module.prepare_store(key, 7).context.get("slots")
-        assert mock_storage.reserve_write.call_count == 2
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=6))
+    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=7))
+    key = _default_key()
+    assert module.prepare_store(key, 6).context.get("slots")
+    assert module.prepare_store(key, 7).context.get("slots")
+    assert mock_storage.reserve_write.call_count == 2
 
 
 def test_server_non_gpu_reregister_returns_existing_shm_response(
     stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure duplicate non-GPU registration returns existing SHM response."""
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
-
-    mock_storage = MagicMock()
-
-    with (
-        patch(
-            "lmcache.v1.multiprocess.engine_context.StorageManager",
-            return_value=mock_storage,
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=2048
         ),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-    ):
-        ctx = MPCacheEngineContext(
-            storage_manager_config=_make_storage_manager_config(
-                shm_name="lmcache_test_pool", pool_size=2048
-            ),
-            chunk_size=8,
-        )
-        module = NonGPUTransferModule(ctx)
-        payload = RegisterNonGpuContextPayload(
-            instance_id=8,
-            model_name="m",
-            world_size=1,
-            block_size=4,
-            num_layers=2,
-            hidden_dim_size=16,
-            dtype_str="float32",
-            use_mla=False,
-        )
-        first_response = module.register_kv_cache_non_gpu_context(payload)
-        second_response = module.register_kv_cache_non_gpu_context(payload)
+    )
+    payload = _default_register_payload(instance_id=8)
+    first_response = module.register_kv_cache_non_gpu_context(payload)
+    second_response = module.register_kv_cache_non_gpu_context(payload)
 
-        assert first_response.shm_name == "lmcache_l1_pool_lmcache_test_pool"
-        assert first_response.pool_size == 2048
-        assert second_response.shm_name == "lmcache_l1_pool_lmcache_test_pool"
-        assert second_response.pool_size == 2048
+    assert first_response.shm_name == "lmcache_l1_pool_lmcache_test_pool"
+    assert first_response.pool_size == 2048
+    assert second_response.shm_name == "lmcache_l1_pool_lmcache_test_pool"
+    assert second_response.pool_size == 2048
 
 
 def test_server_unregister_non_gpu_context_releases_pending_shm_locks(
     stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
 ) -> None:
     """Ensure unregister releases pending SHM read/write reservations."""
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheEngineKey,
-        RegisterNonGpuContextPayload,
-    )
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
-
     mock_storage = MagicMock()
     mock_memory_obj = MagicMock()
     mock_memory_obj.tensor = torch.zeros(2, 2, 8, 16)
@@ -855,55 +780,22 @@ def test_server_unregister_non_gpu_context_releases_pending_shm_locks(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h"]
 
-    with (
-        patch(
-            "lmcache.v1.multiprocess.engine_context.StorageManager",
-            return_value=mock_storage,
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=4096
         ),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_cls,
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-        patch(
-            "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-            return_value=["obj"],
-        ),
-    ):
-        session_cls.return_value.get_or_create.return_value = mock_session
-        ctx = MPCacheEngineContext(
-            storage_manager_config=_make_storage_manager_config(
-                shm_name="lmcache_test_pool", pool_size=4096
-            ),
-            chunk_size=8,
-        )
-        module = NonGPUTransferModule(ctx)
-        module.register_kv_cache_non_gpu_context(
-            RegisterNonGpuContextPayload(
-                instance_id=4,
-                model_name="m",
-                world_size=1,
-                block_size=4,
-                num_layers=2,
-                hidden_dim_size=16,
-                dtype_str="float32",
-                use_mla=False,
-            )
-        )
-        key = IPCCacheEngineKey.from_token_ids(
-            "m",
-            1,
-            0,
-            [1] * 8,
-            start=0,
-            end=8,
-            request_id="req",
-        )
-        assert module.prepare_store(key, 4).context.get("slots")
-        assert module.prepare_retrieve(key, 4).success is True
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=4))
+    key = _default_key()
+    assert module.prepare_store(key, 4).context.get("slots")
+    assert module.prepare_retrieve(key, 4).success is True
 
-        module.unregister_kv_cache(4)
+    module.unregister_kv_cache(4)
 
-        mock_storage.finish_write.assert_called_once()
-        mock_storage.finish_read_prefetched.assert_called_once()
+    mock_storage.finish_write.assert_called_once()
+    mock_storage.finish_read_prefetched.assert_called_once()
 
 
 def test_gather_paged_kv_with_chunk_indices_subset() -> None:
@@ -947,37 +839,15 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     assert torch.allclose(out_buffers[1], all_chunks[2])
 
 
-def test_gather_paged_kv_chunk_indices_none_is_backward_compatible() -> None:
-    """chunk_indices=None gathers all chunks, same as before the fix."""
-    # First Party
-    from lmcache.v1.multiprocess.worker_transfer.base import gather_paged_kv_to_cpu
-
-    source = _make_kv_caches(num_layers=2, num_blocks=4, block_size=4)
-    out_all = gather_paged_kv_to_cpu(
-        source, [0, 1, 2, 3], blocks_per_chunk=2, chunk_indices=None
-    )
-    out_default = gather_paged_kv_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=2)
-    assert len(out_all) == len(out_default) == 2
-    for a, b in zip(out_all, out_default, strict=True):
-        assert torch.allclose(a, b)
-
-
 def test_server_prepare_store_includes_chunk_indices(
     stub_native_storage_ops: Any,
+    server_module_factory: ServerModuleFactory,
 ) -> None:
     """prepare_store response context includes chunk_indices for SHM mode.
 
     Regression test: the server must return the positional indices of the
     reserved chunks so the client only gathers KV data for those chunks.
     """
-    # First Party
-    from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheEngineKey,
-        RegisterNonGpuContextPayload,
-    )
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
-
     mock_storage = MagicMock()
     obj1 = "obj1"
     obj2 = "obj2"
@@ -990,49 +860,23 @@ def test_server_prepare_store_includes_chunk_indices(
     mock_session = MagicMock()
     mock_session.get_hashes.return_value = [b"h1", b"h2"]
 
-    with (
-        patch(
-            "lmcache.v1.multiprocess.engine_context.StorageManager",
-            return_value=mock_storage,
+    module, _, _, _ = server_module_factory(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name="lmcache_test_pool", pool_size=4096
         ),
-        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
-        patch("lmcache.v1.multiprocess.engine_context.SessionManager") as session_cls,
-        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
-        patch(
-            "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-            return_value=[obj1, obj2],
-        ),
-    ):
-        session_cls.return_value.get_or_create.return_value = mock_session
-        ctx = MPCacheEngineContext(
-            storage_manager_config=_make_storage_manager_config(
-                shm_name="lmcache_test_pool", pool_size=4096
-            ),
-            chunk_size=8,
-        )
-        module = NonGPUTransferModule(ctx)
-        module.register_kv_cache_non_gpu_context(
-            RegisterNonGpuContextPayload(
-                instance_id=10,
-                model_name="m",
-                world_size=1,
-                block_size=4,
-                num_layers=2,
-                hidden_dim_size=16,
-                dtype_str="float32",
-                use_mla=False,
-            )
-        )
-        key = IPCCacheEngineKey.from_token_ids(
-            "m", 1, 0, [1] * 16, start=0, end=16, request_id="req"
-        )
-        response = module.prepare_store(key, 10)
-        response_context = response.context
+        object_keys=[obj1, obj2],
+        mock_storage=mock_storage,
+        mock_session=mock_session,
+    )
+    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=10))
+    key = _default_key(tokens=16)
+    response = module.prepare_store(key, 10)
+    response_context = response.context
 
-        # slots should have 1 entry (only obj2 reserved)
-        assert len(response_context.get("slots", [])) == 1
-        # chunk_indices should be [1] (position of obj2 in [obj1, obj2])
-        assert response_context.get("chunk_indices") == [1]
+    # slots should have 1 entry (only obj2 reserved)
+    assert len(response_context.get("slots", [])) == 1
+    # chunk_indices should be [1] (position of obj2 in [obj1, obj2])
+    assert response_context.get("chunk_indices") == [1]
 
 
 class _CompletedFuture:
