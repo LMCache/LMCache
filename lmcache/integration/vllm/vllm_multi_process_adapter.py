@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
 import enum
@@ -492,12 +491,6 @@ class LMCacheMPSchedulerAdapter:
         #   request_id (min hit across servers, in tokens). Popped by
         #   `cleanup_lookup_result`.
 
-        # One worker thread per server so all lookups can be fired off at once.
-
-        self._executor = ThreadPoolExecutor(
-            max_workers=len(self._server_urls),
-            thread_name_prefix="lmcache-mp-lookup",
-        )
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
@@ -643,17 +636,23 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         ).no_worker_id_version()
 
-        # One task per server.
-        def _submit_one(url: str) -> tuple[str, bool]:
-            client = self.mq_clients[url]
+        futures: dict[str, MessagingFuture[Any]] = {}
+        for url in self._server_urls:
             try:
-                fut = send_lmcache_request(
-                    client,
+                futures[url] = send_lmcache_request(
+                    self.mq_clients[url],
                     RequestType.LOOKUP,
                     [key, self.tp_size],
                 )
+            except Exception as e:
+                logger.error("LOOKUP submit to %s failed: %s", url, e, exc_info=True)
+                self._health_events[url].clear()
+
+        results: list[tuple[str, bool]] = []
+        for url, fut in futures.items():
+            try:
                 fut.result(timeout=self._mq_timeout)
-                return url, True
+                results.append((url, True))
             except TimeoutError:
                 logger.warning(
                     "LOOKUP to %s timed out after %ss; marking unhealthy.",
@@ -661,14 +660,15 @@ class LMCacheMPSchedulerAdapter:
                     self._mq_timeout,
                 )
                 self._health_events[url].clear()
-                return url, False
+                results.append((url, False))
             except Exception as e:
                 logger.error("LOOKUP to %s failed: %s", url, e, exc_info=True)
                 self._health_events[url].clear()
-                return url, False
+                results.append((url, False))
 
-        # Fan out in parallel; total latency ~= slowest server, not sum.
-        results = list(self._executor.map(_submit_one, self._server_urls))
+        for url in self._server_urls:
+            if url not in futures:
+                results.append((url, False))
 
         # Only track as pending when every server accepted the job.
         if all(ok for _, ok in results):
@@ -715,44 +715,48 @@ class LMCacheMPSchedulerAdapter:
             # Aggregation already done; return the cached value.
             return self._finished_lookup_results[request_id]
 
-        # Each server is polled at most once per request_id: the server
-        # pops the job after its first non-None reply (re-asking would
-        # return 0, indistinguishable from a true zero-hit).
-        def _query_one(url: str) -> tuple[str, int | None]:
-            client = self.mq_clients[url]
-            try:
-                r = send_lmcache_request(
-                    client,
-                    RequestType.QUERY_PREFETCH_STATUS,
-                    [request_id],
-                ).result(timeout=self._mq_timeout)
-                return url, r
-            except TimeoutError:
-                logger.warning(
-                    "QUERY_PREFETCH_STATUS to %s timed out. Marking unhealthy.",
-                    url,
-                )
-                self._health_events[url].clear()
-                return url, None
-            except Exception as e:
-                logger.error(
-                    "QUERY_PREFETCH_STATUS to %s failed: %s", url, e, exc_info=True
-                )
-                self._health_events[url].clear()
-                return url, None
-
         # Persistent accumulator for this request. A server present in
         # the dict has already handed over its final hit count and must
         # not be polled again; absence means "not yet observed".
         per_server = self._per_server_hits.setdefault(request_id, {})
         unresolved_urls = [u for u in self._server_urls if u not in per_server]
 
-        if unresolved_urls:
-            results = list(self._executor.map(_query_one, unresolved_urls))
-        else:
-            results = []
+        futures: dict[str, MessagingFuture[Any]] = {}
+        for url in unresolved_urls:
+            try:
+                futures[url] = send_lmcache_request(
+                    self.mq_clients[url],
+                    RequestType.QUERY_PREFETCH_STATUS,
+                    [request_id],
+                )
+            except Exception as e:
+                logger.error(
+                    "QUERY_PREFETCH_STATUS submit to %s failed: %s",
+                    url,
+                    e,
+                    exc_info=True,
+                )
+                self._health_events[url].clear()
 
-        for url, r in results:
+        for url, fut in futures.items():
+            try:
+                r = fut.result(timeout=self._mq_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "QUERY_PREFETCH_STATUS to %s timed out. Marking unhealthy.",
+                    url,
+                )
+                self._health_events[url].clear()
+                continue
+            except Exception as e:
+                logger.error(
+                    "QUERY_PREFETCH_STATUS to %s failed: %s",
+                    url,
+                    e,
+                    exc_info=True,
+                )
+                self._health_events[url].clear()
+                continue
             if r is None:
                 continue
             per_server[url] = int(r)
@@ -794,7 +798,6 @@ class LMCacheMPSchedulerAdapter:
 
     def shutdown(self) -> None:
         """Shutdown the scheduler adapter and its resources."""
-        self._executor.shutdown(wait=True)
         for client in self.mq_clients.values():
             client.close()
         with self._heartbeat_lock:
