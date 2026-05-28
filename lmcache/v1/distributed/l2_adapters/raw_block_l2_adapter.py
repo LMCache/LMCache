@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -80,6 +81,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         meta_checkpoint_interval_sec: int = 60,
         meta_idle_quiet_ms: int = 100,
         meta_enable_periodic: bool = True,
+        load_checkpoint_on_init: bool = True,
         meta_verify_on_load: bool = True,
         enable_zero_copy: bool = True,
         io_engine: str = "posix",
@@ -103,6 +105,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_checkpoint_interval_sec: Periodic checkpoint interval.
             meta_idle_quiet_ms: Quiet period before periodic checkpoints.
             meta_enable_periodic: Whether to run the checkpoint thread.
+            load_checkpoint_on_init: Whether to load existing checkpoint metadata.
             meta_verify_on_load: Whether recovery verifies slot headers.
             enable_zero_copy: Whether to use aligned direct-buffer I/O.
             io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
@@ -124,6 +127,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         self.meta_checkpoint_interval_sec = int(meta_checkpoint_interval_sec)
         self.meta_idle_quiet_ms = int(meta_idle_quiet_ms)
         self.meta_enable_periodic = bool(meta_enable_periodic)
+        self.load_checkpoint_on_init = bool(load_checkpoint_on_init)
         self.meta_verify_on_load = bool(meta_verify_on_load)
         self.enable_zero_copy = bool(enable_zero_copy)
         self.io_engine = normalize_raw_block_io_engine(io_engine)
@@ -206,6 +210,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_checkpoint_interval_sec=int(d.get("meta_checkpoint_interval_sec", 60)),
             meta_idle_quiet_ms=int(d.get("meta_idle_quiet_ms", 100)),
             meta_enable_periodic=bool(d.get("meta_enable_periodic", True)),
+            load_checkpoint_on_init=bool(d.get("load_checkpoint_on_init", True)),
             meta_verify_on_load=bool(d.get("meta_verify_on_load", True)),
             enable_zero_copy=bool(d.get("enable_zero_copy", True)),
             io_engine=io_engine,
@@ -237,6 +242,8 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             "- meta_idle_quiet_ms (int): quiet period before checkpoint (default 100)\n"
             "- meta_enable_periodic (bool): enable periodic checkpointing "
             "(default true)\n"
+            "- load_checkpoint_on_init (bool): load existing metadata checkpoint "
+            "on startup (default true)\n"
             "- meta_verify_on_load (bool): validate slot headers on recovery "
             "(default true)\n"
             "- enable_zero_copy (bool): use aligned direct buffers when possible "
@@ -265,6 +272,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             meta_checkpoint_interval_sec=self.meta_checkpoint_interval_sec,
             meta_idle_quiet_ms=self.meta_idle_quiet_ms,
             meta_enable_periodic=self.meta_enable_periodic,
+            load_checkpoint_on_init=self.load_checkpoint_on_init,
             meta_verify_on_load=self.meta_verify_on_load,
             io_engine=self.io_engine,
             iouring_queue_depth=self.iouring_queue_depth,
@@ -344,7 +352,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._lock = threading.Lock()
         self._next_task_id: L2TaskId = 0
 
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
 
@@ -407,7 +415,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         future.add_done_callback(partial(self._finish_store_task, task_id))
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         """Drain and return completed store task results."""
         with self._lock:
             completed = self._completed_store_tasks
@@ -650,13 +658,17 @@ class RawBlockL2Adapter(L2AdapterInterface):
         success = False
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+        bytes_transferred = 0
         try:
             success, stored_keys, stored_sizes = future.result()
+            bytes_transferred = sum(stored_sizes)
         except Exception as e:
             logger.error("RawBlockL2Adapter store task %d failed: %s", task_id, e)
         with self._lock:
             self._store_inflight_tasks -= 1
-            self._completed_store_tasks[task_id] = success
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
             event_fd = self._store_efd
         if stored_keys:
             try:

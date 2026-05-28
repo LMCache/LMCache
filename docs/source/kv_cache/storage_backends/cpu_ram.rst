@@ -63,6 +63,56 @@ tokens into the pinned CPU RAM from the disk or remote storage (*if* the KV cach
 tokens are already stored there). This can preemptively avoid the latency of the disk and
 remote KV transfer if we predict these tokens will be requested soon (e.g. structured or agentic workflows).
 
+.. _cpu_ram-hugepage-support:
+
+Hugepage Support
+-----------------
+
+By default LMCache allocates CPU-pinned memory using regular 4 KiB pages.
+For large KV cache buffers (multiple gigabytes), enabling **Linux hugepages**
+(2 MiB pages) can reduce TLB (Translation Lookaside Buffer) pressure and
+improve memory access performance.
+
+**System prerequisite**
+
+Hugepages must be pre-allocated at the OS level before LMCache starts.
+TO find the number of pages needed, divide the desired buffer size by 2 MiB and round up.
+For example, 5 GB requires at least 2560 pages:
+
+.. code-block:: bash
+
+    # Allocate 2560 hugepages (5 GB)
+    sudo sysctl -w vm.nr_hugepages=2560
+
+    # Make persistent across reboots
+    echo 'vm.nr_hugepages=2560' | sudo tee -a /etc/sysctl.conf
+
+Verify that pages are available:
+
+.. code-block:: bash
+
+    grep HugePages /proc/meminfo
+    # HugePages_Total:    2560
+    # HugePages_Free:     2560
+
+**Configuration**
+
+.. code-block:: yaml
+
+    local_cpu_use_hugepages: true
+
+Or via environment variable:
+
+.. code-block:: bash
+
+    export LMCACHE_LOCAL_CPU_USE_HUGEPAGES=true
+
+**Restrictions**
+
+- Hugepages are **not compatible with P2P mode** (``enable_p2p: true``).
+- Hugepages are **not compatible with shared memory** (``shm_name`` is set).
+- On non-CUDA platforms, hugepages are not supported. Regular allocation will be used as fallback.
+
 .. _cpu_ram-online-inference-example:
 
 Online Inference Example

@@ -100,6 +100,7 @@ def _make_raw_block_core(*, use_odirect: bool = False) -> RawBlockCore:
             meta_checkpoint_interval_sec=60,
             meta_idle_quiet_ms=100,
             meta_enable_periodic=False,
+            load_checkpoint_on_init=True,
             meta_verify_on_load=True,
             io_engine="posix",
             iouring_queue_depth=256,
@@ -162,6 +163,7 @@ def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch):
             meta_checkpoint_interval_sec=60,
             meta_idle_quiet_ms=100,
             meta_enable_periodic=False,
+            load_checkpoint_on_init=True,
             meta_verify_on_load=True,
             io_engine="io_uring",
             iouring_queue_depth=512,
@@ -1131,6 +1133,86 @@ def test_rust_raw_block_backend_device_checkpoint_roundtrip(
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
+def test_rust_raw_block_backend_skips_checkpoint_on_init(
+    memory_allocator, loop_in_thread
+):
+    """Skip on-device metadata checkpoint loading when configured."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            max_local_cpu_size=0.1,
+            lmcache_instance_id="test_rust_raw_block_backend_skip_checkpoint",
+        )
+        config.extra_config = {
+            "rust_raw_block.device_path": dev_path,
+            "rust_raw_block.block_align": 4096,
+            "rust_raw_block.header_bytes": 4096,
+            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
+            "rust_raw_block.meta_enable_periodic": False,
+        }
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(4, 2, 256, 8, 128),
+        )
+
+        local_cpu = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend1 = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu,
+            loop=loop_in_thread,
+            dst_device="cpu",
+        )
+        allocator = AdHocMemoryAllocator(device="cpu")
+        key = CacheEngineKey("test_model", 1, 0, 222, torch.bfloat16)
+        obj = allocator.allocate(
+            [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
+        )
+        assert obj is not None
+        try:
+            fut = backend1.batched_submit_put_task([key], [obj])[0]
+            fut.result(timeout=10)
+        finally:
+            backend1.close()
+
+        config.extra_config["rust_raw_block.load_checkpoint_on_init"] = False
+        with patch.object(
+            RawBlockCore,
+            "_select_latest_checkpoint",
+            side_effect=AssertionError("checkpoint retrieval should be skipped"),
+        ) as mock_select_latest_checkpoint:
+            backend2 = RustRawBlockBackend(
+                config=config,
+                metadata=metadata,
+                local_cpu_backend=local_cpu,
+                loop=loop_in_thread,
+                dst_device="cpu",
+            )
+        try:
+            assert mock_select_latest_checkpoint.call_count == 0
+            assert backend2.contains(key) is False
+        finally:
+            backend2.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
 def test_rust_raw_block_backend_data_offsets_start_after_metadata(
     memory_allocator, loop_in_thread
 ):
@@ -1995,11 +2077,15 @@ def test_rust_raw_block_backend_uring_put_get_roundtrip(
                 out = backend.get_blocking(key)
                 assert out is not None, f"Failed to read key {i}"
                 actual_data = bytes(out.byte_array)
-                assert actual_data == expected_data[i], (
-                    f"Data mismatch for key {i}: "
-                    f"expected first bytes {expected_data[i][:16]}, "
-                    f"got {actual_data[:16]}"
-                )
+                # Use `raise AssertionError` instead of `assert ==` so pytest
+                # doesn't try to render a difflib diff between two large
+                # byte arrays on failure (effectively a hang on _fancy_replace).
+                if actual_data != expected_data[i]:
+                    raise AssertionError(
+                        f"Data mismatch for key {i}: "
+                        f"expected first bytes {expected_data[i][:16]!r}, "
+                        f"got {actual_data[:16]!r}"
+                    )
 
         finally:
             backend.close()
@@ -2054,7 +2140,16 @@ def test_rust_raw_block_backend_close_with_inflight(memory_allocator, loop_in_th
             for i, expected in enumerate(buffers):
                 actual = bytearray(payload_len)
                 reader.pread_into(i * payload_len, actual, payload_len, payload_len)
-                assert actual == expected
+                # Use `raise AssertionError` instead of `assert ==` so pytest
+                # doesn't try to render a difflib-based diff between two
+                # large byte arrays on failure, which is O(n^2) on
+                # `_fancy_replace` and effectively never returns.
+                if actual != expected:
+                    raise AssertionError(
+                        f"Data mismatch at offset {i * payload_len}: "
+                        f"expected first bytes {bytes(expected[:16])!r}, "
+                        f"got {bytes(actual[:16])!r}"
+                    )
         finally:
             reader.close()
 

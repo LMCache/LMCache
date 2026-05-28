@@ -11,10 +11,8 @@ path selection to this module so the policy lives in one place.
 from typing import List
 import os
 
-# Third Party
-import torch
-
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
@@ -29,16 +27,16 @@ def _resolve_device_id(dst_device: str) -> int:
 
     Returns:
         Integer device index.  Falls back to
-        :func:`torch.cuda.current_device` when the string carries no
-        explicit index, or ``0`` when CUDA is unavailable.
+        :func:`torch_dev.current_device` when the string carries no
+        explicit index, or ``0`` when the accelerator is unavailable.
     """
     if ":" in dst_device:
         try:
             return int(dst_device.split(":", 1)[1])
         except ValueError:
             logger.warning(f"Invalid device index in '{dst_device}', falling back.")
-    if "cuda" in dst_device and torch.cuda.is_available():
-        return torch.cuda.current_device()
+    if torch_dev.is_available() and dst_device != "cpu":
+        return torch_dev.current_device()
     return 0
 
 

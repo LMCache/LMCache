@@ -40,7 +40,7 @@ from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
@@ -131,7 +131,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         self._serde_to_load: dict[SerdeTaskId, L2TaskId] = {}
 
         # User-visible completion queues (drained by controller polls).
-        self._completed_store: dict[L2TaskId, bool] = {}
+        self._completed_store: dict[L2TaskId, L2StoreResult] = {}
         self._completed_load: dict[L2TaskId, Bitmap] = {}
 
         self._stop_flag = threading.Event()
@@ -213,7 +213,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
             return wrapped_id
         return wrapped_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             result = self._completed_store
             self._completed_store = {}
@@ -457,7 +457,7 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         """Drain inner store completions; release temp read locks (auto-
         delete) and finalize the wrapped tasks."""
         completed = self._inner.pop_completed_store_tasks()
-        for inner_id, success in completed.items():
+        for inner_id, result in completed.items():
             with self._lock:
                 wrapped_id = self._inner_to_store.pop(inner_id, None)
                 state = (
@@ -473,7 +473,9 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
                 continue
             if state is not None:
                 self._l1_manager.finish_read(state.temp_keys)
-            self._finalize_store(wrapped_id, success)
+            self._finalize_store(
+                wrapped_id, result.is_successful(), result.bytes_transferred()
+            )
 
     def _drain_inner_load(self) -> None:
         """Drain inner load completions; on per-key success submit
@@ -607,10 +609,17 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
         except Exception:
             logger.exception("Serde wrapper: failed releasing write-locked temps")
 
-    def _finalize_store(self, wrapped_id: L2TaskId, success: bool) -> None:
+    def _finalize_store(
+        self,
+        wrapped_id: L2TaskId,
+        success: bool,
+        bytes_transferred: int = 0,
+    ) -> None:
         with self._lock:
             self._store_tasks.pop(wrapped_id, None)
-            self._completed_store[wrapped_id] = success
+            self._completed_store[wrapped_id] = L2StoreResult(
+                success, bytes_transferred
+            )
         try:
             self._store_efd.notify()
         except OSError:

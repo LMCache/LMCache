@@ -279,6 +279,9 @@ class RustRawBlockBackend(StoragePluginInterface):
             meta_enable_periodic=bool(
                 extra.get("rust_raw_block.meta_enable_periodic", True)
             ),
+            load_checkpoint_on_init=bool(
+                extra.get("rust_raw_block.load_checkpoint_on_init", True)
+            ),
             meta_verify_on_load=bool(
                 extra.get("rust_raw_block.meta_verify_on_load", True)
             ),

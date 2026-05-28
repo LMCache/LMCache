@@ -3,6 +3,7 @@
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+import math
 import os
 
 # Third Party
@@ -85,6 +86,7 @@ class DisaggSpec:
     receiver_alloc_port: int
     is_last_prefill: bool = False
     num_transferred_tokens: int = 0
+    total_chunks: int = 0
     receiver_query_port: Optional[list[int]] = None
 
 
@@ -413,6 +415,12 @@ class ReqMeta:
                 tracker.req_id,
             )
 
+        # For disagg requests, compute total_chunks for sender admission control.
+        if tracker.disagg_spec is not None and tracker.disagg_spec.total_chunks == 0:
+            # Only compute once (on first batch)
+            total_chunks_for_req = math.ceil(tracker.prompt_len / lmcache_chunk_size)
+            tracker.disagg_spec.total_chunks = total_chunks_for_req
+
         # Note: We keep load_spec even when can_load=False to pass metrics to worker
         return ReqMeta(
             req_id=tracker.req_id,
@@ -610,15 +618,19 @@ class LMCacheConnectorV1Impl:
         """Get the lookup server from manager."""
         return self._manager.lookup_server
 
-    def _setup_metrics(self):
+    def _setup_metrics(self) -> None:
         """Setup metrics for monitoring data structures in the connector."""
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is None:
+        metadata = self._manager.lmcache_engine_metadata
+        if metadata is None:
             logger.warning(
-                "PrometheusLogger is not initialized, "
+                "LMCache metadata is not initialized, "
                 "connector metrics will not be collected"
             )
             return
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            metadata,
+            config=self.config,
+        )
 
         # Set up metrics for scheduler-specific and general data structures
         metrics_map = {
@@ -1766,11 +1778,18 @@ class LMCacheConnectorV1Impl:
             self._layerwise_save_storers.pop(request.request_id, None)
 
         # Cleanup if request was aborted
-        if request.status == RequestStatus.FINISHED_ABORTED and self.async_loading:
-            # Cancel any ongoing async lookup and prefetch tasks on workers
-            lookup_id = request.request_id
-            assert self.lookup_client is not None
-            self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
+        if request.status == RequestStatus.FINISHED_ABORTED:
+            # Notify storage backends of aborted requests
+            assert self.lmcache_engine is not None
+            sm = self.lmcache_engine.storage_manager
+            if sm is not None:
+                sm.cancel_request(request.request_id)
+
+            if self.async_loading:
+                # Cancel any ongoing async lookup and prefetch tasks on workers
+                lookup_id = request.request_id
+                assert self.lookup_client is not None
+                self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
 
         params = (
             request.kv_transfer_params

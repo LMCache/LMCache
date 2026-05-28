@@ -53,10 +53,10 @@ class LookupMetricsSubscriber(EventSubscriber):
     """Maintains OTel counters for L1+L2 token-level cache hit rate.
 
     Metrics (both labeled by ``model_name`` and ``cache_salt``):
-    - ``lmcache_mp.lookup_requested_tokens`` — tokens submitted for lookup
+    - ``lmcache_mp.lookup_requested`` — tokens submitted for lookup
       (denominator).  Counts only the chunk-aligned portion; sub-chunk
       trailing tokens are excluded because they cannot hit by design.
-    - ``lmcache_mp.lookup_hit_tokens`` — tokens found in L1+L2 during the
+    - ``lmcache_mp.lookup_hit`` — tokens found in L1+L2 during the
       lookup (numerator).  Counts the contiguous prefix hit only.
     """
 
@@ -64,7 +64,7 @@ class LookupMetricsSubscriber(EventSubscriber):
         meter = metrics.get_meter("lmcache.lookup")
 
         self._requested_tokens = meter.create_counter(
-            "lmcache_mp.lookup_requested_tokens",
+            "lmcache_mp.lookup_requested",
             description=(
                 "Total tokens submitted for lookup (denominator of the "
                 "L1+L2 token-level hit rate). Only chunk-aligned tokens "
@@ -73,7 +73,7 @@ class LookupMetricsSubscriber(EventSubscriber):
             unit="tokens",
         )
         self._hit_tokens = meter.create_counter(
-            "lmcache_mp.lookup_hit_tokens",
+            "lmcache_mp.lookup_hit",
             description=(
                 "Total tokens found in L1+L2 during lookup (numerator of "
                 "the L1+L2 token-level hit rate). Counts the contiguous "

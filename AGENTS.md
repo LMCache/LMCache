@@ -30,8 +30,11 @@ uv pip install -e . --no-build-isolation
 # Standard install with CUDA extensions (requires torch pre-installed)
 pip install -e . --no-build-isolation
 
-# Source-only (no CUDA extensions)
-NO_CUDA_EXT=1 pip install -e .
+# Source-only (no native extensions)
+NO_NATIVE_EXT=1 pip install -e .
+
+# CPU-only (common C++ extensions, no GPU backend)
+NO_GPU_EXT=1 pip install -e . --no-build-isolation
 
 # HIP/ROCm build
 BUILD_WITH_HIP=1 pip install -e .
@@ -44,11 +47,10 @@ BUILD_WITH_HIP=1 pip install -e .
 ```bash
 # Run standard test suite (mirrors CI)
 pytest -xvs --ignore=tests/disagg \
-  --ignore=tests/v1/test_nixl_storage.py \
-  --ignore=tests/v1/multiprocess/ \
-  --ignore=tests/v1/distributed/ \
-  --ignore=tests/skipped \
-  --ignore=tests/v1/storage_backend/test_eic.py
+ --ignore=tests/v1/multiprocess/ \
+ --ignore=tests/v1/distributed/ \
+ --ignore=tests/skipped \
+ --ignore=tests/v1/storage_backend/test_eic.py
 
 # Run a single test file
 pytest -xvs tests/v1/test_cache_engine.py

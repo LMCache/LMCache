@@ -16,7 +16,7 @@ lmcache
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
 ├── query    {kvcache,engine}       # Single-shot query with metrics
-├── bench    {kvcache,engine}       # Sustained performance benchmarking
+├── bench    {engine,server,l2}    # Sustained performance benchmarking
 └── kvcache  {clear,end-session}    # KV cache management actions
 ```
 
@@ -82,7 +82,7 @@ Running requests:                        3
 ```
 
 `describe kvcache` gathers data from multiple ZMQ request types (`NOOP` for debug
-info, `GET_CHUNK_SIZE` for chunk size) and `/api/status` (HTTP) to build a
+info, `GET_CHUNK_SIZE` for chunk size) and `/status` (HTTP) to build a
 consolidated view.
 
 ### `lmcache ping`
@@ -90,7 +90,7 @@ consolidated view.
 Pure liveness check for both targets. Returns OK/FAIL with round-trip time,
 measuring only the network round-trip excluding local Python overhead.
 
-**`ping kvcache`** -- pings the LMCache server process via HTTP `/api/healthcheck`:
+**`ping kvcache`** -- pings the LMCache server process via HTTP `/healthcheck`:
 ```bash
 $ lmcache ping kvcache --url http://localhost:8080
 
@@ -285,7 +285,11 @@ lmcache/cli/
 │   ├── describe.py      # lmcache describe {kvcache,engine}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
 │   ├── query.py         # lmcache query {kvcache,engine}
-│   ├── bench.py         # lmcache bench {kvcache,engine}
+│   ├── bench/           # lmcache bench {engine,server,l2}
+│   │   ├── __init__.py          # BenchCommand + dispatch
+│   │   ├── engine_bench/        # lmcache bench engine
+│   │   ├── server_bench/        # lmcache bench server
+│   │   └── l2_adapter_bench/    # lmcache bench l2
 │   └── kvcache.py       # lmcache kvcache {clear,end-session}
 ├── config.py            # CLIConfig (centralized config system)
 └── corpora/             # Built-in prompt corpora
@@ -294,7 +298,7 @@ lmcache/cli/
 ### Other notes
 
 - **Entry point:** `lmcache = "lmcache.cli.main:main"` in `pyproject.toml`.
-- **`bench engine`:** Wraps `vllm.benchmarks`, then queries `/api/status` for
+- **`bench engine`:** Wraps `vllm.benchmarks`, then queries `/status` for
   cache metrics.
 - **`query kvcache`:** Tokenizes `--prompt` using the model's tokenizer, then
   performs a lookup over ZMQ to check which chunks are cached.
@@ -305,7 +309,7 @@ lmcache/cli/
 |-------|-------|
 | **0** | CLI framework (explicit registration, `Metrics`), `mock` example command, entry point — see [framework-and-metrics.md](framework-and-metrics.md) |
 | **1** | **`server`** (done), `ping kvcache`, `kvcache clear`, `kvcache end-session`, `describe kvcache` |
-| **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench kvcache`, `describe engine`, corpora |
+| **2** | `ping engine`, `query engine`, `query kvcache`, `bench engine`, `bench server`, `bench l2`, `describe engine`, corpora |
 | **3** | `kvcache evict` (future) |
 
 Existing `lmcache_server` entry point kept as a deprecated alias for 2 minor releases.

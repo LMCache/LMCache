@@ -28,6 +28,7 @@ import time
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCacheStatsLogger, LMCStatsMonitor
 from lmcache.usage_context import InitializeUsageContext
@@ -118,7 +119,7 @@ class LMCacheEngine:
             self.broadcast_stream = (
                 self.gpu_connector.load_stream
                 if hasattr(self.gpu_connector, "load_stream")
-                else torch.cuda.Stream()
+                else torch_dev.Stream()
             )
 
         self.enable_controller = config.enable_controller
@@ -208,7 +209,7 @@ class LMCacheEngine:
         InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         # Initialize PinMonitor singleton with config
-        PinMonitor.GetOrCreate(config)
+        PinMonitor.GetOrCreate(config, metadata)
 
         self.post_inited = False
 
@@ -418,7 +419,7 @@ class LMCacheEngine:
             )
             num_to_store_tokens = sum(offsets)
             kwargs["slot_mapping"] = torch.tensor(
-                kwargs["slot_mapping"], dtype=torch.long, device="cuda"
+                kwargs["slot_mapping"], dtype=torch.long, device=torch_device_type
             )
 
         assert tokens is not None or hashes is not None, (
@@ -829,7 +830,7 @@ class LMCacheEngine:
 
         if self.save_only_first_rank:
             with retrieve_stats.profile_broadcast():
-                with torch.cuda.stream(self.broadcast_stream):
+                with torch_dev.stream(self.broadcast_stream):
                     self._broadcast_or_receive_memory_objs(
                         reordered_chunks,
                         ret_mask,
@@ -839,7 +840,7 @@ class LMCacheEngine:
                 # to self.gpu_connector.load_stream, the broadcast and to_gpu operation
                 # will execute sequentially within the stream.
                 # if self.gpu_connector does not have load_stream, self.broadcast_stream
-                # is created by torch.cuda.Stream(), we need to synchronize broadcast
+                # is created by torch_dev.Stream(), we need to synchronize broadcast
                 # operation, and then process to_cpu operation.
                 if not hasattr(self.gpu_connector, "load_stream"):
                     self.broadcast_stream.synchronize()
@@ -861,7 +862,12 @@ class LMCacheEngine:
             if self.remove_after_retrieve and not self._is_passive():
                 assert self.storage_manager is not None
                 self.storage_manager.remove(key, self.retrieve_locations)
-            if not self.async_loading:
+                # Sync PDBackend.remove() does NOT call ref_count_down() internally
+                # (unlike async PD and other backends), so we must call it manually.
+                # See pd_backend.py line 605 TODO comment.
+                if self._is_sync_pd_backend():
+                    memory_obj.ref_count_down()
+            elif not self.async_loading:
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
@@ -1271,6 +1277,12 @@ class LMCacheEngine:
         if search_range is None:
             search_range = self.retrieve_locations
 
+        # When layerwise is enabled, store_layer writes per-layer keys
+        # (LayerCacheEngineKey, chunk_hash + layer_id). Async lookup must
+        # split each chunk key into num_layers per-layer keys so the
+        # storage backend hot_cache lookups match the same key type.
+        keys_per_chunk = self.num_layers if self.use_layerwise else 1
+
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -1279,12 +1291,20 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            keys.append(key)
+            if self.use_layerwise:
+                keys.extend(key.split_layers(self.num_layers))
+            else:
+                keys.append(key)
             cum_chunk_lengths.append(end)
 
         asyncio.run_coroutine_threadsafe(
             self.storage_manager.async_lookup_and_prefetch(
-                lookup_id, keys, cum_chunk_lengths, search_range, pin
+                lookup_id,
+                keys,
+                cum_chunk_lengths,
+                search_range,
+                pin,
+                keys_per_chunk=keys_per_chunk,
             ),
             self.storage_manager.loop,
         )
@@ -1317,7 +1337,8 @@ class LMCacheEngine:
             for key, memory_obj in memory_objs_flat:
                 try:
                     logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
-                    memory_obj.unpin()
+                    if memory_obj.is_pinned:
+                        memory_obj.unpin()
                     memory_obj.ref_count_down()
                 except Exception as e:
                     logger.error(f"Error releasing memory object: {e}")
@@ -1689,22 +1710,28 @@ class LMCacheEngine:
         if last_failed_block_start is not None:
             ret_mask[last_failed_block_start:] = False
 
-            for key, memory_obj, _, end in reordered_chunks:
-                if end > last_failed_block_start:
-                    logger.debug(
-                        "ref_count_down for %s as it is truncated by "
-                        "last_failed_block_start %d",
-                        key,
-                        last_failed_block_start,
-                    )
+            kept_chunks: List[ProcessedChunk] = []
+            for key, memory_obj, start, end in reordered_chunks:
+                if end <= last_failed_block_start:
+                    kept_chunks.append((key, memory_obj, start, end))
+                else:
                     tot_kv_size -= memory_obj.get_size()
-                    memory_obj.ref_count_down()
-
-            reordered_chunks = [
-                (key, memory_obj, start, end)
-                for key, memory_obj, start, end in reordered_chunks
-                if end <= last_failed_block_start
-            ]
+                    # This chunk will not be used. If the engine is configured
+                    # to remove-after-retrieve, the caller would normally call
+                    # remove (which frees the block), but since we are dropping
+                    # these chunks here, we must free them ourselves to avoid
+                    # leaking PD buffer pool memory.
+                    if self.remove_after_retrieve:
+                        assert self.storage_manager is not None
+                        self.storage_manager.remove(key, self.retrieve_locations)
+                        # Sync PDBackend.remove() does NOT call ref_count_down()
+                        # internally (unlike async PD and other backends), so we
+                        # must call it manually. See pd_backend.py line 605.
+                        if self._is_sync_pd_backend():
+                            memory_obj.ref_count_down()
+                    else:
+                        memory_obj.ref_count_down()
+            reordered_chunks = kept_chunks
         return reordered_chunks, tot_kv_size
 
     def _broadcast_or_receive_memory_objs(
@@ -1746,7 +1773,9 @@ class LMCacheEngine:
                 # Broadcast tensor data
                 raw_tensor = memory_obj.raw_tensor
                 assert raw_tensor is not None
-                tensor_to_broadcast = raw_tensor.to(f"cuda:{self.metadata.worker_id}")
+                tensor_to_broadcast = raw_tensor.to(
+                    f"{torch_device_type}:{self.metadata.worker_id}"
+                )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
         else:
             # Receive total chunk count
@@ -1774,11 +1803,11 @@ class LMCacheEngine:
 
                 # Create tensor and receive data
                 metadata = MemoryObjMetadata.from_dict(metadata_dict)
-                local_rank = self.metadata.worker_id % torch.cuda.device_count()
+                local_rank = self.metadata.worker_id % torch_dev.device_count()
                 raw_tensor = torch.empty(
                     torch.Size([metadata.get_size()]),
                     dtype=torch.uint8,
-                    device=f"cuda:{local_rank}",
+                    device=f"{torch_device_type}:{local_rank}",
                 )
                 self.broadcast_fn(raw_tensor, self.metadata.first_rank)
 
@@ -1794,6 +1823,14 @@ class LMCacheEngine:
         the data directly, but from the "active" worker (i.e., rank 0 in MLA)
         """
         return self.save_only_first_rank and not self.metadata.is_first_rank()
+
+    def _is_sync_pd_backend(self) -> bool:
+        """Check if the PD backend is the sync variant.
+
+        :return: True when PD is enabled and ``pd_backend_mode`` is ``"sync"``.
+        :rtype: bool
+        """
+        return self.config.enable_pd and self.config.pd_backend_mode == "sync"
 
     def _get_slot_mapping_list(
         self,
@@ -1902,12 +1939,21 @@ class LMCacheEngineBuilder:
             )
 
             if corrected_device == "cpu":
-                torch.cuda.cudart().cudaHostRegister(
-                    buffer.data_ptr(), config.nixl_buffer_size, 0
-                )
+                # Not all backends support cudart() for host memory pinning
+                if not hasattr(torch_dev, "cudart"):
+                    raise RuntimeError(
+                        f"Backend '{torch_device_type}' does not support "
+                        "cudart(). NIXL storage CPU buffer requires "
+                        "pinned memory via cudaHostRegister, which is "
+                        "not available on this backend."
+                    )
+                else:
+                    torch_dev.cudart().cudaHostRegister(
+                        buffer.data_ptr(), config.nixl_buffer_size, 0
+                    )
             else:
-                logger.info(f"Setting cuda device to {corrected_device} ")
-                torch.cuda.set_device(corrected_device)
+                logger.info(f"Setting device to {corrected_device} ")
+                torch_dev.set_device(corrected_device)
 
             return PagedTensorMemoryAllocator(
                 buffer,
@@ -1971,7 +2017,7 @@ class LMCacheEngineBuilder:
         raises: ValueError if the instance already exists with a different
             configuration.
         """
-        logger.info(f"Creating LMCacheEngine instance {instance_id}")
+        logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:
             numa_mapping = NUMADetector.get_numa_mapping(config)
             logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
@@ -2017,7 +2063,7 @@ class LMCacheEngineBuilder:
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
         # TODO: unit test for this
-        logger.info(f"Destroying LMCacheEngine instance: {instance_id}")
+        logger.info("Destroying LMCacheEngine instance: %s", instance_id)
 
         if instance_id in cls._instances:
             stat_logger = cls._stat_loggers[instance_id]
@@ -2053,6 +2099,6 @@ class LMCacheEngineBuilder:
             except Exception as e:
                 logger.error(f"Error destroying stats monitor: {e}")
 
-            logger.info(f"LMCacheEngine instance {instance_id} destroyed")
+            logger.info("LMCacheEngine instance %s destroyed", instance_id)
         else:
             logger.warning(f"Instance {instance_id} not found for destruction")

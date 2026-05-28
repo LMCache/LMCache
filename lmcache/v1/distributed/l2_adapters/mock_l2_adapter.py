@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
@@ -124,7 +125,7 @@ class MockL2Adapter(L2AdapterInterface):
 
         # Task ID management
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()  # lock for all shared state
@@ -181,15 +182,13 @@ class MockL2Adapter(L2AdapterInterface):
 
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         """
-        Pop all the completed store tasks with a flag indicating
-        whether the task is successful or not.
+        Pop all the completed store tasks with their results.
 
         Returns:
-            dict[L2TaskId, bool]: a dictionary mapping the task id to a boolean flag
-            indicating whether the task is successful or not. True means
-            successful, and False means failed.
+            dict[L2TaskId, L2StoreResult]: a dictionary mapping the task id to
+            an L2StoreResult encoding success/failure and bytes transferred.
         """
         with self._lock:
             completed = self._completed_store_tasks
@@ -433,7 +432,11 @@ class MockL2Adapter(L2AdapterInterface):
         # Schedule completion coroutine on the event loop
         await asyncio.sleep(delay_seconds)
         with self._lock:
-            self._completed_store_tasks[task_id] = success
+            # ``total_bytes`` counts only objects actually written into
+            # ``self._memory_objects`` — duplicates and capacity-skipped
+            # keys are excluded.  Reporting this lets the L2 throughput
+            # subscriber distinguish real I/O from fast-pathed no-ops.
+            self._completed_store_tasks[task_id] = L2StoreResult(success, total_bytes)
 
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
