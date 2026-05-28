@@ -8,7 +8,7 @@ on:
       max_entries:
         description: "Maximum entries to translate in this run"
         required: false
-        default: "10"
+        default: "50"
 
 concurrency:
     group: update-chinese-docs
@@ -60,7 +60,7 @@ jobs:
             rel="${po#docs/source/locale/zh_CN/LC_MESSAGES/}"
             if [ ! -f "docs/build/gettext/${rel%.po}.pot" ]; then
               echo "deleting $po (no matching source doc)"
-              git rm -q --ignore-unmatch "$po"
+              git rm -fq --ignore-unmatch "$po"
             fi
           done
 
