@@ -179,6 +179,60 @@ class ParallelPatternMatcher:
         """
         ...
 
+class PeriodicEventNotifier:
+    """Singleton that periodically signals registered file descriptors.
+
+    A background thread writes to every registered fd at a configurable
+    interval.  The thread sleeps when no fds are registered and wakes
+    automatically when the first fd is added.
+    """
+
+    @staticmethod
+    def create(interval_ms: int, use_eventfd: bool) -> None:
+        """Create the singleton. Idempotent -- second call is a no-op.
+
+        Args:
+            interval_ms: Notification interval in milliseconds.
+            use_eventfd: True to write as eventfd (8-byte uint64),
+                False to write as pipe (1-byte).
+        """
+        ...
+
+    @staticmethod
+    def get() -> PeriodicEventNotifier | None:
+        """Return the singleton instance, or None if not created."""
+        ...
+
+    @staticmethod
+    def shutdown() -> None:
+        """Shut down the singleton and join its thread. Idempotent."""
+        ...
+
+    def register_fd(self, fd: int) -> None:
+        """Register a file descriptor for periodic signaling.
+
+        Args:
+            fd: The file descriptor to signal. For eventfd, pass the
+                eventfd itself. For pipes, pass the write end.
+        """
+        ...
+
+    def unregister_fd(self, fd: int) -> None:
+        """Unregister a file descriptor. No-op if not registered.
+
+        Args:
+            fd: The file descriptor to stop signaling.
+        """
+        ...
+
+    def set_interval_ms(self, interval_ms: int) -> None:
+        """Change the notification interval. Clamped to >= 1ms.
+
+        Args:
+            interval_ms: New interval in milliseconds.
+        """
+        ...
+
 class RangePatternMatcher:
     """
     Range pattern matcher for integer vectors.

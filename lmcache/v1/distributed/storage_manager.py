@@ -10,6 +10,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.native_storage_ops import PeriodicEventNotifier
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -46,6 +47,7 @@ from lmcache.v1.mp_observability.trace.decorator import (
     is_tracing_enabled,
     publish_call_event,
 )
+from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
 
@@ -77,6 +79,11 @@ class StorageManager:
                     l1_manager=self._l1_manager,
                 )
             self._l2_adapters.append(adapter)
+
+        PeriodicEventNotifier.create(
+            interval_ms=config.periodic_notifier_interval_ms,
+            use_eventfd=HAS_EVENTFD,
+        )
 
         # Per-cache_salt quota registry. Shared across the L2 eviction
         # controller (reads quotas each cycle) and the HTTP quota
@@ -646,6 +653,8 @@ class StorageManager:
         self._store_controller.stop()
         self._eviction_controller.stop()
         self._l2_eviction_controller.stop()
+
+        PeriodicEventNotifier.shutdown()
 
         for adapter in self._l2_adapters:
             adapter.close()
