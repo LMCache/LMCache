@@ -16,8 +16,7 @@ from .base import (
     scatter_cpu_to_paged_kv,
 )
 from .pickle import NonGpuContextPickle
-from .shm import NonGpuContextShm
-from .shm_types import ShmSlotDescriptor
+from .shm import NonGpuContextShm, ShmSlotDescriptor
 from .worker_transfer import (
     DataTransferContext,
     HandleTransferContext,
