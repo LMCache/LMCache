@@ -85,6 +85,7 @@ class NonGPUTransferModule:
             tuple[int, IPCCacheEngineKey], list[ObjectKey]
         ] = {}
         self._pending_shm_lock = threading.Lock()
+        self._shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info()
 
     @property
     def context(self) -> MPCacheEngineContext:
@@ -192,9 +193,8 @@ class NonGPUTransferModule:
         Raises:
             ValueError: If ``payload.dtype_str`` is not a valid torch dtype name.
         """
-        shm_pool_info = self._compute_shm_pool_info()
-        shm_name = shm_pool_info["shm_name"]
-        pool_size = shm_pool_info["pool_size"]
+        shm_name = self._shm_pool_info["shm_name"]
+        pool_size = self._shm_pool_info["pool_size"]
 
         if payload.instance_id in self._non_gpu_contexts:
             logger.warning(
