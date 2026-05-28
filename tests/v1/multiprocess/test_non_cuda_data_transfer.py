@@ -118,7 +118,7 @@ def test_wrap_kv_caches_wraps_all_tensors(monkeypatch: Any) -> None:
 def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
     """Ensure transfer context factory returns DataTransferContext for CPU KV."""
     # First Party
-    from lmcache.v1.multiprocess.transfer_context import (
+    from lmcache.v1.multiprocess.worker_transfer.transfer_context import (
         DataTransferContext,
         create_transfer_context,
     )

@@ -23,7 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-from lmcache.v1.multiprocess.transfer_context import (
+from lmcache.v1.multiprocess.worker_transfer.transfer_context import (
     DataTransferContext,
     TransferContext,
     create_transfer_context,

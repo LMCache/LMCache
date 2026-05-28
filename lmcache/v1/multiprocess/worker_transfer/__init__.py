@@ -18,15 +18,25 @@ from .base import (
 from .pickle import NonGpuContextPickle
 from .shm import NonGpuContextShm
 from .shm_types import ShmSlotDescriptor
+from .transfer_context import (
+    DataTransferContext,
+    HandleTransferContext,
+    TransferContext,
+    create_transfer_context,
+)
 
 __all__ = [
+    "DataTransferContext",
+    "HandleTransferContext",
     "NonGpuContext",
     "NonGpuContextMetadata",
     "NonGpuContextPickle",
     "NonGpuContextShm",
     "ShmSlotDescriptor",
+    "TransferContext",
     "compute_kv_layout",
     "create_non_gpu_context",
+    "create_transfer_context",
     "gather_paged_kv_to_cpu",
     "scatter_cpu_to_paged_kv",
 ]
