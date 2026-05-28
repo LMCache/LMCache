@@ -122,6 +122,12 @@ class LMCacheEngine:
                 else torch_dev.Stream()
             )
 
+        # Holds GPU-resident copies of the broadcast send buffers on the
+        # leader rank so the subsequent batched_to_gpu can read from HBM
+        # rather than re-reading the same L1 bytes over PCIe. Always empty
+        # on non-leader ranks and outside the broadcast critical section.
+        self._leader_gpu_substitute_objs: List[TensorMemoryObj] = []
+
         self.enable_controller = config.enable_controller
 
         # NOTE: Unix systems use fork by default
@@ -865,7 +871,7 @@ class LMCacheEngine:
                 if (
                     self.save_only_first_rank
                     and self.metadata.is_first_rank()
-                    and len(getattr(self, "_leader_gpu_substitute_objs", []))
+                    and len(self._leader_gpu_substitute_objs)
                     == len(memory_objs_for_togpu)
                 ):
                     memory_objs_for_togpu = self._leader_gpu_substitute_objs
@@ -880,11 +886,7 @@ class LMCacheEngine:
                     # loop below. Done in `finally` so a raise from
                     # batched_to_gpu (e.g. CUDA OOM) does not leave the
                     # references dangling on this long-lived engine.
-                    if (
-                        self.save_only_first_rank
-                        and self.metadata.is_first_rank()
-                        and hasattr(self, "_leader_gpu_substitute_objs")
-                    ):
+                    if self.save_only_first_rank and self.metadata.is_first_rank():
                         self._leader_gpu_substitute_objs = []
 
         # TODO(Jiayi): Remove the following for loop with batched operations
@@ -1794,10 +1796,13 @@ class LMCacheEngine:
             chunk_count = len(reordered_chunks)
             self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
 
-            # Save GPU-resident copies created during broadcast so the
-            # caller's subsequent batched_to_gpu can read from HBM instead
-            # of re-reading the same CPU L1 buffer over PCIe.
-            self._leader_gpu_substitute_objs: List[TensorMemoryObj] = []
+            # Reset the GPU-resident copy list. We populate it during this
+            # broadcast loop so the caller's subsequent batched_to_gpu can
+            # read from HBM instead of re-reading the same CPU L1 buffer
+            # over PCIe. (Declared in __init__; reassigning to a fresh list
+            # rather than .clear() to drop any references the caller's
+            # finally block missed if a previous retrieve raised.)
+            self._leader_gpu_substitute_objs = []
 
             # Broadcast each chunk's data
             for key, memory_obj, start, end in reordered_chunks:
