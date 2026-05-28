@@ -140,6 +140,11 @@ class GPUTransferModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
+    @property
+    def gpu_contexts(self) -> dict[int, GPUContextEntry]:
+        """Per-instance GPU context registry."""
+        return self._gpu_contexts
+
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
 
