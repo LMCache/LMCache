@@ -56,6 +56,9 @@ class MPServerConfig:
     """SHM segment name for non-GPU KV transfer.
     None: auto-allocate (default). "": force pickle. Other: use that name."""
 
+    script_allowed_imports: list[str] = field(default_factory=list)
+    """Modules that /run_script endpoint is allowed to import."""
+
 
 @dataclass
 class RuntimePluginConfig:
@@ -194,6 +197,14 @@ def add_mp_server_args(
         'Set to "" to force pickle path (disable SHM). '
         "Set to a name to use that specific SHM segment.",
     )
+    mp_group.add_argument(
+        "--script-allowed-imports",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Python modules that the /run_script endpoint is allowed to "
+        "import. Example: --script-allowed-imports numpy pandas",
+    )
     return parser
 
 
@@ -231,6 +242,7 @@ def parse_args_to_mp_server_config(
             extra_config=plugin_extra,
         ),
         shm_name=args.shm_name,
+        script_allowed_imports=args.script_allowed_imports or [],
     )
 
 

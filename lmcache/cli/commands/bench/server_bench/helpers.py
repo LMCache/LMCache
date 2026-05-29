@@ -407,7 +407,7 @@ def _query_checksum(
         else:
             parts.append(str(item))
     block_ids = ",".join(parts)
-    # The MP /api/kvcache/check endpoint is block-native: its
+    # The MP /kvcache/check endpoint is block-native: its
     # chunk_size counts blocks per chunk, while our caller passes
     # in the server-side token-level chunk_size. Convert here.
     if chunk_size % block_size != 0:
@@ -418,7 +418,7 @@ def _query_checksum(
         return None
     chunk_size_blocks = chunk_size // block_size
     url = (
-        "%s/api/kvcache/check?block_ids=%s&block_size=%d&chunk_size=%d&layerwise=false"
+        "%s/kvcache/check?block_ids=%s&block_size=%d&chunk_size=%d&layerwise=false"
     ) % (
         http_base,
         block_ids,
