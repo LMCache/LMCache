@@ -1,9 +1,9 @@
 <div align="center">
   <p align="center">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="asset/logo_dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="asset/logo_light.png">
-      <img src="asset/logo_light.png" width="720" alt="lmcache logo">
+      <source media="(prefers-color-scheme: dark)" srcset="asset/logo_transparent.png">
+      <source media="(prefers-color-scheme: light)" srcset="asset/logo_transparent.png">
+      <img src="asset/logo_transparent.png" width="720" alt="lmcache logo">
     </picture>
   </p>
   <h2 align="center">
@@ -57,9 +57,9 @@ LMCache supports two deployment modes:
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="asset/mode_dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="asset/mode_light.png">
-    <img src="asset/mode_light.png" alt="LMCache Deployment Modes">
+    <source media="(prefers-color-scheme: dark)" srcset="asset/deployment_modes.png">
+    <source media="(prefers-color-scheme: light)" srcset="asset/deployment_modes.png">
+    <img src="asset/deployment_modes.png" alt="LMCache Deployment Modes">
   </picture>
 </p>
 
