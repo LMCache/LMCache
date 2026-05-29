@@ -58,21 +58,15 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str, vllm_version: str
     # field, and vLLM >= 0.20 / pydantic v2 rejects None for
     # CompilationConfig fields like cudagraph_capture_sizes (list) and
     # pass_config.fuse_minimax_qk_norm (bool). See issue #3438.
+    llm_kwargs = {
+        "model": model,
+        "kv_transfer_config": ktc,
+        "max_model_len": 8000,
+        "gpu_memory_utilization": 0.8,
+    }
     if vllm_version == "v0":
-        llm = LLM(
-            model=model,
-            kv_transfer_config=ktc,
-            max_model_len=8000,
-            gpu_memory_utilization=0.8,
-            enable_chunked_prefill=True,  # Only in v0
-        )
-    else:
-        llm = LLM(
-            model=model,
-            kv_transfer_config=ktc,
-            max_model_len=8000,
-            gpu_memory_utilization=0.8,
-        )
+        llm_kwargs["enable_chunked_prefill"] = True  # Only in v0
+    llm = LLM(**llm_kwargs)
     try:
         yield llm
     finally:
@@ -128,7 +122,7 @@ def main():
         model = "mistralai/Mistral-7B-Instruct-v0.2"
     else:
         lmcache_connector = "LMCacheConnectorV1"
-        model = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+        model = "mistralai/Mistral-7B-Instruct-v0.2"
 
     setup_environment_variables(args.version, args.use_disk)
 
