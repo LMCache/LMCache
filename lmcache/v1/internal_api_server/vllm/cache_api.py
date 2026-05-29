@@ -120,7 +120,7 @@ def _get_kvcaches_and_device(engine):
         kvcaches = engine.gpu_connector.kvcaches
         if kvcaches is not None and len(kvcaches) > 0:
             device = kvcaches[0].device
-            logger.debug(f"Using kvcaches device: {device}")
+            logger.debug("Using kvcaches device: %s", device)
         else:
             logger.warning(
                 "gpu_connector.kvcaches is None or empty. "
@@ -434,7 +434,7 @@ def _execute_cache_operation(
     except Exception as e:
         # Log the full traceback for debugging
         tb_str = traceback.format_exc()
-        logger.error(f"Failed to {operation_name}: {str(e)}\\n{tb_str}")
+        logger.error("Failed to %s: %s\n%s", operation_name, e, tb_str)
 
         # Include more detailed error info in response
         error_message = str(e) if str(e) else f"Exception type: {type(e).__name__}"
