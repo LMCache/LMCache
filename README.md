@@ -1,8 +1,10 @@
 <div align="center">
   <p align="center">
-      <source media="(prefers-color-scheme: dark)" srcset="asset/dark_logo.png">
-      <source media="(prefers-color-scheme: light)" srcset="asset/logo.png">
-    <img src="https://raw.githubusercontent.com/LMCache/LMCache/dev/asset/logo.png" width="720" alt="lmcache logo">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="asset/logo_dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="asset/logo_light.png">
+      <img src="asset/logo_light.png" width="720" alt="lmcache logo">
+    </picture>
   </p>
   <h2 align="center">
       A KV Cache Management Layer for Scalable LLM Inference
