@@ -120,6 +120,7 @@ lmcache/experimental/tests
 /csrc/*.hip
 /csrc/*_hip.cuh
 /csrc/*_hip.cpp
+/csrc/*_hip.h
 
 # SYCL build artifacts
 /build_sycl/

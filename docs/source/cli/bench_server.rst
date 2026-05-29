@@ -1,7 +1,7 @@
-lmcache bench kvcache
+lmcache bench server
 =====================
 
-The ``lmcache bench kvcache`` command is an end-to-end sanity test for the
+The ``lmcache bench server`` command is an end-to-end sanity test for the
 LMCache Multi-Process (MP) cache server. It connects to a running server
 over ZMQ and exercises the full KV-cache data path for a sequence of
 synthetic requests, then optionally verifies per-chunk checksums through
@@ -9,7 +9,7 @@ the HTTP API.
 
 .. code-block:: bash
 
-   lmcache bench kvcache [options]
+   lmcache bench server [options]
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
@@ -55,7 +55,7 @@ Then in another terminal:
 
 .. code-block:: bash
 
-   lmcache bench kvcache \
+   lmcache bench server \
        --rpc-url tcp://localhost:15556 \
        --url http://localhost:8080
 
@@ -135,7 +135,7 @@ layers + classical attention layers in the same model):
 
 .. code-block:: bash
 
-   lmcache bench kvcache \
+   lmcache bench server \
        --rpc-url tcp://localhost:15556 \
        --kvcache-shape-spec "(1,1024,16,1,128):float16:4;(2,1024,16,8,128):float16:28"
 

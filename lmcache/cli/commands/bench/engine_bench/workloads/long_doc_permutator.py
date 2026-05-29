@@ -278,26 +278,6 @@ class LongDocPermutatorWorkload(BaseWorkload):
             len(self._request_list),
         )
 
-    def run(self) -> None:
-        """Run warmup + benchmark, closing the HTTP client in the same loop.
-
-        Overrides ``BaseWorkload.run()`` to ensure the ``RequestSender``'s
-        async HTTP client is closed before the event loop shuts down.
-        ``asyncio.run()`` closes the loop on exit, which orphans any open
-        httpx connections; closing the client here — inside the same
-        ``asyncio.run()`` — tears them down cleanly so the caller's
-        subsequent ``asyncio.run(request_sender.close())`` finds nothing
-        to close and completes without error.
-        """
-
-        async def _run_and_close() -> None:
-            try:
-                await self._run_async()
-            finally:
-                await self._request_sender.close()
-
-        asyncio.run(_run_and_close())
-
     def log_config(self) -> None:
         """Log key workload config before the benchmark starts."""
         c = self._config

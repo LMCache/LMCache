@@ -78,6 +78,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 		cfg, err := utils.GetConnectionConfig(ctx, k8sClient, engineKey(nsName, "smoke-harness"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.KVConnector).To(Equal("LMCacheMPConnector"))
+		Expect(cfg.KVConnectorModulePath).To(Equal("lmcache.integration.vllm.lmcache_mp_connector"))
 
 		By("deleting the CR and waiting for owned objects to be garbage-collected")
 		Expect(utils.DeleteLMCAndWaitGC(ctx, k8sClient,
@@ -115,6 +116,7 @@ var _ = Describe("LMCacheEngine smoke (no-GPU)", Ordered, func() {
 		cfg, err := utils.GetConnectionConfig(ctx, k8sClient, key)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(cfg.KVConnector).To(Equal("LMCacheMPConnector"))
+		Expect(cfg.KVConnectorModulePath).To(Equal("lmcache.integration.vllm.lmcache_mp_connector"))
 		Expect(cfg.KVRole).To(Equal("kv_both"))
 		Expect(cfg.KVConnectorExtraConfig.Host).To(Equal(
 			fmt.Sprintf("tcp://smoke-minimal.%s.svc.cluster.local", nsName)))

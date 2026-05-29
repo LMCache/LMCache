@@ -339,6 +339,7 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/mem_alloc.cpp",
         "csrc/utils.cpp",
         "csrc/event_recorder.cpp",
+        "csrc/completion_recorder.cpp",
     ]
     ext_modules = [
         cpp_extension.CUDAExtension(
@@ -371,6 +372,7 @@ def rocm_extension() -> tuple[list, dict]:
         "csrc/mem_alloc_hip.cpp",
         "csrc/utils_hip.cpp",
         "csrc/event_recorder.cpp",
+        "csrc/completion_recorder.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
