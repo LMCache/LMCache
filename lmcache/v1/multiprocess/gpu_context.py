@@ -363,23 +363,6 @@ class GPUCacheContext:
             for i in range(batch_size)
         ]
 
-    def stage_block_ids(self, block_ids: list[int]) -> torch.Tensor:
-        """Copy block_ids into the pre-allocated GPU buffer and return a
-        view of the occupied region. Uses non-blocking copy via a pinned
-        CPU tensor created from the list's underlying buffer.
-
-        Args:
-            block_ids: Block indices as a Python list of ints.
-
-        Returns:
-            A GPU int64 tensor view into the pre-allocated buffer.
-        """
-        n = len(block_ids)
-        cpu_tensor = torch.frombuffer(array.array("l", block_ids), dtype=torch.long)
-        buf = self.block_ids_buffer_[:n]
-        buf.copy_(cpu_tensor, non_blocking=True)
-        return buf
-
     def copy_lmc_group_block_ids_to_gpu(
         self, block_ids_per_lmc_group: list[list[int]]
     ) -> list[torch.Tensor]:

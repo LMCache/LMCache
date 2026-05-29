@@ -23,6 +23,21 @@ steps:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
         artifact_paths: ["*.log"]
 
+      # HMA (hybrid memory allocator) correctness check on a real hybrid model.
+      # openai/gpt-oss-20b interleaves sliding-window and full-attention layers,
+      # so vLLM exposes multiple KV cache groups and the connector exercises the
+      # hybrid-memory-allocator store/retrieve path. Runs gsm8k, resets vLLM's
+      # local prefix cache (LMCache preserved), reruns, and asserts the scores
+      # align. gpt-oss-20b is ungated, so the HF cache at /data/huggingface can
+      # download it on demand (no token needed).
+      - label: ":compression: hma_lm_eval"
+        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval
+        timeout_in_minutes: 40
+        env: { MODEL: "openai/gpt-oss-20b" }
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: vllm_bench"
         command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 30

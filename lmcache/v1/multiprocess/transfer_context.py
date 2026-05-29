@@ -265,6 +265,13 @@ class DataTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
     ) -> None:
+        """Register KV caches with the non-GPU context server.
+
+        ``lmc_kv_cache_groups`` is accepted to satisfy the base interface but
+        is currently a no-op: the non-GPU transfer path does not support
+        hybrid KV cache groups and rejects multi-group transfers at store /
+        retrieve time (see ``_single_engine_group_block_ids``).
+        """
         # TODO: inference_engine_logical_block_size is currently used by
         # DeepSeek V4 on the CUDA path. The non-CUDA path is yet to be
         # implemented.

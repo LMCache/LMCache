@@ -417,15 +417,14 @@ class GPUTransferModule:
                             idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
                         ]
                         if chunk_block_ids_gpu.shape[0] != blocks_per_chunk:
-                            logger.error(
-                                "STORE block ID underflow: lmc_group_idx=%d "
-                                "engine_group_idx=%d "
-                                "chunk=%d expected=%d got=%d",
-                                lmc_group_idx,
-                                group.engine_group_idx,
-                                idx,
-                                blocks_per_chunk,
-                                chunk_block_ids_gpu.shape[0],
+                            # Fail closed: a short block-id slice would make the
+                            # transfer kernel read out-of-bounds GPU memory.
+                            raise ValueError(
+                                "STORE block ID underflow: "
+                                f"lmc_group_idx={lmc_group_idx} "
+                                f"engine_group_idx={group.engine_group_idx} "
+                                f"chunk={idx} expected={blocks_per_chunk} "
+                                f"got={chunk_block_ids_gpu.shape[0]}"
                             )
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(lmc_group_idx)
                         group_kv_pointers = gpu_context.get_group_kv_pointers(
@@ -616,15 +615,15 @@ class GPUTransferModule:
                         * blocks_per_chunk
                     ]
                     if chunk_block_ids_gpu.shape[0] != batch_len * blocks_per_chunk:
-                        logger.error(
-                            "RETRIEVE block ID underflow: lmc_group_idx=%d "
-                            "engine_group_idx=%d "
-                            "batch=%d expected=%d got=%d",
-                            lmc_group_idx,
-                            group.engine_group_idx,
-                            batch_idx,
-                            batch_len * blocks_per_chunk,
-                            chunk_block_ids_gpu.shape[0],
+                        # Fail closed: a short block-id slice would make the
+                        # transfer kernel write out-of-bounds GPU memory.
+                        raise ValueError(
+                            "RETRIEVE block ID underflow: "
+                            f"lmc_group_idx={lmc_group_idx} "
+                            f"engine_group_idx={group.engine_group_idx} "
+                            f"batch={batch_idx} "
+                            f"expected={batch_len * blocks_per_chunk} "
+                            f"got={chunk_block_ids_gpu.shape[0]}"
                         )
                     tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
                         batch_len, lmc_group_idx

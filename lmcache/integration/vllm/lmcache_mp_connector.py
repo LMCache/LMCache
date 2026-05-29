@@ -97,11 +97,28 @@ logger = lmcache_init_logger(__name__)
 def normalize_block_ids_per_engine_group(
     block_ids: tuple[list[int], ...] | None,
 ) -> tuple[list[int], ...]:
+    """Normalize vLLM per-engine-group block IDs to a concrete tuple.
+
+    vLLM reports allocated block IDs as a tuple with one ``list[int]`` per
+    engine KV cache group (or ``None`` when nothing is allocated yet). This
+    coerces the ``None`` case to an empty tuple and validates the shape.
+
+    Args:
+        block_ids: Per-engine-group block IDs from vLLM, or ``None``.
+
+    Returns:
+        The block IDs as a tuple of per-engine-group lists; an empty tuple
+        when ``block_ids`` is ``None``.
+
+    Raises:
+        TypeError: If ``block_ids`` is neither ``None`` nor a tuple.
+    """
     if block_ids is None:
         return ()
-    assert isinstance(block_ids, tuple), (
-        f"Expected block_ids to be a tuple of lists, but got {type(block_ids)}"
-    )
+    if not isinstance(block_ids, tuple):
+        raise TypeError(
+            f"Expected block_ids to be a tuple of lists, but got {type(block_ids)}"
+        )
     return block_ids
 
 

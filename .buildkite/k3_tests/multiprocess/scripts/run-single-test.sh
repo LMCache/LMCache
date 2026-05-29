@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | vllm_bench | long_doc_qa | long_doc_qa_l2 | fault_tolerance
+#   test_name: lm_eval | hma_lm_eval | vllm_bench | long_doc_qa | long_doc_qa_l2
+#              | fault_tolerance | deadlock | restart_recovery
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -20,7 +21,15 @@ export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
-export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+# Per-test default model (overridable via the MODEL env var). The HMA test needs
+# a hybrid (sliding-window + full-attention) model so vLLM exposes multiple KV
+# cache groups and the connector exercises the hybrid-memory-allocator path.
+# gpt-oss-20b is ungated and uses paged attention for both layer families.
+if [ "$TEST_NAME" = "hma_lm_eval" ]; then
+    export MODEL="${MODEL:-openai/gpt-oss-20b}"
+else
+    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+fi
 export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 export MAX_WORKERS="${MAX_WORKERS:-4}"
 export LMCACHE_DIR="$REPO_ROOT"
@@ -76,6 +85,9 @@ case "$TEST_NAME" in
     lm_eval)
         exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
+    hma_lm_eval)
+        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
+        ;;
     vllm_bench)
         exec_script="${SCRIPT_DIR}/run-vllm-bench.sh"
         ;;
@@ -96,7 +108,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery"
+        echo "Valid tests: lm_eval, hma_lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery"
         exit 1
         ;;
 esac
