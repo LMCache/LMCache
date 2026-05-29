@@ -205,19 +205,160 @@ error rather than full serving benchmark results.
 | turboquant | `turboquant_k3v4_nc` | 8.00 | 1.84 | 4.34 | 0.555 | 0.642 | 0.989075 | 0.115782 | 0.970703 |
 | turboquant | `turboquant_3bit_nc` | 8.00 | 1.59 | 5.02 | 0.557 | 0.643 | 0.980405 | 0.164546 | 0.970703 |
 
+### Generation validation
+
+I also ran generation-based sanity checks to compare Base, vLLM Native
+TurboQuant, and the LMCache TurboQuant serde-only path.
+
+On a RULER-style 8K replay task, LMCache serde round2 is close to Base /
+Native TurboQuant across the tested presets:
+
+| Group | Preset | Accuracy |
+| --- | --- | ---: |
+| Base | none | 0.998 |
+| Native TQ | k8v4 | 0.998 |
+| Native TQ | 4bit_nc | 0.996 |
+| Native TQ | k3v4_nc | 0.982 |
+| Native TQ | 3bit_nc | 0.972 |
+| LMCache serde round2 | k8v4 | 0.992 |
+| LMCache serde round2 | 4bit_nc | 0.994 |
+| LMCache serde round2 | k3v4_nc | 0.982 |
+| LMCache serde round2 | 3bit_nc | 0.988 |
+
+On longer-context CLBench, the current LMCache TurboQuant serde-only path is
+unstable:
+
+| Group | Preset | Score |
+| --- | --- | ---: |
+| Base | none | 9/163 |
+| Native TQ | k8v4 | 7/163 |
+| Native TQ | 4bit_nc | 8/163 |
+| Native TQ | k3v4_nc | 5/163 |
+| Native TQ | 3bit_nc | 9/163 |
+| LMCache serde | k8v4 | 0/163 |
+| LMCache serde | 4bit_nc | 0/163 |
+| LMCache serde | k3v4_nc | 0/163 |
+| LMCache serde | 3bit_nc | 0/163 |
+
+This suggests that the current serde-only path can preserve generation quality
+on the shorter 8K replay setting, but it is not yet robust for longer-context
+generation. Since Native TurboQuant does not show the same collapse on CLBench,
+the issue is unlikely to be TurboQuant quantization alone. It is more likely
+related to the LMCache restore path, including restored KV layout, block/slot
+mapping, K/V-specific metadata, or the mismatch between restoring bf16 KV and
+the native backend computing directly in the rotated quantized space.
+
+One possible source of the mismatch is that Native TurboQuant computes attention
+scores directly in the rotated quantized space:
+
+$$
+\hat{s}^{native}_i
+=
+(P^\top q)^\top Q(P^\top k_i)
+$$
+
+Define the quantization error in the rotated key space as:
+
+$$
+\epsilon_i = Q(P^\top k_i) - P^\top k_i
+$$
+
+Then the Native TurboQuant score error is:
+
+$$
+\Delta_{native,i}
+=
+\hat{s}^{native}_i - s_i
+=
+(P^\top q)^\top \epsilon_i
+$$
+
+The bf16 restore path first reconstructs an ordinary key:
+
+$$
+\hat{k}^{bf16}_i
+=
+\mathrm{bf16}(P Q(P^\top k_i))
+$$
+
+Define the bf16 restore error as:
+
+$$
+\rho_i
+=
+\mathrm{bf16}(P Q(P^\top k_i))
+-
+P Q(P^\top k_i)
+$$
+
+Normal FlashAttention then computes:
+
+$$
+\hat{s}^{bf16}_i
+=
+q^\top \hat{k}^{bf16}_i
+$$
+
+Therefore, the bf16 restore path has:
+
+$$
+\Delta_{bf16,i}
+=
+(P^\top q)^\top \epsilon_i
++
+q^\top \rho_i
+$$
+
+Compared with Native TurboQuant, the bf16 restore path introduces the extra
+score error:
+
+$$
+\Delta_{bf16,i} - \Delta_{native,i}
+=
+q^\top \rho_i
+$$
+
+After softmax, the two paths become:
+
+$$
+\hat{p}^{native}_i
+\propto
+\exp(s_i + (P^\top q)^\top \epsilon_i)
+$$
+
+$$
+\hat{p}^{bf16}_i
+\propto
+\exp(s_i + (P^\top q)^\top \epsilon_i + q^\top \rho_i)
+$$
+
+Thus, \(q^\top \rho_i\) is an additional error term introduced by the bf16
+restore path, and it can be amplified by the exponential form of softmax. This
+extra score perturbation may be more visible in long-context generation than in
+shorter replay-style retrieval tasks.
+
+Therefore, the TurboQuant serde-only path is currently best treated as an
+initial correctness / integration prototype. A follow-up direction is to further
+align LMCache TurboQuant with the serving backend semantics, rather than
+treating TurboQuant only as an independent external serde format.
+
+
 ## Limitations
 
-This backend currently focuses on correctness and LMCache L2 integration.
+This backend currently focuses on LMCache L2 serde integration. The main
+limitation is that the current path restores TurboQuant-compressed KV back to
+ordinary bf16 KV and then relies on the normal attention backend.
 
-Known limitations and follow-up work:
+This differs from vLLM Native TurboQuant, which computes attention directly in
+the rotated quantized space with its backend-specific layout and metadata. As
+shown in the generation validation above, this serde-only restore path can be
+reasonable for shorter replay-style tasks, but it is not yet robust for
+longer-context generation.
 
-* Serving-level benchmark scripts are not included in the core backend PR.
-* Task-level quality evaluation, such as NIAH or GSM8K, is not included.
-* Multi-GPU device placement should be kept explicit and conservative.
-* Reusable GPU buffers should be cached or moved out of per-layer loops where
-  possible.
-* Attention-specific kernels from vLLM should not be included unless they are
-  used by the LMCache serde path.
+A follow-up direction is to align LMCache TurboQuant more deeply with the
+serving backend semantics, including compressed KV layout, block/slot mapping,
+K/V-specific metadata, and the attention path, rather than treating TurboQuant
+only as an independent external serde format.
 
 ## Tests
 

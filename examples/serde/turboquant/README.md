@@ -52,7 +52,6 @@ L1_SIZE_GB=20 \
 LMCACHE_PORT=6555 \
 VLLM_PORT=8000 \
 TQ_PRESET=turboquant_k8v4 \
-TQ_HEAD_DIM=128 \
 TQ_BLOCK_SIZE=16 \
 ./run_serde_turboquant_example.sh
 ```
@@ -72,7 +71,6 @@ JSON. Each adapter independently decides whether to use serde.
   "serde": {
     "type": "turboquant",
     "preset": "turboquant_k8v4",
-    "head_dim": 128,
     "block_size": 16
   }
 }

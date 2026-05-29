@@ -61,16 +61,17 @@ serde factory.
    * - ``turboquant``
      - Compress KV tensors with TurboQuant presets before L2 store and
        reconstruct them on load.
-     - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (default
-       128), ``block_size`` (default 16), ``max_workers`` (thread pool
-       size, default 1)
+     - ``preset`` (default ``turboquant_k8v4``), ``head_dim`` (optional,
+       default 128), ``block_size`` (default 16), ``max_workers`` (thread
+       pool size, default 1)
 
 
 TurboQuant serde
 ----------------
 
 TurboQuant serde can be enabled by setting ``"type": "turboquant"`` in the
-adapter serde config.
+adapter serde config. If ``preset`` is omitted, TurboQuant serde defaults to
+``turboquant_k8v4``.
 
 .. code-block:: bash
 
@@ -83,7 +84,6 @@ adapter serde config.
             "serde": {
                 "type": "turboquant",
                 "preset": "turboquant_k8v4",
-                "head_dim": 128,
                 "block_size": 16
             }
         }'
