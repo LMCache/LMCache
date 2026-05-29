@@ -488,7 +488,9 @@ async def store(
         slot_mapping = torch.arange(len(token_list), dtype=torch.long, device=device)
 
         logger.debug(
-            f"Storing {len(token_list)} tokens with slot_mapping on device {device}"
+            "Storing %d tokens with slot_mapping on device %s",
+            len(token_list),
+            device,
         )
 
         engine.store(
