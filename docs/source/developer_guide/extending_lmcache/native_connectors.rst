@@ -624,6 +624,32 @@ For **external** native connector plugins (``native_plugin``):
 5. Unit tests (see ``examples/lmc_external_native_connector/tests/``)
 
 
+Built-in Aerospike backend (optional)
+-------------------------------------
+
+LMCache ships an optional in-tree Aerospike native connector (same
+``ConnectorBase`` harness as Redis). It is compiled only when
+``BUILD_AEROSPIKE=1`` or ``AEROSPIKE_INCLUDE_DIR`` is set during
+``pip install -e .``.
+
+**Build:**
+
+.. code-block:: bash
+
+   See ``.github/workflows/aerospike_integration.yml`` for installing the C client into ``.deps/``
+   source .deps/aerospike-client-c.env
+   BUILD_AEROSPIKE=1 pip install -e .
+
+**MP mode:**
+
+.. code-block:: bash
+
+   --l2-adapter '{"type": "aerospike", "hosts": "127.0.0.1:3000", "namespace": "lmcache", "set_name": "kv_chunks", "num_workers": 8}'
+
+Implementation: ``csrc/storage_backends/aerospike/``,
+``lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py``.
+
+
 Additional Resources
 --------------------
 
@@ -632,6 +658,7 @@ Additional Resources
 - ``IStorageConnector`` interface: ``csrc/storage_backends/connector_interface.h``
 - Pybind utilities: ``csrc/storage_backends/connector_pybind_utils.h``
 - Redis reference implementation: ``csrc/storage_backends/redis/``
+- Aerospike implementation (optional): ``csrc/storage_backends/aerospike/``
 - Architecture README: ``csrc/storage_backends/README.md``
 - External native connector example:
   ``examples/lmc_external_native_connector/``

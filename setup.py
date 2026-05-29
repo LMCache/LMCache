@@ -92,6 +92,73 @@ def hipify_wrapper() -> None:
     assert len(hipified_sources) == len(extra_files)
 
 
+def _aerospike_extension(
+    cpp_extension,
+    aerospike_sources: list[str],
+    extra_cxx_flags: list[str],
+) -> list:
+    """Build Aerospike CppExtension if enabled via env vars.
+
+    Set ``BUILD_AEROSPIKE=1`` or provide ``AEROSPIKE_INCLUDE_DIR`` (and
+  ``AEROSPIKE_LIBRARY_DIR``) pointing at libaerospike development files.
+    """
+    # Standard
+    import ctypes.util
+
+    as_env = os.environ.get("BUILD_AEROSPIKE")
+    if as_env is not None:
+        build_as = as_env == "1"
+    else:
+        build_as = os.environ.get("AEROSPIKE_INCLUDE_DIR", "") != ""
+    if not build_as:
+        return []
+
+    as_include = os.environ.get("AEROSPIKE_INCLUDE_DIR", "")
+    as_lib = os.environ.get("AEROSPIKE_LIBRARY_DIR", "")
+    deps_yaml_lib = ROOT_DIR / ".deps" / "libyaml-install" / "usr" / "lib" / "x86_64-linux-gnu"
+    include_dirs = [
+        "csrc/storage_backends",
+        "csrc/storage_backends/aerospike",
+    ]
+    if as_include:
+        include_dirs.extend(as_include.split(";"))
+    library_dirs: list[str] = []
+    if as_lib:
+        library_dirs.extend(as_lib.split(";"))
+    extra_objects: list[str] = []
+    yaml_shared = deps_yaml_lib / "libyaml.so"
+    yaml_static = deps_yaml_lib / "libyaml.a"
+    if yaml_shared.exists() or yaml_static.exists():
+        library_dirs.append(str(deps_yaml_lib))
+
+    libraries = ["aerospike"]
+    if yaml_shared.exists() or ctypes.util.find_library("yaml"):
+        libraries.append("yaml")
+    elif yaml_static.exists():
+        extra_objects.append(str(yaml_static))
+    libraries.extend(["ssl", "crypto", "pthread", "z", "rt"])
+    if os.environ.get("AEROSPIKE_EVENT_LIB", "libuv") == "libuv":
+        libraries.append("uv")
+
+    runtime_library_dirs = list(library_dirs)
+
+    return [
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_aerospike",
+            sources=aerospike_sources,
+            include_dirs=include_dirs,
+            library_dirs=library_dirs,
+            libraries=libraries,
+            extra_objects=extra_objects,
+            runtime_library_dirs=runtime_library_dirs,
+            extra_compile_args={
+                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
+            },
+            extra_link_args=["-Wl,--no-as-needed"],
+        ),
+    ]
+
+
 def _mooncake_extension(
     cpp_extension,
     mooncake_sources: list[str],
@@ -180,6 +247,10 @@ def _common_cpp_extensions(
         "csrc/storage_backends/mooncake/pybind.cpp",
         "csrc/storage_backends/mooncake/connector.cpp",
     ]
+    aerospike_sources = [
+        "csrc/storage_backends/aerospike/pybind.cpp",
+        "csrc/storage_backends/aerospike/connector.cpp",
+    ]
     ext_modules = [
         cpp_extension.CppExtension(
             "lmcache.native_storage_ops",
@@ -209,6 +280,9 @@ def _common_cpp_extensions(
     # Mooncake extension is optional.
     ext_modules.extend(
         _mooncake_extension(cpp_extension, mooncake_sources, extra_cxx_flags)
+    )
+    ext_modules.extend(
+        _aerospike_extension(cpp_extension, aerospike_sources, extra_cxx_flags)
     )
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
