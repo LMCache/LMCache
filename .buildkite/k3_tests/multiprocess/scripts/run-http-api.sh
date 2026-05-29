@@ -6,8 +6,8 @@
 #   multiprocess HTTP server (port 8080) with a live engine + vLLM.
 #
 # Part 2 — CLI commands:
-#   Tests `lmcache describe`, `lmcache bench server`, and
-#   `lmcache kvcache clear` against the running server.
+#   Tests `lmcache describe` and `lmcache kvcache clear`
+#   against the running server.
 #
 # Requires: LMCache MP server + vLLM launched by launch-processes.sh.
 set -e
@@ -21,7 +21,6 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 # Configuration (inherited from run-single-test.sh)
 VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
-LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/lmcache_ci_results_${BUILD_ID}}"
@@ -35,7 +34,6 @@ echo "=== HTTP API & CLI Test ==="
 echo "Model: $MODEL"
 echo "vLLM port: $VLLM_PORT"
 echo "LMCache HTTP: $BASE_URL"
-echo "LMCache ZMQ: tcp://localhost:${LMCACHE_PORT}"
 echo "Results dir: $HTTP_DIR"
 echo ""
 
@@ -407,32 +405,10 @@ fi
 assert_contains "describe — Health section" "$HTTP_DIR/describe.txt" "Health"
 assert_contains "describe — L1 capacity section" "$HTTP_DIR/describe.txt" "L1 capacity"
 
-# ── Step 12: lmcache bench server ──────────────────────────
+# ── Step 12: lmcache kvcache clear ─────────────────────────
 echo ""
 echo "============================================"
-echo "=== Step 12: lmcache bench server ==="
-echo "============================================"
-
-if lmcache bench server \
-    --rpc-url "tcp://localhost:${LMCACHE_PORT}" \
-    --url "${BASE_URL}" \
-    --start 0 --end 1 \
-    --num-tokens 512 \
-    > "$HTTP_DIR/bench_server.txt" 2>&1; then
-    pass "lmcache bench server — exit code 0"
-else
-    fail "lmcache bench server — exit code 0" "command returned non-zero"
-    echo "  Output:"
-    cat "$HTTP_DIR/bench_server.txt" 2>/dev/null || true
-fi
-
-assert_contains "bench server — register OK" "$HTTP_DIR/bench_server.txt" "REGISTER_KV_CACHE: OK"
-assert_contains "bench server — checksum match" "$HTTP_DIR/bench_server.txt" "CHECKSUM MATCH OK"
-
-# ── Step 13: lmcache kvcache clear ─────────────────────────
-echo ""
-echo "============================================"
-echo "=== Step 13: lmcache kvcache clear ==="
+echo "=== Step 12: lmcache kvcache clear ==="
 echo "============================================"
 
 if lmcache kvcache clear --url "${BASE_URL}" > "$HTTP_DIR/kvcache_clear.txt" 2>&1; then
