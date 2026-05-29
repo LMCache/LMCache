@@ -83,15 +83,13 @@ def _build_backend_params() -> list:
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         try:
             # First Party
-            import lmcache.xpu_ops as xpu_sycl_ops
+            import lmcache.c_ops as xpu_sycl_ops
 
             params.append(
                 pytest.param(("xpu_sycl_ops", xpu_sycl_ops, "xpu"), id="xpu_sycl_ops")
             )
         except ImportError:
             pass
-
-        params.append(pytest.param(("xpu_py_ops", _py_ops, "xpu"), id="xpu_py_ops"))
 
     return params
 
@@ -1791,11 +1789,7 @@ class TestScenarios:
         by test_2_compare.
         """
         backend_id, ops, device = backend
-        # Skip scenarios whose required op is not exported by this backend
-        try:
-            result = fn(ops, device)
-        except AttributeError as e:
-            pytest.skip(f"backend '{backend_id}' missing op: {e}")
+        result = fn(ops, device)
         if result is not None:
             _results[(name, backend_id)] = result
 

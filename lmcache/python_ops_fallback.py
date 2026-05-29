@@ -681,7 +681,6 @@ def multi_layer_kv_transfer_unilateral(
             gpu_kv_format,
             0,  # block_size unused for MLA formats
         )
-
     # ── Non-MLA path: unilateral (separate K/V buffers per layer) ──
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
