@@ -2017,7 +2017,7 @@ class LMCacheEngineBuilder:
         raises: ValueError if the instance already exists with a different
             configuration.
         """
-        logger.info(f"Creating LMCacheEngine instance {instance_id}")
+        logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:
             numa_mapping = NUMADetector.get_numa_mapping(config)
             logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
@@ -2063,7 +2063,7 @@ class LMCacheEngineBuilder:
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
         # TODO: unit test for this
-        logger.info(f"Destroying LMCacheEngine instance: {instance_id}")
+        logger.info("Destroying LMCacheEngine instance: %s", instance_id)
 
         if instance_id in cls._instances:
             stat_logger = cls._stat_loggers[instance_id]
@@ -2099,6 +2099,6 @@ class LMCacheEngineBuilder:
             except Exception as e:
                 logger.error(f"Error destroying stats monitor: {e}")
 
-            logger.info(f"LMCacheEngine instance {instance_id} destroyed")
+            logger.info("LMCacheEngine instance %s destroyed", instance_id)
         else:
             logger.warning(f"Instance {instance_id} not found for destruction")
