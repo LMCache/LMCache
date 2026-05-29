@@ -140,6 +140,35 @@ class GPUTransferModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
+    @property
+    def gpu_contexts(self) -> dict[int, GPUCacheContext]:
+        """Snapshot of registered GPU contexts keyed by ``instance_id``.
+
+        Returns the underlying :class:`GPUCacheContext` per instance,
+        not the internal :class:`GPUContextEntry`. Diagnostic callers
+        (HTTP ``/kvcache/check``, ``status``) want shape/format access,
+        not registration metadata, so the entry is unwrapped here.
+
+        Note: ``_gpu_contexts`` is not lock-protected, mirroring the
+        pre-refactor ``MPCacheEngine`` behaviour. A concurrent
+        ``register_kv_cache`` / ``unregister_kv_cache`` from a ZMQ
+        worker thread while this comprehension is iterating can still
+        raise ``RuntimeError: dictionary changed size during
+        iteration``. That race predates this PR and is tracked
+        separately; properly fixing it requires a registry-wide lock
+        (covering register / unregister / close / iterate) that is
+        out of scope for the HTTP-API regression fix this property
+        enables.
+
+        Returns:
+            A fresh ``dict[instance_id, GPUCacheContext]``. Mutating
+            the returned dict has no effect on registration state.
+        """
+        return {
+            instance_id: entry.gpu_context
+            for instance_id, entry in self._gpu_contexts.items()
+        }
+
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
 

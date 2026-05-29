@@ -2,6 +2,7 @@
 """MPCacheEngine compositor and unified cache server entry point."""
 
 # Standard
+from typing import TypeVar
 import argparse
 import time
 
@@ -16,6 +17,7 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -34,6 +36,7 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
+from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
@@ -46,6 +49,13 @@ from lmcache.v1.multiprocess.protocol import (
 )
 
 logger = init_logger(__name__)
+
+# Type variable for ``MPCacheEngine._find_module``: the lookup is invariant
+# in the requested module class, so callers receive the precise subclass
+# back rather than a bare ``EngineModule`` whose protocol-level surface
+# would not include the methods (``clear``, ``gpu_contexts``) the facade
+# delegates to.
+ModuleT = TypeVar("ModuleT", bound=EngineModule)
 
 
 class MPCacheEngine:
@@ -72,6 +82,113 @@ class MPCacheEngine:
     def context(self) -> MPCacheEngineContext:
         """Return the shared engine context."""
         return self._context
+
+    # ------------------------------------------------------------------
+    # HTTP-API compatibility facade
+    #
+    # The MP HTTP endpoints (``/clear-cache``, ``/quota``,
+    # ``/kvcache/check``, ``/status`` and friends in
+    # ``lmcache/v1/multiprocess/http_apis/``) treat ``MPCacheEngine`` as
+    # a stable surface and reach for ``engine.clear``,
+    # ``engine.storage_manager``, and ``engine.gpu_contexts`` directly.
+    # The compositor refactor moved that state into the shared context
+    # and individual modules; the forwarders below keep the HTTP layer
+    # decoupled from module internals so adding/removing modules does
+    # not ripple into HTTP handlers.
+    # ------------------------------------------------------------------
+
+    @property
+    def storage_manager(self) -> StorageManager:
+        """Forward to the shared context's storage manager.
+
+        Used by the ``/quota`` and ``/status`` HTTP endpoints, which
+        need quota-manager and usage-by-salt access on the shared
+        storage layer.
+
+        Returns:
+            The :class:`StorageManager` owned by the shared engine context.
+        """
+        return self._context.storage_manager
+
+    def clear(self) -> None:
+        """Clear all stored KV cache data via the management module.
+
+        Routes through the registered :class:`ManagementModule` so the
+        HTTP ``/clear-cache`` endpoint keeps working without the HTTP
+        layer importing module classes. Locking and the
+        ``memcheck → clear(force=True) → memcheck`` sequence are owned
+        by the module itself and are unchanged from the pre-refactor
+        ``MPCacheEngine.clear`` behavior.
+
+        Returns:
+            None.
+
+        Raises:
+            RuntimeError: If no :class:`ManagementModule` is registered.
+                Production loadouts in ``_build_modules`` always install
+                one, so this is a defensive guard against custom
+                compositions rather than a normal runtime path.
+        """
+        mgmt = self._find_module(ManagementModule)
+        if mgmt is None:
+            raise RuntimeError(
+                "MPCacheEngine.clear() requires a registered ManagementModule"
+            )
+        mgmt.clear()
+
+    @property
+    def gpu_contexts(self) -> dict[int, GPUCacheContext]:
+        """Snapshot of registered GPU contexts keyed by ``instance_id``.
+
+        Mirrors the pre-refactor ``MPCacheEngine.gpu_contexts``
+        contract: returns a fresh dict on every access, empty when no
+        contexts are registered (or when the engine was assembled
+        without a :class:`GPUTransferModule`). HTTP callers wanting to
+        distinguish "no GPU support" from "no GPU registrations yet"
+        should consult :attr:`supports_gpu_kvcache_check` first.
+
+        Returns:
+            A fresh ``dict[instance_id, GPUCacheContext]``. Mutating
+            the returned dict has no effect on registration state.
+        """
+        gpu_module = self._find_module(GPUTransferModule)
+        if gpu_module is None:
+            return {}
+        return gpu_module.gpu_contexts
+
+    @property
+    def supports_gpu_kvcache_check(self) -> bool:
+        """Capability flag for the ``/kvcache/check`` HTTP endpoint.
+
+        Decoupled from :attr:`gpu_contexts` so the data contract there
+        can stay a pure mapping while HTTP callers still get a clean
+        ``501 Not Implemented`` signal in non-GPU mode (e.g.
+        ``transfer_mode != 'gpu'``) instead of a misleading ``404``
+        meaning "instance_id not registered".
+
+        Returns:
+            ``True`` if a :class:`GPUTransferModule` is registered and
+            can host GPU-backed KV checksum diagnostics; ``False``
+            otherwise.
+        """
+        return self._find_module(GPUTransferModule) is not None
+
+    def _find_module(self, module_cls: type[ModuleT]) -> ModuleT | None:
+        """Return the first registered module of ``module_cls`` or ``None``.
+
+        Args:
+            module_cls: The module subclass to look up
+                (e.g. :class:`ManagementModule`).
+
+        Returns:
+            The first matching module instance (typed as the requested
+            subclass), or ``None`` if no instance of that class is
+            registered.
+        """
+        for module in self._modules:
+            if isinstance(module, module_cls):
+                return module
+        return None
 
     def report_status(self) -> dict:
         """Return an aggregated status dict from all modules.

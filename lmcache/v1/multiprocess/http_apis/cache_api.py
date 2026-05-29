@@ -117,13 +117,18 @@ async def kvcache_check(
             content={"error": "engine not initialized"},
         )
 
-    gpu_ctxs = getattr(engine, "gpu_contexts", None)
-    if gpu_ctxs is None:
+    # ``supports_gpu_kvcache_check`` distinguishes "engine has no GPU
+    # transfer module" (501 Not Implemented — clean capability signal)
+    # from "GPU module present but instance_id not registered" (404
+    # below). ``gpu_contexts`` itself always returns a dict, even when
+    # empty, so the previous ``is None`` probe would no longer fire.
+    if not getattr(engine, "supports_gpu_kvcache_check", False):
         return JSONResponse(
             status_code=501,
             content={"error": "checksum not supported for this engine type"},
         )
 
+    gpu_ctxs = engine.gpu_contexts
     ctx = gpu_ctxs.get(instance_id)
     if ctx is None:
         return JSONResponse(
