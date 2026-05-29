@@ -74,8 +74,8 @@ Example ``lmcache-config.yaml`` for OBJ backend using S3 API:
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
     extra_config:
       enable_nixl_storage: true
       nixl_backend: OBJ
@@ -96,8 +96,8 @@ Example ``lmcache-config.yaml`` for POSIX backend using liburing:
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
     extra_config:
       enable_nixl_storage: true
       nixl_backend: POSIX
@@ -112,8 +112,8 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using Azure Bl
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
     extra_config:
       enable_nixl_storage: true
       nixl_backend: AZURE_BLOB
@@ -178,10 +178,8 @@ Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:
   local_cpu: False
   save_unfull_chunk: False
   enable_async_loading: False # set to True to test async loading
-  # buffer size has to be divisible by chunk size
-  # 2880MiB is divisible by 256 token chunk for Qwen3-4B/8B/32B
-  nixl_buffer_size: 3019898880
   nixl_buffer_device: cpu
+  max_local_cpu_size: 3  # GiB
   extra_config:
     enable_nixl_storage: true
     nixl_backend: OBJ
@@ -205,10 +203,8 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend with dynamic mode:
   local_cpu: False
   save_unfull_chunk: False
   enable_async_loading: False # set to True to test async loading
-  # buffer size has to be divisible by chunk size
-  # 2880MiB is divisible by 256 token chunk for Qwen3-4B/8B/32B
-  nixl_buffer_size: 3019898880
   nixl_buffer_device: cpu
+  max_local_cpu_size: 3  # GiB
   extra_config:
     enable_nixl_storage: true
     nixl_backend: AZURE_BLOB
