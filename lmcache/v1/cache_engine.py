@@ -126,7 +126,9 @@ class LMCacheEngine:
         # leader rank so the subsequent batched_to_gpu can read from HBM
         # rather than re-reading the same L1 bytes over PCIe. Always empty
         # on non-leader ranks and outside the broadcast critical section.
-        self._leader_gpu_substitute_objs: List[TensorMemoryObj] = []
+        # Typed as List[MemoryObj] (the supertype) so the list can be
+        # passed directly to batched_to_gpu without an invariance cast.
+        self._leader_gpu_substitute_objs: List[MemoryObj] = []
 
         self.enable_controller = config.enable_controller
 
@@ -867,14 +869,26 @@ class LMCacheEngine:
                 # swap, batched_to_gpu on the leader takes ~9 ms (PCIe-bound)
                 # while passive ranks take ~0.5 ms (HBM-bound) — a structural
                 # asymmetry on the critical path of every retrieve.
-                memory_objs_for_togpu = list(memory_objs)
-                if (
-                    self.save_only_first_rank
-                    and self.metadata.is_first_rank()
-                    and len(self._leader_gpu_substitute_objs)
-                    == len(memory_objs_for_togpu)
-                ):
-                    memory_objs_for_togpu = self._leader_gpu_substitute_objs
+                if self.save_only_first_rank and self.metadata.is_first_rank():
+                    if len(self._leader_gpu_substitute_objs) == len(memory_objs):
+                        memory_objs_for_togpu = self._leader_gpu_substitute_objs
+                    else:
+                        # Substitute list should always match memory_objs after
+                        # _broadcast_or_receive_memory_objs has run on the
+                        # leader.  A mismatch indicates a bug or stale state;
+                        # fall back to the CPU L1 source so retrieval is still
+                        # correct, but warn so the issue is visible.
+                        logger.warning(
+                            "Leader rank: GPU substitute count (%d) does not "
+                            "match memory_objs count (%d); falling back to "
+                            "CPU L1 source for batched_to_gpu (PCIe-bound, "
+                            "~9 ms slower).",
+                            len(self._leader_gpu_substitute_objs),
+                            len(memory_objs),
+                        )
+                        memory_objs_for_togpu = list(memory_objs)
+                else:
+                    memory_objs_for_togpu = list(memory_objs)
                 try:
                     self.gpu_connector.batched_to_gpu(
                         memory_objs_for_togpu, list(starts), list(ends), **kwargs
