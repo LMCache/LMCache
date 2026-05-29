@@ -49,6 +49,8 @@ FMT_FLASH_INFER = lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
 FMT_MLA = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
 FMT_SGLANG_MHA = lmc_ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
 FMT_SGLANG_MLA = lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS
+FMT_NORMAL_HND = lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS
+FMT_FLASH_INFER_HND = lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS
 
 # Format parameters: (gpu_kv_format, num_layers, num_heads, head_size, is_mla)
 # Use small layer counts to keep GPU memory usage low in CI
@@ -59,6 +61,8 @@ FORMAT_PARAMS = [
     (FMT_MLA, 4, 1, 576, True),
     (FMT_SGLANG_MHA, 4, 8, 128, False),
     (FMT_SGLANG_MLA, 4, 1, 576, True),
+    (FMT_NORMAL_HND, 4, 8, 128, False),
+    (FMT_FLASH_INFER_HND, 4, 8, 128, False),
 ]
 
 
@@ -76,11 +80,17 @@ def create_vllm_tensors(
     if gpu_kv_format == FMT_NORMAL:
         shape = [2, nb, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif gpu_kv_format == FMT_NORMAL_HND:
+        shape = [2, nb, nh, bs, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     elif gpu_kv_format == FMT_CROSS_LAYER:
         shape = [nb, nl, 2, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device)]
     elif gpu_kv_format == FMT_FLASH_INFER:
         shape = [nb, 2, bs, nh, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
+    elif gpu_kv_format == FMT_FLASH_INFER_HND:
+        shape = [nb, 2, nh, bs, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     elif gpu_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
@@ -108,11 +118,17 @@ def create_zero_vllm_tensors(
     if gpu_kv_format == FMT_NORMAL:
         shape = [2, nb, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif gpu_kv_format == FMT_NORMAL_HND:
+        shape = [2, nb, nh, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif gpu_kv_format == FMT_CROSS_LAYER:
         shape = [nb, nl, 2, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device)]
     elif gpu_kv_format == FMT_FLASH_INFER:
         shape = [nb, 2, bs, nh, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
+    elif gpu_kv_format == FMT_FLASH_INFER_HND:
+        shape = [nb, 2, nh, bs, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif gpu_kv_format == FMT_MLA:
         shape = [nb, bs, hs]
@@ -162,9 +178,13 @@ def get_block_data(
     for layer_idx in range(nl):
         if gpu_kv_format == FMT_NORMAL:
             results.append(vllm_tensors[layer_idx][:, block_idx, :, :, :].clone())
+        elif gpu_kv_format == FMT_NORMAL_HND:
+            results.append(vllm_tensors[layer_idx][:, block_idx, :, :, :].clone())
         elif gpu_kv_format == FMT_CROSS_LAYER:
             results.append(vllm_tensors[0][block_idx, layer_idx, :, :, :, :].clone())
         elif gpu_kv_format == FMT_FLASH_INFER:
+            results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
+        elif gpu_kv_format == FMT_FLASH_INFER_HND:
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
         elif gpu_kv_format == FMT_MLA:
             results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
@@ -243,7 +263,16 @@ TOTAL_BLOCKS = NUM_MEMORY_OBJECTS * BLOCKS_PER_OBJECT  # 64
 @pytest.mark.parametrize(
     "gpu_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
-    ids=["normal", "cross_layer", "flash_infer", "mla", "sglang_mha", "sglang_mla"],
+    ids=[
+        "normal",
+        "cross_layer",
+        "flash_infer",
+        "mla",
+        "sglang_mha",
+        "sglang_mla",
+        "normal_hnd",
+        "flash_infer_hnd",
+    ],
 )
 @pytest.mark.parametrize(
     "dtype", [torch.bfloat16, torch.float8_e4m3fn], ids=["bf16", "fp8"]
@@ -333,7 +362,16 @@ def test_block_transfer_roundtrip(gpu_kv_format, nl, nh, hs, is_mla, dtype, mem_
 @pytest.mark.parametrize(
     "gpu_kv_format,nl,nh,hs,is_mla",
     FORMAT_PARAMS,
-    ids=["normal", "cross_layer", "flash_infer", "mla", "sglang_mha", "sglang_mla"],
+    ids=[
+        "normal",
+        "cross_layer",
+        "flash_infer",
+        "mla",
+        "sglang_mha",
+        "sglang_mla",
+        "normal_hnd",
+        "flash_infer_hnd",
+    ],
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
 def test_block_transfer_skip_prefix(gpu_kv_format, nl, nh, hs, is_mla, dtype):

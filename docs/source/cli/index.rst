@@ -41,6 +41,6 @@ For a comprehensive guide with examples, see :doc:`/getting_started/cli`.
    :maxdepth: 2
 
    bench
-   bench_kvcache
+   bench_server
    bench_l2
    kvcache

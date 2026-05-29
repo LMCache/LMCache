@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit and integration tests for BlendTokenRangeMatcher and BlendEngineV2.
+Unit and integration tests for BlendTokenRangeMatcher and BlendModule.
 
 Structure
 ---------
 Part 1 – BlendTokenRangeMatcher (pure unit tests, no GPU/server needed)
     Tests the rolling-hash sub-sequence matching logic in isolation.
 
-Part 2 – BlendEngineV2 integration tests (two-process ZMQ architecture)
+Part 2 – Blend integration tests (two-process ZMQ architecture)
     Uses CB_LOOKUP_PRE_COMPUTED_V2 / CB_RETRIEVE_PRE_COMPUTED_V2, which
     return/accept list[CBMatchResult] instead of list[tuple[int, int]].
 
@@ -42,16 +42,16 @@ from lmcache.v1.distributed.config import (
     StorageManagerConfig,
 )
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
-from lmcache.v1.multiprocess.blend_server_v2 import (
-    BlendEngineV2,
-    BlendTokenRangeMatcher,
-    _unique_token_coverage,
-)
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+)
+from lmcache.v1.multiprocess.modules.blend import (
+    BlendModule,
+    BlendTokenRangeMatcher,
+    _unique_token_coverage,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -692,17 +692,17 @@ def expected_full_chunks(num_tokens: int, chunk_size: int = CHUNK_SIZE) -> int:
 
 
 # =============================================================================
-# Server Process Runner (BlendEngineV2)
+# Server Process Runner (Blend Mode)
 # =============================================================================
 
 
 def server_process_runner_v2(
     host: str, port: int, chunk_size: int, cpu_buffer_size: float
 ):
-    """Entry point for the server process running BlendEngineV2."""
+    """Entry point for the server process running blend mode."""
     # First Party
-    from lmcache.v1.multiprocess.blend_server_v2 import run_cache_server
     from lmcache.v1.multiprocess.config import MPServerConfig
+    from lmcache.v1.multiprocess.server import run_cache_server
 
     mp_config = MPServerConfig(
         host=host,
@@ -733,7 +733,7 @@ def server_process_runner_v2(
 
 @pytest.fixture(scope="module")
 def server_process() -> Generator[mp.Process, None, None]:
-    """Start the BlendEngineV2 server in a separate process for the module."""
+    """Start the blend mode server in a separate process for the module."""
     mp.set_start_method("spawn", force=True)
     process = mp.Process(
         target=server_process_runner_v2,
@@ -855,7 +855,7 @@ def registered_instance(
 
 
 # =============================================================================
-# Part 2: BlendEngineV2 Integration Tests
+# Part 2: Blend Integration Tests
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -865,7 +865,7 @@ def registered_instance(
 
 def test_server_running_v2(server_process: mp.Process):
     """Server process should be alive."""
-    assert server_process.is_alive(), "BlendEngineV2 server process should be running"
+    assert server_process.is_alive(), "Blend server process should be running"
 
 
 @pytest.mark.skipif(
@@ -2001,18 +2001,27 @@ def test_cb_store_final_v2_visible_to_cb_lookup_v2(
 # 8. report_status() – CB-extended fields
 # ---------------------------------------------------------------------------
 #
-# These tests construct a BlendEngineV2 directly in the test process because
-# report_status() is invoked in-process by the FastAPI /api/status handler,
-# not over ZMQ. CUDA IPC unwrapping is bypassed via a monkeypatched
-# unwrap_kv_cache_tensors so the public cb_register_kv_cache path can run
-# without a cross-process producer.
+# These tests construct an MPCacheEngine with a BlendModule directly in the
+# test process because report_status() is invoked in-process by the FastAPI
+# /api/status handler, not over ZMQ. CUDA IPC unwrapping is bypassed via a
+# monkeypatched unwrap_kv_cache_tensors so the public cb_register_kv_cache
+# path can run without a cross-process producer.
 
 
 @pytest.fixture(scope="function")
-def in_process_blend_engine() -> Generator[BlendEngineV2, None, None]:
-    """Build a BlendEngineV2 in-process for direct method-call tests."""
+def in_process_blend_engine() -> Generator[tuple, None, None]:
+    """Build an MPCacheEngine with BlendModule in-process for direct tests.
+
+    Yields:
+        (engine, blend_module) tuple.
+    """
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
+
+    # First Party
+    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
+    from lmcache.v1.multiprocess.server import MPCacheEngine
 
     config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
@@ -2023,12 +2032,15 @@ def in_process_blend_engine() -> Generator[BlendEngineV2, None, None]:
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
     )
-    engine = BlendEngineV2(
+    ctx = MPCacheEngineContext(
         storage_manager_config=config,
         chunk_size=CHUNK_SIZE,
     )
+    gpu_module = GPUTransferModule(ctx)
+    blend_module = BlendModule(ctx)
+    engine = MPCacheEngine(ctx, [gpu_module, blend_module])
     try:
-        yield engine
+        yield engine, blend_module
     finally:
         engine.close()
 
@@ -2055,10 +2067,11 @@ def local_kv_cache_unwrap(monkeypatch, cb_client_context: CBClientContext):
     not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
 )
 def test_report_status_no_cb_registrations(
-    in_process_blend_engine: BlendEngineV2,
+    in_process_blend_engine: tuple,
 ):
     """Without any CB registration, the new fields are present and empty."""
-    status = in_process_blend_engine.report_status()
+    engine, _blend_module = in_process_blend_engine
+    status = engine.report_status()
 
     assert "registered_cb_gpu_ids" in status
     assert "cb_gpu_context_meta" in status
@@ -2070,15 +2083,15 @@ def test_report_status_no_cb_registrations(
     not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
 )
 def test_report_status_surfaces_cb_registration(
-    in_process_blend_engine: BlendEngineV2,
+    in_process_blend_engine: tuple,
     cb_client_context: CBClientContext,
     local_kv_cache_unwrap,
 ):
     """A CB-registered instance shows up in both new fields with correct shape."""
-    engine = in_process_blend_engine
+    engine, blend_module = in_process_blend_engine
     instance_id = 4242
 
-    engine.cb_register_kv_cache(
+    blend_module.cb_register_kv_cache(
         instance_id,
         cb_client_context.get_kv_cache(),
         "testmodel",
@@ -2110,21 +2123,21 @@ def test_report_status_surfaces_cb_registration(
     not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
 )
 def test_report_status_unregister_clears_cb_fields(
-    in_process_blend_engine: BlendEngineV2,
+    in_process_blend_engine: tuple,
     cb_client_context: CBClientContext,
     local_kv_cache_unwrap,
 ):
     """Unregistering removes the entry from both new fields."""
-    engine = in_process_blend_engine
+    engine, blend_module = in_process_blend_engine
     instance_id = 4243
 
-    engine.cb_register_kv_cache(
+    blend_module.cb_register_kv_cache(
         instance_id,
         cb_client_context.get_kv_cache(),
         "testmodel",
         1,
     )
-    engine.cb_unregister_kv_cache(instance_id)
+    blend_module.cb_unregister_kv_cache(instance_id)
 
     status = engine.report_status()
     assert status["registered_cb_gpu_ids"] == []

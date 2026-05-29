@@ -39,13 +39,20 @@ class MPServerConfig:
 
     engine_type: str = "default"
     """Cache engine backend type
-    ('default' for MPCacheEngine, 'blend' for BlendEngineV2).
+    ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
+
+    transfer_mode: str = "gpu"
+    """Transfer mode: 'gpu' for GPU-based IPC transfer (STORE/RETRIEVE),
+    'non_gpu' for non-GPU-based transfer (PREPARE/COMMIT)."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
     )
     """Runtime plugin configuration (locations + extra config)."""
+
+    script_allowed_imports: list[str] = field(default_factory=list)
+    """Modules that /run_script endpoint is allowed to import."""
 
 
 @dataclass
@@ -146,9 +153,17 @@ def add_mp_server_args(
         type=str,
         default="default",
         choices=["default", "blend"],
-        help="Cache engine backend type. 'default' uses MPCacheEngine, "
-        "'blend' uses BlendEngineV2 for cross-request KV reuse. "
-        "Default is 'default'.",
+        help="Cache engine backend type. 'default' uses standard prefix caching, "
+        "'blend' when cacheblend is enabled. Default is 'default'.",
+    )
+    mp_group.add_argument(
+        "--transfer-mode",
+        type=str,
+        default="gpu",
+        choices=["gpu", "non_gpu"],
+        help="Transfer mode: 'gpu' for GPU-based IPC transfer "
+        "(STORE/RETRIEVE), 'non_gpu' for non-GPU-based transfer "
+        "(PREPARE/COMMIT). Default is 'gpu'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -166,6 +181,14 @@ def add_mp_server_args(
         "plugins via LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG. "
         'Example: \'{"plugin.frontend.heartbeat_url": '
         '"http://localhost:5000/heartbeat"}\'',
+    )
+    mp_group.add_argument(
+        "--script-allowed-imports",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Python modules that the /run_script endpoint is allowed to "
+        "import. Example: --script-allowed-imports numpy pandas",
     )
     return parser
 
@@ -198,10 +221,12 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        transfer_mode=args.transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,
         ),
+        script_allowed_imports=args.script_allowed_imports or [],
     )
 
 

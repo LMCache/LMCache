@@ -139,6 +139,10 @@ Source: ``lmcache/v1/distributed/config.py``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
        ``--no-l1-use-lazy`` to explicitly disable.
+       Lazy allocation relies on ``cudart`` host-pinned memory, so on
+       non-CUDA backends (where ``lmcache.torch_dev`` exposes no
+       ``cudart`` attribute) it is automatically downgraded to eager
+       allocation with a logged warning, regardless of the flag value.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
@@ -407,6 +411,33 @@ On the vLLM side, specify the LMCache server host and port via the
     vllm serve Qwen/Qwen3-14B \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+
+``LMCacheMPConnector`` reads the following keys from
+``kv_connector_extra_config``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Key
+     - Default
+     - Description
+   * - ``lmcache.mp.host``
+     - ``tcp://localhost``
+     - Host (with ZMQ transport prefix) of the LMCache MP server.
+   * - ``lmcache.mp.port``
+     - ``5555``
+     - Port of the LMCache MP server. Must match the server's ``--port``.
+   * - ``lmcache.mp.mq_timeout``
+     - ``300.0``
+     - Timeout (seconds) for blocking message-queue requests, including
+       the initial chunk-size query and KV cache
+       registration/unregistration. If the server does not respond within
+       this window, the connector raises ``ConnectionError`` on startup.
+   * - ``lmcache.mp.heartbeat_interval``
+     - ``10.0``
+     - Interval (seconds) between periodic heartbeat pings sent from the
+       connector to the server.
 
 Environment Variables
 ---------------------

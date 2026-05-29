@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 import enum
 import os
 import threading
@@ -167,6 +167,36 @@ def get_lmcache_chunk_size(
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
     chunk_size = future.result(timeout=timeout)
     return chunk_size
+
+
+def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
+    """Raise a verbose ConnectionError when the LMCache MP server is
+    unreachable.
+
+    The message intentionally spells out the most common cause (the
+    standalone ``lmcache server`` process is not running), the URL that
+    was being dialed, and the exact command to start it -- so that users
+    landing here via ``vllm serve --kv-offloading-backend lmcache`` are
+    not left guessing.
+    """
+    hint = (
+        "Cannot reach the LMCache MP server at "
+        f"'{server_url}' within {timeout}s.\n"
+        "This usually means the standalone LMCache server is not "
+        "running, or it is listening on a different host/port.\n"
+        "To start one locally with the default port (5555):\n"
+        "    lmcache server --l1-size-gb 20 --eviction-policy LRU\n"
+        "To target a different host/port, override via "
+        "kv_connector_extra_config (lmcache.mp.host / lmcache.mp.port), "
+        "e.g.:\n"
+        '    --kv-transfer-config \'{"kv_connector":'
+        '"LMCacheMPConnector","kv_role":"kv_both",'
+        '"kv_connector_extra_config":{"lmcache.mp.host":'
+        '"tcp://localhost","lmcache.mp.port":5555}}\'\n'
+        "See https://docs.lmcache.ai/mp/quickstart.html for details."
+    )
+    logger.warning(hint)
+    raise ConnectionError(hint) from None
 
 
 def send_ping(
@@ -452,10 +482,7 @@ class LMCacheMPSchedulerAdapter:
             )
         except TimeoutError:
             self.mq_client.close()
-            raise ConnectionError(
-                f"LMCache server did not respond within {self._mq_timeout}s. "
-                "Is the server running?"
-            ) from None
+            _raise_server_unreachable(server_url, self._mq_timeout)
         assert self.chunk_size % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
@@ -840,10 +867,7 @@ class LMCacheMPWorkerAdapter:
             )
         except TimeoutError:
             self.mq_client.close()
-            raise ConnectionError(
-                f"LMCache server did not respond within {self._mq_timeout}s. "
-                "Is the server running?"
-            ) from None
+            _raise_server_unreachable(server_url, self._mq_timeout)
         assert chunk_size % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )

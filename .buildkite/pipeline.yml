@@ -25,6 +25,7 @@ steps:
         export CXX=hipcc
         export BUILD_WITH_HIP=1
         uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
+        uv pip install -r requirements/rocm_core.txt
       fi
 
       uv pip install -r requirements/common.txt
@@ -37,7 +38,6 @@ steps:
         --cov-report term --cov-report=html:coverage-test \
         --cov-report=xml:coverage-test.xml --html=durations/test.html \
         --ignore=tests/disagg --ignore=tests/v1/test_pos_kernels.py \
-        --ignore=tests/v1/test_nixl_storage.py \
         --ignore=tests/v1/test_nixl_batched_contains.py \
         --ignore=tests/v1/test_device_id_race.py \
         --ignore=tests/skipped \
