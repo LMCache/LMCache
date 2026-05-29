@@ -1,10 +1,6 @@
 <div align="center">
   <p align="center">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="asset/logo_dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="asset/logo_light.png">
-      <img src="asset/logo_light.png" width="720" alt="lmcache logo">
-    </picture>
+    <img src="asset/logo.png" width="720" alt="lmcache logo">
   </p>
   <h2 align="center">
       A KV Cache Management Layer for Scalable LLM Inference
@@ -56,11 +52,7 @@ LMCache supports two deployment modes:
 - **In-process mode**: LMCache runs inside the inference engine process through connectors this mode is limited by python GILs.
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="asset/deployment_modes.png">
-    <source media="(prefers-color-scheme: light)" srcset="asset/deployment_modes.png">
-    <img src="asset/deployment_modes.png" alt="LMCache Deployment Modes">
-  </picture>
+  <img src="asset/deployment_modes.png" alt="LMCache Deployment Modes">
 </p>
 
 ### Key capabilities
@@ -73,18 +65,14 @@ LMCache supports two deployment modes:
 
 - **PD disaggregation and KV transfer**: move KV cache from prefill workers to decode workers over NVLink, RDMA, or TCP through transport layers such as NIXL, so decoding can continue without recomputing prompt KV.
 
-- **Pluggable KV transformation**: apply compression, token dropping, and custom serialization/deserialization through LMCache’s SERDE interface without forking LMCache.
+- **Pluggable KV transformation**: apply compression, token dropping, and custom serialization through the SERDE interface, without forking the codebase.
 
-- **Pluggable storage and transport backends**: connect LMCache with storage and transfer backends such as local CPU memory, local disk, NIXL, GDS, Redis/Valkey, Mooncake, InfiniStore, and S3-compatible object storage.
+- **Pluggable storage and transport backends**: plug in local CPU memory, local disk, NIXL, GDS, Redis/Valkey, Mooncake, InfiniStore, and S3-compatible object storage.
 
 LMCache is becoming a shared infrastructure layer across the LLM inference ecosystem, connecting serving platforms, hardware vendors, storage systems, infrastructure providers, and open-source projects:
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="asset/ecosystem_dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="asset/ecosystem_light.png">
-    <img src="asset/ecosystem_light.png" alt="LMCache ecosystem">
-  </picture>
+  <img src="asset/ecosystem.png" alt="LMCache ecosystem">
 </p>
 
 ## Getting Started
@@ -109,11 +97,7 @@ We welcome and value any contributions and collaborations. Join us in improving 
 LMCache is developed with a growing community of developers, researchers, industry adopters, and partners building the next generation of efficient LLM inference systems.
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="asset/adoption_dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="asset/adoption_light.png">
-    <img src="asset/adoption_light.png" alt="LMCache Adoption and Parterships">
-  </picture>
+  <img src="asset/partner.png" alt="LMCache Adoption and Partnerships">
 </p>
 
 As an independent open-source project, LMCache is becoming the de facto standard for KV Cache management in LLM inference and its continued development and community work are supported in part by [Tensormesh](https://www.tensormesh.ai/).
