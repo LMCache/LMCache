@@ -386,6 +386,49 @@ def test_server_register_and_find_non_cuda_context_layout(
     assert layout.shapes[0] == torch.Size([2, 2, 16, 16])
 
 
+@pytest.mark.no_shared_allocator
+def test_unregister_non_cuda_context_preserves_sibling_layout(
+    stub_native_storage_ops: Any,
+) -> None:
+    """Unregistering one same-model worker does not remove a sibling layout."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
+    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
+
+    with (
+        patch("lmcache.v1.multiprocess.engine_context.StorageManager"),
+        patch("lmcache.v1.multiprocess.engine_context.TokenHasher"),
+        patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
+        patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
+    ):
+        ctx = MPCacheEngineContext(storage_manager_config=MagicMock(), chunk_size=16)
+    module = NonGPUTransferModule(ctx)
+    for instance_id in (1, 2):
+        module.register_kv_cache_non_gpu_context(
+            RegisterNonGpuContextPayload(
+                instance_id=instance_id,
+                model_name="m",
+                world_size=1,
+                block_size=4,
+                num_layers=2,
+                hidden_dim_size=16,
+                dtype_str="float32",
+                use_mla=False,
+            )
+        )
+
+    module.unregister_kv_cache(1)
+
+    layout = ctx.layout_desc_registry.find("m", 1)
+    assert layout is not None
+    assert module.report_status()["registered_non_cuda_instance_ids"] == [2]
+
+    module.unregister_kv_cache(2)
+
+    assert ctx.layout_desc_registry.find("m", 1) is None
+
+
 def test_server_store_and_retrieve_cpu_chunks(stub_native_storage_ops: Any) -> None:
     """Validate mocked server-side CPU chunk store and retrieve behavior."""
     # First Party

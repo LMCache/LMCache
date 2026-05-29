@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared context and layout descriptor registry for engine modules."""
-
-# Standard
-import threading
+"""Shared context for engine modules."""
 
 # First Party
 from lmcache.logging import init_logger
@@ -15,64 +12,11 @@ from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.layout_desc_registry import LayoutDescRegistry
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
-
-
-class LayoutDescRegistry:
-    """Thread-safe registry mapping (model_name, world_size) to MemoryLayoutDesc.
-
-    Modules write to this registry when KV caches are registered.
-    Consumers (e.g. LookupModule) read from it to find layout descriptors
-    for prefetch tasks.
-    """
-
-    def __init__(self) -> None:
-        # Key: (model_name, world_size) -> MemoryLayoutDesc
-        self._registry: dict[tuple[str, int], MemoryLayoutDesc] = {}
-        self._lock = threading.Lock()
-
-    def register(
-        self,
-        model_name: str,
-        world_size: int,
-        layout_desc: MemoryLayoutDesc,
-    ) -> None:
-        """Register a layout descriptor for a (model_name, world_size) pair.
-
-        Args:
-            model_name: The model name.
-            world_size: The world size.
-            layout_desc: The memory layout descriptor.
-        """
-        with self._lock:
-            self._registry[(model_name, world_size)] = layout_desc
-
-    def unregister(self, model_name: str, world_size: int) -> None:
-        """Remove a layout descriptor for a (model_name, world_size) pair.
-
-        Args:
-            model_name: The model name.
-            world_size: The world size.
-        """
-        with self._lock:
-            self._registry.pop((model_name, world_size), None)
-
-    def find(self, model_name: str, world_size: int) -> MemoryLayoutDesc | None:
-        """Look up a layout descriptor by (model_name, world_size).
-
-        Args:
-            model_name: The model name.
-            world_size: The world size.
-
-        Returns:
-            The layout descriptor if found, otherwise None.
-        """
-        with self._lock:
-            return self._registry.get((model_name, world_size))
-
 
 class MPCacheEngineContext:
     """Shared infrastructure for all engine modules.

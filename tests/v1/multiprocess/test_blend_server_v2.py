@@ -67,6 +67,7 @@ SERVER_PORT = (
 SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
+IN_PROCESS_CPU_BUFFER_SIZE = 64 * 1024**2
 DEFAULT_TIMEOUT = 10.0
 
 
@@ -2026,7 +2027,7 @@ def in_process_blend_engine() -> Generator[tuple, None, None]:
     config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
-                size_in_bytes=int(CPU_BUFFER_SIZE * 1024**3),
+                size_in_bytes=IN_PROCESS_CPU_BUFFER_SIZE,
                 use_lazy=True,
             ),
         ),
@@ -2066,6 +2067,7 @@ def local_kv_cache_unwrap(monkeypatch, cb_client_context: CBClientContext):
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
 )
+@pytest.mark.no_shared_allocator
 def test_report_status_no_cb_registrations(
     in_process_blend_engine: tuple,
 ):
@@ -2082,6 +2084,7 @@ def test_report_status_no_cb_registrations(
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
 )
+@pytest.mark.no_shared_allocator
 def test_report_status_surfaces_cb_registration(
     in_process_blend_engine: tuple,
     cb_client_context: CBClientContext,
@@ -2122,6 +2125,7 @@ def test_report_status_surfaces_cb_registration(
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="report_status CB tests require CUDA"
 )
+@pytest.mark.no_shared_allocator
 def test_report_status_unregister_clears_cb_fields(
     in_process_blend_engine: tuple,
     cb_client_context: CBClientContext,
@@ -2137,8 +2141,11 @@ def test_report_status_unregister_clears_cb_fields(
         "testmodel",
         1,
     )
+    assert engine.context.layout_desc_registry.find("testmodel", 1) is not None
+
     blend_module.cb_unregister_kv_cache(instance_id)
 
     status = engine.report_status()
     assert status["registered_cb_gpu_ids"] == []
     assert status["cb_gpu_context_meta"] == {}
+    assert engine.context.layout_desc_registry.find("testmodel", 1) is None

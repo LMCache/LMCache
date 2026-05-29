@@ -222,6 +222,12 @@ class GPUTransferModule:
         self._device_host_func_dispatcher.stop()
 
         had_contexts = len(self._gpu_contexts) > 0
+        for instance_id, entry in self._gpu_contexts.items():
+            self._ctx.layout_desc_registry.unregister(
+                entry.model_name,
+                entry.world_size,
+                instance_id=instance_id,
+            )
         self._gpu_contexts.clear()
         if had_contexts:
             torch_dev.empty_cache()
@@ -269,7 +275,12 @@ class GPUTransferModule:
         )
 
         layout_desc = get_layout_desc(gpu_context, self._ctx.chunk_size)
-        self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
+        self._ctx.layout_desc_registry.register(
+            model_name,
+            world_size,
+            layout_desc,
+            instance_id=instance_id,
+        )
 
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
@@ -290,7 +301,11 @@ class GPUTransferModule:
             )
             return
 
-        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        self._ctx.layout_desc_registry.unregister(
+            entry.model_name,
+            entry.world_size,
+            instance_id=instance_id,
+        )
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
         torch_dev.empty_cache()
 

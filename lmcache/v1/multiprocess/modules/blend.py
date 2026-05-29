@@ -411,6 +411,12 @@ class BlendModule:
 
     def close(self) -> None:
         """Release resources owned by this module."""
+        for instance_id, (model_name, world_size) in self._cb_gpu_context_meta.items():
+            self._ctx.layout_desc_registry.unregister(
+                model_name,
+                world_size,
+                instance_id=instance_id,
+            )
         self._cb_gpu_contexts.clear()
         self._cb_gpu_context_meta.clear()
 
@@ -437,7 +443,12 @@ class BlendModule:
             shapes=[gpu_context.get_kv_buffer_shape(self._ctx.chunk_size)],
             dtypes=[gpu_context.dtype],
         )
-        self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
+        self._ctx.layout_desc_registry.register(
+            model_name,
+            world_size,
+            layout_desc,
+            instance_id=instance_id,
+        )
 
         logger.info(
             "Registered CB KV cache for instance_id %d with %d layers",
@@ -453,6 +464,12 @@ class BlendModule:
                 to unregister.
         """
         if instance_id in self._cb_gpu_contexts:
+            model_name, world_size = self._cb_gpu_context_meta[instance_id]
+            self._ctx.layout_desc_registry.unregister(
+                model_name,
+                world_size,
+                instance_id=instance_id,
+            )
             del self._cb_gpu_contexts[instance_id]
             del self._cb_gpu_context_meta[instance_id]
             logger.info("Unregistered CB KV cache for instance_id %d", instance_id)

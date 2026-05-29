@@ -135,6 +135,12 @@ class NonGPUTransferModule:
 
     def close(self) -> None:
         """Release resources owned by this module."""
+        for instance_id, entry in self._non_gpu_contexts.items():
+            self._ctx.layout_desc_registry.unregister(
+                entry.model_name,
+                entry.world_size,
+                instance_id=instance_id,
+            )
         self._non_gpu_contexts.clear()
 
     def register_kv_cache_non_gpu_context(
@@ -189,7 +195,10 @@ class NonGPUTransferModule:
         )
 
         self._ctx.layout_desc_registry.register(
-            payload.model_name, payload.world_size, layout_desc
+            payload.model_name,
+            payload.world_size,
+            layout_desc,
+            instance_id=payload.instance_id,
         )
 
     def unregister_kv_cache(self, instance_id: int) -> None:
@@ -206,7 +215,11 @@ class NonGPUTransferModule:
             )
             return
 
-        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        self._ctx.layout_desc_registry.unregister(
+            entry.model_name,
+            entry.world_size,
+            instance_id=instance_id,
+        )
         logger.info("Unregistered non-CUDA context for instance ID %d", instance_id)
 
     @_lmcache_nvtx_annotate
