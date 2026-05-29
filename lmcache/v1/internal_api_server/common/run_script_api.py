@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any
+from typing import Any, List
 import importlib
 
 # Third Party
@@ -16,6 +16,18 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
+def _get_allowed_imports(request: Request) -> List[str]:
+    """Extract script_allowed_imports from either inProcess or mp mode."""
+    adapter = getattr(request.app.state, "lmcache_adapter", None)
+    if adapter is not None:
+        return getattr(adapter.config, "script_allowed_imports", None) or []
+    configs = getattr(request.app.state, "configs", None)
+    if isinstance(configs, dict):
+        mp_cfg = configs.get("mp")
+        return getattr(mp_cfg, "script_allowed_imports", None) or []
+    return []
+
+
 @router.post("/run_script")
 async def run_script(request: Request):
     form_data = await request.form()
@@ -27,9 +39,7 @@ async def run_script(request: Request):
     script_content = await script_file.read()
 
     try:
-        # Get allowed imports from config
-        config = request.app.state.lmcache_adapter.config
-        allowed_imports = config.script_allowed_imports or []
+        allowed_imports = _get_allowed_imports(request)
 
         # Pre-import allowed modules
         allowed_modules = {}
