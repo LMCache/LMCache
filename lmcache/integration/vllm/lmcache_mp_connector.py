@@ -155,7 +155,7 @@ def create_scheduler_adapter(
         global_rank=global_rank,
         tp_size=global_tp_size,
         pp_size=vllm_config.parallel_config.pipeline_parallel_size,
-        kv_local_world_size=local_world_size,
+        local_kv_world_size=local_world_size,
         local_tp_size=local_tp_size,
         n_servers=n_servers,
     )
@@ -211,7 +211,7 @@ def create_worker_adapter(
         global_rank=global_rank,
         tp_size=global_tp_size,
         pp_size=vllm_config.parallel_config.pipeline_parallel_size,
-        kv_local_world_size=local_world_size,
+        local_kv_world_size=local_world_size,
         local_tp_size=local_tp_size,
         n_servers=n_servers,
     )
@@ -946,6 +946,18 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 LMCacheMPRequestState.WAITING_FOR_LOAD
                 if condition
                 else LMCacheMPRequestState.READY
+            )
+            # Release per-server over-hit tails before cleanup discards
+            # the per-server hit map.
+            self.scheduler_adapter.free_per_server_overhit_locks(
+                token_ids=list(tracker.all_token_ids),
+                request_id=request.request_id,
+                cache_salt=tracker.cache_salt,
+            )
+            logger.debug(
+                "[req=%s] Released per-server over-hit tail locks "
+                "(no-op when all servers reported the same hit count).",
+                request.request_id,
             )
             # Clean up lookup future in scheduler adapter
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)

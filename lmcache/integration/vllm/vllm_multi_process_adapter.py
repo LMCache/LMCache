@@ -220,45 +220,42 @@ def send_ping(
 
 @dataclass
 class ParallelStrategy:
+    """vLLM parallelism layout snapshot consumed by the LMCache adapters."""
+
     use_mla: bool
-    """Whether to use the MLA."""
-
-    kv_world_size: int
-    """
-    The kv world size. May differ from ``global_world_size``: in MLA mode it
-    'excludes' the effect of TP. Computed by ``extract_world_size_and_kv_rank``
-    in ``lmcache_mp_connector.py``.
-    """
-
-    kv_worker_id: int
-    """
-    The kv worker id of the sub-process. May differ from ``global_rank``: in
-    MLA mode it 'excludes' the effect of TP. Computed by
-    ``extract_world_size_and_kv_rank`` in ``lmcache_mp_connector.py``.
-    """
+    """Whether the model uses MLA."""
 
     global_world_size: int
-    """The GLOBAL (cross-node) world size — total number of vLLM worker
-    processes across all nodes. Mirrors ``parallel_config.world_size``."""
+    """Total number of vLLM worker processes."""
 
     global_rank: int
-    """The GLOBAL rank of this worker process
-    (0 .. global_world_size - 1). Mirrors ``parallel_config.rank``."""
+    """The current worker's rank in ``[0, global_world_size)``."""
 
     tp_size: int
-    """The (global) tensor parallel size."""
+    """Tensor-parallel size of the model."""
 
     pp_size: int
-    """The pipeline parallel size."""
-
-    kv_local_world_size: int
-    """The kv world size per node (one LMCache server per node)."""
-
-    local_tp_size: int
-    """The tensor parallel size per node (one LMCache server per node)."""
+    """Pipeline-parallel size of the model."""
 
     n_servers: int
-    """The number of LMCache servers."""
+    """Number of LMCache servers backing this deployment
+    (1 = single shared server, >1 = one server per node)."""
+
+    kv_world_size: int
+    """How many different pieces the KV cache is split into across the
+    whole deployment."""
+
+    kv_worker_id: int
+    """Which piece of the KV cache the current worker has, in
+    ``[0, kv_world_size)``."""
+
+    local_kv_world_size: int
+    """Same as ``kv_world_size`` but scoped to a single LMCache server;
+    consulted only when ``n_servers > 1``."""
+
+    local_tp_size: int
+    """Same as ``tp_size`` but scoped to a single LMCache server;
+    consulted only when ``n_servers > 1``."""
 
 
 def _normalize_adapter_init_args(
@@ -303,7 +300,7 @@ def _normalize_adapter_init_args(
         global_rank=kv_worker_id,
         tp_size=kv_world_size,
         pp_size=1,
-        kv_local_world_size=kv_world_size,
+        local_kv_world_size=kv_world_size,
         local_tp_size=kv_world_size,
         n_servers=1,
     )
@@ -481,16 +478,12 @@ class LMCacheMPSchedulerAdapter:
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
         self._mq_timeout = mq_timeout
 
-        # Lookup state tracking (multi-server aware, N>=1):
-        # - _pending_lookups: request_ids submitted but not yet resolved
-        #   (resolved == results from ALL servers have been merged).
+        # Lookup state tracking:
+        # - _pending_lookups: request_ids submitted but not yet resolved.
         # - _per_server_hits: {request_id: {server_url: hit_chunks}}.
-        #   Accumulated across polls; entries are final once written.
-        #   Popped by `cleanup_lookup_result`.
-        # - _finished_lookup_results: aggregated token count keyed by
-        #   request_id (min hit across servers, in tokens). Popped by
-        #   `cleanup_lookup_result`.
-
+        # - _finished_lookup_results: cached token count keyed by request_id,
+        #   so that repeated calls to check_lookup_result return the same
+        #   value until cleanup_lookup_result is invoked.
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
@@ -543,30 +536,30 @@ class LMCacheMPSchedulerAdapter:
 
     @property
     def world_size(self) -> int:
+        """How many pieces the KV cache is split into across the LMCache
+        server(s) this adapter talks to."""
         if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
-            return self.parallel_strategy.kv_local_world_size
+            return self.parallel_strategy.local_kv_world_size
         return self.parallel_strategy.kv_world_size
 
     @property
     def tp_size(self) -> int:
+        """Tensor-parallel size as seen from a single LMCache server."""
         if self.parallel_strategy.n_servers > 1:
             return self.parallel_strategy.local_tp_size
         return self.parallel_strategy.tp_size
 
     @property
     def is_healthy(self) -> bool:
-        """Whether all the LMCache server is healthy."""
+        """True iff every backing LMCache server is healthy."""
         return all(ev.is_set() for ev in self._health_events.values())
 
     def healthy_urls(self) -> list[str]:
+        """Return the list of server URLs that are currently healthy."""
         return [u for u, ev in self._health_events.items() if ev.is_set()]
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start heartbeat threads (one per server) on first use.
-        Safe to call concurrently; threads are only created once thanks
-        to the lock + membership check on the ``self._heartbeats`` dict.
-        """
-        # Fast path: threads already started for every server.
+        """Lazily start the heartbeat thread on first use."""
         if self._heartbeats:
             return
         with self._heartbeat_lock:
@@ -615,11 +608,6 @@ class LMCacheMPSchedulerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            logger.warning(
-                "Skip LOOKUP for req=%s because not all servers are healthy: %s",
-                request_id,
-                {u: ev.is_set() for u, ev in self._health_events.items()},
-            )
             return
 
         if request_id in self._pending_lookups:
@@ -684,14 +672,12 @@ class LMCacheMPSchedulerAdapter:
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         """
-        Return the number of tokens matched in LMCache for ``request_id``,
-        or ``None`` if the lookup is still in progress on at least one
-        server.
+        Check the result of a previously submitted lookup request.
 
-        On the first poll where every server has reported, the aggregate
-        is written to ``_finished_lookup_results`` and returned. Repeat
-        calls return the cached aggregate verbatim until
-        ``cleanup_lookup_result`` is invoked.
+        Returns the matched token count when the lookup is complete, or
+        ``None`` if it is still in progress.  Once a non-``None`` result
+        has been returned, repeated calls keep returning the same value
+        until ``cleanup_lookup_result`` is invoked.
 
         Args:
             request_id: The ID of the lookup request submitted in
@@ -832,28 +818,18 @@ class LMCacheMPSchedulerAdapter:
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
         """
-        per_server = self._per_server_hits.get(request_id)
-        if per_server is None:
-            targets = {
-                url: (end - start) // self.chunk_size for url in self._server_urls
-            }
-        else:
-            targets = dict(per_server)
+        if not self.is_healthy:
+            return
 
-        for url, hit_chunks in targets.items():
-            if hit_chunks <= 0:
-                continue
-            per_server_end = start + hit_chunks * self.chunk_size
-            per_server_end = min(per_server_end, len(token_ids))
-
-            key = self._create_key(
-                token_ids=token_ids,
-                start=start,
-                end=per_server_end,
-                request_id=request_id,
-                cache_salt=cache_salt,
-            ).no_worker_id_version()
-
+        # Free [start, end) on every server.
+        base_key = self._create_key(
+            token_ids,
+            start=start,
+            end=end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+        ).no_worker_id_version()
+        for url in self._server_urls:
             client = self.mq_clients.get(url)
             if client is None:
                 continue
@@ -861,11 +837,54 @@ class LMCacheMPSchedulerAdapter:
                 send_lmcache_request(
                     client,
                     RequestType.FREE_LOOKUP_LOCKS,
-                    [key, self.tp_size],
+                    [base_key, self.tp_size],
                 )
             except Exception as e:
                 logger.warning(
                     "[req=%s] FREE_LOOKUP_LOCKS to %s failed: %s "
+                    "(rely on server-side GC for any residual lock)",
+                    request_id,
+                    url,
+                    e,
+                )
+
+    def free_per_server_overhit_locks(
+        self,
+        token_ids: list[int],
+        request_id: str,
+        cache_salt: str = "",
+    ) -> None:
+        """Release the per-server tail locks that exceed the global min hit."""
+        if not self.is_healthy:
+            return
+        per_server = self._per_server_hits.get(request_id)
+        if not per_server:
+            return
+        min_hit_chunks = min(per_server.values())
+        min_hit_end = min_hit_chunks * self.chunk_size
+        for url, hit_chunks in per_server.items():
+            if hit_chunks <= min_hit_chunks:
+                continue
+            tail_end = min(hit_chunks * self.chunk_size, len(token_ids))
+            tail_key = self._create_key(
+                token_ids=token_ids,
+                start=min_hit_end,
+                end=tail_end,
+                request_id=request_id,
+                cache_salt=cache_salt,
+            ).no_worker_id_version()
+            client = self.mq_clients.get(url)
+            if client is None:
+                continue
+            try:
+                send_lmcache_request(
+                    client,
+                    RequestType.FREE_LOOKUP_LOCKS,
+                    [tail_key, self.tp_size],
+                )
+            except Exception as e:
+                logger.warning(
+                    "[req=%s] FREE_LOOKUP_LOCKS (tail) to %s failed: %s "
                     "(rely on server-side GC for any residual lock)",
                     request_id,
                     url,
@@ -1075,53 +1094,43 @@ class LMCacheMPWorkerAdapter:
 
     @property
     def is_healthy(self) -> bool:
-        """Whether the LMCache server is healthy.
-
-        Reflects the most recent heartbeat result. KV cache
-        re-registration on the unhealthy->healthy transition is handled
-        by the heartbeat thread itself via ``register_recover_callback``,
-        so this property only reads the shared event.
-        """
+        """Whether the LMCache server is healthy."""
         return self._health_event.is_set()
 
     @property
     def world_size(self) -> int:
+        """How many pieces the KV cache is split into across the LMCache
+        server this worker talks to."""
         if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
-            return self.parallel_strategy.kv_local_world_size
+            return self.parallel_strategy.local_kv_world_size
         return self.parallel_strategy.kv_world_size
 
     @property
     def worker_id(self) -> int:
+        """This worker's piece index, in ``[0, world_size)``.
+        Unique among workers backing the same LMCache server."""
         if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
             return (
                 self.parallel_strategy.global_rank
-                % self.parallel_strategy.kv_local_world_size
+                % self.parallel_strategy.local_kv_world_size
             )
         return self.parallel_strategy.kv_worker_id
 
     @property
     def use_mla(self) -> bool:
-        """Whether to use MLA."""
+        """Whether this worker is running in MLA mode."""
         return self.parallel_strategy.use_mla
 
     @property
     def is_first_rank_of_pp_group(self) -> bool:
-        """Is the first rank of the pipeline parallel group (TP-group local rank 0).
-
-        In multi-server MLA deployments, this only identifies the global
-        rank-0 worker.  Use ``is_first_rank_of_node`` for per-node STORE gating.
-        """
+        """Whether this worker is the first rank of its pipeline-parallel
+        group. Use ``is_first_rank_of_node`` for per-node STORE gating."""
         return self.parallel_strategy.global_rank % self.parallel_strategy.tp_size == 0
 
     @property
     def is_first_rank_of_node(self) -> bool:
-        """Whether this worker is the first rank on its node.
-
-        In multi-server MLA deployments each node runs one LMCache server.
-        Only the first rank on each node needs to STORE the KV cache, since
-        all ranks on the same node hold identical KV data under MLA.
-        For single-server deployments this degenerates to is_first_rank_of_pp_group.
-        """
+        """Whether this worker is the first rank on its node. Use
+        ``is_first_rank_of_pp_group`` outside multi-server deployments."""
         n_servers = self.parallel_strategy.n_servers
         if n_servers <= 1:
             return self.is_first_rank_of_pp_group

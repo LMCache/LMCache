@@ -65,7 +65,7 @@ def fake_adapter(monkeypatch):
         global_rank=0,
         tp_size=1,
         pp_size=1,
-        kv_local_world_size=1,
+        local_kv_world_size=1,
         local_tp_size=1,
         n_servers=1,
     )
