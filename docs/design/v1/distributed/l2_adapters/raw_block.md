@@ -96,10 +96,20 @@ Rules:
 - periodic checkpointing
 - optional checkpoint load on startup
 - optional verification on load
+- optional checkpoint payload compression (`meta_checkpoint_compression`)
 - recovery by loading the latest durable checkpoint and rebuilding the in-memory
   index
 
-The on-device format is intentionally unchanged by the MP adapter work.
+The checkpoint payload may optionally be compressed with zlib. When enabled, the
+on-device payload is framed with a leading magic tag (`b"LMCZ1\x00"`) so recovery
+auto-detects the codec without changing the metadata header struct or
+`meta_version`. An uncompressed payload is JSON and always starts with `{`, which
+never collides with the tag, so checkpoints written without compression (or by
+older versions) still load. The CRC and the container-capacity check operate on
+the stored (compressed) bytes, so torn-write detection is preserved and more
+entries fit per metadata container while fewer bytes are written each cycle.
+
+The on-device slot/header format is otherwise unchanged by the MP adapter work.
 
 Recovered keys are exposed to the shared L2 eviction policy on adapter startup,
 so reclaimed slots come from global L2 eviction or explicit `delete()` calls.
@@ -124,6 +134,7 @@ The MP adapter is configured through `--l2-adapter` JSON:
   "meta_enable_periodic": true,
   "load_checkpoint_on_init": true,
   "meta_verify_on_load": true,
+  "meta_checkpoint_compression": "zlib",
   "num_store_workers": 2,
   "num_lookup_workers": 1,
   "num_load_workers": 4
@@ -140,6 +151,9 @@ Important validation rules:
   of loading the latest on-device metadata checkpoint
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
+- `meta_checkpoint_compression` must be `"none"` or `"zlib"` (default `"zlib"`).
+  A compressed checkpoint cannot be read by a version that predates this knob;
+  set `"none"` before downgrading.
 
 ## Relationship to Non-MP Mode
 

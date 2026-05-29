@@ -23,6 +23,13 @@ caller-provided load buffers during prefetch.
 - ``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` /
   ``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and recovery
   controls carried over from the legacy raw-block backend.
+- ``meta_checkpoint_compression``: Checkpoint payload codec, ``"none"`` or
+  ``"zlib"`` (default ``"zlib"``). Compression shrinks the checkpoint so more
+  entries fit per metadata container and fewer bytes are written each cycle;
+  it runs on the background checkpoint thread and does not affect the KV data
+  path. Recovery auto-detects the codec, so uncompressed checkpoints still
+  load. A compressed checkpoint cannot be read by a version predating this
+  knob; set ``"none"`` before downgrading.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.

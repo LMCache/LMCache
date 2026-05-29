@@ -627,3 +627,26 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
             assert str(load_bitmap) == "00"
         finally:
             adapter.close()
+
+
+def test_raw_block_l2_adapter_config_default_compression():
+    config = RawBlockL2AdapterConfig.from_dict(_config_dict())
+
+    assert config.meta_checkpoint_compression == "zlib"
+    assert config.to_core_config().meta_checkpoint_compression == "zlib"
+
+
+def test_raw_block_l2_adapter_config_explicit_compression_passthrough():
+    config = RawBlockL2AdapterConfig.from_dict(
+        _config_dict(meta_checkpoint_compression="none")
+    )
+
+    assert config.meta_checkpoint_compression == "none"
+    assert config.to_core_config().meta_checkpoint_compression == "none"
+
+
+def test_raw_block_l2_adapter_config_rejects_invalid_compression():
+    with pytest.raises(ValueError, match="meta_checkpoint_compression"):
+        RawBlockL2AdapterConfig.from_dict(
+            _config_dict(meta_checkpoint_compression="gzip")
+        )

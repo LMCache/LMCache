@@ -6,7 +6,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Literal, Optional, cast
 import ctypes
 import json
 import os
@@ -43,6 +43,22 @@ _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
+
+# Checkpoint payload compression.
+#
+# The on-device checkpoint payload is optionally framed with a leading magic
+# tag so recovery can auto-detect the codec without changing the metadata header
+# struct or bumping ``meta_version``. An uncompressed payload is JSON and always
+# starts with ``{`` (0x7B), which never collides with the magic tag, so
+# checkpoints written by older versions (no tag) still load unchanged.
+RawBlockCheckpointCompression = Literal["none", "zlib"]
+RAW_BLOCK_CHECKPOINT_COMPRESSIONS = frozenset({"none", "zlib"})
+DEFAULT_CHECKPOINT_COMPRESSION: RawBlockCheckpointCompression = "zlib"
+_CHECKPOINT_COMPRESS_MAGIC = b"LMCZ1\x00"
+# Level 1 captures nearly all of the achievable ratio for this payload (repeated
+# key prefixes and JSON structure); the bulk of the bytes are random chunk-hash
+# hex that does not compress. Higher levels roughly double the CPU for ~7% more.
+_CHECKPOINT_COMPRESS_LEVEL = 1
 
 
 def round_up(x: int, align: int) -> int:
@@ -126,6 +142,24 @@ def _read_sysfs_int(path: str) -> Optional[int]:
         return None
 
 
+def validate_checkpoint_compression(value: str) -> RawBlockCheckpointCompression:
+    """Validate and narrow a checkpoint payload compression codec name.
+
+    Args:
+        value: Codec name from configuration.
+
+    Returns:
+        The validated codec name (``"none"`` or ``"zlib"``).
+
+    Raises:
+        ValueError: If ``value`` is not a supported codec.
+    """
+    if value not in RAW_BLOCK_CHECKPOINT_COMPRESSIONS:
+        allowed = ", ".join(sorted(RAW_BLOCK_CHECKPOINT_COMPRESSIONS))
+        raise ValueError(f"meta_checkpoint_compression must be one of: {allowed}")
+    return cast(RawBlockCheckpointCompression, value)
+
+
 @dataclass(frozen=True)
 class RawBlockCoreConfig:
     """Configuration for RawBlockCore device layout, I/O, and checkpoints."""
@@ -149,6 +183,9 @@ class RawBlockCoreConfig:
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
     use_uring_cmd: bool = False
+    meta_checkpoint_compression: RawBlockCheckpointCompression = (
+        DEFAULT_CHECKPOINT_COMPRESSION
+    )
 
 
 @dataclass
@@ -228,6 +265,9 @@ class RawBlockCore:
                 "character devices when use_uring_cmd=true"
             )
             self.use_odirect = False
+        self.meta_checkpoint_compression = validate_checkpoint_compression(
+            str(config.meta_checkpoint_compression)
+        )
         self.key_namespace = key_namespace
 
         if not self.device_path:
@@ -933,6 +973,7 @@ class RawBlockCore:
                 "io_engine": self.io_engine,
                 "iouring_queue_depth": self.iouring_queue_depth,
                 "use_uring_cmd": self.use_uring_cmd,
+                "meta_checkpoint_compression": self.meta_checkpoint_compression,
             }
 
     def close(self) -> None:
@@ -1624,6 +1665,41 @@ class RawBlockCore:
             return None
         return TORCH_DTYPE_TO_STR_DTYPE.get(dtype, str(dtype))
 
+    def _encode_checkpoint_payload(self, raw: bytes) -> bytes:
+        """Frame a serialized checkpoint payload for on-device storage.
+
+        Args:
+            raw: UTF-8 JSON checkpoint bytes produced by ``_snapshot_state``.
+
+        Returns:
+            The bytes to store on the device. When compression is enabled the
+            result is ``_CHECKPOINT_COMPRESS_MAGIC`` followed by the
+            zlib-compressed payload; otherwise ``raw`` is returned unchanged.
+        """
+        if self.meta_checkpoint_compression == "zlib":
+            return _CHECKPOINT_COMPRESS_MAGIC + zlib.compress(
+                raw, _CHECKPOINT_COMPRESS_LEVEL
+            )
+        return raw
+
+    def _decode_checkpoint_payload(self, payload: bytes) -> bytes:
+        """Decode an on-device checkpoint payload back to JSON bytes.
+
+        Args:
+            payload: CRC-validated bytes read from a checkpoint container.
+
+        Returns:
+            The original UTF-8 JSON checkpoint bytes. A payload carrying the
+            compression magic tag is decompressed; an untagged payload (written
+            by older versions or with compression disabled) is returned as-is.
+
+        Raises:
+            zlib.error: If a tagged payload cannot be decompressed.
+        """
+        if payload.startswith(_CHECKPOINT_COMPRESS_MAGIC):
+            return zlib.decompress(payload[len(_CHECKPOINT_COMPRESS_MAGIC) :])
+        return payload
+
     def _write_checkpoint(self, payload: bytes, dirty_total_snapshot: int) -> bool:
         """Write one checkpoint copy and advance persisted metadata counters."""
         payload_cap = self._meta_payload_capacity()
@@ -1680,9 +1756,10 @@ class RawBlockCore:
             return False
 
         snapshot, dirty_total_snapshot = self._snapshot_state()
-        payload = json.dumps(snapshot, separators=(",", ":"), ensure_ascii=True).encode(
-            "utf-8"
-        )
+        raw_payload = json.dumps(
+            snapshot, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        payload = self._encode_checkpoint_payload(raw_payload)
         return self._write_checkpoint(payload, dirty_total_snapshot)
 
     def _is_valid_checkpoint_entry(self, offset: int, size: int) -> bool:
@@ -1929,7 +2006,7 @@ class RawBlockCore:
             logger.warning("RawBlockCore: checkpoint header had no payload")
             return
         try:
-            data = json.loads(payload.decode("utf-8"))
+            data = json.loads(self._decode_checkpoint_payload(payload).decode("utf-8"))
         except Exception:
             logger.warning("RawBlockCore: failed to decode metadata payload")
             return
