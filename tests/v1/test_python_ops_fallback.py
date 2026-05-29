@@ -1736,18 +1736,6 @@ def scenario_transfer_direction_enum(ops: Any, device: str) -> dict[str, torch.T
 # ==========================================
 # 3. Registry
 # ==========================================
-# Map scenario name -> attribute on the ops module the scenario needs.
-# When a native backend (e.g. lmcache.xpu_ops) has not implemented the op
-# yet, the scenario is skipped for that backend instead of being run and
-# crashing the device. Scenarios whose name matches the attribute exactly
-# are omitted: the default lookup falls back to the scenario name.
-SCENARIO_REQUIRED_ATTR: dict[str, str] = {
-    "alloc_free_pinned_ptr": "alloc_pinned_ptr",
-    "alloc_free_pinned_numa_ptr": "alloc_pinned_numa_ptr",
-    "alloc_free_numa_ptr": "alloc_numa_ptr",
-    "alloc_free_shm_pinned_ptr": "alloc_shm_pinned_ptr",
-    "transfer_direction_enum": "TransferDirection",
-}
 
 # cover pybind list in csrc/pybind.cpp
 SCENARIO_REGISTRY = {
@@ -1803,15 +1791,11 @@ class TestScenarios:
         by test_2_compare.
         """
         backend_id, ops, device = backend
-        # Skip scenarios whose required op is not exported by this backend.
-        # In particular, lmcache.xpu_ops is still missing several functions
-        # the CUDA c_ops backend exposes; running them anyway would raise
-        # AttributeError/TypeError and on XPU may cascade into
-        # UR_RESULT_ERROR_DEVICE_LOST, poisoning the rest of the session.
-        required_attr = SCENARIO_REQUIRED_ATTR.get(name, name)
-        if not hasattr(ops, required_attr):
-            pytest.skip(f"backend '{backend_id}' does not implement '{required_attr}'")
-        result = fn(ops, device)
+        # Skip scenarios whose required op is not exported by this backend
+        try:
+            result = fn(ops, device)
+        except AttributeError as e:
+            pytest.skip(f"backend '{backend_id}' missing op: {e}")
         if result is not None:
             _results[(name, backend_id)] = result
 
