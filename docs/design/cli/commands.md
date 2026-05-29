@@ -14,6 +14,7 @@ LMCache functionality.
 lmcache
 ├── server                          # Launch LMCache server (ZMQ + HTTP)
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
+├── conf                            # Dump active MP server config as JSON
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
 ├── query    {kvcache,engine}       # Single-shot query with metrics
 ├── bench    {engine,server,l2}    # Sustained performance benchmarking
@@ -25,6 +26,7 @@ lmcache
 | `ping` | Is it alive? | Single-shot, instant (OK/FAIL) |
 | `query` | What happens when I send one request? | Single-shot, with metrics |
 | `describe` | What is this thing? | Rich status dashboard |
+| `conf` | What configuration did this MP server load? | JSON config snapshot |
 | `bench` | How fast is it? | Multi-iteration, metrics-heavy |
 | `kvcache` | Mutate cache state | Clear, end-session, evict (future) |
 
@@ -84,6 +86,21 @@ Running requests:                        3
 `describe kvcache` gathers data from multiple ZMQ request types (`NOOP` for debug
 info, `GET_CHUNK_SIZE` for chunk size) and `/status` (HTTP) to build a
 consolidated view.
+
+### `lmcache conf`
+
+Fetches the active MP server configuration from HTTP `/conf`, prints formatted
+JSON to stdout, and can persist the same JSON to a file for debugging.
+
+```bash
+$ lmcache conf --url http://localhost:8080 -o lmcache-config.json
+```
+
+The payload is a snapshot of active config objects, not a schema catalog. It
+includes MP, HTTP, storage-manager, L1/L2, policy, and observability values.
+Nested adapter configs, per-adapter eviction, persist, and serde settings are
+expanded when the active objects expose public attributes. Sensitive fields
+such as passwords and secrets are redacted.
 
 ### `lmcache ping`
 

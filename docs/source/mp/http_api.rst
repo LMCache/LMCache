@@ -96,8 +96,7 @@ compatibility with the vLLM-embedded API server.
        cycle).
    * - GET
      - ``/conf``
-     - Dump merged server configurations (mp, storage_manager,
-       observability).
+     - Dump active server configurations for debugging.
    * - GET
      - ``/version``
      - Full version descriptor (package version + commit id).
@@ -406,11 +405,15 @@ List every registered quota alongside its live usage.
 ~~~~~~~~~~~~~
 
 Returns every server-side configuration object registered on
-``app.state.configs`` (typically ``mp``, ``storage_manager`` and
-``observability``) as a single indented JSON document. Dataclasses are
-serialized via ``safe_asdict``; other values go through ``make_json_safe``.
-Useful for confirming what the process actually loaded — including
-environment overrides — without restarting.
+``app.state.configs`` as a single indented JSON document. This typically
+includes ``mp``, ``http``, ``storage_manager`` and ``observability``.
+Dataclasses, nested dict/list values, and config-like objects with public
+attributes are expanded so active L2 adapter, per-adapter eviction, persist,
+and serde configs remain structured instead of being stringified. Sensitive
+fields such as passwords and secrets are redacted.
+
+Use this endpoint to confirm what the process actually loaded, including
+runtime defaults and environment-derived values, without restarting.
 
 **Response** (``200 OK``):
 
@@ -418,12 +421,28 @@ environment overrides — without restarting.
 
     {
       "mp": {
-        "http_host": "0.0.0.0",
-        "http_port": 8080,
+        "host": "localhost",
+        "port": 5555,
         "...": "..."
       },
+      "http": {
+        "http_host": "0.0.0.0",
+        "http_port": 8080
+      },
       "storage_manager": {
-        "...": "..."
+        "l2_adapter_config": {
+          "adapters": [
+            {
+              "__class__": "FSL2AdapterConfig",
+              "base_path": "/tmp/lmcache",
+              "persist_config": {"persist_enabled": true},
+              "serde_config": null
+            }
+          ]
+        },
+        "store_policy": "default",
+        "prefetch_policy": "default",
+        "prefetch_max_in_flight": 8
       },
       "observability": {
         "...": "..."
@@ -444,6 +463,12 @@ onto ``app.state`` yet:
 .. code-block:: bash
 
     curl -s http://localhost:8080/conf | jq
+
+The same endpoint is available through the CLI:
+
+.. code-block:: bash
+
+    lmcache conf --url http://localhost:8080 -o lmcache-config.json
 
 ``GET /version``
 ~~~~~~~~~~~~~~~~

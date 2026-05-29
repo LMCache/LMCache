@@ -80,6 +80,9 @@ SAMPLE_STATUS = {
 
 
 class TestNormalizeUrl:
+    def test_port_shorthand_uses_localhost(self):
+        assert normalize_url("8080") == "http://localhost:8080"
+
     def test_adds_http(self):
         assert normalize_url("localhost:8000") == "http://localhost:8000"
 
