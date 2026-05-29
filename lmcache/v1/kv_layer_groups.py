@@ -51,6 +51,18 @@ def _layer_names_by_index(
     lmc_kv_cache_groups: "LMCKVCacheGroups",
     num_layers: int,
 ) -> list[str]:
+    """Build a per-registered-index layer-name list from group metadata.
+
+    Args:
+        lmc_kv_cache_groups: Group metadata whose ``layer_indices`` /
+            ``layer_names`` supply names for known indices.
+        num_layers: Number of registered KV tensors (length of the result).
+
+    Returns:
+        A list of length ``num_layers`` mapping each registered tensor index to
+        its layer name, defaulting unknown indices to
+        ``"model.layers.<idx>"``.
+    """
     names = [f"{DEFAULT_LAYER_NAME_PREFIX}{idx}" for idx in range(num_layers)]
     for group in lmc_kv_cache_groups.groups:
         for layer_idx, layer_name in zip(
@@ -71,6 +83,22 @@ def group_layers_by_identity(
 
     This helper is shared by vLLM-side LMCache group inflation and server-side
     ``KVLayerGroupInfo`` construction so both sides agree on group order.
+
+    Args:
+        kv_caches: Registered KV cache structure inspected for per-layer shape
+            and dtype.
+        gpu_kv_format: Format descriptor returned by
+            :func:`normalize_kv_and_discover_format`, used to read heads/sizes.
+        num_layers: Number of registered KV tensors to partition.
+        per_layer_engine_group_idx: Optional per-registered-index engine KV
+            cache group id. When ``None`` every layer is treated as engine
+            group 0 (non-hybrid); when present, layers from different engine
+            groups never share an identity even if their tensor shapes match.
+
+    Returns:
+        A list of ``(identity, layer_indices)`` pairs sorted by each group's
+        first layer index, so the group order is deterministic and identical on
+        both the vLLM and server sides.
     """
     # First Party
     from lmcache.v1.gpu_connector.utils import (
@@ -109,6 +137,19 @@ def inflate_lmc_kv_cache_groups(
     store/retrieve block IDs. It is intentionally derived with the same
     ``group_layers_by_identity`` helper that builds runtime
     ``KVLayerGroupInfo`` objects.
+
+    Args:
+        kv_caches: Registered KV cache structure (source of truth for physical
+            shape and dtype).
+        gpu_kv_format: Format descriptor from
+            :func:`normalize_kv_and_discover_format`.
+        lmc_kv_cache_groups: Engine KV cache group metadata. When ``None`` (or
+            empty), all layers are treated as a single engine group.
+
+    Returns:
+        An ``LMCKVCacheGroups`` with one ``LMCKVCacheGroup`` per LMCache
+        transfer identity, ordered by first layer index; empty when there are
+        no registered layers.
     """
     # First Party
     from lmcache.v1.gpu_connector.utils import get_num_layers

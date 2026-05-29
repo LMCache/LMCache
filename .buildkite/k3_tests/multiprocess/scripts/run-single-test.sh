@@ -27,6 +27,12 @@ export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 # gpt-oss-20b is ungated and uses paged attention for both layer families.
 if [ "$TEST_NAME" = "hma_lm_eval" ]; then
     export MODEL="${MODEL:-openai/gpt-oss-20b}"
+    # gpt-oss-20b ships MXFP4 weights whose MoE kernels do not support vLLM's
+    # batch-invariant mode, so disable it and load via the Marlin MXFP4 backend.
+    # The hma test therefore compares gsm8k scores within a tolerance (see
+    # run-hma-lm-eval.sh) rather than requiring bit-identical samples.
+    export VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-0}"
+    export VLLM_MXFP4_USE_MARLIN="${VLLM_MXFP4_USE_MARLIN:-1}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi

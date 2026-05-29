@@ -73,7 +73,8 @@ echo "Port: $vllm_port"
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
-VLLM_BATCH_INVARIANT=1 \
+VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-1}" \
+VLLM_MXFP4_USE_MARLIN="${VLLM_MXFP4_USE_MARLIN:-0}" \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
@@ -94,7 +95,8 @@ echo "Port: $vllm_baseline_port"
 CUDA_VISIBLE_DEVICES="${GPU_FOR_BASELINE}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
-VLLM_BATCH_INVARIANT=1 \
+VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-1}" \
+VLLM_MXFP4_USE_MARLIN="${VLLM_MXFP4_USE_MARLIN:-0}" \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --attention-backend FLASH_ATTN \

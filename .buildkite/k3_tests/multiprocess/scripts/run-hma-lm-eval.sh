@@ -18,11 +18,19 @@
 #   3. Re-run lm_eval                                  -> vLLM APC misses, so the
 #      prefix KV is served by LMCache (RETRIEVE), exercising the HMA retrieve path.
 #   4. Assert the two runs' gsm8k scores are aligned (LMCache retrieve is
-#      numerically correct) and aligned with the no-LMCache baseline (full stack).
+#      numerically correct) and that run 2 is aligned with the no-LMCache
+#      baseline (full stack).
 #   5. Assert LMCache actually served retrieves during run 2 (non-vacuous).
 #
-# Determinism comes from VLLM_BATCH_INVARIANT=1 (set by launch-processes.sh);
-# the reset endpoint requires VLLM_SERVER_DEV_MODE=1 (also set there).
+# The reset endpoint requires VLLM_SERVER_DEV_MODE=1 (set by launch-processes.sh).
+#
+# NOTE on determinism: gpt-oss-20b's MXFP4 MoE kernels do not support vLLM's
+# batch-invariant mode, so this test runs with VLLM_BATCH_INVARIANT=0 (set by
+# run-single-test.sh). Generation is therefore not bit-deterministic and carries
+# a few-percent run-to-run noise floor, so the comparison uses a score TOLERANCE
+# rather than exact-sample matching. This still catches a broken HMA path: if
+# retrieve served corrupt KV, the gsm8k score would collapse far beyond the
+# tolerance.
 set -e
 set -o pipefail
 
@@ -38,7 +46,9 @@ MODEL="${MODEL:-openai/gpt-oss-20b}"
 NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
 LIMIT="${LIMIT:-200}"
 # Max allowed absolute difference in the gsm8k exact_match score between runs.
-SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.01}"
+# Loose because gpt-oss runs without batch-invariance (see NOTE above); a broken
+# HMA retrieve would drop the score far more than this.
+SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.08}"
 # Seconds to wait after run 1 so async LMCache stores drain before run 2.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 BUILD_ID="${BUILD_ID:-local_$$}"
@@ -63,6 +73,22 @@ echo ""
 
 mkdir -p "$RUN1_DIR" "$RUN2_DIR" "$BASELINE_DIR"
 
+# Run one lm_eval gsm8k pass against a vLLM OpenAI-compatible server.
+#
+# Globals (read):
+#   MODEL          - HuggingFace model id, echoed to lm_eval's model_args.
+#   NUM_CONCURRENT - number of in-flight requests lm_eval issues.
+#   LIMIT          - number of gsm8k samples to evaluate.
+# Arguments:
+#   $1 port       - TCP port of the vLLM /v1/completions endpoint to evaluate.
+#   $2 output_dir - directory lm_eval writes results_*.json / samples_*.jsonl to.
+#   $3 run_name   - human-readable label used only in progress log lines.
+# Outputs:
+#   Writes lm_eval result and per-sample files under output_dir; prints progress
+#   to stdout.
+# Returns:
+#   lm_eval's exit status (non-zero if the evaluation run fails). Propagated to
+#   the caller via ``set -e``.
 run_lm_eval() {
     local port="$1"
     local output_dir="$2"
@@ -79,6 +105,18 @@ run_lm_eval() {
     echo ""
 }
 
+# Reset a vLLM server's local prefix cache (APC) while preserving LMCache.
+#
+# POSTs to the dev-mode /reset_prefix_cache endpoint without reset_external
+# (which defaults to false), so only vLLM's GPU-side automatic prefix cache is
+# cleared and the LMCache-managed cache is left intact.
+# Arguments:
+#   $1 port - TCP port of the vLLM server whose local APC should be reset.
+# Outputs:
+#   Progress / failure detail to stdout.
+# Returns:
+#   0 if the server acknowledged with HTTP 200; 1 otherwise (e.g. the endpoint
+#   is absent because VLLM_SERVER_DEV_MODE was not set when launching vLLM).
 reset_vllm_prefix_cache() {
     local port="$1"
     echo "=== Resetting vLLM local prefix cache on port $port (LMCache preserved) ==="
@@ -94,8 +132,19 @@ reset_vllm_prefix_cache() {
     echo ""
 }
 
+# Count completed LMCache retrieves recorded in the server log so far.
+#
+# Used to prove run 2 was actually served by LMCache (the delta around run 2
+# must be > 0), so the correctness comparison cannot pass vacuously by silently
+# recomputing.
+# Globals (read):
+#   LMCACHE_LOG - path to the LMCache MP server log file.
+# Arguments:
+#   none.
+# Outputs:
+#   The integer count of "Retrieved" log lines to stdout (0 if the log file does
+#   not exist yet).
 count_retrieves() {
-    # Number of completed LMCache retrieves logged so far (0 if log absent).
     # NB: ``grep -c`` prints 0 *and* exits 1 on no match, so guard the file
     # existence and use ``|| true`` (not ``|| echo 0``) to avoid emitting "0\n0".
     [ -f "$LMCACHE_LOG" ] || { echo 0; return; }
@@ -142,10 +191,23 @@ retrieves_after = int(after_s)
 
 
 def gsm8k_exact_match(results_dir: str) -> float:
-    """Return the gsm8k exact_match score from an lm_eval results dir.
+    """Return the gsm8k exact_match score from an lm_eval results directory.
 
     Prefers the strict-match variant; falls back to any non-stderr
     ``exact_match`` metric key.
+
+    Args:
+        results_dir: Directory passed to ``lm_eval --output_path``. Searched
+            recursively for the newest ``results_*.json`` (lm_eval nests it
+            under a per-model subdirectory and stamps the filename with a
+            timestamp).
+
+    Returns:
+        The gsm8k ``exact_match`` accuracy as a float in ``[0.0, 1.0]``.
+
+    Raises:
+        SystemExit: If no ``results_*.json`` exists under ``results_dir`` or the
+            newest one contains no ``exact_match`` metric for the gsm8k task.
     """
     files = glob.glob(os.path.join(results_dir, "**", "results_*.json"), recursive=True)
     if not files:
@@ -173,15 +235,17 @@ print(f"  baseline (no LMCache)   gsm8k exact_match = {sb:.4f}")
 print(f"  tolerance = {tol}")
 
 failures = []
+# run1 (store) vs run2 (retrieve): same server, the core store/retrieve check.
 if abs(s1 - s2) > tol:
     failures.append(
-        f"LMCache retrieve score drift: |{s1:.4f} - {s2:.4f}| = "
+        f"LMCache store-vs-retrieve score drift: |{s1:.4f} - {s2:.4f}| = "
         f"{abs(s1 - s2):.4f} > {tol}"
     )
-if abs(s1 - sb) > tol:
+# run2 (retrieve) vs baseline (no LMCache): retrieve must match ground truth.
+if abs(s2 - sb) > tol:
     failures.append(
-        f"Full-stack score drift vs baseline: |{s1:.4f} - {sb:.4f}| = "
-        f"{abs(s1 - sb):.4f} > {tol}"
+        f"Retrieve-vs-baseline score drift: |{s2:.4f} - {sb:.4f}| = "
+        f"{abs(s2 - sb):.4f} > {tol}"
     )
 # Non-vacuous: run 2 must have been served by LMCache retrieves, not recompute.
 if retrieves_after <= retrieves_before:
