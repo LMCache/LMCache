@@ -16,10 +16,11 @@ A subset of routes defined under
 ``lmcache/v1/internal_api_server/common/`` is also exposed on this HTTP
 server. The module
 ``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates those
-routers (skipping modules listed in ``_MP_INCOMPATIBLE_MODULES``, such as
-``run_script_api``) and forwards them to the auto-discovery pipeline.
-Adding a new compatible module under ``internal_api_server/common``
-therefore requires no wiring changes on the MP side.
+routers (skipping any module listed in ``_MP_INCOMPATIBLE_MODULES``,
+which is currently empty) and forwards them to the auto-discovery
+pipeline. Adding a new compatible module under
+``internal_api_server/common`` therefore requires no wiring changes on
+the MP side.
 
 .. contents::
    :local:
@@ -131,6 +132,10 @@ compatibility with the vLLM-embedded API server.
    * - GET
      - ``/periodic-threads-health``
      - Quick health check for critical/high-level periodic threads.
+   * - POST
+     - ``/run_script``
+     - Execute an uploaded Python script in a restricted sandbox. Only
+       modules listed in ``--script-allowed-imports`` can be imported.
 
 ``GET /``
 ~~~~~~~~~
@@ -706,9 +711,9 @@ registration list to edit.
 If the route is generic enough to be shared with the vLLM-embedded API
 server, add it under ``lmcache/v1/internal_api_server/common/`` instead.
 It will be picked up on the MP side via ``common_api.py`` unless its
-module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (used for
-modules that require vLLM-specific ``app.state`` attributes, e.g.
-``run_script_api``).
+module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved
+for modules that require vLLM-specific ``app.state`` attributes; the
+list is currently empty).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and

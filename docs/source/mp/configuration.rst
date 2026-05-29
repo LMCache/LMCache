@@ -63,6 +63,11 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - JSON string of extra key-value config forwarded to runtime
        plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
        ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
+   * - ``--script-allowed-imports``
+     - ``[]``
+     - Space-separated list of Python module names that scripts posted
+       to the HTTP ``/run_script`` endpoint are allowed to import.
+       Example: ``--script-allowed-imports numpy pandas``.
 
 Lookup Hash Logging
 -------------------
