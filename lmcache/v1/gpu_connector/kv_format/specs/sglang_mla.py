@@ -8,7 +8,9 @@ from typing import ClassVar
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.kv_format.families import SGLangFusedPBSSpec
+from lmcache.v1.gpu_connector.kv_format.kv_format_spec_families import (
+    SGLangFusedPBSSpec,
+)
 import lmcache.c_ops as lmc_ops
 
 

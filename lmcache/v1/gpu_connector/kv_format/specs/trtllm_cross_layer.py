@@ -6,7 +6,7 @@ from typing import ClassVar
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format.base import AxisLayout
-from lmcache.v1.gpu_connector.kv_format.families import CrossLayer6DSpec
+from lmcache.v1.gpu_connector.kv_format.kv_format_spec_families import CrossLayer6DSpec
 import lmcache.c_ops as lmc_ops
 
 
