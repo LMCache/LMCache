@@ -17,7 +17,13 @@ import lmcache.python_ops_fallback as _py_ops
 # ==========================================
 
 
-# Device utility functions
+# Fallback check utility function
+def is_fallback_fn(fn) -> bool:
+    """True if `fn` is the Python fallback implementation."""
+    return getattr(_py_ops, fn.__name__, None) is fn
+
+
+# Device utility function
 def device_sync(device: str) -> None:
     """Synchronize device operations.
 
@@ -263,8 +269,8 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
     # Python, so it must receive torch.Tensor inputs. The native XPU
     # SYCL backend only accepts uintptr_t pointers, so it stays in
     # pointer mode.
-    is_py_fallback = getattr(ops, "__name__", "") == "lmcache.python_ops_fallback"
-    use_tensor_mode = is_py_fallback and device not in ("cpu", "cuda")
+    fn = ops.lmcache_memcpy_async
+    use_tensor_mode = is_fallback_fn(fn) and device not in ("cpu", "cuda")
 
     # (host_buffer_offset, nbytes) boundary test cases:
     #   (0,  64): exactly one aligned block from the start
@@ -292,7 +298,7 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
         device_sync(device)
 
         if use_tensor_mode:
-            ops.lmcache_memcpy_async(
+            fn(
                 gpu_buffer[offset : offset + nbytes],
                 src_host[offset : offset + nbytes],
                 nbytes,
@@ -301,7 +307,7 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
                 alignment,
             )
             device_sync(device)
-            ops.lmcache_memcpy_async(
+            fn(
                 dst_host[offset : offset + nbytes],
                 gpu_buffer[offset : offset + nbytes],
                 nbytes,
@@ -310,7 +316,7 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
                 alignment,
             )
         else:
-            ops.lmcache_memcpy_async(
+            fn(
                 gpu_buffer.data_ptr() + offset,
                 src_host.data_ptr() + offset,
                 nbytes,
@@ -319,7 +325,7 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
                 alignment,
             )
             device_sync(device)
-            ops.lmcache_memcpy_async(
+            fn(
                 dst_host.data_ptr() + offset,
                 gpu_buffer.data_ptr() + offset,
                 nbytes,
@@ -1192,8 +1198,8 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
     # Using pointer mode for CPU/CUDA and the native XPU backend keeps the
     # SYCL path happy, while the fallback still exercises the tensor-list
     # path on devices other than CPU/CUDA.
-    is_py_fallback = getattr(ops, "__name__", "") == "lmcache.python_ops_fallback"
-    use_tensor_list = is_py_fallback and device not in ("cpu", "cuda")
+    fn = ops.multi_layer_kv_transfer
+    use_tensor_list = is_fallback_fn(fn) and device not in ("cpu", "cuda")
 
     for gpu_kv_format, is_mla, bs_arg in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1282,7 +1288,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
             xfer_dir = (
                 ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
             )
-            ops.multi_layer_kv_transfer(
+            fn(
                 key_value,
                 key_value_ptrs,
                 slot_mapping,
@@ -1365,7 +1371,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
             )
 
         xfer_dir = ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
-        ops.multi_layer_kv_transfer(
+        fn(
             key_value,
             key_value_ptrs,
             slot_mapping,
@@ -1420,8 +1426,8 @@ def scenario_multi_layer_kv_transfer_unilateral(
     # Decide mode based on the backend module, not the device.
     # The native XPU backend (lmcache.xpu_ops) only accepts a tensor of
     # uint64 pointers; only the Python fallback supports list[Tensor].
-    is_py_fallback = getattr(ops, "__name__", "") == "lmcache.python_ops_fallback"
-    use_tensor_list = is_py_fallback and device not in ("cpu", "cuda")
+    fn = ops.multi_layer_kv_transfer_unilateral
+    use_tensor_list = is_fallback_fn(fn) and device not in ("cpu", "cuda")
 
     for gpu_kv_format, is_mla in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1526,7 +1532,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
             xfer_dir = (
                 ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
             )
-            ops.multi_layer_kv_transfer_unilateral(
+            fn(
                 lmc_tensor,
                 key_value_ptrs,
                 slot_mapping,
@@ -1622,7 +1628,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
             ).contiguous()
 
         xfer_dir = ops.TransferDirection.D2H if direction else ops.TransferDirection.H2D
-        ops.multi_layer_kv_transfer_unilateral(
+        fn(
             lmc_tensor,
             key_value_ptrs,
             slot_mapping,
