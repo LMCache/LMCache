@@ -88,9 +88,7 @@ class SGLangDetector(EngineDetector):
                             f"SGLang KV page_buffer_size {pbs} not "
                             f"divisible by tokens_per_block {block_size}"
                         )
-                    inner.append(
-                        t.view(pbs // block_size, block_size, *t.shape[1:])
-                    )
+                    inner.append(t.view(pbs // block_size, block_size, *t.shape[1:]))
                 reshaped.append(inner)
             return reshaped
         return kv_caches
