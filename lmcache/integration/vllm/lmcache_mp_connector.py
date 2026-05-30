@@ -118,15 +118,13 @@ def extract_world_size_and_kv_rank(
         return world_size // tp_size, rank // tp_size
 
 
-def create_scheduler_adapter(
+def _build_parallel_strategy(
     server_urls: list[str],
-    zmq_context: zmq.Context,
     vllm_config: VllmConfig,
-) -> LMCacheMPSchedulerAdapter:
-    # `vllm_config.parallel_config.world_size` and `.rank` are vLLM's GLOBAL
-    # view across every worker process (ranks 0 .. world_size - 1). We use
-    # explicit `global_` / `local_` prefixes here so that downstream readers
-    # do not have to guess the scope of each variable.
+) -> ParallelStrategy:
+    """`vllm_config.parallel_config.world_size` and `.rank` are vLLM's GLOBAL
+    view across every worker process (ranks 0 .. world_size - 1).
+    """
     n_servers = len(server_urls)
     global_world_size = vllm_config.parallel_config.world_size
     global_rank = vllm_config.parallel_config.rank
@@ -147,7 +145,7 @@ def create_scheduler_adapter(
         global_rank,
         vllm_config,
     )
-    parallel_strategy = ParallelStrategy(
+    return ParallelStrategy(
         use_mla=mla_enabled(vllm_config.model_config),
         kv_world_size=kv_world_size,
         kv_worker_id=kv_rank,
@@ -160,6 +158,13 @@ def create_scheduler_adapter(
         n_servers=n_servers,
     )
 
+
+def create_scheduler_adapter(
+    server_urls: list[str],
+    zmq_context: zmq.Context,
+    vllm_config: VllmConfig,
+) -> LMCacheMPSchedulerAdapter:
+    parallel_strategy = _build_parallel_strategy(server_urls, vllm_config)
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPSchedulerAdapter(
         server_urls=server_urls,
@@ -176,45 +181,14 @@ def create_worker_adapter(
     zmq_context: zmq.Context,
     vllm_config: VllmConfig,
 ) -> LMCacheMPWorkerAdapter:
-    # See `create_scheduler_adapter` for the global_/local_ naming rationale.
-    n_servers = len(server_urls)
-    global_world_size = vllm_config.parallel_config.world_size
-    global_rank = vllm_config.parallel_config.rank
-    global_tp_size = vllm_config.parallel_config.tensor_parallel_size
-
-    # `extract_world_size_and_kv_rank` expects the GLOBAL world_size / rank
-    # and returns the kv-side world_size and kv_rank (excluding TP for MLA).
-    kv_world_size, kv_rank = extract_world_size_and_kv_rank(
-        global_world_size,
-        global_rank,
-        vllm_config,
-    )
+    parallel_strategy = _build_parallel_strategy(server_urls, vllm_config)
 
     # Node routing: a worker connects only to its local LMCache server.
     # Global ranks are assigned to nodes in contiguous blocks:
     #   node 0 → ranks [0, ranks_per_node),
     #   node 1 → [ranks_per_node, 2 * ranks_per_node), ...
-    ranks_per_node = global_world_size // n_servers
-    local_server_url = server_urls[global_rank // ranks_per_node]
-
-    if global_tp_size % n_servers != 0:
-        raise ValueError(
-            f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
-        )
-    local_world_size = global_world_size // n_servers
-    local_tp_size = global_tp_size // n_servers
-    parallel_strategy = ParallelStrategy(
-        use_mla=mla_enabled(vllm_config.model_config),
-        kv_world_size=kv_world_size,
-        kv_worker_id=kv_rank,
-        global_world_size=global_world_size,
-        global_rank=global_rank,
-        tp_size=global_tp_size,
-        pp_size=vllm_config.parallel_config.pipeline_parallel_size,
-        local_kv_world_size=local_world_size,
-        local_tp_size=local_tp_size,
-        n_servers=n_servers,
-    )
+    ranks_per_node = parallel_strategy.global_world_size // parallel_strategy.n_servers
+    local_server_url = server_urls[parallel_strategy.global_rank // ranks_per_node]
 
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPWorkerAdapter(
