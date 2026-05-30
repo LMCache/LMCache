@@ -950,7 +950,9 @@ def test_non_gpu_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
 
     def _submit_request(req_type, payload, response_cls):  # noqa: ARG001
         if req_type == RequestType.PREPARE_STORE:
-            return _CompletedFuture(PrepareStoreResponse(context={"slots": slots}))
+            return _CompletedFuture(
+                PrepareStoreResponse(context={"slots": slots, "chunk_indices": [0]})
+            )
         if req_type == RequestType.COMMIT_STORE:
             _, _, commit_cpu_data = payload
             assert commit_cpu_data == b""
