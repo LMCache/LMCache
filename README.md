@@ -1,6 +1,6 @@
 <div align="center">
   <p align="center">
-    <img src="asset/logo.png" width="720" alt="lmcache logo">
+    <img src="asset/logo.png" alt="lmcache logo">
   </p>
   <h2 align="center">
       A KV Cache Management Layer for Scalable LLM Inference
@@ -57,17 +57,15 @@ LMCache supports two deployment modes:
 
 ### Key capabilities
 
-- **KV cache reuse across requests, sessions, and engine instances**: reuse cached KV for repeated prompts, conversations, and shared context to reduce repeated prefill work and improve TTFT.
+- **Persistent KV cache offloading and reuse**: Move KV caches out of GPU memory into a tiered storage hierarchy spanning CPU memory, local storage, and remote backends, enabling reuse across requests, sessions, and engine instances to reduce repeated prefill computation and improve TTFT.
 
-- **Non-prefix KV reuse**: go beyond prefix caching by reusing cached KV blocks for repeated text that may appear anywhere in the prompt, not only at the beginning.
+- **Pluggable storage and transport backends**: Easily integrate remote storage and KV transfer backends through a unified interface, enabling KV cache offloading and sharing across systems such as CPU RAM, local disk, Redis/Valkey, Mooncake, InfiniStore, S3-compatible object storage, NIXL, and GDS.
 
-- **Shared and multi-tier KV cache management**: manage KV cache across GPU memory, CPU memory, local storage, and remote backends, enabling reuse across inference engine instances and larger serving deployments.
+- **Non-prefix KV reuse**: Extend KV reuse beyond prefix matches by retrieving cached KV blocks for repeated text chunks and using CacheBlend to selectively recompute tokens for quality recovery.
 
-- **PD disaggregation and KV transfer**: move KV cache from prefill workers to decode workers over NVLink, RDMA, or TCP through transport layers such as NIXL, so decoding can continue without recomputing prompt KV.
+- **PD disaggregation and KV transfer**: Transfer KV cache from prefill workers to decode workers over NVLink, RDMA, or TCP through transport layers such as NIXL, allowing decoding to continue without recomputing prompt KV.
 
-- **Pluggable KV transformation**: apply compression, token dropping, and custom serialization through the SERDE interface, without forking the codebase.
-
-- **Pluggable storage and transport backends**: plug in local CPU memory, local disk, NIXL, GDS, Redis/Valkey, Mooncake, InfiniStore, and S3-compatible object storage.
+- **Pluggable KV transformation**: Simple interface for applying compression, token dropping, and custom serialization through the SERDE interface.
 
 LMCache is becoming a shared infrastructure layer across the LLM inference ecosystem, connecting serving platforms, hardware vendors, storage systems, infrastructure providers, and open-source projects:
 
