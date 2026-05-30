@@ -755,9 +755,14 @@ class BlendModule:
                     lmcache_memcpy_async_d2h(tmp_buffer, memory_obj)
 
             event.record()
-        # Call finish_write after the copy is done
-        gpu_context.cupy_stream.launch_host_func(
-            self._ctx.storage_manager.finish_write,
+
+        # Call finish_write synchronously after GPU copy is done.
+        # Must be synchronous so the write lock is released before the
+        # store response is sent back to the client; otherwise an immediate
+        # lookup can see KEY_NOT_READABLE and spuriously evict the
+        # freshly-stored fingerprint from the matcher.
+        event.synchronize()
+        self._ctx.storage_manager.finish_write(
             list(reserved_dict.keys()),
         )
 
