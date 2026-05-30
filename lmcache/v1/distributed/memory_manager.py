@@ -19,6 +19,7 @@ from lmcache.v1.memory_management import (
 logger = init_logger(__name__)
 
 
+# HELPER FUNCTIONS
 def _unlink_stale_shm(shm_name: str) -> None:
     """Remove a stale LMCache shm segment if it exists."""
     normalized = shm_name.lstrip("/")
