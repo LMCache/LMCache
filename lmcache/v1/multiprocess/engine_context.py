@@ -2,8 +2,8 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from typing import TypedDict
 from dataclasses import dataclass
+from typing import TypedDict
 import threading
 
 # First Party
@@ -28,6 +28,7 @@ class ShmPoolInfo(TypedDict):
 
     shm_name: str
     pool_size: int
+
 
 @dataclass
 class _LayoutDescEntry:
