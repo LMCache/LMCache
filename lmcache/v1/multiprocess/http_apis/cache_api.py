@@ -23,7 +23,7 @@ router = APIRouter()
 
 
 # Per-format axis of the ``num_blocks`` dimension inside a per-layer KV tensor.
-# The MP /api/kvcache/check endpoint gathers KV data by block IDs along this
+# The MP /kvcache/check endpoint gathers KV data by block IDs along this
 # axis, which preserves the block_size dimension verbatim so chunking is a
 # clean slice on a known axis.
 #

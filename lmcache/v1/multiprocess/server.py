@@ -16,6 +16,7 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -34,6 +35,7 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
+from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
@@ -99,6 +101,29 @@ class MPCacheEngine:
             module.close()
         self._context.storage_manager.close()
         logger.info("MPCacheEngine closed")
+
+    # HTTP-layer passthroughs lost in the engine refactor.
+
+    @property
+    def storage_manager(self) -> StorageManager:
+        """Used by ``/quota/*``."""
+        return self._context.storage_manager
+
+    @property
+    def gpu_contexts(self) -> dict[int, GPUCacheContext] | None:
+        """Used by ``/kvcache/check``; unwraps :class:`GPUContextEntry`."""
+        for module in self._modules:
+            if isinstance(module, GPUTransferModule):
+                return {i: e.gpu_context for i, e in module.gpu_contexts.items()}
+        return None
+
+    def clear(self) -> None:
+        """Used by ``/clear-cache``; delegates to :class:`ManagementModule`."""
+        for module in self._modules:
+            if isinstance(module, ManagementModule):
+                module.clear()
+                return
+        raise RuntimeError("MPCacheEngine.clear: no ManagementModule registered")
 
 
 def add_handler_helper(
