@@ -118,6 +118,7 @@ class BigtableConnector(RemoteConnector):
             if self.cfg.credentials_path:
                 # Third Party
                 from google.oauth2 import service_account
+                import google.auth.exceptions
 
                 try:
                     credentials = service_account.Credentials.from_service_account_file(
@@ -128,12 +129,15 @@ class BigtableConnector(RemoteConnector):
                         credentials=credentials,
                         client_info=client_info,
                     )
-                except (FileNotFoundError, Exception) as e:
+                except (
+                    OSError,
+                    ValueError,
+                    google.auth.exceptions.GoogleAuthError,
+                ) as e:
                     logger.warning(
-                        f"LMCache Warning: Declared credentials_path "
-                        f"'{self.cfg.credentials_path}' could not be "
-                        f"loaded ({e}). Falling back to GCP ADC "
-                        f"for K3 CI resiliency."
+                        f"Failed to load credentials from "
+                        f"{self.cfg.credentials_path} due to {e}. "
+                        f"Falling back to Application Default Credentials."
                     )
                     self._client = BigtableDataClientAsync(
                         project=self.cfg.project_id,

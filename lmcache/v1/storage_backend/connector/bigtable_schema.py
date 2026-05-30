@@ -22,12 +22,15 @@ class BigtableSchema:
             fingerprint += f"@{tags_str}"
 
         template = self.row_key_template
-        row_key_str = template.replace("{hash}", key.chunk_hash_hex).replace(
-            "hash", key.chunk_hash_hex
-        )
-        row_key_str = row_key_str.replace("{model}", fingerprint).replace(
-            "model", fingerprint
-        )
+        if "{hash}" in template:
+            row_key_str = template.replace("{hash}", key.chunk_hash_hex)
+        else:
+            row_key_str = template.replace("hash", key.chunk_hash_hex)
+
+        if "{model}" in row_key_str:
+            row_key_str = row_key_str.replace("{model}", fingerprint)
+        else:
+            row_key_str = row_key_str.replace("model", fingerprint)
 
         return row_key_str.encode("utf-8")
 

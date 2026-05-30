@@ -1,24 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import asyncio
 import sys
-
-# Third Party
-import pytest
-import torch
-
-# First Party
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.storage_backend.connector.bigtable_connector import (
-    BigtableConnector,
-)
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.remote_backend import RemoteBackend
-from tests.v1.utils import create_test_memory_obj
 
 
 class MockDeadlineExceeded(Exception):
@@ -51,6 +35,17 @@ mock_row_filters.StripValueTransformerFilter.return_value = MagicMock()
 
 mock_data = MagicMock()
 mock_data.BigtableDataClientAsync = MagicMock()
+
+
+def fake_client_constructor(*args, **kwargs):
+    client = mock_data.BigtableDataClientAsync.return_value
+    if isinstance(client, MagicMock):
+        client.get_table.return_value = client
+    return client
+
+
+mock_data.BigtableDataClientAsync.side_effect = fake_client_constructor
+
 mock_data.ReadRowsQuery = MagicMock()
 mock_data.RowMutationEntry = MagicMock()
 mock_data.row_filters = mock_row_filters
@@ -60,15 +55,56 @@ mock_bigtable = MagicMock(data=mock_data, row_filters=mock_row_filters)
 mock_service_account = MagicMock()
 mock_oauth2 = MagicMock(service_account=mock_service_account)
 
-sys.modules["google.api_core"] = MagicMock(exceptions=mock_exceptions)
+mock_api_core = MagicMock(exceptions=mock_exceptions)
+sys.modules["google.api_core"] = mock_api_core
 sys.modules["google.api_core.exceptions"] = mock_exceptions
-sys.modules["google.cloud"] = MagicMock(bigtable=mock_bigtable)
+mock_gapic = MagicMock()
+sys.modules["google.api_core.gapic_v1"] = mock_gapic
+sys.modules["google.api_core.gapic_v1.client_info"] = MagicMock()
+
+mock_cloud = MagicMock(bigtable=mock_bigtable)
+sys.modules["google.cloud"] = mock_cloud
 sys.modules["google.cloud.bigtable"] = mock_bigtable
 sys.modules["google.cloud.bigtable.row_filters"] = mock_row_filters
 sys.modules["google.cloud.bigtable.data"] = mock_data
 sys.modules["google.cloud.bigtable.data.row_filters"] = mock_row_filters
+
 sys.modules["google.oauth2"] = mock_oauth2
 sys.modules["google.oauth2.service_account"] = mock_service_account
+
+# Attach mocks to pre-existing modules in sys.modules to prevent
+# AttributeError in full test suite runs
+if "google" in sys.modules:
+    google_mod = sys.modules["google"]
+    google_mod.oauth2 = mock_oauth2
+    google_mod.cloud = mock_cloud
+    google_mod.api_core = mock_api_core
+
+if "google.cloud" in sys.modules:
+    sys.modules["google.cloud"].bigtable = mock_bigtable
+
+if "google.oauth2" in sys.modules:
+    sys.modules["google.oauth2"].service_account = mock_service_account
+
+if "google.api_core" in sys.modules:
+    sys.modules["google.api_core"].exceptions = mock_exceptions
+    sys.modules["google.api_core"].gapic_v1 = mock_gapic
+
+# Third Party
+import pytest  # noqa: E402
+import torch  # noqa: E402
+
+# First Party
+from lmcache.utils import CacheEngineKey  # noqa: E402
+from lmcache.v1.config import LMCacheEngineConfig  # noqa: E402
+from lmcache.v1.memory_management import MemoryObj  # noqa: E402
+from lmcache.v1.metadata import LMCacheMetadata  # noqa: E402
+from lmcache.v1.storage_backend.connector.bigtable_connector import (  # noqa: E402
+    BigtableConnector,
+)
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend  # noqa: E402
+from lmcache.v1.storage_backend.remote_backend import RemoteBackend  # noqa: E402
+from tests.v1.utils import create_test_memory_obj  # noqa: E402
 
 
 async def mock_async_gen(items):
@@ -97,7 +133,7 @@ def create_test_config(extra_overrides=None):
     )
 
 
-def create_test_metadata():
+def create_test_metadata(kv_shape=(28, 2, 256, 8, 128), chunk_size=256):
     return LMCacheMetadata(
         model_name="test_model",
         world_size=1,
@@ -105,7 +141,8 @@ def create_test_metadata():
         worker_id=0,
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
-        kv_shape=(28, 2, 256, 8, 128),
+        kv_shape=kv_shape,
+        chunk_size=chunk_size,
     )
 
 
@@ -146,6 +183,26 @@ def local_cpu_backend(memory_allocator):
     return LocalCPUBackend(config, metadata, memory_allocator=memory_allocator)
 
 
+@pytest.fixture(autouse=True)
+def mock_pq_executor():
+    # Patch AsyncPQExecutor so it doesn't spawn real thread workers during unit tests,
+    # but still executes jobs inline when submit_job is called.
+    with patch(
+        "lmcache.v1.storage_backend.connector.bigtable_connector.AsyncPQExecutor"
+    ) as mock:
+        instance = MagicMock()
+
+        async def fake_submit_job(fn, *args, **kwargs):
+            kwargs.pop("priority", None)
+            return await fn(*args, **kwargs)
+
+        instance.submit_job = AsyncMock(side_effect=fake_submit_job)
+        instance.shutdown_async = AsyncMock()
+        instance.shutdown = MagicMock()
+        mock.return_value = instance
+        yield mock
+
+
 class TestBigtableConnector:
     def test_init_and_lazy_pool(self, async_loop, local_cpu_backend):
         """Verify independent lazy async client pool initialization."""
@@ -171,9 +228,9 @@ class TestBigtableConnector:
             else backend.connection
         )
         assert isinstance(connector, BigtableConnector)
-        assert connector.project_id == "test-project"
-        assert connector.instance_id == "test-instance"
-        assert connector.table_name == "test-table"
+        assert connector.cfg.project_id == "test-project"
+        assert connector.cfg.instance_id == "test-instance"
+        assert connector.cfg.table_name == "test-table"
 
         # Client pool should not be initialized yet (lazy)
         assert connector._client is None
@@ -185,7 +242,7 @@ class TestBigtableConnector:
         # Pool now initialized
         assert connector._client is not None
         mock_data.BigtableDataClientAsync.assert_called_once_with(
-            project="test-project"
+            project="test-project", client_info=ANY
         )
 
         backend.close()
@@ -255,14 +312,18 @@ class TestBigtableConnector:
             plugin_name="bigtable",
         )
 
-        connector = backend.connection
+        connector = (
+            backend.connection._connector
+            if hasattr(backend.connection, "_connector")
+            else backend.connection
+        )
         connector._get_client()
 
         mock_service_account.Credentials.from_service_account_file.assert_called_once_with(
             "/path/to/creds.json"
         )
         mock_data.BigtableDataClientAsync.assert_called_with(
-            project="test-project", credentials=mock_creds
+            project="test-project", credentials=mock_creds, client_info=ANY
         )
 
         backend.close()
@@ -282,7 +343,12 @@ class TestBigtableConnector:
         )
 
         key = create_test_key(123)
-        row_key = backend.connection._get_row_key(key)
+        connector = (
+            backend.connection._connector
+            if hasattr(backend.connection, "_connector")
+            else backend.connection
+        )
+        row_key = connector.schema.get_row_key(key)
         row_key_str = row_key.decode("utf-8")
 
         assert row_key_str.startswith("test_model@3@1@bfloat16#")
@@ -324,7 +390,8 @@ class TestBigtableConnector:
 
     def test_get_blocking_hit(self, async_loop, local_cpu_backend):
         config = create_test_config()
-        metadata = create_test_metadata()
+        metadata = create_test_metadata(kv_shape=(1, 2, 16, 8, 128), chunk_size=16)
+        local_cpu_backend.metadata = metadata
 
         memory_obj = create_test_memory_obj()
         expected_bytes = bytes(memory_obj.byte_array)
@@ -353,7 +420,12 @@ class TestBigtableConnector:
         assert isinstance(res, MemoryObj)
         assert bytes(res.byte_array)[: len(expected_bytes)] == expected_bytes
 
-        assert backend.connection.exists_cache.get(key.to_string()) is True
+        connector = (
+            backend.connection._connector
+            if hasattr(backend.connection, "_connector")
+            else backend.connection
+        )
+        assert connector.exists_cache.get(key.to_string()) is True
 
         backend.close()
         local_cpu_backend.memory_allocator.close()
@@ -383,8 +455,13 @@ class TestBigtableConnector:
         mock_memory_obj = MagicMock()
         mock_memory_obj.byte_array = large_view
 
+        connector = (
+            backend.connection._connector
+            if hasattr(backend.connection, "_connector")
+            else backend.connection
+        )
         asyncio.run_coroutine_threadsafe(
-            backend.connection._put_internal(key, mock_memory_obj),
+            connector._put_internal(key, mock_memory_obj),
             async_loop,
         ).result()
 
@@ -445,8 +522,13 @@ class TestBigtableConnector:
 
         key = create_test_key(1)
 
+        connector = (
+            backend.connection._connector
+            if hasattr(backend.connection, "_connector")
+            else backend.connection
+        )
         with pytest.raises(MockPermissionDenied):
-            backend.contains(key)
+            asyncio.run_coroutine_threadsafe(connector.exists(key), async_loop).result()
 
         backend.close()
         local_cpu_backend.memory_allocator.close()
@@ -454,22 +536,15 @@ class TestBigtableConnector:
     def test_batched_get(self, async_loop, local_cpu_backend):
         """Verify batched_get retrieves multiple memory objects cleanly."""
         config = create_test_config()
-        metadata = create_test_metadata()
+        metadata = create_test_metadata(kv_shape=(1, 2, 16, 8, 128), chunk_size=16)
+        local_cpu_backend.metadata = metadata
 
         memory_obj1 = create_test_memory_obj()
         memory_obj2 = create_test_memory_obj()
         bytes1 = bytes(memory_obj1.byte_array)
         bytes2 = bytes(memory_obj2.byte_array)
 
-        mock_cell1 = MagicMock(value=bytes1)
-        mock_cell2 = MagicMock(value=bytes2)
-        mock_row1 = MagicMock(row_key=b"hash1#fingerprint")
-        mock_row2 = MagicMock(row_key=b"hash2#fingerprint")
-        mock_row1.cells = {"cf": {b"data": [mock_cell1]}}
-        mock_row2.cells = {"cf": {b"data": [mock_cell2]}}
-
         mock_client_instance = MagicMock()
-        mock_client_instance.read_rows = AsyncMock(return_value=[mock_row1, mock_row2])
         mock_data.BigtableDataClientAsync.return_value = mock_client_instance
 
         backend = RemoteBackend(
@@ -483,6 +558,22 @@ class TestBigtableConnector:
 
         key1 = create_test_key(1)
         key2 = create_test_key(2)
+
+        connector = (
+            backend.connection._connector
+            if hasattr(backend.connection, "_connector")
+            else backend.connection
+        )
+        row_key1 = connector.schema.get_row_key(key1)
+        row_key2 = connector.schema.get_row_key(key2)
+
+        mock_cell1 = MagicMock(value=bytes1)
+        mock_cell2 = MagicMock(value=bytes2)
+        mock_row1 = MagicMock(row_key=row_key1)
+        mock_row2 = MagicMock(row_key=row_key2)
+        mock_row1.cells = {"cf": {b"data": [mock_cell1]}}
+        mock_row2.cells = {"cf": {b"data": [mock_cell2]}}
+        mock_client_instance.read_rows = AsyncMock(return_value=[mock_row1, mock_row2])
 
         res = asyncio.run_coroutine_threadsafe(
             backend.connection.batched_get([key1, key2]),
@@ -535,9 +626,7 @@ class TestBigtableConnector:
         config = create_test_config()
         metadata = create_test_metadata()
 
-        mock_row = MagicMock(row_key=b"hash1#fingerprint")
         mock_client_instance = MagicMock()
-        mock_client_instance.read_rows = AsyncMock(return_value=[mock_row])
         mock_data.BigtableDataClientAsync.return_value = mock_client_instance
 
         backend = RemoteBackend(
@@ -551,6 +640,15 @@ class TestBigtableConnector:
 
         key1 = create_test_key(1)
         key2 = create_test_key(2)
+
+        connector = (
+            backend.connection._connector
+            if hasattr(backend.connection, "_connector")
+            else backend.connection
+        )
+        row_key1 = connector.schema.get_row_key(key1)
+        mock_row = MagicMock(row_key=row_key1)
+        mock_client_instance.read_rows = AsyncMock(return_value=[mock_row])
 
         res = asyncio.run_coroutine_threadsafe(
             backend.connection.batched_async_contains("test", [key1, key2]),
@@ -655,3 +753,136 @@ class TestBigtableConnector:
 
         backend.close()
         local_cpu_backend.memory_allocator.close()
+
+    def test_get_client_credentials_success(self, async_loop, local_cpu_backend):
+        config = create_test_config(
+            extra_overrides={"bigtable_credentials_path": "/path/to/fake_creds.json"}
+        )
+        connector = BigtableConnector(async_loop, local_cpu_backend, config)
+
+        mock_creds = MagicMock()
+        with (
+            patch(
+                "google.oauth2.service_account.Credentials.from_service_account_file",
+                return_value=mock_creds,
+            ) as mock_from_file,
+            patch(
+                "google.cloud.bigtable.data.BigtableDataClientAsync"
+            ) as mock_client_cls,
+        ):
+            client = connector._get_client()
+
+            mock_from_file.assert_called_once_with("/path/to/fake_creds.json")
+            mock_client_cls.assert_called_once()
+            assert mock_client_cls.call_args[1]["credentials"] == mock_creds
+            assert mock_client_cls.call_args[1]["project"] == "test-project"
+            assert client == mock_client_cls.return_value
+
+    def test_get_client_credentials_os_error(self, async_loop, local_cpu_backend):
+        config = create_test_config(
+            extra_overrides={
+                "bigtable_credentials_path": "/path/to/permission_denied_creds.json"
+            }
+        )
+        connector = BigtableConnector(async_loop, local_cpu_backend, config)
+
+        with (
+            patch(
+                "google.oauth2.service_account.Credentials.from_service_account_file",
+                side_effect=PermissionError("Permission denied"),
+            ),
+            patch(
+                "google.cloud.bigtable.data.BigtableDataClientAsync"
+            ) as mock_client_cls,
+            patch(
+                "lmcache.v1.storage_backend.connector.bigtable_connector.logger.warning"
+            ) as mock_warning,
+        ):
+            client = connector._get_client()
+
+            mock_client_cls.assert_called_once()
+            assert (
+                "credentials" not in mock_client_cls.call_args[1]
+                or mock_client_cls.call_args[1]["credentials"] is None
+            )
+            assert mock_client_cls.call_args[1]["project"] == "test-project"
+
+            mock_warning.assert_called_once()
+            assert (
+                "Falling back to Application Default Credentials"
+                in mock_warning.call_args[0][0]
+            )
+            assert client == mock_client_cls.return_value
+
+    def test_get_client_credentials_value_error(self, async_loop, local_cpu_backend):
+        config = create_test_config(
+            extra_overrides={
+                "bigtable_credentials_path": "/path/to/corrupted_creds.json"
+            }
+        )
+        connector = BigtableConnector(async_loop, local_cpu_backend, config)
+
+        with (
+            patch(
+                "google.oauth2.service_account.Credentials.from_service_account_file",
+                side_effect=ValueError("Invalid JSON"),
+            ),
+            patch(
+                "google.cloud.bigtable.data.BigtableDataClientAsync"
+            ) as mock_client_cls,
+            patch(
+                "lmcache.v1.storage_backend.connector.bigtable_connector.logger.warning"
+            ) as mock_warning,
+        ):
+            client = connector._get_client()
+
+            mock_client_cls.assert_called_once()
+            assert (
+                "credentials" not in mock_client_cls.call_args[1]
+                or mock_client_cls.call_args[1]["credentials"] is None
+            )
+            assert mock_client_cls.call_args[1]["project"] == "test-project"
+
+            mock_warning.assert_called_once()
+            assert (
+                "Falling back to Application Default Credentials"
+                in mock_warning.call_args[0][0]
+            )
+            assert client == mock_client_cls.return_value
+
+    def test_get_client_credentials_auth_error(self, async_loop, local_cpu_backend):
+        config = create_test_config(
+            extra_overrides={"bigtable_credentials_path": "/path/to/expired_creds.json"}
+        )
+        connector = BigtableConnector(async_loop, local_cpu_backend, config)
+
+        # Third Party
+        import google.auth.exceptions
+
+        with (
+            patch(
+                "google.oauth2.service_account.Credentials.from_service_account_file",
+                side_effect=google.auth.exceptions.GoogleAuthError("Auth failed"),
+            ),
+            patch(
+                "google.cloud.bigtable.data.BigtableDataClientAsync"
+            ) as mock_client_cls,
+            patch(
+                "lmcache.v1.storage_backend.connector.bigtable_connector.logger.warning"
+            ) as mock_warning,
+        ):
+            client = connector._get_client()
+
+            mock_client_cls.assert_called_once()
+            assert (
+                "credentials" not in mock_client_cls.call_args[1]
+                or mock_client_cls.call_args[1]["credentials"] is None
+            )
+            assert mock_client_cls.call_args[1]["project"] == "test-project"
+
+            mock_warning.assert_called_once()
+            assert (
+                "Falling back to Application Default Credentials"
+                in mock_warning.call_args[0][0]
+            )
+            assert client == mock_client_cls.return_value

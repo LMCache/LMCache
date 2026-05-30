@@ -71,6 +71,14 @@ remote_url: "bigtable://your-gcp-project-id/your-bigtable-instance-id"
 
 remote_serde: "naive"
 
+extra_config:
+  bigtable_project_id: "your-gcp-project-id"
+  bigtable_instance_id: "your-bigtable-instance-id"
+  bigtable_table_name: "lmcache-benchmark-v1"
+
+.. note::
+   Alternatively, you can set the environment variables ``BT_PROJECT_ID``, ``BT_INSTANCE_ID``, and ``BT_TABLE_NAME`` instead of using ``extra_config``.
+
 **Example B: 3-Tier Multi-Connector Hybrid (Local CPU -> Redis L2 -> Bigtable SSD L3)**
 
 Deploy Redis for hot-cache loopbacks while offloading long-tail persistent storage to Bigtable SSD, using LMCache's dynamic OrderedDict routing.
@@ -87,9 +95,6 @@ remote_storage_plugins:
 
 extra_config:
   remote_storage_plugin.redis.redis_url: "redis://your-redis-host:6379"
-
-  remote_storage_plugin.bigtable.module_path: "lmcache_bigtable.adapter"
-  remote_storage_plugin.bigtable.class_name: "BigtableConnectorAdapter"
   
   remote_storage_plugin.bigtable.bigtable_project_id: "your-gcp-project-id"
   remote_storage_plugin.bigtable.bigtable_instance_id: "your-bigtable-instance-id"
@@ -114,6 +119,14 @@ Authentication
 
 Verification
 ------------
+
+Ensure you have installed the required dependencies:
+
+.. code-block:: bash
+
+pip install cachetools google-cloud-bigtable
+
+Run the unit tests:
 
 .. code-block:: bash
 

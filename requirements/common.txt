@@ -44,6 +44,6 @@ torch
 transformers >= 5.4
 uvicorn
 httptools
-google-cloud-bigtable
 cachetools
 google-api-core
+google-cloud-bigtable
