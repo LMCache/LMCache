@@ -427,10 +427,10 @@ class LookupModule:
             )
         )
         if session is None:
-            logger.debug("Session %s not found, skipping touch", request_id)
+            logger.warning("Session %s not found, skipping touch", request_id)
             return
         if session.lookup_ipc_key is None:
-            logger.debug(
+            logger.warning(
                 "Session %s has no lookup ipc key, skipping touch",
                 request_id,
             )

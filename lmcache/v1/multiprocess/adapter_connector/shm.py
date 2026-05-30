@@ -162,13 +162,7 @@ class NonGpuContextShm(NonGpuContext):
         if not slots:
             # Server explicitly signals all chunks are already cached.
             return [], []
-        # chunk_indices is always present when the server has this fix applied.
-        # The fallback to range(len(slots)) preserves correctness with an older
-        # server: if all returned slots happen to be contiguous from index 0 the
-        # result is the same; if not, the IndexError we are fixing would still
-        # occur.  In practice the server is always updated together with the
-        # client, so the fallback is a defensive guard only.
-        chunk_indices: list[int] = context.get("chunk_indices", list(range(len(slots))))
+        chunk_indices: list[int] = context["chunk_indices"]
         return self._build_slot_tensors(slots), chunk_indices
 
     def commit_store(

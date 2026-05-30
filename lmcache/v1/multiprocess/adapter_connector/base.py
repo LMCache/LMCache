@@ -75,14 +75,21 @@ class NonGpuContext(ABC):
     def prepare_store(
         self, key: Any, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
-        """Prepare store.
+        """Prepare SHM buffers for a store operation.
 
-        Returns a ``(tensors, chunk_indices)`` tuple for SHM mode or ``None``
-        for pickle mode / when no new chunks need writing.
-
-        The ``chunk_indices`` list contains the position of each reserved chunk
-        within the full chunk sequence so that the caller only gathers data for
-        chunks that were actually reserved (i.e. not already present in cache).
+        Returns:
+            None: pickle mode — no pre-allocated buffers. Caller gathers all
+                chunks to CPU itself and sends the serialized data via
+                commit_store.
+            ([], []): SHM mode but all chunks already cached. Caller should
+                skip gather and commit entirely.
+            (tensors, chunk_indices): SHM mode with new chunks to write.
+                - tensors[i] is a writable SHM-backed buffer for one chunk.
+                - chunk_indices[i] is the position of that chunk in the full
+                  block_ids sequence (e.g. [0, 2] means only chunks 0 and 2
+                  need writing; chunk 1 is already cached).
+                Caller gathers only these chunks into the provided tensors,
+                then calls commit_store with empty payload.
         """
         ...
 
