@@ -6,6 +6,8 @@ with a trivial discovery service.
 
 Architecture:
 
+![Architecture Diagram](assets/architecture.png)
+
 ```
 +-----------------------------+
 |  LMCache MP HTTP Server     |
