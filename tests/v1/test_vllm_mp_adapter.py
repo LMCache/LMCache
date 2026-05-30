@@ -216,6 +216,8 @@ def test_store_keeps_event_until_future_finishes(fake_adapter):
 
     assert finished_stores == {"req-1"}
     assert finished_retrieves == set()
+    assert "req-1" not in adapter.store_events
+    transfer_ctx.submit_store.reset_mock()
     gc.collect()
     assert event_ref() is None
 
@@ -244,5 +246,7 @@ def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
 
     assert finished_stores == set()
     assert finished_retrieves == {"req-1"}
+    assert "req-1" not in adapter.retrieve_events
+    transfer_ctx.submit_retrieve.reset_mock()
     gc.collect()
     assert event_ref() is None
