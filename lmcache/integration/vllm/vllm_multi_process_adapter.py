@@ -15,7 +15,7 @@ import zmq
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
-from lmcache.v1.multiprocess.adapter_connector.worker_transfer import (
+from lmcache.v1.multiprocess.adapter_connector import (
     DataTransferContext,
     TransferContext,
     create_transfer_context,
