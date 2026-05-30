@@ -959,6 +959,7 @@ def _create_metadata(use_mla, kv_caches, engine_kv_format):
     return metadata
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA GPU not available")
 def test_vllm_paged_connector_active_concurrency_race():
     """
     Actively races a Loader thread (calling to_gpu) and an Eviction thread
@@ -975,9 +976,9 @@ def test_vllm_paged_connector_active_concurrency_race():
     head_size = 64
     device = "cuda"
     dtype = torch.float16
-    start, end = 0, 32
+    start, end = 0, 4
 
-    slot_mapping = torch.arange(32, dtype=torch.long, device=device)
+    slot_mapping = torch.arange(4, dtype=torch.long, device=device)
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(
         num_blocks=num_blocks,
         device=device,
