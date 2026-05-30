@@ -31,6 +31,7 @@ PYBIND11_MODULE(c_ops, m) {
       .value("NL_X_TWO_NB_NH_BS_HS", GPUKVFormat::NL_X_TWO_NB_NH_BS_HS)
       .value("NL_X_NB_TWO_NH_BS_HS", GPUKVFormat::NL_X_NB_TWO_NH_BS_HS)
       .value("NB_NL_TWO_NH_BS_HS", GPUKVFormat::NB_NL_TWO_NH_BS_HS)
+      .value("TWO_X_NL_X_NB_BS_NH_HS", GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
       .export_values();
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),

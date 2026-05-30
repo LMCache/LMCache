@@ -13,7 +13,6 @@ from __future__ import annotations
 # Standard
 from typing import TYPE_CHECKING
 import argparse
-import asyncio
 import os
 import sys
 
@@ -577,7 +576,6 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
         workload.run()
     finally:
         progress_monitor.stop()
-        asyncio.run(request_sender.close())
 
     # 7. Final metrics
     final = stats_collector.get_final_stats()
