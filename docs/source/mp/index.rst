@@ -32,7 +32,7 @@ Prerequisites
 Server Variants
 ---------------
 
-LMCache ships three server entry points:
+LMCache ships two server entry points:
 
 .. list-table::
    :header-rows: 1
@@ -46,10 +46,15 @@ LMCache ships three server entry points:
        :doc:`http_api`). Use ``--engine-type blend`` to enable BlendEngineV2
        for cross-request KV reuse.
    * - ``python3 -m lmcache.v1.multiprocess.server``
-     - (Legacy) ZMQ-only server using MPCacheEngine (no HTTP endpoints).
+     - (Legacy) ZMQ-only server with no HTTP endpoints; same
+       ``--engine-type`` / ``--transfer-mode`` flags as ``lmcache server``.
        Prefer ``lmcache server``.
-   * - ``python3 -m lmcache.v1.multiprocess.blend_server_v2``
-     - (Legacy) CacheBlend-enabled server. Prefer ``lmcache server --engine-type blend``.
+
+.. note::
+   The standalone ``blend_server_v2`` entry point has been retired;
+   CacheBlend is now selected at runtime via ``--engine-type blend`` on
+   the entries above (which loads ``BlendModule`` from
+   ``lmcache/v1/multiprocess/modules/blend.py``).
 
 .. toctree::
    :maxdepth: 2

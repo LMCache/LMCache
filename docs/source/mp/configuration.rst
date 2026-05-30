@@ -52,6 +52,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``default`` uses MPCacheEngine; ``blend`` uses BlendEngineV2
        for cross-request KV reuse.
        Choices: ``default``, ``blend``.
+   * - ``--transfer-mode``
+     - ``gpu``
+     - KV transfer transport. ``gpu`` uses GPU-based CUDA IPC for the
+       STORE/RETRIEVE fast path (default, required when
+       ``--engine-type blend`` is used). ``non_gpu`` switches to the
+       PREPARE/COMMIT shared-memory path used by non-CUDA backends
+       (loads ``NonGPUTransferModule`` instead of ``GPUTransferModule``).
+       Choices: ``gpu``, ``non_gpu``.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to
