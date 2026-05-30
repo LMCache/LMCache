@@ -12,10 +12,13 @@ This module provides:
   shared gather/scatter utilities used by all concrete implementations.
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, cast
 
 # Third Party
 import torch
@@ -24,6 +27,13 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.mq import MessageQueueClient
+
+if TYPE_CHECKING:
+    # First Party
+    import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -59,7 +69,7 @@ class NonGpuContext(ABC):
     def __init__(
         self,
         metadata: NonGpuContextMetadata,
-        mq_client: Any,
+        mq_client: MessageQueueClient,
         mq_timeout: float,
     ) -> None:
         self.metadata = metadata
@@ -73,7 +83,7 @@ class NonGpuContext(ABC):
 
     @abstractmethod
     def prepare_store(
-        self, key: Any, instance_id: int
+        self, key: IPCCacheEngineKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         """Prepare SHM buffers for a store operation.
 
@@ -95,18 +105,20 @@ class NonGpuContext(ABC):
 
     @abstractmethod
     def commit_store(
-        self, key: Any, instance_id: int, chunks: list[torch.Tensor]
+        self, key: IPCCacheEngineKey, instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
         """Commit store. Pickle: serialize and send. Shm: notify server."""
         ...
 
     @abstractmethod
-    def prepare_retrieve(self, key: Any, instance_id: int) -> list[torch.Tensor] | None:
+    def prepare_retrieve(
+        self, key: IPCCacheEngineKey, instance_id: int
+    ) -> list[torch.Tensor] | None:
         """Prepare retrieve. Returns chunks or shm views, or None on miss."""
         ...
 
     @abstractmethod
-    def commit_retrieve(self, key: Any, instance_id: int) -> bool:
+    def commit_retrieve(self, key: IPCCacheEngineKey, instance_id: int) -> bool:
         """Commit retrieve. Pickle: no-op. Shm: release read locks."""
         ...
 
@@ -118,7 +130,7 @@ class NonGpuContext(ABC):
 
 def create_non_gpu_context(
     metadata: NonGpuContextMetadata,
-    mq_client: Any,
+    mq_client: MessageQueueClient,
     mq_timeout: float,
     shm_name: str = "",
     pool_size: int = 0,
@@ -175,8 +187,8 @@ def create_non_gpu_context(
 
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
-    layout_hints: Any | None = None,
-) -> tuple[int, int, int, str, Any]:
+    layout_hints: LayoutHints | None = None,
+) -> tuple[int, int, int, str, "lmc_ops.GPUKVFormat"]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
@@ -216,8 +228,8 @@ def gather_paged_kv_to_cpu(
     kv_caches: dict[str, torch.Tensor],
     block_ids: list[int],
     blocks_per_chunk: int,
-    layout_hints: Any | None = None,
-    gpu_kv_format: Any | None = None,
+    layout_hints: LayoutHints | None = None,
+    gpu_kv_format: "lmc_ops.GPUKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
 ) -> list[torch.Tensor]:
@@ -360,8 +372,8 @@ def scatter_cpu_to_paged_kv(
     chunks: list[torch.Tensor],
     blocks_per_chunk: int,
     skip_first_n_tokens: int = 0,
-    layout_hints: Any | None = None,
-    gpu_kv_format: Any | None = None,
+    layout_hints: LayoutHints | None = None,
+    gpu_kv_format: "lmc_ops.GPUKVFormat" | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 

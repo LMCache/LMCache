@@ -30,6 +30,7 @@ from lmcache.v1.multiprocess.protocols.engine import (
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.config import StorageManagerConfig
+    from lmcache.v1.gpu_connector.utils import LayoutHints
     from lmcache.v1.multiprocess.custom_types import (
         IPCCacheEngineKey,
         RegisterNonGpuContextPayload,
@@ -266,7 +267,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
     builder_fn: Callable[[], dict[str, torch.Tensor]],
     expected_block_size: int,
     expected_hidden_dim: int,
-    layout_hints: dict[str, str] | None,
+    layout_hints: "LayoutHints | None",
 ) -> None:
     """Validate layout extraction and gather/scatter round-trip on CPU tensors."""
     # First Party
@@ -325,7 +326,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
     import lmcache.c_ops as lmc_ops
 
     source = hnd_builder(2, 8, 4, 2, 8)
-    layout_hints = {"kv_layout": "HND"}
+    layout_hints: LayoutHints = {"kv_layout": "HND"}
     (
         block_size,
         num_layers,
@@ -984,21 +985,22 @@ def test_non_gpu_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
         pool_size=4096,
     )
     try:
-        store_result = context.prepare_store(key="k", instance_id=1)
+        key = _default_key()
+        store_result = context.prepare_store(key=key, instance_id=1)
         assert store_result is not None
         store_views, _ = store_result
         store_views[0].copy_(
             torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
         )
-        assert context.commit_store("k", 1, store_views)
+        assert context.commit_store(key, 1, store_views)
 
-        retrieve_views = context.prepare_retrieve(key="k", instance_id=1)
+        retrieve_views = context.prepare_retrieve(key=key, instance_id=1)
         assert retrieve_views is not None
         assert torch.equal(
             retrieve_views[0],
             torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32),
         )
-        assert context.commit_retrieve("k", 1)
+        assert context.commit_retrieve(key, 1)
     finally:
         context.close()
         if os.path.exists(shm_path):
