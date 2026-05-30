@@ -828,10 +828,11 @@ class LMCacheEngine:
                         **kwargs,
                     )
 
+        chunks_to_load = reordered_chunks
         if self.save_only_first_rank:
             with retrieve_stats.profile_broadcast():
                 with torch_dev.stream(self.broadcast_stream):
-                    self._broadcast_or_receive_memory_objs(
+                    chunks_to_load = self._broadcast_or_receive_memory_objs(
                         reordered_chunks,
                         ret_mask,
                     )
@@ -851,7 +852,7 @@ class LMCacheEngine:
         # RDMA is another example.
         if len(reordered_chunks) > 0:
             with retrieve_stats.profile_to_gpu():
-                _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+                _, memory_objs, starts, ends = zip(*chunks_to_load, strict=False)
                 self.gpu_connector.batched_to_gpu(
                     list(memory_objs), list(starts), list(ends), **kwargs
                 )
@@ -1758,7 +1759,9 @@ class LMCacheEngine:
           * Receives chunk data and populates reordered_chunks
           * Updates ret_mask to mark received positions as True
         """
+        chunks_to_load = reordered_chunks
         if self.metadata.is_first_rank():
+            chunks_to_load = []
             # Broadcast total chunk count
             chunk_count = len(reordered_chunks)
             self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
@@ -1777,6 +1780,24 @@ class LMCacheEngine:
                     f"{torch_device_type}:{self.metadata.worker_id}"
                 )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
+
+                load_metadata = MemoryObjMetadata.from_dict(metadata_dict)
+                load_metadata.address = tensor_to_broadcast.data_ptr()
+                load_metadata.phy_size = (
+                    tensor_to_broadcast.numel() * tensor_to_broadcast.element_size()
+                )
+                chunks_to_load.append(
+                    (
+                        key,
+                        TensorMemoryObj(
+                            raw_data=tensor_to_broadcast,
+                            metadata=load_metadata,
+                            parent_allocator=None,
+                        ),
+                        start,
+                        end,
+                    )
+                )
         else:
             # Receive total chunk count
             chunk_count = self.broadcast_object_fn(None, self.metadata.first_rank)
@@ -1816,6 +1837,8 @@ class LMCacheEngine:
                     raw_data=raw_tensor, metadata=metadata, parent_allocator=None
                 )
                 reordered_chunks.append((None, memory_obj, start, end))
+
+        return chunks_to_load
 
     def _is_passive(self):
         """
