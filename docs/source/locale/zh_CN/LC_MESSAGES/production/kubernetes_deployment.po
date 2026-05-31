@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/production/kubernetes_deployment.rst:2
 msgid "Kubernetes Deployment"
-msgstr ""
+msgstr "Kubernetes 部署"
 
 #: ../../source/production/kubernetes_deployment.rst:4
 msgid ""
@@ -29,30 +29,30 @@ msgid ""
 "using the `vLLM Production Stack <https://github.com/vllm-project"
 "/production-stack>`_ project. This is a specialized production-ready "
 "implementation for K8S-native cluster-wide deployment for vllm & lmcache."
-msgstr ""
+msgstr "对于集成 LMCache 的 vLLM 的 Kubernetes 部署，我们建议使用 `vLLM Production Stack <https://github.com/vllm-project/production-stack>`_ 项目。这是一个专门为 vllm 和 lmcache 提供的 K8S 原生集群范围的生产就绪实现。"
 
 #: ../../source/production/kubernetes_deployment.rst:6
 msgid ""
 "For a quick start guide, please refer to the official `documentation "
 "<https://docs.vllm.ai/projects/production-"
 "stack/en/latest/getting_started/quickstart.html>`_"
-msgstr ""
+msgstr "有关快速入门指南，请参阅官方 `文档 <https://docs.vllm.ai/projects/production-stack/en/latest/getting_started/quickstart.html>`_。"
 
 #: ../../source/production/kubernetes_deployment.rst:8
 msgid ""
 "and replace the Helm values file with (`values-05-cpu-offloading.yaml "
 "<https://github.com/vllm-project/production-"
 "stack/blob/main/tutorials/assets/values-05-cpu-offloading.yaml>`_):"
-msgstr ""
+msgstr "并用 (`values-05-cpu-offloading.yaml <https://github.com/vllm-project/production-stack/blob/main/tutorials/assets/values-05-cpu-offloading.yaml>`_) 替换 Helm 值文件："
 
 #: ../../source/production/kubernetes_deployment.rst:35
 msgid "OR"
-msgstr ""
+msgstr "或"
 
 #: ../../source/production/kubernetes_deployment.rst:37
 msgid ""
 "refer to a detailed `step-by-step tutorial <https://github.com/vllm-"
 "project/production-stack/blob/main/tutorials/05-offload-kv-cache.md>`_ on"
 " how to offload KV cache with LMCache in the production stack."
-msgstr ""
+msgstr "请参阅有关如何在生产环境中使用 LMCache 卸载 KV Cache 的详细 `逐步教程 <https://github.com/vllm-project/production-stack/blob/main/tutorials/05-offload-kv-cache.md>`_。"
 

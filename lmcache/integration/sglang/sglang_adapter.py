@@ -33,6 +33,7 @@ class StoreMetadata:
     token_ids: List[int]
     kv_indices: torch.Tensor
     offset: int
+    request_id: str = ""
 
 
 @dataclass
@@ -40,6 +41,8 @@ class LoadMetadata:
     token_ids: List[int]
     slot_mapping: torch.Tensor
     offset: int
+    prefix_pad: int = 0
+    request_id: str = ""
 
 
 def init_lmcache_engine(
@@ -48,6 +51,7 @@ def init_lmcache_engine(
     local_rank: int,
     global_rank: int,
     kv_dtype: torch.dtype,
+    config_file: str,
 ) -> LMCacheEngine:
     """
     Initialize LMCache engine for SGLang integration.
@@ -58,11 +62,12 @@ def init_lmcache_engine(
         local_rank: Local GPU device index (for device selection)
         global_rank: Global tensor parallel rank (for metadata)
         kv_dtype: Data type for KV cache tensors
+        config_file: Path to the LMCache YAML configuration file
     """
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
 
-    config = lmcache_get_config()
+    config = lmcache_get_config(config_file)
     assert isinstance(config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
     )
@@ -108,6 +113,7 @@ class LMCacheConnector:
         rank: int,
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
+        config_file: str,
     ):
         if not k_pool:
             raise ValueError("k_pool cannot be empty during initialization.")
@@ -129,6 +135,7 @@ class LMCacheConnector:
             local_rank,
             rank,  # global_rank (tp_rank) for metadata
             kv_dtype,
+            config_file,
         )
         self.sgl_config = sgl_config
         self.tp_size = tp_size
@@ -212,9 +219,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
         rank: int,
         k_pool: List[torch.Tensor],
         v_pool: List[torch.Tensor],
+        config_file: str,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
-        super().__init__(sgl_config, tp_size, rank, k_pool, v_pool)
+        super().__init__(sgl_config, tp_size, rank, k_pool, v_pool, config_file)
         self._lmcache_chunk_size = self.lmcache_engine.config.chunk_size
         self.layerwise_retrievers: List[Any] = []
         self.layer_load_layer: List[int] = []

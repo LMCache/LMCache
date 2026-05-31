@@ -618,15 +618,19 @@ class LMCacheConnectorV1Impl:
         """Get the lookup server from manager."""
         return self._manager.lookup_server
 
-    def _setup_metrics(self):
+    def _setup_metrics(self) -> None:
         """Setup metrics for monitoring data structures in the connector."""
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is None:
+        metadata = self._manager.lmcache_engine_metadata
+        if metadata is None:
             logger.warning(
-                "PrometheusLogger is not initialized, "
+                "LMCache metadata is not initialized, "
                 "connector metrics will not be collected"
             )
             return
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            metadata,
+            config=self.config,
+        )
 
         # Set up metrics for scheduler-specific and general data structures
         metrics_map = {

@@ -15,10 +15,11 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.internal_api import L2AdapterListener
+from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
     L2AdapterInterface,
+    L2TaskId,
 )
 
 
@@ -47,7 +48,7 @@ class _StubAdapter(L2AdapterInterface):
     def submit_store_task(self, keys, objects):
         return 0
 
-    def pop_completed_store_tasks(self):
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         return {}
 
     def submit_lookup_and_lock_task(self, keys):

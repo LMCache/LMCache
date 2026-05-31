@@ -657,7 +657,7 @@ class TestMooncakeStoreIntegration:
         store_tid = self.adapter.submit_store_task(keys, objs)
         assert wait_for_event_fd(store_fd)
         completed = self.adapter.pop_completed_store_tasks()
-        assert completed[store_tid] is True
+        assert completed[store_tid].is_successful()
 
         # Lookup all — should find everything
         lookup_tid = self.adapter.submit_lookup_and_lock_task(keys)
@@ -695,7 +695,7 @@ class TestMooncakeStoreIntegration:
         # Store
         store_tid = self.adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd)
-        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+        assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup
         lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
@@ -733,7 +733,7 @@ class TestMooncakeStoreIntegration:
         # Store all
         store_tid = self.adapter.submit_store_task(keys, store_objs)
         assert wait_for_event_fd(store_fd)
-        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+        assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup all
         lookup_tid = self.adapter.submit_lookup_and_lock_task(keys)
@@ -798,7 +798,7 @@ class TestMooncakeStoreIntegration:
         # Store
         store_tid = self.adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd)
-        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+        assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Confirm stored
         lookup_tid = self.adapter.submit_lookup_and_lock_task([key])
@@ -840,7 +840,7 @@ class TestMooncakeStoreIntegration:
         # Store the first 3
         store_tid = self.adapter.submit_store_task(stored_keys, stored_objs)
         assert wait_for_event_fd(store_fd)
-        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+        assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Confirm they exist
         lookup_tid = self.adapter.submit_lookup_and_lock_task(stored_keys)
@@ -874,7 +874,7 @@ class TestMooncakeStoreIntegration:
         # Store
         store_tid = self.adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd)
-        assert self.adapter.pop_completed_store_tasks()[store_tid] is True
+        assert self.adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         usage_after_store = self.adapter.get_usage().total_bytes_used
         assert usage_after_store > usage_before, "Usage should increase after store"
@@ -967,7 +967,7 @@ class TestMooncakeStoreIntegration:
 
             store_tid = adapter.submit_store_task([key], [store_obj])
             assert wait_for_event_fd(adapter.get_store_event_fd())
-            assert adapter.pop_completed_store_tasks()[store_tid] is True
+            assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
             lookup_tid = adapter.submit_lookup_and_lock_task([key])
             assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())

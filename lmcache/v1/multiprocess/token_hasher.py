@@ -154,17 +154,18 @@ class TokenHasher:
 
         Adapted from TokenDatabase.__init__ (token_database.py:64-82).
         """
-        try:
-            # Third Party
-            from vllm.v1.core import kv_cache_utils
+        if self.hash_algorithm_name != "blake3":
+            try:
+                # Third Party
+                from vllm.v1.core import kv_cache_utils
 
-            if hasattr(kv_cache_utils, "init_none_hash"):
-                kv_cache_utils.init_none_hash(self.hash_func)
-                none_hash = kv_cache_utils.NONE_HASH
-                logger.info("Initialized NONE_HASH=%s from vLLM", none_hash)
-                return none_hash
-        except (ImportError, AttributeError, ValueError):
-            pass
+                if hasattr(kv_cache_utils, "init_none_hash"):
+                    kv_cache_utils.init_none_hash(self.hash_func)
+                    none_hash = kv_cache_utils.NONE_HASH
+                    logger.info("Initialized NONE_HASH=%s from vLLM", none_hash)
+                    return none_hash
+            except (ImportError, AttributeError, ValueError, RuntimeError):
+                pass
 
         # Fallback: compute none_hash using our hash function
         none_hash = self.hash_func((0, (0,), None))

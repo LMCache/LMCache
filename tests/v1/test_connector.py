@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from unittest.mock import patch
 import asyncio
 import tempfile
 
@@ -177,6 +178,7 @@ def test_fs_connector(autorelease_v1, full_chunk, save_chunk_meta, use_mla):
         "redis://:password@localhost:6379/1",
         "rediss://user:password@localhost:6380?ssl_cert_reqs=CERT_REQUIRED",
         "unix:///tmp/redis.sock",
+        "plugin://redis",
     ],
 )
 def test_redis_connector(url, autorelease_v1):
@@ -418,3 +420,33 @@ def _create_local_cpu_backend(memory_allocator, use_mla, config=None):
     return LocalCPUBackend(
         config=config, metadata=metadata, memory_allocator=memory_allocator
     )
+
+
+@patch("lmcache.v1.storage_backend.connector.redis_connector.RedisConnector")
+def test_redis_plugin_custom_url(mock_redis_connector, autorelease_v1) -> None:
+    """Verify that RedisConnectorAdapter extracts custom Redis URL
+    from extra_config when loaded dynamically as a plugin.
+    """
+    async_loop, async_thread = init_asyncio_loop()
+    memory_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    local_cpu_backend = _create_local_cpu_backend(memory_allocator, False)
+
+    # Define custom Redis URL inside extra_config
+    custom_url = "redis://my-custom-redis-host:6379"
+    config = LMCacheEngineConfig.from_defaults(
+        extra_config={"remote_storage_plugin.redis.redis_url": custom_url}
+    )
+
+    # Create connector using dynamic plugin schema URL
+    autorelease_v1(
+        CreateConnector("plugin://redis", async_loop, local_cpu_backend, config)
+    )
+
+    mock_redis_connector.assert_called_once_with(
+        url=custom_url,
+        loop=async_loop,
+        local_cpu_backend=local_cpu_backend,
+    )
+
+    close_asyncio_loop(async_loop, async_thread)
+    local_cpu_backend.close()

@@ -21,53 +21,53 @@ msgstr ""
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:2
 msgid "SageMaker Hyperpod"
-msgstr ""
+msgstr "SageMaker Hyperpod"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:5
 msgid "Prerequisites"
-msgstr ""
+msgstr "前提条件"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:7
 msgid ""
 "Create an Amazon SageMaker HyperPod cluster with tiered storage enabled "
 "by following the instructions at:"
-msgstr ""
+msgstr "按照以下说明创建一个启用分层存储的 Amazon SageMaker HyperPod 集群："
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:9
 msgid ""
 "https://docs.aws.amazon.com/sagemaker/latest/dg/managed-tier-"
 "checkpointing-setup.html"
-msgstr ""
+msgstr "https://docs.aws.amazon.com/sagemaker/latest/dg/managed-tier-checkpointing-setup.html"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:11
 msgid ""
 "This enables the ai-toolkit daemon that provides shared memory access for"
 " LMCache."
-msgstr ""
+msgstr "这启用提供 LMCache 共享内存访问的 ai-toolkit 守护进程。"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:14
 msgid "Example Configuration"
-msgstr ""
+msgstr "示例配置"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:24
 msgid "Configuration Parameters"
-msgstr ""
+msgstr "配置参数"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:27
 msgid "SageMaker Hyperpod-Specific (in extra_config)"
-msgstr ""
+msgstr "SageMaker Hyperpod 特定（在 extra_config 中）"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:29
 msgid ""
 "**sagemaker_hyperpod_bucket**: Bucket name for KV storage namespace "
 "(default: \"lmcache\")"
-msgstr ""
+msgstr "**sagemaker_hyperpod_bucket**: KV 存储命名空间的桶名称（默认: \"lmcache\"）"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:30
 msgid ""
 "**sagemaker_hyperpod_shared_memory_name**: Name of shared memory segment "
 "(default: \"shared_memory\"). Set to None to disable shared memory."
-msgstr ""
+msgstr "**sagemaker_hyperpod_shared_memory_name**: 共享内存段的名称（默认: \"shared_memory\"）。设置为 None 以禁用共享内存。"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:31
 msgid ""
@@ -76,7 +76,7 @@ msgid ""
 "default: 100, minimum: 1). This limit is per LMCache engine instance. "
 "With multiple workers (e.g., high TP), each worker creates its own engine"
 " with separate limits."
-msgstr ""
+msgstr "**sagemaker_hyperpod_max_concurrent_requests**: 每时每刻允许的最大并发 HTTP 请求数（应用级限流，默认值：100，最小值：1）。此限制适用于每个 LMCache 引擎实例。对于多个工作进程（例如，高 TP），每个工作进程创建自己的引擎并具有独立的限制。"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:32
 msgid ""
@@ -85,7 +85,7 @@ msgid ""
 "minimum: 1). For typical single-daemon setups, this effectively limits "
 "connections from one engine to one daemon. With N workers per node, total"
 " connections to the daemon = N × this value."
-msgstr ""
+msgstr "**sagemaker_hyperpod_max_connections**: 每个 LMCache 引擎在所有守护进程中的连接池中允许的最大 TCP 连接总数（默认：256，最小：1）。对于典型的单守护进程设置，这实际上限制了一个引擎与一个守护进程之间的连接。每个节点的 N 个工作线程与守护进程的总连接数 = N × 此值。"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:33
 msgid ""
@@ -98,60 +98,60 @@ msgid ""
 "balancing. With N workers per node connecting to the same daemon, total "
 "connections = N × this value. Reduce proportionally for high TP setups "
 "(e.g., set to 16 for 8 workers to achieve ~128 total connections)."
-msgstr ""
+msgstr "**sagemaker_hyperpod_max_connections_per_host**: 每个 LMCache 引擎到单个守护进程地址（IP:端口）的最大 TCP 连接数（默认：128，最小：1）。“主机”指的是守护进程的网络地址，而不是客户端机器。对于今天典型的单守护进程设置，这与 max_connections 的效果相似。此参数支持未来的多守护进程配置，其中一个引擎可以连接多个守护进程以实现负载均衡。对于每个节点连接到同一守护进程的 N 个工作者，总连接数 = N × 此值。对于高吞吐量设置，按比例减少（例如，对于 8 个工作者设置为 16，以实现 ~128 个总连接）。"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:34
 msgid ""
 "**sagemaker_hyperpod_timeout_ms**: Timeout for lease acquisition requests"
 " in milliseconds (default: 5000, minimum: 100)"
-msgstr ""
+msgstr "**sagemaker_hyperpod_timeout_ms**: 租约获取请求的超时时间（毫秒）（默认值：5000，最小值：100）"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:35
 msgid ""
 "**sagemaker_hyperpod_lease_ttl_s**: Server-side lease timeout in seconds "
 "(default: 30.0)"
-msgstr ""
+msgstr "**sagemaker_hyperpod_lease_ttl_s**: 服务器端租约超时时间（单位：秒，默认值：30.0）"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:36
 msgid ""
 "**sagemaker_hyperpod_put_stream_chunk_bytes**: Chunk size for streaming "
 "PUT requests in bytes (default: 65536, minimum: 1024)"
-msgstr ""
+msgstr "**sagemaker_hyperpod_put_stream_chunk_bytes**: 流式 PUT 请求的块大小（以字节为单位）（默认: 65536，最小: 1024）"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:37
 msgid ""
 "**sagemaker_hyperpod_use_https**: Enable HTTPS instead of HTTP (default: "
 "False). **Note**: Ignored if ``remote_url`` already contains ``http://`` "
 "or ``https://`` protocol."
-msgstr ""
+msgstr "**sagemaker_hyperpod_use_https**: 启用 HTTPS 而不是 HTTP（默认: False）。**注意**: 如果 ``remote_url`` 已经包含 ``http://`` 或 ``https://`` 协议，则忽略此设置。"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:38
 msgid ""
 "**save_chunk_meta**: Whether to save chunk metadata with data (set False "
 "for performance)"
-msgstr ""
+msgstr "**save_chunk_meta**: 是否将块元数据与数据一起保存（为提高性能设置为 False）"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:41
 msgid "Kubernetes Deployment Requirements"
-msgstr ""
+msgstr "Kubernetes 部署要求"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:44
 msgid "Environment Variable for Node IP"
-msgstr ""
+msgstr "节点 IP 的环境变量"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:46
 msgid ""
 "Add the ``NODE_IP`` environment variable to resolve the local node's IP "
 "address:"
-msgstr ""
+msgstr "添加 ``NODE_IP`` 环境变量以解析本地节点的 IP 地址："
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:57
 msgid "/dev/shm Volume Configuration"
-msgstr ""
+msgstr "/dev/shm 卷配置"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:59
 msgid ""
 "SageMaker Hyperpod requires /dev/shm for high-performance shared memory "
 "operations:"
-msgstr ""
+msgstr "SageMaker Hyperpod 需要 /dev/shm 以进行高性能共享内存操作："
 

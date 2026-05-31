@@ -21,23 +21,23 @@ msgstr ""
 
 #: ../../source/kv_cache/caching_policies.rst:2
 msgid "Using Different Caching Policies"
-msgstr ""
+msgstr "使用不同的缓存策略"
 
 #: ../../source/kv_cache/caching_policies.rst:4
 msgid "LMCache supports multiple caching policies."
-msgstr ""
+msgstr "LMCache 支持多种缓存策略。"
 
 #: ../../source/kv_cache/caching_policies.rst:6
 msgid ""
 "For example, to use LRU, you can set the environment variable "
 "``LMCACHE_CACHE_POLICY=LRU`` or set it in the configuration file with "
 "``cache_policy=\"LRU\"``."
-msgstr ""
+msgstr "例如，要使用 LRU，您可以设置环境变量 ``LMCACHE_CACHE_POLICY=LRU`` 或在配置文件中设置 ``cache_policy=\\\"LRU\\\"``。"
 
 #: ../../source/kv_cache/caching_policies.rst:8
 msgid ""
 "Currently, LMCache supports \"LRU\" (Least Recently Used), \"MRU\" (Most "
 "Recently Used), \"LFU\" (Least Frequently Used) and \"FIFO\" (First-In-"
 "First-Out) caching policies."
-msgstr ""
+msgstr "目前，LMCache 支持 \\\"LRU\\\"（最近最少使用）、\\\"MRU\\\"（最近最多使用）、\\\"LFU\\\"（最不常用）和 \\\"FIFO\\\"（先进先出）缓存策略。"
 

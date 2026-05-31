@@ -21,48 +21,48 @@ msgstr ""
 
 #: ../../source/kv_cache_management/query_worker_info.rst:4
 msgid "Query Worker Info"
-msgstr ""
+msgstr "查询工作者信息"
 
 #: ../../source/kv_cache_management/query_worker_info.rst:6
 msgid "The ``query_worker_info`` interface is defined as the following:"
-msgstr ""
+msgstr "``query_worker_info`` 接口定义如下："
 
 #: ../../source/kv_cache_management/query_worker_info.rst:12
 msgid ""
 "The function get the info of the workers which specified by "
 "``instance_id`` and ``worker_ids``. The controller returns an "
 "``event_id`` and the worker infos."
-msgstr ""
+msgstr "该函数获取由 ``instance_id`` 和 ``worker_ids`` 指定的工作者的信息。控制器返回一个 ``event_id`` 和工作者信息。"
 
 #: ../../source/kv_cache_management/query_worker_info.rst:16
 msgid "Example usage:"
-msgstr ""
+msgstr "示例用法："
 
 #: ../../source/kv_cache_management/query_worker_info.rst:18
 msgid ""
 "First, create a yaml file ``example.yaml`` to configure the lmcache "
 "instance:"
-msgstr ""
+msgstr "首先，创建一个 yaml 文件 ``example.yaml`` 来配置 lmcache 实例："
 
 #: ../../source/kv_cache_management/query_worker_info.rst:37
 msgid "Start the vllm/lmcache instance at port 8000:"
-msgstr ""
+msgstr "在端口 8000 启动 vllm/lmcache 实例："
 
 #: ../../source/kv_cache_management/query_worker_info.rst:44
 msgid "Start the lmcache controller at port 9000 and the monitor at port 9001:"
-msgstr ""
+msgstr "在9000端口启动lmcache控制器，在9001端口启动监视器："
 
 #: ../../source/kv_cache_management/query_worker_info.rst:50
 msgid "Send a request to controller:"
-msgstr ""
+msgstr "发送请求到控制器："
 
 #: ../../source/kv_cache_management/query_worker_info.rst:61
 msgid "The controller responds with a message similar to:"
-msgstr ""
+msgstr "控制器会回复类似于以下内容的消息："
 
 #: ../../source/kv_cache_management/query_worker_info.rst:67
 msgid ""
 "``worker_infos`` contains the queried worker information. returned "
 "``event_id`` can be used to query the status of the operation."
-msgstr ""
+msgstr "``worker_infos`` 包含查询到的工作者信息。返回的 ``event_id`` 可用于查询操作的状态。"
 
