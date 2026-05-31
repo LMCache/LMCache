@@ -88,24 +88,30 @@ echo "$VLLM_PID" >> "$PID_FILE"
 echo "vLLM with LMCache started (PID=$VLLM_PID)"
 
 # ── 3. vLLM Baseline (without LMCache) ──────────────────────
-echo "=== Launching vLLM baseline ==="
-echo "Port: $vllm_baseline_port"
+# Only launched for tests that compare against a baseline (2-GPU pods).
+# Single-GPU tests set LAUNCH_BASELINE=false and skip this entirely.
+if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
+    echo "=== Launching vLLM baseline ==="
+    echo "Port: $vllm_baseline_port"
 
-CUDA_VISIBLE_DEVICES="${GPU_FOR_BASELINE}" \
-VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-VLLM_SERVER_DEV_MODE=1 \
-VLLM_BATCH_INVARIANT=1 \
-PYTHONHASHSEED=0 \
-vllm serve "$MODEL" \
-    --attention-backend FLASH_ATTN \
-    --port "$vllm_baseline_port" \
-    --no-async-scheduling \
-    $GPU_MEMORY_UTIL_ARG \
-    > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
+    CUDA_VISIBLE_DEVICES="${GPU_FOR_BASELINE}" \
+    VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+    VLLM_SERVER_DEV_MODE=1 \
+    VLLM_BATCH_INVARIANT=1 \
+    PYTHONHASHSEED=0 \
+    vllm serve "$MODEL" \
+        --attention-backend FLASH_ATTN \
+        --port "$vllm_baseline_port" \
+        --no-async-scheduling \
+        $GPU_MEMORY_UTIL_ARG \
+        > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 
-VLLM_BASELINE_PID=$!
-echo "$VLLM_BASELINE_PID" >> "$PID_FILE"
-echo "vLLM baseline started (PID=$VLLM_BASELINE_PID)"
+    VLLM_BASELINE_PID=$!
+    echo "$VLLM_BASELINE_PID" >> "$PID_FILE"
+    echo "vLLM baseline started (PID=$VLLM_BASELINE_PID)"
+else
+    echo "=== Skipping vLLM baseline (LAUNCH_BASELINE=false, 1-GPU test) ==="
+fi
 
 echo "=== All processes launched ==="
-echo "PIDs: LMCache=$LMCACHE_PID, vLLM=$VLLM_PID, Baseline=$VLLM_BASELINE_PID"
+echo "PIDs: LMCache=$LMCACHE_PID, vLLM=$VLLM_PID, Baseline=${VLLM_BASELINE_PID:-skipped}"
