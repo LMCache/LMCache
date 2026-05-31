@@ -1,68 +1,72 @@
 # SPDX-License-Identifier: Apache-2.0
+# Third Party
+import msgspec
+
 # First Party
-from lmcache.v1.kv_cache_groups import LMCKVCacheGroup, LMCKVCacheGroups
+from lmcache.v1.kv_cache_groups import LMCacheKVGroup, LMCacheKVSpec
 
 
 def test_lmc_kv_cache_groups_default_to_one_engine_group():
-    assert LMCKVCacheGroups().num_engine_kv_cache_groups == 1
-    assert LMCKVCacheGroups().num_lmc_kv_cache_groups == 1
-    assert LMCKVCacheGroups().per_layer_engine_group_indices(1) is None
-    assert LMCKVCacheGroups().engine_group_ids_by_lmc_group() == (0,)
+    assert LMCacheKVSpec().num_hybrid_block_groups == 1
+    assert LMCacheKVSpec().num_lmc_kv_cache_groups == 1
+    assert LMCacheKVSpec().get_per_layer_hybrid_block_group_indices(1) is None
+    assert LMCacheKVSpec().hybrid_block_group_ids_by_lmc_group() == (0,)
 
 
 def test_lmc_kv_cache_groups_build_per_layer_engine_group_indices():
-    groups = LMCKVCacheGroups.from_groups(
+    groups = LMCacheKVSpec.from_groups(
         [
-            LMCKVCacheGroup(0, ("layer.0", "layer.2"), (0, 2)),
-            LMCKVCacheGroup(1, ("layer.1", "layer.3"), (1, 3)),
+            LMCacheKVGroup(0, (0, 2)),
+            LMCacheKVGroup(1, (1, 3)),
         ]
     )
 
-    assert groups.num_engine_kv_cache_groups == 2
+    assert groups.num_hybrid_block_groups == 2
     assert groups.num_lmc_kv_cache_groups == 2
-    assert groups.per_layer_engine_group_indices(4) == [0, 1, 0, 1]
-    assert groups.engine_group_ids_by_lmc_group() == (0, 1)
+    assert groups.get_per_layer_hybrid_block_group_indices(4) == [0, 1, 0, 1]
+    assert groups.hybrid_block_group_ids_by_lmc_group() == (0, 1)
 
 
 def test_lmc_kv_cache_groups_expand_block_ids_to_lmc_groups():
-    groups = LMCKVCacheGroups.from_groups(
+    groups = LMCacheKVSpec.from_groups(
         [
-            LMCKVCacheGroup(0, ("layer.0", "layer.2"), (0, 2)),
-            LMCKVCacheGroup(0, ("layer.4",), (4,)),
-            LMCKVCacheGroup(1, ("layer.1", "layer.3"), (1, 3)),
+            LMCacheKVGroup(0, (0, 2)),
+            LMCacheKVGroup(0, (4,)),
+            LMCacheKVGroup(1, (1, 3)),
         ]
     )
 
-    assert groups.expand_engine_block_ids_to_lmc_groups([[10, 11], [20, 21]]) == [
+    assert groups.expand_block_ids_to_lmc_groups([[10, 11], [20, 21]]) == [
         [10, 11],
         [10, 11],
         [20, 21],
     ]
 
 
-def test_lmc_kv_cache_groups_serialize_round_trip():
-    groups = LMCKVCacheGroups.from_groups(
+def test_lmc_kv_cache_groups_msgspec_round_trip():
+    """The spec encodes/decodes losslessly via msgspec (the IPC path)."""
+    groups = LMCacheKVSpec.from_groups(
         [
-            LMCKVCacheGroup(0, ("layer.0", "layer.2"), (0, 2)),
-            LMCKVCacheGroup(1, ("layer.1", "layer.3"), (1, 3)),
+            LMCacheKVGroup(0, (0, 2)),
+            LMCacheKVGroup(1, (1, 3)),
         ]
     )
 
-    decoded = LMCKVCacheGroups.deserialize(groups.serialize())
+    decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(groups), type=LMCacheKVSpec)
 
     assert decoded == groups
 
 
 def test_lmc_kv_cache_groups_reject_missing_layers():
-    groups = LMCKVCacheGroups.from_groups(
+    groups = LMCacheKVSpec.from_groups(
         [
-            LMCKVCacheGroup(0, ("layer.0",), (0,)),
-            LMCKVCacheGroup(1, ("layer.1",), (1,)),
+            LMCacheKVGroup(0, (0,)),
+            LMCacheKVGroup(1, (1,)),
         ]
     )
 
     try:
-        groups.per_layer_engine_group_indices(3)
+        groups.get_per_layer_hybrid_block_group_indices(3)
     except ValueError as exc:
         assert "did not cover" in str(exc)
     else:

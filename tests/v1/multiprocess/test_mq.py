@@ -13,7 +13,7 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
+from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
@@ -393,7 +393,7 @@ def test_mq_register_kv_cache():
             1,
             EngineType.VLLM,
             {"vllm_block_size": 16},
-            LMCKVCacheGroups().serialize(),
+            LMCacheKVSpec(),
         ],
         expected_response=None,
         num_requests=1,

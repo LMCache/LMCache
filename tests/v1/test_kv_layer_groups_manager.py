@@ -5,7 +5,7 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_cache_groups import LMCKVCacheGroup, LMCKVCacheGroups
+from lmcache.v1.kv_cache_groups import LMCacheKVGroup, LMCacheKVSpec
 from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     KVLayerGroupsManager,
@@ -23,7 +23,7 @@ def _build_manager(
     *,
     num_blocks: int,
     layout_hints: LayoutHints | None = None,
-    lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
+    lmc_kv_cache_groups: LMCacheKVSpec | None = None,
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
@@ -78,42 +78,42 @@ class TestKVLayerGroupsManager:
         assert group.layer_indices == [0, 1, 2]
         assert group.shape_desc.nl == 3
         assert group.shape_desc.nh == 8
-        assert group.engine_group_idx == 0
+        assert group.hybrid_block_group_idx == 0
 
-    def test_build_splits_same_shape_by_engine_group_idx(self):
+    def test_build_splits_same_shape_by_hybrid_block_group_idx(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(4)
         ]
         manager = _build_manager(
             tensors,
             num_blocks=32,
-            lmc_kv_cache_groups=LMCKVCacheGroups.from_groups(
+            lmc_kv_cache_groups=LMCacheKVSpec.from_groups(
                 [
-                    LMCKVCacheGroup(0, ("layer.0", "layer.2"), (0, 2)),
-                    LMCKVCacheGroup(1, ("layer.1", "layer.3"), (1, 3)),
+                    LMCacheKVGroup(0, (0, 2)),
+                    LMCacheKVGroup(1, (1, 3)),
                 ]
             ),
         )
 
         assert len(manager.kv_layer_groups) == 2
-        groups_by_engine_group_idx = {
-            group.engine_group_idx: group for group in manager.kv_layer_groups
+        groups_by_hybrid_block_group_idx = {
+            group.hybrid_block_group_idx: group for group in manager.kv_layer_groups
         }
-        assert groups_by_engine_group_idx[0].layer_indices == [0, 2]
-        assert groups_by_engine_group_idx[1].layer_indices == [1, 3]
+        assert groups_by_hybrid_block_group_idx[0].layer_indices == [0, 2]
+        assert groups_by_hybrid_block_group_idx[1].layer_indices == [1, 3]
 
     def test_build_rejects_bad_lmc_kv_cache_groups(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(2)
         ]
         with pytest.raises(ValueError, match="non-negative"):
-            LMCKVCacheGroups.from_groups([LMCKVCacheGroup(-1, ("layer.0",), (0,))])
+            LMCacheKVSpec.from_groups([LMCacheKVGroup(-1, (0,))])
         with pytest.raises(ValueError, match="outside registered layer"):
             _build_manager(
                 tensors,
                 num_blocks=32,
-                lmc_kv_cache_groups=LMCKVCacheGroups.from_groups(
-                    [LMCKVCacheGroup(0, ("layer.0",), (2,))]
+                lmc_kv_cache_groups=LMCacheKVSpec.from_groups(
+                    [LMCacheKVGroup(0, (2,))]
                 ),
             )
 

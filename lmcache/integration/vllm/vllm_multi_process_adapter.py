@@ -15,13 +15,13 @@ import zmq
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
+from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
 )
-from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
@@ -860,7 +860,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self.lmc_kv_cache_groups: LMCKVCacheGroups | None = None
+        self.lmc_kv_cache_groups: LMCacheKVSpec | None = None
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -970,7 +970,7 @@ class LMCacheMPWorkerAdapter:
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
-        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
+        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -990,8 +990,8 @@ class LMCacheMPWorkerAdapter:
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_lmc_group(self, op: LoadStoreOp) -> list[list[int]]:
-        lmc_kv_cache_groups = self.lmc_kv_cache_groups or LMCKVCacheGroups()
-        return lmc_kv_cache_groups.expand_engine_block_ids_to_lmc_groups(
+        lmc_kv_cache_groups = self.lmc_kv_cache_groups or LMCacheKVSpec()
+        return lmc_kv_cache_groups.expand_block_ids_to_lmc_groups(
             op.block_ids_per_engine_group
         )
 

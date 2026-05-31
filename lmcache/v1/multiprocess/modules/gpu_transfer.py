@@ -24,7 +24,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
+from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
@@ -235,7 +235,7 @@ class GPUTransferModule:
         world_size: int,
         engine_type: EngineType,
         layout_hints: LayoutHints,
-        serialized_lmc_kv_cache_groups: str,
+        lmc_kv_cache_groups: LMCacheKVSpec,
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -249,7 +249,8 @@ class GPUTransferModule:
                 Forwarded to GPUCacheContext for format detection.
             layout_hints: See LayoutHints.  Forwarded to
                 GPUCacheContext for GPU KV format detection.
-            serialized_lmc_kv_cache_groups: Serialized LMCKVCacheGroups.
+            lmc_kv_cache_groups: Engine-neutral KV cache group metadata
+                (already msgspec-decoded by the message queue).
         """
         if instance_id in self._gpu_contexts:
             logger.warning(
@@ -259,9 +260,6 @@ class GPUTransferModule:
             )
             return
 
-        lmc_kv_cache_groups = LMCKVCacheGroups.deserialize(
-            serialized_lmc_kv_cache_groups
-        )
         gpu_context = GPUCacheContext(
             kv_caches,
             self._ctx.chunk_size,
@@ -427,7 +425,7 @@ class GPUTransferModule:
                             raise ValueError(
                                 "STORE block ID underflow: "
                                 f"lmc_group_idx={lmc_group_idx} "
-                                f"engine_group_idx={group.engine_group_idx} "
+                                f"hybrid_group={group.hybrid_block_group_idx} "
                                 f"chunk={idx} expected={blocks_per_chunk} "
                                 f"got={chunk_block_ids_gpu.shape[0]}"
                             )
@@ -625,7 +623,7 @@ class GPUTransferModule:
                         raise ValueError(
                             "RETRIEVE block ID underflow: "
                             f"lmc_group_idx={lmc_group_idx} "
-                            f"engine_group_idx={group.engine_group_idx} "
+                            f"hybrid_block_group_idx={group.hybrid_block_group_idx} "
                             f"batch={batch_idx} "
                             f"expected={batch_len * blocks_per_chunk} "
                             f"got={chunk_block_ids_gpu.shape[0]}"

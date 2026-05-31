@@ -25,6 +25,7 @@ except ImportError:
         pass
 
 
+# Third Party
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -36,8 +37,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.vllm.kv_cache_groups import (
-    inflated_lmcache_kv_cache_groups_from_vllm,
-    lmcache_kv_cache_groups_from_vllm,
+    create_lmcache_kv_spec_from_vllm,
 )
 from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
@@ -589,9 +589,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
         self.vllm_block_size = vllm_config.cache_config.block_size
+        # The scheduler side only needs the number of engine KV cache groups
+        # (to slice per-engine-group block IDs); the full LMCacheKVSpec is built
+        # worker-side in register_kv_caches where the real tensors are available.
+        # Engine group ids are dense (0..N-1), so the count is just the number
+        # of vLLM KV cache groups (>=1).
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        lmc_kv_cache_groups = lmcache_kv_cache_groups_from_vllm(kv_cache_config)
-        self._num_engine_groups = lmc_kv_cache_groups.num_engine_kv_cache_groups
+        vllm_groups = (
+            getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+            if kv_cache_config is not None
+            else ()
+        )
+        self._num_engine_groups = len(vllm_groups) or 1
 
     @property
     def role(self) -> KVConnectorRole:
@@ -624,7 +633,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        lmc_kv_cache_groups = inflated_lmcache_kv_cache_groups_from_vllm(
+        lmc_kv_cache_groups = create_lmcache_kv_spec_from_vllm(
             kv_cache_config,
             kv_caches,
             layout_hints=vllm_layout_hints(),

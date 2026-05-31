@@ -12,13 +12,13 @@ import zmq
 
 # First Party
 from lmcache.utils import EngineType
-from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
+from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
@@ -344,7 +344,7 @@ def registered_instance(
             1,
             EngineType.VLLM,
             {"inference_engine_logical_block_size": 16},
-            LMCKVCacheGroups().serialize(),
+            LMCacheKVSpec(),
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
@@ -403,7 +403,7 @@ def test_register_unregister_kv_cache(
             1,
             EngineType.VLLM,
             {"inference_engine_logical_block_size": 16},
-            LMCKVCacheGroups().serialize(),
+            LMCacheKVSpec(),
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )

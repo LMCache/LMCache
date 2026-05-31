@@ -8,7 +8,7 @@ group design used by the multiprocess vLLM connector.
 The key idea is to separate three concepts that are easy to conflate:
 
 - Engine KV cache groups: groups defined by the serving engine.
-- `LMCKVCacheGroups`: LMCache's serialized, engine-neutral group contract.
+- `LMCacheKVSpec`: LMCache's engine-neutral, `msgspec`-encoded group contract.
 - `KVLayerGroupInfo`: LMCache's runtime transfer-kernel dispatch groups.
 
 vLLM may organize KV cache groups by engine-side cache behavior. LMCache needs
@@ -57,34 +57,34 @@ optimizations are separate concerns layered on top of this contract.
 An engine KV cache group is a serving-engine-native group. In vLLM this comes
 from `KVCacheConfig.kv_cache_groups`.
 
-The engine group ID is preserved as `engine_kv_cache_group_id` because block
+The engine group ID is preserved as `hybrid_block_group_id` because block
 IDs reported by vLLM are indexed by engine group.
 
-### `LMCKVCacheGroup`
+### `LMCacheKVGroup`
 
-`LMCKVCacheGroup` is LMCache's neutral, serializable group descriptor. It does
-not contain vLLM objects.
+`LMCacheKVGroup` is LMCache's neutral group descriptor, a `msgspec.Struct`. It
+does not contain vLLM objects.
 
 Each group currently records:
 
-- `engine_kv_cache_group_id`;
-- `layer_names`;
+- `hybrid_block_group_id`;
 - `layer_indices`.
 
-After inflation, each `LMCKVCacheGroup` corresponds to one protocol-visible
-LMCache KV group. Store and retrieve block IDs are indexed by this inflated
-group order.
+After creation, each `LMCacheKVGroup` corresponds to one protocol-visible
+LMCache KV group. Store and retrieve block IDs are indexed by this group order.
 
-### `LMCKVCacheGroups`
+### `LMCacheKVSpec`
 
-`LMCKVCacheGroups` is the serialized registration contract. It owns explicit
-`serialize()` and `deserialize()` methods for ZMQ transfer.
+`LMCacheKVSpec` is the registration contract: a `msgspec.Struct` of
+`LMCacheKVGroup`s. Because it is a `msgspec.Struct`, the multiprocess message
+queue encodes/decodes it directly in the `REGISTER_KV_CACHE` payload — there is
+no separate JSON serialization step.
 
 It also provides:
 
-- `engine_group_ids_by_lmc_group()`;
-- `expand_engine_block_ids_to_lmc_groups(...)`;
-- `per_layer_engine_group_indices(...)`.
+- `hybrid_block_group_ids_by_lmc_group()`;
+- `expand_block_ids_to_lmc_groups(...)`;
+- `get_per_layer_hybrid_block_group_indices(...)`.
 
 ### `KVLayerGroupInfo`
 
@@ -96,7 +96,7 @@ dispatch group. It contains kernel-facing data such as:
 - dtype;
 - compression ratio;
 - physical chunk size;
-- engine group index.
+- hybrid block group index.
 
 It should not be serialized as the API contract because it depends on the real
 registered tensors and kernel implementation details.
@@ -108,11 +108,11 @@ vLLM KVCacheConfig + registered kv_caches
         |
         | lmcache.integration.vllm.kv_cache_groups
         v
-Inflated LMCKVCacheGroups
+Inflated LMCacheKVSpec
         |
         | REGISTER_KV_CACHE over ZMQ
         v
-LMCache server deserializes LMCKVCacheGroups
+LMCache server msgspec-decodes LMCacheKVSpec
         |
         | KVLayerGroupsManager validates against real tensors
         v
@@ -126,25 +126,25 @@ Transfer kernels
 ## Registration
 
 During `register_kv_caches`, the vLLM connector builds inflated
-`LMCKVCacheGroups`.
+`LMCacheKVSpec`.
 
 The process is:
 
-1. Convert vLLM's native KV cache groups to base `LMCKVCacheGroups`.
+1. Convert vLLM's native KV cache groups to base `LMCacheKVSpec`.
 2. Normalize and inspect the registered KV tensors.
 3. Reuse `group_layers_by_identity(...)` to split layers by LMCache physical
    transfer identity.
-4. Emit one inflated `LMCKVCacheGroup` per LMCache transfer identity.
-5. Serialize the inflated `LMCKVCacheGroups` in the `REGISTER_KV_CACHE`
-   payload.
+4. Emit one `LMCacheKVGroup` per LMCache transfer identity.
+5. Pass the `LMCacheKVSpec` in the `REGISTER_KV_CACHE` payload; the message
+   queue `msgspec`-encodes it directly.
 
 The layer identity used for inflation is:
 
 ```text
-(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype)
+(kv_size, num_heads, head_size, block_size, hybrid_block_group_idx, dtype)
 ```
 
-The `engine_group_idx` component is important. It prevents layers with
+The `hybrid_block_group_idx` component is important. It prevents layers with
 identical tensor shape from being merged if their block IDs come from different
 engine KV cache groups.
 
@@ -163,7 +163,7 @@ block IDs to LMCache group order:
 ```text
 block_ids_by_lmc_group[lmc_group_idx]
     = block_ids_by_engine_group[
-        lmc_kv_cache_groups.groups[lmc_group_idx].engine_kv_cache_group_id
+        lmc_kv_cache_groups.groups[lmc_group_idx].hybrid_block_group_id
       ]
 ```
 
@@ -214,12 +214,12 @@ LMCache group 2: [10, 11]
 
 ## Invariants
 
-- The inflated `LMCKVCacheGroups` order is the protocol-visible LMCache group
+- The inflated `LMCacheKVSpec` order is the protocol-visible LMCache group
   order.
 - Store and retrieve request block IDs are indexed by inflated LMCache group
   order.
 - vLLM-specific metadata access stays in `lmcache.integration.vllm`.
-- `LMCKVCacheGroups` contains neutral metadata only.
+- `LMCacheKVSpec` contains neutral metadata only.
 - `KVLayerGroupsManager` derives runtime `KVLayerGroupInfo` from real tensors.
 - Server-side runtime grouping must use the same `group_layers_by_identity(...)`
   helper as vLLM-side inflation.
@@ -248,7 +248,7 @@ They remain for tensor interpretation metadata such as:
   metadata.
 
 Future work may move logical block-size or compression policy into
-`LMCKVCacheGroups`, but HMA group identity should not be carried in
+`LMCacheKVSpec`, but HMA group identity should not be carried in
 `layout_hints`.
 
 ## Alternatives Considered
@@ -280,7 +280,7 @@ separate API migration.
 
 ## Follow-Up Work
 
-- Add sliding-window and Mamba metadata fields to `LMCKVCacheGroup` as neutral
+- Add sliding-window and Mamba metadata fields to `LMCacheKVGroup` as neutral
   per-group or per-layer semantics.
 - Add a load-plan interface that trims retrieved tokens according to full
   attention and sliding-window cache availability.

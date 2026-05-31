@@ -13,7 +13,7 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
-from lmcache.v1.kv_cache_groups import LMCKVCacheGroups
+from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -68,7 +68,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
+        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -174,7 +174,7 @@ class HandleTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
+        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
     ) -> None:
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
@@ -191,7 +191,7 @@ class HandleTransferContext(TransferContext):
                 world_size,
                 EngineType.VLLM,
                 layout_hints,
-                (lmc_kv_cache_groups or LMCKVCacheGroups()).serialize(),
+                lmc_kv_cache_groups or LMCacheKVSpec(),
             ],
         )
         future.result(timeout=mq_timeout)
@@ -263,7 +263,7 @@ class DataTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: LMCKVCacheGroups | None = None,
+        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
