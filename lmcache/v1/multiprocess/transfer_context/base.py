@@ -132,8 +132,10 @@ def create_non_gpu_context(
     metadata: NonGpuContextMetadata,
     mq_client: MessageQueueClient,
     mq_timeout: float,
-    shm_name: str = "",
-    pool_size: int = 0,
+    shm_name: str,
+    pool_size: int,
+    *,
+    use_pickle: bool = False,
 ) -> NonGpuContext:
     """Factory that returns the appropriate :class:`NonGpuContext` implementation.
 
@@ -146,13 +148,19 @@ def create_non_gpu_context(
         metadata: Layout metadata for the non-GPU context.
         mq_client: Message-queue client for server communication.
         mq_timeout: Timeout in seconds for blocking MQ requests.
-        shm_name: Shared-memory segment name. Empty means pickle mode.
-        pool_size: Shared-memory pool size in bytes. Non-positive means pickle mode.
+        shm_name: Shared-memory segment name. Empty values force pickle mode.
+        pool_size: Shared-memory pool size in bytes. Non-positive values force
+            pickle mode.
+        use_pickle: Explicitly use pickle transport even when SHM info is
+            available.
 
     Returns:
         A concrete :class:`NonGpuContext` instance.
     """
-    if shm_name and pool_size > 0:
+    if not shm_name or pool_size <= 0:
+        use_pickle = True
+
+    if not use_pickle:
         # Local
         from .shm import NonGpuContextShm
 

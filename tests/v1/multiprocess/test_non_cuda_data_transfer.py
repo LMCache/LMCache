@@ -1043,6 +1043,25 @@ def test_create_non_gpu_context_falls_back_to_pickle_without_shm_info() -> None:
     assert isinstance(context, NonGpuContextPickle)
 
 
+def test_create_non_gpu_context_use_pickle_ignores_valid_shm_info() -> None:
+    context = create_non_gpu_context(
+        metadata=NonGpuContextMetadata(
+            layout_desc=MemoryLayoutDesc(
+                shapes=[torch.Size([2, 2])],
+                dtypes=[torch.float32],
+            ),
+            block_size=1,
+            use_mla=False,
+        ),
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        shm_name="lmcache_valid_shm",
+        pool_size=4096,
+        use_pickle=True,
+    )
+    assert isinstance(context, NonGpuContextPickle)
+
+
 def test_non_gpu_context_shm_close_is_idempotent() -> None:
     shm_name = f"lmcache_test_close_{os.getpid()}"
     shm_path = _create_shm_file(shm_name, 4096)
