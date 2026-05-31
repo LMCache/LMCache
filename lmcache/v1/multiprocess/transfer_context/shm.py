@@ -11,13 +11,13 @@ from typing import Any
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.adapter_connector.base import (
-    NonGpuContext,
-    NonGpuContextMetadata,
-)
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+from lmcache.v1.multiprocess.transfer_context.base import (
+    NonGpuContext,
+    NonGpuContextMetadata,
+)
 
 
 @dataclass(frozen=True)

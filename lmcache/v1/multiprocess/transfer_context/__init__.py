@@ -2,7 +2,7 @@
 """Transport package for non-GPU KV data transfer in multiprocess mode.
 
 Re-exports all public symbols from the sub-modules so that existing imports
-from ``lmcache.v1.multiprocess.adapter_connector`` work without specifying the
+from ``lmcache.v1.multiprocess.transfer_context`` work without specifying the
 sub-module.
 """
 

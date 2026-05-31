@@ -15,7 +15,6 @@ from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
 )
-from lmcache.v1.multiprocess.adapter_connector.base import NonGpuContextMetadata
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     RegisterNonGpuContextPayload,
@@ -31,6 +30,7 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareStoreResponse,
     RegisterNonGpuContextResponse,
 )
+from lmcache.v1.multiprocess.transfer_context.base import NonGpuContextMetadata
 
 # Local
 from .server_transfer import (
