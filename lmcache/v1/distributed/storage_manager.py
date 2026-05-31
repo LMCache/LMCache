@@ -10,6 +10,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -391,6 +392,8 @@ class StorageManager:
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         external_request_id: str = "",
+        sparse: bool = False,
+        covered_keys: set[ObjectKey] | None = None,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -402,6 +405,13 @@ class StorageManager:
                 key.  Total locks = 1 + extra_count.
             external_request_id: Request ID from the caller
                 for end-to-end log tracing.
+            sparse: If True, retain every found key (L1+L2), not just the
+                contiguous prefix; results via :meth:`wait_prefetch_found`.
+                Coalesces scattered chunks into one L2 load.
+            covered_keys: Sparse only. Keys already served elsewhere (e.g. the
+                parent prefix): excluded from the L2 load and found set, and
+                any probe read-lock on them is released — so the locked set
+                equals what the caller retrieves (no leak).
 
         Returns:
             PrefetchHandle to track the task.
@@ -410,6 +420,15 @@ class StorageManager:
         # objects are already in L1, and adding read locks to them.
 
         l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+        if sparse:
+            return self._finish_submit_prefetch_sparse(
+                keys,
+                l1_read_result,
+                layout_desc,
+                extra_count,
+                external_request_id,
+                covered_keys or frozenset(),
+            )
         hit_count = 0
         for key in keys:
             entry = l1_read_result.get(key, None)
@@ -476,6 +495,102 @@ class StorageManager:
             submit_time=submit_time,
         )
 
+    def _finish_submit_prefetch_sparse(
+        self,
+        keys: list[ObjectKey],
+        l1_read_result: dict,
+        layout_desc: MemoryLayoutDesc,
+        extra_count: int,
+        external_request_id: str,
+        covered_keys: "frozenset[ObjectKey] | set[ObjectKey]",
+    ) -> PrefetchHandle:
+        """Sparse prefetch: keep read locks on every found L1 key (not just the
+        prefix) and send all L1-misses to L2 as one sparse request; found keys
+        reported via :meth:`wait_prefetch_found`. ``covered_keys`` (served by the
+        parent prefix) are excluded and any probe lock on them released, so the
+        locked set equals what the caller retrieves."""
+        # L1-present keys kept read-locked, except parent-covered (released below).
+        l1_found_indices = [
+            i
+            for i, key in enumerate(keys)
+            if key not in covered_keys
+            and (ent := l1_read_result.get(key)) is not None
+            and ent[0] == L1Error.SUCCESS
+            and ent[1] is not None
+        ]
+        l1_found_set = {keys[i] for i in l1_found_indices}
+
+        # Release probe read-locks we won't retain (covered + stray), else leak.
+        stray_keys = [
+            key
+            for key, ent in l1_read_result.items()
+            if ent is not None and ent[1] is not None and key not in l1_found_set
+        ]
+        if stray_keys:
+            self._l1_manager.finish_read(stray_keys, extra_count=extra_count)
+
+        # L1 misses (minus covered) → L2 sparse; keep each one's original index.
+        found_set = set(l1_found_indices)
+        l2_orig_indices = [
+            i
+            for i in range(len(keys))
+            if i not in found_set and keys[i] not in covered_keys
+        ]
+        remaining_keys = [keys[i] for i in l2_orig_indices]
+
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_READ_PREFETCHED,
+                metadata={
+                    "succeeded_keys": [keys[i] for i in l1_found_indices],
+                    "failed_keys": remaining_keys,
+                },
+            )
+        )
+
+        prefetch_request_id = -1
+        if remaining_keys and self._l2_adapters:
+            prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+                remaining_keys,
+                layout_desc,
+                extra_count=extra_count,
+                sparse=True,
+            )
+
+        return PrefetchHandle(
+            prefetch_request_id=prefetch_request_id,
+            external_request_id=external_request_id,
+            l1_prefix_hit_count=len(l1_found_indices),
+            total_requested_keys=len(keys),
+            submit_time=time.monotonic(),
+            sparse=True,
+            l1_found_indices=tuple(l1_found_indices),
+            l2_orig_indices=tuple(l2_orig_indices),
+        )
+
+    def wait_prefetch_found(
+        self,
+        handle: PrefetchHandle,
+        timeout: float | None = None,
+    ) -> set[int] | None:
+        """Sparse-prefetch result: the set of original key indices found and
+        read-locked in L1 (directly or via L2), or ``None`` on timeout."""
+        found: set[int] = set(handle.l1_found_indices)
+        if handle.prefetch_request_id != -1:
+            l2_res = self._prefetch_controller.wait_prefetch_result(
+                handle.prefetch_request_id, timeout=timeout
+            )
+            if l2_res is None:
+                return None
+            if isinstance(l2_res, Bitmap):
+                for local_idx in l2_res.get_indices_list():
+                    found.add(handle.l2_orig_indices[local_idx])
+            else:
+                # Defensive: a prefix-count int (non-sparse controller path).
+                for local_idx in range(int(l2_res)):
+                    found.add(handle.l2_orig_indices[local_idx])
+        return found
+
     def query_prefetch_lookup_hits(
         self,
         handle: PrefetchHandle,
@@ -540,7 +655,8 @@ class StorageManager:
 
             if l2_r is None:
                 return None
-            l2_result = l2_r  # Just to make linter happy
+            # Non-sparse handle => int; tolerate a Bitmap defensively.
+            l2_result = l2_r.popcount() if isinstance(l2_r, Bitmap) else l2_r
 
         total_hits = handle.l1_prefix_hit_count + l2_result
         elapsed_ms = (time.monotonic() - handle.submit_time) * 1000

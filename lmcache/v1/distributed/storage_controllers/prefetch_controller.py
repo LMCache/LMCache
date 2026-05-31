@@ -116,6 +116,22 @@ def trim_load_plan_to_prefix(
     return trim_load_plan_to_first_n_keys(load_plan, num_keys, prefix_length)
 
 
+def trim_load_plan_with_mask(
+    load_plan: dict[int, Bitmap],
+    mask: Bitmap,
+) -> dict[int, Bitmap]:
+    """Trim the load plan to keys set in ``mask`` (sparse: keeps every masked
+    key regardless of gaps, unlike :func:`trim_load_plan_to_prefix`). Adapter
+    indices retaining no keys are dropped."""
+    trimmed_plan: dict[int, Bitmap] = {}
+    for adapter_idx, bitmap in load_plan.items():
+        new_bitmap = bitmap & mask
+        if new_bitmap.popcount() == 0:
+            continue
+        trimmed_plan[adapter_idx] = new_bitmap
+    return trimmed_plan
+
+
 def merge_bitmaps(bitmaps: Iterable[Bitmap], num_keys: int) -> Bitmap:
     """Merge multiple bitmaps with a bitwise OR."""
     if not bitmaps:
@@ -149,6 +165,10 @@ class InFlightPrefetchRequest:
     """Extra read locks per key (on top of the default 1) to acquire when
     transitioning from write-locked to read-locked.  Must match the
     ``extra_count`` used in the corresponding ``submit_prefetch_task`` call."""
+
+    sparse: bool = False
+    """Sparse: load every found key (not just the prefix), keep all
+    read-locked; result is a per-key ``Bitmap`` not a prefix-hit count."""
 
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
@@ -219,7 +239,7 @@ class PrefetchController(StorageControllerInterface):
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
         self._pending_queue: list[
-            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
+            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int, bool]
         ] = []
 
         # Shadow counters for status reporting (updated in background loop)
@@ -231,7 +251,7 @@ class PrefetchController(StorageControllerInterface):
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
         self._submission_queue: list[
-            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
+            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int, bool]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
         self._submission_efd = create_event_notifier()
@@ -240,9 +260,10 @@ class PrefetchController(StorageControllerInterface):
         self._lookup_results_lock = threading.Lock()
         self._completed_lookups: dict[PrefetchRequestId, int] = {}
 
-        # Thread-safe prefetch results (background -> external)
-        self._prefetch_results_lock = threading.Lock()
-        self._completed_results: dict[PrefetchRequestId, int] = {}
+        # Background → external. Condition notifies wait_prefetch_result.
+        self._prefetch_results_lock = threading.Condition()
+        # int = prefix-hit count (normal); Bitmap = per-key found set (sparse).
+        self._completed_results: dict[PrefetchRequestId, int | Bitmap] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -295,6 +316,7 @@ class PrefetchController(StorageControllerInterface):
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
+        sparse: bool = False,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
@@ -307,6 +329,10 @@ class PrefetchController(StorageControllerInterface):
         the prefix are never transferred, saving I/O bandwidth and L1
         memory.  Use :meth:`query_prefetch_result` to retrieve the number
         of prefix hits once the request completes.
+
+        When ``sparse=True``, every found key is loaded and read-locked (no
+        prefix trim) and the result is a per-key :class:`Bitmap`; coalesces
+        scattered, independently-usable chunks into one L2 load.
 
         Args:
             keys: List of object keys to prefetch from L2 into L1.
@@ -324,7 +350,9 @@ class PrefetchController(StorageControllerInterface):
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
-            self._submission_queue.append((request_id, keys, layout_desc, extra_count))
+            self._submission_queue.append(
+                (request_id, keys, layout_desc, extra_count, sparse)
+            )
         self._submission_efd.notify()
         return request_id
 
@@ -352,7 +380,9 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             return self._completed_lookups.get(request_id, None)
 
-    def query_prefetch_result(self, request_id: PrefetchRequestId) -> int | None:
+    def query_prefetch_result(
+        self, request_id: PrefetchRequestId
+    ) -> "int | Bitmap | None":
         """
         Query the result of a prefetch request.
 
@@ -377,6 +407,26 @@ class PrefetchController(StorageControllerInterface):
         if result is not None:
             with self._lookup_results_lock:
                 self._completed_lookups.pop(request_id, None)
+        return result
+
+    def wait_prefetch_result(
+        self, request_id: PrefetchRequestId, timeout: float | None = None
+    ) -> "int | Bitmap | None":
+        """Event-driven :meth:`query_prefetch_result`; blocks until ready and
+        returns the result (``int`` count or ``Bitmap``), ``None`` on timeout."""
+        with self._prefetch_results_lock:
+            if request_id in self._completed_results:
+                result = self._completed_results.pop(request_id)
+            else:
+                got = self._prefetch_results_lock.wait_for(
+                    lambda: request_id in self._completed_results,
+                    timeout=timeout,
+                )
+                if not got:
+                    return None
+                result = self._completed_results.pop(request_id)
+        with self._lookup_results_lock:
+            self._completed_lookups.pop(request_id, None)
         return result
 
     def report_status(self) -> dict:
@@ -551,9 +601,11 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count = self._pending_queue.pop(0)
+            request_id, keys, layout_desc, extra_count, sparse = (
+                self._pending_queue.pop(0)
+            )
             self._status_pending_count -= 1
-            self._start_lookup_phase(request_id, keys, layout_desc, extra_count)
+            self._start_lookup_phase(request_id, keys, layout_desc, extra_count, sparse)
 
     # =========================================================================
     # Lookup phase
@@ -565,10 +617,11 @@ class PrefetchController(StorageControllerInterface):
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
+        sparse: bool = False,
     ) -> None:
         """Submit lookup_and_lock to all adapters for a new request."""
         if not self._l2_adapters:
-            self._complete_request(request_id, 0)
+            self._complete_request(request_id, Bitmap(len(keys)) if sparse else 0)
             return
 
         pending_lookup_tasks: dict[int, L2TaskId] = {}
@@ -582,6 +635,7 @@ class PrefetchController(StorageControllerInterface):
             layout_desc=layout_desc,
             phase=PrefetchPhase.LOOKUP,
             extra_count=extra_count,
+            sparse=sparse,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
@@ -615,8 +669,11 @@ class PrefetchController(StorageControllerInterface):
             self._adapter_descriptors,
         )
 
-        # Step 2: trim the load plan to only prefix
-        trimmed_plan = trim_load_plan_to_prefix(load_plan, len(request.keys))
+        # Step 2: trim load plan — sparse keeps every found key, default prefix.
+        if request.sparse:
+            trimmed_plan = dict(load_plan)
+        else:
+            trimmed_plan = trim_load_plan_to_prefix(load_plan, len(request.keys))
 
         if not trimmed_plan:
             # Nothing to load after trimming to prefix. Unlock all lookup locks
@@ -688,10 +745,15 @@ class PrefetchController(StorageControllerInterface):
             if key in reserved_key_set:
                 reserved_bitmap.set(i)
 
-        prefix_length = reserved_bitmap.count_leading_ones()
-        trimmed_plan = trim_load_plan_to_first_n_keys(
-            load_plan, len(request.keys), prefix_length
-        )
+        if request.sparse:
+            # Sparse: keep every successfully-reserved key (no prefix trim).
+            lookup_hits = reserved_bitmap.popcount()
+            trimmed_plan = trim_load_plan_with_mask(load_plan, reserved_bitmap)
+        else:
+            lookup_hits = reserved_bitmap.count_leading_ones()
+            trimmed_plan = trim_load_plan_to_first_n_keys(
+                load_plan, len(request.keys), lookup_hits
+            )
         request.load_plan = trimmed_plan
 
         ## Step 6: phase 1 unlock — keys locked in lookup but not in plan
@@ -749,14 +811,14 @@ class PrefetchController(StorageControllerInterface):
             )
 
         ## Step 8: update the lookup result based on the final load plan
-        self._update_lookup_results(request.request_id, prefix_length)
+        self._update_lookup_results(request.request_id, lookup_hits)
 
         self._event_bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
                 metadata={
                     "request_id": request.request_id,
-                    "prefix_hit_count": prefix_length,
+                    "prefix_hit_count": lookup_hits,
                 },
             )
         )
@@ -922,16 +984,20 @@ class PrefetchController(StorageControllerInterface):
                 )
             )
 
-        # Partial load failures can create gaps in the prefix.
-        # Release read locks for loaded keys beyond the prefix.
-        prefix_hits = result_bitmap.count_leading_ones()
-        prefix_mask = Bitmap(num_keys, prefix_hits)
-        non_prefix_loaded_bitmap = result_bitmap & (~prefix_mask)
-        non_prefix_loaded = non_prefix_loaded_bitmap.gather(request.keys)
-        if non_prefix_loaded:
-            l1_mgr.finish_read(non_prefix_loaded, extra_count=request.extra_count)
-
-        self._complete_request(request.request_id, prefix_hits)
+        if request.sparse:
+            # Sparse: every loaded key keeps its read lock for retrieval;
+            # result is the per-key found bitmap (no prefix-based release).
+            self._complete_request(request.request_id, result_bitmap)
+        else:
+            # Partial load failures can create gaps in the prefix.
+            # Release read locks for loaded keys beyond the prefix.
+            prefix_hits = result_bitmap.count_leading_ones()
+            prefix_mask = Bitmap(num_keys, prefix_hits)
+            non_prefix_loaded_bitmap = result_bitmap & (~prefix_mask)
+            non_prefix_loaded = non_prefix_loaded_bitmap.gather(request.keys)
+            if non_prefix_loaded:
+                l1_mgr.finish_read(non_prefix_loaded, extra_count=request.extra_count)
+            self._complete_request(request.request_id, prefix_hits)
 
     # =========================================================================
     # Unlock helpers
@@ -964,11 +1030,13 @@ class PrefetchController(StorageControllerInterface):
     # =========================================================================
 
     def _complete_request(
-        self, request_id: PrefetchRequestId, prefix_hits: int
+        self, request_id: PrefetchRequestId, result: int | Bitmap
     ) -> None:
-        """Store the result and remove from in-flight tracking."""
+        """Store the result (prefix-hit ``int`` or sparse per-key ``Bitmap``)
+        and notify ``wait_prefetch_result`` waiters."""
         with self._prefetch_results_lock:
-            self._completed_results[request_id] = prefix_hits
+            self._completed_results[request_id] = result
+            self._prefetch_results_lock.notify_all()
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1
@@ -976,10 +1044,12 @@ class PrefetchController(StorageControllerInterface):
                 self._status_lookup_phase_count -= 1
             elif removed.phase == PrefetchPhase.PLAN_AND_LOAD:
                 self._status_load_phase_count -= 1
+        hit_count = result.popcount() if isinstance(result, Bitmap) else result
         logger.debug(
-            "Prefetch request %d completed: %d prefix hits",
+            "Prefetch request %d completed: %d hits%s",
             request_id,
-            prefix_hits,
+            hit_count,
+            " (sparse)" if isinstance(result, Bitmap) else " prefix",
         )
 
     def _cleanup_in_flight_requests(self) -> None:

@@ -180,6 +180,18 @@ class PrefetchHandle:
     submit_time: float
     """Monotonic timestamp when the prefetch task was submitted."""
 
+    sparse: bool = False
+    """Sparse prefetch: every found key is loaded and read-locked (not just
+    the contiguous prefix); result is a per-key found set via
+    ``wait_prefetch_found``."""
+
+    l1_found_indices: tuple[int, ...] = ()
+    """Sparse only: original-key indices found in L1 at submit time."""
+
+    l2_orig_indices: tuple[int, ...] = ()
+    """Sparse only: original-key index of each L1-miss sent to L2; maps the
+    controller's local result bitmap back to original positions."""
+
 
 def ipc_key_to_object_keys(
     ipc_key: IPCCacheEngineKey,
