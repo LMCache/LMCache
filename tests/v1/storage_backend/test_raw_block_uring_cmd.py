@@ -3,7 +3,7 @@
 """Tests for io_uring command (passthrough) support in Rust raw block backend."""
 
 # Standard
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import asyncio
 import os
 
@@ -17,8 +17,48 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.plugins.rust_raw_block_backend import (
     RustRawBlockBackend,
 )
+from lmcache.v1.storage_backend.raw_block.core import (
+    RawBlockCore,
+)
 
 logger = init_logger(__name__)
+
+
+# GLobal test device configuration with environment variables
+TEST_DEVICES = {
+    "block_device": os.environ.get("LMCACHE_TEST_BLOCK_DEVICE", "/dev/nvme0n1"),
+    "char_device": os.environ.get("LMCACHE_TEST_CHAR_DEVICE", "/dev/ng0n1"),
+    "null_device": os.environ.get("LMCACHE_TEST_NULL_DEVICE", "/dev/null"),
+}
+
+
+def _get_sysfs_path(device_path: str) -> str:
+    """Derive sysfs path from device path."""
+
+    device_name = os.path.basename(device_path)
+
+    if device_name.startswith("ng"):
+        parts = device_name[2:]
+        device_name = f"nvme{parts}"
+
+    return f"/sys/block/{device_name}"
+
+
+def _has_ext() -> bool:
+    """Check if the Rust raw block I/O extension is available."""
+    try:
+        # Third Party
+        import lmcache_rust_raw_block_io  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+# Skip all tests in this file if the Rust extension is not available
+pytestmark = pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not available"
+)
 
 
 @pytest.fixture
@@ -94,11 +134,41 @@ def _build_rust_raw_block_local_cpu_backend() -> MagicMock:
     return local_cpu_backend
 
 
+def _build_transfer_limit_backend(
+    dev_path: str,
+    max_data_transfer_size: int | None = None,
+) -> RustRawBlockBackend:
+    config = MockConfig(device_path=dev_path, use_uring_cmd=True)
+    if max_data_transfer_size is not None:
+        config.extra_config["rust_raw_block.max_data_transfer_size"] = (
+            max_data_transfer_size
+        )
+
+    metadata = MockMetadata()
+    loop = asyncio.new_event_loop()
+    try:
+        with (
+            patch.object(RawBlockCore, "_rawdev", return_value=MagicMock()),
+            patch.object(RawBlockCore, "_ensure_capacity_and_layout"),
+            patch.object(RawBlockCore, "_load_checkpoint_from_device"),
+        ):
+            backend = RustRawBlockBackend(
+                config=config,
+                metadata=metadata,
+                local_cpu_backend=MockLocalCPUBackend(),
+                loop=loop,
+                dst_device="cpu",
+            )
+            return backend
+    finally:
+        loop.close()
+
+
 def test_uring_cmd_requires_character_device(loop_in_thread):
     """Test that io_uring_cmd requires a character device, not a block device."""
-    # This test requires a block device device /dev/nvme0n1
+    # This test requires a block device device
     # Skip if this doesn't exist
-    device_path = os.environ.get("LMCACHE_TEST_BLOCK_DEVICE", "/dev/nvme0n1")
+    device_path = TEST_DEVICES["block_device"]
 
     if not os.path.exists(device_path):
         pytest.skip(f"Test device {device_path} not found.")
@@ -109,7 +179,7 @@ def test_uring_cmd_requires_character_device(loop_in_thread):
 
     # This should raise an error because the device is not a character device
     with pytest.raises(
-        ValueError, match="io_uring_cmd requires a NVMe namespace character device"
+        ValueError, match="use_uring_cmd requires an NVMe namespace character device"
     ):
         RustRawBlockBackend(
             config=config,
@@ -121,9 +191,9 @@ def test_uring_cmd_requires_character_device(loop_in_thread):
 
 def test_uring_cmd_get_nvme_info(loop_in_thread):
     """Test getting NVMe namespace ID and LBA size from character device."""
-    # This test requires a block device device /dev/nvme0n1
+    # This test requires a nvme NS character device
     # Skip if this doesn't exist
-    device_path = os.environ.get("LMCACHE_TEST_BLOCK_DEVICE", "/dev/ng0n1")
+    device_path = TEST_DEVICES["char_device"]
 
     if not os.path.exists(device_path):
         pytest.skip(f"Test device {device_path} not found.")
@@ -155,6 +225,94 @@ def test_uring_cmd_get_nvme_info(loop_in_thread):
 
     except Exception as e:
         pytest.fail(f"Failed to get NVMe info: {e}")
+
+
+def test_uring_cmd_disabled(loop_in_thread):
+    """Test that NVMe methods are not available when use_uring_cmd is disabled."""
+    config = MockConfig(device_path=TEST_DEVICES["null_device"], use_uring_cmd=False)
+    metadata = MockMetadata(worker_id=0, world_size=1)
+    local_cpu_backend = MockLocalCPUBackend()
+    raw_device = MagicMock()
+    raw_device.nvme_nsid.side_effect = RuntimeError("use_uring_cmd not enabled")
+    raw_device.nvme_lba_size.side_effect = RuntimeError("use_uring_cmd not enabled")
+
+    with (
+        patch.object(RawBlockCore, "_rawdev", return_value=MagicMock()),
+        patch.object(RawBlockCore, "_ensure_capacity_and_layout"),
+        patch.object(RawBlockCore, "_load_checkpoint_from_device"),
+    ):
+        backend = RustRawBlockBackend(
+            config=config,
+            metadata=metadata,
+            local_cpu_backend=local_cpu_backend,
+            loop=loop_in_thread,
+        )
+        backend._raw = raw_device
+
+    # These should raise errors when use_uring_cmd is disabled
+    with pytest.raises(RuntimeError, match="use_uring_cmd not enabled"):
+        raw_device.nvme_nsid()
+
+    with pytest.raises(RuntimeError, match="use_uring_cmd not enabled"):
+        raw_device.nvme_lba_size()
+
+
+def test_uring_cmd_auto_transfer_limit_from_sysfs_ng_device():
+    expected_path = (
+        f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue/max_hw_sectors_kb"
+    )
+    with patch(
+        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        return_value=1024,
+    ) as mock_read:
+        backend = _build_transfer_limit_backend(
+            TEST_DEVICES["char_device"], max_data_transfer_size=-1
+        )
+
+    mock_read.assert_called_once_with(expected_path)
+    assert backend._core.max_data_transfer_size == 1024 * 1024
+
+
+def test_uring_cmd_auto_transfer_limit_fails_when_sysfs_unavailable():
+    expected_path = (
+        f"{_get_sysfs_path(TEST_DEVICES['char_device'])}/queue/max_hw_sectors_kb"
+    )
+    with patch(
+        "lmcache.v1.storage_backend.raw_block.core._read_sysfs_int",
+        return_value=None,
+    ) as mock_read:
+        with pytest.raises(RuntimeError, match="failed to read max_hw_sectors_kb"):
+            _build_transfer_limit_backend(
+                TEST_DEVICES["char_device"], max_data_transfer_size=-1
+            )
+
+    mock_read.assert_called_once_with(expected_path)
+
+
+def test_uring_cmd_explicit_transfer_limit_must_be_block_aligned():
+    """Test that explicitly configured max_data_transfer_size must be block-aligned."""
+    # Default block_align is 4096 bytes
+    # 4096 is block-aligned (4096 % 4096 == 0)
+    backend = _build_transfer_limit_backend(
+        TEST_DEVICES["char_device"], max_data_transfer_size=4096
+    )
+    assert backend._core.max_data_transfer_size == 4096
+
+    # 8192 is block-aligned (8192 % 4096 == 0)
+    backend = _build_transfer_limit_backend(
+        TEST_DEVICES["char_device"], max_data_transfer_size=8192
+    )
+    assert backend._core.max_data_transfer_size == 8192
+
+    # 5000 is NOT block-aligned (5000 % 4096 != 0)
+    with pytest.raises(
+        ValueError,
+        match=r"max_data_transfer_size \(5000\) must be a multiple of "
+        "block_align \(4096\)",
+    ):
+        _build_transfer_limit_backend(
+            TEST_DEVICES["char_device"], max_data_transfer_size=5000
+        )
 
 
 if __name__ == "__main__":

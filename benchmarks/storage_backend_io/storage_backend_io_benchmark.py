@@ -708,8 +708,10 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
         cleanup_raw_device: bool,
         write_bench: bool,
         use_uring: bool,
+        use_uring_cmd: bool,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         verify_integrity: bool = False,
+        max_data_transfer_size: int = 0,
     ):
         super().__init__(
             "rust_raw_block",
@@ -728,6 +730,8 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
         self._temp_dir: Optional[str] = None
         self._manifest_path: Optional[str] = None
         self.use_uring = use_uring
+        self.use_uring_cmd = use_uring_cmd
+        self.max_data_transfer_size = max_data_transfer_size
         # Create manifest path
         self._manifest_path = os.path.join(
             tempfile.gettempdir(),
@@ -744,11 +748,14 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
             "rust_raw_block.manifest_path": self._manifest_path,
             "rust_raw_block.manifest_write_interval": 0,
             "rust_raw_block.use_uring": self.use_uring,
+            "rust_raw_block.use_uring_cmd": self.use_uring_cmd,
+            "rust_raw_block.max_data_transfer_size": self.max_data_transfer_size,
         }
 
     def _setup_device(self) -> None:
         """Setup raw block device or temp file."""
         is_block_device = False
+        is_char_device = False
         self._temp_dir = None
         prefix = "write" if self.write_bench else "read"
         prefix = prefix + "raw_block_bench_"
@@ -756,16 +763,18 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
             try:
                 st_mode = os.stat(self.raw_device).st_mode
                 is_block_device = stat.S_ISBLK(st_mode)
+                is_char_device = stat.S_ISCHR(st_mode)
             except FileNotFoundError:
                 is_block_device = False
+                is_char_device = False
 
         # Create temp file if no device specified
         if not self.raw_device:
             self._temp_dir = tempfile.mkdtemp(prefix)
             self.raw_device = os.path.join(self._temp_dir, "raw_block.bin")
 
-        # Truncate if not a real block device
-        if self.raw_device and not is_block_device:
+        # Truncate if not a real block device or character device
+        if self.raw_device and not is_block_device and not is_char_device:
             with open(self.raw_device, "wb") as f:
                 f.truncate(int(self.raw_device_size_gb * 1024**3))
 
@@ -823,7 +832,10 @@ class RustRawBlockBackendBenchmark(StorageBackendBenchmark):
 
     def _get_extra_result_fields(self) -> dict:
         """Get extra fields for RustRawBlockBackend benchmark results."""
-        return {"use_uring": self.use_uring}
+        return {
+            "use_uring": self.use_uring,
+            "use_uring_cmd": self.use_uring_cmd,
+        }
 
     def _cleanup_device(self) -> None:
         """Cleanup temp files."""
@@ -1007,6 +1019,25 @@ def main() -> None:
         help="Enable io_uring for raw block backend",
     )
     parser.add_argument(
+        "--use-uring-cmd",
+        action="store_true",
+        help=(
+            "Enable io_uring_cmd for raw block backend. "
+            "This automatically enables --use-uring. "
+            "Must use nvme character device node (/dev/ngXnY)"
+        ),
+    )
+    parser.add_argument(
+        "--max-data-transfer-size",
+        type=int,
+        default=0,
+        help=(
+            "Maximum data transfer size for use_uring_cmd. "
+            " > 0: Split based on the specified limit. "
+            " <= 0: Split based on device reported max hardware sector size"
+        ),
+    )
+    parser.add_argument(
         "--verify-integrity",
         action="store_true",
         help="Verify data integrity after reads (write_bench is False)",
@@ -1058,6 +1089,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # use_uring_cmd requires io_uring as io_engine
+    if args.use_uring_cmd:
+        args.use_uring = True
+
     # write_bench defaults to True (write benchmark), set to False for read benchmark
     write_bench = args.write_bench.lower() in ("true", "1", "yes", "y", "")
 
@@ -1098,8 +1133,10 @@ def main() -> None:
             cleanup_raw_device=cleanup_raw_device,
             write_bench=write_bench,
             use_uring=args.use_uring,
+            use_uring_cmd=args.use_uring_cmd,
             chunk_size=args.chunk_size,
             verify_integrity=args.verify_integrity,
+            max_data_transfer_size=args.max_data_transfer_size,
         )
         result = rustraw_bench.run()
         result["raw_device"] = raw_device

@@ -28,8 +28,50 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use io_uring::cqueue::{Entry, Entry32};
+use io_uring::squeue::{Entry as SqueueEntry, Entry128};
 use io_uring::types::Fd;
 use io_uring::{opcode, IoUring};
+
+// Wrapper enum to support both standard and big io_uring entries
+// This allows fallback to standard entries on kernels < 5.19
+#[derive(Clone)]
+enum IoUringWrapper {
+    Standard(Arc<Mutex<IoUring<SqueueEntry, Entry>>>),
+    Big(Arc<Mutex<IoUring<Entry128, Entry32>>>),
+}
+
+impl IoUringWrapper {
+    // Get the submission queue length
+    fn submission_len(&self) -> usize {
+        match self {
+            IoUringWrapper::Standard(ring) => {
+                let mut ring = ring.lock().unwrap();
+                let len = ring.submission().len();
+                len
+            }
+            IoUringWrapper::Big(ring) => {
+                let mut ring = ring.lock().unwrap();
+                let len = ring.submission().len();
+                len
+            }
+        }
+    }
+
+    // Sync the submission queue
+    fn submission_sync(&self) {
+        match self {
+            IoUringWrapper::Standard(ring) => {
+                let mut ring = ring.lock().unwrap();
+                ring.submission().sync();
+            }
+            IoUringWrapper::Big(ring) => {
+                let mut ring = ring.lock().unwrap();
+                ring.submission().sync();
+            }
+        }
+    }
+}
 
 // NVMe identify namespace data structure
 #[repr(C)]
@@ -122,7 +164,7 @@ struct NvmeUringCmd {
 const NVME_IOCTL_ADMIN_CMD: libc::c_ulong = 0xC048_4E41;
 
 // Defined in <linux/nvme_ioctl.h>: NVME_IOCTL_IO_CMD _IOWR ('N', 0x43)
-const NVME_IOCTL_IO_CMD: libc::c_ulong = 0xC048_4E43;
+// const NVME_IOCTL_IO_CMD: libc::c_ulong = 0xC048_4E43;
 
 // NVMe io_uring_cmd opcodes
 const NVME_URING_CMD_IO: u32 = 0xC048_4E80;
@@ -381,6 +423,83 @@ fn nvme_identify_ns(fd: RawFd, nsid: u32) -> Result<NvmeIdNs, PyErr> {
     }
 
     Ok(id_ns)
+}
+
+/// Prepare NVMe uring command for read/write operations
+#[allow(clippy::too_many_arguments)]
+fn nvme_uring_cmd_prep(
+    cmd: &mut NvmeUringCmd,
+    is_write: bool,
+    nsid: u32,
+    offset: u64,
+    len: usize,
+    lba_shift: u32,
+    ptr: *const u8,
+    dtype: u8,
+    dspec: u16,
+) -> Result<(), PyErr> {
+    let lba_size = 1usize << lba_shift;
+
+    // Validate offset alignment
+    if !(offset as usize).is_multiple_of(lba_size) {
+        return Err(PyValueError::new_err(format!(
+            "offset must be aligned to LBA size ({} bytes), got offset={}",
+            lba_size, offset
+        )));
+    }
+
+    // Validate length alignment
+    if !len.is_multiple_of(lba_size) {
+        return Err(PyValueError::new_err(format!(
+            "length must be aligned to LBA size ({} bytes), got len={}",
+            lba_size, len
+        )));
+    }
+
+    // Validate non-zero length
+    if len == 0 {
+        return Err(PyValueError::new_err("length must be non-zero"));
+    }
+
+    // Calculate SLBA (Starting LBA) and NLB (Number of LBAs)
+    let slba = offset >> lba_shift;
+    let nlb = (len >> lba_shift) - 1; // NLB is 0-based
+
+    // Validate NLB fits in NVMe field (16 bits, max 0xFFFF)
+    if nlb > 0xFFFF {
+        return Err(PyValueError::new_err(format!(
+            "NLB ({}) exceeds NVMe field maximum (65535)",
+            nlb
+        )));
+    }
+
+    // Set opcode
+    cmd.opcode = if is_write {
+        NVME_IO_WRITE
+    } else {
+        NVME_IO_READ
+    };
+    cmd.nsid = nsid;
+
+    // Set SLBA in cdw10 and cdw11
+    cmd.cdw10 = (slba & 0xFFFFFFFF) as u32;
+    cmd.cdw11 = (slba >> 32) as u32;
+
+    // Set NLB in cdw12 (bits 0-15) and dtype in bits 20-23
+    cmd.cdw12 = nlb as u32 | ((dtype as u32) << 20);
+
+    // Set dspec in cdw13 bits 16-31
+    cmd.cdw13 = (dspec as u32) << 16;
+
+    // Set data address and length
+    cmd.addr = ptr as u64;
+    cmd.data_len = len as u32;
+
+    // No metadata support for now
+    cmd.metadata = 0;
+    cmd.metadata_len = 0;
+
+    Ok(())
 }
 
 /// NVMe command data for io_uring_cmd submissions.
@@ -713,6 +832,7 @@ impl Drop for UringNotify {
 /// - `original_ptr`: For reads with bounce buffer, the original destination pointer.
 /// - `payload_len`: For reads with bounce buffer, the actual payload length to copy back.
 /// - `batch_id`: The batch ID this submission belongs to (for per-batch tracking)
+/// - `nvme_cmd_data`: Optional NVMe command for io_uring_cmd submission
 #[derive(Clone)]
 struct IoSubmission {
     fd: RawFd,
@@ -723,9 +843,10 @@ struct IoSubmission {
     completion: Arc<IoCompletion>,
     fixed_buffer_idx: Option<u16>,
     bounce: Option<std::sync::Arc<AlignedBuf>>,
-    original_ptr: Option<usize>, // For bounce buffer reads
-    payload_len: Option<usize>,  // For bounce buffer reads
-    batch_id: u64,               // Batch ID for per-batch tracking
+    original_ptr: Option<usize>,        // For bounce buffer reads
+    payload_len: Option<usize>,         // For bounce buffer reads
+    batch_id: u64,                      // Batch ID for per-batch tracking
+    nvme_cmd_data: Option<NvmeCmdData>, // NVMe command data for io_uring_cmd
 }
 
 impl Default for IoSubmission {
@@ -742,6 +863,7 @@ impl Default for IoSubmission {
             original_ptr: None,
             payload_len: None,
             batch_id: 0,
+            nvme_cmd_data: None,
         }
     }
 }
@@ -765,7 +887,8 @@ struct RawBlockDevice {
     nvme_lba_shift: Option<u32>, // LBA shift (log2 of LBA size)
     nvme_lba_size: Option<u32>,  // LBA size in bytes
     // io_uring ring instance (only when use_iouring=true)
-    ring: Option<Arc<Mutex<IoUring>>>,
+    // Uses wrapper to support both standard and big entries for kernel compatibility
+    ring: Option<IoUringWrapper>,
     // Queue for sending I/O requests from Python to worker thread
     queue: Option<Arc<Mutex<Vec<IoSubmission>>>>,
     // Background worker thread handle
@@ -864,7 +987,7 @@ impl RawBlockDevice {
         } else {
             libc::O_RDONLY
         };
-        if use_odirect {
+        if use_odirect && !use_uring_cmd {
             flags |= O_DIRECT;
         }
         // SAFETY: open returns fd or -1.
@@ -883,7 +1006,7 @@ impl RawBlockDevice {
             let is_char_dev = is_character_device(&path)?;
             if !is_char_dev {
                 return Err(PyValueError::new_err(
-                    "io_uring_cmd requires a NVMe namespace character device (e.g., /dev/ng0n1)",
+                    "use_uring_cmd requires an NVMe namespace character device (e.g., /dev/ng0n1)",
                 ));
             }
 
@@ -924,17 +1047,63 @@ impl RawBlockDevice {
             next_batch_id_opt,
             batch_in_flight_opt,
         ) = if use_iouring {
-            let ring = IoUring::new(iouring_queue_depth as u32)
-                .map_err(|e| PyRuntimeError::new_err(format!("io_uring init failed: {}", e)))?;
             let notify = UringNotify::new()
                 .map_err(|e| PyRuntimeError::new_err(format!("UringNotify init failed: {}", e)))?;
-            // Register the CQ eventfd with the ring so the kernel writes to it
-            // whenever a CQE is posted. Must happen before the ring is wrapped
-            // in a Mutex / handed to the worker.
-            ring.submitter()
-                .register_eventfd(notify.cq_efd)
-                .map_err(|e| PyRuntimeError::new_err(format!("register_eventfd failed: {}", e)))?;
-            let ring = Arc::new(Mutex::new(ring));
+            // Try to create IoUring with big entries (Entry128/Entry32) first
+            // This is required for io_uring_cmd support (kernel 5.19+)
+            // If that fails, fall back to standard entries (Entry/Entry) for kernel 5.4-5.18
+            let ring = match IoUring::<Entry128, Entry32>::builder()
+                .build(iouring_queue_depth as u32)
+            {
+                Ok(big_ring) => {
+                    // Big entries supported - io_uring_cmd can be used
+                    if use_uring_cmd {
+                        // Validate that device is a character device (required for io_uring_cmd)
+                        let is_char_dev = is_character_device(&path)?;
+                        if !is_char_dev {
+                            return Err(PyValueError::new_err(
+                                "use_uring_cmd requires an NVMe namespace character device (e.g., /dev/ng0n1)",
+                            ));
+                        }
+                    }
+                    // Register the CQ eventfd with the ring so the kernel writes to it
+                    // whenever a CQE is posted. Must happen before the ring is wrapped
+                    // in a Mutex / handed to the worker.
+                    big_ring
+                        .submitter()
+                        .register_eventfd(notify.cq_efd)
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("register_eventfd failed: {}", e))
+                        })?;
+                    let big_ring = Arc::new(Mutex::new(big_ring));
+                    IoUringWrapper::Big(big_ring)
+                }
+                Err(_) => {
+                    // Big entries not supported (kernel < 5.19), fall back to standard entries
+                    // io_uring_cmd is not available on these kernels
+                    if use_uring_cmd {
+                        return Err(PyRuntimeError::new_err(
+                            "io_uring_cmd requires kernel 5.19 or later (big SQE/CQE entries not supported)",
+                        ));
+                    }
+                    let std_ring = IoUring::<SqueueEntry, Entry>::builder()
+                        .build(iouring_queue_depth as u32)
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("io_uring init failed: {}", e))
+                        })?;
+                    // Register the CQ eventfd with the ring so the kernel writes to it
+                    // whenever a CQE is posted. Must happen before the ring is wrapped
+                    // in a Mutex / handed to the worker.
+                    std_ring
+                        .submitter()
+                        .register_eventfd(notify.cq_efd)
+                        .map_err(|e| {
+                            PyRuntimeError::new_err(format!("register_eventfd failed: {}", e))
+                        })?;
+                    let std_ring = Arc::new(Mutex::new(std_ring));
+                    IoUringWrapper::Standard(std_ring)
+                }
+            };
             let queue = Arc::new(Mutex::new(Vec::<IoSubmission>::new()));
             let shutdown = Arc::new(AtomicBool::new(false));
             let batch_ready = Arc::new(notify);
@@ -946,7 +1115,7 @@ impl RawBlockDevice {
             let next_batch_id = Arc::new(AtomicU64::new(1));
             let batch_in_flight = Arc::new(Mutex::new(HashMap::<u64, BatchTracking>::new()));
 
-            let ring_clone = Arc::clone(&ring);
+            let ring_clone = ring.clone();
             let queue_clone = Arc::clone(&queue);
             let shutdown_clone = Arc::clone(&shutdown);
             let batch_ready_clone = Arc::clone(&batch_ready);
@@ -954,6 +1123,213 @@ impl RawBlockDevice {
             let in_flight_cvar_clone = Arc::clone(&in_flight_cvar);
             let batch_in_flight_clone = Arc::clone(&batch_in_flight);
             let ring_size = iouring_queue_depth;
+
+            // Helper function to copy data from bounce buffer to original buffer
+            fn copy_from_bounce_buffer(bounce: &AlignedBuf, orig_ptr: usize, payload_len: usize) {
+                unsafe {
+                    libc::memcpy(
+                        orig_ptr as *mut libc::c_void,
+                        bounce.as_ptr() as *const libc::c_void,
+                        payload_len,
+                    );
+                }
+            }
+
+            // Helper function to handle completion result and set IoCompletion
+            // Returns Ok(()) for successful completion, Err for errors
+            // Note: Short I/O resubmission for regular I/O is handled BEFORE calling this function
+            // in the main completion loop. This function only handles:
+            // - Full completions
+            // - Errors (negative results)
+            // - Short I/O during shutdown (cannot resubmit)
+            fn handle_completion_result(
+                sub: &mut IoSubmission,
+                cqe_result: i32,
+                is_shutdown: bool,
+            ) -> PyResult<()> {
+                let is_uring_cmd = sub.nvme_cmd_data.is_some();
+
+                if cqe_result < 0 {
+                    let code = -cqe_result;
+                    let _ = sub.bounce.take();
+                    Err(PyOSError::new_err((code, "io_uring I/O error")))
+                } else if is_uring_cmd {
+                    // Non-zero result indicates NVMe command error
+                    if cqe_result != 0 {
+                        let code = cqe_result;
+                        let _ = sub.bounce.take();
+                        Err(PyOSError::new_err((code, "io_uring_cmd NVMe error")))
+                    } else {
+                        // io_uring_cmd successful completion (result == 0)
+                        // For reads with bounce buffer, copy data back to original buffer
+                        if !sub.is_write {
+                            if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
+                                (sub.bounce.take(), sub.original_ptr, sub.payload_len)
+                            {
+                                copy_from_bounce_buffer(&bounce, orig_ptr, payload_len);
+                            }
+                        } else {
+                            let _ = sub.bounce.take();
+                        }
+                        Ok(())
+                    }
+                } else {
+                    // Regular io_uring read/write
+                    let bytes_transferred = cqe_result as usize;
+                    if bytes_transferred < sub.len {
+                        if is_shutdown {
+                            // Short read/write during shutdown: fail the request
+                            let _ = sub.bounce.take();
+                            Err(PyRuntimeError::new_err(
+                                "io_uring worker shutting down: short I/O during shutdown",
+                            ))
+                        } else {
+                            // This should never happen
+                            let _ = sub.bounce.take();
+                            Err(PyRuntimeError::new_err(
+                                "Unexpected short I/O: internal error",
+                            ))
+                        }
+                    } else {
+                        // Full completion
+                        // For reads with bounce buffer, copy data back to original buffer
+                        if !sub.is_write {
+                            if let (Some(bounce), Some(orig_ptr), Some(payload_len)) =
+                                (sub.bounce.take(), sub.original_ptr, sub.payload_len)
+                            {
+                                copy_from_bounce_buffer(&bounce, orig_ptr, payload_len);
+                            }
+                        } else {
+                            let _ = sub.bounce.take();
+                        }
+                        Ok(())
+                    }
+                }
+            }
+
+            // Helper function to decrement in-flight counts and notify condition variables
+            fn decrement_in_flight(
+                in_flight_count: &Arc<AtomicU64>,
+                in_flight_cvar: &Arc<Condvar>,
+                batch_in_flight: &Arc<Mutex<HashMap<u64, BatchTracking>>>,
+                batch_id: u64,
+            ) {
+                let prev = in_flight_count.fetch_sub(1, Ordering::Relaxed);
+                if prev == 1 {
+                    in_flight_cvar.notify_all();
+                }
+                // Decrement per-batch in-flight count and notify if batch is complete
+                if batch_id != 0 {
+                    let batch_map = batch_in_flight.lock().unwrap();
+                    if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
+                        let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
+                        if prev_batch == 1 {
+                            batch_cvar.notify_all();
+                        }
+                    }
+                }
+            }
+
+            // Helper function to build and submit an SQE for a submission
+            fn build_and_submit_sqe(
+                ring: &IoUringWrapper,
+                sub: &IoSubmission,
+                user_data: u64,
+            ) -> Result<(), PyErr> {
+                let ptr = sub.ptr_addr as *mut u8;
+
+                // Check if this is an io_uring_cmd submission
+                if let Some(nvme_data) = &sub.nvme_cmd_data {
+                    // Prepare NVMe uring command
+                    let mut nvme_cmd: NvmeUringCmd = unsafe { std::mem::zeroed() };
+                    nvme_uring_cmd_prep(
+                        &mut nvme_cmd,
+                        sub.is_write,
+                        nvme_data.nsid,
+                        sub.offset,
+                        sub.len,
+                        nvme_data.lba_shift,
+                        ptr,
+                        nvme_data.dtype,
+                        nvme_data.dspec,
+                    )?;
+
+                    // Convert NvmeUringCmd to byte array for UringCmd80
+                    let cmd_bytes: [u8; 80] = unsafe { std::mem::transmute_copy(&nvme_cmd) };
+
+                    // Build UringCmd80 with big SQE entry
+                    let mut uring_cmd =
+                        opcode::UringCmd80::new(Fd(sub.fd), NVME_URING_CMD_IO).cmd(cmd_bytes);
+
+                    // Set buf_index if using fixed buffers
+                    if let Some(idx) = sub.fixed_buffer_idx {
+                        uring_cmd = uring_cmd.buf_index(Some(idx));
+                    }
+
+                    let sqe128 = uring_cmd.build().user_data(user_data);
+
+                    // Push the big SQE entry (128 bytes)
+                    match ring {
+                        IoUringWrapper::Big(ring) => {
+                            let mut ring = ring.lock().unwrap();
+                            unsafe {
+                                ring.submission()
+                                    .push(&sqe128)
+                                    .expect("failed to push sqe128");
+                            }
+                        }
+                        IoUringWrapper::Standard(_) => {
+                            return Err(PyRuntimeError::new_err(
+                                "io_uring_cmd requires big entries (kernel 5.19+)",
+                            ));
+                        }
+                    }
+                } else {
+                    // Regular read/write operations
+                    let sqe = if sub.is_write {
+                        if let Some(idx) = sub.fixed_buffer_idx {
+                            opcode::WriteFixed::new(
+                                Fd(sub.fd),
+                                ptr as *const u8,
+                                sub.len as u32,
+                                idx,
+                            )
+                            .offset(sub.offset)
+                            .build()
+                        } else {
+                            opcode::Write::new(Fd(sub.fd), ptr as *const u8, sub.len as u32)
+                                .offset(sub.offset)
+                                .build()
+                        }
+                    } else if let Some(idx) = sub.fixed_buffer_idx {
+                        opcode::ReadFixed::new(Fd(sub.fd), ptr, sub.len as u32, idx)
+                            .offset(sub.offset)
+                            .build()
+                    } else {
+                        opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
+                            .offset(sub.offset)
+                            .build()
+                    };
+                    let sqe = sqe.user_data(user_data);
+                    // Convert to appropriate entry type based on ring type
+                    match ring {
+                        IoUringWrapper::Big(ring) => {
+                            let mut ring = ring.lock().unwrap();
+                            let sqe128: Entry128 = sqe.into();
+                            unsafe {
+                                ring.submission().push(&sqe128).expect("failed to push sqe");
+                            }
+                        }
+                        IoUringWrapper::Standard(ring) => {
+                            let mut ring = ring.lock().unwrap();
+                            unsafe {
+                                ring.submission().push(&sqe).expect("failed to push sqe");
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
 
             // Worker thread that handles io_uring submissions and completions.
             //
@@ -986,24 +1362,25 @@ impl RawBlockDevice {
                         //   - Decrement the in_flight_count atomic
                         //   - Wake up any threads waiting for all I/O to complete
                         {
-                            let mut ring = ring_clone.lock().unwrap();
-                            let completions: Vec<_> = ring.completion().collect();
-                            for cqe in completions {
-                                let user_data = cqe.user_data();
-                                if let Some(mut sub) = in_flight.remove(&user_data) {
-                                    let batch_id = sub.batch_id;
-                                    if cqe.result() < 0 {
-                                        let code = -cqe.result();
-                                        // Drop any bounce buffer associated with this submission.
-                                        let _ = sub.bounce.take();
-                                        sub.completion.set(Err(PyOSError::new_err((
-                                            code,
-                                            "io_uring I/O error",
-                                        ))));
-                                    } else {
-                                        let bytes_transferred = cqe.result() as usize;
-                                        if bytes_transferred < sub.len {
-                                            // Short read/write: update offset and length, then resubmit
+                            // Process completions for standard ring
+                            if let IoUringWrapper::Standard(ring) = &ring_clone {
+                                let completions: Vec<_> = {
+                                    let mut ring = ring.lock().unwrap();
+                                    ring.completion().collect()
+                                };
+                                for cqe in completions {
+                                    let user_data = cqe.user_data();
+                                    if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        let batch_id = sub.batch_id;
+                                        let cqe_result = cqe.result();
+
+                                        // Handle short I/O with resubmission (only for regular I/O, not io_uring_cmd)
+                                        if cqe_result >= 0
+                                            && (cqe_result as usize) < sub.len
+                                            && sub.nvme_cmd_data.is_none()
+                                        {
+                                            let bytes_transferred = cqe_result as usize;
+                                            // Update offset and length for resubmission
                                             sub.offset += bytes_transferred as u64;
                                             sub.len -= bytes_transferred;
                                             // Update buffer pointer for writes and direct reads
@@ -1021,13 +1398,11 @@ impl RawBlockDevice {
                                                     sub.original_ptr,
                                                     sub.payload_len,
                                                 ) {
-                                                    unsafe {
-                                                        libc::memcpy(
-                                                            orig_ptr as *mut libc::c_void,
-                                                            bounce.as_ptr() as *const libc::c_void,
-                                                            bytes_transferred.min(payload_len),
-                                                        );
-                                                    }
+                                                    copy_from_bounce_buffer(
+                                                        bounce,
+                                                        orig_ptr,
+                                                        bytes_transferred.min(payload_len),
+                                                    );
                                                     sub.original_ptr =
                                                         Some(orig_ptr + bytes_transferred);
                                                     sub.payload_len = Some(
@@ -1040,97 +1415,118 @@ impl RawBlockDevice {
                                             // Don't decrement in_flight_count since we're resubmitting
                                             in_flight.insert(user_data, sub.clone());
                                             // Push a new SQE for the remaining data
-                                            let ptr = sub.ptr_addr as *mut u8;
-                                            let sqe = if sub.is_write {
-                                                if let Some(idx) = sub.fixed_buffer_idx {
-                                                    opcode::WriteFixed::new(
-                                                        Fd(sub.fd),
-                                                        ptr as *const u8,
-                                                        sub.len as u32,
-                                                        idx,
-                                                    )
-                                                    .offset(sub.offset)
-                                                    .build()
-                                                } else {
-                                                    opcode::Write::new(
-                                                        Fd(sub.fd),
-                                                        ptr as *const u8,
-                                                        sub.len as u32,
-                                                    )
-                                                    .offset(sub.offset)
-                                                    .build()
+                                            let _ =
+                                                build_and_submit_sqe(&ring_clone, &sub, user_data);
+                                            let _ = match &ring_clone {
+                                                IoUringWrapper::Standard(ring) => {
+                                                    let ring = ring.lock().unwrap();
+                                                    ring.submitter().submit()
                                                 }
-                                            } else if let Some(idx) = sub.fixed_buffer_idx {
-                                                opcode::ReadFixed::new(
-                                                    Fd(sub.fd),
-                                                    ptr,
-                                                    sub.len as u32,
-                                                    idx,
-                                                )
-                                                .offset(sub.offset)
-                                                .build()
-                                            } else {
-                                                opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
-                                                    .offset(sub.offset)
-                                                    .build()
+                                                IoUringWrapper::Big(ring) => {
+                                                    let ring = ring.lock().unwrap();
+                                                    ring.submitter().submit()
+                                                }
                                             };
-                                            let sqe = sqe.user_data(user_data);
-                                            unsafe {
-                                                ring.submission().push(&sqe).expect(
-                                                    "failed to push sqe for short read/write",
-                                                );
-                                            }
-                                            // Submit the new SQE to the kernel
-                                            let _ = ring.submitter().submit();
                                             continue;
                                         }
-                                        // Full completion
-                                        // For reads with bounce buffer, copy data back to original buffer
-                                        if !sub.is_write {
-                                            if let (
-                                                Some(bounce),
-                                                Some(orig_ptr),
-                                                Some(payload_len),
-                                            ) = (
-                                                sub.bounce.take(),
-                                                sub.original_ptr,
-                                                sub.payload_len,
-                                            ) {
-                                                unsafe {
-                                                    libc::memcpy(
-                                                        orig_ptr as *mut libc::c_void,
-                                                        bounce.as_ptr() as *const libc::c_void,
-                                                        payload_len,
+
+                                        // Handle completion result
+                                        let result =
+                                            handle_completion_result(&mut sub, cqe_result, false);
+                                        sub.completion.set(result);
+
+                                        // Decrement in-flight counts and notify
+                                        decrement_in_flight(
+                                            &in_flight_count_clone,
+                                            &in_flight_cvar_clone,
+                                            &batch_in_flight_clone,
+                                            batch_id,
+                                        );
+                                    }
+                                }
+                            } else if let IoUringWrapper::Big(ring) = &ring_clone {
+                                let completions: Vec<_> = {
+                                    let mut ring = ring.lock().unwrap();
+                                    ring.completion().collect()
+                                };
+                                for cqe in completions {
+                                    let user_data = cqe.user_data();
+                                    if let Some(mut sub) = in_flight.remove(&user_data) {
+                                        let batch_id = sub.batch_id;
+                                        let cqe_result = cqe.result();
+
+                                        // Handle short I/O with resubmission (only for regular I/O, not io_uring_cmd)
+                                        if cqe_result >= 0
+                                            && (cqe_result as usize) < sub.len
+                                            && sub.nvme_cmd_data.is_none()
+                                        {
+                                            let bytes_transferred = cqe_result as usize;
+                                            // Update offset and length for resubmission
+                                            sub.offset += bytes_transferred as u64;
+                                            sub.len -= bytes_transferred;
+                                            // Update buffer pointer for writes and direct reads
+                                            if sub.is_write || sub.bounce.is_none() {
+                                                sub.ptr_addr += bytes_transferred;
+                                            }
+                                            // For read with bounce buffer, copy partial data back
+                                            if !sub.is_write {
+                                                if let (
+                                                    Some(bounce),
+                                                    Some(orig_ptr),
+                                                    Some(payload_len),
+                                                ) = (
+                                                    sub.bounce.as_ref(),
+                                                    sub.original_ptr,
+                                                    sub.payload_len,
+                                                ) {
+                                                    copy_from_bounce_buffer(
+                                                        bounce,
+                                                        orig_ptr,
+                                                        bytes_transferred.min(payload_len),
+                                                    );
+                                                    sub.original_ptr =
+                                                        Some(orig_ptr + bytes_transferred);
+                                                    sub.payload_len = Some(
+                                                        payload_len
+                                                            .saturating_sub(bytes_transferred),
                                                     );
                                                 }
                                             }
-                                        } else {
-                                            // Drop any bounce buffer associated with this submission.
-                                            let _ = sub.bounce.take();
+                                            // Re-insert into in_flight with updated values
+                                            // Don't decrement in_flight_count since we're resubmitting
+                                            in_flight.insert(user_data, sub.clone());
+                                            // Push a new SQE for the remaining data
+                                            let _ =
+                                                build_and_submit_sqe(&ring_clone, &sub, user_data);
+                                            let _ = match &ring_clone {
+                                                IoUringWrapper::Standard(ring) => {
+                                                    let ring = ring.lock().unwrap();
+                                                    ring.submitter().submit()
+                                                }
+                                                IoUringWrapper::Big(ring) => {
+                                                    let ring = ring.lock().unwrap();
+                                                    ring.submitter().submit()
+                                                }
+                                            };
+                                            continue;
                                         }
-                                        sub.completion.set(Ok(()));
-                                    }
-                                    let prev =
-                                        in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
-                                    if prev == 1 {
-                                        in_flight_cvar_clone.notify_all();
-                                    }
-                                    // Decrement per-batch in-flight count and notify if batch is complete
-                                    if batch_id != 0 {
-                                        let batch_map = batch_in_flight_clone.lock().unwrap();
-                                        if let Some((batch_count, batch_cvar)) =
-                                            batch_map.get(&batch_id)
-                                        {
-                                            let prev_batch =
-                                                batch_count.fetch_sub(1, Ordering::Relaxed);
-                                            if prev_batch == 1 {
-                                                batch_cvar.notify_all();
-                                            }
-                                        }
+
+                                        // Handle completion result
+                                        let result =
+                                            handle_completion_result(&mut sub, cqe_result, false);
+                                        sub.completion.set(result);
+
+                                        // Decrement in-flight counts and notify
+                                        decrement_in_flight(
+                                            &in_flight_count_clone,
+                                            &in_flight_cvar_clone,
+                                            &batch_in_flight_clone,
+                                            batch_id,
+                                        );
                                     }
                                 }
                             }
-                            ring.submission().sync();
+                            ring_clone.submission_sync();
                         }
 
                         // Block on epoll only if there's truly nothing pending. The empty +
@@ -1163,9 +1559,7 @@ impl RawBlockDevice {
                             let mut batch: Vec<IoSubmission> = std::mem::take(&mut *q);
                             let batch_len = batch.len();
 
-                            let mut ring = ring_clone.lock().unwrap();
-
-                            let available = ring_size - ring.submission().len();
+                            let available = ring_size - ring_clone.submission_len();
                             let to_submit_count = std::cmp::min(available, batch_len);
 
                             if to_submit_count < batch_len {
@@ -1186,42 +1580,20 @@ impl RawBlockDevice {
                                 user_data_list.push(user_data);
                                 in_flight.insert(user_data, sub.clone());
 
-                                let ptr = sub.ptr_addr as *mut u8;
-                                let sqe = if sub.is_write {
-                                    if let Some(idx) = sub.fixed_buffer_idx {
-                                        opcode::WriteFixed::new(
-                                            Fd(sub.fd),
-                                            ptr as *const u8,
-                                            sub.len as u32,
-                                            idx,
-                                        )
-                                        .offset(sub.offset)
-                                        .build()
-                                    } else {
-                                        opcode::Write::new(
-                                            Fd(sub.fd),
-                                            ptr as *const u8,
-                                            sub.len as u32,
-                                        )
-                                        .offset(sub.offset)
-                                        .build()
-                                    }
-                                } else if let Some(idx) = sub.fixed_buffer_idx {
-                                    opcode::ReadFixed::new(Fd(sub.fd), ptr, sub.len as u32, idx)
-                                        .offset(sub.offset)
-                                        .build()
-                                } else {
-                                    opcode::Read::new(Fd(sub.fd), ptr, sub.len as u32)
-                                        .offset(sub.offset)
-                                        .build()
-                                };
-                                let sqe = sqe.user_data(user_data);
-                                unsafe {
-                                    ring.submission().push(&sqe).expect("failed to push sqe");
-                                }
+                                // Build and submit SQE
+                                let _ = build_and_submit_sqe(&ring_clone, sub, user_data);
                             }
 
-                            let submit_result = ring.submitter().submit();
+                            let submit_result = match &ring_clone {
+                                IoUringWrapper::Standard(ring) => {
+                                    let ring = ring.lock().unwrap();
+                                    ring.submitter().submit()
+                                }
+                                IoUringWrapper::Big(ring) => {
+                                    let ring = ring.lock().unwrap();
+                                    ring.submitter().submit()
+                                }
+                            };
                             // Handle EAGAIN (ring full) and EINTR (interrupted syscall)
                             match submit_result {
                                 Ok(submitted) => {
@@ -1236,7 +1608,6 @@ impl RawBlockDevice {
                                         let unsubmitted: Vec<_> =
                                             batch[submitted..to_submit_count].to_vec();
                                         if !unsubmitted.is_empty() {
-                                            drop(ring);
                                             let mut q = queue_clone.lock().unwrap();
                                             // Insert unsubmitted requests back at the front preserving order
                                             q.splice(0..0, unsubmitted);
@@ -1258,7 +1629,6 @@ impl RawBlockDevice {
                                             if to_submit_count > 0 {
                                                 let unsubmitted: Vec<_> =
                                                     batch[..to_submit_count].to_vec();
-                                                drop(ring);
                                                 let mut q = queue_clone.lock().unwrap();
                                                 // Insert unsubmitted requests back at the front preserving order
                                                 q.splice(0..0, unsubmitted);
@@ -1276,25 +1646,12 @@ impl RawBlockDevice {
                                                     format!("io_uring submit error: {:?}", e),
                                                 )));
                                                 let _ = sub.bounce.take();
-                                                let prev = in_flight_count_clone
-                                                    .fetch_sub(1, Ordering::Relaxed);
-                                                if prev == 1 {
-                                                    in_flight_cvar_clone.notify_all();
-                                                }
-                                                // Decrement per-batch in-flight count and notify if batch is complete
-                                                if batch_id != 0 {
-                                                    let batch_map =
-                                                        batch_in_flight_clone.lock().unwrap();
-                                                    if let Some((batch_count, batch_cvar)) =
-                                                        batch_map.get(&batch_id)
-                                                    {
-                                                        let prev_batch = batch_count
-                                                            .fetch_sub(1, Ordering::Relaxed);
-                                                        if prev_batch == 1 {
-                                                            batch_cvar.notify_all();
-                                                        }
-                                                    }
-                                                }
+                                                decrement_in_flight(
+                                                    &in_flight_count_clone,
+                                                    &in_flight_cvar_clone,
+                                                    &batch_in_flight_clone,
+                                                    batch_id,
+                                                );
                                             }
                                         }
                                     }
@@ -1311,22 +1668,16 @@ impl RawBlockDevice {
                             .expect("Worker: queue mutex poisoned during shutdown");
                         while let Some(mut sub) = q.pop() {
                             let batch_id = sub.batch_id;
-                            // Drop any bounce buffer associated with this submission.
                             let _ = sub.bounce.take();
-                            in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
                             sub.completion.set(Err(PyRuntimeError::new_err(
                                 "io_uring worker shutting down",
                             )));
-                            // Decrement per-batch in-flight count and notify if batch is complete
-                            if batch_id != 0 {
-                                let batch_map = batch_in_flight_clone.lock().unwrap();
-                                if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
-                                    let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
-                                    if prev_batch == 1 {
-                                        batch_cvar.notify_all();
-                                    }
-                                }
-                            }
+                            decrement_in_flight(
+                                &in_flight_count_clone,
+                                &in_flight_cvar_clone,
+                                &batch_in_flight_clone,
+                                batch_id,
+                            );
                         }
                     }
 
@@ -1336,100 +1687,65 @@ impl RawBlockDevice {
                     let graceful_shutdown = Duration::from_millis(1000);
                     thread::sleep(graceful_shutdown);
                     {
-                        let mut ring = ring_clone
-                            .lock()
-                            .expect("Worker: ring mutex poisoned during shutdown");
-                        for cqe in ring.completion() {
-                            let user_data = cqe.user_data();
-                            if let Some(mut sub) = in_flight.remove(&user_data) {
-                                let batch_id = sub.batch_id;
-                                if cqe.result() < 0 {
-                                    let code = -cqe.result();
-                                    // Drop any bounce buffer associated with this submission.
-                                    let _ = sub.bounce.take();
-                                    sub.completion
-                                        .set(Err(PyOSError::new_err((code, "io_uring I/O error"))));
-                                } else {
-                                    let bytes_transferred = cqe.result() as usize;
-                                    if bytes_transferred < sub.len {
-                                        // Short read/write during shutdown: fail the request
-                                        // We cannot resubmit because the worker is about to exit
-                                        // Drop any bounce buffer associated with this submission.
-                                        let _ = sub.bounce.take();
-                                        sub.completion.set(Err(PyRuntimeError::new_err(
-                                        "io_uring worker shutting down - short I/O during shutdown",
-                                    )));
-                                        // Continue to decrement in_flight_count below
-                                    } else {
-                                        // Full completion
-                                        // For reads with bounce buffer, copy data back to original buffer
-                                        if !sub.is_write {
-                                            if let (
-                                                Some(bounce),
-                                                Some(orig_ptr),
-                                                Some(payload_len),
-                                            ) = (
-                                                sub.bounce.take(),
-                                                sub.original_ptr,
-                                                sub.payload_len,
-                                            ) {
-                                                unsafe {
-                                                    libc::memcpy(
-                                                        orig_ptr as *mut libc::c_void,
-                                                        bounce.as_ptr() as *const libc::c_void,
-                                                        payload_len,
-                                                    );
-                                                }
-                                            }
-                                        } else {
-                                            // Drop any bounce buffer associated with this submission.
-                                            let _ = sub.bounce.take();
-                                        }
-                                        sub.completion.set(Ok(()));
-                                    }
+                        // Process completions for standard ring
+                        if let IoUringWrapper::Standard(ring) = &ring_clone {
+                            let completions: Vec<_> = {
+                                let mut ring = ring.lock().unwrap();
+                                ring.completion().collect()
+                            };
+                            for cqe in completions {
+                                let user_data = cqe.user_data();
+                                if let Some(mut sub) = in_flight.remove(&user_data) {
+                                    let batch_id = sub.batch_id;
+                                    let result =
+                                        handle_completion_result(&mut sub, cqe.result(), true);
+                                    sub.completion.set(result);
+                                    decrement_in_flight(
+                                        &in_flight_count_clone,
+                                        &in_flight_cvar_clone,
+                                        &batch_in_flight_clone,
+                                        batch_id,
+                                    );
                                 }
-                                let prev = in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
-                                if prev == 1 {
-                                    in_flight_cvar_clone.notify_all();
-                                }
-                                // Decrement per-batch in-flight count and notify if batch is complete
-                                if batch_id != 0 {
-                                    let batch_map = batch_in_flight_clone.lock().unwrap();
-                                    if let Some((batch_count, batch_cvar)) =
-                                        batch_map.get(&batch_id)
-                                    {
-                                        let prev_batch =
-                                            batch_count.fetch_sub(1, Ordering::Relaxed);
-                                        if prev_batch == 1 {
-                                            batch_cvar.notify_all();
-                                        }
-                                    }
+                            }
+                        } else if let IoUringWrapper::Big(ring) = &ring_clone {
+                            let completions: Vec<_> = {
+                                let mut ring = ring.lock().unwrap();
+                                ring.completion().collect()
+                            };
+                            for cqe in completions {
+                                let user_data = cqe.user_data();
+                                if let Some(mut sub) = in_flight.remove(&user_data) {
+                                    let batch_id = sub.batch_id;
+                                    let result =
+                                        handle_completion_result(&mut sub, cqe.result(), true);
+                                    sub.completion.set(result);
+                                    decrement_in_flight(
+                                        &in_flight_count_clone,
+                                        &in_flight_cvar_clone,
+                                        &batch_in_flight_clone,
+                                        batch_id,
+                                    );
                                 }
                             }
                         }
-                        ring.submission().sync();
+                        ring_clone.submission_sync();
                     }
 
                     // Any remaining in_flight requests, force wake with error
                     // (these were submitted to kernel but won't get completions)
                     for (_user_data, mut sub) in in_flight.drain() {
                         let batch_id = sub.batch_id;
-                        // Drop any bounce buffer associated with this submission.
                         let _ = sub.bounce.take();
-                        in_flight_count_clone.fetch_sub(1, Ordering::Relaxed);
                         sub.completion.set(Err(PyRuntimeError::new_err(
                             "io_uring worker shutting down - request cancelled",
                         )));
-                        // Decrement per-batch in-flight count and notify if batch is complete
-                        if batch_id != 0 {
-                            let batch_map = batch_in_flight_clone.lock().unwrap();
-                            if let Some((batch_count, batch_cvar)) = batch_map.get(&batch_id) {
-                                let prev_batch = batch_count.fetch_sub(1, Ordering::Relaxed);
-                                if prev_batch == 1 {
-                                    batch_cvar.notify_all();
-                                }
-                            }
-                        }
+                        decrement_in_flight(
+                            &in_flight_count_clone,
+                            &in_flight_cvar_clone,
+                            &batch_in_flight_clone,
+                            batch_id,
+                        );
                     }
 
                     // Final notification in case any thread is waiting on in_flight_count
@@ -1489,6 +1805,24 @@ impl RawBlockDevice {
             batch_in_flight: batch_in_flight_opt
                 .unwrap_or_else(|| Arc::new(Mutex::new(HashMap::new()))),
         })
+    }
+
+    /// Build NVMe command data for io_uring_cmd operations.
+    /// Returns None if use_uring_cmd is disabled.
+    fn _build_nvme_cmd_data(&self, dtype: u8, dspec: u16) -> PyResult<Option<NvmeCmdData>> {
+        if !self.use_uring_cmd {
+            return Ok(None);
+        }
+        Ok(Some(NvmeCmdData {
+            nsid: self
+                .nvme_nsid
+                .ok_or_else(|| PyRuntimeError::new_err("NVMe namespace ID not available"))?,
+            lba_shift: self
+                .nvme_lba_shift
+                .ok_or_else(|| PyRuntimeError::new_err("NVMe LBA shift not available"))?,
+            dtype,
+            dspec,
+        }))
     }
 }
 
@@ -1597,7 +1931,6 @@ impl RawBlockDevice {
         }
 
         if let Some(ring) = &self.ring {
-            let ring = ring.lock().unwrap();
             let mut iovecs: Vec<libc::iovec> = Vec::new();
             for (ptr, size) in buffer_ptrs.iter().zip(buffer_sizes.iter()) {
                 iovecs.push(libc::iovec {
@@ -1606,7 +1939,17 @@ impl RawBlockDevice {
                 });
             }
             unsafe {
-                match ring.submitter().register_buffers(&iovecs) {
+                let result = match ring {
+                    IoUringWrapper::Standard(ring) => {
+                        let ring = ring.lock().unwrap();
+                        ring.submitter().register_buffers(&iovecs)
+                    }
+                    IoUringWrapper::Big(ring) => {
+                        let ring = ring.lock().unwrap();
+                        ring.submitter().register_buffers(&iovecs)
+                    }
+                };
+                match result {
                     Ok(_) => {
                         self.fixed_buffers_registered.store(true, Ordering::Relaxed);
                     }
@@ -1700,6 +2043,7 @@ impl RawBlockDevice {
         let fd = self.fd;
         let use_odirect = self.use_odirect;
         let alignment = self.alignment;
+        let use_uring_cmd = self.use_uring_cmd;
         let fixed_buffers_registered = self.fixed_buffers_registered.load(Ordering::Relaxed);
         // Clone the fixed buffer map before releasing GIL to avoid lock contention
         let fixed_buffer_map: HashMap<usize, (u16, usize)> = if fixed_buffers_registered {
@@ -1707,6 +2051,17 @@ impl RawBlockDevice {
             map.clone()
         } else {
             HashMap::new()
+        };
+
+        let nvme_cmd_data_base = if use_uring_cmd {
+            Some((
+                self.nvme_nsid
+                    .ok_or_else(|| PyRuntimeError::new_err("NVMe namespace ID not available"))?,
+                self.nvme_lba_shift
+                    .ok_or_else(|| PyRuntimeError::new_err("NVMe LBA shift not available"))?,
+            ))
+        } else {
+            None
         };
         let in_flight_count = Arc::clone(&self.in_flight_count);
         let queue = Arc::clone(self.queue.as_ref().unwrap());
@@ -1756,6 +2111,18 @@ impl RawBlockDevice {
                     (ptr, None, fixed_idx)
                 };
 
+                // Build NVMe command data
+                let nvme_cmd_data = if let Some((nsid, lba_shift)) = nvme_cmd_data_base {
+                    Some(NvmeCmdData {
+                        nsid,
+                        lba_shift,
+                        dtype: 0,
+                        dspec: 0,
+                    })
+                } else {
+                    None
+                };
+
                 let sub = IoSubmission {
                     fd,
                     offset,
@@ -1768,6 +2135,7 @@ impl RawBlockDevice {
                     original_ptr: None,
                     payload_len: None,
                     batch_id,
+                    nvme_cmd_data,
                 };
 
                 submissions.push((sub, comp));
@@ -2002,6 +2370,7 @@ impl RawBlockDevice {
                 original_ptr: None,
                 payload_len: None,
                 batch_id: 0,
+                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
@@ -2030,6 +2399,7 @@ impl RawBlockDevice {
                 original_ptr: Some(ptr as usize),
                 payload_len: Some(payload_len),
                 batch_id: 0,
+                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
@@ -2135,6 +2505,7 @@ impl RawBlockDevice {
                 original_ptr: None,
                 payload_len: None,
                 batch_id: 0,
+                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
@@ -2167,6 +2538,7 @@ impl RawBlockDevice {
                 original_ptr: None,
                 payload_len: Some(payload_len),
                 batch_id: 0,
+                nvme_cmd_data: self._build_nvme_cmd_data(0, 0)?,
             };
             {
                 let q = self.queue.as_ref().expect("queue must exist");
@@ -2279,6 +2651,8 @@ impl RawBlockDevice {
         } else {
             HashMap::new()
         };
+        // Get NVMe data for io_uring_cmd
+        let nvme_cmd_data = self._build_nvme_cmd_data(0, 0)?;
         let in_flight_count = Arc::clone(&self.in_flight_count);
         let queue = Arc::clone(self.queue.as_ref().unwrap());
         let batch_ready = Arc::clone(self.batch_ready.as_ref().unwrap());
@@ -2340,6 +2714,7 @@ impl RawBlockDevice {
                     original_ptr: None,
                     payload_len: None,
                     batch_id,
+                    nvme_cmd_data: nvme_cmd_data.clone(),
                 };
 
                 submissions.push((sub, comp));
@@ -2677,8 +3052,16 @@ impl RawBlockDevice {
 
             if self.fixed_buffers_registered.load(Ordering::Relaxed) {
                 if let Some(ring) = &self.ring {
-                    let ring = ring.lock().unwrap();
-                    let _ = ring.submitter().unregister_buffers();
+                    let _ = match ring {
+                        IoUringWrapper::Standard(ring) => {
+                            let ring = ring.lock().unwrap();
+                            ring.submitter().unregister_buffers()
+                        }
+                        IoUringWrapper::Big(ring) => {
+                            let ring = ring.lock().unwrap();
+                            ring.submitter().unregister_buffers()
+                        }
+                    };
                 }
                 self.fixed_buffers_registered
                     .store(false, Ordering::Relaxed);

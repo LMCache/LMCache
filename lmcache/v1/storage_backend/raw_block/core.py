@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from typing import Any, Optional
 import ctypes
 import json
+import os
+import re
+import stat
 import struct
 import threading
 import time
@@ -104,6 +107,25 @@ def validate_raw_block_io_options(
         raise ValueError("iouring_queue_depth must be > 0")
 
 
+def _resolve_sysfs_queue_dir(device_path: str) -> Optional[str]:
+    """Resolve sysfs queue directory for NVMe character device paths."""
+    base_name = os.path.basename(device_path)
+    match = re.fullmatch(r"ng(\d+)n(\d+)", base_name)
+    if match:
+        ctrl, nsid = match.groups()
+        return f"/sys/block/nvme{ctrl}n{nsid}/queue"
+    return None
+
+
+def _read_sysfs_int(path: str) -> Optional[int]:
+    """Read an integer value from sysfs and return None on failure."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class RawBlockCoreConfig:
     """Configuration for RawBlockCore device layout, I/O, and checkpoints."""
@@ -122,6 +144,7 @@ class RawBlockCoreConfig:
     meta_idle_quiet_ms: int
     meta_enable_periodic: bool
     meta_verify_on_load: bool
+    max_data_transfer_size: int = 0
     load_checkpoint_on_init: bool = True
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
@@ -232,6 +255,36 @@ class RawBlockCore:
         )
         if self.use_uring_cmd and self.io_engine != "io_uring":
             raise ValueError("use_uring_cmd requires io_uring as io_engine")
+        if self.use_uring_cmd:
+            try:
+                mode = os.stat(self.device_path).st_mode
+            except OSError as e:
+                raise ValueError(
+                    "use_uring_cmd requires an existing NVMe namespace "
+                    f"character device path, got {self.device_path!r}"
+                ) from e
+            if not stat.S_ISCHR(mode):
+                raise ValueError(
+                    "use_uring_cmd requires an NVMe namespace character device "
+                    f"(for example /dev/ng0n1), got {self.device_path!r}"
+                )
+            # Validate NVMe generic namespace naming pattern (ng<ctrl>n<ns>)
+            basename = os.path.basename(self.device_path)
+            if not re.match(r"^ng\d+n\d+$", basename):
+                raise ValueError(
+                    "use_uring_cmd requires an NVMe generic namespace character device "
+                    f"with naming pattern ng<ctrl>n<ns> (for example /dev/ng0n1), "
+                    f"got {self.device_path!r}"
+                )
+
+        # Maximum data transfer size for a single I/O request.
+        # Default is 0 (no splitting).
+        # > 0 : explicit manual split size
+        # <= 0: opt-in auto-detect from device queue limits
+        if self.use_uring_cmd:
+            self.max_data_transfer_size = self._resolve_max_data_transfer_size(
+                config.max_data_transfer_size
+            )
 
         try:
             self.meta_magic_text = self.meta_magic.decode("ascii")
@@ -286,6 +339,69 @@ class RawBlockCore:
         except Exception:
             self._cleanup_after_init_failure()
             raise
+
+    @property
+    def _requires_transfer_alignment(self) -> bool:
+        """Return whether I/O transfers require block alignment.
+
+        Returns:
+            True when transfers must be aligned to ``self.block_align``.
+            This is required for O_DIRECT I/O and for io_uring_cmd operations.
+        """
+        return self.use_odirect or self.use_uring_cmd
+
+    def _resolve_max_data_transfer_size(self, configured_size: int) -> int:
+        """Resolve transfer split size from config or NVMe sysfs queue limits.
+
+        Args:
+            configured_size: Explicitly configured max data transfer size in bytes.
+                If > 0, this value is used directly. If <= 0, the size is
+                auto-detected from device queue limits.
+
+        Returns:
+            The resolved max data transfer size in bytes, guaranteed to be
+            a multiple of ``self.block_align``.
+
+        Raises:
+            ValueError: If ``configured_size`` is > 0 but not a multiple of
+                ``self.block_align``.
+        """
+        if configured_size > 0:
+            if configured_size % self.block_align != 0:
+                raise ValueError(
+                    f"max_data_transfer_size ({configured_size}) must be a "
+                    f"multiple of block_align ({self.block_align})"
+                )
+            return configured_size
+
+        queue_dir = _resolve_sysfs_queue_dir(self.device_path)
+        if queue_dir is None:
+            raise RuntimeError(
+                "RustRawBlockBackend: unable to derive NVMe sysfs queue path from "
+                "NVMe character device path "
+                f"{self.device_path} for auto max_data_transfer_size"
+            )
+
+        max_hw_sectors_kb = _read_sysfs_int(f"{queue_dir}/max_hw_sectors_kb")
+        if max_hw_sectors_kb is None or max_hw_sectors_kb <= 0:
+            raise RuntimeError(
+                "RustRawBlockBackend: failed to read max_hw_sectors_kb from "
+                f"{queue_dir} for auto max_data_transfer_size"
+            )
+
+        resolved_bytes = max_hw_sectors_kb * 1024
+        aligned_bytes = (resolved_bytes // self.block_align) * self.block_align
+        if aligned_bytes <= 0:
+            aligned_bytes = self.block_align
+
+        logger.info(
+            "RustRawBlockBackend: auto max_data_transfer_size=%d bytes "
+            "(device=%s, max_hw_sectors_kb=%s)",
+            aligned_bytes,
+            self.device_path,
+            max_hw_sectors_kb,
+        )
+        return aligned_bytes
 
     def _rawdev(self):
         """Return the lazily opened Rust raw-block device binding."""
@@ -656,7 +772,7 @@ class RawBlockCore:
                     payload_len = int(entry.size)
                     total_len = (
                         round_up(payload_len, self.block_align)
-                        if self.use_odirect
+                        if self._requires_transfer_alignment
                         else payload_len
                     )
                     buf = memoryview(objs[i].byte_array)
@@ -975,11 +1091,11 @@ class RawBlockCore:
                 f"{payload_capacity}"
             )
         total_len = payload_len
-        if self.use_odirect:
+        if self._requires_transfer_alignment:
             total_len = round_up(payload_len, self.block_align)
             if total_len > payload_capacity:
                 raise RuntimeError(
-                    f"O_DIRECT payload {total_len} exceeds slot capacity "
+                    f"Aligned payload {total_len} exceeds slot capacity "
                     f"{payload_capacity}"
                 )
             direct_view = self._build_direct_odirect_view(
@@ -992,6 +1108,139 @@ class RawBlockCore:
             if direct_view is not None:
                 buf = direct_view
         return buf, payload_len, total_len
+
+    def _validate_uring_cmd_chunk(self, offset: int, total_len: int) -> None:
+        """Validate one NVMe raw-command transfer range.
+
+        Args:
+            offset: Device byte offset for the transfer.
+            total_len: Transfer size in bytes.
+
+        Raises:
+            ValueError: If either value is not block aligned.
+        """
+        if offset % self.block_align != 0:
+            raise ValueError("io_uring_cmd requires aligned offsets")
+        if total_len % self.block_align != 0:
+            raise ValueError("io_uring_cmd requires aligned transfer lengths")
+
+    def _write_uring_cmd_buffers(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Any],
+        payload_lens: Sequence[int],
+        total_lens: Sequence[int],
+    ) -> None:
+        """Write buffers as bounded NVMe raw-command chunks.
+
+        Args:
+            offsets: Device offsets for each logical write.
+            buffers: Source buffers.
+            payload_lens: Logical source byte counts.
+            total_lens: Physical transfer sizes, including padding.
+
+        Raises:
+            ValueError: If lengths are inconsistent or unaligned.
+            Exception: Propagates Rust raw-device write errors.
+        """
+        raw_dev = self._rawdev()
+        chunk_offsets: list[int] = []
+        chunk_buffers: list[memoryview] = []
+        chunk_lens: list[int] = []
+        keepalive: list[memoryview] = []
+
+        for offset, buf, payload_len, total_len in zip(
+            offsets, buffers, payload_lens, total_lens, strict=True
+        ):
+            offset = int(offset)
+            payload_len = int(payload_len)
+            total_len = int(total_len)
+            self._validate_uring_cmd_chunk(offset, total_len)
+
+            view = self._byte_view(buf)
+            if len(view) < total_len:
+                if len(view) < payload_len:
+                    raise ValueError("input buffer shorter than payload_len")
+                padded = bytearray(total_len)
+                padded[:payload_len] = view[:payload_len]
+                view = memoryview(padded)
+            else:
+                view = view[:total_len]
+            keepalive.append(view)
+
+            cursor = 0
+            while cursor < total_len:
+                chunk_len = min(self.max_data_transfer_size, total_len - cursor)
+                self._validate_uring_cmd_chunk(offset + cursor, chunk_len)
+                chunk_offsets.append(offset + cursor)
+                chunk_buffers.append(view[cursor : cursor + chunk_len])
+                chunk_lens.append(chunk_len)
+                cursor += chunk_len
+
+        if not chunk_offsets:
+            return
+        batch_id = raw_dev.batched_write(
+            chunk_offsets,
+            chunk_buffers,
+            chunk_lens,
+        )
+        raw_dev.wait_iouring(batch_id)
+        keepalive.clear()
+
+    def _read_uring_cmd_buffers(
+        self,
+        offsets: Sequence[int],
+        buffers: Sequence[Any],
+        payload_lens: Sequence[int],
+        total_lens: Sequence[int],
+    ) -> None:
+        """Read buffers as bounded NVMe raw-command chunks.
+
+        Args:
+            offsets: Device offsets for each logical read.
+            buffers: Destination buffers.
+            payload_lens: Logical bytes to expose to callers.
+            total_lens: Physical transfer sizes, including padding.
+
+        Raises:
+            ValueError: If lengths are inconsistent or unaligned.
+            Exception: Propagates Rust raw-device read errors.
+        """
+        raw_dev = self._rawdev()
+        read_uring = raw_dev.read_uring
+
+        for offset, buf, payload_len, total_len in zip(
+            offsets, buffers, payload_lens, total_lens, strict=True
+        ):
+            offset = int(offset)
+            payload_len = int(payload_len)
+            total_len = int(total_len)
+            self._validate_uring_cmd_chunk(offset, total_len)
+
+            dst = self._byte_view(buf)
+            if len(dst) < total_len:
+                if len(dst) < payload_len:
+                    raise ValueError("output buffer shorter than payload_len")
+                target = memoryview(bytearray(total_len))
+                copy_back = True
+            else:
+                target = dst[:total_len]
+                copy_back = False
+
+            cursor = 0
+            while cursor < total_len:
+                chunk_len = min(self.max_data_transfer_size, total_len - cursor)
+                self._validate_uring_cmd_chunk(offset + cursor, chunk_len)
+                read_uring(
+                    offset + cursor,
+                    target[cursor : cursor + chunk_len],
+                    chunk_len,
+                    chunk_len,
+                )
+                cursor += chunk_len
+
+            if copy_back:
+                dst[:payload_len] = target[:payload_len]
 
     def _write_buffers(
         self,
@@ -1018,6 +1267,15 @@ class RawBlockCore:
                 offsets, buffers, payload_lens, total_lens, strict=True
             ):
                 raw_dev.pwrite_from_buffer(offset, buf, payload_len, total_len)
+            return
+
+        if self.use_uring_cmd:
+            self._write_uring_cmd_buffers(
+                offsets,
+                buffers,
+                payload_lens,
+                total_lens,
+            )
             return
 
         can_batch = all(
@@ -1065,6 +1323,10 @@ class RawBlockCore:
                 raw_dev.pread_into(offset, buf, payload_len, total_len)
             return
 
+        if self.use_uring_cmd:
+            self._read_uring_cmd_buffers(offsets, buffers, payload_lens, total_lens)
+            return
+
         can_batch = all(
             int(payload_len) == int(total_len)
             for payload_len, total_len in zip(payload_lens, total_lens, strict=True)
@@ -1107,7 +1369,7 @@ class RawBlockCore:
             try:
                 hdr_total = (
                     round_up(len(header), self.block_align)
-                    if self.use_odirect
+                    if self._requires_transfer_alignment
                     else len(header)
                 )
                 header_buf: Any = header

@@ -87,6 +87,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
         io_engine: str = "posix",
         iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH,
         use_uring_cmd: bool = False,
+        max_data_transfer_size: int = 0,
         num_store_workers: int = 2,
         num_lookup_workers: int = 1,
         num_load_workers: int = 4,
@@ -112,6 +113,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             io_engine: Raw-block I/O engine: ``"posix"`` or ``"io_uring"``.
             iouring_queue_depth: Queue depth for the Rust io_uring engine.
             use_uring_cmd: Whether to use NVMe io_uring_cmd passthrough.
+            max_data_transfer_size: Max data transfer size for a single request.
             num_store_workers: Number of store worker threads.
             num_lookup_workers: Number of lookup worker threads.
             num_load_workers: Number of load worker threads.
@@ -138,6 +140,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             iouring_queue_depth=self.iouring_queue_depth,
         )
         self.use_uring_cmd = bool(use_uring_cmd)
+        self.max_data_transfer_size = int(max_data_transfer_size)
         self.num_store_workers = int(num_store_workers)
         self.num_lookup_workers = int(num_lookup_workers)
         self.num_load_workers = int(num_load_workers)
@@ -172,6 +175,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             d.get("iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
         )
         use_uring_cmd = bool(d.get("use_uring_cmd", False))
+        max_data_transfer_size = int(d.get("max_data_transfer_size", 0))
 
         if block_align <= 0:
             raise ValueError("block_align must be > 0")
@@ -222,6 +226,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
             use_uring_cmd=use_uring_cmd,
+            max_data_transfer_size=max_data_transfer_size,
             num_store_workers=worker_counts["num_store_workers"],
             num_lookup_workers=worker_counts["num_lookup_workers"],
             num_load_workers=worker_counts["num_load_workers"],
@@ -260,6 +265,9 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             f"(default {DEFAULT_IOURING_QUEUE_DEPTH})\n"
             "- use_uring_cmd (bool): enable NVMe io_uring_cmd path "
             "(default false, requires io_uring as the io_engine)\n"
+            "- max_data_transfer_size (int): for a single I/O request "
+            "(0: (default) auto detect limit splitting, > 0: explicit split, "
+            "< 0: auto detect limit splitting)\n"
             "- num_store_workers (int): store worker threads (default 2)\n"
             "- num_lookup_workers (int): lookup worker threads (default 1)\n"
             "- num_load_workers (int): load worker threads (default 4)"
@@ -286,6 +294,7 @@ class RawBlockL2AdapterConfig(L2AdapterConfigBase):
             io_engine=self.io_engine,
             iouring_queue_depth=self.iouring_queue_depth,
             use_uring_cmd=self.use_uring_cmd,
+            max_data_transfer_size=self.max_data_transfer_size,
         )
 
 

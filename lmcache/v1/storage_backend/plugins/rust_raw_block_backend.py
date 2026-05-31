@@ -249,6 +249,9 @@ class RustRawBlockBackend(StoragePluginInterface):
             extra.get("rust_raw_block.iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
         )
         use_uring_cmd = bool(extra.get("rust_raw_block.use_uring_cmd", False))
+        max_data_transfer_size = int(
+            extra.get("rust_raw_block.max_data_transfer_size", 0)
+        )
         validate_raw_block_io_options(
             iouring_queue_depth=iouring_queue_depth,
         )
@@ -307,6 +310,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             meta_verify_on_load=bool(
                 extra.get("rust_raw_block.meta_verify_on_load", True)
             ),
+            max_data_transfer_size=max_data_transfer_size,
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
             use_uring_cmd=use_uring_cmd,
