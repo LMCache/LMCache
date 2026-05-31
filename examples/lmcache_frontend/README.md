@@ -6,7 +6,7 @@ with a trivial discovery service.
 
 Architecture:
 
-![Architecture Diagram](assets/architecture.png)
+![Architecture Diagram](../../docs/source/mp/architecture.png)
 
 ```
 +-----------------------------+

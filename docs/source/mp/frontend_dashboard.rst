@@ -9,6 +9,10 @@ requires no extra infrastructure beyond a small discovery service.
 Architecture Overview
 ---------------------
 
+.. image:: architecture.png
+   :alt: Architecture Diagram
+   :align: center
+
 .. code-block:: text
 
     +-----------------------------+
