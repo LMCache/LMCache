@@ -24,12 +24,12 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
+    LMCacheKVSpec,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 from lmcache.v1.multiprocess.engine_module import (

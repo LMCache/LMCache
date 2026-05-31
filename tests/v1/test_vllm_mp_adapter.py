@@ -23,7 +23,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
-from lmcache.v1.kv_cache_groups import LMCacheKVGroup, LMCacheKVSpec
+from lmcache.v1.multiprocess.custom_types import LMCacheKVGroup, LMCacheKVSpec
 from lmcache.v1.multiprocess.protocol import RequestType
 
 

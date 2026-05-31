@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
+    LMCacheKVSpec,
     RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition

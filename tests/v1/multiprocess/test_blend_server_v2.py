@@ -41,13 +41,13 @@ from lmcache.v1.distributed.config import (
     L1MemoryManagerConfig,
     StorageManagerConfig,
 )
-from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    LMCacheKVSpec,
 )
 from lmcache.v1.multiprocess.modules.blend import (
     BlendModule,

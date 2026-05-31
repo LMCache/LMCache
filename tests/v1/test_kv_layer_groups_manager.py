@@ -5,13 +5,13 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.kv_cache_groups import LMCacheKVGroup, LMCacheKVSpec
 from lmcache.v1.kv_layer_groups import (
     KVLayerGroupInfo,
     KVLayerGroupsManager,
     format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
+from lmcache.v1.multiprocess.custom_types import LMCacheKVGroup, LMCacheKVSpec
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="PageBufferShapeDesc requires CUDA build"

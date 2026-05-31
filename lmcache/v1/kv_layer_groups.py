@@ -18,7 +18,7 @@ import lmcache.c_ops as lmc_ops
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.utils import DiscoverableKVCache, LayoutHints
-    from lmcache.v1.kv_cache_groups import LMCacheKVSpec
+    from lmcache.v1.multiprocess.custom_types import LMCacheKVSpec
 
 logger = init_logger(__name__)
 

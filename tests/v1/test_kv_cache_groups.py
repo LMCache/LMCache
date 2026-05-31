@@ -3,7 +3,7 @@
 import msgspec
 
 # First Party
-from lmcache.v1.kv_cache_groups import LMCacheKVGroup, LMCacheKVSpec
+from lmcache.v1.multiprocess.custom_types import LMCacheKVGroup, LMCacheKVSpec
 
 
 def test_lmc_kv_cache_groups_default_to_one_engine_group():

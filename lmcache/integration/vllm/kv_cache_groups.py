@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
 # First Party
-from lmcache.v1.kv_cache_groups import LMCacheKVGroup, LMCacheKVSpec
+from lmcache.v1.multiprocess.custom_types import LMCacheKVGroup, LMCacheKVSpec
 
 
 def create_lmcache_kv_spec_from_vllm(

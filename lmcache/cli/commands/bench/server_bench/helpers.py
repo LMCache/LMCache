@@ -47,7 +47,6 @@ try:
         check_interprocess_event_support,
         compress_slot_mapping,
     )
-    from lmcache.v1.kv_cache_groups import LMCacheKVSpec
     from lmcache.v1.kv_layer_groups import (
         DTYPE_MAP,
         KVLayerGroupInfo,
@@ -55,6 +54,7 @@ try:
     from lmcache.v1.multiprocess.custom_types import (
         CudaIPCWrapper,
         IPCCacheEngineKey,
+        LMCacheKVSpec,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.mq import MessageQueueClient

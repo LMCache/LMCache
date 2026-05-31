@@ -35,10 +35,10 @@ from lmcache.v1.gpu_connector.utils import (
     is_mla,
     normalize_kv_and_discover_format,
 )
-from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import (
     KVCache,
+    LMCacheKVSpec,
 )
 
 # Backend selection (c_ops when CUDA is available, otherwise a pure-Python

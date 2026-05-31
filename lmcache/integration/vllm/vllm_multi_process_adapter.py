@@ -15,12 +15,12 @@ import zmq
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
-from lmcache.v1.kv_cache_groups import LMCacheKVSpec
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+    LMCacheKVSpec,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class

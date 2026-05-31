@@ -293,9 +293,9 @@ separate API migration.
 
 | Area | File |
 |---|---|
-| Neutral serialized group model | `lmcache/v1/kv_cache_groups.py` |
+| Neutral msgspec group model (IPC type) | `lmcache/v1/multiprocess/custom_types.py` |
 | Shared physical grouping helper | `lmcache/v1/kv_layer_groups.py` |
-| vLLM conversion and inflation | `lmcache/integration/vllm/kv_cache_groups.py` |
+| vLLM conversion to LMCacheKVSpec | `lmcache/integration/vllm/kv_cache_groups.py` |
 | vLLM register/store/retrieve path | `lmcache/integration/vllm/lmcache_mp_connector.py`, `lmcache/integration/vllm/vllm_multi_process_adapter.py` |
 | Server-side GPU context | `lmcache/v1/multiprocess/gpu_context.py` |
 | Server-side transfer loop | `lmcache/v1/multiprocess/modules/gpu_transfer.py` |
