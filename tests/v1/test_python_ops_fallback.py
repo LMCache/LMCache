@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Union
 import ctypes
 import os
+import threading
+import time
 import unittest.mock
 
 # Third Party
@@ -1867,3 +1871,76 @@ def test_alloc_pinned_ptr_is_page_aligned(size: int) -> None:
             assert buf[i] == ((i & 0xFF) ^ 0xA5)
     finally:
         _py_ops.free_pinned_ptr(ptr)
+
+
+@pytest.fixture()
+def clean_fallback() -> Iterator[None]:
+    """Drain the module-level buffer before and after each test."""
+    _py_ops.drain_recorded_completions()
+    yield
+    _py_ops.drain_recorded_completions()
+
+
+class TestFallbackRecordDrain:
+    """Unit / contract tests for python_ops_fallback completion recorder.
+
+    Pure Python, no GPU required — these run in the standard CI suite.
+    """
+
+    def test_empty_drain(self, clean_fallback: None) -> None:
+        assert _py_ops.drain_recorded_completions() == []
+
+    def test_fifo_order_and_return_types(self, clean_fallback: None) -> None:
+        _py_ops.record_completion_on_stream(0, "kind-a", b"payload-a")
+        _py_ops.record_completion_on_stream(0, "kind-b", b"payload-b")
+        result = _py_ops.drain_recorded_completions()
+        assert result == [("kind-a", b"payload-a"), ("kind-b", b"payload-b")]
+        assert all(isinstance(k, str) and isinstance(p, bytes) for k, p in result)
+
+    def test_drain_clears_buffer(self, clean_fallback: None) -> None:
+        _py_ops.record_completion_on_stream(0, "k", b"v")
+        _py_ops.drain_recorded_completions()
+        assert _py_ops.drain_recorded_completions() == []
+
+    def test_stream_ptr_is_ignored(self, clean_fallback: None) -> None:
+        for ptr in (0, -1, 2**32):
+            _py_ops.record_completion_on_stream(ptr, "k", b"v")
+        result = _py_ops.drain_recorded_completions()
+        assert len(result) == 3
+        assert all(k == "k" and p == b"v" for k, p in result)
+
+    def test_concurrent_no_data_loss(self, clean_fallback: None) -> None:
+        """Regression for the lock fix: concurrent record/drain must not drop items."""
+        n_writers = 8
+        records_per_writer = 500
+        total_expected = n_writers * records_per_writer
+
+        drained: list[tuple[str, bytes]] = []
+        stop = threading.Event()
+
+        def drain_loop() -> None:
+            while not stop.is_set():
+                drained.extend(_py_ops.drain_recorded_completions())
+                time.sleep(0.001)
+            drained.extend(_py_ops.drain_recorded_completions())
+
+        def writer(thread_id: int) -> None:
+            for i in range(records_per_writer):
+                _py_ops.record_completion_on_stream(
+                    0, f"kind-{thread_id}", f"payload-{i}".encode()
+                )
+
+        drain_thread = threading.Thread(target=drain_loop, daemon=True)
+        drain_thread.start()
+
+        with ThreadPoolExecutor(max_workers=n_writers) as pool:
+            for fut in [pool.submit(writer, i) for i in range(n_writers)]:
+                fut.result()
+
+        stop.set()
+        drain_thread.join(timeout=5.0)
+        assert not drain_thread.is_alive(), "drain thread did not exit cleanly"
+
+        assert len(drained) == total_expected, (
+            f"data loss: expected {total_expected}, got {len(drained)}"
+        )
