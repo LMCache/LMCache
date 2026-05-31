@@ -28,8 +28,8 @@ def create_lmcache_kv_spec_from_vllm(
     ``KVCacheGroupSpec.layer_names`` from the v1 KV cache interface), maps each
     engine KV cache group's layer names to registered tensor indices, then
     splits the layers by physical transfer identity using the real tensors (via
-    :func:`lmcache.v1.kv_layer_groups.create_lmcache_kv_spec`). vLLM-specific
-    field access is intentionally confined to this function.
+    the shared :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`).
+    vLLM-specific field access is intentionally confined to this function.
 
     Args:
         kv_cache_config: vLLM ``KVCacheConfig`` describing the engine KV cache
@@ -46,8 +46,11 @@ def create_lmcache_kv_spec_from_vllm(
     """
     # First Party
     from lmcache.utils import EngineType
-    from lmcache.v1.gpu_connector.utils import normalize_kv_and_discover_format
-    from lmcache.v1.kv_layer_groups import create_lmcache_kv_spec
+    from lmcache.v1.gpu_connector.utils import (
+        get_num_layers,
+        normalize_kv_and_discover_format,
+    )
+    from lmcache.v1.kv_layer_groups import group_layers_by_identity
 
     # Map each vLLM engine KV cache group to LMCache's neutral group form,
     # resolving layer names to registered tensor indices. This is the only
@@ -70,15 +73,30 @@ def create_lmcache_kv_spec_from_vllm(
         for hybrid_block_group_id, group in enumerate(vllm_groups)
     )
 
-    # Split engine groups further by physical transfer identity using the real
-    # registered tensors.
+    # Split each hybrid block group further by physical transfer identity using
+    # the real registered tensors. ``group_layers_by_identity`` is the shared,
+    # engine-neutral grouping primitive (the server reuses it too).
     gpu_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
         list(kv_caches.values()),
         EngineType.VLLM,
         layout_hints=layout_hints,
     )
-    return create_lmcache_kv_spec(
-        normalized_kv_caches,
-        gpu_kv_format,
-        engine_kv_spec,
+    num_layers = get_num_layers(normalized_kv_caches, gpu_kv_format)
+    if num_layers == 0:
+        return LMCacheKVSpec()
+
+    per_layer_group_idx = engine_kv_spec.get_per_layer_hybrid_block_group_indices(
+        num_layers
+    )
+    return LMCacheKVSpec.from_groups(
+        LMCacheKVGroup(
+            hybrid_block_group_id=identity[4],
+            layer_indices=tuple(indices),
+        )
+        for identity, indices in group_layers_by_identity(
+            normalized_kv_caches,
+            gpu_kv_format,
+            num_layers,
+            per_layer_group_idx,
+        )
     )

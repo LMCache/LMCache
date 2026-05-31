@@ -103,59 +103,6 @@ def group_layers_by_identity(
     return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
 
 
-def create_lmcache_kv_spec(
-    kv_caches: "DiscoverableKVCache",
-    gpu_kv_format: "lmc_ops.GPUKVFormat",
-    lmc_kv_cache_groups: "LMCacheKVSpec | None" = None,
-) -> "LMCacheKVSpec":
-    """Create the LMCache KV spec by splitting layers into transfer groups.
-
-    Each hybrid block group is split further into one LMCache group per distinct
-    physical transfer identity. The output group order is the protocol-visible
-    LMCache group order used by store/retrieve block IDs. It is intentionally
-    derived with the same ``group_layers_by_identity`` helper that builds
-    runtime ``KVLayerGroupInfo`` objects.
-
-    Args:
-        kv_caches: Registered KV cache structure (source of truth for physical
-            shape and dtype).
-        gpu_kv_format: Format descriptor from
-            :func:`normalize_kv_and_discover_format`.
-        lmc_kv_cache_groups: Hybrid block group metadata. When ``None`` (or
-            empty), all layers are treated as a single block group.
-
-    Returns:
-        An ``LMCacheKVSpec`` with one ``LMCacheKVGroup`` per LMCache
-        transfer identity, ordered by first layer index; empty when there are
-        no registered layers.
-    """
-    # First Party
-    from lmcache.v1.gpu_connector.utils import get_num_layers
-    from lmcache.v1.kv_cache_groups import LMCacheKVGroup, LMCacheKVSpec
-
-    base_groups = lmc_kv_cache_groups or LMCacheKVSpec()
-    num_layers = get_num_layers(kv_caches, gpu_kv_format)
-    if num_layers == 0:
-        return LMCacheKVSpec()
-
-    per_layer_group_idx = base_groups.get_per_layer_hybrid_block_group_indices(
-        num_layers
-    )
-
-    return LMCacheKVSpec.from_groups(
-        LMCacheKVGroup(
-            hybrid_block_group_id=identity[4],
-            layer_indices=tuple(indices),
-        )
-        for identity, indices in group_layers_by_identity(
-            kv_caches,
-            gpu_kv_format,
-            num_layers,
-            per_layer_group_idx,
-        )
-    )
-
-
 @dataclass
 class KVLayerGroupInfo:
     """A single transfer-kernel dispatch unit: a set of KV layers that can
