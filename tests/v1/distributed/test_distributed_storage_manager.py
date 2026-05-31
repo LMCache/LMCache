@@ -878,3 +878,39 @@ class TestStorageManagerSparsePrefetch:
 
         sm.finish_read_prefetched(complement)
         sm.close()
+
+    def test_sparse_abandoned_timeout_releases_locks(
+        self, l2_storage_manager_config, basic_layout
+    ):
+        """A ``wait_prefetch_found`` timeout must not leak L1 read locks: the
+        background load still completes, but the abandoned request releases the
+        loaded keys' locks (L1 usage returns to 0 instead of staying pinned)."""
+        sm = StorageManager(l2_storage_manager_config)
+        keys = [make_object_key(i) for i in range(4)]
+        wret = sm.reserve_write(keys, basic_layout, mode="new")
+        sm.finish_write(list(wret.keys()))
+        adapter = sm._l2_adapters[0]
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in keys),  # type: ignore
+            timeout=10.0,
+        )
+        time.sleep(0.05)
+        sm.clear()  # evict from L1; L2 retains, so the prefetch must hit L2
+        assert sm._l1_manager.get_memory_usage()[0] == 0
+
+        handle = sm.submit_prefetch_task(keys, basic_layout, sparse=True)
+        assert handle.prefetch_request_id != -1  # all keys went to the L2 load
+        # Zero-timeout: the async load can't finish this fast -> None + abandoned.
+        assert sm.wait_prefetch_found(handle, timeout=0.0) is None
+
+        # Wait for the load to finalize, then assert no leak below.
+        pc = sm._prefetch_controller
+        assert wait_for_condition(
+            lambda: handle.prefetch_request_id not in pc._in_flight_requests,
+            timeout=10.0,
+        )
+        time.sleep(0.05)  # let _finalize_load's finish_read settle
+        # No leak: locks released -> L1 usage 0 (would stay >0 pinned if leaked).
+        assert sm._l1_manager.get_memory_usage()[0] == 0
+
+        sm.close()

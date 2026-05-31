@@ -573,8 +573,17 @@ class StorageManager:
         handle: PrefetchHandle,
         timeout: float | None = None,
     ) -> set[int] | None:
-        """Sparse-prefetch result: the set of original key indices found and
-        read-locked in L1 (directly or via L2), or ``None`` on timeout."""
+        """Event-driven result of a sparse prefetch (``sparse=True`` in
+        :meth:`submit_prefetch_task`).
+
+        Args:
+            handle: The sparse :class:`PrefetchHandle` from submit.
+            timeout: Max seconds to wait; ``None`` blocks indefinitely.
+
+        Returns:
+            Set of original key indices found and read-locked in L1 (directly
+            or via L2), or ``None`` on timeout (which releases the locks).
+        """
         found: set[int] = set(handle.l1_found_indices)
         if handle.prefetch_request_id != -1:
             l2_res = self._prefetch_controller.wait_prefetch_result(
