@@ -99,7 +99,11 @@ We welcome and value any contributions and collaborations. Join us in improving 
 LMCache is developed with a growing community of developers, researchers, industry adopters, and partners building the next generation of efficient LLM inference systems.
 
 <p align="center">
-  <img src="asset/partner.png" alt="LMCache Adoption and Partnerships">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="asset/partner_dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="asset/partner_light.png">
+    <img alt="LMCache Adoption and Partnerships" src="asset/partner_light.png">
+  </picture>
 </p>
 
 As an independent open-source project, LMCache is becoming the de facto standard for KV Cache management in LLM inference and its continued development and community work are supported in part by [Tensormesh](https://www.tensormesh.ai/).
