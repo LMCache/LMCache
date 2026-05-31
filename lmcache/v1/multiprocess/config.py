@@ -42,7 +42,7 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
-    transfer_mode: str = "auto"
+    supported_transfer_mode: str = "auto"
     """Transfer mode: 'gpu' for GPU-based IPC transfer (STORE/RETRIEVE),
     'non_gpu' for non-GPU-based transfer (PREPARE/COMMIT), or 'auto' to
     enable both."""
@@ -162,11 +162,11 @@ def add_mp_server_args(
         "'blend' when cacheblend is enabled. Default is 'default'.",
     )
     mp_group.add_argument(
-        "--transfer-mode",
+        "--supported-transfer-mode",
         type=str,
         default="auto",
         choices=["gpu", "non_gpu", "auto"],
-        help="Transfer mode: 'gpu' for GPU-based IPC transfer "
+        help="Supported transfer mode: 'gpu' for GPU-based IPC transfer "
         "(STORE/RETRIEVE), 'non_gpu' for non-GPU-based transfer "
         "(PREPARE/COMMIT), or 'auto' to enable both transfer paths. "
         "Default is 'auto'.",
@@ -236,7 +236,7 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
-        transfer_mode=args.transfer_mode,
+        supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,

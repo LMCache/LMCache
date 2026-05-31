@@ -311,11 +311,11 @@ class DataTransferContext(TransferContext):
             shm_name=shm_name,
             pool_size=pool_size,
         )
-        transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
+        supported_transfer_mode = "SHM" if shm_name and pool_size > 0 else "pickle"
         logger.info(
             "Worker non-GPU transfer context registered (instance_id=%d, mode=%s)",
             instance_id,
-            transfer_mode,
+            supported_transfer_mode,
         )
 
     def submit_store(
