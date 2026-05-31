@@ -36,6 +36,17 @@ if [ "$GPU_MEMORY_GB" -gt 90 ]; then
     GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
 fi
 
+# Attention backend. Defaults to FLASH_ATTN (used by the deterministic
+# batch-invariant tests). Override via the ATTENTION_BACKEND env var; set it to
+# empty to let vLLM auto-select — e.g. gpt-oss uses attention sinks, which the
+# FLASH_ATTN backend does not support.
+ATTENTION_BACKEND="${ATTENTION_BACKEND-FLASH_ATTN}"
+ATTENTION_BACKEND_ARG=""
+if [ -n "$ATTENTION_BACKEND" ]; then
+    ATTENTION_BACKEND_ARG="--attention-backend $ATTENTION_BACKEND"
+fi
+echo "Attention backend: ${ATTENTION_BACKEND:-<auto>}"
+
 # Store PIDs in a file so cleanup.sh can find them
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 > "$PID_FILE"
@@ -78,7 +89,7 @@ VLLM_MXFP4_USE_MARLIN="${VLLM_MXFP4_USE_MARLIN:-0}" \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
-    --attention-backend FLASH_ATTN \
+    $ATTENTION_BACKEND_ARG \
     --port "$vllm_port" \
     --no-async-scheduling \
     $GPU_MEMORY_UTIL_ARG \
@@ -102,7 +113,7 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
     VLLM_MXFP4_USE_MARLIN="${VLLM_MXFP4_USE_MARLIN:-0}" \
     PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
-        --attention-backend FLASH_ATTN \
+        $ATTENTION_BACKEND_ARG \
         --port "$vllm_baseline_port" \
         --no-async-scheduling \
         $GPU_MEMORY_UTIL_ARG \

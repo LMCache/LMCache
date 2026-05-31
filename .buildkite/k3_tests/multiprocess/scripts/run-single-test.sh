@@ -33,6 +33,9 @@ if [ "$TEST_NAME" = "hma_lm_eval" ]; then
     # run-hma-lm-eval.sh) rather than requiring bit-identical samples.
     export VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-0}"
     export VLLM_MXFP4_USE_MARLIN="${VLLM_MXFP4_USE_MARLIN:-1}"
+    # gpt-oss uses attention sinks, unsupported by FLASH_ATTN; let vLLM
+    # auto-select a sink-capable attention backend.
+    export ATTENTION_BACKEND="${ATTENTION_BACKEND-}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi
