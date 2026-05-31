@@ -75,7 +75,6 @@ Documentation
    getting_started/quickstart/index
    getting_started/benchmarking
    getting_started/kv_cache_calculator
-   getting_started/cli
    getting_started/troubleshoot
    getting_started/faq
    getting_started/quickstart/standalone_starter

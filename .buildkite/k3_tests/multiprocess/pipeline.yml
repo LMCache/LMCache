@@ -1,12 +1,15 @@
 # Multiprocess tests — one step per test, run in parallel.
-# Each step gets its own K8s pod, launches its own servers, runs one test, cleans up.
-# All steps need 2 GPUs (LMCache+vLLM on GPU 0, baseline on GPU 1).
+# Each step gets its own K8s pod with the exact GPU count it needs.
+# Tests are grouped by GPU requirement; the 2-GPU group is listed first so
+# these heavier jobs get scheduled before 1-GPU jobs.
+#   2-GPU: LMCache+vLLM on GPU 0, baseline on GPU 1 (or TP=2 across both).
+#   1-GPU: LMCache+vLLM on GPU 0 only (no baseline server).
 
 steps:
-  - group: ":compression: Multiprocess"
+  - group: ":compression: Multiprocess (2-GPU)"
     steps:
-      - label: ":compression: lm_eval"
-        command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
+      - label: ":compression: vllm_bench"
+        command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -23,13 +26,6 @@ steps:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
         artifact_paths: ["*.log"]
 
-      - label: ":compression: vllm_bench"
-        command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
-
       - label: ":compression: long_doc_qa"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         timeout_in_minutes: 30
@@ -44,13 +40,6 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: fault_tolerance"
-        command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
-
       - label: ":compression: deadlock"
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
         timeout_in_minutes: 30
@@ -58,16 +47,48 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
+  - group: ":compression: Multiprocess (1-GPU)"
+    steps:
+      - label: ":compression: lm_eval"
+        command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec: &pod-1gpu
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts: *vol-mounts
+                volumes: *vols
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: fault_tolerance"
+        command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
       - label: ":compression: restart_recovery"
         command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
       - label: ":compression: cache_stats"
         command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: http_api"
+        command: .buildkite/k3_tests/multiprocess/run.sh http_api
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
