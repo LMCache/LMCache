@@ -52,7 +52,11 @@ LMCache supports two deployment modes:
 - **In-process mode**: LMCache runs inside the inference engine process through connectors this mode is limited by python GILs.
 
 <p align="center">
-  <img src="asset/deployment_modes.png" alt="LMCache Deployment Modes">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="asset/deployment_modes_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="asset/deployment_modes_light.png">
+  <img alt="LMCache Deployment Modes" src="asset/deployment_modes_light.png">
+</picture>
 </p>
 
 ### Key capabilities
