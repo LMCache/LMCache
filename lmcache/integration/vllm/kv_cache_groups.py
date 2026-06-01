@@ -43,6 +43,9 @@ def create_lmcache_kv_spec_from_vllm(
     Returns:
         The ``LMCacheKVSpec`` whose group order is the protocol-visible LMCache
         group order used by store/retrieve block IDs.
+
+    Raises:
+        ValueError: If no KV cache tensors are registered (empty ``kv_caches``).
     """
     # First Party
     from lmcache.utils import EngineType
@@ -52,30 +55,7 @@ def create_lmcache_kv_spec_from_vllm(
     )
     from lmcache.v1.kv_layer_groups import group_layers_by_identity
 
-    # Map each vLLM engine KV cache group to LMCache's neutral group form,
-    # resolving layer names to registered tensor indices. This is the only
-    # place that reads vLLM ``KVCacheConfig`` fields.
-    layer_to_idx = {name: idx for idx, name in enumerate(kv_caches.keys())}
-    vllm_groups = (
-        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
-        if kv_cache_config is not None
-        else ()
-    )
-    engine_kv_spec = LMCacheKVSpec.from_groups(
-        LMCacheKVGroup(
-            hybrid_block_group_id=hybrid_block_group_id,
-            layer_indices=tuple(
-                layer_to_idx[name]
-                for name in getattr(group, "layer_names", ())
-                if name in layer_to_idx
-            ),
-        )
-        for hybrid_block_group_id, group in enumerate(vllm_groups)
-    )
-
-    # Split each hybrid block group further by physical transfer identity using
-    # the real registered tensors. ``group_layers_by_identity`` is the shared,
-    # engine-neutral grouping primitive (the server reuses it too).
+    # Inspect the real registered tensors for physical layout and dtype.
     gpu_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
         list(kv_caches.values()),
         EngineType.VLLM,
@@ -83,11 +63,36 @@ def create_lmcache_kv_spec_from_vllm(
     )
     num_layers = get_num_layers(normalized_kv_caches, gpu_kv_format)
     if num_layers == 0:
-        return LMCacheKVSpec()
+        raise ValueError(
+            "No KV cache tensors were registered; cannot build an LMCacheKVSpec."
+        )
 
-    per_layer_group_idx = engine_kv_spec.get_per_layer_hybrid_block_group_indices(
-        num_layers
+    # vLLM-specific field access (confined to this function): map each
+    # registered KV tensor to its vLLM engine KV cache group index. vLLM places
+    # every registered layer in exactly one group; layers in different groups
+    # have disjoint block-id spaces and must not share an LMCache group. ``None``
+    # means a single (non-hybrid) group, i.e. every layer shares one block-id
+    # space.
+    layer_to_idx = {name: idx for idx, name in enumerate(kv_caches.keys())}
+    vllm_groups = (
+        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+        if kv_cache_config is not None
+        else ()
     )
+    per_layer_group_idx: list[int] | None = None
+    if vllm_groups:
+        per_layer_group_idx = [0] * num_layers
+        for hybrid_block_group_id, group in enumerate(vllm_groups):
+            for name in group.layer_names:
+                per_layer_group_idx[layer_to_idx[name]] = hybrid_block_group_id
+
+    # Within one vLLM engine group, layers can have different hidden dimensions
+    # (e.g. a different head count), which require different GPU copy kernels.
+    # ``group_layers_by_identity`` splits each engine group further by physical
+    # transfer identity (kv_size, num_heads, head_size, block_size, dtype), so
+    # every resulting LMCache group can be served by a single copy kernel. It is
+    # the shared, engine-neutral primitive the server reuses to reproduce the
+    # same grouping from the registered tensors.
     return LMCacheKVSpec.from_groups(
         LMCacheKVGroup(
             hybrid_block_group_id=identity[4],
