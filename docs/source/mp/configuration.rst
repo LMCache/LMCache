@@ -63,6 +63,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - JSON string of extra key-value config forwarded to runtime
        plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
        ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
+   * - ``--shm-name``
+     - *(not set)*
+     - SHM segment name for non-GPU KV transfer.
+       Not set (default): auto-allocate a shared-memory pool.
+       ``""`` (empty string): disable SHM and force the pickle transfer
+       path.  Any other value: use that exact name for the SHM pool
+       segment.
 
 Lookup Hash Logging
 -------------------

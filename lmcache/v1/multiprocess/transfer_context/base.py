@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Non-GPU context abstractions and utilities for multiprocess mode.
+"""Non-GPU context abstractions and utilities for multiprocess transport.
 
 This module provides:
 - ``NonGpuContextMetadata``: layout metadata dataclass for non-CUDA workers.
@@ -7,22 +7,35 @@ This module provides:
   interface for CPU-side KV data transfer. Concrete implementations (e.g.
   ``NonGpuContextPickle``) each decide *how* data is serialised and transported.
 - ``create_non_gpu_context()``: factory that returns the appropriate
-  ``NonGpuContext`` subclass (currently always ``NonGpuContextPickle``).
+  ``NonGpuContext`` subclass.
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
   shared gather/scatter utilities used by all concrete implementations.
 """
 
+# Future
+from __future__ import annotations
+
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, cast
 
 # Third Party
 import torch
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.mq import MessageQueueClient
+
+if TYPE_CHECKING:
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -56,7 +69,7 @@ class NonGpuContext(ABC):
     def __init__(
         self,
         metadata: NonGpuContextMetadata,
-        mq_client: Any,
+        mq_client: MessageQueueClient,
         mq_timeout: float,
     ) -> None:
         self.metadata = metadata
@@ -69,24 +82,43 @@ class NonGpuContext(ABC):
         return self.metadata.layout_desc
 
     @abstractmethod
-    def prepare_store(self, key: Any, instance_id: int) -> list[torch.Tensor] | None:
-        """Prepare store. Returns pre-allocated out buffers (shm) or None (pickle)."""
+    def prepare_store(
+        self, key: IPCCacheEngineKey, instance_id: int
+    ) -> tuple[list[torch.Tensor], list[int]] | None:
+        """Prepare SHM buffers for a store operation.
+
+        Returns:
+            None: pickle mode — no pre-allocated buffers. Caller gathers all
+                chunks to CPU itself and sends the serialized data via
+                commit_store.
+            ([], []): SHM mode but all chunks already cached. Caller should
+                skip gather and commit entirely.
+            (tensors, chunk_indices): SHM mode with new chunks to write.
+                - tensors[i] is a writable SHM-backed buffer for one chunk.
+                - chunk_indices[i] is the position of that chunk in the full
+                  block_ids sequence (e.g. [0, 2] means only chunks 0 and 2
+                  need writing; chunk 1 is already cached).
+                Caller gathers only these chunks into the provided tensors,
+                then calls commit_store with empty payload.
+        """
         ...
 
     @abstractmethod
     def commit_store(
-        self, key: Any, instance_id: int, chunks: list[torch.Tensor]
+        self, key: IPCCacheEngineKey, instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
         """Commit store. Pickle: serialize and send. Shm: notify server."""
         ...
 
     @abstractmethod
-    def prepare_retrieve(self, key: Any, instance_id: int) -> list[torch.Tensor] | None:
+    def prepare_retrieve(
+        self, key: IPCCacheEngineKey, instance_id: int
+    ) -> list[torch.Tensor] | None:
         """Prepare retrieve. Returns chunks or shm views, or None on miss."""
         ...
 
     @abstractmethod
-    def commit_retrieve(self, key: Any, instance_id: int) -> bool:
+    def commit_retrieve(self, key: IPCCacheEngineKey, instance_id: int) -> bool:
         """Commit retrieve. Pickle: no-op. Shm: release read locks."""
         ...
 
@@ -98,26 +130,61 @@ class NonGpuContext(ABC):
 
 def create_non_gpu_context(
     metadata: NonGpuContextMetadata,
-    mq_client: Any,
+    mq_client: MessageQueueClient,
     mq_timeout: float,
+    shm_name: str,
+    pool_size: int,
+    *,
+    use_pickle: bool = False,
 ) -> NonGpuContext:
     """Factory that returns the appropriate :class:`NonGpuContext` implementation.
 
-    Currently always returns a pickle-based implementation
-    (``NonGpuContextPickle``). A future SHM-capable PR
-    may probe for shared-memory availability and fall back to pickle.
+    Returns SHM-based implementation when shared-memory pool information is
+    available; otherwise falls back to the pickle-based implementation.
+    If SHM initialization fails for any reason (e.g. segment not found,
+    permission error), gracefully falls back to pickle transport.
 
     Args:
         metadata: Layout metadata for the non-GPU context.
         mq_client: Message-queue client for server communication.
         mq_timeout: Timeout in seconds for blocking MQ requests.
+        shm_name: Shared-memory segment name. Empty values force pickle mode.
+        pool_size: Shared-memory pool size in bytes. Non-positive values force
+            pickle mode.
+        use_pickle: Explicitly use pickle transport even when SHM info is
+            available.
 
     Returns:
         A concrete :class:`NonGpuContext` instance.
     """
-    # Local
-    from .non_gpu_context_pickle import NonGpuContextPickle
+    if not shm_name or pool_size <= 0:
+        use_pickle = True
 
+    if not use_pickle:
+        # Local
+        from .shm import NonGpuContextShm
+
+        try:
+            logger.info(
+                "Creating NonGpuContextShm (shm_name=%s, pool_size=%d)",
+                shm_name,
+                pool_size,
+            )
+            return NonGpuContextShm(
+                metadata, mq_client, mq_timeout, shm_name, pool_size
+            )
+        except Exception:
+            logger.warning(
+                "Failed to initialize SHM context (shm_name=%s), "
+                "falling back to pickle transport",
+                shm_name,
+                exc_info=True,
+            )
+
+    # Local
+    from .pickle import NonGpuContextPickle
+
+    logger.info("Creating NonGpuContextPickle (pickle transport)")
     return NonGpuContextPickle(metadata, mq_client, mq_timeout)
 
 
@@ -128,8 +195,8 @@ def create_non_gpu_context(
 
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
-    layout_hints: Any | None = None,
-) -> tuple[int, int, int, str, Any]:
+    layout_hints: LayoutHints | None = None,
+) -> tuple[int, int, int, str, "lmc_ops.GPUKVFormat"]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
@@ -169,9 +236,10 @@ def gather_paged_kv_to_cpu(
     kv_caches: dict[str, torch.Tensor],
     block_ids: list[int],
     blocks_per_chunk: int,
-    layout_hints: Any | None = None,
-    gpu_kv_format: Any | None = None,
+    layout_hints: LayoutHints | None = None,
+    gpu_kv_format: "lmc_ops.GPUKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
+    chunk_indices: list[int] | None = None,
 ) -> list[torch.Tensor]:
     """Gather paged KV blocks into CPU chunk tensors.
 
@@ -181,6 +249,14 @@ def gather_paged_kv_to_cpu(
         blocks_per_chunk: Number of paged blocks in one LMCache chunk.
         layout_hints: Optional engine layout hints.
         gpu_kv_format: Optional pre-detected KV format.
+        out: Optional pre-allocated output tensors (one per entry in
+            ``chunk_indices`` when ``chunk_indices`` is given, or one per
+            chunk otherwise).
+        chunk_indices: Optional list of chunk positions (into the full
+            ``block_ids`` sequence) to gather.  When provided together with
+            ``out``, only those chunks are gathered and written into
+            ``out[i]`` in order.  When ``None``, all chunks are gathered
+            (backward-compatible behaviour).
 
     Returns:
         List of CPU tensors, one per chunk. For non-MLA each chunk has shape
@@ -216,7 +292,14 @@ def gather_paged_kv_to_cpu(
     layer_tensors = cast(list[torch.Tensor], normalized)
 
     chunks: list[torch.Tensor] = [] if out is None else out
-    for chunk_idx in range(num_chunks):
+
+    # When chunk_indices is given (SHM partial-reservation path), only
+    # process the specified subset.  The i-th entry in chunk_indices is the
+    # position of that chunk within the full block_ids sequence; the
+    # corresponding pre-allocated slot lives at out[i].
+    iter_indices = chunk_indices if chunk_indices is not None else range(num_chunks)
+
+    for out_idx, chunk_idx in enumerate(iter_indices):
         chunk_block_ids = block_ids[
             chunk_idx * blocks_per_chunk : (chunk_idx + 1) * blocks_per_chunk
         ]
@@ -232,7 +315,7 @@ def gather_paged_kv_to_cpu(
                 )
             chunk_tensor = torch.stack(mla_layers, dim=0)
             if out is not None:
-                out[chunk_idx].copy_(chunk_tensor, non_blocking=True)
+                out[out_idx].copy_(chunk_tensor, non_blocking=True)
             else:
                 chunks.append(chunk_tensor.cpu())
         else:
@@ -285,7 +368,7 @@ def gather_paged_kv_to_cpu(
             v_stacked = torch.stack(v_layers, dim=0)
             chunk_tensor = torch.stack([k_stacked, v_stacked], dim=0)
             if out is not None:
-                out[chunk_idx].copy_(chunk_tensor, non_blocking=True)
+                out[out_idx].copy_(chunk_tensor, non_blocking=True)
             else:
                 chunks.append(chunk_tensor.cpu())
     return chunks
@@ -297,8 +380,8 @@ def scatter_cpu_to_paged_kv(
     chunks: list[torch.Tensor],
     blocks_per_chunk: int,
     skip_first_n_tokens: int = 0,
-    layout_hints: Any | None = None,
-    gpu_kv_format: Any | None = None,
+    layout_hints: LayoutHints | None = None,
+    gpu_kv_format: "lmc_ops.GPUKVFormat" | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
