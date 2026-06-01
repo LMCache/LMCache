@@ -24,6 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
+    DataTransferContext,
     TransferContext,
     create_transfer_context,
 )
@@ -1339,9 +1340,14 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Unregistering kv caches")
         try:
+            unregister_type = (
+                RequestType.UNREGISTER_KV_CACHE_NON_GPU_CONTEXT
+                if isinstance(self.transfer_ctx, DataTransferContext)
+                else RequestType.UNREGISTER_KV_CACHE
+            )
             send_lmcache_request(
                 self.mq_client,
-                RequestType.UNREGISTER_KV_CACHE,
+                unregister_type,
                 [self.instance_id],
             ).result(timeout=self._mq_timeout)
         except TimeoutError:

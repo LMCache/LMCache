@@ -4,7 +4,8 @@ Engine protocol definitions for core KV cache operations.
 
 This module defines the protocol for:
 - REGISTER_KV_CACHE: Register a KV cache instance with the server
-- UNREGISTER_KV_CACHE: Unregister a KV cache instance
+- UNREGISTER_KV_CACHE: Unregister a KV cache instance (GPU path)
+- UNREGISTER_KV_CACHE_NON_GPU_CONTEXT: Unregister a non-GPU KV cache context
 - STORE: Store KV cache blocks to the server
 - RETRIEVE: Retrieve KV cache blocks from the server
 - LOOKUP: Submit a prefix lookup and return a prefetch job ID
@@ -46,6 +47,14 @@ class PrepareRetrieveResponse:
     )  # pickle: {}, shm will put slot info here
 
 
+@dataclass
+class RegisterNonGpuContextResponse:
+    """Response for REGISTER_KV_CACHE_NON_GPU_CONTEXT."""
+
+    shm_name: str = ""
+    pool_size: int = 0
+
+
 # Define request names for this protocol group
 REQUEST_NAMES = [
     "REGISTER_KV_CACHE",
@@ -58,6 +67,7 @@ REQUEST_NAMES = [
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
     "REGISTER_KV_CACHE_NON_GPU_CONTEXT",
+    "UNREGISTER_KV_CACHE_NON_GPU_CONTEXT",
     "PREPARE_STORE",
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
@@ -176,13 +186,22 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
+        # Unregister non-GPU KV cache context
+        # Payload:
+        #   - instance_id: int - Unique identifier for the vLLM instance
+        # Returns: None
+        "UNREGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
+        ),
         # Register non-GPU KV cache context
         # Payload:
         #   - RegisterNonGpuContextPayload - all metadata fields in one struct
-        # Returns: None
+        # Returns: RegisterNonGpuContextResponse
         "REGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
             payload_classes=[RegisterNonGpuContextPayload],
-            response_class=None,
+            response_class=RegisterNonGpuContextResponse,
             handler_type=HandlerType.SYNC,
         ),
         "PREPARE_STORE": ProtocolDefinition(

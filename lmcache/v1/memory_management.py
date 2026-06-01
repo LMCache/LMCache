@@ -300,6 +300,16 @@ class MemoryObj(metaclass=abc.ABCMeta):
         raise NotImplementedError
 
     @property
+    def shm_offset(self) -> int:
+        """Return the byte offset of this object inside the SHM pool."""
+        return self.meta.address
+
+    @property
+    def shm_byte_length(self) -> int:
+        """Return the byte length of this object inside the SHM pool."""
+        return self.get_size()
+
+    @property
     @abc.abstractmethod
     def metadata(self) -> MemoryObjMetadata:
         """
