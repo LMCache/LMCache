@@ -23,6 +23,10 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
+from lmcache.integration.vllm.mp_server_launcher import (
+    maybe_autostart_mp_server,
+    shutdown_mp_server_launcher,
+)
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
@@ -478,6 +482,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
+    - lmcache.mp.autostart: whether rank-0 worker should start a local
+      LMCache MP server.
+    - lmcache.mp.autostart.wait_timeout: timeout (seconds) for server health.
+    - lmcache.mp.autostart.health_url: server health endpoint URL.
+    - lmcache.mp.autostart.server_args: extra CLI args for the server process.
     """
 
     def __init__(
@@ -498,6 +507,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
+        extra_config = getattr(
+            vllm_config.kv_transfer_config, "kv_connector_extra_config", None
+        )
+        self._mp_server_launcher = None
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
                 server_url,
@@ -506,11 +519,21 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
-            self.worker_adapter = create_worker_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
+            self._mp_server_launcher = maybe_autostart_mp_server(
+                extra_config=extra_config,
+                server_host=str(server_host),
+                server_port=server_port,
+                rank=vllm_config.parallel_config.rank,
             )
+            try:
+                self.worker_adapter = create_worker_adapter(
+                    server_url,
+                    zmq_context,
+                    vllm_config,
+                )
+            except Exception:
+                shutdown_mp_server_launcher(self._mp_server_launcher)
+                raise
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -709,8 +732,12 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         is shutting down to ensure that all the async operations are
         completed and the connector is cleaned up properly.
         """
-        if hasattr(self, "worker_adapter"):
-            self.worker_adapter.shutdown()
+        try:
+            if hasattr(self, "worker_adapter"):
+                self.worker_adapter.shutdown()
+        finally:
+            launcher = getattr(self, "_mp_server_launcher", None)
+            shutdown_mp_server_launcher(launcher)
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":

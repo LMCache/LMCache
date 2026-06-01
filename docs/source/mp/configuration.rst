@@ -445,6 +445,34 @@ On the vLLM side, specify the LMCache server host and port via the
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.autostart``
+     - ``false``
+     - Whether worker rank 0 should start a local ``lmcache server`` process
+       before connecting to it. Only ``localhost`` and ``127.0.0.1`` are
+       supported.
+   * - ``lmcache.mp.autostart.wait_timeout``
+     - ``90.0``
+     - Timeout (seconds) to wait for the auto-started server's health endpoint
+       to report healthy.
+   * - ``lmcache.mp.autostart.health_url``
+     - ``http://127.0.0.1:<http-port>/healthcheck``
+     - Health endpoint polled by the connector. Override this when passing a
+       custom health endpoint to the auto-started server. The default HTTP
+       port is ``8080`` unless ``--http-port`` is present in
+       ``lmcache.mp.autostart.server_args``.
+   * - ``lmcache.mp.autostart.server_args``
+     - ``""``
+     - Extra command-line arguments passed to the auto-started MP HTTP server
+       process. For example, pass storage settings such as
+       ``--l1-size-gb 20 --eviction-policy LRU``.
+
+To let the vLLM worker start a local MP server automatically:
+
+.. code-block:: bash
+
+    vllm serve Qwen/Qwen3-14B \
+        --kv-transfer-config \
+        '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.autostart": true, "lmcache.mp.autostart.server_args": "--l1-size-gb 20 --eviction-policy LRU"}}'
 
 Environment Variables
 ---------------------
