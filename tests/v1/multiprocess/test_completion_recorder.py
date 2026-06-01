@@ -3,7 +3,6 @@
 """Tests for the C++ CompletionRecorder and DeviceHostFuncDispatcher."""
 
 # Standard
-from collections.abc import Iterator
 import threading
 import time
 
@@ -16,7 +15,6 @@ from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
-import lmcache.python_ops_fallback as fallback
 
 try:
     # Third Party
@@ -179,45 +177,3 @@ class TestDeadlockRegression:
             f"deadlock or drop: only {len(received)} of 200 dispatched"
         )
         assert len(received) == 200
-
-
-class _FakeStream:
-    """Minimal stream stub: cuda_stream_ptr is ignored by the fallback."""
-
-    ptr: int = 0
-
-
-@pytest.fixture()
-def clean_fallback() -> Iterator[None]:
-    """Drain the module-level buffer before and after each fallback test."""
-    fallback.drain_recorded_completions()
-    yield
-    fallback.drain_recorded_completions()
-
-
-class TestFallbackDispatcherIntegration:
-    """Integration: fallback queue → DeviceHostFuncDispatcher → handler."""
-
-    def test_callback_dispatched_end_to_end(
-        self, clean_fallback: None, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Patch native_completion._lmc_ops to the fallback, then verify that
-        submit_callback_to_stream → drain → handler fires correctly."""
-        # First Party
-        import lmcache.v1.multiprocess.native_completion as nc
-
-        monkeypatch.setattr(nc, "_lmc_ops", fallback)
-
-        dispatcher = DeviceHostFuncDispatcher(drain_interval_seconds=0.001)
-        received: list[list[bytes]] = []
-        dispatcher.register("finish_write", received.append, payload_type=list[bytes])
-        dispatcher.start()
-        try:
-            submit_callback_to_stream(_FakeStream(), "finish_write", [b"k0", b"k1"])
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline and not received:
-                time.sleep(0.01)
-        finally:
-            dispatcher.stop()
-
-        assert received == [[b"k0", b"k1"]]

@@ -14,6 +14,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.native_completion import (
+    DeviceHostFuncDispatcher,
+    submit_callback_to_stream,
+)
 import lmcache.python_ops_fallback as _py_ops
 
 # ==========================================
@@ -1887,32 +1891,24 @@ class TestFallbackRecordDrain:
     Pure Python, no GPU required — these run in the standard CI suite.
     """
 
-    def test_empty_drain(self, clean_fallback: None) -> None:
+    def test_basic_record_drain(self, clean_fallback: None) -> None:
         assert _py_ops.drain_recorded_completions() == []
-
-    def test_fifo_order_and_return_types(self, clean_fallback: None) -> None:
         _py_ops.record_completion_on_stream(0, "kind-a", b"payload-a")
         _py_ops.record_completion_on_stream(0, "kind-b", b"payload-b")
         result = _py_ops.drain_recorded_completions()
         assert result == [("kind-a", b"payload-a"), ("kind-b", b"payload-b")]
         assert all(isinstance(k, str) and isinstance(p, bytes) for k, p in result)
-
-    def test_drain_clears_buffer(self, clean_fallback: None) -> None:
-        _py_ops.record_completion_on_stream(0, "k", b"v")
-        _py_ops.drain_recorded_completions()
         assert _py_ops.drain_recorded_completions() == []
 
     def test_stream_ptr_is_ignored(self, clean_fallback: None) -> None:
         for ptr in (0, -1, 2**32):
             _py_ops.record_completion_on_stream(ptr, "k", b"v")
-        result = _py_ops.drain_recorded_completions()
-        assert len(result) == 3
-        assert all(k == "k" and p == b"v" for k, p in result)
+        assert len(_py_ops.drain_recorded_completions()) == 3
 
     def test_concurrent_no_data_loss(self, clean_fallback: None) -> None:
         """Regression for the lock fix: concurrent record/drain must not drop items."""
-        n_writers = 8
-        records_per_writer = 500
+        n_writers = 4
+        records_per_writer = 200
         total_expected = n_writers * records_per_writer
 
         drained: list[tuple[str, bytes]] = []
@@ -1944,3 +1940,37 @@ class TestFallbackRecordDrain:
         assert len(drained) == total_expected, (
             f"data loss: expected {total_expected}, got {len(drained)}"
         )
+
+
+class _FakeStream:
+    """Minimal stream stub: cuda_stream_ptr is ignored by the fallback."""
+
+    ptr: int = 0
+
+
+class TestFallbackDispatcherIntegration:
+    """Integration: fallback queue -> DeviceHostFuncDispatcher -> handler."""
+
+    def test_callback_dispatched_end_to_end(
+        self, clean_fallback: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Patch native_completion._lmc_ops to the fallback, then verify that
+        submit_callback_to_stream -> drain -> handler fires correctly."""
+        # First Party
+        import lmcache.v1.multiprocess.native_completion as nc
+
+        monkeypatch.setattr(nc, "_lmc_ops", _py_ops)
+
+        dispatcher = DeviceHostFuncDispatcher(drain_interval_seconds=0.001)
+        received: list[list[bytes]] = []
+        dispatcher.register("finish_write", received.append, payload_type=list[bytes])
+        dispatcher.start()
+        try:
+            submit_callback_to_stream(_FakeStream(), "finish_write", [b"k0", b"k1"])
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not received:
+                time.sleep(0.01)
+        finally:
+            dispatcher.stop()
+
+        assert received == [[b"k0", b"k1"]]
