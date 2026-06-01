@@ -471,6 +471,54 @@ def pick_up_clients(request: Request) -> tuple[ClientInfo, ClientInfo, ClientInf
     return round_robin_pick_clients()
 
 
+def completion_chunk_to_chat_chunk(completion_data: dict) -> Optional[dict]:
+    """Convert one ``/v1/completions`` stream chunk to ``chat.completion.chunk`` form.
+
+    The decoder's streaming response can include chunks with an empty
+    ``choices`` list -- for example the trailing usage/metadata frame emitted
+    when ``stream_options.include_usage`` is set. The previous inline code
+    indexed ``choices[0]`` unconditionally, so those frames raised
+    ``IndexError`` and aborted the whole proxied stream (LMCache#3475).
+
+    Such empty-``choices`` frames are dropped (return ``None``) rather than
+    converted: this proxy already surfaces the prefill token both by
+    appending it to the decoder prompt and by emitting it to the client as
+    completion content, so the decoder subrequest's ``usage`` is miscounted
+    for the original client request -- forwarding it would propagate wrong
+    token accounting. Dropping the frame also matches the pre-existing
+    behavior, where the converted chat chunk never carried ``usage``.
+
+    Args:
+        completion_data: A decoded ``text_completion`` stream chunk. Expected
+            keys: ``id`` / ``created`` / ``model`` and a ``choices`` list
+            (possibly empty); each choice carries ``text`` plus optional
+            ``logprobs`` / ``finish_reason``.
+
+    Returns:
+        A ``chat.completion.chunk``-shaped dict ready to be re-serialized,
+        or ``None`` when the source chunk has no choices and the caller
+        should skip it.
+    """
+    choices = completion_data.get("choices") or []
+    if not choices:
+        return None
+    first_choice = choices[0]
+    return {
+        "id": completion_data["id"],
+        "object": "chat.completion.chunk",
+        "created": completion_data["created"],
+        "model": completion_data["model"],
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": first_choice["text"]},
+                "logprobs": first_choice.get("logprobs"),
+                "finish_reason": first_choice.get("finish_reason"),
+            }
+        ],
+    }
+
+
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
     global counter, stats_calculator
@@ -714,28 +762,14 @@ async def handle_chat_completions(request: Request):
                         json_str = chunk_str[6:].strip()  # Remove 'data: ' prefix
                         if json_str:
                             completion_data = json.loads(json_str)
-                            chat_completion_data = {
-                                "id": completion_data["id"],
-                                "object": "chat.completion.chunk",
-                                "created": completion_data["created"],
-                                "model": completion_data["model"],
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "delta": {
-                                            "content": completion_data["choices"][0][
-                                                "text"
-                                            ]
-                                        },
-                                        "logprobs": completion_data["choices"][0].get(
-                                            "logprobs"
-                                        ),
-                                        "finish_reason": completion_data["choices"][
-                                            0
-                                        ].get("finish_reason"),
-                                    }
-                                ],
-                            }
+                            chat_completion_data = completion_chunk_to_chat_chunk(
+                                completion_data
+                            )
+                            # Empty-choices frames (e.g. the trailing usage
+                            # frame) convert to None and are skipped — see
+                            # completion_chunk_to_chat_chunk (LMCache#3475).
+                            if chat_completion_data is None:
+                                continue
                             converted_chunk = (
                                 "data: "
                                 + json.dumps(
