@@ -63,9 +63,19 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - JSON string of extra key-value config forwarded to runtime
        plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
        ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
+   * - ``--supported-transfer-mode``
+     - ``auto``
+     - Which worker → server transfer paths the server loads.
+       ``gpu`` enables only GPU-based IPC transfer (STORE/RETRIEVE);
+       ``non_gpu`` enables only the non-GPU (PREPARE/COMMIT) transfer
+       path; ``auto`` (default) loads both so workers of either device
+       type can connect without manual configuration.
+       Choices: ``gpu``, ``non_gpu``, ``auto``.
    * - ``--shm-name``
      - *(not set)*
-     - SHM segment name for non-GPU KV transfer.
+     - SHM segment name for non-GPU KV transfer (only used when the
+       non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
+       ``auto`` or ``non_gpu``).
        Not set (default): auto-allocate a shared-memory pool.
        ``""`` (empty string): disable SHM and force the pickle transfer
        path.  Any other value: use that exact name for the SHM pool
