@@ -161,6 +161,7 @@ The MP adapter is configured through `--l2-adapter` JSON:
   "meta_checkpoint_interval_sec": 60,
   "meta_enable_periodic": true,
   "load_checkpoint_on_init": true,
+  "blkdiscard_on_init": false,
   "meta_verify_on_load": true,
   "num_store_workers": 2,
   "num_lookup_workers": 1,
@@ -181,6 +182,9 @@ Important validation rules:
 - `per_tp_device_paths` is rejected in MP mode
 - `load_checkpoint_on_init=false` starts with an empty in-memory index instead
   of loading the latest on-device metadata checkpoint
+- `blkdiscard_on_init=true` issues a `BLKDISCARD` ioctl to zero/trim the full
+  device range on startup; requires `load_checkpoint_on_init=false` (combining
+  the two raises `ValueError`)
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
 - with `use_odirect=true`, raw-block I/O rejects offsets and total I/O lengths

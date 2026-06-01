@@ -193,6 +193,7 @@ class RawBlockCoreConfig:
     meta_verify_on_load: bool
     max_data_transfer_size: int = 0
     load_checkpoint_on_init: bool = True
+    blkdiscard_on_init: bool = False
     io_engine: str = "posix"
     iouring_queue_depth: int = DEFAULT_IOURING_QUEUE_DEPTH
     use_uring_cmd: bool = False
@@ -266,8 +267,9 @@ class RawBlockCore:
         self.meta_checkpoint_interval_sec = int(config.meta_checkpoint_interval_sec)
         self.meta_idle_quiet_ms = int(config.meta_idle_quiet_ms)
         self.meta_enable_periodic = bool(config.meta_enable_periodic)
-        self.load_checkpoint_on_init = bool(config.load_checkpoint_on_init)
         self.meta_verify_on_load = bool(config.meta_verify_on_load)
+        self.load_checkpoint_on_init = bool(config.load_checkpoint_on_init)
+        self.blkdiscard_on_init = bool(config.blkdiscard_on_init)
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.use_uring_cmd = bool(config.use_uring_cmd)
@@ -349,6 +351,10 @@ class RawBlockCore:
             self.max_data_transfer_size = self._resolve_max_data_transfer_size(
                 config.max_data_transfer_size
             )
+        if self.blkdiscard_on_init and self.load_checkpoint_on_init:
+            raise ValueError(
+                "blkdiscard_on_init requires load_checkpoint_on_init=False"
+            )
 
         try:
             self.meta_magic_text = self.meta_magic.decode("ascii")
@@ -396,6 +402,8 @@ class RawBlockCore:
                 self._load_checkpoint_from_device()
             else:
                 logger.info("RawBlockCore: skipping on-device metadata checkpoint load")
+                if self.blkdiscard_on_init:
+                    self._discard_full_device()
 
             if self.meta_enable_periodic:
                 self._meta_thread = threading.Thread(
@@ -1151,6 +1159,32 @@ class RawBlockCore:
         ptr = ctypes.addressof((ctypes.c_byte * 1).from_buffer(backing))
         offset = (-ptr) % self.block_align
         return memoryview(backing)[offset : offset + length]
+
+    def _discard_full_device(self) -> None:
+        """Issue BLKDISCARD via the Rust binding to discard the full device range.
+
+        This is a best-effort operation. When the underlying device does not
+        support TRIM/discard (e.g. a regular file or a driver that lacks
+        BLKDISCARD), the Rust binding raises ``OSError``; those errors are
+        logged as warnings and execution continues normally.
+        """
+        length = self._effective_capacity_bytes
+        if length <= 0:
+            return
+        try:
+            self._rawdev().discard(0, length)
+            logger.info(
+                "RawBlockCore: BLKDISCARD discarded %d bytes on %s",
+                length,
+                self.device_path,
+            )
+        except OSError as e:
+            logger.warning(
+                "RawBlockCore: BLKDISCARD failed on %s (%s); "
+                "device may not support TRIM or is not a block device",
+                self.device_path,
+                e,
+            )
 
     def _build_direct_odirect_view(
         self,

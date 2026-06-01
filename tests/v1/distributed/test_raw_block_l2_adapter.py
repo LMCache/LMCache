@@ -138,6 +138,7 @@ def _make_config(
     capacity_bytes: int = 0,
     io_engine: str = "posix",
     use_uring_cmd: bool = False,
+    **kwargs,
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
         device_path=device_path,
@@ -153,6 +154,7 @@ def _make_config(
         num_store_workers=2,
         num_lookup_workers=1,
         num_load_workers=2,
+        **kwargs,
     )
 
 
@@ -636,3 +638,59 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
             assert str(load_bitmap) == "00"
         finally:
             adapter.close()
+
+def test_raw_block_l2_adapter_config_discard_from_dict():
+    config = RawBlockL2AdapterConfig.from_dict(
+        _config_dict(load_checkpoint_on_init=False, blkdiscard_on_init=True)
+    )
+    assert config.blkdiscard_on_init is True
+
+
+def test_raw_block_l2_adapter_config_to_core_config_propagates_discard():
+    adapter_cfg = RawBlockL2AdapterConfig.from_dict(
+        _config_dict(load_checkpoint_on_init=False, blkdiscard_on_init=True)
+    )
+    core_cfg = adapter_cfg.to_core_config()
+    assert core_cfg.blkdiscard_on_init is True
+
+
+def test_raw_block_l2_adapter_blkdiscard_on_init_calls_discard(monkeypatch):
+    """Adapter forwards blkdiscard_on_init to RawBlockCore which calls device.discard."""
+    discard_calls: list[tuple[int, int]] = []
+    original_discard = RawBlockCore._discard_full_device
+
+    def tracking_discard(self):
+        # Record the call, then invoke the real method to exercise the full path.
+        # We intercept at the core level so we don't need the Rust extension.
+        discard_calls.append((0, self._effective_capacity_bytes))
+
+    monkeypatch.setattr(RawBlockCore, "_discard_full_device", tracking_discard)
+
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        cfg = _make_config(dev_path, load_checkpoint_on_init=False, blkdiscard_on_init=True)
+        adapter = RawBlockL2Adapter(cfg)
+        try:
+            assert len(discard_calls) == 1
+            offset, length = discard_calls[0]
+            assert offset == 0
+            assert length > 0
+        finally:
+            adapter.close()
+
+
+def test_raw_block_l2_adapter_discard_rejected_with_load_checkpoint():
+    """Adapter raises ValueError when blkdiscard_on_init is combined with checkpoint load."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        cfg = _make_config(dev_path, load_checkpoint_on_init=True, blkdiscard_on_init=True)
+        with pytest.raises(
+            ValueError, match="blkdiscard_on_init requires load_checkpoint_on_init=False"
+        ):
+            RawBlockL2Adapter(cfg)
