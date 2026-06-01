@@ -692,7 +692,9 @@ class LocalDiskBackend(StorageBackendInterface):
         num_hit_counts = 0
         with self.disk_lock:
             for key in keys:
-                if not self._ensure_disk_entry_from_file_locked(key, pin=pin):
+                # Async disk prefetch owns the scoped disk metadata pin. Pinning
+                # during lookup is not tracked by cleanup_memory_objs().
+                if not self._ensure_disk_entry_from_file_locked(key):
                     return num_hit_counts
                 num_hit_counts += 1
         return num_hit_counts

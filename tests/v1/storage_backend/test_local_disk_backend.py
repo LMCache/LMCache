@@ -18,6 +18,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 import lmcache.v1.storage_backend.local_disk_backend as local_disk_backend_module
@@ -435,6 +436,76 @@ class TestLocalDiskBackend:
                 memory_obj1.ref_count_down()
             if not memory_obj2_released:
                 memory_obj2.ref_count_down()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_batched_async_contains_pin_true_does_not_leak_disk_pin(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test async disk lookup pins are released after prefetch cleanup."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(26)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=4,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        loaded_mem_objs: list[MemoryObj] = []
+        memory_obj_released = False
+        PinMonitor.GetOrCreate(config, metadata)
+
+        try:
+            backend.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend, key)
+            memory_obj.ref_count_down()
+            memory_obj_released = True
+
+            assert backend.dict[key].pin_count == 0
+            contains_future = asyncio.run_coroutine_threadsafe(
+                backend.batched_async_contains("lookup", [key], pin=True),
+                loop_in_thread,
+            )
+            assert contains_future.result(timeout=5) == 1
+            assert backend.dict[key].pin_count == 0
+
+            get_future = asyncio.run_coroutine_threadsafe(
+                backend.batched_get_non_blocking("lookup", [key]),
+                loop_in_thread,
+            )
+            loaded_mem_objs = get_future.result(timeout=5)
+            assert len(loaded_mem_objs) == 1
+
+            for loaded_mem_obj in loaded_mem_objs:
+                if loaded_mem_obj.is_pinned:
+                    loaded_mem_obj.unpin()
+                loaded_mem_obj.ref_count_down()
+            loaded_mem_objs = []
+
+            assert backend.dict[key].pin_count == 0
+        finally:
+            backend.close()
+            for loaded_mem_obj in loaded_mem_objs:
+                if loaded_mem_obj.is_pinned:
+                    loaded_mem_obj.unpin()
+                loaded_mem_obj.ref_count_down()
+            if not memory_obj_released:
+                memory_obj.ref_count_down()
+            PinMonitor.DestroyInstance()
             local_cpu_backend.memory_allocator.close()
 
     def test_contains_handles_file_disappearing_before_getsize(
