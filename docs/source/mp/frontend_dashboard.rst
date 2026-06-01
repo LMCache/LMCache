@@ -110,7 +110,7 @@ Alternatively, use the provided example script:
 
 .. code-block:: bash
 
-    bash examples/lmcache_frontend/run_mp_server_with_frontend.sh
+    bash lmcache/lmcache_frontend/run_mp_server_with_frontend.sh
 
 **Step 3 — Start the dashboard**
 

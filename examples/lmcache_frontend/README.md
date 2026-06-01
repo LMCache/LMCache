@@ -59,7 +59,7 @@ try the flow end-to-end right after `pip install lmcache`.
 3. Start the LMCache MP HTTP server with the frontend plugin:
 
    ```bash
-   bash examples/lmcache_frontend/run_mp_server_with_frontend.sh
+bash lmcache/lmcache_frontend/run_mp_server_with_frontend.sh
    ```
 
    Under the hood this runs (see the script for the full command):
