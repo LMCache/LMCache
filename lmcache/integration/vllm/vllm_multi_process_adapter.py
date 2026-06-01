@@ -8,6 +8,7 @@ import os
 import threading
 
 # Third Party
+from vllm.config import VllmConfig
 import torch
 import zmq
 
@@ -237,9 +238,15 @@ class ParallelStrategy:
     """vLLM-side pipeline parallel size."""
 
     @classmethod
-    def from_vllm_config(cls, vllm_config) -> "ParallelStrategy":
-        """Build a :class:`ParallelStrategy` from a vLLM config.
+    def from_vllm_config(cls, vllm_config: "VllmConfig") -> "ParallelStrategy":
+        """Build a ParallelStrategy from a vLLM config.
         Centralises the (vllm_config -> KV parallel geometry) mapping.
+
+        Args:
+            vllm_config: The vLLM configuration object.
+
+        Returns:
+            The constructed ParallelStrategy.
         """
         pc = vllm_config.parallel_config
         return cls(
@@ -252,16 +259,17 @@ class ParallelStrategy:
 
     @property
     def kv_world_size(self) -> int:
-        """How many different pieces the KV cache is split into
-        in the lmcache server storage."""
+        """Number of pieces a single token chunk's KV cache is split into
+        on the LMCache server storage."""
         if self.use_mla:
             return self.vllm_world_size // self.tp_size
         return self.vllm_world_size
 
     @property
     def kv_worker_id(self) -> int:
-        """Which piece of the KV cache the current worker has, in
-        ``[0, kv_world_size)``."""
+        """Index of the piece of a single token chunk's KV cache
+        that the current worker is responsible for,
+        in ``[0, kv_world_size)``."""
         if self.use_mla:
             return self.vllm_worker_id // self.tp_size
         return self.vllm_worker_id
