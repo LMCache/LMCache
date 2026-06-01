@@ -129,9 +129,9 @@ contribute to histograms; counters above always count all events.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_store_submitted` | `lmcache_mp_l2_store_submitted_requests_total` | Counter | `L2_STORE_SUBMITTED` | +1 per event |
-| `lmcache_mp.l2_store_submitted_objects` | `lmcache_mp_l2_store_submitted_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_STORE_SUBMITTED` | `+len(keys)`, grouped by `cache_salt` |
+| `lmcache_mp.l2_store_submitted_objects` | `lmcache_mp_l2_store_submitted_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_STORE_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_store_completed` | `lmcache_mp_l2_store_completed_requests_total` | Counter (attr: `l2_name`) | `L2_STORE_COMPLETED` | +1 per event |
-| `lmcache_mp.l2_store_completed_objects` | `lmcache_mp_l2_store_completed_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_STORE_COMPLETED` | `+len(succeeded_keys)`, grouped by `cache_salt` |
+| `lmcache_mp.l2_store_completed_objects` | `lmcache_mp_l2_store_completed_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_STORE_COMPLETED` | `+count` per `cache_salt` via `key_count_per_salt` |
 
 **What it answers:** How many chunks are being pushed to L2? What fraction fail?
 
@@ -142,11 +142,11 @@ contribute to histograms; counters above always count all events.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.l2_prefetch_lookup` | `lmcache_mp_l2_prefetch_lookup_requests_total` | Counter | `L2_PREFETCH_LOOKUP_SUBMITTED` | +1 per event |
-| `lmcache_mp.l2_prefetch_lookup_objects` | `lmcache_mp_l2_prefetch_lookup_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+len(keys)`, grouped by `cache_salt` |
+| `lmcache_mp.l2_prefetch_lookup_objects` | `lmcache_mp_l2_prefetch_lookup_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOOKUP_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_prefetch_hit` | `lmcache_mp_l2_prefetch_hit_chunks_total` | Counter | `L2_PREFETCH_LOOKUP_COMPLETED` | `+prefix_hit_count` |
 | `lmcache_mp.l2_prefetch_load_submitted` | `lmcache_mp_l2_prefetch_load_submitted_requests_total` | Counter | `L2_PREFETCH_LOAD_SUBMITTED` | `+adapter_count` (per-adapter task count) |
-| `lmcache_mp.l2_prefetch_load_submitted_objects` | `lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOAD_SUBMITTED` | `+len(keys)`, grouped by `cache_salt` |
-| `lmcache_mp.l2_prefetch_load_completed` | `lmcache_mp_l2_prefetch_load_completed_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOAD_COMPLETED` | `+len(loaded_keys)`, grouped by `cache_salt` |
+| `lmcache_mp.l2_prefetch_load_submitted_objects` | `lmcache_mp_l2_prefetch_load_submitted_objects_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOAD_SUBMITTED` | `+count` per `cache_salt` via `key_count_per_salt` |
+| `lmcache_mp.l2_prefetch_load_completed` | `lmcache_mp_l2_prefetch_load_completed_chunks_total` | Counter (attr: `cache_salt`) | `L2_PREFETCH_LOAD_COMPLETED` | `+count` per `cache_salt` via `key_count_per_salt` |
 | `lmcache_mp.l2_load_completed` | `lmcache_mp_l2_load_completed_requests_total` | Counter (attr: `l2_name`) | `L2_LOAD_TASK_COMPLETED` | +1 per event |
 
 **What it answers:** How effective is L2 prefetching? What is the L2 hit rate?

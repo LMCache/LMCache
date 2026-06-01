@@ -14,7 +14,9 @@ from opentelemetry import metrics
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
-from lmcache.v1.mp_observability.subscribers.metrics.utils import emit_by_salt
+from lmcache.v1.mp_observability.subscribers.metrics.utils import (
+    emit_salt_counts,
+)
 
 
 def _l2_name_attrs(event: Event) -> dict[str, Any]:
@@ -129,38 +131,26 @@ class L2MetricsSubscriber(EventSubscriber):
 
     def _on_store_submitted(self, event: Event) -> None:
         self._store_submitted.add(1)
-        emit_by_salt(self._store_submitted_objects, event.metadata.get("keys", []))
+        emit_salt_counts(self._store_submitted_objects, event)
 
     def _on_store_completed(self, event: Event) -> None:
         attrs = _l2_name_attrs(event)
         self._store_completed.add(1, attributes=attrs)
-        emit_by_salt(
-            self._store_completed_objects,
-            event.metadata.get("succeeded_keys", []),
-        )
+        emit_salt_counts(self._store_completed_objects, event)
 
     def _on_load_task_completed(self, event: Event) -> None:
         self._load_completed.add(1, attributes=_l2_name_attrs(event))
 
     def _on_lookup_submitted(self, event: Event) -> None:
         self._prefetch_lookup_submitted.add(1)
-        emit_by_salt(
-            self._prefetch_lookup_submitted_objects,
-            event.metadata.get("keys", []),
-        )
+        emit_salt_counts(self._prefetch_lookup_submitted_objects, event)
 
     def _on_lookup_completed(self, event: Event) -> None:
         self._prefetch_lookup_hit.add(event.metadata["prefix_hit_count"])
 
     def _on_load_submitted(self, event: Event) -> None:
         self._prefetch_load_submitted.add(event.metadata["adapter_count"])
-        emit_by_salt(
-            self._prefetch_load_submitted_objects,
-            event.metadata.get("keys", []),
-        )
+        emit_salt_counts(self._prefetch_load_submitted_objects, event)
 
     def _on_load_completed(self, event: Event) -> None:
-        emit_by_salt(
-            self._prefetch_load_completed,
-            event.metadata.get("loaded_keys", []),
-        )
+        emit_salt_counts(self._prefetch_load_completed, event)
