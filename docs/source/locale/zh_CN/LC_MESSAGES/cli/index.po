@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-05-25 10:41+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -77,27 +77,28 @@ msgstr "``bench``"
 
 #: ../../source/cli/index.rst:30
 msgid ""
-"Run sustained performance benchmarks against an inference engine, or an "
-"end-to-end sanity test against an LMCache MP server."
-msgstr "对推理引擎运行持续性能基准测试，或对 LMCache MP 服务器进行端到端的完整性测试。"
+"Run sustained performance benchmarks against an inference engine, an end-"
+"to-end sanity test against an LMCache MP server, or a throughput/latency "
+"benchmark against an L2 cache adapter."
+msgstr "对推理引擎运行持续性能基准测试，对 LMCache MP 服务器进行端到端的有效性测试，或对 L2 缓存适配器进行吞吐量/延迟基准测试。"
 
-#: ../../source/cli/index.rst:32
+#: ../../source/cli/index.rst:33
 msgid "``kvcache``"
 msgstr "``kvcache``"
 
-#: ../../source/cli/index.rst:33
+#: ../../source/cli/index.rst:34
 msgid "Manage KV cache state (e.g. clear L1 cache)."
 msgstr "管理 KV Cache 状态（例如，清除 L1 缓存）。"
 
-#: ../../source/cli/index.rst:34
+#: ../../source/cli/index.rst:35
 msgid "``server``"
 msgstr "``server``"
 
-#: ../../source/cli/index.rst:35
+#: ../../source/cli/index.rst:36
 msgid "Launch the LMCache server (ZMQ + HTTP)."
 msgstr "启动 LMCache 服务器（ZMQ + HTTP）。"
 
-#: ../../source/cli/index.rst:37
+#: ../../source/cli/index.rst:38
 msgid "For a comprehensive guide with examples, see :doc:`/getting_started/cli`."
 msgstr "有关带有示例的全面指南，请参见 :doc:`/getting_started/cli`。"
 
