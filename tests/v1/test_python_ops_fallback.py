@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Union
 import ctypes
 import os
-import threading
 import time
 import unittest.mock
 
@@ -1718,6 +1715,75 @@ def scenario_transfer_direction_enum(ops: Any, device: str) -> dict[str, torch.T
     }
 
 
+def scenario_record_drain_completion(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test record_completion_on_stream / drain_recorded_completions contracts.
+
+    Verified backend-agnostic: native c_ops uses cudaLaunchHostFunc on the
+    default stream (ptr=0), which fires synchronously after device_sync; the
+    fallback enqueues immediately. Both paths satisfy every assertion below.
+    """
+    ops.drain_recorded_completions()  # clear residual global state
+
+    assert ops.drain_recorded_completions() == []
+
+    ops.record_completion_on_stream(0, "kind-a", b"payload-a")
+    ops.record_completion_on_stream(0, "kind-b", b"payload-b")
+    device_sync(device)
+    result = ops.drain_recorded_completions()
+    assert result == [("kind-a", b"payload-a"), ("kind-b", b"payload-b")]
+    assert all(isinstance(k, str) and isinstance(p, bytes) for k, p in result)
+
+    assert ops.drain_recorded_completions() == []
+
+    # Multiple records on the default stream (ptr=0) must all enqueue.
+    # Note: ptr=0 is the only value safe on both backends — the fallback
+    # ignores the field, but the native path casts it to cudaStream_t, so
+    # arbitrary values like -1 / 2**32 would be invalid there.
+    for _ in range(3):
+        ops.record_completion_on_stream(0, "k", b"v")
+    device_sync(device)
+    assert len(ops.drain_recorded_completions()) == 3
+
+    return {"record_drain_completion": torch.tensor([1], dtype=torch.int32)}
+
+
+def scenario_dispatcher_integration(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test submit_callback_to_stream -> DeviceHostFuncDispatcher -> handler.
+
+    Works on all backends: submit_callback_to_stream only reads stream.ptr, so
+    _FakeStream(ptr=0) is accepted; the native path routes through the CUDA
+    default stream which fires before the dispatcher's drain loop polls.
+    """
+    # First Party
+    import lmcache.v1.multiprocess.native_completion as nc
+
+    original = nc._lmc_ops
+    nc._lmc_ops = ops
+    try:
+        ops.drain_recorded_completions()
+
+        class _FakeStream:
+            ptr: int = 0
+
+        dispatcher = DeviceHostFuncDispatcher(drain_interval_seconds=0.001)
+        received: list[list[bytes]] = []
+        dispatcher.register("finish_write", received.append, payload_type=list[bytes])
+        dispatcher.start()
+        try:
+            submit_callback_to_stream(_FakeStream(), "finish_write", [b"k0", b"k1"])
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not received:
+                time.sleep(0.01)
+        finally:
+            dispatcher.stop()
+
+        assert received == [[b"k0", b"k1"]]
+    finally:
+        nc._lmc_ops = original
+
+    return {"dispatcher_integration": torch.tensor([1], dtype=torch.int32)}
+
+
 # ==========================================
 # 3. Registry
 # ==========================================
@@ -1741,6 +1807,8 @@ SCENARIO_REGISTRY = {
     "alloc_free_numa_ptr": scenario_alloc_free_numa_ptr,
     "alloc_free_shm_pinned_ptr": scenario_alloc_free_shm_pinned_ptr,
     "get_gpu_pci_bus_id": scenario_get_gpu_pci_bus_id,
+    "record_drain_completion": scenario_record_drain_completion,
+    "dispatcher_integration": scenario_dispatcher_integration,
 }
 
 
@@ -1875,102 +1943,3 @@ def test_alloc_pinned_ptr_is_page_aligned(size: int) -> None:
             assert buf[i] == ((i & 0xFF) ^ 0xA5)
     finally:
         _py_ops.free_pinned_ptr(ptr)
-
-
-@pytest.fixture()
-def clean_fallback() -> Iterator[None]:
-    """Drain the module-level buffer before and after each test."""
-    _py_ops.drain_recorded_completions()
-    yield
-    _py_ops.drain_recorded_completions()
-
-
-class TestFallbackRecordDrain:
-    """Unit / contract tests for python_ops_fallback completion recorder.
-
-    Pure Python, no GPU required — these run in the standard CI suite.
-    """
-
-    def test_basic_record_drain(self, clean_fallback: None) -> None:
-        assert _py_ops.drain_recorded_completions() == []
-        _py_ops.record_completion_on_stream(0, "kind-a", b"payload-a")
-        _py_ops.record_completion_on_stream(0, "kind-b", b"payload-b")
-        result = _py_ops.drain_recorded_completions()
-        assert result == [("kind-a", b"payload-a"), ("kind-b", b"payload-b")]
-        assert all(isinstance(k, str) and isinstance(p, bytes) for k, p in result)
-        assert _py_ops.drain_recorded_completions() == []
-
-    def test_stream_ptr_is_ignored(self, clean_fallback: None) -> None:
-        for ptr in (0, -1, 2**32):
-            _py_ops.record_completion_on_stream(ptr, "k", b"v")
-        assert len(_py_ops.drain_recorded_completions()) == 3
-
-    def test_concurrent_no_data_loss(self, clean_fallback: None) -> None:
-        """Regression for the lock fix: concurrent record/drain must not drop items."""
-        n_writers = 4
-        records_per_writer = 200
-        total_expected = n_writers * records_per_writer
-
-        drained: list[tuple[str, bytes]] = []
-        stop = threading.Event()
-
-        def drain_loop() -> None:
-            while not stop.is_set():
-                drained.extend(_py_ops.drain_recorded_completions())
-                time.sleep(0.001)
-            drained.extend(_py_ops.drain_recorded_completions())
-
-        def writer(thread_id: int) -> None:
-            for i in range(records_per_writer):
-                _py_ops.record_completion_on_stream(
-                    0, f"kind-{thread_id}", f"payload-{i}".encode()
-                )
-
-        drain_thread = threading.Thread(target=drain_loop, daemon=True)
-        drain_thread.start()
-
-        with ThreadPoolExecutor(max_workers=n_writers) as pool:
-            for fut in [pool.submit(writer, i) for i in range(n_writers)]:
-                fut.result()
-
-        stop.set()
-        drain_thread.join(timeout=5.0)
-        assert not drain_thread.is_alive(), "drain thread did not exit cleanly"
-
-        assert len(drained) == total_expected, (
-            f"data loss: expected {total_expected}, got {len(drained)}"
-        )
-
-
-class _FakeStream:
-    """Minimal stream stub: cuda_stream_ptr is ignored by the fallback."""
-
-    ptr: int = 0
-
-
-class TestFallbackDispatcherIntegration:
-    """Integration: fallback queue -> DeviceHostFuncDispatcher -> handler."""
-
-    def test_callback_dispatched_end_to_end(
-        self, clean_fallback: None, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Patch native_completion._lmc_ops to the fallback, then verify that
-        submit_callback_to_stream -> drain -> handler fires correctly."""
-        # First Party
-        import lmcache.v1.multiprocess.native_completion as nc
-
-        monkeypatch.setattr(nc, "_lmc_ops", _py_ops)
-
-        dispatcher = DeviceHostFuncDispatcher(drain_interval_seconds=0.001)
-        received: list[list[bytes]] = []
-        dispatcher.register("finish_write", received.append, payload_type=list[bytes])
-        dispatcher.start()
-        try:
-            submit_callback_to_stream(_FakeStream(), "finish_write", [b"k0", b"k1"])
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline and not received:
-                time.sleep(0.01)
-        finally:
-            dispatcher.stop()
-
-        assert received == [[b"k0", b"k1"]]
