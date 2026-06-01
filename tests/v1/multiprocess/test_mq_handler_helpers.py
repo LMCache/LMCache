@@ -11,8 +11,8 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
+    EngineGroup,
     KVCache,
-    LMCacheKVSpec,
 )
 from lmcache.v1.multiprocess.protocol import KeyType
 
@@ -41,7 +41,7 @@ def register_kv_cache_handler(
     world_size: int,
     engine_type: EngineType,
     layout_hints: LayoutHints,
-    lmc_kv_cache_groups: LMCacheKVSpec,
+    lmc_kv_cache_groups: list[EngineGroup],
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -86,9 +86,8 @@ def register_kv_cache_handler(
         "Expected layout_hints['inference_engine_logical_block_size'] to be int, got "
         f"{type(ie_logical_block_size)}"
     )
-    assert isinstance(lmc_kv_cache_groups, LMCacheKVSpec), (
-        "Expected lmc_kv_cache_groups to be LMCacheKVSpec, got "
-        f"{type(lmc_kv_cache_groups)}"
+    assert isinstance(lmc_kv_cache_groups, list), (
+        f"Expected lmc_kv_cache_groups to be a list, got {type(lmc_kv_cache_groups)}"
     )
     # No return value (returns None implicitly)
 

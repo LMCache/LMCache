@@ -27,9 +27,9 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
+    EngineGroup,
     IPCCacheEngineKey,
     KVCache,
-    LMCacheKVSpec,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -235,7 +235,7 @@ class GPUTransferModule:
         world_size: int,
         engine_type: EngineType,
         layout_hints: LayoutHints,
-        lmc_kv_cache_groups: LMCacheKVSpec,
+        lmc_kv_cache_groups: list[EngineGroup],
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -353,7 +353,6 @@ class GPUTransferModule:
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            gpu_block_ids = gpu_context.normalize_lmc_group_block_ids(gpu_block_ids)
             block_ids_per_lmc_group_gpu = gpu_context.copy_lmc_group_block_ids_to_gpu(
                 gpu_block_ids
             )
@@ -425,7 +424,7 @@ class GPUTransferModule:
                             raise ValueError(
                                 "STORE block ID underflow: "
                                 f"lmc_group_idx={lmc_group_idx} "
-                                f"hybrid_group={group.hybrid_block_group_idx} "
+                                f"engine_group={group.engine_block_group_idx} "
                                 f"chunk={idx} expected={blocks_per_chunk} "
                                 f"got={chunk_block_ids_gpu.shape[0]}"
                             )
@@ -623,7 +622,7 @@ class GPUTransferModule:
                         raise ValueError(
                             "RETRIEVE block ID underflow: "
                             f"lmc_group_idx={lmc_group_idx} "
-                            f"hybrid_block_group_idx={group.hybrid_block_group_idx} "
+                            f"engine_block_group_idx={group.engine_block_group_idx} "
                             f"batch={batch_idx} "
                             f"expected={batch_len * blocks_per_chunk} "
                             f"got={chunk_block_ids_gpu.shape[0]}"
@@ -653,7 +652,6 @@ class GPUTransferModule:
             torch_dev.stream(gpu_context.stream),
         ):
             # Copy all block_ids to GPU once before the loop
-            gpu_block_ids = gpu_context.normalize_lmc_group_block_ids(gpu_block_ids)
             block_ids_per_lmc_group_gpu = gpu_context.copy_lmc_group_block_ids_to_gpu(
                 gpu_block_ids
             )

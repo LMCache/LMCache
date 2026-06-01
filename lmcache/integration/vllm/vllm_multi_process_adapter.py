@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn, cast
+from typing import Any, Callable, NoReturn
 import enum
 import os
 import threading
@@ -18,9 +19,10 @@ from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
+    EngineGroup,
     IPCCacheEngineKey,
     KVCache,
-    LMCacheKVSpec,
+    expand_block_ids_to_lmc_groups,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -396,13 +398,10 @@ class LoadStoreOp:
     token_ids: list[int]
     """Token IDs for the load/store operation"""
 
-    block_ids: list[int] | list[list[int]]
-    """Block IDs for the load/store operation.
-
-    Scheduler-side HMA metadata uses ``list[list[int]]`` indexed by engine
-    KV cache group. Legacy single-group callers may still pass the prior flat
-    ``list[int]`` shape. Worker submit paths expand this to LMCache KV group
-    order before sending requests to the server.
+    block_ids: list[list[int]]
+    """Block IDs for the load/store operation, indexed by engine KV cache
+    group (one inner list per engine block group). Worker submit paths expand
+    this to LMCache KV group order before sending requests to the server.
     """
 
     start: int = 0
@@ -416,26 +415,13 @@ class LoadStoreOp:
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
     @property
-    def block_ids_per_engine_group(self) -> list[list[int]]:
-        """Return block IDs indexed by engine KV cache group."""
-        if not self.block_ids:
-            return [[]]
-        first = self.block_ids[0]
-        if isinstance(first, list):
-            return cast(list[list[int]], self.block_ids)
-        return [cast(list[int], self.block_ids)]
-
-    @property
     def flat_block_ids(self) -> list[int]:
-        """Return all block IDs flattened for engine-group-blind error paths."""
+        """Return all block IDs flattened for group-blind error paths."""
         return [
             block_id
-            for engine_group_block_ids in self.block_ids_per_engine_group
-            for block_id in engine_group_block_ids
+            for group_block_ids in self.block_ids
+            for block_id in group_block_ids
         ]
-
-    def __len__(self) -> int:
-        return len(self.block_ids_per_engine_group[0])
 
 
 StoreResult = bool
@@ -860,7 +846,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self.lmc_kv_cache_groups: LMCacheKVSpec | None = None
+        self.lmc_kv_cache_groups: list[EngineGroup] = []
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -970,7 +956,7 @@ class LMCacheMPWorkerAdapter:
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
-        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
+        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -986,14 +972,11 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
-        self.lmc_kv_cache_groups = lmc_kv_cache_groups
+        self.lmc_kv_cache_groups = list(lmc_kv_cache_groups)
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_lmc_group(self, op: LoadStoreOp) -> list[list[int]]:
-        lmc_kv_cache_groups = self.lmc_kv_cache_groups or LMCacheKVSpec()
-        return lmc_kv_cache_groups.expand_block_ids_to_lmc_groups(
-            op.block_ids_per_engine_group
-        )
+        return expand_block_ids_to_lmc_groups(self.lmc_kv_cache_groups, op.block_ids)
 
     def _send_register_kv_caches_request(
         self, kv_caches: dict[str, torch.Tensor]

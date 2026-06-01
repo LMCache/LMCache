@@ -24,7 +24,6 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
-    LMCacheKVSpec,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -344,7 +343,7 @@ def registered_instance(
             1,
             EngineType.VLLM,
             {"inference_engine_logical_block_size": 16},
-            LMCacheKVSpec(),
+            [],
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
@@ -403,7 +402,7 @@ def test_register_unregister_kv_cache(
             1,
             EngineType.VLLM,
             {"inference_engine_logical_block_size": 16},
-            LMCacheKVSpec(),
+            [],
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )

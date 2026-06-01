@@ -94,7 +94,7 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def normalize_block_ids_per_engine_group(
+def normalize_block_ids(
     block_ids: tuple[list[int], ...] | None,
 ) -> tuple[list[int], ...]:
     """Normalize vLLM per-engine-group block IDs to a concrete tuple.
@@ -295,22 +295,20 @@ class LMCacheMPRequestTracker:
         """
         self.num_stored_blocks += num_new_blocks
 
-    def append_block_ids_per_engine_group(
+    def append_block_ids(
         self,
-        new_block_ids_per_engine_group: tuple[list[int], ...],
+        new_block_ids: tuple[list[int], ...],
     ):
         """Update the block ids for the current request
         This function will be called when processing the cached requests.
         """
-        for engine_group_idx, group_block_ids in enumerate(
-            new_block_ids_per_engine_group
-        ):
+        for engine_group_idx, group_block_ids in enumerate(new_block_ids):
             if group_block_ids:
                 self.allocated_block_ids.setdefault(engine_group_idx, []).extend(
                     group_block_ids
                 )
 
-    def num_allocated_blocks_per_engine_group(self) -> dict[int, int]:
+    def num_allocated_blocks(self) -> dict[int, int]:
         return {
             engine_group_idx: len(blocks)
             for engine_group_idx, blocks in self.allocated_block_ids.items()
@@ -324,8 +322,8 @@ class LMCacheMPRequestTracker:
             f"LMCacheMPRequestTracker(request_id={self.request_id}, "
             f"num_tokens={len(self.all_token_ids)}, "
             f"num_block_hashes={len(self.block_hashes)}, "
-            f"num_allocated_blocks_per_engine_group="
-            f"{self.num_allocated_blocks_per_engine_group()}, "
+            f"num_allocated_blocks="
+            f"{self.num_allocated_blocks()}, "
             f"num_stored_blocks={self.num_stored_blocks}, "
             f"vllm_hit_blocks={self.num_vllm_hit_blocks}, "
             f"lmcache_hit_blocks={self.num_lmcache_hit_blocks}, "
@@ -344,17 +342,29 @@ class LMCacheMPRequestMetadata:
     cache_salt: str = ""
 
     @staticmethod
-    def _per_engine_group_slice(
+    def _slice_block_ids(
         tracker: LMCacheMPRequestTracker,
         num_engine_groups: int,
         start: int,
         end: int,
     ) -> list[list[int]]:
-        """Slice every vLLM KV cache group's block IDs for ``[start, end)``.
+        """Slice every engine group's block IDs for the block range.
 
-        Minimal HMA support assumes all groups share vLLM's scheduler block
-        size. DeepSeek-V4's per-group logical/physical block-size mapping is
-        intentionally left for a follow-up.
+        Args:
+            tracker: Request tracker holding the per-engine-group block IDs.
+            num_engine_groups: Number of engine KV cache groups; the result
+                has one inner list per group, in engine-group order.
+            start: Start **block** index (inclusive), not a token index.
+            end: End **block** index (exclusive), not a token index.
+
+        Returns:
+            One ``list[int]`` of block IDs per engine group, each sliced to
+            ``[start, end)``.
+
+        Notes:
+            Minimal HMA support assumes all groups share vLLM's scheduler
+            block size. DeepSeek-V4's per-group logical/physical block-size
+            mapping is intentionally left for a follow-up.
         """
         return [
             tracker.allocated_block_ids.get(engine_group_idx, [])[start:end]
@@ -375,6 +385,8 @@ class LMCacheMPRequestMetadata:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
             vllm_block_size: the block size used in vLLM
+            num_engine_groups: number of engine KV cache groups; the op's
+                block IDs carry one inner list per group, in engine order.
         """
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
@@ -401,10 +413,10 @@ class LMCacheMPRequestMetadata:
         computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
-        per_engine_group_lengths = tracker.num_allocated_blocks_per_engine_group()
+        allocated_lengths = tracker.num_allocated_blocks()
         allocated_blocks = (
             min(
-                per_engine_group_lengths.get(engine_group_idx, 0)
+                allocated_lengths.get(engine_group_idx, 0)
                 for engine_group_idx in range(num_engine_groups)
             )
             if num_engine_groups > 0
@@ -421,7 +433,7 @@ class LMCacheMPRequestMetadata:
         if num_chunks >= 1:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
-            block_ids = LMCacheMPRequestMetadata._per_engine_group_slice(
+            block_ids = LMCacheMPRequestMetadata._slice_block_ids(
                 tracker, num_engine_groups, start, end
             )
             start_token_idx = start * vllm_block_size
@@ -461,6 +473,8 @@ class LMCacheMPRequestMetadata:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
             vllm_block_size: the block size used in vLLM
+            num_engine_groups: number of engine KV cache groups; the op's
+                block IDs carry one inner list per group, in engine order.
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -481,7 +495,7 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit blocks. "
         )
         if end > start:
-            block_ids = LMCacheMPRequestMetadata._per_engine_group_slice(
+            block_ids = LMCacheMPRequestMetadata._slice_block_ids(
                 tracker, num_engine_groups, start, end
             )
             start_token_idx = start * vllm_block_size
@@ -533,7 +547,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
                 f"direction={req_meta.direction}, "
-                f"num_blocks={len(req_meta.op)}, "
+                f"num_blocks={len(req_meta.op.block_ids[0])}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
         return "[" + "\n".join(request_strs) + "]"
@@ -590,8 +604,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.vllm_block_size = vllm_config.cache_config.block_size
         # The scheduler side only needs the number of engine KV cache groups
-        # (to slice per-engine-group block IDs); the full LMCacheKVSpec is built
-        # worker-side in register_kv_caches where the real tensors are available.
+        # (to slice per-engine-group block IDs); the full list[EngineGroup] is
+        # built worker-side in register_kv_caches where the tensors are available.
         # Engine group ids are dense (0..N-1), so the count is just the number
         # of vLLM KV cache groups (>=1).
         kv_cache_config = getattr(self, "_kv_cache_config", None)
@@ -914,18 +928,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
-        block_ids_per_engine_group = normalize_block_ids_per_engine_group(
-            blocks.get_block_ids()
-        )
+        block_ids = normalize_block_ids(blocks.get_block_ids())
 
         # Only append blocks beyond what's already tracked, per engine group.
-        existing_per_engine_group = tracker.num_allocated_blocks_per_engine_group()
-        new_per_engine_group: list[list[int]] = []
-        for engine_group_idx, group_blocks in enumerate(block_ids_per_engine_group):
-            existing = existing_per_engine_group.get(engine_group_idx, 0)
-            new_per_engine_group.append(list(group_blocks[existing:]))
-        if any(new_per_engine_group):
-            tracker.append_block_ids_per_engine_group(tuple(new_per_engine_group))
+        existing_counts = tracker.num_allocated_blocks()
+        new_block_ids: list[list[int]] = []
+        for engine_group_idx, group_blocks in enumerate(block_ids):
+            existing = existing_counts.get(engine_group_idx, 0)
+            new_block_ids.append(list(group_blocks[existing:]))
+        if any(new_block_ids):
+            tracker.append_block_ids(tuple(new_block_ids))
 
         # Update the state of the tracker
         condition = tracker.needs_retrieve()
@@ -1177,11 +1189,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request_tracker = self._get_request_tracker(request_id)
 
             # Update block ids
-            new_block_ids = normalize_block_ids_per_engine_group(
-                cached_reqs.new_block_ids[idx]
-            )
+            new_block_ids = normalize_block_ids(cached_reqs.new_block_ids[idx])
             if request_id not in cached_reqs.resumed_req_ids:
-                request_tracker.append_block_ids_per_engine_group(new_block_ids)
+                request_tracker.append_block_ids(new_block_ids)
 
             # Use the incremental num_scheduled_tokens to
             # stay consistent with _process_new_requests.
@@ -1234,14 +1244,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # can correctly identify block content.
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
-            new_block_ids_per_engine_group = normalize_block_ids_per_engine_group(
-                cached_reqs.new_block_ids[idx]
-            )
-            new_block_ids = (
-                list(new_block_ids_per_engine_group[0])
-                if new_block_ids_per_engine_group
-                else []
-            )
+            block_ids = normalize_block_ids(cached_reqs.new_block_ids[idx])
+            new_block_ids = list(block_ids[0]) if block_ids else []
             if not new_block_ids:
                 continue
             tracker = self.request_trackers.get(request_id)

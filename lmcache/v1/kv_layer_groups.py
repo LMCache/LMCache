@@ -18,7 +18,7 @@ import lmcache.c_ops as lmc_ops
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.utils import DiscoverableKVCache, LayoutHints
-    from lmcache.v1.multiprocess.custom_types import LMCacheKVSpec
+    from lmcache.v1.multiprocess.custom_types import EngineGroup
 
 logger = init_logger(__name__)
 
@@ -42,8 +42,8 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 
 # The tuple that uniquely identifies a set of kernel-equivalent layers; one
 # distinct identity becomes one LMCache KV group:
-# ``(kv_size, num_heads, head_size, block_size, hybrid_block_group_idx, dtype)``.
-# The ``hybrid_block_group_idx`` slot is the hybrid block group id (one paged-
+# ``(kv_size, num_heads, head_size, block_size, engine_block_group_idx, dtype)``.
+# The ``engine_block_group_idx`` slot is the engine block group id (one paged-
 # block address space). Block IDs are only meaningful within one such group, so
 # layers from different groups must not share one LMCache group (and thus one
 # transfer-kernel launch) even if their tensor shape and dtype match.
@@ -54,7 +54,7 @@ def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
     gpu_kv_format: "lmc_ops.GPUKVFormat",
     num_layers: int,
-    per_layer_hybrid_block_group_idx: Sequence[int] | None = None,
+    per_layer_engine_block_group_idx: Sequence[int] | None = None,
 ) -> list[tuple[LayerGroupIdentity, list[int]]]:
     """Partition layer indices by :data:`LayerGroupIdentity`.
 
@@ -67,9 +67,9 @@ def group_layers_by_identity(
         gpu_kv_format: Format descriptor returned by
             :func:`normalize_kv_and_discover_format`, used to read heads/sizes.
         num_layers: Number of registered KV tensors to partition.
-        per_layer_hybrid_block_group_idx: Optional per-registered-index hybrid
+        per_layer_engine_block_group_idx: Optional per-registered-index engine
             block group id. When ``None`` every layer is treated as block group
-            0 (non-hybrid); when present, layers from different hybrid block
+            0 (non-hybrid); when present, layers from different engine block
             groups never share an identity even if their tensor shapes match.
 
     Returns:
@@ -94,12 +94,12 @@ def group_layers_by_identity(
         hs = get_head_size(kv_caches, gpu_kv_format, idx)
         dt = get_dtype(kv_caches, gpu_kv_format, idx)
         bs = get_block_size(kv_caches, gpu_kv_format, idx)
-        hybrid_block_group_idx = (
-            per_layer_hybrid_block_group_idx[idx]
-            if per_layer_hybrid_block_group_idx is not None
+        engine_block_group_idx = (
+            per_layer_engine_block_group_idx[idx]
+            if per_layer_engine_block_group_idx is not None
             else 0
         )
-        groups_dict[(kv_size, nh, hs, bs, hybrid_block_group_idx, dt)].append(idx)
+        groups_dict[(kv_size, nh, hs, bs, engine_block_group_idx, dt)].append(idx)
     return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
 
 
@@ -111,7 +111,7 @@ class KVLayerGroupInfo:
     Membership is decided by :class:`KVLayerGroupsManager` according to
     :data:`LayerGroupIdentity`; every layer referenced by
     ``layer_indices`` shares the same
-    ``(kv_size, num_heads, head_size, block_size, hybrid_block_group_idx,
+    ``(kv_size, num_heads, head_size, block_size, engine_block_group_idx,
     dtype)`` signature.
     Consumers use ``layer_indices`` to pull the matching device pointers
     out of ``kv_caches`` (via
@@ -156,8 +156,8 @@ class KVLayerGroupInfo:
     means the field has not been populated yet; ``GPUCacheContext``
     fills it in after construction once ``lmcache_logical_chunk_size``
     is known."""
-    hybrid_block_group_idx: int = 0
-    """Hybrid block group index (paged-block address space). 0 for non-hybrid."""
+    engine_block_group_idx: int = 0
+    """Engine block group index (paged-block address space). 0 for non-hybrid."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -175,7 +175,7 @@ class KVLayerGroupInfo:
             f"dtype={self.dtype}, "
             f"compress_ratio={self.compress_ratio}, "
             f"physical_chunk_size={self.physical_chunk_size}, "
-            f"hybrid_block_group_idx={self.hybrid_block_group_idx})"
+            f"engine_block_group_idx={self.engine_block_group_idx})"
         )
 
     @property
@@ -194,7 +194,7 @@ class KVLayerGroupsManager:
 
     At construction time, every layer in ``kv_caches`` is bucketed by its
     :data:`LayerGroupIdentity` (``(kv_size, num_heads, head_size,
-    block_size, hybrid_block_group_idx, dtype)``). Each bucket becomes one
+    block_size, engine_block_group_idx, dtype)``). Each bucket becomes one
     :class:`KVLayerGroupInfo` holding the layer indices, a shared
     :class:`PageBufferShapeDesc`, and the group's torch dtype.
 
@@ -215,7 +215,7 @@ class KVLayerGroupsManager:
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_blocks: int,
         layout_hints: "LayoutHints | None" = None,
-        lmc_kv_cache_groups: "LMCacheKVSpec | None" = None,
+        lmc_kv_cache_groups: "Sequence[EngineGroup]" = (),
         lmcache_logical_chunk_size: int = 256,
     ) -> None:
         """Partition layers into groups keyed by
@@ -265,6 +265,7 @@ class KVLayerGroupsManager:
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
+        from lmcache.v1.multiprocess.custom_types import get_engine_group_indices
 
         # Pull the inference-engine logical block size out of
         # ``layout_hints`` once; ``None`` means no compression info
@@ -284,14 +285,12 @@ class KVLayerGroupsManager:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
 
-        per_layer_hybrid_block_group_idx = (
-            lmc_kv_cache_groups.get_per_layer_hybrid_block_group_indices(num_layers)
-            if lmc_kv_cache_groups is not None
-            else None
+        per_layer_engine_block_group_idx = get_engine_group_indices(
+            lmc_kv_cache_groups, num_layers
         )
 
         groups_by_identity = group_layers_by_identity(
-            kv_caches, gpu_kv_format, num_layers, per_layer_hybrid_block_group_idx
+            kv_caches, gpu_kv_format, num_layers, per_layer_engine_block_group_idx
         )
 
         # Emit groups in order of their first-appearing layer so that group
@@ -329,7 +328,7 @@ class KVLayerGroupsManager:
                     dtype=dt,
                     compress_ratio=compress_ratio,
                     physical_chunk_size=physical_chunk_size,
-                    hybrid_block_group_idx=hbg_idx,
+                    engine_block_group_idx=hbg_idx,
                 )
             )
 

@@ -3,6 +3,7 @@
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any, Callable, Protocol
 
 # Third Party
@@ -14,7 +15,7 @@ from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
 from lmcache.v1.multiprocess.custom_types import (
-    LMCacheKVSpec,
+    EngineGroup,
     RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -42,7 +43,7 @@ class IPCEvent(Protocol):
 SendRequest = Callable[[MessageQueueClient, RequestType, list[object]], MessagingFuture]
 
 
-def _single_engine_group_block_ids(block_ids: list[list[int]]) -> list[int]:
+def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
     """Return the flat block-id list for transports without HMA support."""
     if len(block_ids) != 1:
         raise RuntimeError("non-GPU transfer does not support hybrid KV cache groups")
@@ -70,7 +71,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
+        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -176,7 +177,7 @@ class HandleTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
+        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
     ) -> None:
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
@@ -193,7 +194,7 @@ class HandleTransferContext(TransferContext):
                 world_size,
                 EngineType.VLLM,
                 layout_hints,
-                lmc_kv_cache_groups or LMCacheKVSpec(),
+                list(lmc_kv_cache_groups),
             ],
         )
         future.result(timeout=mq_timeout)
@@ -265,14 +266,14 @@ class DataTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
+        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
         ``lmc_kv_cache_groups`` is accepted to satisfy the base interface but
         is currently a no-op: the non-GPU transfer path does not support
         hybrid KV cache groups and rejects multi-group transfers at store /
-        retrieve time (see ``_single_engine_group_block_ids``).
+        retrieve time (see ``_single_group_block_ids``).
         """
         # TODO: inference_engine_logical_block_size is currently used by
         # DeepSeek V4 on the CUDA path. The non-CUDA path is yet to be
@@ -343,7 +344,7 @@ class DataTransferContext(TransferContext):
         out_buffers = self._non_gpu_context.prepare_store(key, instance_id)
         cpu_chunks = gather_paged_kv_to_cpu(
             kv_caches,
-            _single_engine_group_block_ids(block_ids),
+            _single_group_block_ids(block_ids),
             blocks_in_chunk,
             layout_hints=self._layout_hints,
             gpu_kv_format=self._gpu_kv_format,
@@ -378,7 +379,7 @@ class DataTransferContext(TransferContext):
             try:
                 scatter_cpu_to_paged_kv(
                     kv_caches,
-                    _single_engine_group_block_ids(block_ids),
+                    _single_group_block_ids(block_ids),
                     src_buffers,
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,

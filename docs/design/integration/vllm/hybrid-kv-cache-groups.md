@@ -8,15 +8,15 @@ group design used by the multiprocess vLLM connector.
 The key idea is to separate three concepts that are easy to conflate:
 
 - Engine KV cache groups: groups defined by the serving engine.
-- `LMCacheKVSpec`: LMCache's engine-neutral, `msgspec`-encoded group contract.
+- The LMCache KV spec (`list[EngineGroup]`): LMCache's engine-neutral,
+  `msgspec`-encoded group contract.
 - `KVLayerGroupInfo`: LMCache's runtime transfer-kernel dispatch groups.
 
 vLLM may organize KV cache groups by engine-side cache behavior. LMCache needs
 to transfer KV tensors by physical layout compatibility: KV size, number of
 heads, head size, physical block size, dtype, and the engine block-id space.
-Therefore, vLLM-side groups are inflated into LMCache KV groups at
-registration time. Store and retrieve requests then address those inflated
-LMCache groups directly.
+Therefore, vLLM-side groups are built into LMCache KV groups at registration
+time. Store and retrieve requests then address those LMCache groups directly.
 
 ## Motivation
 
@@ -37,8 +37,8 @@ optimizations are separate concerns layered on top of this contract.
 - Keep vLLM-specific field reads in `lmcache.integration.vllm`.
 - Make registration define the protocol-visible LMCache KV group order.
 - Make store and retrieve block IDs indexed by LMCache KV group index.
-- Reuse the same layer-grouping logic for vLLM-side inflation and server-side
-  runtime group construction.
+- Reuse the same layer-grouping logic for vLLM-side group construction and
+  server-side runtime group construction.
 - Keep real tensors as the source of truth for physical transfer shape.
 
 ## Non-Goals
@@ -57,34 +57,39 @@ optimizations are separate concerns layered on top of this contract.
 An engine KV cache group is a serving-engine-native group. In vLLM this comes
 from `KVCacheConfig.kv_cache_groups`.
 
-The engine group ID is preserved as `hybrid_block_group_id` because block
-IDs reported by vLLM are indexed by engine group.
+The engine group ID is recorded as `engine_block_group_id` because block IDs
+reported by vLLM are indexed by engine group (one distinct paged-block address
+space per group).
 
-### `LMCacheKVGroup`
+### `EngineGroup`
 
-`LMCacheKVGroup` is LMCache's neutral group descriptor, a `msgspec.Struct`. It
-does not contain vLLM objects.
+`EngineGroup` is LMCache's neutral group descriptor, a `msgspec.Struct`. It does
+not contain vLLM objects. Each group records:
 
-Each group currently records:
-
-- `hybrid_block_group_id`;
+- `engine_block_group_id`;
 - `layer_indices`.
 
-After creation, each `LMCacheKVGroup` corresponds to one protocol-visible
-LMCache KV group. Store and retrieve block IDs are indexed by this group order.
+Each `EngineGroup` corresponds to one protocol-visible LMCache KV group. Several
+`EngineGroup`s may share the same `engine_block_group_id` when one engine block
+group is split by physical transfer identity. Store and retrieve block IDs are
+indexed by this group order.
 
-### `LMCacheKVSpec`
+### LMCache KV spec (`list[EngineGroup]`)
 
-`LMCacheKVSpec` is the registration contract: a `msgspec.Struct` of
-`LMCacheKVGroup`s. Because it is a `msgspec.Struct`, the multiprocess message
-queue encodes/decodes it directly in the `REGISTER_KV_CACHE` payload — there is
-no separate JSON serialization step.
+The registration contract is simply a `list[EngineGroup]` — there is no wrapper
+type. Because each element is a `msgspec.Struct`, the multiprocess message queue
+encodes/decodes the list directly in the `REGISTER_KV_CACHE` payload (typed
+`list[EngineGroup]`); there is no separate JSON serialization step. An empty
+list means a single non-hybrid group (the default for engines that do not report
+KV cache group metadata).
 
-It also provides:
+Engine-neutral module-level helpers in `custom_types.py` operate on a
+`Sequence[EngineGroup]`:
 
-- `hybrid_block_group_ids_by_lmc_group()`;
-- `expand_block_ids_to_lmc_groups(...)`;
-- `get_per_layer_hybrid_block_group_indices(...)`.
+- `num_engine_block_groups(groups)`;
+- `num_lmc_kv_cache_groups(groups)`;
+- `expand_block_ids_to_lmc_groups(groups, engine_side_block_ids)`;
+- `get_engine_group_indices(groups, num_registered_layers)`.
 
 ### `KVLayerGroupInfo`
 
@@ -96,7 +101,7 @@ dispatch group. It contains kernel-facing data such as:
 - dtype;
 - compression ratio;
 - physical chunk size;
-- hybrid block group index.
+- engine block group index.
 
 It should not be serialized as the API contract because it depends on the real
 registered tensors and kernel implementation details.
@@ -108,11 +113,11 @@ vLLM KVCacheConfig + registered kv_caches
         |
         | lmcache.integration.vllm.kv_cache_groups
         v
-Inflated LMCacheKVSpec
+list[EngineGroup]
         |
         | REGISTER_KV_CACHE over ZMQ
         v
-LMCache server msgspec-decodes LMCacheKVSpec
+LMCache server msgspec-decodes list[EngineGroup]
         |
         | KVLayerGroupsManager validates against real tensors
         v
@@ -125,26 +130,27 @@ Transfer kernels
 
 ## Registration
 
-During `register_kv_caches`, the vLLM connector builds inflated
-`LMCacheKVSpec`.
+During `register_kv_caches`, the vLLM connector builds the `list[EngineGroup]`
+via `create_lmcache_kv_spec_from_vllm(...)`.
 
 The process is:
 
-1. Convert vLLM's native KV cache groups to base `LMCacheKVSpec`.
-2. Normalize and inspect the registered KV tensors.
+1. Inspect the registered KV tensors for physical layout and dtype.
+2. Read vLLM's native KV cache groups to map each registered layer to its
+   engine block group index (the only place that reads vLLM `KVCacheConfig`).
 3. Reuse `group_layers_by_identity(...)` to split layers by LMCache physical
    transfer identity.
-4. Emit one `LMCacheKVGroup` per LMCache transfer identity.
-5. Pass the `LMCacheKVSpec` in the `REGISTER_KV_CACHE` payload; the message
+4. Emit one `EngineGroup` per LMCache transfer identity.
+5. Pass the `list[EngineGroup]` in the `REGISTER_KV_CACHE` payload; the message
    queue `msgspec`-encodes it directly.
 
-The layer identity used for inflation is:
+The layer identity used for grouping is:
 
 ```text
-(kv_size, num_heads, head_size, block_size, hybrid_block_group_idx, dtype)
+(kv_size, num_heads, head_size, block_size, engine_block_group_idx, dtype)
 ```
 
-The `hybrid_block_group_idx` component is important. It prevents layers with
+The `engine_block_group_idx` component is important. It prevents layers with
 identical tensor shape from being merged if their block IDs come from different
 engine KV cache groups.
 
@@ -154,18 +160,14 @@ vLLM scheduler metadata still naturally starts as engine-group-indexed block
 IDs:
 
 ```text
-block_ids_by_engine_group[engine_group_idx] -> list[int]
+block_ids[engine_group_idx] -> list[int]
 ```
 
 Before sending requests to the LMCache server, the worker adapter expands these
-block IDs to LMCache group order:
-
-```text
-block_ids_by_lmc_group[lmc_group_idx]
-    = block_ids_by_engine_group[
-        lmc_kv_cache_groups.groups[lmc_group_idx].hybrid_block_group_id
-      ]
-```
+block IDs to LMCache group order with
+`expand_block_ids_to_lmc_groups(groups, engine_side_block_ids)`, where each
+LMCache group reuses the block IDs from its source engine block group
+(`groups[lmc_group_idx].engine_block_group_id`).
 
 The ZMQ `STORE` and `RETRIEVE` APIs therefore receive:
 
@@ -189,7 +191,7 @@ engine group 1: layers [1, 3]
 ```
 
 If layers 0, 1, 2, and 3 have the same transfer shape, but layer 4 has a
-different hidden dimension, inflation produces:
+different hidden dimension, the conversion produces:
 
 ```text
 LMCache group 0: engine group 0, layers [0, 2]
@@ -214,27 +216,29 @@ LMCache group 2: [10, 11]
 
 ## Invariants
 
-- The inflated `LMCacheKVSpec` order is the protocol-visible LMCache group
-  order.
-- Store and retrieve request block IDs are indexed by inflated LMCache group
-  order.
+- The `list[EngineGroup]` order is the protocol-visible LMCache group order.
+- Store and retrieve request block IDs are indexed by that LMCache group order:
+  callers must send one block-id list per LMCache group.
 - vLLM-specific metadata access stays in `lmcache.integration.vllm`.
-- `LMCacheKVSpec` contains neutral metadata only.
+- `EngineGroup` contains neutral metadata only.
 - `KVLayerGroupsManager` derives runtime `KVLayerGroupInfo` from real tensors.
 - Server-side runtime grouping must use the same `group_layers_by_identity(...)`
-  helper as vLLM-side inflation.
+  helper as vLLM-side group construction.
 - Serialized metadata may guide grouping, but real tensors remain the source of
   truth for shape, dtype, and stride.
 
-## Compatibility
+## Caller Contract
 
-For legacy single-group callers, the server accepts a single block-ID list. If
-LMCache derives multiple physical groups but all of them belong to engine group
-0, the server duplicates that single list across all LMCache groups.
+Every caller sends block IDs in LMCache group order (one `list[int]` per LMCache
+group). There is no server-side single-list fallback.
 
-This compatibility fallback does not apply to true multi-engine-group HMA.
-When multiple engine block-id spaces exist, callers must send block IDs in
-LMCache group order.
+- The vLLM worker adapter expands engine-group block IDs to LMCache group order
+  via `expand_block_ids_to_lmc_groups(...)`.
+- Callers with a single block-id space (the TRT-LLM adapter, the
+  `lmcache bench kvcache` CLI) register an empty `list[EngineGroup]`. When the
+  server derives several physical groups from a multi-shape registration, the
+  caller sends one block-id list per group (the bench replicates its single
+  logical list `num_lmc_groups` times).
 
 ## Relationship to `layout_hints`
 
@@ -247,8 +251,8 @@ They remain for tensor interpretation metadata such as:
 - inference-engine logical block size, currently used to derive compression
   metadata.
 
-Future work may move logical block-size or compression policy into
-`LMCacheKVSpec`, but HMA group identity should not be carried in
+Future work may move logical block-size or compression policy into the
+`EngineGroup` metadata, but HMA group identity should not be carried in
 `layout_hints`.
 
 ## Alternatives Considered
@@ -280,7 +284,7 @@ separate API migration.
 
 ## Follow-Up Work
 
-- Add sliding-window and Mamba metadata fields to `LMCacheKVGroup` as neutral
+- Add sliding-window and Mamba metadata fields to `EngineGroup` as neutral
   per-group or per-layer semantics.
 - Add a load-plan interface that trims retrieved tokens according to full
   attention and sliding-window cache availability.
@@ -293,9 +297,9 @@ separate API migration.
 
 | Area | File |
 |---|---|
-| Neutral msgspec group model (IPC type) | `lmcache/v1/multiprocess/custom_types.py` |
+| Neutral msgspec group model (IPC type) + helpers | `lmcache/v1/multiprocess/custom_types.py` |
 | Shared physical grouping helper | `lmcache/v1/kv_layer_groups.py` |
-| vLLM conversion to LMCacheKVSpec | `lmcache/integration/vllm/kv_cache_groups.py` |
+| vLLM conversion to `list[EngineGroup]` | `lmcache/integration/vllm/kv_cache_groups.py` |
 | vLLM register/store/retrieve path | `lmcache/integration/vllm/lmcache_mp_connector.py`, `lmcache/integration/vllm/vllm_multi_process_adapter.py` |
 | Server-side GPU context | `lmcache/v1/multiprocess/gpu_context.py` |
 | Server-side transfer loop | `lmcache/v1/multiprocess/modules/gpu_transfer.py` |

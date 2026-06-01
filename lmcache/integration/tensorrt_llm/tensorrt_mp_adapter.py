@@ -36,7 +36,6 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType, check_interprocess_event_support
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
-    LMCacheKVSpec,
     RawCudaIPCWrapper,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
@@ -369,7 +368,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                 self._world_size,
                 EngineType.TRTLLM,
                 layout_hints,
-                LMCacheKVSpec(),
+                [],
             ],
         )
         try:

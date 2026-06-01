@@ -23,7 +23,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
-from lmcache.v1.multiprocess.custom_types import LMCacheKVGroup, LMCacheKVSpec
+from lmcache.v1.multiprocess.custom_types import EngineGroup
 from lmcache.v1.multiprocess.protocol import RequestType
 
 
@@ -139,7 +139,7 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     fake_future = MagicMock()
     transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
-    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[0], start=0, end=4)
+    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
 
     adapter.submit_store_request("req-1", op, event=MagicMock())
 
@@ -157,13 +157,11 @@ def test_submit_store_request_expands_block_ids_to_lmc_groups(
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     adapter.kv_caches = {"layer.0": fake_tensor}
-    adapter.lmc_kv_cache_groups = LMCacheKVSpec.from_groups(
-        [
-            LMCacheKVGroup(0, (0, 2)),
-            LMCacheKVGroup(0, (4,)),
-            LMCacheKVGroup(1, (1, 3)),
-        ]
-    )
+    adapter.lmc_kv_cache_groups = [
+        EngineGroup(0, (0, 2)),
+        EngineGroup(0, (4,)),
+        EngineGroup(1, (1, 3)),
+    ]
     transfer_ctx = MagicMock()
     fake_future = MagicMock()
     transfer_ctx.submit_store.return_value = fake_future
@@ -197,7 +195,7 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
         token_ids=[1, 2, 3, 4],
-        block_ids=[0],
+        block_ids=[[0]],
         start=0,
         end=4,
         skip_first_n_tokens=1,
@@ -219,6 +217,5 @@ def test_load_store_op_accepts_per_group_block_ids():
         end=4,
     )
 
-    assert op.block_ids_per_engine_group == [[0, 1], [10, 11]]
+    assert op.block_ids == [[0, 1], [10, 11]]
     assert op.flat_block_ids == [0, 1, 10, 11]
-    assert len(op) == 2

@@ -54,7 +54,6 @@ try:
     from lmcache.v1.multiprocess.custom_types import (
         CudaIPCWrapper,
         IPCCacheEngineKey,
-        LMCacheKVSpec,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -273,7 +272,7 @@ def _send_register_kv_cache(
         world_size,
         EngineType.VLLM,
         hints,
-        LMCacheKVSpec(),
+        [],
     ]
     result = _call(client, RequestType.REGISTER_KV_CACHE, payloads)
     return result is not _TIMEOUT
@@ -332,12 +331,13 @@ def _send_store(
     key: IPCCacheEngineKey,
     block_offset: int = 0,
     block_size: int = 16,
+    num_lmc_groups: int = 1,
 ) -> str:
     """STORE — store KV cache blocks. Returns status string."""
     num_tokens = key.end - key.start
     num_blocks = num_tokens // block_size
     block_ids = list(range(block_offset, block_offset + num_blocks))
-    payloads = [key, _INSTANCE_ID, [block_ids], _make_event_handle()]
+    payloads = [key, _INSTANCE_ID, [block_ids] * num_lmc_groups, _make_event_handle()]
     result = _call(client, RequestType.STORE, payloads)
     if result is _TIMEOUT:
         return "timeout"
@@ -351,6 +351,7 @@ def _send_retrieve(
     hit_chunks: int,
     block_offset: int = 0,
     block_size: int = 16,
+    num_lmc_groups: int = 1,
 ) -> str:
     """RETRIEVE — retrieve KV cache blocks. Returns status."""
     hit_tokens = hit_chunks * chunk_size
@@ -359,7 +360,7 @@ def _send_retrieve(
     payloads = [
         key,
         _INSTANCE_ID,
-        [block_ids],
+        [block_ids] * num_lmc_groups,
         _make_event_handle(),
         0,  # skip_first_n_tokens
     ]
@@ -462,6 +463,7 @@ def _process_request(
     http_base: str = "",
     block_size: int = 16,
     total_blocks: int = 1024,
+    num_lmc_groups: int = 1,
 ) -> list[str] | None:
     """Run the full lookup -> retrieve/store flow."""
     token_ids = _build_token_ids(seq_no, num_tokens)
@@ -538,6 +540,7 @@ def _process_request(
             hit_chunks,
             block_offset=block_offset,
             block_size=block_size,
+            num_lmc_groups=num_lmc_groups,
         )
         retrieve_ms = (time.monotonic() - t1) * 1000
         print(
@@ -570,6 +573,7 @@ def _process_request(
             store_key,
             block_offset=store_block_off,
             block_size=block_size,
+            num_lmc_groups=num_lmc_groups,
         )
         store_ms = (time.monotonic() - t2) * 1000
         print(

@@ -17,7 +17,6 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
     IPCCacheEngineKey,
-    LMCacheKVSpec,
 )
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
@@ -393,7 +392,7 @@ def test_mq_register_kv_cache():
             1,
             EngineType.VLLM,
             {"vllm_block_size": 16},
-            LMCacheKVSpec(),
+            [],
         ],
         expected_response=None,
         num_requests=1,

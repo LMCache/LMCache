@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable
 import pickle
@@ -407,195 +407,176 @@ class CBMatchResult:
 
 
 # ------------------------------------------------------------------ #
-#  Hybrid KV cache group metadata (engine-neutral)                     #
+#  Engine KV cache group metadata (engine-neutral)                     #
 # ------------------------------------------------------------------ #
 #
-# A *hybrid block group* is one distinct paged-block address space: block IDs
+# An *engine block group* is one distinct paged-block address space: block IDs
 # are only meaningful within a single group, and layers from different groups
 # must never be merged into one LMCache KV group. They correspond to the serving
-# engine's KV cache groups (e.g. vLLM's hybrid KV cache manager), but that
-# mapping is resolved at the engine boundary — from LMCache's side these are
-# just neutral block groups. Engine-specific conversion belongs in the
-# corresponding ``lmcache.integration.<engine>`` package, not here.
+# engine's KV cache groups (e.g. vLLM's hybrid KV cache manager). Engine-specific
+# conversion belongs in the corresponding ``lmcache.integration.<engine>``
+# package, not here.
+#
+# LMCache's neutral KV cache spec is simply a ``list[EngineGroup]`` (passed as a
+# ``Sequence[EngineGroup]`` where only order matters). The group order is the
+# protocol-visible LMCache group order used by store/retrieve block IDs. An
+# empty list means a single non-hybrid group (the default for engines that do
+# not report KV cache group metadata).
 
 
-class LMCacheKVGroup(msgspec.Struct, frozen=True):
-    """One LMCache hybrid block group: layers sharing one block-id space.
+class EngineGroup(msgspec.Struct, frozen=True):
+    """One LMCache KV group: layers that share a single GPU copy kernel.
 
-    A ``msgspec.Struct`` so it can be encoded/decoded directly as part of a
-    multiprocess IPC payload.
+    Several ``EngineGroup`` instances may share the same
+    ``engine_block_group_id`` when one engine block group is split by physical
+    transfer identity (e.g. differing hidden dims). A ``list[EngineGroup]`` is
+    carried verbatim in the ``REGISTER_KV_CACHE`` IPC payload; the message queue
+    handles encoding/decoding.
     """
 
-    hybrid_block_group_id: int
-    """Hybrid block group ID; selects which request block-id list applies."""
+    engine_block_group_id: int
+    """Engine block group this group's layers live in (one distinct paged-block
+    address space). Selects which request block-id list applies."""
 
     layer_indices: tuple[int, ...] = ()
-    """Registered KV tensor indices assigned to this hybrid block group."""
+    """Registered KV tensor indices assigned to this group."""
 
 
-class LMCacheKVSpec(msgspec.Struct, frozen=True):
-    """LMCache's neutral KV cache group spec (a tuple of hybrid block groups).
+def num_engine_block_groups(groups: Sequence[EngineGroup]) -> int:
+    """Return the number of engine block groups (block-id lists per request).
 
-    A ``msgspec.Struct`` carried verbatim in the ``REGISTER_KV_CACHE`` IPC
-    payload; the message queue handles encoding/decoding.
+    Args:
+        groups: The LMCache KV groups, in protocol order.
+
+    Returns:
+        ``max(engine_block_group_id) + 1`` (ids are dense from 0), or ``1`` for
+        an empty ``groups`` (single non-hybrid group).
     """
+    if not groups:
+        return 1
+    return max(group.engine_block_group_id for group in groups) + 1
 
-    groups: tuple[LMCacheKVGroup, ...] = ()
 
-    @classmethod
-    def from_groups(cls, groups: Iterable[LMCacheKVGroup]) -> "LMCacheKVSpec":
-        """Build a validated spec from individual groups.
+def num_lmc_kv_cache_groups(groups: Sequence[EngineGroup]) -> int:
+    """Return the number of LMCache KV groups visible to transfer requests.
 
-        Args:
-            groups: Iterable of :class:`LMCacheKVGroup`. Order is preserved and
-                becomes the protocol-visible LMCache group order.
+    Args:
+        groups: The LMCache KV groups, in protocol order.
 
-        Returns:
-            An :class:`LMCacheKVSpec` wrapping the given groups as a tuple.
+    Returns:
+        ``len(groups)``, or ``1`` for an empty ``groups`` (single non-hybrid
+        group).
+    """
+    if not groups:
+        return 1
+    return len(groups)
 
-        Raises:
-            ValueError: If any group has a negative ``hybrid_block_group_id``.
-        """
-        groups_tuple = tuple(groups)
-        bad_ids = [
-            group.hybrid_block_group_id
-            for group in groups_tuple
-            if group.hybrid_block_group_id < 0
-        ]
-        if bad_ids:
-            raise ValueError(f"hybrid_block_group_id must be non-negative: {bad_ids}")
-        return cls(groups_tuple)
 
-    @property
-    def num_hybrid_block_groups(self) -> int:
-        """Number of hybrid block groups (block-id lists per transfer request).
+def _engine_block_group_id_per_lmc_group(
+    groups: Sequence[EngineGroup],
+) -> tuple[int, ...]:
+    """Return, per LMCache group, the engine block group it draws block IDs from.
 
-        Returns:
-            ``max(hybrid_block_group_id) + 1`` (ids are dense from 0), or ``1``
-            for an empty spec (single-group fallback).
-        """
-        if not self.groups:
-            return 1
-        return max(group.hybrid_block_group_id for group in self.groups) + 1
+    Args:
+        groups: The LMCache KV groups, in protocol order.
 
-    @property
-    def num_lmc_kv_cache_groups(self) -> int:
-        """Number of LMCache KV layer groups visible to transfer requests.
+    Returns:
+        A tuple whose length equals the number of LMCache groups (i.e.
+        :func:`num_lmc_kv_cache_groups`); element ``i`` is the engine block group
+        id that LMCache group ``i`` reads block IDs from. ``(0,)`` for an empty
+        ``groups`` (single non-hybrid group).
+    """
+    if not groups:
+        return (0,)
+    return tuple(group.engine_block_group_id for group in groups)
 
-        Returns:
-            The number of LMCache KV groups, or ``1`` for an empty spec
-            (single-group fallback).
-        """
-        if not self.groups:
-            return 1
-        return len(self.groups)
 
-    def hybrid_block_group_ids_by_lmc_group(self) -> tuple[int, ...]:
-        """Return the hybrid block group ID for each LMCache group.
+def expand_block_ids_to_lmc_groups(
+    groups: Sequence[EngineGroup],
+    engine_side_block_ids: Sequence[Sequence[int]],
+) -> list[list[int]]:
+    """Re-index engine-side block IDs to one list per LMCache group.
 
-        Returns:
-            A tuple indexed by LMCache group order whose ``i``-th element is the
-            hybrid block group id that LMCache group ``i`` draws block IDs from.
-            ``(0,)`` for an empty spec (single-group fallback).
-        """
-        if not self.groups:
-            return (0,)
-        return tuple(group.hybrid_block_group_id for group in self.groups)
+    The serving engine reports block IDs per engine block group. LMCache
+    transfer requests are indexed by LMCache KV group, so each LMCache group
+    reuses the block IDs from its source engine block group.
 
-    def expand_block_ids_to_lmc_groups(
-        self,
-        block_ids_per_hybrid_block_group: Sequence[Sequence[int]],
-    ) -> list[list[int]]:
-        """Expand hybrid-block-group block IDs to LMCache-group block IDs.
+    Args:
+        groups: The LMCache KV groups, in protocol order.
+        engine_side_block_ids: Block IDs indexed by engine block group id, i.e.
+            one inner ``list[int]`` per engine block group (element ``g`` is
+            engine block group ``g``'s block list). May be empty when nothing is
+            allocated yet.
 
-        Block IDs arrive indexed by hybrid block group (the serving engine
-        reports them per KV cache group). LMCache transfer requests are indexed
-        by LMCache KV group, so each LMCache group reuses the block IDs from its
-        source hybrid block group.
+    Returns:
+        Block IDs re-indexed by LMCache group order: one inner list per LMCache
+        group, copied from that group's source engine block group. When
+        ``engine_side_block_ids`` is empty, returns one empty list per LMCache
+        group.
 
-        Args:
-            block_ids_per_hybrid_block_group: Block IDs indexed by hybrid block
-                group id (element ``g`` is group ``g``'s block list). May be
-                empty when nothing is allocated yet.
+    Raises:
+        ValueError: If a group references an engine block group id beyond the
+            supplied ``engine_side_block_ids``.
+    """
+    if not engine_side_block_ids:
+        return [[] for _ in _engine_block_group_id_per_lmc_group(groups)]
 
-        Returns:
-            Block IDs re-indexed by LMCache group order: one inner list per
-            LMCache group, copied from that group's source hybrid block group.
-            When the input is empty, returns one empty list per LMCache group.
-
-        Raises:
-            ValueError: If a group references a hybrid block group id beyond the
-                supplied ``block_ids_per_hybrid_block_group``.
-        """
-        if not block_ids_per_hybrid_block_group:
-            return [[] for _ in self.hybrid_block_group_ids_by_lmc_group()]
-
-        block_ids_per_lmc_group: list[list[int]] = []
-        for hybrid_block_group_id in self.hybrid_block_group_ids_by_lmc_group():
-            if hybrid_block_group_id >= len(block_ids_per_hybrid_block_group):
-                raise ValueError(
-                    "Missing block IDs for hybrid block group "
-                    f"{hybrid_block_group_id}; got "
-                    f"{len(block_ids_per_hybrid_block_group)} groups"
-                )
-            block_ids_per_lmc_group.append(
-                list(block_ids_per_hybrid_block_group[hybrid_block_group_id])
-            )
-        return block_ids_per_lmc_group
-
-    def get_per_layer_hybrid_block_group_indices(
-        self,
-        num_registered_layers: int,
-    ) -> list[int] | None:
-        """Return the hybrid block group index for each registered KV tensor.
-
-        Args:
-            num_registered_layers: Number of KV tensors registered with the
-                server, i.e. the length of the per-layer mapping to produce.
-
-        Returns:
-            A list of length ``num_registered_layers`` mapping each registered
-            tensor index to its hybrid block group id, or ``None`` when there is
-            no group metadata (no groups, zero layers, or a single non-hybrid
-            group) so callers fall back to single-group behavior.
-
-        Raises:
-            ValueError: If a group references a layer index outside
-                ``[0, num_registered_layers)``, if the groups cover only some
-                registered layers, or if no layer mapping is available but
-                multiple hybrid block groups exist (ambiguous HMA mapping).
-        """
-        if not self.groups or num_registered_layers == 0:
-            return None
-
-        per_layer_hybrid_block_group_idx = [0] * num_registered_layers
-        matched_indices: set[int] = set()
-
-        for group in self.groups:
-            for layer_idx in group.layer_indices:
-                if layer_idx < 0 or layer_idx >= num_registered_layers:
-                    raise ValueError(
-                        f"Layer index {layer_idx} is outside registered layer "
-                        f"range [0, {num_registered_layers})"
-                    )
-                per_layer_hybrid_block_group_idx[layer_idx] = (
-                    group.hybrid_block_group_id
-                )
-                matched_indices.add(layer_idx)
-
-        if matched_indices:
-            missing_indices = set(range(num_registered_layers)) - matched_indices
-            if missing_indices:
-                raise ValueError(
-                    "Hybrid block groups did not cover registered KV "
-                    f"cache layer indices: {sorted(missing_indices)[:8]}"
-                )
-            return per_layer_hybrid_block_group_idx
-
-        if self.num_hybrid_block_groups > 1:
+    block_ids_per_lmc_group: list[list[int]] = []
+    for engine_block_group_id in _engine_block_group_id_per_lmc_group(groups):
+        if engine_block_group_id >= len(engine_side_block_ids):
             raise ValueError(
-                "Unable to map registered KV cache tensors to hybrid block "
-                "groups for HMA."
+                "Missing block IDs for engine block group "
+                f"{engine_block_group_id}; got "
+                f"{len(engine_side_block_ids)} groups"
             )
+        block_ids_per_lmc_group.append(
+            list(engine_side_block_ids[engine_block_group_id])
+        )
+    return block_ids_per_lmc_group
 
+
+def get_engine_group_indices(
+    groups: Sequence[EngineGroup],
+    num_registered_layers: int,
+) -> list[int] | None:
+    """Return the engine block group index for each registered KV tensor.
+
+    Args:
+        groups: The LMCache KV groups, in protocol order.
+        num_registered_layers: Number of KV tensors registered with the server,
+            i.e. the length of the per-layer mapping to produce.
+
+    Returns:
+        A list of length ``num_registered_layers`` mapping each registered
+        tensor index to its engine block group id, or ``None`` when there is no
+        group metadata (empty ``groups`` or zero layers) so callers fall back to
+        single-group behavior.
+
+    Raises:
+        ValueError: If a group references a layer index outside
+            ``[0, num_registered_layers)``, or if the groups cover only some
+            registered layers.
+    """
+    if not groups or num_registered_layers == 0:
         return None
+
+    per_layer_engine_block_group_idx = [0] * num_registered_layers
+    matched_indices: set[int] = set()
+
+    for group in groups:
+        for layer_idx in group.layer_indices:
+            if layer_idx < 0 or layer_idx >= num_registered_layers:
+                raise ValueError(
+                    f"Layer index {layer_idx} is outside registered layer "
+                    f"range [0, {num_registered_layers})"
+                )
+            per_layer_engine_block_group_idx[layer_idx] = group.engine_block_group_id
+            matched_indices.add(layer_idx)
+
+    missing_indices = set(range(num_registered_layers)) - matched_indices
+    if missing_indices:
+        raise ValueError(
+            "Engine block groups did not cover registered KV cache layer "
+            f"indices: {sorted(missing_indices)[:8]}"
+        )
+    return per_layer_engine_block_group_idx

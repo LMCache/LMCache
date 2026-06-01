@@ -9,6 +9,11 @@ import torch
 from lmcache.integration.vllm.kv_cache_groups import (
     create_lmcache_kv_spec_from_vllm,
 )
+from lmcache.v1.multiprocess.custom_types import (
+    expand_block_ids_to_lmc_groups,
+    get_engine_group_indices,
+    num_engine_block_groups,
+)
 
 
 @dataclass
@@ -31,9 +36,9 @@ def test_conversion_defaults_to_single_group_without_config():
         None, _same_shape_caches(["layer.0", "layer.1"])
     )
 
-    assert spec.num_hybrid_block_groups == 1
-    assert [group.hybrid_block_group_id for group in spec.groups] == [0]
-    assert spec.groups[0].layer_indices == (0, 1)
+    assert num_engine_block_groups(spec) == 1
+    assert [group.engine_block_group_id for group in spec] == [0]
+    assert spec[0].layer_indices == (0, 1)
 
 
 def test_conversion_preserves_engine_group_layers():
@@ -48,8 +53,8 @@ def test_conversion_preserves_engine_group_layers():
         _same_shape_caches(["layer.0", "layer.1", "layer.2", "layer.3"]),
     )
 
-    assert spec.num_hybrid_block_groups == 2
-    assert spec.get_per_layer_hybrid_block_group_indices(4) == [0, 1, 0, 1]
+    assert num_engine_block_groups(spec) == 2
+    assert get_engine_group_indices(spec, 4) == [0, 1, 0, 1]
 
 
 def test_conversion_splits_by_lmcache_layer_identity():
@@ -67,9 +72,9 @@ def test_conversion_splits_by_lmcache_layer_identity():
         caches,
     )
 
-    assert [group.hybrid_block_group_id for group in spec.groups] == [0, 1, 0]
-    assert [group.layer_indices for group in spec.groups] == [(0, 2), (1, 3), (4,)]
-    assert spec.expand_block_ids_to_lmc_groups([[10], [20]]) == [
+    assert [group.engine_block_group_id for group in spec] == [0, 1, 0]
+    assert [group.layer_indices for group in spec] == [(0, 2), (1, 3), (4,)]
+    assert expand_block_ids_to_lmc_groups(spec, [[10], [20]]) == [
         [10],
         [20],
         [10],

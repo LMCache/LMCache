@@ -8,6 +8,7 @@ This module provides GPU-side KV cache management functionality, including:
 """
 
 # Standard
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 import array
 
@@ -37,8 +38,8 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import (
+    EngineGroup,
     KVCache,
-    LMCacheKVSpec,
 )
 
 # Backend selection (c_ops when CUDA is available, otherwise a pure-Python
@@ -74,7 +75,7 @@ class GPUCacheContext:
         kv_caches: KVCache,
         lmcache_logical_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: LMCacheKVSpec | None = None,
+        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
@@ -392,52 +393,6 @@ class GPUCacheContext:
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
             for i in range(len(block_ids_per_lmc_group))
         ]
-
-    def normalize_lmc_group_block_ids(
-        self,
-        block_ids_per_lmc_group: list[list[int]],
-    ) -> list[list[int]]:
-        """Validate per-LMCache-group block IDs, with a single-group fallback.
-
-        The HMA-aware vLLM worker already sends one block-id list per LMCache
-        group, so the common case is a length match that returns unchanged.
-
-        The fallback exists only for callers that do not pre-expand block IDs
-        per LMCache group: the TRT-LLM adapter and the ``lmcache bench kvcache``
-        CLI send a single flat list. For a model whose layers all live in one
-        block-id space (``hybrid_block_group_idx == 0``) but were split into
-        several physical transfer groups, that single list applies to every
-        group, so it is duplicated across them. It is *not* a valid input for
-        true multi-block-group HMA (where each hybrid block group has its own
-        block IDs), which is why the length must otherwise match exactly.
-
-        Args:
-            block_ids_per_lmc_group: Block IDs indexed by LMCache group, or a
-                single-element list from a non-expanding caller.
-
-        Returns:
-            Block IDs with exactly one list per LMCache group.
-
-        Raises:
-            ValueError: If the length neither matches the number of LMCache
-                groups nor qualifies for the single-block-group fallback.
-        """
-        num_groups = self.kv_layer_groups_manager_.num_groups
-        if len(block_ids_per_lmc_group) == num_groups:
-            return block_ids_per_lmc_group
-
-        groups = self.kv_layer_groups_manager_.kv_layer_groups
-        if (
-            len(block_ids_per_lmc_group) == 1
-            and num_groups > 1
-            and {group.hybrid_block_group_idx for group in groups} == {0}
-        ):
-            return [list(block_ids_per_lmc_group[0]) for _ in range(num_groups)]
-
-        raise ValueError(
-            "Expected block IDs for "
-            f"{num_groups} LMCache KV groups, got {len(block_ids_per_lmc_group)}"
-        )
 
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0
