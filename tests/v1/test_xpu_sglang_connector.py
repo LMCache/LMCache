@@ -406,13 +406,13 @@ def test_sglang_xpu_connector_roundtrip_layerwise(use_xpu: bool, use_mla: bool):
     pin_alloc = PinMemoryAllocator(size=1024 * 1024 * 256)
 
     # Per-layer list-of-chunks (1 chunk per layer)
-    kv_dim = 1 if use_mla else 2
+    mem_fmt = MemoryFormat.KV_MLA_FMT if use_mla else MemoryFormat.KV_T2D
     memobjs_by_layer = [
         [
             pin_alloc.allocate(
-                torch.Size([num_tokens, kv_dim, hidden_dim]),
+                conn.get_shape(num_tokens),
                 torch.bfloat16,
-                MemoryFormat.KV_T2D,
+                mem_fmt,
             )
         ]
         for _ in range(num_layers)
@@ -518,7 +518,7 @@ def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(
         use_mla=use_mla,
     )
 
-    kv_dim = 1 if use_mla else 2
+    mem_fmt = MemoryFormat.KV_MLA_FMT if use_mla else MemoryFormat.KV_T2D
     pin_alloc = PinMemoryAllocator(size=1024 * 1024 * 128)
     memobjs_by_layer = []
     for _ in range(num_layers):
@@ -527,9 +527,9 @@ def test_sglang_xpu_connector_roundtrip_layerwise_multi_chunk(
             n = e - s
             per_layer.append(
                 pin_alloc.allocate(
-                    torch.Size([n, kv_dim, hidden_dim]),
+                    conn.get_shape(n),
                     torch.bfloat16,
-                    MemoryFormat.KV_T2D,
+                    mem_fmt,
                 )
             )
         memobjs_by_layer.append(per_layer)
@@ -720,6 +720,177 @@ def test_sglang_layerwise_uses_kernel_transfers(monkeypatch):
         assert len(d2h_calls) == expected_calls_per_direction
         assert len(h2d_calls) == expected_calls_per_direction
         assert all(token_major for _, token_major in calls)
+    finally:
+        for layer in memobjs_by_layer:
+            for memobj in layer:
+                memobj.ref_count_down()
+        pin_alloc.close()
+
+
+def test_sglang_layerwise_uses_mla_kernel_transfers(monkeypatch):
+    """Ensure MLA layerwise path dispatches through single_layer_kv_transfer."""
+    _skip_if_no_xpu()
+    device = torch.device("xpu:0")
+
+    num_layers = 3
+    num_blocks = 6
+    block_size = 8
+    num_heads = 1
+    head_size = 64
+    hidden_dim = num_heads * head_size
+    total_tokens = 24
+    starts = [0, 7]
+    ends = [4, 12]
+    num_chunks = len(starts)
+
+    kvcaches = generate_sglang_kv_cache_paged_list_tensors(
+        num_layers=num_layers,
+        num_blocks=num_blocks,
+        block_size=block_size,
+        num_heads=num_heads,
+        head_size=head_size,
+        use_mla=True,
+        device=device,
+    )
+
+    slot_mapping = _make_unique_slot_mapping(
+        total_slots=num_blocks * block_size,
+        num_tokens=total_tokens,
+        device=device,
+    )
+
+    conn = SGLangLayerwiseXPUConnector(
+        hidden_dim_size=hidden_dim,
+        num_layers=num_layers,
+        use_xpu=True,
+        chunk_size=total_tokens,
+        dtype=torch.bfloat16,
+        device=device,
+        use_mla=True,
+    )
+
+    pin_alloc = PinMemoryAllocator(size=1024 * 1024 * 128)
+    memobjs_by_layer = []
+    for _ in range(num_layers):
+        per_layer = []
+        for s, e in zip(starts, ends, strict=False):
+            n = e - s
+            per_layer.append(
+                pin_alloc.allocate(
+                    conn.get_shape(n),
+                    torch.bfloat16,
+                    MemoryFormat.KV_MLA_FMT,
+                )
+            )
+        memobjs_by_layer.append(per_layer)
+
+    single_layer_calls: list[tuple[object, bool]] = []
+    sgl_calls: list[tuple[object, bool]] = []
+    orig_single_layer_kv_transfer = xpu_connectors.lmc_ops.single_layer_kv_transfer
+    orig_single_layer_kv_transfer_sgl = (
+        xpu_connectors.lmc_ops.single_layer_kv_transfer_sgl
+    )
+
+    def _recording_single_layer_kv_transfer(
+        src,
+        dst,
+        slot_map,
+        direction,
+        gpu_kv_format,
+        token_major=False,
+    ):
+        single_layer_calls.append((direction, token_major))
+        return orig_single_layer_kv_transfer(
+            src,
+            dst,
+            slot_map,
+            direction,
+            gpu_kv_format,
+            token_major,
+        )
+
+    def _recording_single_layer_kv_transfer_sgl(
+        src,
+        sgl_k,
+        sgl_v,
+        slot_map,
+        direction,
+        token_major=False,
+    ):
+        sgl_calls.append((direction, token_major))
+        return orig_single_layer_kv_transfer_sgl(
+            src,
+            sgl_k,
+            sgl_v,
+            slot_map,
+            direction,
+            token_major,
+        )
+
+    monkeypatch.setattr(
+        xpu_connectors.lmc_ops,
+        "single_layer_kv_transfer",
+        _recording_single_layer_kv_transfer,
+    )
+    monkeypatch.setattr(
+        xpu_connectors.lmc_ops,
+        "single_layer_kv_transfer_sgl",
+        _recording_single_layer_kv_transfer_sgl,
+    )
+
+    try:
+        # D2H path
+        producer = conn.batched_from_gpu(
+            memobjs_by_layer,
+            starts=starts,
+            ends=ends,
+            slot_mapping=slot_mapping,
+            sync=True,
+            kvcaches=kvcaches,
+        )
+        for _ in range(num_layers + 1):
+            next(producer)
+
+        # H2D path into fresh caches
+        kvcaches_dst = generate_sglang_kv_cache_paged_list_tensors(
+            num_layers=num_layers,
+            num_blocks=num_blocks,
+            block_size=block_size,
+            num_heads=num_heads,
+            head_size=head_size,
+            use_mla=True,
+            device=device,
+        )
+        _zero_kvcaches(kvcaches_dst, use_mla=True)
+
+        consumer = conn.batched_to_gpu(
+            starts=starts,
+            ends=ends,
+            slot_mapping=slot_mapping,
+            sync=True,
+            kvcaches=kvcaches_dst,
+        )
+        next(consumer)
+        for layer_id in range(num_layers):
+            consumer.send(memobjs_by_layer[layer_id])
+        next(consumer)
+
+        expected_calls_per_direction = num_layers * num_chunks
+        d2h_calls = [
+            c
+            for c in single_layer_calls
+            if c[0] == xpu_connectors.lmc_ops.TransferDirection.D2H
+        ]
+        h2d_calls = [
+            c
+            for c in single_layer_calls
+            if c[0] == xpu_connectors.lmc_ops.TransferDirection.H2D
+        ]
+
+        assert len(d2h_calls) == expected_calls_per_direction
+        assert len(h2d_calls) == expected_calls_per_direction
+        assert all(token_major for _, token_major in single_layer_calls)
+        assert len(sgl_calls) == 0
     finally:
         for layer in memobjs_by_layer:
             for memobj in layer:
