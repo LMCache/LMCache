@@ -29,24 +29,71 @@ Every KV-cache value in LMCache is one of these shapes:
 Engine adapters that hand us other containers (vLLM's `dict[str, Tensor]`)
 are responsible for unwrapping to this form before calling any helper.
 
+## Package structure
+
+The layout logic lives in `lmcache/v1/gpu_connector/kv_format/`. The
+public `utils.py` helpers below are a thin **facade** that delegates
+into it, so the single-source-of-truth surface is unchanged for callers.
+
+```
+kv_format/
+├── base.py        # KVFormatSpec ABC: the per-format geometry interface
+├── specs.py       # one concrete spec per GPUKVFormat + the registry dict
+└── detection.py   # detect_format() + per-engine _normalize_/_detect_ helpers
+```
+
+- **One spec class per format — pure geometry.** Each `GPUKVFormat`
+  maps to exactly one `KVFormatSpec` subclass that knows how to index a
+  value of that format. A spec describes *only* layout geometry; its
+  class is named by that geometry (`CrossLayerNhdSpec`,
+  `PerLayerKvFirstNhdSpec`, `TwoListFusedPbsSpec`, …), never by an
+  engine. `get_spec(kv, fmt)` returns an instance for geometry;
+  `get_spec_class(fmt)` returns the class for static facts (`is_mla`,
+  `is_hnd`, `is_cross_layer`, `shape_desc`).
+- **Engine/backend is a higher-level concern, not a format property.**
+  A single `GPUKVFormat` can be produced by many (engine,
+  attention-backend) combinations — the relationship is many-to-one — so
+  engine identity never lives on the geometry layer. If an
+  engine/backend abstraction is ever needed it is a higher-level type
+  that *owns* a `GPUKVFormat`. Today the only such thing is the
+  diagnostic `get_attention_backend(fmt)` logging label, which lives in
+  the `utils` facade as a representative map.
+- **The enum is the single identity.** Each spec declares its
+  `gpu_kv_format` in its class body; the registry is derived from it.
+  No separate string id, no engine attribute. The C++ `GPUKVFormat`
+  enum is the one authority for which formats exist.
+- **A flat dict is the registry.** `specs._ALL_SPECS` lists the spec
+  classes and `_SPECS` maps `cls.gpu_kv_format → cls` — no inheritance
+  taxonomy, no auto-discovery, and no plugin machinery. The set of formats is closed and in-tree, so explicit
+  beats clever. Deliberately *not* introduced: "family" base classes
+  (formats vary on ≥5 orthogonal axes — engine, per-/cross-layer,
+  MLA/MHA, NHD/HND, fused/separate PBS — which a single inheritance
+  spine cannot model without orphans) and a runtime plugin registry
+  (there is no out-of-tree registrant). Add structure only when a
+  concrete need appears.
+- **Detection is the one engine-aware layer.** `detect_format`
+  consults `EngineType`; the spec layer never does. Engine-specific
+  reshape/detection lives in `_normalize_<engine>` / `_detect_<engine>`.
+
 ## Adding a new format
 
 1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
-2. Extend `normalize_kv_and_discover_format` to detect it. The dispatch
-   keys off `(list_depth, tensor_ndim)` — both are computed once in a
-   single descent via the private `_list_depth_tensor_dim` probe, so
-   new detection branches only need to add a shape check, not re-walk
-   the structure. If the engine produces a tensor whose shape needs
-   reshape-via-hints (e.g. TRT-LLM's 4-D bare tensor that must be
-   `view`'d as 6-D), put the reshape inside this function in the
-   engine-keyed branch — *before* the permute step.
-3. Add a branch in every `utils.py` helper that raises "Unknown GPU KV
-   Format" — the exhaustive chain makes it mechanical.
-4. Add a row in `tests/v1/gpu_connector/test_utils_shape_desc.py`.
+2. Add a detection branch. `detect_format` keys off
+   `(list_depth, tensor_ndim)` — both computed once via the private
+   `_list_depth_tensor_dim` probe — so a new branch only adds a shape
+   check in the engine's `_detect_<engine>` helper. If the engine needs
+   reshape-via-hints (e.g. TRT-LLM's 4-D bare tensor `view`'d to 6-D),
+   put it in that engine's `_normalize_<engine>` helper.
+3. Write a `KVFormatSpec` subclass in `specs.py` (named by its geometry,
+   declaring its `gpu_kv_format`) and add it to `_ALL_SPECS`. The ABC
+   makes the required accessors explicit.
+4. Add a row to the golden table in
+   `tests/v1/gpu_connector/test_kv_format_specs.py` and a detection
+   case in `test_kv_format_detection.py`.
 
 No other Python module should need edits. If you're editing
 `kv_layer_groups.py`, `gpu_context.py`, or any `KVLayerGroupInfo`
-consumer for a new layout — the branching belongs in `utils.py`.
+consumer for a new layout — the branching belongs in a spec.
 
 ## Helper surface
 
