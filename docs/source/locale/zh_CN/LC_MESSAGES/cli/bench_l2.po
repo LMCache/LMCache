@@ -1,0 +1,468 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-29 22:44+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/bench_l2.rst:4
+msgid "lmcache bench l2"
+msgstr "lmcache bench l2"
+
+#: ../../source/cli/bench_l2.rst:6
+msgid ""
+"The ``lmcache bench l2`` command benchmarks an L2 cache adapter (e.g. the"
+" local-filesystem adapter) end-to-end through the same "
+"``parse_args_to_l2_adapters_config`` + ``create_l2_adapter`` pipeline "
+"that LMCache uses in production. Any registered adapter type can be "
+"tested without code changes: you describe the adapter with a single JSON "
+"spec and pick the operations to exercise."
+msgstr ""
+"``lmcache bench l2`` 命令通过 LMCache 在生产中使用的相同 "
+"``parse_args_to_l2_adapters_config`` + ``create_l2_adapter`` 流水线，对 L2 "
+"缓存适配器（例如本地文件系统适配器）进行端到端基准测试。任何注册的适配器类型都可以在不更改代码的情况下进行测试：您只需用一个 JSON "
+"规范描述适配器，并选择要执行的操作。"
+
+#: ../../source/cli/bench_l2.rst:17
+msgid ""
+"Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command "
+"does **not** require an inference engine or an LMCache MP server. It only"
+" needs the adapter's own backing storage to be reachable (for the ``fs`` "
+"adapter, that simply means a writable directory)."
+msgstr ""
+"与 :ref:`lmcache bench engine <lmcache-bench-engine>` 不同，此命令**不**需要推理引擎或 "
+"LMCache MP 服务器。它只需要适配器自己的后端存储可访问（对于 ``fs`` 适配器，这仅意味着一个可写的目录）。"
+
+#: ../../source/cli/bench_l2.rst:24
+msgid "What it does"
+msgstr "它的作用是什么"
+
+#: ../../source/cli/bench_l2.rst:26
+msgid ""
+"For each measured operation the tool drives the adapter directly via its "
+"public submit/wait API:"
+msgstr "对于每个测量的操作，该工具通过其公共的提交/等待 API 直接驱动适配器："
+
+#: ../../source/cli/bench_l2.rst:29
+msgid ""
+"``Store``  -- ``submit_store_task`` writes ``num_keys`` MemoryObjs per "
+"submit and waits for the store eventfd."
+msgstr ""
+"``Store``  -- ``submit_store_task`` 每次提交写入 ``num_keys`` 个 "
+"MemoryObjs，并等待存储 eventfd。"
+
+#: ../../source/cli/bench_l2.rst:31
+msgid ""
+"``Lookup`` -- ``submit_lookup_and_lock_task`` checks key existence (no "
+"payload transfer) and waits for the lookup eventfd."
+msgstr "``查找`` -- ``submit_lookup_and_lock_task`` 检查键的存在性（不传输有效负载）并等待查找 eventfd。"
+
+#: ../../source/cli/bench_l2.rst:33
+msgid ""
+"``Load``   -- ``submit_load_task`` reads ``num_keys`` MemoryObjs per "
+"submit and waits for the load eventfd."
+msgstr ""
+"``Load``   -- ``submit_load_task`` 读取 ``num_keys`` MemoryObjs 每次提交，并等待加载 "
+"eventfd。"
+
+#: ../../source/cli/bench_l2.rst:36
+msgid ""
+"Each measured **round** issues ``--in-flight`` submits sequentially from "
+"a single producer thread and then waits for all of them to complete; the "
+"round duration is the wall-clock time from the first submit until the "
+"last completion. Warmup rounds run before measurement and their results "
+"are discarded from the final summary."
+msgstr ""
+"每个测量的 **轮次** 从单个生产者线程顺序发出 ``--in-flight`` "
+"提交，然后等待所有提交完成；轮次持续时间是从第一次提交到最后一次完成的墙钟时间。测量之前会进行热身轮次，其结果会从最终摘要中丢弃。"
+
+#: ../../source/cli/bench_l2.rst:42
+msgid ""
+"All three operations share the same key idx universe, so running ``--only"
+" store`` followed by ``--only load`` (or ``--only lookup``) with "
+"identical other flags hits exactly the same keys. This makes the "
+"benchmark useful as a quick regression test for adapters that should "
+"support a clean store -> load round-trip."
+msgstr ""
+"这三种操作共享相同的键 idx 范围，因此运行 ``--only store`` 然后是 ``--only load``（或 ``--only "
+"lookup``）并使用相同的其他标志时，正好命中相同的键。这使得基准测试可以作为适配器的快速回归测试，适配器应该支持干净的存储 -> 加载往返。"
+
+#: ../../source/cli/bench_l2.rst:50
+msgid ""
+"When ``--only`` is not given, the three operations are run **in a single "
+"process in the order** ``store -> lookup -> load``. For adapters whose "
+"backing storage sits behind an OS-level cache -- most notably the local-"
+"filesystem (``fs``) adapter, which is subject to the Linux **page cache**"
+" -- this means ``lookup`` and ``load`` will almost always observe the "
+"data that ``store`` just wrote still hot in RAM, and the reported numbers"
+" reflect page-cache throughput rather than the underlying device."
+msgstr ""
+"当未给出 ``--only`` 时，这三种操作将在 **单个进程中按顺序** 执行 ``store -> lookup -> "
+"load``。对于其后端存储位于操作系统级缓存后面的适配器——尤其是本地文件系统（``fs``）适配器，它受 Linux **页缓存** "
+"的影响——这意味着 ``lookup`` 和 ``load`` 几乎总是会观察到 ``store`` 刚写入的数据仍然在 RAM "
+"中热存储，报告的数字反映的是页缓存的吞吐量，而不是底层设备的吞吐量。"
+
+#: ../../source/cli/bench_l2.rst:59
+msgid ""
+"To benchmark each operation against a cold cache, run them separately "
+"with ``--only`` and drop the OS caches in between, for example::"
+msgstr "要针对冷缓存对每个操作进行基准测试，请使用 ``--only`` 分别运行它们，并在之间清除操作系统缓存，例如::"
+
+#: ../../source/cli/bench_l2.rst:69
+msgid ""
+"For adapters that bypass the page cache (e.g. ``fs`` with "
+"``\"use_odirect\": true``) or that talk to a remote service without a "
+"local cache, the default combined run is usually fine."
+msgstr ""
+"对于绕过页面缓存的适配器（例如，``fs`` 与 ``\"use_odirect\": "
+"true``）或与没有本地缓存的远程服务通信的适配器，默认的组合运行通常是可以的。"
+
+#: ../../source/cli/bench_l2.rst:74
+msgid "Benchmark the local filesystem adapter with default parameters:"
+msgstr "使用默认参数基准测试本地文件系统适配器："
+
+#: ../../source/cli/bench_l2.rst:81
+msgid ""
+"This runs all three operations (store, lookup, load) with one warmup "
+"round and one measurement round."
+msgstr "这将运行所有三个操作（存储、查找、加载），并进行一次热身轮次和一次测量轮次。"
+
+#: ../../source/cli/bench_l2.rst:84
+msgid "Stress the adapter with more in-flight submits and larger payloads:"
+msgstr "对适配器施加更多的并发提交和更大的负载："
+
+#: ../../source/cli/bench_l2.rst:94
+msgid "Run only one operation (useful to isolate store vs. load throughput):"
+msgstr "仅运行一个操作（用于隔离存储与加载的吞吐量）："
+
+#: ../../source/cli/bench_l2.rst:102
+msgid ""
+"Lookup with a controlled hit rate (the benchmark splits the lookup keys "
+"between a potentially-existing range and a guaranteed-non-existent "
+"range):"
+msgstr "使用受控命中率的查找（基准测试将查找键分为一个可能存在的范围和一个保证不存在的范围）："
+
+#: ../../source/cli/bench_l2.rst:112
+msgid ""
+"Enable a store -> load round-trip data integrity check on the last "
+"measured round:"
+msgstr "在最后一次测量的轮次上启用存储 -> 加载往返数据完整性检查："
+
+#: ../../source/cli/bench_l2.rst:121
+msgid ""
+"If you prefer to keep the JSON spec out of the command line, set the "
+"``L2_ADAPTER_JSON`` environment variable instead of passing "
+"``--l2-adapter``:"
+msgstr ""
+"如果您希望将 JSON 规范保留在命令行之外，请设置 ``L2_ADAPTER_JSON`` 环境变量，而不是传递 "
+"``--l2-adapter``："
+
+#: ../../source/cli/bench_l2.rst:132
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/bench_l2.rst:138
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/bench_l2.rst:139
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/cli/bench_l2.rst:140
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/bench_l2.rst:141
+msgid "``--l2-adapter JSON``"
+msgstr "``--l2-adapter JSON``"
+
+#: ../../source/cli/bench_l2.rst:142 ../../source/cli/bench_l2.rst:182
+msgid "*(unset)*"
+msgstr "*(未设置)*"
+
+#: ../../source/cli/bench_l2.rst:143
+#, python-brace-format
+msgid ""
+"L2 adapter spec as JSON with a ``\"type\"`` field plus adapter-specific "
+"configs, e.g. ``'{\"type\":\"fs\",\"base_path\":\"/tmp/bench\"}'``. May "
+"be passed multiple times; only the first spec is benchmarked. If not "
+"provided, falls back to the ``L2_ADAPTER_JSON`` environment variable. "
+"Either the flag or the env var is **required**."
+msgstr ""
+"L2 适配器规范以 JSON 格式表示，包含 ``\"type\"`` 字段以及适配器特定的配置，例如 "
+"``'{\\\"type\\\":\\\"fs\\\",\\\"base_path\\\":\\\"/tmp/bench\\\"}'``。可以多次传递；只有第一个规范会被基准测试。如果未提供，则回退到"
+" ``L2_ADAPTER_JSON`` 环境变量。标志或环境变量 **是必需的**。"
+
+#: ../../source/cli/bench_l2.rst:149
+msgid "``--num-keys N``"
+msgstr "``--num-keys N``"
+
+#: ../../source/cli/bench_l2.rst:150
+msgid "``32``"
+msgstr "``32``"
+
+#: ../../source/cli/bench_l2.rst:151
+msgid "Number of keys per submit."
+msgstr "每次提交的键数量。"
+
+#: ../../source/cli/bench_l2.rst:152
+msgid "``--in-flight N``"
+msgstr "``--in-flight N``"
+
+#: ../../source/cli/bench_l2.rst:153 ../../source/cli/bench_l2.rst:161
+#: ../../source/cli/bench_l2.rst:164 ../../source/cli/bench_l2.rst:324
+msgid "``1``"
+msgstr "``1``"
+
+#: ../../source/cli/bench_l2.rst:154
+msgid ""
+"In-flight submits per round. Each round issues this many submits "
+"sequentially from a single producer thread, then waits for all of them."
+msgstr "每轮的在途提交数。每轮从单个生产者线程顺序发出这么多提交，然后等待所有提交完成。"
+
+#: ../../source/cli/bench_l2.rst:157
+msgid "``--data-size-kb N``"
+msgstr "``--data-size-kb N``"
+
+#: ../../source/cli/bench_l2.rst:158
+msgid "``256``"
+msgstr "``256``"
+
+#: ../../source/cli/bench_l2.rst:159
+msgid "Data size per key, in KiB."
+msgstr "每个键的数据大小，以 KiB 为单位。"
+
+#: ../../source/cli/bench_l2.rst:160
+msgid "``--rounds N``"
+msgstr "``--rounds N``"
+
+#: ../../source/cli/bench_l2.rst:162
+msgid "Measurement rounds per operation."
+msgstr "每次操作的测量轮数。"
+
+#: ../../source/cli/bench_l2.rst:163
+msgid "``--warmup-rounds N``"
+msgstr "``--warmup-rounds N``"
+
+#: ../../source/cli/bench_l2.rst:165
+msgid "Warmup rounds run before measurement; their results are discarded."
+msgstr "在测量之前运行的预热轮次；它们的结果会被丢弃。"
+
+#: ../../source/cli/bench_l2.rst:167
+msgid "``--lookup-max-hit-rate F``"
+msgstr "``--lookup-max-hit-rate F``"
+
+#: ../../source/cli/bench_l2.rst:168
+msgid "``0.0``"
+msgstr "``0.0``"
+
+#: ../../source/cli/bench_l2.rst:169
+msgid ""
+"Upper bound on the lookup hit rate, in ``[0, 1]``. The benchmark requests"
+" ``floor(N * rate)`` keys from the potentially-existing range and ``N - "
+"hit`` keys from a guaranteed-non-existent range, where ``N`` is the total"
+" number of lookup keys. The actual hit rate may be lower if those keys "
+"were never stored in this run."
+msgstr ""
+"查找命中率的上限，范围在 ``[0, 1]`` 之间。基准测试请求 ``floor(N * rate)`` 个来自潜在存在范围的键，以及 ``N "
+"- hit`` 个来自保证不存在范围的键，其中 ``N`` 是查找键的总数。如果这些键在此运行中从未存储，则实际的命中率可能会更低。"
+
+#: ../../source/cli/bench_l2.rst:175
+msgid "``--skip-verify`` / ``--no-skip-verify``"
+msgstr "``--跳过验证`` / ``--不跳过验证``"
+
+#: ../../source/cli/bench_l2.rst:176
+msgid "``--skip-verify``"
+msgstr "``--skip-verify``"
+
+#: ../../source/cli/bench_l2.rst:177
+msgid ""
+"Skip the store -> load round-trip data integrity check (the default). "
+"Pass ``--no-skip-verify`` to enable verification on the last measured "
+"round; this requires both ``store`` and ``load`` to be exercised."
+msgstr ""
+"跳过存储 -> 加载往返数据完整性检查（默认）。传递 ``--no-skip-verify`` 以在最后一次测量的轮次上启用验证；这要求同时执行 "
+"``store`` 和 ``load``。"
+
+#: ../../source/cli/bench_l2.rst:181
+#, python-brace-format
+msgid "``--only {lookup,store,load}``"
+msgstr "``--only {查找,存储,加载}``"
+
+#: ../../source/cli/bench_l2.rst:183
+msgid ""
+"Run only the specified operation. When omitted, all three operations are "
+"run in the order ``store -> lookup -> load``."
+msgstr "仅运行指定的操作。如果省略，则按顺序运行所有三个操作 ``store -> lookup -> load``。"
+
+#: ../../source/cli/bench_l2.rst:188
+msgid "Adapter JSON spec"
+msgstr "适配器 JSON 规范"
+
+#: ../../source/cli/bench_l2.rst:190
+msgid ""
+"The ``--l2-adapter`` JSON is parsed by "
+"``lmcache.v1.distributed.l2_adapters.config.parse_args_to_l2_adapters_config``,"
+" the same entry point LMCache uses everywhere else. The minimum required "
+"field is ``type``; all remaining fields are forwarded to the adapter "
+"implementation as keyword arguments."
+msgstr ""
+"``--l2-adapter`` JSON 由 "
+"``lmcache.v1.distributed.l2_adapters.config.parse_args_to_l2_adapters_config``"
+" 解析，这是 LMCache 在其他地方使用的相同入口点。最小必需字段是 ``type``；所有剩余字段作为关键字参数转发给适配器实现。"
+
+#: ../../source/cli/bench_l2.rst:196
+msgid "Example for the local-filesystem adapter:"
+msgstr "本地文件系统适配器示例："
+
+#: ../../source/cli/bench_l2.rst:208
+msgid ""
+"See the source under ``lmcache/v1/distributed/l2_adapters/`` for the full"
+" list of adapter types and their accepted fields."
+msgstr "请参阅 ``lmcache/v1/distributed/l2_adapters/`` 下的源代码，以获取适配器类型及其接受字段的完整列表。"
+
+#: ../../source/cli/bench_l2.rst:213
+msgid "Example output"
+msgstr "示例输出"
+
+#: ../../source/cli/bench_l2.rst:215
+msgid "Per-round progress (suppressed by ``-q`` if you wire it through):"
+msgstr "每轮进度（如果通过 ``-q`` 进行抑制）："
+
+#: ../../source/cli/bench_l2.rst:248
+msgid "Final summary (one section per exercised operation):"
+msgstr "最终总结（每个执行的操作一个部分）："
+
+#: ../../source/cli/bench_l2.rst:278
+msgid ""
+"Each operation section reports per-round duration statistics (avg / min /"
+" max / p50 / p99 / std), aggregate throughput (``avg_throughput_mbps`` --"
+" 0 for ``Lookup`` since it has no payload), average key-rate "
+"(``avg_ops_per_sec``), and a per-key latency."
+msgstr ""
+"每个操作部分报告每轮持续时间统计（平均 / 最小 / 最大 / p50 / p99 / "
+"标准差）、汇总吞吐量（``avg_throughput_mbps`` -- 对于 ``Lookup`` 来说为 "
+"0，因为它没有负载）、平均键速率（``avg_ops_per_sec``）以及每个键的延迟。"
+
+#: ../../source/cli/bench_l2.rst:283
+msgid ""
+"For ``Lookup``, three additional fields are reported when ``--lookup-max-"
+"hit-rate`` is non-zero or some keys were found:"
+msgstr "对于 ``Lookup``，当 ``--lookup-max-hit-rate`` 非零或找到了一些键时，会报告三个额外字段："
+
+#: ../../source/cli/bench_l2.rst:286
+msgid "``Expected max hit rate`` -- the configured upper bound."
+msgstr "``预期最大命中率`` -- 配置的上限。"
+
+#: ../../source/cli/bench_l2.rst:287
+msgid ""
+"``Expected hit keys`` -- ``floor(total_keys * rate)``, scaled for the "
+"measured rounds only."
+msgstr "``Expected hit keys`` -- ``floor(total_keys * rate)``, 仅针对测量轮次进行缩放。"
+
+#: ../../source/cli/bench_l2.rst:289
+msgid "``Actual hit rate`` -- the measured hit rate over the kept rounds."
+msgstr "``实际命中率`` -- 在保留的轮次中测量的命中率。"
+
+#: ../../source/cli/bench_l2.rst:293
+msgid "Round-trip verification"
+msgstr "往返验证"
+
+#: ../../source/cli/bench_l2.rst:295
+msgid ""
+"When ``--no-skip-verify`` is passed and both ``store`` and ``load`` were "
+"run, the benchmark compares the load buffers from the last measured round"
+" against the byte pattern that ``store`` wrote (see "
+"``make_memory_objects`` in "
+"``lmcache/cli/commands/bench/l2_adapter_bench/data.py``):"
+msgstr ""
+"当传递 ``--no-skip-verify`` 并且同时运行了 ``store`` 和 ``load`` "
+"时，基准测试将最后一次测量轮次的加载缓冲区与 ``store`` 写入的字节模式进行比较（请参见 "
+"``lmcache/cli/commands/bench/l2_adapter_bench/data.py`` 中的 "
+"``make_memory_objects``）："
+
+#: ../../source/cli/bench_l2.rst:306
+msgid ""
+"Verification is **off** by default because the stricter byte pattern also"
+" forces every key to allocate its own ``data_size`` buffer (otherwise the"
+" runner is free to reuse a single shared buffer across keys to keep the "
+"memory footprint small)."
+msgstr ""
+"默认情况下，验证是 **关闭** 的，因为更严格的字节模式还强制每个键分配其自己的 ``data_size`` "
+"缓冲区（否则运行者可以自由地在键之间重用一个共享缓冲区，以保持内存占用小）。"
+
+#: ../../source/cli/bench_l2.rst:313
+msgid "Exit codes"
+msgstr "退出代码"
+
+#: ../../source/cli/bench_l2.rst:319
+msgid "Code"
+msgstr "代码"
+
+#: ../../source/cli/bench_l2.rst:320
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/cli/bench_l2.rst:321
+msgid "``0``"
+msgstr "``0``"
+
+#: ../../source/cli/bench_l2.rst:322
+msgid ""
+"All requested operations completed and (when enabled) the round-trip "
+"verification passed."
+msgstr "所有请求的操作已完成，并且（在启用时）往返验证通过。"
+
+#: ../../source/cli/bench_l2.rst:325
+msgid ""
+"Adapter creation failed, round-trip verification failed, or an operation "
+"hit a fatal error (e.g. all rounds timed out)."
+msgstr "适配器创建失败，往返验证失败，或某个操作遇到致命错误（例如，所有轮次超时）。"
+
+#: ../../source/cli/bench_l2.rst:327
+msgid "``2``"
+msgstr "``2``"
+
+#: ../../source/cli/bench_l2.rst:328
+msgid ""
+"The ``--l2-adapter`` JSON / ``L2_ADAPTER_JSON`` env var was missing or "
+"could not be parsed."
+msgstr "``--l2-adapter`` JSON / ``L2_ADAPTER_JSON`` 环境变量缺失或无法解析。"
+
+#: ../../source/cli/bench_l2.rst:333
+msgid "See also"
+msgstr "另请参阅"
+
+#: ../../source/cli/bench_l2.rst:335
+msgid ""
+":doc:`bench` -- ``lmcache bench engine`` for engine-side workload "
+"benchmarks."
+msgstr "：doc:`bench` -- ``lmcache bench engine`` 用于引擎端工作负载基准测试。"
+
+#: ../../source/cli/bench_l2.rst:337
+msgid ""
+":doc:`bench_server` -- end-to-end sanity test against an LMCache MP "
+"server."
+msgstr "：doc:`bench_server` -- 针对 LMCache MP 服务器的端到端健全性测试。"
+
+#: ../../source/cli/bench_l2.rst:339
+msgid ""
+":doc:`kvcache` -- ``lmcache kvcache`` for managing KV cache state on a "
+"running server."
+msgstr ":doc:`kvcache` -- ``lmcache kvcache`` 用于管理运行服务器上的 KV Cache 状态。"
+

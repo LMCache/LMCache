@@ -66,7 +66,9 @@ def test_raw_block_l2_adapter_store_lookup_load_roundtrip(tmp_path):
 
         store_task_id = adapter.submit_store_task([key], [make_memory_obj(payload)])
         assert wait_for_event_fd(adapter.get_store_event_fd())
-        assert adapter.pop_completed_store_tasks()[store_task_id] is True
+        store_result = adapter.pop_completed_store_tasks()[store_task_id]
+        assert store_result.is_successful()
+        assert store_result.bytes_transferred() == RAW_BLOCK_CI_SLOT_BYTES
 
         lookup_task_id = adapter.submit_lookup_and_lock_task([key, missing_key])
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
@@ -98,7 +100,9 @@ def test_raw_block_l2_adapter_delete_makes_key_miss(tmp_path):
 
         store_task_id = adapter.submit_store_task([key], [make_memory_obj(payload)])
         assert wait_for_event_fd(adapter.get_store_event_fd())
-        assert adapter.pop_completed_store_tasks()[store_task_id] is True
+        store_result = adapter.pop_completed_store_tasks()[store_task_id]
+        assert store_result.is_successful()
+        assert store_result.bytes_transferred() == RAW_BLOCK_CI_SLOT_BYTES
 
         adapter.delete([key])
 
