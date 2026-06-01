@@ -11,32 +11,18 @@ from collections import Counter
 # Third Party
 from opentelemetry import metrics
 
-# First Party
-from lmcache.v1.mp_observability.event import Event
+
+def group_by_salt(keys: list) -> dict[str, int]:
+    """Group *keys* by ``cache_salt``, returning salt → count."""
+    return Counter(getattr(k, "cache_salt", "") for k in keys)
 
 
-def emit_by_salt(counter: metrics.Counter, keys: list) -> None:
-    """Add to *counter* once per distinct ``cache_salt`` in *keys*.
+def emit_salt_counts(counter: metrics.Counter, salt_counts: dict[str, int]) -> None:
+    """Add to *counter* once per entry in *salt_counts*.
 
-    When ``cache_salt`` is missing or empty, the counter increments
-    without a ``cache_salt`` attribute (dimensionless), so it behaves
-    identically to a plain ``counter.add(len(keys))``.
-    """
-    for salt, count in Counter(getattr(k, "cache_salt", "") for k in keys).items():
-        attrs = {"cache_salt": salt} if salt else {}
-        counter.add(count, attributes=attrs)
-
-
-def emit_salt_counts(counter: metrics.Counter, event: Event) -> None:
-    """Add to *counter* using pre-grouped ``key_count_per_salt`` from *event*.
-
-    The emit site computes ``Counter(k.cache_salt for k in keys)`` and
-    stores it as ``key_count_per_salt`` in the event metadata so the
-    drain thread only iterates over tenants (O(T)), not keys (O(N)).
-
-    When ``key_count_per_salt`` is absent, this is a no-op.
+    *salt_counts* maps ``cache_salt`` values to key counts.
     Empty salt produces a dimensionless increment (no attribute).
     """
-    for salt, count in event.metadata.get("key_count_per_salt", {}).items():
+    for salt, count in salt_counts.items():
         attrs = {"cache_salt": salt} if salt else {}
         counter.add(count, attributes=attrs)
