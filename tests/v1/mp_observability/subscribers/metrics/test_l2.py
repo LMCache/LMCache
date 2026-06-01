@@ -371,6 +371,31 @@ class TestL2PrefetchMetrics:
 
 
 # ---------------------------------------------------------------------------
+# Eviction events
+# ---------------------------------------------------------------------------
+
+
+class TestL2EvictionMetrics:
+    def test_eviction_counts(self, bus, subscriber, snapshot):
+        bus.start()
+        keys = _make_keys(7)
+        bus.publish(
+            Event(
+                event_type=EventType.L2_KEYS_EVICTED,
+                metadata={
+                    "key_count": 7,
+                    "key_count_per_salt": _salt_counts(keys),
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        delta = snapshot()
+        assert delta["lmcache_mp.l2_evicted_objects"] == 7
+
+
+# ---------------------------------------------------------------------------
 # Subscription wiring
 # ---------------------------------------------------------------------------
 
@@ -385,7 +410,8 @@ class TestL2MetricsSubscriptions:
         assert EventType.L2_PREFETCH_LOOKUP_COMPLETED in subs
         assert EventType.L2_PREFETCH_LOAD_SUBMITTED in subs
         assert EventType.L2_PREFETCH_LOAD_COMPLETED in subs
-        assert len(subs) == 7
+        assert EventType.L2_KEYS_EVICTED in subs
+        assert len(subs) == 8
 
 
 # ---------------------------------------------------------------------------
@@ -716,3 +742,25 @@ class TestL2CacheSaltTagging:
         )
         key = (("cache_salt", "tenant-c"),)
         assert after.get(key, 0) >= before.get(key, 0) + 5
+
+    def test_evicted_groups_by_salt(self, bus, subscriber):
+        """Eviction counter groups by cache_salt."""
+        before = _read_counters_by_attrs().get("lmcache_mp.l2_evicted_objects", {})
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L2_KEYS_EVICTED,
+                metadata={
+                    "key_count": 9,
+                    "key_count_per_salt": {"tenant-a": 4, "tenant-b": 5},
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get("lmcache_mp.l2_evicted_objects", {})
+        key_a = (("cache_salt", "tenant-a"),)
+        key_b = (("cache_salt", "tenant-b"),)
+        assert after.get(key_a, 0) >= before.get(key_a, 0) + 4
+        assert after.get(key_b, 0) >= before.get(key_b, 0) + 5

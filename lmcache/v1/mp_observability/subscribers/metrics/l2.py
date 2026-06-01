@@ -118,6 +118,13 @@ class L2MetricsSubscriber(EventSubscriber):
             unit="chunks",
         )
 
+        # Eviction counter
+        self._evicted_objects = meter.create_counter(
+            "lmcache_mp.l2_evicted_objects",
+            description="Total chunks evicted from L2",
+            unit="chunks",
+        )
+
     def get_subscriptions(self) -> dict[EventType, EventCallback]:
         return {
             EventType.L2_STORE_SUBMITTED: self._on_store_submitted,
@@ -127,6 +134,7 @@ class L2MetricsSubscriber(EventSubscriber):
             EventType.L2_PREFETCH_LOOKUP_COMPLETED: self._on_lookup_completed,
             EventType.L2_PREFETCH_LOAD_SUBMITTED: self._on_load_submitted,
             EventType.L2_PREFETCH_LOAD_COMPLETED: self._on_load_completed,
+            EventType.L2_KEYS_EVICTED: self._on_evicted,
         }
 
     def _on_store_submitted(self, event: Event) -> None:
@@ -167,5 +175,11 @@ class L2MetricsSubscriber(EventSubscriber):
     def _on_load_completed(self, event: Event) -> None:
         emit_salt_counts(
             self._prefetch_load_completed,
+            event.metadata.get("key_count_per_salt", {}),
+        )
+
+    def _on_evicted(self, event: Event) -> None:
+        emit_salt_counts(
+            self._evicted_objects,
             event.metadata.get("key_count_per_salt", {}),
         )

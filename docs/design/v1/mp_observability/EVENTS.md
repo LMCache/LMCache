@@ -106,6 +106,18 @@ events; key-count counters continue to consume the request-level events.
 
 ---
 
+## L2 Eviction Controller Events
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `L2_KEYS_EVICTED` | `key_count`, `key_count_per_salt` | `int`, `dict[str, int]` |
+
+Published by `L2EvictionController._execute_eviction_action` after
+`adapter.delete()` completes. Only emitted when at least one key was
+evicted. `key_count_per_salt` enables per-tenant eviction dashboards.
+
+---
+
 ## L2 Failure Events
 
 Health-monitoring event for the L2 prefetch path. See LM-291.

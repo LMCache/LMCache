@@ -161,6 +161,16 @@ raw counter keeps the window choice in the dashboard.
 
 ---
 
+## L2 Eviction Metrics
+
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.l2_evicted_objects` | `lmcache_mp_l2_evicted_chunks_total` | Counter (attr: `cache_salt`) | `L2_KEYS_EVICTED` | `+count` per `cache_salt` via `key_count_per_salt` |
+
+**What it answers:** How many chunks are being evicted from L2? Which tenants are losing data?
+
+---
+
 ## Lookup Hit-Rate Metrics (L1 + L2 combined)
 
 Token-level counters derived from the `MP_LOOKUP_PREFETCH_END` event.  Their

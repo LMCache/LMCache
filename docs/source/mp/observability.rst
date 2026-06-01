@@ -279,6 +279,9 @@ L2 Metrics
    * - ``lmcache_mp.l2_load_completed``
      - Counter (attr: ``l2_name``)
      - Number of per-adapter L2 load requests completed, labeled by adapter type.
+   * - ``lmcache_mp.l2_evicted_objects``
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks evicted from L2, grouped by tenant.
 
 The ``l2_name``-labeled counters (``l2_store_completed`` and
 ``l2_load_completed``) exist so dashboards can compute per-backend IOPS on
