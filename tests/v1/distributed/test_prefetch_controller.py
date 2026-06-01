@@ -18,6 +18,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
@@ -88,7 +89,7 @@ def wait_for_prefetch_result(
     req_id: int,
     timeout: float = 5.0,
     poll_interval: float = 0.05,
-) -> int | None:
+) -> int | Bitmap | None:
     """Poll query_prefetch_result until it returns a non-None value."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
