@@ -198,6 +198,8 @@ class LocalDiskBackend(StorageBackendInterface):
         return os.path.join(self.path, key.to_string().replace("/", "-") + ".pt")
 
     def _default_memory_format(self) -> MemoryFormat:
+        if self.metadata is not None and self.metadata.use_mla:
+            return MemoryFormat.KV_MLA_FMT
         if not self.layerwise:
             return MemoryFormat.KV_2LTD
         if self.enable_blending:

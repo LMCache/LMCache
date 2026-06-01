@@ -366,6 +366,68 @@ class TestLocalDiskBackend:
         finally:
             local_cpu_backend.memory_allocator.close()
 
+    def test_contains_recovers_mla_format_after_restart(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test restart recovery preserves MLA memory format."""
+        config = create_test_config(temp_disk_path)
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(28, 1, 256, 8, 128),
+            use_mla=True,
+        )
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend1 = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(15)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=6,
+            fmt=MemoryFormat.KV_MLA_FMT,
+        )
+        expected = bytes(memory_obj.byte_array)
+
+        try:
+            backend1.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend1, key)
+            memory_obj.ref_count_down()
+            backend1.close()
+
+            backend2 = LocalDiskBackend(
+                config=config,
+                loop=loop_in_thread,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cpu",
+                metadata=metadata,
+            )
+            try:
+                restored = backend2.get_blocking(key)
+                assert restored is not None
+                assert restored.metadata.fmt == MemoryFormat.KV_MLA_FMT
+                assert bytes(restored.byte_array) == expected
+                restored.ref_count_down()
+            finally:
+                backend2.close()
+        finally:
+            local_cpu_backend.memory_allocator.close()
+
     def test_batched_async_contains_recovers_consecutive_files(
         self, temp_disk_path, loop_in_thread, memory_allocator
     ):
