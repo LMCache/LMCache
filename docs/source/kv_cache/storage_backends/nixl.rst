@@ -219,6 +219,12 @@ backend (like ``OBJ``), supported in both static (``nixl_pool_size`` > 0) and
 dynamic (``nixl_pool_size`` = 0) mode. ``nixl_buffer_device`` must be ``cpu``.
 ``nixl_endpoint_list`` is not supported for DOCA_MEMOS.
 
+Object names are 128-bit lowercase-hex strings: the NIXL DOCA_MEMOS plugin
+passes object names as strings and hex-decodes them on the device side, so
+each name is exactly 32 hex characters. In dynamic mode this name is a
+truncated SHA-256 of the cache key, so names are opaque (they carry no
+model/chunk debug information) and uniqueness is probabilistic at 128 bits.
+
 .. code-block:: yaml
 
     chunk_size: 256
