@@ -1,0 +1,152 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-29 22:44+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/index.rst:63
+msgid "Welcome to LMCache"
+msgstr "欢迎使用 LMCache"
+
+#: ../../source/index.rst:69
+msgid "Getting Started"
+msgstr "入门指南"
+
+#: ../../source/index.rst:86
+msgid "Recipes"
+msgstr "食谱"
+
+#: ../../source/index.rst:94
+msgid "KV Cache offloading and sharing"
+msgstr "KV Cache 卸载和共享"
+
+#: ../../source/index.rst:105
+msgid "Non-KV caching"
+msgstr "非 KV 缓存"
+
+#: ../../source/index.rst:113
+msgid "Multiprocess Mode"
+msgstr "多进程模式"
+
+#: ../../source/index.rst:121
+msgid "Disaggregated prefill"
+msgstr "分离式 Prefill"
+
+#: ../../source/index.rst:130
+msgid "KV Cache management"
+msgstr "KV Cache 管理"
+
+#: ../../source/index.rst:138
+msgid "KV Cache Optimizations"
+msgstr "KV Cache 优化"
+
+#: ../../source/index.rst:148
+msgid "Use LMCache in production"
+msgstr "在生产中使用 LMCache"
+
+#: ../../source/index.rst:160
+msgid "CLI"
+msgstr "命令行界面"
+
+#: ../../source/index.rst:168
+msgid "Internal API Server"
+msgstr "内部 API 服务器"
+
+#: ../../source/index.rst:176
+msgid "Controller WebUI"
+msgstr "控制器 WebUI"
+
+#: ../../source/index.rst:184
+msgid "Developer Guide"
+msgstr "开发者指南"
+
+#: ../../source/index.rst:197
+msgid "API Reference"
+msgstr "API 参考"
+
+#: ../../source/index.rst:208
+msgid "Community"
+msgstr "社区"
+
+#: ../../source/index.rst:10
+msgid "Welcome to LMCache!"
+msgstr "欢迎使用 LMCache！"
+
+#: ../../source/index.rst:12
+msgid "LMCache"
+msgstr "LMCache"
+
+#: ../../source/index.rst:25
+msgid ""
+"We are currently in the process of upgrading our documentation to provide"
+" better guidance and examples. Some sections may be under construction. "
+"Thank you for your patience!"
+msgstr "我们目前正在升级我们的文档，以提供更好的指导和示例。某些部分可能正在建设中。感谢您的耐心等待！"
+
+#: ../../source/index.rst:46
+msgid "For more information, check out the following:"
+msgstr "有关更多信息，请查看以下内容："
+
+#: ../../source/index.rst:48
+msgid "`LMCache blogs <https://lmcache.github.io>`_"
+msgstr "`LMCache 博客 <https://lmcache.github.io>`_"
+
+#: ../../source/index.rst:49
+msgid ""
+"`Join LMCache slack workspace "
+"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3eck2v8ub-"
+"j2hPn0AdzcfyykatTBXSTg>`_"
+msgstr "`加入 LMCache Slack 工作区 <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3eck2v8ub-j2hPn0AdzcfyykatTBXSTg>`_"
+
+#: ../../source/index.rst:50
+msgid "Our papers:"
+msgstr "我们的论文："
+
+#: ../../source/index.rst:52
+msgid ""
+"`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
+"Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
+msgstr "`CacheGen: KV Cache 压缩与流式传输以快速服务大型语言模型 <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
+
+#: ../../source/index.rst:53
+msgid ""
+"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge "
+"Fusion <https://arxiv.org/abs/2405.16444>`_"
+msgstr "`CacheBlend: 基于缓存知识融合的快速大型语言模型服务 <https://arxiv.org/abs/2405.16444>`_"
+
+#: ../../source/index.rst:54
+msgid ""
+"`Do Large Language Models Need a Content Delivery Network? "
+"<https://arxiv.org/abs/2409.13761>`_"
+msgstr "`大型语言模型需要内容分发网络吗？ <https://arxiv.org/abs/2409.13761>`_"
+
+#: ../../source/index.rst:56 ../../source/index.rst:84
+#: ../../source/index.rst:92 ../../source/index.rst:103
+#: ../../source/index.rst:111 ../../source/index.rst:119
+#: ../../source/index.rst:128 ../../source/index.rst:136
+#: ../../source/index.rst:146 ../../source/index.rst:158
+#: ../../source/index.rst:166 ../../source/index.rst:174
+#: ../../source/index.rst:182 ../../source/index.rst:195
+#: ../../source/index.rst:206 ../../source/index.rst:215
+msgid ":raw-html:`<br />`"
+msgstr ":raw-html:`<br />`"
+
+#: ../../source/index.rst:60
+msgid "Documentation"
+msgstr "文档"
+
