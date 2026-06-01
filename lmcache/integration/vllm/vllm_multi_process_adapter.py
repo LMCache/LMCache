@@ -13,7 +13,7 @@ import zmq
 
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
-from lmcache.integration.vllm.utils import vllm_layout_hints
+from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
@@ -224,32 +224,54 @@ class ParallelStrategy:
     use_mla: bool
     """Whether to use the MLA."""
 
-    kv_world_size: int
-    """
-    The kv world size, kv_world_size may not be equal to the actual_world_size, 
-    in the case of mla, it will 'exclude' the effect of TP, the value is 
-    calculated by `extract_world_size_and_kv_rank` in `lmcache_mp_connector.py`.
-    """
+    vllm_world_size: int
+    """vLLM-side world size."""
 
-    kv_worker_id: int
-    """
-    The kv worker id of the sub-process, kv_worker_id may not be equal to the 
-    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP, 
-    the value is calculated by `extract_world_size_and_kv_rank` in 
-    `lmcache_mp_connector.py`.
-    """
-
-    actual_world_size: int
-    """The actual world size."""
-
-    actual_worker_id: int
-    """The actual worker id of the sub-process."""
+    vllm_worker_id: int
+    """vLLM-side rank of the sub-process."""
 
     tp_size: int
-    """The tensor parallel size."""
+    """vLLM-side tensor parallel size."""
 
     pp_size: int
-    """The pipeline parallel size."""
+    """vLLM-side pipeline parallel size."""
+
+    @classmethod
+    def from_vllm_config(cls, vllm_config) -> "ParallelStrategy":
+        """Build a :class:`ParallelStrategy` from a vLLM config.
+        Centralises the (vllm_config -> KV parallel geometry) mapping.
+        """
+        pc = vllm_config.parallel_config
+        return cls(
+            use_mla=mla_enabled(vllm_config.model_config),
+            vllm_world_size=pc.world_size,
+            vllm_worker_id=pc.rank,
+            tp_size=pc.tensor_parallel_size,
+            pp_size=pc.pipeline_parallel_size,
+        )
+
+    @property
+    def kv_world_size(self) -> int:
+        """How many different pieces the KV cache is split into
+        in the lmcache server storage."""
+        if self.use_mla:
+            return self.vllm_world_size // self.tp_size
+        return self.vllm_world_size
+
+    @property
+    def kv_worker_id(self) -> int:
+        """Which piece of the KV cache the current worker has, in
+        ``[0, kv_world_size)``."""
+        if self.use_mla:
+            return self.vllm_worker_id // self.tp_size
+        return self.vllm_worker_id
+
+    @property
+    def is_kv_writer(self) -> bool:
+        """Whether this rank is responsible for storing KV."""
+        if not self.use_mla:
+            return True
+        return self.vllm_worker_id % self.tp_size == 0
 
 
 def _normalize_adapter_init_args(
@@ -288,10 +310,8 @@ def _normalize_adapter_init_args(
     kv_worker_id = int(parallel_strategy)
     strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=kv_world_size,
-        kv_worker_id=kv_worker_id,
-        actual_world_size=kv_world_size,
-        actual_worker_id=kv_worker_id,
+        vllm_world_size=kv_world_size,
+        vllm_worker_id=kv_worker_id,
         tp_size=kv_world_size,
         pp_size=1,
     )
@@ -929,17 +949,9 @@ class LMCacheMPWorkerAdapter:
         return self.parallel_strategy.kv_worker_id
 
     @property
-    def use_mla(self) -> bool:
-        """Whether to use MLA."""
-        return self.parallel_strategy.use_mla
-
-    @property
-    def is_first_rank_of_pp_group(self) -> bool:
-        """Is the first rank of the pipeline parallel group."""
-        return (
-            self.parallel_strategy.actual_worker_id % self.parallel_strategy.tp_size
-            == 0
-        )
+    def is_kv_writer(self) -> bool:
+        """Whether this worker is responsible for storing KV."""
+        return self.parallel_strategy.is_kv_writer
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """

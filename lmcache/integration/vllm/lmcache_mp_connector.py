@@ -23,7 +23,6 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
 try:
@@ -92,92 +91,6 @@ def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
         )
 
     return block_ids[0]
-
-
-def extract_world_size_and_kv_rank(
-    world_size: int,
-    rank: int,
-    vllm_config: VllmConfig,
-) -> tuple[int, int]:
-    """
-    Convert the rank for the MLA.
-    """
-    use_mla = mla_enabled(vllm_config.model_config)
-    if not use_mla:
-        return world_size, rank
-    else:
-        # Tensor parallel does not change the KV caches for MLA models.
-        # So we need to "exclude" the effect of TP on rank and world size
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        # vLLM constructs TP groups first, and then construct other
-        # parallel groups on top of TP groups.
-        # for example, TP=4, PP=2,
-        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
-        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
-        # So we can "exclude" the effect of TP by rank // tp_size.
-        return world_size // tp_size, rank // tp_size
-
-
-def create_scheduler_adapter(
-    server_url: str,
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
-) -> LMCacheMPSchedulerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config,
-    )
-    parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-    )
-
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return LMCacheMPSchedulerAdapter(
-        server_url=server_url,
-        context=zmq_context,
-        model_name=vllm_config.model_config.model,
-        vllm_block_size=vllm_config.cache_config.block_size,
-        parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
-    )
-
-
-def create_worker_adapter(
-    server_url: str,
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
-) -> LMCacheMPWorkerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config,
-    )
-    parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-    )
-
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return LMCacheMPWorkerAdapter(
-        server_url=server_url,
-        context=zmq_context,
-        model_name=vllm_config.model_config.model,
-        vllm_block_size=vllm_config.cache_config.block_size,
-        parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
-    )
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -498,19 +411,20 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
+        parallel_strategy = ParallelStrategy.from_vllm_config(vllm_config)
+        common_adapter_kwargs: dict[str, Any] = dict(
+            server_url=server_url,
+            context=zmq_context,
+            model_name=vllm_config.model_config.model,
+            vllm_block_size=vllm_config.cache_config.block_size,
+            parallel_strategy=parallel_strategy,
+            extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+        )
         if self.role == KVConnectorRole.SCHEDULER:
-            self.scheduler_adapter = create_scheduler_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
-            )
+            self.scheduler_adapter = LMCacheMPSchedulerAdapter(**common_adapter_kwargs)
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
-            self.worker_adapter = create_worker_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
-            )
+            self.worker_adapter = LMCacheMPWorkerAdapter(**common_adapter_kwargs)
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -633,10 +547,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         # In MLA scenario, only the first rank of the pipeline group
         # needs to save the KV cache.
-        if (
-            self.worker_adapter.use_mla
-            and not self.worker_adapter.is_first_rank_of_pp_group
-        ):
+        if not self.worker_adapter.is_kv_writer:
             return
 
         metadata = self._get_connector_metadata()
