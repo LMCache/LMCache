@@ -117,7 +117,7 @@ Key functions:
 |----------|---------|
 | `parse_args_to_config(args) -> EngineBenchConfig` | Converts CLI args to fully-resolved config |
 | `auto_detect_model(engine_url) -> str` | Fetches model ID from `/v1/models` |
-| `resolve_tokens_per_gb(lmcache_url, model_name) -> int` | Queries LMCache `/api/status` for `cache_size_per_token * world_size` |
+| `resolve_tokens_per_gb(lmcache_url, model_name) -> int` | Queries LMCache `/status` for `cache_size_per_token * world_size` |
 
 `EngineBenchConfig` contains only general parameters. Workload-specific
 configs live in their own modules and are resolved by the workload factory.
@@ -269,7 +269,7 @@ instance, and returns it ready to `run()`.
 
 ## 3. End-to-End Flow
 
-The orchestrator in `BenchCommand._bench_engine()` wires everything together:
+The orchestrator in `engine_bench.command.run_engine_bench()` wires everything together:
 
 ```
 0. _resolve_args(args)            → argparse.Namespace
@@ -628,7 +628,7 @@ def create_workload(...):
 
 ### Step 3: Add CLI args
 
-In `bench/__init__.py`, inside `_register_engine()`:
+In `engine_bench/command.py`, inside `register_engine_parser()`:
 
 1. Add `"my-workload"` to the `--workload` choices list.
 2. Add a new argument group with **prefixed** arg names:

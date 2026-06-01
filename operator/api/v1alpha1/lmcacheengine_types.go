@@ -30,6 +30,11 @@ const (
 	PhaseFailed   = "Failed"
 )
 
+const (
+	GPUVendorNvidia = "nvidia"
+	GPUVendorAMD    = "amd"
+)
+
 // Condition type constants.
 const (
 	ConditionAvailable         = "Available"
@@ -92,6 +97,11 @@ type ServerSpec struct {
 // L1BackendSpec defines the L1 memory cache configuration.
 type L1BackendSpec struct {
 	// sizeGB is the L1 cache size in gigabytes. Required, must be > 0.
+	// The CRD-level constraint (exclusiveMinimum=0) rejects invalid values
+	// at admission time so the controller never sees them; the in-Go
+	// ValidateSpec keeps the same rule for defense in depth.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:ExclusiveMinimum=true
 	SizeGB float64 `json:"sizeGB"`
 }
 
@@ -243,6 +253,14 @@ type RawL2AdapterSpec struct {
 
 // LMCacheEngineSpec defines the desired state of LMCacheEngine.
 type LMCacheEngineSpec struct {
+	// gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
+	// GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
+	// runtime with privileged: true.
+	// +optional
+	// +kubebuilder:default="nvidia"
+	// +kubebuilder:validation:Enum=nvidia;amd
+	GPUVendor *string `json:"gpuVendor,omitempty"`
+
 	// image defines the container image to use.
 	// +optional
 	Image *ImageSpec `json:"image,omitempty"`

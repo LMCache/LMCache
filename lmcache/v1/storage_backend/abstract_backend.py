@@ -9,6 +9,7 @@ import asyncio
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
 class StorageBackendInterface(metaclass=abc.ABCMeta):
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
     ):
         """
         Initialize the storage backend.
@@ -164,11 +165,11 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         """
-        A non-blcocking function to get the kv cache from the storage backend.
+        A non-blocking function to get the kv cache from the storage backend.
 
         :param list[CacheEngineKey] keys: The keys of the list of MemoryObjs.
 
-        :return: a list of Memoryobjs.
+        :return: a list of MemoryObj.
         """
         raise NotImplementedError
 
@@ -306,6 +307,20 @@ class StorageBackendInterface(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def cancel_request(self, req_id: str) -> None:
+        """
+        Cancel an in-flight or pending request.
+
+        This method is used by backends that track per-request state
+        (e.g., PDBackendAsync for disaggregation). For backends that
+        do not track request state, this method is a no-op.
+
+        :param str req_id: The request identifier to cancel.
+        :return: None
+        """
+        # Default implementation is no-op
+        return
+
 
 class AllocatorBackendInterface(StorageBackendInterface):
     """
@@ -413,7 +428,7 @@ class StoragePluginInterface(StorageBackendInterface):
 
     def __init__(
         self,
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
         config: Optional[LMCacheEngineConfig] = None,
         metadata: Optional[LMCacheMetadata] = None,
         local_cpu_backend: Optional["LocalCPUBackend"] = None,

@@ -14,6 +14,11 @@ import pytest
 
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
+from lmcache.cli.commands.bench.engine_bench.command import (
+    _emit_final_metrics,
+    _resolve_args,
+    run_engine_bench,
+)
 from lmcache.cli.commands.bench.engine_bench.config import EngineBenchConfig
 from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
@@ -228,9 +233,8 @@ class TestNoInteractive:
             tokens_per_gb_kvcache=6553,
             no_interactive=True,
         )
-        cmd = BenchCommand()
         with pytest.raises(SystemExit, match="--engine-url"):
-            cmd._resolve_args(args)
+            _resolve_args(args)
 
     def test_no_interactive_missing_workload(self) -> None:
         args = _make_args(
@@ -239,9 +243,8 @@ class TestNoInteractive:
             tokens_per_gb_kvcache=6553,
             no_interactive=True,
         )
-        cmd = BenchCommand()
         with pytest.raises(SystemExit, match="--workload"):
-            cmd._resolve_args(args)
+            _resolve_args(args)
 
     def test_no_interactive_missing_tokens_and_lmcache(self) -> None:
         args = _make_args(
@@ -251,16 +254,14 @@ class TestNoInteractive:
             lmcache_url=None,
             no_interactive=True,
         )
-        cmd = BenchCommand()
         with pytest.raises(
             SystemExit, match="--tokens-per-gb-kvcache or --lmcache-url"
         ):
-            cmd._resolve_args(args)
+            _resolve_args(args)
 
     def test_no_interactive_passes_with_all_args(self) -> None:
         args = _make_args(no_interactive=True)
-        cmd = BenchCommand()
-        result = cmd._resolve_args(args)
+        result = _resolve_args(args)
         assert result is args
 
     def test_no_interactive_passes_with_lmcache_url(self) -> None:
@@ -269,8 +270,7 @@ class TestNoInteractive:
             lmcache_url="http://localhost:8080",
             no_interactive=True,
         )
-        cmd = BenchCommand()
-        result = cmd._resolve_args(args)
+        result = _resolve_args(args)
         assert result is args
 
 
@@ -307,9 +307,8 @@ class TestExportConfig:
             engine_url=None,
             export_config="out.json",
         )
-        cmd = BenchCommand()
         with pytest.raises(SystemExit, match="--engine-url"):
-            cmd._resolve_args(args)
+            _resolve_args(args)
 
     def test_export_config_writes_json(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
         export_path = str(tmp_path / "exported.json")
@@ -322,7 +321,7 @@ class TestExportConfig:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -349,7 +348,7 @@ class TestExportConfig:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -376,7 +375,7 @@ class TestExportConfig:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -402,7 +401,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            cmd._emit_final_metrics(config, final, args)
+            _emit_final_metrics(cmd, config, final, args)
         finally:
             sys.stdout = old_stdout
 
@@ -422,7 +421,7 @@ class TestBenchCommandEmitMetrics:
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            cmd._emit_final_metrics(config, final, args)
+            _emit_final_metrics(cmd, config, final, args)
         finally:
             sys.stdout = old_stdout
 
@@ -512,7 +511,7 @@ class TestBenchCommandOrchestrator:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -592,7 +591,7 @@ class TestBenchCommandOrchestrator:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 
@@ -691,7 +690,7 @@ class TestBenchCommandOrchestrator:
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
         try:
-            cmd._bench_engine(args)
+            run_engine_bench(cmd, args)
         finally:
             sys.stdout = old_stdout
 

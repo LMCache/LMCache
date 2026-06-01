@@ -8,7 +8,6 @@ deterministic; the end-to-end test drives through ``EventBus``.
 """
 
 # Standard
-from unittest.mock import patch
 import time
 
 # Third Party
@@ -23,8 +22,8 @@ from lmcache.v1.mp_observability.subscribers.metrics.l2_throughput import (
 from tests.v1.mp_observability.subscribers.metrics.otel_setup import reader as _reader
 
 _DRAIN_WAIT = 0.15
-_STORE_METRIC = "lmcache_mp.l2_store_throughput_gbs"
-_LOAD_METRIC = "lmcache_mp.l2_load_throughput_gbs"
+_STORE_METRIC = "lmcache_mp.l2_store_throughput"
+_LOAD_METRIC = "lmcache_mp.l2_load_throughput"
 
 
 # ---------------------------------------------------------------------------
@@ -57,19 +56,25 @@ def _store_completed(
     t: float,
     adapter_index: int = 0,
     l2_name: str = "fs",
+    bytes_transferred: int | None = None,
 ) -> Event:
-    # L2_STORE_COMPLETED does not carry total_bytes; the subscriber
-    # looks up the bytes it cached at SUBMITTED time.
+    # ``bytes_transferred`` is populated by fast-path-aware adapters (see
+    # ``store_controller._finalize_store``).  Absence means the subscriber
+    # falls back to the submitted-bytes accounting it cached at SUBMITTED
+    # time.
+    metadata: dict = {
+        "adapter_index": adapter_index,
+        "task_id": task_id,
+        "l2_name": l2_name,
+        "succeeded_count": 1,
+        "failed_count": 0,
+    }
+    if bytes_transferred is not None:
+        metadata["bytes_transferred"] = bytes_transferred
     return Event(
         event_type=EventType.L2_STORE_COMPLETED,
         timestamp=t,
-        metadata={
-            "adapter_index": adapter_index,
-            "task_id": task_id,
-            "l2_name": l2_name,
-            "succeeded_count": 1,
-            "failed_count": 0,
-        },
+        metadata=metadata,
     )
 
 
@@ -150,7 +155,7 @@ def _attrs_of_nonzero_dps(name: str) -> list[dict]:
 
 @pytest.fixture
 def subscriber():
-    return L2ThroughputSubscriber(sample_rate=1.0)
+    return L2ThroughputSubscriber()
 
 
 # ---------------------------------------------------------------------------
@@ -172,12 +177,6 @@ class TestSubscriptions:
         subs = subscriber.get_subscriptions()
         assert EventType.L2_PREFETCH_LOAD_SUBMITTED not in subs
         assert EventType.L2_PREFETCH_LOAD_COMPLETED not in subs
-
-    def test_rejects_invalid_sample_rate(self):
-        with pytest.raises(AssertionError):
-            L2ThroughputSubscriber(sample_rate=0.0)
-        with pytest.raises(AssertionError):
-            L2ThroughputSubscriber(sample_rate=1.5)
 
 
 # ---------------------------------------------------------------------------
@@ -249,41 +248,6 @@ class TestLoadThroughput:
 
         attrs = _attrs_of_nonzero_dps(_LOAD_METRIC)
         assert any(a.get("l2_name") == "mooncake_store" for a in attrs)
-
-
-# ---------------------------------------------------------------------------
-# Sampling behavior
-# ---------------------------------------------------------------------------
-
-
-class TestSampling:
-    def test_unsampled_task_leaves_no_state(self):
-        sub = L2ThroughputSubscriber(sample_rate=0.01)
-        with patch(
-            "lmcache.v1.mp_observability.subscribers.metrics."
-            "l2_throughput.random.random",
-            return_value=0.99,
-        ):
-            sub._on_store_submitted(_store_submitted(task_id=9, t=0.0))
-
-        assert (0, 9) not in sub._pending_store
-
-    def test_unsampled_task_does_not_record(self):
-        sub = L2ThroughputSubscriber(sample_rate=0.01)
-        count_before = _total_count(_STORE_METRIC)
-
-        with patch(
-            "lmcache.v1.mp_observability.subscribers.metrics."
-            "l2_throughput.random.random",
-            return_value=0.99,
-        ):
-            sub._on_store_submitted(
-                _store_submitted(task_id=11, t=0.0, total_bytes=10**9)
-            )
-        # COMPLETED arrives but SUBMITTED wasn't tracked.
-        sub._on_store_completed(_store_completed(task_id=11, t=0.1))
-
-        assert _total_count(_STORE_METRIC) == count_before
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +342,68 @@ class TestEdgeCases:
 
 
 # ---------------------------------------------------------------------------
+# bytes_transferred override (fast-path-aware adapters)
+# ---------------------------------------------------------------------------
+
+
+class TestStoreBytesTransferred:
+    """Store path prefers ``bytes_transferred`` from the COMPLETED event
+    over the submitted-bytes cache when the adapter populates it."""
+
+    def test_uses_bytes_transferred_when_present(self, subscriber):
+        count_before = _total_count(_STORE_METRIC)
+        sum_before = _sum(_STORE_METRIC)
+
+        # Submitted = 10 GB but adapter actually transferred only 1 GB
+        # (rest were fast-pathed duplicates).  Over 0.25 s -> 4 GB/s,
+        # not 40 GB/s.
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=10, t=0.0, total_bytes=10_000_000_000)
+        )
+        subscriber._on_store_completed(
+            _store_completed(task_id=10, t=0.25, bytes_transferred=1_000_000_000)
+        )
+
+        assert _total_count(_STORE_METRIC) == count_before + 1
+        assert _sum(_STORE_METRIC) - sum_before == pytest.approx(4.0, rel=1e-6)
+
+    def test_zero_bytes_transferred_drops_sample(self, subscriber):
+        count_before = _total_count(_STORE_METRIC)
+        sum_before = _sum(_STORE_METRIC)
+
+        # Adapter fast-pathed every key -- no real work, drop the sample
+        # even though submitted bytes and dt look reasonable.
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=11, t=0.0, total_bytes=10_000_000_000)
+        )
+        subscriber._on_store_completed(
+            _store_completed(task_id=11, t=0.1, bytes_transferred=0)
+        )
+
+        assert _total_count(_STORE_METRIC) == count_before
+        assert _sum(_STORE_METRIC) == sum_before
+        # Pending dict still drained even when sample dropped.
+        assert (0, 11) not in subscriber._pending_store
+
+    def test_absent_field_falls_back_to_submitted_bytes(self, subscriber):
+        # Adapters that don't track per-task transfer bytes omit the
+        # field; behavior matches the load path -- submitted bytes / dt.
+        count_before = _total_count(_STORE_METRIC)
+        sum_before = _sum(_STORE_METRIC)
+
+        # 2 GB in 0.1 s -> 20 GB/s
+        subscriber._on_store_submitted(
+            _store_submitted(task_id=12, t=0.0, total_bytes=2_000_000_000)
+        )
+        subscriber._on_store_completed(
+            _store_completed(task_id=12, t=0.1)  # no bytes_transferred
+        )
+
+        assert _total_count(_STORE_METRIC) == count_before + 1
+        assert _sum(_STORE_METRIC) - sum_before == pytest.approx(20.0, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: drive through EventBus
 # ---------------------------------------------------------------------------
 
@@ -385,7 +411,7 @@ class TestEdgeCases:
 class TestEventBusIntegration:
     def test_store_pair_via_bus_records_metric(self):
         bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
-        sub = L2ThroughputSubscriber(sample_rate=1.0)
+        sub = L2ThroughputSubscriber()
         bus.register_subscriber(sub)
 
         count_before = _total_count(_STORE_METRIC)

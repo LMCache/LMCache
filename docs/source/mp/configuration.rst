@@ -139,6 +139,10 @@ Source: ``lmcache/v1/distributed/config.py``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
        ``--no-l1-use-lazy`` to explicitly disable.
+       Lazy allocation relies on ``cudart`` host-pinned memory, so on
+       non-CUDA backends (where ``lmcache.torch_dev`` exposes no
+       ``cudart`` attribute) it is automatically downgraded to eager
+       allocation with a logged warning, regardless of the flag value.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
@@ -185,7 +189,7 @@ Source: ``lmcache/v1/distributed/config.py``
        write buffer (data is deleted from L1 after L2 store).
        ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
        and requires per-``cache_salt`` quotas to be configured at
-       runtime via the ``/api/quota`` HTTP endpoints
+       runtime via the ``/quota`` HTTP endpoints
        (see :ref:`mp-http-quota-api`); a ``cache_salt`` with no
        registered quota has an effective limit of ``0`` bytes,
        so its data is evicted at the next eviction cycle
@@ -243,14 +247,14 @@ The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
 ``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
-``native_plugin``.
+``native_plugin``, ``raw_block``, ``dax``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Fields:
 
-- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``.
+- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
 - ``backend_params`` *(required for file-based backends)*: Dict of string
   key-value pairs.  File-based backends (``GDS``, ``GDS_MT``, ``POSIX``,
   ``HF3FS``) require ``file_path`` and ``use_direct_io``.
@@ -274,6 +278,10 @@ Examples:
 
     # OBJ backend (object store -- no file_path needed)
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
+
+    # AZURE_BLOB backend
+    --l2-adapter '{"type": "nixl_store", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}, "pool_size": 32}'
+
 
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -403,6 +411,33 @@ On the vLLM side, specify the LMCache server host and port via the
     vllm serve Qwen/Qwen3-14B \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+
+``LMCacheMPConnector`` reads the following keys from
+``kv_connector_extra_config``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Key
+     - Default
+     - Description
+   * - ``lmcache.mp.host``
+     - ``tcp://localhost``
+     - Host (with ZMQ transport prefix) of the LMCache MP server.
+   * - ``lmcache.mp.port``
+     - ``5555``
+     - Port of the LMCache MP server. Must match the server's ``--port``.
+   * - ``lmcache.mp.mq_timeout``
+     - ``300.0``
+     - Timeout (seconds) for blocking message-queue requests, including
+       the initial chunk-size query and KV cache
+       registration/unregistration. If the server does not respond within
+       this window, the connector raises ``ConnectionError`` on startup.
+   * - ``lmcache.mp.heartbeat_interval``
+     - ``10.0``
+     - Interval (seconds) between periodic heartbeat pings sent from the
+       connector to the server.
 
 Environment Variables
 ---------------------

@@ -43,9 +43,12 @@ L2_MAX_SIZE_GB="${L2_MAX_SIZE_GB:-80}"
 L2_BANDWIDTH_GB="${L2_BANDWIDTH_GB:-4}"
 
 # L2 performance thresholds
-MIN_L2_SPEEDUP="${MIN_L2_SPEEDUP:-1.0}"
-MIN_L2_TTFT_SPEEDUP="${MIN_L2_TTFT_SPEEDUP:-1.0}"
-MAX_WARMUP_OVERHEAD="${MAX_WARMUP_OVERHEAD:-2.0}"
+# Recent CI runs show ~1.51-1.67x query speedup, ~1.77-2.02x TTFT speedup,
+# and ~0.87-0.99x warmup overhead. Tighten from the previous pass-anything
+# thresholds (1.0x/1.0x/2.0x) while leaving headroom for variance.
+MIN_L2_SPEEDUP="${MIN_L2_SPEEDUP:-1.3}"
+MIN_L2_TTFT_SPEEDUP="${MIN_L2_TTFT_SPEEDUP:-1.5}"
+MAX_WARMUP_OVERHEAD="${MAX_WARMUP_OVERHEAD:-1.2}"
 
 L2_RESULTS_DIR="$RESULTS_DIR/long_doc_qa_l2"
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
@@ -388,14 +391,14 @@ def get_counter(name):
     return 0.0
 
 # L1 metrics
-l1_write_keys = get_counter('lmcache_mp_l1_write_keys_total')
+l1_write_keys = get_counter('lmcache_mp_l1_write_chunks_total')
 
 # L2 metrics
-store_keys = get_counter('lmcache_mp_l2_store_keys_total')
-store_succeeded = get_counter('lmcache_mp_l2_store_succeeded_keys_total')
-prefetch_lookups = get_counter('lmcache_mp_l2_prefetch_lookups_total')
-prefetch_hits = get_counter('lmcache_mp_l2_prefetch_hit_keys_total')
-prefetch_loaded = get_counter('lmcache_mp_l2_prefetch_loaded_keys_total')
+store_keys = get_counter('lmcache_mp_l2_store_submitted_objects_chunks_total')
+store_succeeded = get_counter('lmcache_mp_l2_store_completed_objects_chunks_total')
+prefetch_lookups = get_counter('lmcache_mp_l2_prefetch_lookup_requests_total')
+prefetch_hits = get_counter('lmcache_mp_l2_prefetch_hit_chunks_total')
+prefetch_loaded = get_counter('lmcache_mp_l2_prefetch_load_completed_chunks_total')
 
 print('=' * 60)
 print('Data Flow Metrics')
@@ -518,8 +521,8 @@ def has_label(base_name: str, label: str) -> bool:
 # (kind, metric_name, optional_label_to_assert_present_or_None)
 checks = [
     # ── Newer counters (with label dimensions) ─────────────────────
-    ("counter", "lmcache_mp_l2_store_completed_total", "l2_name"),
-    ("counter", "lmcache_mp_l2_load_completed_total", "l2_name"),
+    ("counter", "lmcache_mp_l2_store_completed_requests_total", "l2_name"),
+    ("counter", "lmcache_mp_l2_load_completed_requests_total", "l2_name"),
     ("counter", "lmcache_mp_lookup_requested_tokens_total", "model_name"),
     ("counter", "lmcache_mp_lookup_hit_tokens_total", "model_name"),
     ("counter", "lmcache_mp_num_chunks_loaded_total", "worker_id"),
@@ -528,10 +531,10 @@ checks = [
     # ``unit="GB/s"`` actually reports as
     # ``<name>_GB_per_second_count`` / ``..._sum`` / ``..._bucket``.
     # Match by base name and let the helper tolerate the unit suffix.
-    ("hist", "lmcache_mp_l0_l1_store_throughput_gbs", None),
-    ("hist", "lmcache_mp_l0_l1_load_throughput_gbs", None),
-    ("hist", "lmcache_mp_l2_store_throughput_gbs", "l2_name"),
-    ("hist", "lmcache_mp_l2_load_throughput_gbs", "l2_name"),
+    ("hist", "lmcache_mp_l0_l1_store_throughput", None),
+    ("hist", "lmcache_mp_l0_l1_load_throughput", None),
+    ("hist", "lmcache_mp_l2_store_throughput", "l2_name"),
+    ("hist", "lmcache_mp_l2_load_throughput", "l2_name"),
 ]
 
 failed = False

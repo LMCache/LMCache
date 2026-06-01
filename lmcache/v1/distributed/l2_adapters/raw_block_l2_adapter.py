@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -351,7 +352,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         self._lock = threading.Lock()
         self._next_task_id: L2TaskId = 0
 
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
 
@@ -414,7 +415,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         future.add_done_callback(partial(self._finish_store_task, task_id))
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         """Drain and return completed store task results."""
         with self._lock:
             completed = self._completed_store_tasks
@@ -657,13 +658,17 @@ class RawBlockL2Adapter(L2AdapterInterface):
         success = False
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
+        bytes_transferred = 0
         try:
             success, stored_keys, stored_sizes = future.result()
+            bytes_transferred = sum(stored_sizes)
         except Exception as e:
             logger.error("RawBlockL2Adapter store task %d failed: %s", task_id, e)
         with self._lock:
             self._store_inflight_tasks -= 1
-            self._completed_store_tasks[task_id] = success
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
             event_fd = self._store_efd
         if stored_keys:
             try:
