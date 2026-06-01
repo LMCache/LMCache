@@ -3272,6 +3272,44 @@ impl RawBlockDevice {
         Ok(())
     }
 
+    /// Issue a BLKDISCARD ioctl to zero/trim a byte range on the block device.
+    ///
+    /// Raises ``OSError`` on any failure, including:
+    /// - ``EOPNOTSUPP`` / ``ENOTTY``: device or driver does not support BLKDISCARD.
+    /// - ``EOPNOTSUPP``: called on a non-Linux platform.
+    ///
+    /// Args:
+    ///     offset: Byte offset of the range to discard (must be sector-aligned).
+    ///     length: Number of bytes to discard (must be sector-aligned).
+    #[pyo3(signature = (offset, length))]
+    fn discard(&self, offset: u64, length: u64) -> PyResult<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(PyRuntimeError::new_err("device is closed"));
+        }
+        if length == 0 {
+            return Ok(());
+        }
+        // BLKDISCARD = _IO(0x12, 119) from <linux/fs.h>
+        #[cfg(target_os = "linux")]
+        {
+            let range: [u64; 2] = [offset, length];
+            // SAFETY: ioctl expects a pointer to a [u64; 2] range argument for BLKDISCARD.
+            let rc = unsafe { libc::ioctl(self.fd, 0x1277_u64, range.as_ptr()) };
+            if rc != 0 {
+                return Err(os_err("BLKDISCARD ioctl failed"));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (offset, length);
+            return Err(PyOSError::new_err((
+                libc::EOPNOTSUPP,
+                "BLKDISCARD is not supported on this platform",
+            )));
+        }
+        Ok(())
+    }
+
     /// Internal function to perform the cleanup operation.
     fn do_close(&mut self) -> Result<(), PyErr> {
         if self.use_iouring {
