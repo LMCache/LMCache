@@ -147,6 +147,7 @@ class RawBlockPutManyResult:
 
     results: list[bool]
     stored_keys: list[str]
+    no_free_slot_keys: list[str]
 
 
 class RawBlockCore:
@@ -459,6 +460,7 @@ class RawBlockCore:
 
         results = [False] * len(keys)
         stored_keys: list[str] = []
+        no_free_slot_keys: list[str] = []
 
         for i, (key, obj) in enumerate(zip(keys, objs, strict=False)):
             if self._closed:
@@ -478,6 +480,7 @@ class RawBlockCore:
                         "RawBlockCore: no free slot available for key %s",
                         key.encoded,
                     )
+                    no_free_slot_keys.append(key.encoded)
                     continue
 
                 meta = DiskCacheMetadata(
@@ -518,6 +521,7 @@ class RawBlockCore:
         return RawBlockPutManyResult(
             results=results,
             stored_keys=stored_keys,
+            no_free_slot_keys=no_free_slot_keys,
         )
 
     def exists_many(

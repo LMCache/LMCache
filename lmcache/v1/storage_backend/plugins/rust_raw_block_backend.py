@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Standard
+from collections import OrderedDict
 from collections.abc import Mapping
 from concurrent.futures import Future
 from typing import Any, Callable, List, Optional, Sequence
@@ -139,12 +140,13 @@ class RustRawBlockBackend(StoragePluginInterface):
             self._build_core_config(extra),
             key_namespace="legacy",
         )
-        self._warn_if_loaded_metadata_looks_cross_rank()
-
         self._put_lock = threading.Lock()
         self._put_tasks: set[CacheEngineKey] = set()
         self._pin_lock = threading.Lock()
         self._pinned_keys: set[str] = set()
+        self._lru_keys: OrderedDict[str, None] = OrderedDict()
+        self._sync_lru_with_index()
+        self._warn_if_loaded_metadata_looks_cross_rank()
 
     def __str__(self) -> str:
         return "RustRawBlockBackend"
@@ -211,7 +213,10 @@ class RustRawBlockBackend(StoragePluginInterface):
 
     def apply_loaded_state(self, data: dict[str, Any]) -> bool:
         """Validate and apply a raw-block metadata checkpoint payload."""
-        return self._core.apply_loaded_state(data)
+        applied = self._core.apply_loaded_state(data)
+        if applied:
+            self._sync_lru_with_index()
+        return applied
 
     def _build_core_config(self, extra: Mapping[str, Any]) -> RawBlockCoreConfig:
         block_align = int(extra.get("rust_raw_block.block_align", 4096))
@@ -342,6 +347,7 @@ class RustRawBlockBackend(StoragePluginInterface):
             removed = self._core.delete_many([spec.encoded], force=force)[0]
             if removed:
                 self._pinned_keys.discard(spec.encoded)
+                self._lru_keys.pop(spec.encoded, None)
         return removed
 
     def batched_submit_put_task(
@@ -389,13 +395,28 @@ class RustRawBlockBackend(StoragePluginInterface):
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]],
     ) -> None:
         try:
-            put_result = await asyncio.to_thread(
-                self._core.put_many,
-                [spec],
-                [memory_obj],
-            )
-            if not put_result.results or not put_result.results[0]:
+            if len(memory_obj.byte_array) > self.slot_bytes - self.header_bytes:
                 raise RuntimeError(f"Failed to persist raw-block key {spec.encoded}")
+
+            while True:
+                put_result = await asyncio.to_thread(
+                    self._core.put_many,
+                    [spec],
+                    [memory_obj],
+                )
+                if put_result.results and put_result.results[0]:
+                    self._touch_lru([spec.encoded])
+                    break
+
+                # Evict and retry only for confirmed capacity misses. Other
+                # write failures must not remove unrelated cached entries.
+                if (
+                    spec.encoded not in put_result.no_free_slot_keys
+                    or not self._evict_one_lru()
+                ):
+                    raise RuntimeError(
+                        f"Failed to persist raw-block key {spec.encoded}"
+                    )
             if on_complete_callback is not None:
                 try:
                     on_complete_callback(key)
@@ -467,10 +488,13 @@ class RustRawBlockBackend(StoragePluginInterface):
                     break
                 loaded_count += 1
             if loaded_count == len(allocated):
+                self._touch_lru([spec.encoded for spec in load_specs])
                 return allocated
 
             for obj in allocated[loaded_count:]:
                 obj.ref_count_down()
+            if loaded_count > 0:
+                self._touch_lru([spec.encoded for spec in load_specs[:loaded_count]])
             return allocated[:loaded_count]
         except Exception:
             for obj in allocated:
@@ -583,3 +607,32 @@ class RustRawBlockBackend(StoragePluginInterface):
                 self._pinned_keys.discard(encoded_key)
                 return True
             return self._core.contains_key(encoded_key, lock=False)
+
+    def _sync_lru_with_index(self) -> None:
+        with self._pin_lock:
+            indexed_keys = self._core.snapshot_indexed_keys()
+            indexed_key_set = set(indexed_keys)
+            self._lru_keys = OrderedDict(
+                (encoded_key, None) for encoded_key in indexed_keys
+            )
+            self._pinned_keys.intersection_update(indexed_key_set)
+
+    def _touch_lru(self, encoded_keys: Sequence[str]) -> None:
+        with self._pin_lock:
+            for encoded_key in encoded_keys:
+                self._lru_keys[encoded_key] = None
+                self._lru_keys.move_to_end(encoded_key)
+
+    def _evict_one_lru(self) -> bool:
+        with self._pin_lock:
+            for encoded_key in list(self._lru_keys.keys()):
+                if encoded_key in self._pinned_keys:
+                    continue
+                deleted = self._core.delete_many([encoded_key], force=False)[0]
+                if deleted:
+                    self._lru_keys.pop(encoded_key, None)
+                    return True
+                # Drop stale LRU entries for keys already removed from the core.
+                if not self._core.contains_key(encoded_key, lock=False):
+                    self._lru_keys.pop(encoded_key, None)
+            return False

@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 # Standard
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from typing import Any
 from unittest.mock import MagicMock, patch
 import asyncio
 import os
@@ -39,6 +40,7 @@ from lmcache.v1.storage_backend.raw_block import (
     RawBlockCore,
     RawBlockCoreConfig,
     RawBlockKeySpec,
+    RawBlockPutManyResult,
 )
 
 
@@ -273,6 +275,91 @@ def loop_in_thread():
         loop.call_soon_threadsafe(loop.stop)
         t.join(timeout=5)
         loop.close()
+
+
+def _test_raw_block_metadata() -> LMCacheMetadata:
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+    )
+
+
+def _test_raw_block_key(chunk_hash: int) -> CacheEngineKey:
+    return CacheEngineKey("test_model", 1, 0, chunk_hash, torch.bfloat16)
+
+
+def _make_test_raw_block_backend(
+    *,
+    dev_path: str,
+    memory_allocator: Any,
+    loop: asyncio.AbstractEventLoop,
+    instance_id: str,
+    capacity_slots: int = 2,
+    load_checkpoint_on_init: bool = True,
+    meta_verify_on_load: bool = True,
+) -> tuple[LMCacheEngineConfig, LocalCPUBackend, RustRawBlockBackend]:
+    slot_bytes = 4 * 1024 * 1024
+    meta_total_bytes = 4 * 1024 * 1024
+    config = LMCacheEngineConfig.from_defaults(
+        chunk_size=256,
+        local_cpu=True,
+        max_local_cpu_size=0.1,
+        lmcache_instance_id=instance_id,
+    )
+    config.storage_plugins = []
+    config.extra_config = {
+        "rust_raw_block.device_path": dev_path,
+        "rust_raw_block.capacity_bytes": meta_total_bytes + capacity_slots * slot_bytes,
+        "rust_raw_block.block_align": 4096,
+        "rust_raw_block.header_bytes": 4096,
+        "rust_raw_block.slot_bytes": slot_bytes,
+        "rust_raw_block.meta_total_bytes": meta_total_bytes,
+        "rust_raw_block.meta_enable_periodic": False,
+        "rust_raw_block.load_checkpoint_on_init": load_checkpoint_on_init,
+        "rust_raw_block.meta_verify_on_load": meta_verify_on_load,
+    }
+    metadata = _test_raw_block_metadata()
+    local_cpu = LocalCPUBackend(
+        config=config,
+        metadata=metadata,
+        dst_device="cpu",
+        memory_allocator=memory_allocator,
+    )
+    backend = RustRawBlockBackend(
+        config=config,
+        metadata=metadata,
+        local_cpu_backend=local_cpu,
+        loop=loop,
+        dst_device="cpu",
+    )
+    return config, local_cpu, backend
+
+
+def _make_test_raw_block_obj(
+    allocator: AdHocMemoryAllocator, fill_value: int
+) -> TensorMemoryObj:
+    obj = allocator.allocate(
+        [torch.Size([2, 16, 8, 128])],
+        [torch.bfloat16],
+        fmt=MemoryFormat.KV_T2D,
+    )
+    assert obj is not None and obj.tensor is not None
+    obj.tensor.fill_(fill_value)
+    return obj
+
+
+def _put_test_raw_block_obj(
+    backend: RustRawBlockBackend, key: CacheEngineKey, obj: TensorMemoryObj
+) -> None:
+    futs = backend.batched_submit_put_task([key], [obj])
+    assert futs is not None
+    futs[0].result(timeout=10)
+    obj.ref_count_down()
 
 
 def _run_batched_get_prefix_stop(
@@ -961,92 +1048,471 @@ def test_rust_raw_block_backend_batched_get_releases_loaded_prefix_on_read_error
 @pytest.mark.skipif(
     not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
 )
-def test_rust_raw_block_backend_rejects_when_full(memory_allocator, loop_in_thread):
-    """Test that raw-block writes fail when no slot has been freed."""
+def test_rust_raw_block_backend_evicts_lru_when_full(memory_allocator, loop_in_thread):
+    """Raw-block writes evict the least-recently-used unpinned key when full."""
     with tempfile.TemporaryDirectory() as td:
         dev_path = os.path.join(td, "dev.bin")
         with open(dev_path, "wb") as f:
             f.truncate(64 * 1024 * 1024)
 
-        config = LMCacheEngineConfig.from_defaults(
-            chunk_size=256,
-            local_cpu=True,
-            max_local_cpu_size=0.1,
-            lmcache_instance_id="test_rust_raw_block_backend_evict",
-        )
-        config.extra_config = {
-            "rust_raw_block.device_path": dev_path,
-            "rust_raw_block.capacity_bytes": 3 * 4 * 1024 * 1024,
-            "rust_raw_block.block_align": 4096,
-            "rust_raw_block.header_bytes": 4096,
-            "rust_raw_block.slot_bytes": 4 * 1024 * 1024,
-            "rust_raw_block.meta_total_bytes": 4 * 1024 * 1024,
-            "rust_raw_block.meta_enable_periodic": False,
-        }
-        metadata = LMCacheMetadata(
-            model_name="test_model",
-            world_size=1,
-            local_world_size=1,
-            worker_id=0,
-            local_worker_id=0,
-            kv_dtype=torch.bfloat16,
-            kv_shape=(4, 2, 256, 8, 128),
-        )
-
-        local_cpu = LocalCPUBackend(
-            config=config,
-            metadata=metadata,
-            dst_device="cpu",
+        _, _, backend = _make_test_raw_block_backend(
+            dev_path=dev_path,
             memory_allocator=memory_allocator,
-        )
-        backend = RustRawBlockBackend(
-            config=config,
-            metadata=metadata,
-            local_cpu_backend=local_cpu,
             loop=loop_in_thread,
-            dst_device="cpu",
+            instance_id="test_rust_raw_block_backend_evict",
+            capacity_slots=2,
         )
 
         try:
             alloc = AdHocMemoryAllocator(device="cpu")
+            k1 = _test_raw_block_key(1)
+            k2 = _test_raw_block_key(2)
+            k3 = _test_raw_block_key(3)
 
-            k1 = CacheEngineKey("test_model", 1, 0, 1, torch.bfloat16)
-            k2 = CacheEngineKey("test_model", 1, 0, 2, torch.bfloat16)
-            k3 = CacheEngineKey("test_model", 1, 0, 3, torch.bfloat16)
+            o1 = _make_test_raw_block_obj(alloc, 1)
+            o2 = _make_test_raw_block_obj(alloc, 2)
+            o3 = _make_test_raw_block_obj(alloc, 3)
 
-            o1 = alloc.allocate(
-                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
-            )
-            o2 = alloc.allocate(
-                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
-            )
-            o3 = alloc.allocate(
-                [torch.Size([2, 16, 8, 128])], [torch.bfloat16], fmt=MemoryFormat.KV_T2D
-            )
-            assert o1 and o2 and o3
-            assert (
-                o1.tensor is not None
-                and o2.tensor is not None
-                and o3.tensor is not None
-            )
-            o1.tensor.fill_(1)
-            o2.tensor.fill_(2)
-            o3.tensor.fill_(3)
+            _put_test_raw_block_obj(backend, k1, o1)
+            _put_test_raw_block_obj(backend, k2, o2)
 
-            f1 = backend.batched_submit_put_task([k1], [o1])[0]
-            f2 = backend.batched_submit_put_task([k2], [o2])[0]
-            f1.result(timeout=10)
-            f2.result(timeout=10)
+            out1 = backend.get_blocking(k1)
+            assert out1 is not None
+            out1.ref_count_down()
 
-            assert backend.get_blocking(k1) is not None
+            futs = backend.batched_submit_put_task([k3], [o3])
+            assert futs is not None
+            futs[0].result(timeout=10)
+            o3.ref_count_down()
 
-            f3 = backend.batched_submit_put_task([k3], [o3])[0]
+            assert backend.contains(k1) is True
+            assert backend.contains(k2) is False
+            assert backend.contains(k3) is True
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_eviction_skips_pinned_key(
+    memory_allocator, loop_in_thread
+):
+    """Pinned keys are preserved when another LRU victim is available."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        _, _, backend = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_pinned_evict",
+            capacity_slots=2,
+        )
+        try:
+            alloc = AdHocMemoryAllocator(device="cpu")
+            k1 = _test_raw_block_key(11)
+            k2 = _test_raw_block_key(12)
+            k3 = _test_raw_block_key(13)
+            _put_test_raw_block_obj(backend, k1, _make_test_raw_block_obj(alloc, 1))
+            _put_test_raw_block_obj(backend, k2, _make_test_raw_block_obj(alloc, 2))
+
+            assert backend.pin(k1) is True
+            o3 = _make_test_raw_block_obj(alloc, 3)
+            futs = backend.batched_submit_put_task([k3], [o3])
+            assert futs is not None
+            futs[0].result(timeout=10)
+            o3.ref_count_down()
+
+            assert backend.contains(k1) is True
+            assert backend.contains(k2) is False
+            assert backend.contains(k3) is True
+            assert backend.unpin(k1) is True
+            assert backend.lock_refcount(k1.to_string()) == 0
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_put_fails_when_all_candidates_locked(
+    memory_allocator, loop_in_thread
+):
+    """A full backend still fails when every LRU candidate is locked."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        _, _, backend = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_all_locked",
+            capacity_slots=2,
+        )
+        try:
+            alloc = AdHocMemoryAllocator(device="cpu")
+            k1 = _test_raw_block_key(21)
+            k2 = _test_raw_block_key(22)
+            k3 = _test_raw_block_key(23)
+            _put_test_raw_block_obj(backend, k1, _make_test_raw_block_obj(alloc, 1))
+            _put_test_raw_block_obj(backend, k2, _make_test_raw_block_obj(alloc, 2))
+
+            assert backend.pin(k1) is True
+            assert backend.pin(k2) is True
+            o3 = _make_test_raw_block_obj(alloc, 3)
+            futs = backend.batched_submit_put_task([k3], [o3])
+            assert futs is not None
             with pytest.raises(RuntimeError, match="Failed to persist raw-block key"):
-                f3.result(timeout=10)
+                futs[0].result(timeout=10)
+            o3.ref_count_down()
 
-            assert backend.get_blocking(k1) is not None
-            assert backend.get_blocking(k2) is not None
+            assert backend.contains(k1) is True
+            assert backend.contains(k2) is True
             assert backend.contains(k3) is False
+            assert backend.unpin(k1) is True
+            assert backend.unpin(k2) is True
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_write_failure_does_not_evict_lru(
+    memory_allocator, loop_in_thread
+):
+    """Non-capacity put failures do not evict existing LRU entries."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        _, _, backend = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_write_failure_no_evict",
+            capacity_slots=2,
+        )
+        try:
+            alloc = AdHocMemoryAllocator(device="cpu")
+            k1 = _test_raw_block_key(61)
+            k2 = _test_raw_block_key(62)
+            k3 = _test_raw_block_key(63)
+            _put_test_raw_block_obj(backend, k1, _make_test_raw_block_obj(alloc, 1))
+            _put_test_raw_block_obj(backend, k2, _make_test_raw_block_obj(alloc, 2))
+
+            o3 = _make_test_raw_block_obj(alloc, 3)
+            failed_put = RawBlockPutManyResult(
+                results=[False],
+                stored_keys=[],
+                no_free_slot_keys=[],
+            )
+            with patch.object(RawBlockCore, "put_many", return_value=failed_put):
+                futs = backend.batched_submit_put_task([k3], [o3])
+                assert futs is not None
+                with pytest.raises(
+                    RuntimeError, match="Failed to persist raw-block key"
+                ):
+                    futs[0].result(timeout=10)
+            o3.ref_count_down()
+
+            assert backend.contains(k1) is True
+            assert backend.contains(k2) is True
+            assert backend.contains(k3) is False
+            assert backend.indexed_key_count() == 2
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_remove_clears_lru_entry(
+    memory_allocator, loop_in_thread
+):
+    """Removed keys do not remain as stale LRU eviction candidates."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        _, _, backend = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_remove_lru",
+            capacity_slots=2,
+        )
+        try:
+            alloc = AdHocMemoryAllocator(device="cpu")
+            k1 = _test_raw_block_key(31)
+            k2 = _test_raw_block_key(32)
+            k3 = _test_raw_block_key(33)
+            k4 = _test_raw_block_key(34)
+            _put_test_raw_block_obj(backend, k1, _make_test_raw_block_obj(alloc, 1))
+            _put_test_raw_block_obj(backend, k2, _make_test_raw_block_obj(alloc, 2))
+
+            assert backend.remove(k1) is True
+            assert backend.contains(k1) is False
+            _put_test_raw_block_obj(backend, k3, _make_test_raw_block_obj(alloc, 3))
+            _put_test_raw_block_obj(backend, k4, _make_test_raw_block_obj(alloc, 4))
+
+            assert backend.contains(k2) is False
+            assert backend.contains(k3) is True
+            assert backend.contains(k4) is True
+            assert backend.indexed_key_count() == 2
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_checkpoint_rebuilds_lru_for_eviction(
+    memory_allocator, loop_in_thread
+):
+    """Recovered checkpoint entries are registered as eviction candidates."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        _, _, backend1 = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_checkpoint_lru",
+            capacity_slots=2,
+        )
+        alloc = AdHocMemoryAllocator(device="cpu")
+        k1 = _test_raw_block_key(41)
+        k2 = _test_raw_block_key(42)
+        k3 = _test_raw_block_key(43)
+        try:
+            _put_test_raw_block_obj(backend1, k1, _make_test_raw_block_obj(alloc, 1))
+            _put_test_raw_block_obj(backend1, k2, _make_test_raw_block_obj(alloc, 2))
+        finally:
+            backend1.close()
+
+        _, _, backend2 = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_checkpoint_lru",
+            capacity_slots=2,
+        )
+        try:
+            assert backend2.contains(k1) is True
+            assert backend2.contains(k2) is True
+            _put_test_raw_block_obj(backend2, k3, _make_test_raw_block_obj(alloc, 3))
+
+            assert backend2.contains(k3) is True
+            assert backend2.indexed_key_count() == 2
+            assert sum(1 for key in (k1, k2) if backend2.contains(key)) == 1
+        finally:
+            backend2.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_apply_loaded_state_rebuilds_lru(
+    memory_allocator, loop_in_thread
+):
+    """apply_loaded_state syncs recovered keys into the wrapper LRU."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        config, _, backend = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_apply_lru",
+            capacity_slots=2,
+            load_checkpoint_on_init=False,
+            meta_verify_on_load=False,
+        )
+        try:
+            k1 = _test_raw_block_key(51)
+            k2 = _test_raw_block_key(52)
+            k3 = _test_raw_block_key(53)
+            entry_size = 1024
+            applied = backend.apply_loaded_state(
+                {
+                    "version": 1,
+                    "device_path": dev_path,
+                    "capacity_bytes": backend.capacity_bytes,
+                    "block_align": backend.block_align,
+                    "header_bytes": backend.header_bytes,
+                    "slot_bytes": backend.slot_bytes,
+                    "meta_total_bytes": backend.meta_total_bytes,
+                    "meta_magic": backend.meta_magic_text,
+                    "meta_version": backend.meta_version,
+                    "data_base_offset": backend.data_base_offset,
+                    "next_slot": 2,
+                    "free_slots": [],
+                    "entries": {
+                        k1.to_string(): {
+                            "offset": backend.data_base_offset,
+                            "size": entry_size,
+                            "shape": [512],
+                            "dtype": "torch.bfloat16",
+                            "fmt": MemoryFormat.KV_2LTD.name,
+                            "cached_positions": None,
+                        },
+                        k2.to_string(): {
+                            "offset": backend.data_base_offset + backend.slot_bytes,
+                            "size": entry_size,
+                            "shape": [512],
+                            "dtype": "torch.bfloat16",
+                            "fmt": MemoryFormat.KV_2LTD.name,
+                            "cached_positions": None,
+                        },
+                    },
+                }
+            )
+            assert applied is True
+            assert backend.indexed_key_count() == 2
+
+            alloc = AdHocMemoryAllocator(device="cpu")
+            _put_test_raw_block_obj(backend, k3, _make_test_raw_block_obj(alloc, 3))
+
+            assert (
+                config.extra_config["rust_raw_block.load_checkpoint_on_init"] is False
+            )
+            assert backend.contains(k3) is True
+            assert backend.indexed_key_count() == 2
+            assert sum(1 for key in (k1, k2) if backend.contains(key)) == 1
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_concurrent_puts_preserve_slot_invariants(
+    memory_allocator, loop_in_thread
+):
+    """Concurrent puts either complete or fail explicitly without overfilling slots."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        _, _, backend = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_concurrent_put",
+            capacity_slots=3,
+        )
+        try:
+            alloc = AdHocMemoryAllocator(device="cpu")
+            keys = [_test_raw_block_key(100 + i) for i in range(12)]
+            objs = [_make_test_raw_block_obj(alloc, i) for i in range(len(keys))]
+
+            def submit_one(index: int) -> None:
+                futs = backend.batched_submit_put_task([keys[index]], [objs[index]])
+                if futs is None:
+                    objs[index].ref_count_down()
+                    return
+                try:
+                    futs[0].result(timeout=10)
+                except RuntimeError as e:
+                    assert "Failed to persist raw-block key" in str(e)
+                finally:
+                    objs[index].ref_count_down()
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                futures = [executor.submit(submit_one, i) for i in range(len(keys))]
+                for future in as_completed(futures):
+                    future.result(timeout=10)
+
+            assert backend.indexed_key_count() <= 3
+            offsets = [
+                backend.entry_offset(key) for key in keys if backend.contains(key)
+            ]
+            assert len(offsets) == len(set(offsets))
+            for key in keys:
+                if backend.contains(key):
+                    loaded = backend.get_blocking(key)
+                    assert loaded is not None
+                    loaded.ref_count_down()
+                else:
+                    assert backend.contains(key) is False
+        finally:
+            backend.close()
+
+
+@pytest.mark.skipif(
+    not _has_ext(), reason="lmcache_rust_raw_block_io extension not installed"
+)
+def test_rust_raw_block_backend_pinned_read_survives_concurrent_eviction_pressure(
+    memory_allocator, loop_in_thread
+):
+    """Pinned reads and concurrent put pressure keep the pinned key resident."""
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+
+        _, _, backend = _make_test_raw_block_backend(
+            dev_path=dev_path,
+            memory_allocator=memory_allocator,
+            loop=loop_in_thread,
+            instance_id="test_rust_raw_block_backend_pin_pressure",
+            capacity_slots=2,
+        )
+        try:
+            alloc = AdHocMemoryAllocator(device="cpu")
+            pinned_key = _test_raw_block_key(201)
+            evictable_key = _test_raw_block_key(202)
+            pressure_keys = [_test_raw_block_key(203), _test_raw_block_key(204)]
+            _put_test_raw_block_obj(
+                backend, pinned_key, _make_test_raw_block_obj(alloc, 1)
+            )
+            _put_test_raw_block_obj(
+                backend, evictable_key, _make_test_raw_block_obj(alloc, 2)
+            )
+            assert backend.pin(pinned_key) is True
+
+            def load_pinned() -> None:
+                for _ in range(5):
+                    loaded = backend.get_blocking(pinned_key)
+                    assert loaded is not None
+                    loaded.ref_count_down()
+
+            def put_pressure(index: int) -> None:
+                obj = _make_test_raw_block_obj(alloc, 3 + index)
+                futs = backend.batched_submit_put_task([pressure_keys[index]], [obj])
+                assert futs is not None
+                try:
+                    futs[0].result(timeout=10)
+                except RuntimeError as e:
+                    assert "Failed to persist raw-block key" in str(e)
+                finally:
+                    obj.ref_count_down()
+
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [executor.submit(load_pinned)]
+                futures.extend(executor.submit(put_pressure, i) for i in range(2))
+                for future in as_completed(futures):
+                    future.result(timeout=10)
+
+            assert backend.contains(pinned_key) is True
+            assert backend.contains(evictable_key) is False
+            assert backend.indexed_key_count() <= 2
+            assert backend.lock_refcount(pinned_key.to_string()) == 1
+            assert backend.unpin(pinned_key) is True
+            assert backend.lock_refcount(pinned_key.to_string()) == 0
         finally:
             backend.close()
 
