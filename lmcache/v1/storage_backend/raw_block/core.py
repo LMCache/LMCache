@@ -1180,8 +1180,10 @@ class RawBlockCore:
             )
         except OSError as e:
             logger.warning(
-                "RawBlockCore: BLKDISCARD failed on %s (%s); "
-                "device may not support TRIM or is not a block device",
+                "RawBlockCore: BLKDISCARD request for %d bytes on %s failed "
+                "before completion (%s); device may not support TRIM/discard, "
+                "is not a block device, or rejected one discard chunk",
+                length,
                 self.device_path,
                 e,
             )

@@ -29,7 +29,9 @@ caller-provided load buffers during prefetch.
   in-memory index instead.
 - ``blkdiscard_on_init``: Issue a ``BLKDISCARD`` ioctl to zero/trim the full
   device range on startup (default ``false``). Requires
-  ``load_checkpoint_on_init=false``; combining the two raises an error.
+  ``load_checkpoint_on_init=false``; combining the two raises an error. The
+  discard is split automatically using the kernel ``discard_max_bytes`` limit
+  when available.
 - ``enable_zero_copy``: Try aligned direct-buffer I/O when possible.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust

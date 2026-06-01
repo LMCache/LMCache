@@ -182,9 +182,10 @@ Important validation rules:
 - `per_tp_device_paths` is rejected in MP mode
 - `load_checkpoint_on_init=false` starts with an empty in-memory index instead
   of loading the latest on-device metadata checkpoint
-- `blkdiscard_on_init=true` issues a `BLKDISCARD` ioctl to zero/trim the full
+- `blkdiscard_on_init=true` issues a `BLKDISCARD` ioctl to trim the full
   device range on startup; requires `load_checkpoint_on_init=false` (combining
-  the two raises `ValueError`)
+  the two raises `ValueError`). The discard is split automatically using the
+  kernel `discard_max_bytes` limit when available.
 - with `use_odirect=true`, MP L1 alignment must satisfy
   `l1_align_bytes >= block_align`
 - with `use_odirect=true`, raw-block I/O rejects offsets and total I/O lengths
