@@ -195,7 +195,7 @@ sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
 > context matches, empty `chunk_hashes`) contribute `0` to both, and
 > abandoned lookups (client never polls `query_prefetch_status`)
 > contribute to neither.  See
-> [L1_L2_HIT_RATE_PLAN.md](L1_L2_HIT_RATE_PLAN.md) for the full rationale.
+> See the lookup hit-rate section above for the full rationale.
 
 ---
 
