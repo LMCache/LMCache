@@ -29,7 +29,7 @@ class L2LoggingSubscriber(EventSubscriber):
     def _on_store_submitted(self, event: Event) -> None:
         logger.debug(
             "L2 store submitted: %d keys to adapter %d",
-            event.metadata["key_count"],
+            len(event.metadata.get("keys", [])),
             event.metadata["adapter_index"],
         )
 
@@ -37,15 +37,15 @@ class L2LoggingSubscriber(EventSubscriber):
         logger.debug(
             "L2 store completed: adapter %d, %d succeeded, %d failed",
             event.metadata["adapter_index"],
-            event.metadata["succeeded_count"],
-            event.metadata["failed_count"],
+            len(event.metadata.get("succeeded_keys", [])),
+            len(event.metadata.get("failed_keys", [])),
         )
 
     def _on_lookup_submitted(self, event: Event) -> None:
         logger.debug(
             "L2 prefetch lookup submitted: request %d, %d keys to %d adapters",
             event.metadata["request_id"],
-            event.metadata["key_count"],
+            len(event.metadata.get("keys", [])),
             event.metadata["adapter_count"],
         )
 
@@ -60,14 +60,16 @@ class L2LoggingSubscriber(EventSubscriber):
         logger.debug(
             "L2 prefetch load submitted: request %d, %d keys to %d adapters",
             event.metadata["request_id"],
-            event.metadata["key_count"],
+            len(event.metadata.get("keys", [])),
             event.metadata["adapter_count"],
         )
 
     def _on_load_completed(self, event: Event) -> None:
+        loaded = event.metadata.get("loaded_keys", [])
+        failed = event.metadata.get("failed_keys", [])
         logger.debug(
             "L2 prefetch load completed: request %d, %d loaded, %d failed",
             event.metadata["request_id"],
-            event.metadata["loaded_count"],
-            event.metadata["failed_count"],
+            len(loaded),
+            len(failed),
         )

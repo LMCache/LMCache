@@ -506,7 +506,7 @@ class StoreController(StorageControllerInterface):
                         "adapter_index": adapter_index,
                         "task_id": task_id,
                         "l2_name": self._adapter_descriptors[adapter_index].type_name,
-                        "key_count": len(successful_keys),
+                        "keys": successful_keys,
                         "total_bytes": total_bytes,
                     },
                 )
@@ -577,8 +577,8 @@ class StoreController(StorageControllerInterface):
                     event_type=EventType.L2_STORE_COMPLETED,
                     metadata={
                         **completion_meta,
-                        "succeeded_count": len(task.keys),
-                        "failed_count": 0,
+                        "succeeded_keys": task.keys,
+                        "failed_keys": [],
                     },
                 )
             )
@@ -597,8 +597,8 @@ class StoreController(StorageControllerInterface):
                     event_type=EventType.L2_STORE_COMPLETED,
                     metadata={
                         **completion_meta,
-                        "succeeded_count": 0,
-                        "failed_count": len(task.keys),
+                        "succeeded_keys": [],
+                        "failed_keys": task.keys,
                     },
                 )
             )

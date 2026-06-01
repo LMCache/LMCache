@@ -10,6 +10,7 @@ provider and assert on counter **deltas** between before/after snapshots.
 """
 
 # Standard
+from types import SimpleNamespace
 import time
 
 # Third Party
@@ -29,6 +30,10 @@ _DRAIN_WAIT = 0.15
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _make_keys(count: int, cache_salt: str = "") -> list:
+    return [SimpleNamespace(cache_salt=cache_salt, id=i) for i in range(count)]
 
 
 def _read_counters() -> dict[str, int]:
@@ -118,13 +123,13 @@ class TestL2StoreMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_STORE_SUBMITTED,
-                metadata={"adapter_index": 0, "key_count": 10},
+                metadata={"adapter_index": 0, "keys": _make_keys(10)},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.L2_STORE_SUBMITTED,
-                metadata={"adapter_index": 1, "key_count": 5},
+                metadata={"adapter_index": 1, "keys": _make_keys(5)},
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -139,7 +144,11 @@ class TestL2StoreMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_STORE_COMPLETED,
-                metadata={"adapter_index": 0, "succeeded_count": 8, "failed_count": 0},
+                metadata={
+                    "adapter_index": 0,
+                    "succeeded_keys": _make_keys(8),
+                    "failed_keys": [],
+                },
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -154,7 +163,11 @@ class TestL2StoreMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_STORE_COMPLETED,
-                metadata={"adapter_index": 0, "succeeded_count": 3, "failed_count": 7},
+                metadata={
+                    "adapter_index": 0,
+                    "succeeded_keys": _make_keys(3),
+                    "failed_keys": _make_keys(7),
+                },
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -170,13 +183,17 @@ class TestL2StoreMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_STORE_SUBMITTED,
-                metadata={"adapter_index": 0, "key_count": 20},
+                metadata={"adapter_index": 0, "keys": _make_keys(20)},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.L2_STORE_COMPLETED,
-                metadata={"adapter_index": 0, "succeeded_count": 20, "failed_count": 0},
+                metadata={
+                    "adapter_index": 0,
+                    "succeeded_keys": _make_keys(20),
+                    "failed_keys": [],
+                },
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -200,7 +217,7 @@ class TestL2PrefetchMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
-                metadata={"request_id": 1, "key_count": 12, "adapter_count": 2},
+                metadata={"request_id": 1, "keys": _make_keys(12), "adapter_count": 2},
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -229,7 +246,7 @@ class TestL2PrefetchMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
-                metadata={"request_id": 1, "key_count": 10, "adapter_count": 2},
+                metadata={"request_id": 1, "keys": _make_keys(10), "adapter_count": 2},
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -244,7 +261,11 @@ class TestL2PrefetchMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
-                metadata={"request_id": 1, "loaded_count": 9, "failed_count": 1},
+                metadata={
+                    "request_id": 1,
+                    "loaded_keys": _make_keys(9),
+                    "failed_keys": _make_keys(1),
+                },
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -259,7 +280,7 @@ class TestL2PrefetchMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
-                metadata={"request_id": 42, "key_count": 20, "adapter_count": 1},
+                metadata={"request_id": 42, "keys": _make_keys(20), "adapter_count": 1},
             )
         )
         bus.publish(
@@ -271,13 +292,17 @@ class TestL2PrefetchMetrics:
         bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
-                metadata={"request_id": 42, "key_count": 18, "adapter_count": 1},
+                metadata={"request_id": 42, "keys": _make_keys(18), "adapter_count": 1},
             )
         )
         bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
-                metadata={"request_id": 42, "loaded_count": 18, "failed_count": 0},
+                metadata={
+                    "request_id": 42,
+                    "loaded_keys": _make_keys(18),
+                    "failed_keys": [],
+                },
             )
         )
         time.sleep(_DRAIN_WAIT)
@@ -326,8 +351,8 @@ class TestL2NameLabeledCounters:
                     "adapter_index": 0,
                     "task_id": 1,
                     "l2_name": "fs",
-                    "succeeded_count": 5,
-                    "failed_count": 0,
+                    "succeeded_keys": _make_keys(5),
+                    "failed_keys": [],
                     "total_bytes": 1_000,
                 },
             )
@@ -350,7 +375,6 @@ class TestL2NameLabeledCounters:
                     "adapter_index": 1,
                     "task_id": 42,
                     "l2_name": "nixl_store",
-                    "total_bytes": 2_000,
                 },
             )
         )
@@ -374,7 +398,6 @@ class TestL2NameLabeledCounters:
                         "adapter_index": 0,
                         "task_id": 1,
                         "l2_name": "fs",
-                        "total_bytes": 1,
                     },
                 )
             )
@@ -387,7 +410,6 @@ class TestL2NameLabeledCounters:
                         "adapter_index": 1,
                         "task_id": 1,
                         "l2_name": "nixl_store",
-                        "total_bytes": 1,
                     },
                 )
             )
@@ -413,7 +435,7 @@ class TestL2MetricsAccumulation:
             bus.publish(
                 Event(
                     event_type=EventType.L2_STORE_SUBMITTED,
-                    metadata={"adapter_index": 0, "key_count": 3},
+                    metadata={"adapter_index": 0, "keys": _make_keys(3)},
                 )
             )
             bus.publish(
@@ -421,8 +443,8 @@ class TestL2MetricsAccumulation:
                     event_type=EventType.L2_STORE_COMPLETED,
                     metadata={
                         "adapter_index": 0,
-                        "succeeded_count": 3,
-                        "failed_count": 0,
+                        "succeeded_keys": _make_keys(3),
+                        "failed_keys": [],
                     },
                 )
             )
@@ -441,7 +463,11 @@ class TestL2MetricsAccumulation:
             bus.publish(
                 Event(
                     event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
-                    metadata={"request_id": i, "key_count": 10, "adapter_count": 1},
+                    metadata={
+                        "request_id": i,
+                        "keys": _make_keys(10),
+                        "adapter_count": 1,
+                    },
                 )
             )
             bus.publish(
@@ -453,13 +479,21 @@ class TestL2MetricsAccumulation:
             bus.publish(
                 Event(
                     event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
-                    metadata={"request_id": i, "key_count": 8, "adapter_count": 1},
+                    metadata={
+                        "request_id": i,
+                        "keys": _make_keys(8),
+                        "adapter_count": 1,
+                    },
                 )
             )
             bus.publish(
                 Event(
                     event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
-                    metadata={"request_id": i, "loaded_count": 7, "failed_count": 1},
+                    metadata={
+                        "request_id": i,
+                        "loaded_keys": _make_keys(7),
+                        "failed_keys": _make_keys(1),
+                    },
                 )
             )
         time.sleep(_DRAIN_WAIT)
@@ -472,3 +506,141 @@ class TestL2MetricsAccumulation:
         assert delta["lmcache_mp.l2_prefetch_load_submitted"] == 3
         assert delta["lmcache_mp.l2_prefetch_load_submitted_objects"] == 24
         assert delta["lmcache_mp.l2_prefetch_load_completed"] == 21
+
+
+# ---------------------------------------------------------------------------
+# cache_salt-labeled counters
+# ---------------------------------------------------------------------------
+
+
+class TestL2CacheSaltTagging:
+    def test_store_submitted_groups_by_salt(self, bus, subscriber):
+        """Store submitted object counter groups by cache_salt."""
+        before = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_store_submitted_objects", {}
+        )
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_SUBMITTED,
+                metadata={
+                    "adapter_index": 0,
+                    "keys": _make_keys(3, "tenant-a") + _make_keys(4, "tenant-b"),
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_store_submitted_objects", {}
+        )
+        key_a = (("cache_salt", "tenant-a"),)
+        key_b = (("cache_salt", "tenant-b"),)
+        assert after.get(key_a, 0) >= before.get(key_a, 0) + 3
+        assert after.get(key_b, 0) >= before.get(key_b, 0) + 4
+
+    def test_store_completed_groups_by_salt(self, bus, subscriber):
+        """Store completed object counter groups by cache_salt."""
+        before = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_store_completed_objects", {}
+        )
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L2_STORE_COMPLETED,
+                metadata={
+                    "adapter_index": 0,
+                    "task_id": 1,
+                    "l2_name": "fs",
+                    "succeeded_keys": _make_keys(3, "tenant-a")
+                    + _make_keys(4, "tenant-b"),
+                    "failed_keys": [],
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_store_completed_objects", {}
+        )
+        key_a = (("cache_salt", "tenant-a"),)
+        key_b = (("cache_salt", "tenant-b"),)
+        assert after.get(key_a, 0) >= before.get(key_a, 0) + 3
+        assert after.get(key_b, 0) >= before.get(key_b, 0) + 4
+
+    def test_prefetch_lookup_submitted_groups_by_salt(self, bus, subscriber):
+        """Prefetch lookup submitted object counter groups by cache_salt."""
+        before = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_prefetch_lookup_objects", {}
+        )
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
+                metadata={
+                    "request_id": 1,
+                    "keys": _make_keys(5, "tenant-d"),
+                    "adapter_count": 1,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_prefetch_lookup_objects", {}
+        )
+        key = (("cache_salt", "tenant-d"),)
+        assert after.get(key, 0) >= before.get(key, 0) + 5
+
+    def test_prefetch_load_submitted_groups_by_salt(self, bus, subscriber):
+        """Prefetch load submitted object counter groups by cache_salt."""
+        before = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_prefetch_load_submitted_objects", {}
+        )
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
+                metadata={
+                    "request_id": 1,
+                    "keys": _make_keys(6, "tenant-e"),
+                    "adapter_count": 1,
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_prefetch_load_submitted_objects", {}
+        )
+        key = (("cache_salt", "tenant-e"),)
+        assert after.get(key, 0) >= before.get(key, 0) + 6
+
+    def test_prefetch_load_completed_groups_by_salt(self, bus, subscriber):
+        """Prefetch load completed counter groups by cache_salt."""
+        before = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_prefetch_load_completed", {}
+        )
+        bus.start()
+        bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
+                metadata={
+                    "request_id": 1,
+                    "loaded_keys": _make_keys(5, "tenant-c"),
+                    "failed_keys": [],
+                },
+            )
+        )
+        time.sleep(_DRAIN_WAIT)
+        bus.stop()
+
+        after = _read_counters_by_attrs().get(
+            "lmcache_mp.l2_prefetch_load_completed", {}
+        )
+        key = (("cache_salt", "tenant-c"),)
+        assert after.get(key, 0) >= before.get(key, 0) + 5

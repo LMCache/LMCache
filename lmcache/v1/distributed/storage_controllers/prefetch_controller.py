@@ -593,7 +593,7 @@ class PrefetchController(StorageControllerInterface):
                 event_type=EventType.L2_PREFETCH_LOOKUP_SUBMITTED,
                 metadata={
                     "request_id": request_id,
-                    "key_count": len(keys),
+                    "keys": keys,
                     "adapter_count": len(pending_lookup_tasks),
                 },
             )
@@ -765,7 +765,7 @@ class PrefetchController(StorageControllerInterface):
                 event_type=EventType.L2_PREFETCH_LOAD_SUBMITTED,
                 metadata={
                     "request_id": request.request_id,
-                    "key_count": len(reserved_key_set),
+                    "keys": list(reserved_key_set),
                     "adapter_count": len(trimmed_plan),
                 },
             )
@@ -903,8 +903,8 @@ class PrefetchController(StorageControllerInterface):
                 event_type=EventType.L2_PREFETCH_LOAD_COMPLETED,
                 metadata={
                     "request_id": request.request_id,
-                    "loaded_count": len(loaded_keys),
-                    "failed_count": len(failed_keys),
+                    "loaded_keys": loaded_keys,
+                    "failed_keys": failed_keys,
                 },
             )
         )

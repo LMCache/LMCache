@@ -70,8 +70,12 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `bytes_transferred`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int`, `int` |
+| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `total_bytes`, `keys` | `int`, `int`, `str`, `int`, `list[ObjectKey]` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `bytes_transferred`, `succeeded_keys`, `failed_keys` | `int`, `int`, `str`, `int`, `list[ObjectKey]`, `list[ObjectKey]` |
+
+Both events carry full key lists so subscribers can group metric
+emissions by `key.cache_salt`. Store tasks can batch keys from multiple
+tenants, so per-tenant attribution requires grouping by salt.
 
 ---
 
@@ -79,12 +83,16 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
+| `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `keys`, `adapter_count` | `int`, `list[ObjectKey]`, `int` |
 | `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
-| `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
-| `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `keys`, `adapter_count` | `int`, `list[ObjectKey]`, `int` |
+| `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_keys`, `failed_keys` | `int`, `list[ObjectKey]`, `list[ObjectKey]` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
 | `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
+
+`L2_PREFETCH_LOOKUP_SUBMITTED`, `L2_PREFETCH_LOAD_SUBMITTED`, and
+`L2_PREFETCH_LOAD_COMPLETED` carry full key lists so subscribers can
+group metric emissions by `key.cache_salt`.
 
 `L2_LOAD_TASK_*` events fire once per `(request_id, adapter_index)` pair
 — unlike the request-level `L2_PREFETCH_LOAD_*` events above, which
