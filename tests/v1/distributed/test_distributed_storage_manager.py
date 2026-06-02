@@ -11,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -171,6 +171,26 @@ def wait_for_prefetch_status(
         result = sm.query_prefetch_status(handle)
         if result is not None:
             return result.count_leading_ones()
+        time.sleep(poll_interval)
+    return None
+
+
+def wait_for_sparse_found(
+    sm: StorageManager,
+    handle,
+    timeout: float = 10.0,
+    poll_interval: float = 0.05,
+) -> set[int] | None:
+    """Poll query_prefetch_status; return the found-key index set.
+
+    For SPARSE prefetches the result bitmap is gap-tolerant, so callers read
+    the full set via ``get_indices_list`` rather than ``count_leading_ones``.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = sm.query_prefetch_status(handle)
+        if result is not None:
+            return set(result.get_indices_list())
         time.sleep(poll_interval)
     return None
 
@@ -781,3 +801,103 @@ class TestFailureEventProduction:
             assert keys[1] in meta["keys"]
         finally:
             sm.close()
+
+
+class TestStorageManagerSparsePrefetch:
+    """SPARSE prefetch (retain every found key, not just the prefix) +
+    ``covered_keys`` reconcile-before-prefetch."""
+
+    def test_sparse_keeps_all_found_not_just_prefix(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Sparse L1 prefetch retains + read-locks every found key, including
+        those past a gap (unlike the contiguous-prefix default)."""
+        sm = StorageManager(basic_storage_manager_config)
+        all_keys = [make_object_key(i) for i in range(5)]
+        # Write {0,1,3,4}; key 2 is the gap.
+        existing = [all_keys[i] for i in (0, 1, 3, 4)]
+        ret = sm.reserve_write(existing, basic_layout, mode="new")
+        sm.finish_write(list(ret.keys()))
+
+        handle = sm.submit_prefetch_task(
+            all_keys, basic_layout, policy=TrimPolicy.SPARSE
+        )
+        found = wait_for_sparse_found(sm, handle, timeout=10.0)
+
+        # Sparse: all four found indices, NOT just the prefix {0, 1}.
+        assert found == {0, 1, 3, 4}
+
+        # Every found key is read-locked (none write-reservable).
+        locked = sm.reserve_write(existing, basic_layout, mode="update")
+        assert len(locked) == 0
+
+        # Releasing the full found set frees them.
+        sm.finish_read_prefetched(existing)
+        freed = sm.reserve_write(existing, basic_layout, mode="update")
+        assert len(freed) == len(existing)
+
+        sm.close()
+
+    def test_sparse_from_l2_loads_all_found(
+        self, l2_storage_manager_config, basic_layout
+    ):
+        """Sparse prefetch from L2 loads every found key (controller skips the
+        prefix-only trim), not just the prefix before a gap."""
+        sm = StorageManager(l2_storage_manager_config)
+        all_keys = [make_object_key(i) for i in range(5)]
+        # L2 has {0,1,3,4}; gap at 2.
+        existing = [all_keys[i] for i in (0, 1, 3, 4)]
+        wret = sm.reserve_write(existing, basic_layout, mode="new")
+        sm.finish_write(list(wret.keys()))
+        adapter = sm._l2_adapters[0]
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in existing),  # type: ignore
+            timeout=10.0,
+        )
+        time.sleep(0.05)
+        sm.clear()
+        used, _ = sm._l1_manager.get_memory_usage()
+        assert used == 0
+
+        handle = sm.submit_prefetch_task(
+            all_keys, basic_layout, policy=TrimPolicy.SPARSE
+        )
+        found = wait_for_sparse_found(sm, handle, timeout=10.0)
+
+        # Sparse from L2: all found {0,1,3,4}, NOT the contiguous prefix {0,1}.
+        assert found == {0, 1, 3, 4}
+
+        sm.finish_read_prefetched(existing)
+        sm.close()
+
+    def test_sparse_covered_keys_excluded_and_released(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """``covered_keys`` are excluded from the found set and any probe
+        read-lock on them released — so they never leak a read lock."""
+        sm = StorageManager(basic_storage_manager_config)
+        all_keys = [make_object_key(i) for i in range(5)]
+        ret = sm.reserve_write(all_keys, basic_layout, mode="new")
+        sm.finish_write(list(ret.keys()))
+
+        covered = {all_keys[2], all_keys[3]}
+        handle = sm.submit_prefetch_task(
+            all_keys, basic_layout, policy=TrimPolicy.SPARSE, covered_keys=covered
+        )
+        found = wait_for_sparse_found(sm, handle, timeout=10.0)
+
+        # Covered indices 2, 3 excluded; only the complement is found.
+        assert found == {0, 1, 4}
+
+        # Non-covered found keys remain read-locked.
+        complement = [all_keys[i] for i in (0, 1, 4)]
+        assert len(sm.reserve_write(complement, basic_layout, mode="update")) == 0
+
+        # Covered keys are write-reservable again -> their probe lock was
+        # released (no leak), even though they were never retrieved.
+        covered_keys_list = [all_keys[2], all_keys[3]]
+        freed = sm.reserve_write(covered_keys_list, basic_layout, mode="update")
+        assert len(freed) == len(covered_keys_list)
+
+        sm.finish_read_prefetched(complement)
+        sm.close()
