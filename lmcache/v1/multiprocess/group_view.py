@@ -58,7 +58,7 @@ def num_engine_groups(groups: Sequence[LMCacheGroupView]) -> int:
     return max(group.engine_group_id for group in groups) + 1
 
 
-def num_lmc_kv_cache_groups(groups: Sequence[LMCacheGroupView]) -> int:
+def num_group_views(groups: Sequence[LMCacheGroupView]) -> int:
     """Return the number of LMCache KV groups visible to transfer requests.
 
     Args:
@@ -73,7 +73,7 @@ def num_lmc_kv_cache_groups(groups: Sequence[LMCacheGroupView]) -> int:
     return len(groups)
 
 
-def _engine_group_id_per_lmc_group(
+def _engine_group_id_per_view(
     groups: Sequence[LMCacheGroupView],
 ) -> tuple[int, ...]:
     """Return, per LMCache group, the engine group it draws block IDs from.
@@ -83,7 +83,7 @@ def _engine_group_id_per_lmc_group(
 
     Returns:
         A tuple whose length equals the number of LMCache groups (i.e.
-        :func:`num_lmc_kv_cache_groups`); element ``i`` is the engine group id
+        :func:`num_group_views`); element ``i`` is the engine group id
         that LMCache group ``i`` reads block IDs from. ``(0,)`` for an empty
         ``groups`` (single non-hybrid group).
     """
@@ -92,7 +92,7 @@ def _engine_group_id_per_lmc_group(
     return tuple(group.engine_group_id for group in groups)
 
 
-def expand_block_ids_to_lmc_groups(
+def expand_block_ids_to_views(
     groups: Sequence[LMCacheGroupView],
     engine_side_block_ids: Sequence[Sequence[int]],
 ) -> list[list[int]]:
@@ -114,7 +114,7 @@ def expand_block_ids_to_lmc_groups(
     """
     return [
         list(engine_side_block_ids[engine_group_id])
-        for engine_group_id in _engine_group_id_per_lmc_group(groups)
+        for engine_group_id in _engine_group_id_per_view(groups)
     ]
 
 

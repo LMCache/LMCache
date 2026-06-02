@@ -149,15 +149,13 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     assert adapter.store_futures["req-1"] is fake_future
 
 
-def test_submit_store_request_expands_block_ids_to_lmc_groups(
-    fake_adapter, monkeypatch
-):
+def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypatch):
     adapter, _send_mock, _ = fake_adapter
     monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     adapter.kv_caches = {"layer.0": fake_tensor}
-    adapter.lmc_kv_cache_groups = [
+    adapter.group_views = [
         LMCacheGroupView(0, (0, 2)),
         LMCacheGroupView(0, (4,)),
         LMCacheGroupView(1, (1, 3)),

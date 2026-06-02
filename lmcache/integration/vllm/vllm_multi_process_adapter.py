@@ -24,7 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.group_view import (
     LMCacheGroupView,
-    expand_block_ids_to_lmc_groups,
+    expand_block_ids_to_views,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -848,7 +848,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self.lmc_kv_cache_groups: list[LMCacheGroupView] = []
+        self.group_views: list[LMCacheGroupView] = []
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -958,7 +958,7 @@ class LMCacheMPWorkerAdapter:
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
-        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -966,7 +966,7 @@ class LMCacheMPWorkerAdapter:
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
-            lmc_kv_cache_groups: LMCache-owned engine KV cache group metadata.
+            group_views: LMCache-owned engine KV cache group metadata.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -974,11 +974,11 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
-        self.lmc_kv_cache_groups = list(lmc_kv_cache_groups)
+        self.group_views = list(group_views)
         self._send_register_kv_caches_request(kv_caches)
 
-    def _block_ids_per_lmc_group(self, op: LoadStoreOp) -> list[list[int]]:
-        return expand_block_ids_to_lmc_groups(self.lmc_kv_cache_groups, op.block_ids)
+    def _block_ids_per_view(self, op: LoadStoreOp) -> list[list[int]]:
+        return expand_block_ids_to_views(self.group_views, op.block_ids)
 
     def _send_register_kv_caches_request(
         self, kv_caches: dict[str, torch.Tensor]
@@ -1012,7 +1012,7 @@ class LMCacheMPWorkerAdapter:
                 self._mq_timeout,
                 send_request=send_lmcache_request,
                 layout_hints=layout_hints,
-                lmc_kv_cache_groups=self.lmc_kv_cache_groups,
+                group_views=self.group_views,
             )
         except TimeoutError:
             raise ConnectionError(
@@ -1113,7 +1113,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            self._block_ids_per_lmc_group(op),
+            self._block_ids_per_view(op),
             event,
             self.blocks_in_chunk,
         )
@@ -1161,7 +1161,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            self._block_ids_per_lmc_group(op),
+            self._block_ids_per_view(op),
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,

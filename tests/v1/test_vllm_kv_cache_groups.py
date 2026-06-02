@@ -10,7 +10,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
     create_group_views_from_vllm,
 )
 from lmcache.v1.multiprocess.group_view import (
-    expand_block_ids_to_lmc_groups,
+    expand_block_ids_to_views,
     get_engine_group_indices,
     num_engine_groups,
 )
@@ -74,7 +74,7 @@ def test_conversion_splits_by_lmcache_layer_identity():
 
     assert [group.engine_group_id for group in spec] == [0, 1, 0]
     assert [group.layer_indices for group in spec] == [(0, 2), (1, 3), (4,)]
-    assert expand_block_ids_to_lmc_groups(spec, [[10], [20]]) == [
+    assert expand_block_ids_to_views(spec, [[10], [20]]) == [
         [10],
         [20],
         [10],

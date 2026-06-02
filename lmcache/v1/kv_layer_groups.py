@@ -215,7 +215,7 @@ class KVLayerGroupsManager:
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_blocks: int,
         layout_hints: "LayoutHints | None" = None,
-        lmc_kv_cache_groups: "Sequence[LMCacheGroupView]" = (),
+        group_views: "Sequence[LMCacheGroupView]" = (),
         lmcache_logical_chunk_size: int = 256,
     ) -> None:
         """Partition layers into groups keyed by
@@ -245,7 +245,7 @@ class KVLayerGroupsManager:
                 group's ``compress_ratio`` and ``physical_chunk_size``.
                 ``None`` means every group is treated as non-compressed
                 (``compress_ratio == 1``).
-            lmc_kv_cache_groups: LMCache-owned engine KV cache group
+            group_views: LMCache-owned engine KV cache group
                 metadata. When present, it is used to keep layers from
                 different engine block-ID spaces in separate LMCache
                 transfer groups.
@@ -285,9 +285,7 @@ class KVLayerGroupsManager:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
 
-        per_layer_engine_group_idx = get_engine_group_indices(
-            lmc_kv_cache_groups, num_layers
-        )
+        per_layer_engine_group_idx = get_engine_group_indices(group_views, num_layers)
 
         groups_by_identity = group_layers_by_identity(
             kv_caches, gpu_kv_format, num_layers, per_layer_engine_group_idx
@@ -295,14 +293,14 @@ class KVLayerGroupsManager:
 
         # Emit groups in order of their first-appearing layer so that group
         # indices remain deterministic across runs.
-        for lmc_group_idx, ((_, _, _, bs, hbg_idx, dt), indices) in enumerate(
+        for group_idx, ((_, _, _, bs, engine_group_idx, dt), indices) in enumerate(
             groups_by_identity
         ):
             block_stride_elems = resolve_block_stride_and_log_layout(
                 kv_caches,
                 gpu_kv_format,
                 layer_idx=indices[0],
-                group_idx=lmc_group_idx,
+                group_idx=group_idx,
             )
             shape_desc = make_page_buffer_shape_desc(
                 kv_caches,
@@ -315,7 +313,7 @@ class KVLayerGroupsManager:
             )
 
             compress_ratio, physical_chunk_size = self._derive_compression_metadata(
-                group_idx=lmc_group_idx,
+                group_idx=group_idx,
                 bs=bs,
                 ie_logical_block_size=self.inference_engine_logical_block_size_,
                 lmcache_logical_chunk_size=lmcache_logical_chunk_size,
@@ -328,7 +326,7 @@ class KVLayerGroupsManager:
                     dtype=dt,
                     compress_ratio=compress_ratio,
                     physical_chunk_size=physical_chunk_size,
-                    engine_group_idx=hbg_idx,
+                    engine_group_idx=engine_group_idx,
                 )
             )
 

@@ -69,7 +69,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -83,7 +83,7 @@ class TransferContext(ABC):
             mq_timeout: Timeout in seconds for synchronous request wait.
             send_request: Request sender callable used to issue MQ requests.
             layout_hints: Optional inference-engine-provided layout hints.
-            lmc_kv_cache_groups: LMCache-owned engine KV cache group metadata.
+            group_views: LMCache-owned engine KV cache group metadata.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -175,7 +175,7 @@ class HandleTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
@@ -192,7 +192,7 @@ class HandleTransferContext(TransferContext):
                 world_size,
                 EngineType.VLLM,
                 layout_hints,
-                list(lmc_kv_cache_groups),
+                list(group_views),
             ],
         )
         future.result(timeout=mq_timeout)
@@ -264,11 +264,11 @@ class DataTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
-        ``lmc_kv_cache_groups`` is accepted to satisfy the base interface but
+        ``group_views`` is accepted to satisfy the base interface but
         is currently a no-op: the non-GPU transfer path does not support
         hybrid KV cache groups and rejects multi-group transfers at store /
         retrieve time (see ``_single_group_block_ids``).

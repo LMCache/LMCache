@@ -73,7 +73,7 @@ class GPUCacheContext:
         kv_caches: KVCache,
         lmcache_logical_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
+        group_views: Sequence[LMCacheGroupView] = (),
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
@@ -93,7 +93,7 @@ class GPUCacheContext:
             gpu_kv_format=self.gpu_kv_format_,
             num_blocks=self.num_blocks_,
             layout_hints=layout_hints,
-            lmc_kv_cache_groups=lmc_kv_cache_groups,
+            group_views=group_views,
             lmcache_logical_chunk_size=lmcache_logical_chunk_size,
         )
 
@@ -362,8 +362,8 @@ class GPUCacheContext:
             for i in range(batch_size)
         ]
 
-    def copy_lmc_group_block_ids_to_gpu(
-        self, block_ids_per_lmc_group: list[list[int]]
+    def copy_view_block_ids_to_gpu(
+        self, block_ids_per_view: list[list[int]]
     ) -> list[torch.Tensor]:
         """Copy block IDs for each LMCache KV layer group to GPU.
 
@@ -373,8 +373,8 @@ class GPUCacheContext:
         """
         offsets = [0]
         flat: array.array = array.array("l")
-        for lmc_group_block_ids in block_ids_per_lmc_group:
-            flat.extend(lmc_group_block_ids)
+        for view_block_ids in block_ids_per_view:
+            flat.extend(view_block_ids)
             offsets.append(len(flat))
 
         total = offsets[-1]
@@ -389,7 +389,7 @@ class GPUCacheContext:
 
         return [
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
-            for i in range(len(block_ids_per_lmc_group))
+            for i in range(len(block_ids_per_view))
         ]
 
     def get_kv_buffer_shape(

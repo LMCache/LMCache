@@ -26,7 +26,7 @@ def _build_manager(
     *,
     num_blocks: int,
     layout_hints: LayoutHints | None = None,
-    lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
+    group_views: Sequence[LMCacheGroupView] = (),
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
@@ -43,7 +43,7 @@ def _build_manager(
         gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
         layout_hints=layout_hints,
-        lmc_kv_cache_groups=lmc_kv_cache_groups,
+        group_views=group_views,
     )
 
 
@@ -90,7 +90,7 @@ class TestKVLayerGroupsManager:
         manager = _build_manager(
             tensors,
             num_blocks=32,
-            lmc_kv_cache_groups=[
+            group_views=[
                 LMCacheGroupView(0, (0, 2)),
                 LMCacheGroupView(1, (1, 3)),
             ],
@@ -103,7 +103,7 @@ class TestKVLayerGroupsManager:
         assert groups_by_engine_group_idx[0].layer_indices == [0, 2]
         assert groups_by_engine_group_idx[1].layer_indices == [1, 3]
 
-    def test_build_rejects_bad_lmc_kv_cache_groups(self):
+    def test_build_rejects_bad_group_views(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(2)
         ]
@@ -111,7 +111,7 @@ class TestKVLayerGroupsManager:
             _build_manager(
                 tensors,
                 num_blocks=32,
-                lmc_kv_cache_groups=[LMCacheGroupView(0, (2,))],
+                group_views=[LMCacheGroupView(0, (2,))],
             )
 
     def test_build_different_shapes(self):

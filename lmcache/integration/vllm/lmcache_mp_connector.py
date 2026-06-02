@@ -619,14 +619,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        lmc_kv_cache_groups = create_group_views_from_vllm(
+        group_views = create_group_views_from_vllm(
             kv_cache_config,
             kv_caches,
             layout_hints=vllm_layout_hints(),
         )
-        self.worker_adapter.register_kv_caches(
-            kv_caches, lmc_kv_cache_groups=lmc_kv_cache_groups
-        )
+        self.worker_adapter.register_kv_caches(kv_caches, group_views=group_views)
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:

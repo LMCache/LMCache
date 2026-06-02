@@ -41,7 +41,7 @@ def register_kv_cache_handler(
     world_size: int,
     engine_type: EngineType,
     layout_hints: LayoutHints,
-    lmc_kv_cache_groups: list[LMCacheGroupView],
+    group_views: list[LMCacheGroupView],
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -56,7 +56,7 @@ def register_kv_cache_handler(
             ``layout_hints["inference_engine_logical_block_size"]``
             carries the logical tokens-per-engine-block (previously a
             standalone argument).
-        lmc_kv_cache_groups: Engine-neutral KV cache group metadata,
+        group_views: Engine-neutral KV cache group metadata,
             msgspec-decoded from the request payload.
 
     Returns:
@@ -86,8 +86,8 @@ def register_kv_cache_handler(
         "Expected layout_hints['inference_engine_logical_block_size'] to be int, got "
         f"{type(ie_logical_block_size)}"
     )
-    assert isinstance(lmc_kv_cache_groups, list), (
-        f"Expected lmc_kv_cache_groups to be a list, got {type(lmc_kv_cache_groups)}"
+    assert isinstance(group_views, list), (
+        f"Expected group_views to be a list, got {type(group_views)}"
     )
     # No return value (returns None implicitly)
 
