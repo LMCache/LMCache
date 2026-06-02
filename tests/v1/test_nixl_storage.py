@@ -277,6 +277,9 @@ def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
     shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cuda"
+    # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
+    # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
+    config.nixl_buffer_size = 1024**3
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = True
     config.extra_config["nixl_path"] = nixl_tmp_path
@@ -318,6 +321,9 @@ def test_nixl_gds_cuda_backend(nixl_tmp_path):
     shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cuda"
+    # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
+    # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
+    config.nixl_buffer_size = 1024**3
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = True
     config.extra_config["nixl_path"] = nixl_tmp_path
