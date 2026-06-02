@@ -52,6 +52,8 @@ def _create_message_queue_client(
     server_url: str,
     zmq_context: zmq.Context,
 ) -> _MessageQueueClient:
+    # Keep the multiprocess stack deferred so config-only tests can import
+    # this launcher without requiring the full torch/vLLM runtime.
     # First Party
     from lmcache.v1.multiprocess.mq import MessageQueueClient
 
@@ -59,6 +61,8 @@ def _create_message_queue_client(
 
 
 def _submit_ping(client: _MessageQueueClient) -> _MessagingFuture:
+    # Keep the multiprocess stack deferred so config-only tests can import
+    # this launcher without requiring the full torch/vLLM runtime.
     # First Party
     from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 
@@ -121,6 +125,11 @@ def maybe_autostart_mp_server(
     Returns:
         The launcher that owns the server process, or ``None`` when no process
         was started by this connector.
+
+    Raises:
+        ValueError: If an auto-start configuration value is invalid.
+        ConnectionError: If auto-start is enabled and the server does not
+            become reachable before the configured timeout.
     """
     config = MPServerAutostartConfig.from_extra_config(
         extra_config=extra_config,

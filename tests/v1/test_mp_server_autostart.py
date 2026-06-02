@@ -136,9 +136,7 @@ def test_config_parses_server_args() -> None:
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={
             "lmcache.mp.autostart": True,
-            "lmcache.mp.autostart.server_args": (
-                "--http-port 18080 --l1-size-gb 20"
-            ),
+            "lmcache.mp.autostart.server_args": ("--http-port 18080 --l1-size-gb 20"),
         },
         server_host="127.0.0.1",
         server_port=5555,
@@ -175,6 +173,63 @@ def test_config_rejects_remote_host_when_enabled() -> None:
             extra_config={"lmcache.mp.autostart": True},
             server_host="tcp://192.168.1.10",
             server_port=5555,
+        )
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "server_port", "match"),
+    [
+        (
+            {"lmcache.mp.autostart": "maybe"},
+            5555,
+            "must be a boolean",
+        ),
+        (
+            {
+                "lmcache.mp.autostart": True,
+                "lmcache.mp.autostart.server_args": ["invalid"],
+            },
+            5555,
+            "must be a string",
+        ),
+        (
+            {
+                "lmcache.mp.autostart": True,
+                "lmcache.mp.autostart.wait_timeout": "invalid",
+            },
+            5555,
+            "must be a number",
+        ),
+        (
+            {
+                "lmcache.mp.autostart": True,
+                "lmcache.mp.autostart.wait_timeout": 0,
+            },
+            5555,
+            "must be positive",
+        ),
+        (
+            {"lmcache.mp.autostart": True},
+            "invalid",
+            "must be an integer",
+        ),
+        (
+            {"lmcache.mp.autostart": True},
+            0,
+            "must be positive",
+        ),
+    ],
+)
+def test_config_rejects_invalid_enabled_values(
+    extra_config: dict[str, object],
+    server_port: int | str,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        MPServerAutostartConfig.from_extra_config(
+            extra_config=extra_config,
+            server_host="tcp://localhost",
+            server_port=server_port,
         )
 
 

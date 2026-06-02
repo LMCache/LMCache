@@ -728,8 +728,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
     def shutdown(self):
         """
-        Shutdown the connector. This is called when the worker process
-        is shutting down to ensure that all the async operations are
+        Shutdown the connector. This is called when the scheduler or worker
+        process is shutting down to ensure that all the async operations are
         completed and the connector is cleaned up properly.
         """
         try:

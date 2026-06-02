@@ -457,7 +457,8 @@ On the vLLM side, specify the LMCache server host and port via the
    * - ``lmcache.mp.autostart.server_args``
      - ``""``
      - Extra command-line arguments passed to the auto-started MP HTTP server
-       process. For example, pass storage settings such as
+       process. Required server settings such as ``--l1-size-gb`` and
+       ``--eviction-policy`` must be supplied here. For example, pass
        ``--l1-size-gb 20 --eviction-policy LRU``.
 
 To let the vLLM scheduler start a local MP server automatically:
