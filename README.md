@@ -22,7 +22,7 @@
 </p>
 
 ## Updates
-- [2026/05] Agentic workload benchmark on AMD MI300X ([blog](https://blog.lmcache.ai/en/2026/05/12/benchmarking-lmcache-for-multi-turn-agentic-workloads-on-amd-mi300x/)).
+- [2026/05] 🔥 Agentic workload benchmark on AMD MI300X ([blog](https://blog.lmcache.ai/en/2026/05/12/benchmarking-lmcache-for-multi-turn-agentic-workloads-on-amd-mi300x/)).
 - [2026/04] 🔥 LMCache's new multiprocess(MP) architecture release ([blog](https://blog.lmcache.ai/en/2026/04/03/lmcaches-new-architecture-boosts-moe-inference-performance-by-10x/)).
 - [2026/03] LMCache at GTC 2026 ([post](https://www.linkedin.com/posts/lmcache-lab_llm-opensource-nvidiagtc-activity-7442721875664826369-pMAu?utm_source=share&utm_medium=member_desktop&rcm=ACoAADkIIvQBTyG53kXXX70OZdE5rhpllYQqmIA)).
 - [2026/01] LMCache multi-node P2P CPU memory sharing, from experimental feature to production ([blog](https://blog.lmcache.ai/en/2026/01/21/p2p-1/)).
@@ -30,26 +30,29 @@
 <details>
 <summary>More</summary>
 
-- [2025/11] LMCache x Ascend: accelerating LLM inference on Ascend NPUs ([blog](https://blog.lmcache.ai/en/2025/11/04/lmcache-x-ascend-accelerating-llm-inference-on-ascend-npus/)).
-- [2025/10] Tensormesh unveiled and LMCache joins the PyTorch Foundation ([blog](https://blog.lmcache.ai/en/2025/10/31/tensormesh-unveiled-and-lmcache-joins-the-pytorch-foundation/), [PyTorch](https://pytorch.org/blog/lmcache-joins-pytorch-ecosystem/)).
+<!-- - [2025/11] LMCache x Ascend: accelerating LLM inference on Ascend NPUs ([blog](https://blog.lmcache.ai/en/2025/11/04/lmcache-x-ascend-accelerating-llm-inference-on-ascend-npus/)). -->
+- [ADD COHERE]
+- [2025/10] LMCache joins the PyTorch Foundation and Tensormesh unveiled ([blog](https://blog.lmcache.ai/en/2025/10/31/tensormesh-unveiled-and-lmcache-joins-the-pytorch-foundation/), [PyTorch](https://pytorch.org/blog/lmcache-joins-pytorch-ecosystem/)).
 - [2025/09] NVIDIA Dynamo integrates LMCache, accelerating LLM inference ([blog](https://blog.lmcache.ai/en/2025/09/18/nvidia-dynamo-integrates-lmcache-accelerating-llm-inference/)).
 - [2025/08] 🎉 LMCache hits 5,000+ GitHub stars ([blog](https://blog.lmcache.ai/en/2025/08/28/%f0%9f%8e%89-lmcache-hits-5000-github-stars-thank-you-community/)).
 - [2025/08] LMCache supports gpt-oss (20B/120B) on day 1 ([blog](https://blog.lmcache.ai/en/2025/08/05/lmcache-supports-gpt-oss-20b-120b-on-day-1/)).
 - [2025/07] Get faster LLM inference and cheaper responses with LMCache and Redis ([Redis blog](https://redis.io/blog/get-faster-llm-inference-and-cheaper-responses-with-lmcache-and-redis/)).
 - [2025/07] LMCache extends its turbo-boost to multimodal models in vLLM V1 ([blog](https://blog.lmcache.ai/en/2025/07/03/lmcache-extends-its-turbo-boost-to-multimodal-models-in-vllm-v1/)).
-- [2025/06] LLM Production Stack goes cross-hardware: Ascend, Arm, and AMD ([blog](https://blog.lmcache.ai/en/2025/06/20/llm-production-stack-goes-cross-hardware-ascend-arm-and-amd-support-incoming/)).
+- [2025/06] LLM Production Stack goes cross-hardware: AMD, Arm and Ascend ([blog](https://blog.lmcache.ai/en/2025/06/20/llm-production-stack-goes-cross-hardware-ascend-arm-and-amd-support-incoming/)).
 
 </details>
 
 ## About
 
-LMCache is a **KV cache management layer** for LLM inference. It turns KV cache from temporary state into reusable AI-native knowledge that can be stored, moved, transformed, and reused across different servings. LMCache is designed to work with existing inference engines to **reduce TTFT** and **improve throughput**, especially for long-context, multi-turn, and RAG workloads.
+LMCache is a **KV cache management layer** for LLM inference. It turns KV cache from a temporary state into reusable *AI-native knowledge* that can be *stored* persistently, *reused* across multiple serving engines, and *transformed* for better generation quality. As a result, LMCache **reduces TTFT** (time-to-first-token) and **improves throughput**, especially for long-context agentic, multi-turn conversation, and knowledge-augmented workloads (e.g., RAG).
 
-LMCache supports two deployment modes:
+LMCache is **vendor-neutral**. It can be used as a KV cache layer for a range of mainstream open-source serving engines, inference frameworks, hardware vendors, storage systems, and infrastructure providers. The vendor neutrality allows users to freely switch between serving engines and storage vendors, while reusing the stored KV caches. 
 
-- **Multi-process mode** *(recommended mode to implement)*: LMCache runs as a standalone server and inference engines connect to it through connectors over ZMQ. A single LMCache server can serve multiple engine instances, share cache across them, and expose management and observability endpoints.
+<!-- LMCache supports two deployment modes:
 
-- **In-process mode**: LMCache runs inside the inference engine process through connectors this mode is limited by python GILs.
+- **Multi-process (MP) mode** *(recommended)*: LMCache, as a standalone damon process, manages KV cache independently from the inference engine process, and the inference engines connect to LMCache through connectors over ZMQ. In MP mode, a single LMCache server can connect with multiple engine instances, share cache across them, and expose unified management and observability endpoints. 
+
+- **In-process mode**: LMCache runs inside the inference engine process through connectors this mode is limited by python GILs. -->
 
 <p align="center">
 <picture>
@@ -59,19 +62,21 @@ LMCache supports two deployment modes:
 </picture>
 </p>
 
-### Key capabilities
+### Key features
 
-- **Persistent KV cache offloading and reuse**: Move KV caches out of GPU memory into a tiered storage hierarchy spanning CPU memory, local storage, and remote backends, enabling reuse across requests, sessions, and engine instances to reduce repeated prefill computation and improve TTFT.
+- **Engine-independent deployment**: LMCache, as a standalone damon process, manages KV cache independently from the inference engine process, and the inference engines connect to LMCache through connectors over ZMQ. A single LMCache server can connect with multiple engine instances, share cache across them, and expose unified management and observability endpoints. KV cache will not be lost even if the inference engine crashes (i.e., no fate-sharing with engines). 
 
-- **Pluggable storage and transport backends**: Easily integrate remote storage and KV transfer backends through a unified interface, enabling KV cache offloading and sharing across systems such as CPU RAM, local disk, Redis/Valkey, Mooncake, InfiniStore, S3-compatible object storage, NIXL, and GDS.
+- **Persistent, tiered KV cache offloading and reuse**: Move KV caches out of GPU memory into a tiered storage hierarchy spanning CPU memory, local storage, and remote backends, enabling reuse across requests, sessions, and engine instances to reduce repeated prefill computation and improve TTFT.
 
-- **Non-prefix KV reuse**: Extend KV reuse beyond prefix matches by retrieving cached KV blocks for repeated text chunks and using CacheBlend to selectively recompute tokens for quality recovery.
+- **Pluggable storage and transport backends**: Easily integrate remote storage and KV transfer backends through a unified interface, enabling KV cache offloading and sharing across storage providers. Through the interface, LMCache support storage backend including CPU RAM, local disk (SSD), Redis/Valkey, Mooncake, InfiniStore, S3-compatible object storage, NIXL, and GDS.
 
-- **PD disaggregation and KV transfer**: Transfer KV cache from prefill workers to decode workers over NVLink, RDMA, or TCP through transport layers such as NIXL, allowing decoding to continue without recomputing prompt KV.
+- **Non-prefix KV reuse**: Extend KV reuse beyond prefix caching by reusing cached KV blocks for repeated text chunks at any position in prompt. This leverages CacheBlend to selectively recompute tokens for quality recovery.
 
-- **Pluggable KV transformation**: Simple interface for applying compression, token dropping, and custom serialization through the SERDE interface.
+- **PD disaggregation and KV transfer**: Support KV cache transfer from prefill workers to decode workers over NVLink, RDMA, or TCP through transport layers such as NIXL. <!--, allowing decoding to continue without recomputing prompt KV.-->
 
-LMCache is becoming a shared infrastructure layer across the LLM inference ecosystem, connecting serving platforms, hardware vendors, storage systems, infrastructure providers, and open-source projects:
+- **Pluggable KV transformation**: Simple interface for for researchers to write compression, token dropping, and custom serialization through a flexible SERDE interface. 
+
+LMCache is becoming an integral layer in the LLM inference *ecosystem*, with *community*-driven integration with serving engines, inference frameworks, hardware vendors, storage systems, and infrastructure providers:
 
 <p align="center">
   <img src="asset/ecosystem.png" alt="LMCache ecosystem">
@@ -93,10 +98,10 @@ For more setup options and examples, see:
 - [Production Deployment](https://docs.lmcache.ai/production/docker_deployment.html)
 
 ## Contributing
-We welcome and value any contributions and collaborations. Join us in improving LMCache. Check out the [Contributing Guide](https://docs.lmcache.ai/developer_guide/contributing.html) to get started.
+We welcome and value contributions and collaborations. Join us in improving LMCache. Check out the [Contributing Guide](https://docs.lmcache.ai/developer_guide/contributing.html) or join our Slack space [ADD SLACK link] to get started. 
 
 ## Adoption and Partnerships
-LMCache is developed with a growing community of developers, researchers, industry adopters, and partners building the next generation of efficient LLM inference systems.
+LMCache has a growing community of developers, researchers, industry adopters, and partners building the next generation of efficient LLM inference systems.
 
 <p align="center">
   <picture>
@@ -106,7 +111,7 @@ LMCache is developed with a growing community of developers, researchers, indust
   </picture>
 </p>
 
-As an independent open-source project, LMCache is becoming the de facto standard for KV Cache management in LLM inference and its continued development and community work are supported in part by [Tensormesh](https://www.tensormesh.ai/).
+As an independent open-source project, LMCache is becoming the de-facto standard for KV Cache management in LLM inference. Its continued development and community work are supported in part by [Tensormesh](https://www.tensormesh.ai/).
 
 ## Citation
 
