@@ -567,12 +567,17 @@ class StorageManager:
         elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
 
         if total_hits > 0:
+            # L1 and L2 sets are disjoint (only L1-misses go to L2).
+            l1_hits = len(handle.l1_found_indices)
+            l2_hits = l2_r.popcount() if l2_r is not None else 0
             logger.info(
                 "Prefetch request completed (L1+L2): "
-                "%d/%d retained keys in %.1f ms "
+                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
                 "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
+                l1_hits,
+                l2_hits,
                 elapsed_ms,
                 handle.external_request_id,
                 handle.prefetch_request_id,

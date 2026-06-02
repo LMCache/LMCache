@@ -5,11 +5,11 @@ Prefetch Controller: asynchronously prefetches data from L2 adapters into L1.
 The controller runs a background thread with an event-driven loop that:
 1. Accepts prefetch requests from external threads via submit_prefetch_request.
 2. Submits lookup_and_lock tasks to all L2 adapters.
-3. Computes a load plan using the PrefetchPolicy, trimmed to the contiguous
-   prefix of found keys.
+3. Computes a load plan, keeping the keys retained by the TrimPolicy
+   (PREFIX or SEGMENTED_PREFIX).
 4. Reserves L1 write buffers and submits load tasks to L2 adapters.
 5. On load completion, transitions L1 entries from write-locked to read-locked.
-6. Reports prefix hit count.
+6. Reports the retained-key bitmap.
 """
 
 # Standard
