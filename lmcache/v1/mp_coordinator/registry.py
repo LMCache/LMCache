@@ -6,19 +6,15 @@ by the coordinator event loop (register / deregister / heartbeat) and read by
 the health-check thread (stale detection), so every access is guarded by a
 lock.
 
-The registry stores plain data only. The per-instance command socket is owned
-here as an opaque handle but is never opened or closed by the registry --
-socket lifecycle is the controller's responsibility and must stay on the event
-loop thread (ZMQ sockets are not thread-safe).
+The registry stores plain membership data only -- it holds no sockets and has
+no transport dependency. How to reach an instance for server-initiated push is
+the transport's concern, keyed by instance id.
 """
 
 # Standard
 from dataclasses import dataclass, field
 import threading
 import time
-
-# Third Party
-import zmq.asyncio
 
 # First Party
 from lmcache.logging import init_logger
@@ -34,9 +30,6 @@ class MPInstanceNode:
         instance_id: Globally unique identifier of the mp server.
         ip: IP address the mp server is reachable at.
         control_port: Port of the mp server's control REP socket.
-        command_socket: REQ socket connected to the mp server's control REP
-            socket, used by the coordinator to push commands. Owned by the
-            event loop thread.
         registration_time: Wall-clock time the instance registered (for display).
         last_heartbeat_time: Monotonic-clock time of the most recent heartbeat,
             used for stale detection so an NTP step cannot skew liveness.
@@ -46,7 +39,6 @@ class MPInstanceNode:
     instance_id: str
     ip: str
     control_port: int
-    command_socket: zmq.asyncio.Socket
     registration_time: float
     last_heartbeat_time: float
     metadata: dict[str, str] = field(default_factory=dict)

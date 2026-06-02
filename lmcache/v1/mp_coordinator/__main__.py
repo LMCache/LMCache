@@ -13,6 +13,8 @@ import asyncio
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.manager import MPCoordinatorManager
+from lmcache.v1.mp_coordinator.zmq_transport import ZmqCoordinatorTransport
+from lmcache.v1.rpc_utils import get_zmq_context
 
 logger = init_logger(__name__)
 
@@ -20,7 +22,10 @@ logger = init_logger(__name__)
 def main() -> None:
     """Build the coordinator from the environment and run it until interrupted."""
     config = MPCoordinatorConfig.from_env()
-    manager = MPCoordinatorManager(config)
+    transport = ZmqCoordinatorTransport(
+        get_zmq_context(), request_url=config.reply_url, push_url=config.pull_url
+    )
+    manager = MPCoordinatorManager(config, transport)
     try:
         asyncio.run(manager.start_all())
     except KeyboardInterrupt:

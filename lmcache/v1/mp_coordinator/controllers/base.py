@@ -16,11 +16,7 @@ type internally. This keeps the dispatch table soundly typed without a
 # Standard
 from typing import Awaitable, Callable
 
-# Third Party
-import zmq.asyncio
-
 # First Party
-from lmcache.v1.mp_coordinator.command import CommandSender
 from lmcache.v1.mp_coordinator.lifecycle import LifecycleHooks
 from lmcache.v1.mp_coordinator.message import (
     PushMsg,
@@ -28,6 +24,7 @@ from lmcache.v1.mp_coordinator.message import (
     ReqRetMsg,
 )
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
+from lmcache.v1.mp_coordinator.transport import CoordinatorTransport
 
 # A push handler consumes a fire-and-forget message and returns nothing.
 PushHandler = Callable[[PushMsg], Awaitable[None]]
@@ -38,30 +35,27 @@ ReqHandler = Callable[[ReqMsg], Awaitable[ReqRetMsg]]
 class ControllerContext:
     """Shared collaborators handed to every controller at ``post_init``.
 
-    Controllers reach the registry, the command channel, lifecycle hooks, the
-    ZMQ context, and sibling controllers only through this object -- they never
-    import one another directly.
+    Controllers reach the registry, the transport (for server-initiated push
+    and instance reach lifecycle), lifecycle hooks, and sibling controllers
+    only through this object -- they never import one another directly, and no
+    controller touches a socket.
 
     Args:
         registry: The shared instance registry.
-        command_sender: The coordinator -> mp command channel.
+        transport: The coordinator transport (push + reach lifecycle).
         lifecycle: Join/leave hook registry.
-        zmq_context: The shared async ZMQ context, used to open per-instance
-            command sockets.
     """
 
     def __init__(
         self,
         registry: InstanceRegistry,
-        command_sender: CommandSender,
+        transport: CoordinatorTransport,
         lifecycle: LifecycleHooks,
-        zmq_context: zmq.asyncio.Context,
     ) -> None:
         """Initialize the context with shared collaborators."""
         self.registry = registry
-        self.command_sender = command_sender
+        self.transport = transport
         self.lifecycle = lifecycle
-        self.zmq_context = zmq_context
         self._controllers: dict[type, "Controller"] = {}
 
     def register_controller(self, controller: "Controller") -> None:

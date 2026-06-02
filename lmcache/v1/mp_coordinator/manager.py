@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The mp coordinator manager: transport, dispatch, and health.
+"""The mp coordinator manager: dispatch and health, over a transport.
 
-The manager owns the three coordinator sockets (PULL for fire-and-forget
-messages, a reply ROUTER for request/reply, a dedicated heartbeat ROUTER),
-builds the dispatch table by merging every controller's handler declarations,
-and runs a health-check thread that evicts stale instances.
+The manager decodes inbound bytes into typed messages,
+routes them by type to controller handlers (built into a dispatch table at
+startup), and runs a health-check thread that evicts stale instances. All wire
+I/O lives behind the injected :class:`CoordinatorTransport`.
 
 Concurrency model:
 
-- All sockets are created and used only on the single asyncio event loop, so no
-  socket is touched from two threads.
-- The health-check thread never touches sockets directly: it detects stale
-  instances and schedules their eviction back onto the event loop via
-  ``run_coroutine_threadsafe``.
+- The transport runs the inbound loops on the single asyncio event loop.
+- The health-check thread only *detects* stale instances; eviction is scheduled
+  back onto the event loop via ``run_coroutine_threadsafe`` so the transport's
+  connection lifecycle stays on one thread.
 """
 
 # Standard
@@ -21,11 +20,9 @@ import threading
 
 # Third Party
 import msgspec
-import zmq
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.command import CommandSender
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.controllers.base import (
     Controller,
@@ -45,54 +42,38 @@ from lmcache.v1.mp_coordinator.message import (
     ReqRetMsg,
 )
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
-from lmcache.v1.rpc_utils import close_zmq_socket, get_zmq_context, get_zmq_socket
+from lmcache.v1.mp_coordinator.transport import (
+    CoordinatorTransport,
+    Inbound,
+    InboundKind,
+)
 
 logger = init_logger(__name__)
 
 
 class MPCoordinatorManager:
-    """Owns coordinator transport, controller dispatch, and health checks.
+    """Owns controller dispatch and health checks over a transport.
 
     Args:
-        config: The coordinator configuration (socket addresses and timeouts).
+        config: The coordinator configuration (timeouts; addresses live in the
+            transport).
+        transport: The wire transport the coordinator runs on.
     """
 
-    def __init__(self, config: MPCoordinatorConfig) -> None:
-        """Build sockets, controllers, dispatch tables, and shared state."""
+    def __init__(
+        self, config: MPCoordinatorConfig, transport: CoordinatorTransport
+    ) -> None:
+        """Build controllers, dispatch tables, and shared state."""
         self.config = config
-        self.zmq_context = get_zmq_context()
-
-        self.pull_socket = get_zmq_socket(
-            self.zmq_context,
-            config.pull_url,
-            protocol="tcp",
-            role=zmq.PULL,  # type: ignore[attr-defined]
-            bind_or_connect="bind",
-        )
-        self.reply_socket = get_zmq_socket(
-            self.zmq_context,
-            config.reply_url,
-            protocol="tcp",
-            role=zmq.ROUTER,  # type: ignore[attr-defined]
-            bind_or_connect="bind",
-        )
-        self.heartbeat_socket = get_zmq_socket(
-            self.zmq_context,
-            config.heartbeat_url,
-            protocol="tcp",
-            role=zmq.ROUTER,  # type: ignore[attr-defined]
-            bind_or_connect="bind",
-        )
+        self.transport = transport
 
         # Shared state and collaborators.
         self.registry = InstanceRegistry()
         self.lifecycle = LifecycleHooks()
-        self.command_sender = CommandSender(self.registry, self.zmq_context)
         self._ctx = ControllerContext(
             registry=self.registry,
-            command_sender=self.command_sender,
+            transport=self.transport,
             lifecycle=self.lifecycle,
-            zmq_context=self.zmq_context,
         )
 
         # Controllers. Future controllers are appended here only.
@@ -138,6 +119,42 @@ class MPCoordinatorManager:
                     )
                 self._req_dispatch[req_type] = req_handler
 
+    async def dispatch(self, inbound: Inbound) -> bytes | None:
+        """Decode an inbound message and route it to its handler.
+
+        This is the callback handed to :meth:`CoordinatorTransport.serve`.
+
+        Args:
+            inbound: The raw inbound message from the transport.
+
+        Returns:
+            Encoded reply bytes for a ``REQUEST`` (an ``ErrorMsg`` if the
+            payload cannot be decoded or has no handler), or ``None`` for a
+            ``PUSH``.
+        """
+        try:
+            msg = msgspec.msgpack.decode(inbound.payload, type=CoordMsg)
+        except (msgspec.DecodeError, msgspec.ValidationError) as e:
+            logger.error("Failed to decode %s message: %s", inbound.kind.value, e)
+            if inbound.kind is InboundKind.REQUEST:
+                return msgspec.msgpack.encode(ErrorMsg(error=str(e)))
+            return None
+
+        if inbound.kind is InboundKind.PUSH:
+            if isinstance(msg, PushMsg):
+                await self._dispatch_push(msg)
+            else:
+                logger.error("Non-push message %s on push channel", type(msg).__name__)
+            return None
+
+        if not isinstance(msg, ReqMsg):
+            ret: ReqRetMsg = ErrorMsg(
+                error=f"Non-request message {type(msg).__name__} on request channel"
+            )
+        else:
+            ret = await self._dispatch_req(msg)
+        return msgspec.msgpack.encode(ret)
+
     async def _dispatch_push(self, msg: PushMsg) -> None:
         """Route a fire-and-forget message to its handler.
 
@@ -166,60 +183,11 @@ class MPCoordinatorManager:
             return ErrorMsg(error=f"No handler for {type(msg).__name__}")
         return await handler(msg)
 
-    async def _handle_pull(self) -> None:
-        """Receive and dispatch fire-and-forget messages from the PULL socket."""
-        while True:
-            parts = await self.pull_socket.recv_multipart()
-            for part in parts:
-                try:
-                    msg = msgspec.msgpack.decode(part, type=CoordMsg)
-                except (msgspec.DecodeError, msgspec.ValidationError) as e:
-                    logger.error("Failed to decode pull message: %s", e)
-                    continue
-                if isinstance(msg, PushMsg):
-                    await self._dispatch_push(msg)
-                else:
-                    logger.error(
-                        "Non-push message %s on PULL socket", type(msg).__name__
-                    )
-
-    async def _handle_router(self, socket: zmq.asyncio.Socket, label: str) -> None:
-        """Receive request/reply traffic on a ROUTER socket and reply.
-
-        Args:
-            socket: The ROUTER socket to service.
-            label: A short label used in log messages.
-        """
-        while True:
-            frames = await socket.recv_multipart()
-            if len(frames) < 3:
-                logger.error(
-                    "%s: invalid ROUTER frame count %d (expected >= 3)",
-                    label,
-                    len(frames),
-                )
-                continue
-            identity = frames[0]
-            payload = frames[2]
-            try:
-                msg = msgspec.msgpack.decode(payload, type=CoordMsg)
-                if not isinstance(msg, ReqMsg):
-                    ret: ReqRetMsg = ErrorMsg(
-                        error=f"Non-request message {type(msg).__name__} on {label}"
-                    )
-                else:
-                    ret = await self._dispatch_req(msg)
-            except (msgspec.DecodeError, msgspec.ValidationError) as e:
-                logger.error("%s: failed to decode request: %s", label, e)
-                ret = ErrorMsg(error=str(e))
-            await socket.send_multipart([identity, b"", msgspec.msgpack.encode(ret)])
-
     def _health_loop(self) -> None:
         """Evict stale instances on a timer (runs on the health thread).
 
-        Detection happens here; the actual eviction (which closes a socket) is
-        scheduled back onto the event loop so socket access stays
-        single-threaded.
+        Detection happens here; eviction is scheduled back onto the event loop
+        so the transport's connection lifecycle stays single-threaded.
         """
         while not self._shutdown.wait(self.config.health_check_interval):
             loop = self._loop
@@ -235,32 +203,21 @@ class MPCoordinatorManager:
         """Run the coordinator until cancelled.
 
         Captures the running event loop for the health thread, starts the
-        health thread, and serves all three sockets concurrently.
+        health thread, and serves the transport.
         """
         self._loop = asyncio.get_running_loop()
         if self.config.health_check_interval > 0:
             self._health_thread.start()
         logger.info(
-            "MP coordinator listening: pull=%s reply=%s heartbeat=%s",
+            "MP coordinator listening: pull=%s reply=%s",
             self.config.pull_url,
             self.config.reply_url,
-            self.config.heartbeat_url,
         )
-        await asyncio.gather(
-            self._handle_pull(),
-            self._handle_router(self.reply_socket, "reply"),
-            self._handle_router(self.heartbeat_socket, "heartbeat"),
-        )
+        await self.transport.serve(self.dispatch)
 
     def close(self) -> None:
-        """Stop the health thread and close all coordinator sockets."""
+        """Stop the health thread and close the transport."""
         self._shutdown.set()
         if self._health_thread.is_alive():
             self._health_thread.join(timeout=5.0)
-        for node in self.registry.all_instances():
-            removed = self.registry.deregister(node.instance_id)
-            if removed is not None:
-                close_zmq_socket(removed.command_socket)
-        close_zmq_socket(self.pull_socket)
-        close_zmq_socket(self.reply_socket)
-        close_zmq_socket(self.heartbeat_socket)
+        self.transport.close()

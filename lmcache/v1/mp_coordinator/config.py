@@ -24,10 +24,10 @@ class MPCoordinatorConfig:
     """Socket addresses and timing parameters for the coordinator.
 
     Attributes:
-        pull_url: Bind address (``host:port``) for the PULL socket receiving
-            fire-and-forget messages from mp servers.
-        reply_url: Bind address for the ROUTER socket handling request/reply.
-        heartbeat_url: Bind address for the dedicated heartbeat ROUTER socket.
+        pull_url: Bind address (``host:port``) for the fire-and-forget (PULL)
+            channel receiving deregistrations from mp servers.
+        reply_url: Bind address for the request/reply (ROUTER) channel handling
+            register and heartbeat.
         heartbeat_interval: Seconds between heartbeats expected from mp servers.
         instance_timeout: Seconds without a heartbeat after which an instance is
             considered dead and evicted.
@@ -37,7 +37,6 @@ class MPCoordinatorConfig:
 
     pull_url: str = "0.0.0.0:9300"
     reply_url: str = "0.0.0.0:9301"
-    heartbeat_url: str = "0.0.0.0:9302"
     heartbeat_interval: float = 5.0
     instance_timeout: float = 30.0
     health_check_interval: float = 10.0
@@ -93,7 +92,6 @@ class MPCoordinatorConfig:
         return cls(
             pull_url=_str("PULL_URL", cls.pull_url),
             reply_url=_str("REPLY_URL", cls.reply_url),
-            heartbeat_url=_str("HEARTBEAT_URL", cls.heartbeat_url),
             heartbeat_interval=_float("HEARTBEAT_INTERVAL", cls.heartbeat_interval),
             instance_timeout=_float("INSTANCE_TIMEOUT", cls.instance_timeout),
             health_check_interval=_float(

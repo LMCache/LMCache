@@ -11,12 +11,8 @@ contract.
 # Standard
 import time
 
-# Third Party
-import zmq
-
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.command import open_command_socket
 from lmcache.v1.mp_coordinator.controllers.base import (
     Controller,
     ControllerContext,
@@ -35,7 +31,7 @@ from lmcache.v1.mp_coordinator.message import (
     ReqRetMsg,
 )
 from lmcache.v1.mp_coordinator.registry import MPInstanceNode
-from lmcache.v1.rpc_utils import close_zmq_socket
+from lmcache.v1.mp_coordinator.transport import ReachInfo, TransportError
 
 logger = init_logger(__name__)
 
@@ -149,10 +145,10 @@ class RegistrationController(Controller):
     async def register_instance(self, msg: RegisterMsg) -> ReqRetMsg:
         """Register (or re-register) an mp server.
 
-        Opens a REQ command socket connected back to the mp server's control
-        REP socket, stores the instance in the registry, and fires the
-        ``on_join`` lifecycle hook. Re-registering a known instance closes the
-        stale command socket first and fires ``on_join`` again so subscribers
+        Asks the transport to establish a reach back to the mp server, stores
+        the instance in the registry, and fires the ``on_join`` lifecycle hook.
+        Re-registering a known instance replaces its reach (the transport
+        closes any stale connection) and fires ``on_join`` again so subscribers
         can re-broadcast any per-instance state.
 
         Args:
@@ -160,44 +156,41 @@ class RegistrationController(Controller):
 
         Returns:
             A :class:`RegisterRetMsg` on success, or an :class:`ErrorMsg` if
-            the command socket could not be opened.
+            the transport could not reach the mp server.
         """
-        existing = self.ctx.registry.get(msg.instance_id)
-        if existing is not None:
-            logger.info("Instance %s already registered; replacing", msg.instance_id)
-            close_zmq_socket(existing.command_socket)
-
-        control_addr = f"{msg.ip}:{msg.control_port}"
+        reach = ReachInfo(
+            ip=msg.ip, control_port=msg.control_port, metadata=dict(msg.metadata)
+        )
         try:
-            command_socket = open_command_socket(
-                self.ctx.zmq_context, msg.ip, msg.control_port
-            )
-        except zmq.ZMQError as e:
-            logger.error("Failed to open command socket to %s: %s", control_addr, e)
-            return ErrorMsg(error=f"Cannot connect to {control_addr}: {e}")
+            self.ctx.transport.add_instance(msg.instance_id, reach)
+        except TransportError as e:
+            logger.error("Cannot reach instance %s: %s", msg.instance_id, e)
+            return ErrorMsg(error=str(e))
 
         node = MPInstanceNode(
             instance_id=msg.instance_id,
             ip=msg.ip,
             control_port=msg.control_port,
-            command_socket=command_socket,
             registration_time=time.time(),
             last_heartbeat_time=time.monotonic(),
             metadata=dict(msg.metadata),
         )
         self.ctx.registry.register(node)
-        logger.info("Registered instance %s at %s", msg.instance_id, control_addr)
+        logger.info(
+            "Registered instance %s at %s:%s",
+            msg.instance_id,
+            msg.ip,
+            msg.control_port,
+        )
 
         self.ctx.lifecycle.fire_join(msg.instance_id)
         return RegisterRetMsg()
 
     async def deregister_instance(self, instance_id: str) -> None:
-        """Remove an mp server, close its command socket, fire ``on_leave``.
+        """Remove an mp server, release its reach, and fire ``on_leave``.
 
         Safe to call for an unknown instance (logged and ignored). Used both by
-        the deregister push handler and by the manager's health-check eviction;
-        callers must invoke it on the event loop thread so the socket close is
-        single-threaded.
+        the deregister push handler and by the manager's health-check eviction.
 
         Args:
             instance_id: Identifier of the instance to remove.
@@ -207,6 +200,6 @@ class RegistrationController(Controller):
             logger.warning("Deregister for unknown instance %s", instance_id)
             return
 
-        close_zmq_socket(node.command_socket)
+        self.ctx.transport.remove_instance(instance_id)
         logger.info("Deregistered instance %s", instance_id)
         self.ctx.lifecycle.fire_leave(instance_id)

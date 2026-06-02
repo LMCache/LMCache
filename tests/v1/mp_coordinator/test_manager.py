@@ -30,6 +30,10 @@ from lmcache.v1.mp_coordinator.message import (
     RegisterRetMsg,
     ReqMsg,
 )
+from lmcache.v1.mp_coordinator.zmq_transport import (
+    ZmqClientTransport,
+    ZmqCoordinatorTransport,
+)
 
 
 def _free_port() -> int:
@@ -46,7 +50,6 @@ def _config(**overrides) -> MPCoordinatorConfig:
     config = MPCoordinatorConfig(
         pull_url=f"127.0.0.1:{_free_port()}",
         reply_url=f"127.0.0.1:{_free_port()}",
-        heartbeat_url=f"127.0.0.1:{_free_port()}",
         heartbeat_interval=0.2,
         instance_timeout=0.6,
         health_check_interval=0.0,
@@ -54,6 +57,13 @@ def _config(**overrides) -> MPCoordinatorConfig:
     if overrides:
         config = dataclasses.replace(config, **overrides)
     return config
+
+
+def _coordinator_transport(config: MPCoordinatorConfig) -> ZmqCoordinatorTransport:
+    """Build a ZMQ coordinator transport for a config."""
+    return ZmqCoordinatorTransport(
+        zmq.asyncio.Context(), config.reply_url, config.pull_url
+    )
 
 
 class _UnknownReq(ReqMsg):
@@ -65,7 +75,7 @@ class _UnknownReq(ReqMsg):
 @contextlib.asynccontextmanager
 async def _running_manager(config: MPCoordinatorConfig):
     """Start a coordinator on its own task and tear it down afterwards."""
-    manager = MPCoordinatorManager(config)
+    manager = MPCoordinatorManager(config, _coordinator_transport(config))
     server = asyncio.create_task(manager.start_all())
     await asyncio.sleep(0.2)  # let sockets bind and the loop start
     try:
@@ -107,14 +117,19 @@ def test_register_request_is_handled():
 
 
 def test_client_start_times_out_when_coordinator_down():
-    # reply_url points at a free port with nothing listening: connect succeeds
+    # request_url points at a free port with nothing listening: connect succeeds
     # lazily, send succeeds, recv times out -> start() must raise (not hang).
+    control_port = _free_port()
+    transport = ZmqClientTransport(
+        zmq.Context.instance(),
+        request_url=f"127.0.0.1:{_free_port()}",
+        push_url="127.0.0.1:1",
+        control_port=control_port,
+    )
     client = CoordinatorClient(
         instance_id="x",
-        reply_url=f"127.0.0.1:{_free_port()}",
-        heartbeat_url="127.0.0.1:1",
-        pull_url="127.0.0.1:1",
-        control_port=_free_port(),
+        transport=transport,
+        control_port=control_port,
         advertise_ip="127.0.0.1",
         register_timeout_ms=300,
     )
@@ -135,13 +150,18 @@ def test_unknown_request_returns_error():
 
 
 def _make_client(config: MPCoordinatorConfig, instance_id: str) -> CoordinatorClient:
-    """Build a CoordinatorClient targeting the given coordinator config."""
+    """Build a CoordinatorClient (over a ZMQ transport) for a config."""
+    control_port = _free_port()
+    transport = ZmqClientTransport(
+        zmq.Context.instance(),
+        request_url=config.reply_url,
+        push_url=config.pull_url,
+        control_port=control_port,
+    )
     return CoordinatorClient(
         instance_id=instance_id,
-        reply_url=config.reply_url,
-        heartbeat_url=config.heartbeat_url,
-        pull_url=config.pull_url,
-        control_port=_free_port(),
+        transport=transport,
+        control_port=control_port,
         heartbeat_interval=config.heartbeat_interval,
         advertise_ip="127.0.0.1",
     )
@@ -174,7 +194,7 @@ def test_fleet_registration_broadcast_and_health_eviction():
                 )
 
                 # Push channel: broadcast reaches both control sockets, acked.
-                replies = await manager.command_sender.broadcast(b"ping")
+                replies = await manager.transport.broadcast(b"ping")
                 assert replies == {"i1": b"ack", "i2": b"ack"}
 
                 # Deregister via PUSH: client2 leaves.

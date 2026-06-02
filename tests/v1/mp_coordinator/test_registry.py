@@ -2,7 +2,6 @@
 """Unit tests for the mp coordinator instance registry."""
 
 # Standard
-from unittest.mock import Mock
 import time
 
 # First Party
@@ -10,13 +9,12 @@ from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstanceNode
 
 
 def _node(instance_id: str, heartbeat: float = 0.0) -> MPInstanceNode:
-    """Build an MPInstanceNode with a mock command socket for tests."""
+    """Build a pure-membership MPInstanceNode for tests."""
     now = heartbeat or time.time()
     return MPInstanceNode(
         instance_id=instance_id,
         ip="127.0.0.1",
         control_port=5000,
-        command_socket=Mock(),
         registration_time=now,
         last_heartbeat_time=now,
     )
