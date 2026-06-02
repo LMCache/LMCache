@@ -505,22 +505,16 @@ def expand_block_ids_to_lmc_groups(
         groups: The LMCache KV groups, in protocol order.
         engine_side_block_ids: Block IDs indexed by engine block group id, i.e.
             one inner ``list[int]`` per engine block group (element ``g`` is
-            engine block group ``g``'s block list). May be empty when nothing is
-            allocated yet.
+            engine block group ``g``'s block list).
 
     Returns:
         Block IDs re-indexed by LMCache group order: one inner list per LMCache
-        group, copied from that group's source engine block group. When
-        ``engine_side_block_ids`` is empty, returns one empty list per LMCache
-        group.
+        group, copied from that group's source engine block group.
 
     Raises:
         ValueError: If a group references an engine block group id beyond the
             supplied ``engine_side_block_ids``.
     """
-    if not engine_side_block_ids:
-        return [[] for _ in _engine_block_group_id_per_lmc_group(groups)]
-
     block_ids_per_lmc_group: list[list[int]] = []
     for engine_block_group_id in _engine_block_group_id_per_lmc_group(groups):
         if engine_block_group_id >= len(engine_side_block_ids):
