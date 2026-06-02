@@ -151,7 +151,7 @@ warn_return_any = false
 follow_imports = "silent"
 
 [tool.codespell]
-ignore-words-list = "afterall,allready,notin"
+ignore-words-list = "afterall,allready,notin,te"
 skip = "operator/config/crd/bases/*,lmcache/integration/vllm/lmcache_mp_connector_*.py"
 
 [tool.cibuildwheel]
