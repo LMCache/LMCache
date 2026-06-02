@@ -94,13 +94,6 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
-    """Flatten vLLM's per-engine-group block IDs to the primary group's list."""
-    if block_ids is None:
-        return []
-    return block_ids[0]
-
-
 def extract_world_size_and_kv_rank(
     world_size: int,
     rank: int,
@@ -1223,7 +1216,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # can correctly identify block content.
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
-            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
+            # The L0 subscriber works on the primary (group 0) block-id list.
+            new_group_block_ids = cached_reqs.new_block_ids[idx]
+            new_block_ids = new_group_block_ids[0] if new_group_block_ids else []
             if not new_block_ids:
                 continue
             tracker = self.request_trackers.get(request_id)
