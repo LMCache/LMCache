@@ -4,14 +4,15 @@
 # Standard
 from collections.abc import Mapping
 from dataclasses import dataclass
-from urllib.error import HTTPError, URLError
+from typing import Protocol
 from urllib.parse import urlparse
-from urllib.request import urlopen
-import json
 import shlex
 import subprocess
 import sys
 import time
+
+# Third Party
+import zmq
 
 # First Party
 from lmcache.logging import init_logger
@@ -19,37 +20,85 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 _AUTOSTART_KEY = "lmcache.mp.autostart"
-_HEALTH_URL_KEY = "lmcache.mp.autostart.health_url"
 _SERVER_ARGS_KEY = "lmcache.mp.autostart.server_args"
 _WAIT_TIMEOUT_KEY = "lmcache.mp.autostart.wait_timeout"
 
-_DEFAULT_HTTP_PORT = 8080
 _DEFAULT_WAIT_TIMEOUT = 90.0
-_HEALTHCHECK_PATH = "/healthcheck"
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_PING_TIMEOUT_SECONDS = 1.0
 _POLL_INTERVAL_SECONDS = 0.5
-_REQUEST_TIMEOUT_SECONDS = 2.0
 _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
-def is_mp_server_healthy(health_url: str) -> bool:
-    """Return whether the MP server health endpoint reports healthy.
+class _MessagingFuture(Protocol):
+    def result(self, timeout: float | None = None) -> object:
+        """Return the completed result, or raise if unavailable."""
+
+
+class _MessageQueueClient(Protocol):
+    def submit_request(
+        self,
+        request_type: object,
+        request_payloads: list[object],
+        response_cls: object | None = None,
+    ) -> _MessagingFuture:
+        """Submit an MQ request and return its future."""
+
+    def close(self) -> None:
+        """Close the MQ client."""
+
+
+def _create_message_queue_client(
+    server_url: str,
+    zmq_context: zmq.Context,
+) -> _MessageQueueClient:
+    # First Party
+    from lmcache.v1.multiprocess.mq import MessageQueueClient
+
+    return MessageQueueClient(server_url, zmq_context)
+
+
+def _submit_ping(client: _MessageQueueClient) -> _MessagingFuture:
+    # First Party
+    from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+
+    return client.submit_request(
+        RequestType.PING,
+        [],
+        get_response_class(RequestType.PING),
+    )
+
+
+def is_mp_server_healthy(
+    server_url: str,
+    zmq_context: zmq.Context,
+    timeout: float = _PING_TIMEOUT_SECONDS,
+) -> bool:
+    """Return whether the MP server responds to a ZMQ PING request.
 
     Args:
-        health_url: URL of the MP server health check endpoint.
+        server_url: ZMQ URL of the LMCache MP server.
+        zmq_context: ZMQ context used to create a temporary MQ client.
+        timeout: Maximum seconds to wait for the PING response.
 
     Returns:
-        ``True`` if the endpoint returns HTTP 200 with
-        ``{"status": "healthy"}``, otherwise ``False``.
+        ``True`` if the server returns a successful PING response, otherwise
+        ``False``.
     """
+    client: _MessageQueueClient | None = None
     try:
-        with urlopen(health_url, timeout=_REQUEST_TIMEOUT_SECONDS) as response:
-            if response.status != 200:
-                return False
-            data = json.loads(response.read().decode("utf-8"))
-            return data.get("status") == "healthy"
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError):
+        client = _create_message_queue_client(server_url, zmq_context)
+        future = _submit_ping(client)
+        return bool(future.result(timeout=timeout))
+    except Exception:
+        logger.debug("LMCache MP server ZMQ PING failed", exc_info=True)
         return False
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("Failed to close LMCache MP health client", exc_info=True)
 
 
 def maybe_autostart_mp_server(
@@ -57,15 +106,17 @@ def maybe_autostart_mp_server(
     extra_config: object | None,
     server_host: str,
     server_port: int | str,
-    rank: int,
+    server_url: str,
+    zmq_context: zmq.Context,
 ) -> "MPServerLauncher | None":
-    """Start the LMCache MP server for worker rank 0 when configured.
+    """Start the LMCache MP server when configured.
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
         server_host: LMCache MP server host from ``lmcache.mp.host``.
         server_port: LMCache MP server port from ``lmcache.mp.port``.
-        rank: vLLM global rank.
+        server_url: ZMQ URL used by the connector to reach the MP server.
+        zmq_context: ZMQ context used for health probing.
 
     Returns:
         The launcher that owns the server process, or ``None`` when no process
@@ -78,12 +129,9 @@ def maybe_autostart_mp_server(
     )
     if not config.enabled:
         return None
-    if rank != 0:
-        logger.info("LMCache MP auto-start is enabled only for worker rank 0")
-        return None
 
     launcher = MPServerLauncher(config)
-    launcher.start()
+    launcher.start(server_url=server_url, zmq_context=zmq_context)
     return launcher
 
 
@@ -191,21 +239,6 @@ def _normalize_local_host(server_host: str) -> str:
     return host
 
 
-def _get_http_port(server_args: tuple[str, ...]) -> int:
-    http_port = _DEFAULT_HTTP_PORT
-    index = 0
-    while index < len(server_args):
-        arg = server_args[index]
-        if arg == "--http-port" and index + 1 < len(server_args):
-            http_port = _parse_port(server_args[index + 1])
-            index += 2
-            continue
-        if arg.startswith("--http-port="):
-            http_port = _parse_port(arg.split("=", maxsplit=1)[1])
-        index += 1
-    return http_port
-
-
 @dataclass(frozen=True)
 class MPServerAutostartConfig:
     """Configuration for an auto-started LMCache multiprocess server."""
@@ -214,7 +247,6 @@ class MPServerAutostartConfig:
     host: str
     port: int
     wait_timeout: float
-    health_url: str
     server_args: tuple[str, ...]
 
     @classmethod
@@ -244,7 +276,6 @@ class MPServerAutostartConfig:
                 host="",
                 port=0,
                 wait_timeout=_DEFAULT_WAIT_TIMEOUT,
-                health_url="",
                 server_args=(),
             )
 
@@ -256,20 +287,14 @@ class MPServerAutostartConfig:
                 extra_config, _WAIT_TIMEOUT_KEY, _DEFAULT_WAIT_TIMEOUT
             )
         )
-        health_url = _get_extra_config_value(extra_config, _HEALTH_URL_KEY)
-
         host = _normalize_local_host(server_host)
         port = _parse_port(server_port)
-        if health_url is None or str(health_url).strip() == "":
-            http_port = _get_http_port(server_args)
-            health_url = f"http://127.0.0.1:{http_port}{_HEALTHCHECK_PATH}"
 
         return cls(
             enabled=True,
             host=host,
             port=port,
             wait_timeout=wait_timeout,
-            health_url=str(health_url),
             server_args=server_args,
         )
 
@@ -299,8 +324,12 @@ class MPServerLauncher:
         self.config = config
         self._process: subprocess.Popen[bytes] | None = None
 
-    def start(self) -> None:
-        """Start the MP server if the health endpoint is not already healthy.
+    def start(self, server_url: str, zmq_context: zmq.Context) -> None:
+        """Start the MP server if it is not already reachable over ZMQ.
+
+        Args:
+            server_url: ZMQ URL used by the connector to reach the MP server.
+            zmq_context: ZMQ context used for health probing.
 
         Raises:
             ConnectionError: If the server process exits early or does not become
@@ -309,10 +338,10 @@ class MPServerLauncher:
         if not self.config.enabled:
             return
 
-        if is_mp_server_healthy(self.config.health_url):
+        if is_mp_server_healthy(server_url, zmq_context):
             logger.info(
                 "LMCache MP server is already healthy at %s; skipping auto-start",
-                self.config.health_url,
+                server_url,
             )
             return
 
@@ -320,7 +349,7 @@ class MPServerLauncher:
         logger.info("Auto-starting LMCache MP server with command: %s", command)
         self._process = subprocess.Popen(command)
         try:
-            self._wait_until_healthy()
+            self._wait_until_healthy(server_url, zmq_context)
         except Exception:
             self.shutdown()
             raise
@@ -342,13 +371,13 @@ class MPServerLauncher:
             process.kill()
             process.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
 
-    def _wait_until_healthy(self) -> None:
+    def _wait_until_healthy(self, server_url: str, zmq_context: zmq.Context) -> None:
         deadline = time.monotonic() + self.config.wait_timeout
         while time.monotonic() < deadline:
-            if is_mp_server_healthy(self.config.health_url):
+            if is_mp_server_healthy(server_url, zmq_context):
                 logger.info(
                     "LMCache MP server became healthy at %s",
-                    self.config.health_url,
+                    server_url,
                 )
                 return
 
@@ -360,13 +389,13 @@ class MPServerLauncher:
                 raise ConnectionError(
                     "Auto-started LMCache MP server exited before becoming "
                     f"healthy. returncode={return_code}, "
-                    f"health_url={self.config.health_url}, "
+                    f"server_url={server_url}, "
                     f"command={self.config.command()}"
                 )
             time.sleep(_POLL_INTERVAL_SECONDS)
 
         raise ConnectionError(
             "Auto-started LMCache MP server did not become healthy within "
-            f"{self.config.wait_timeout}s. health_url={self.config.health_url}, "
+            f"{self.config.wait_timeout}s. server_url={server_url}, "
             f"command={self.config.command()}"
         )

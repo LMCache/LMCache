@@ -48,24 +48,52 @@ class FakeProcess:
         return self.returncode
 
 
-class FakeResponse:
-    """Minimal urlopen response double for health checks."""
+class FakeFuture:
+    """Minimal future double for ZMQ health checks."""
 
-    def __init__(self, status: int, body: bytes) -> None:
-        self.status = status
-        self.body = body
+    def __init__(
+        self,
+        result: bool | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.result_value = result
+        self.error = error
+        self.timeout: float | None = None
 
-    def __enter__(self) -> "FakeResponse":
-        """Return the response for context-manager use."""
-        return self
+    def result(self, timeout: float | None = None) -> bool | None:
+        """Return the configured result or raise the configured error."""
+        self.timeout = timeout
+        if self.error is not None:
+            raise self.error
+        return self.result_value
 
-    def __exit__(self, *args: object) -> None:
-        """No-op context-manager cleanup."""
-        return None
 
-    def read(self) -> bytes:
-        """Return the configured response body."""
-        return self.body
+class FakeMessageQueueClient:
+    """Minimal message queue client double for health checks."""
+
+    instances: list["FakeMessageQueueClient"] = []
+    future = FakeFuture(True)
+
+    def __init__(self, server_url: str, context: object) -> None:
+        self.server_url = server_url
+        self.context = context
+        self.closed = False
+        self.requests: list[tuple[object, list[object], object]] = []
+        self.instances.append(self)
+
+    def submit_request(
+        self,
+        request_type: object,
+        request_payloads: list[object],
+        response_cls: object,
+    ) -> FakeFuture:
+        """Record the request and return the configured fake future."""
+        self.requests.append((request_type, request_payloads, response_cls))
+        return self.future
+
+    def close(self) -> None:
+        """Record that the client was closed."""
+        self.closed = True
 
 
 def test_config_defaults_to_disabled_without_validating_remote_host() -> None:
@@ -92,7 +120,7 @@ def test_config_ignores_non_mapping_extra_config() -> None:
     assert not config.enabled
 
 
-def test_config_parses_enabled_string_and_default_health_url() -> None:
+def test_config_parses_enabled_string() -> None:
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={"lmcache.mp.autostart": "true"},
         server_host="tcp://localhost",
@@ -102,10 +130,9 @@ def test_config_parses_enabled_string_and_default_health_url() -> None:
     assert config.enabled
     assert config.host == "localhost"
     assert config.port == 5555
-    assert config.health_url == "http://127.0.0.1:8080/healthcheck"
 
 
-def test_config_parses_server_args_and_http_port() -> None:
+def test_config_parses_server_args() -> None:
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={
             "lmcache.mp.autostart": True,
@@ -118,7 +145,6 @@ def test_config_parses_server_args_and_http_port() -> None:
     )
 
     assert config.server_args == ("--http-port", "18080", "--l1-size-gb", "20")
-    assert config.health_url == "http://127.0.0.1:18080/healthcheck"
 
 
 @pytest.mark.parametrize(
@@ -152,36 +178,37 @@ def test_config_rejects_remote_host_when_enabled() -> None:
         )
 
 
-def test_maybe_autostart_only_starts_rank_zero(monkeypatch) -> None:
+def test_maybe_autostart_starts_when_enabled(monkeypatch) -> None:
     instances = []
 
     class FakeLauncher:
         def __init__(self, config: MPServerAutostartConfig) -> None:
             self.config = config
             self.started = False
+            self.server_url = None
+            self.zmq_context = None
             instances.append(self)
 
-        def start(self) -> None:
+        def start(self, server_url: str, zmq_context: object) -> None:
             self.started = True
+            self.server_url = server_url
+            self.zmq_context = zmq_context
 
     monkeypatch.setattr(launcher_mod, "MPServerLauncher", FakeLauncher)
+    zmq_context = MagicMock()
 
-    worker_rank_zero = maybe_autostart_mp_server(
+    launcher = maybe_autostart_mp_server(
         extra_config={"lmcache.mp.autostart": True},
         server_host="tcp://localhost",
         server_port=5555,
-        rank=0,
-    )
-    worker_rank_one = maybe_autostart_mp_server(
-        extra_config={"lmcache.mp.autostart": True},
-        server_host="tcp://localhost",
-        server_port=5555,
-        rank=1,
+        server_url="tcp://localhost:5555",
+        zmq_context=zmq_context,
     )
 
-    assert worker_rank_zero is instances[0]
+    assert launcher is instances[0]
     assert instances[0].started
-    assert worker_rank_one is None
+    assert instances[0].server_url == "tcp://localhost:5555"
+    assert instances[0].zmq_context is zmq_context
     assert len(instances) == 1
 
 
@@ -199,7 +226,11 @@ def test_shutdown_mp_server_launcher_shutdowns_owned_launcher() -> None:
 
 def test_launcher_skips_start_when_server_already_healthy(monkeypatch) -> None:
     popen_mock = MagicMock()
-    monkeypatch.setattr(launcher_mod, "is_mp_server_healthy", lambda _: True)
+    monkeypatch.setattr(
+        launcher_mod,
+        "is_mp_server_healthy",
+        lambda server_url, zmq_context: True,
+    )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={"lmcache.mp.autostart": True},
@@ -207,7 +238,7 @@ def test_launcher_skips_start_when_server_already_healthy(monkeypatch) -> None:
         server_port=5555,
     )
 
-    MPServerLauncher(config).start()
+    MPServerLauncher(config).start("tcp://localhost:5555", MagicMock())
 
     popen_mock.assert_not_called()
 
@@ -217,7 +248,9 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
     process = FakeProcess()
     popen_mock = MagicMock(return_value=process)
     monkeypatch.setattr(
-        launcher_mod, "is_mp_server_healthy", lambda _: next(health_results)
+        launcher_mod,
+        "is_mp_server_healthy",
+        lambda server_url, zmq_context: next(health_results),
     )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
     config = MPServerAutostartConfig.from_extra_config(
@@ -226,7 +259,7 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
         server_port=5555,
     )
 
-    MPServerLauncher(config).start()
+    MPServerLauncher(config).start("tcp://localhost:5555", MagicMock())
 
     popen_mock.assert_called_once()
     command = popen_mock.call_args.args[0]
@@ -242,7 +275,11 @@ def test_launcher_timeout_terminates_process(monkeypatch) -> None:
     process = FakeProcess()
     popen_mock = MagicMock(return_value=process)
     monotonic_values = iter([0.0, 0.0, 1.0])
-    monkeypatch.setattr(launcher_mod, "is_mp_server_healthy", lambda _: False)
+    monkeypatch.setattr(
+        launcher_mod,
+        "is_mp_server_healthy",
+        lambda server_url, zmq_context: False,
+    )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
     monkeypatch.setattr(launcher_mod.time, "monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(launcher_mod.time, "sleep", lambda _: None)
@@ -256,7 +293,7 @@ def test_launcher_timeout_terminates_process(monkeypatch) -> None:
     )
 
     with pytest.raises(ConnectionError, match="did not become healthy"):
-        MPServerLauncher(config).start()
+        MPServerLauncher(config).start("tcp://localhost:5555", MagicMock())
 
     assert process.terminate_called
     assert not process.kill_called
@@ -265,7 +302,11 @@ def test_launcher_timeout_terminates_process(monkeypatch) -> None:
 def test_launcher_early_exit_raises_connection_error(monkeypatch) -> None:
     process = FakeProcess(returncode=2)
     popen_mock = MagicMock(return_value=process)
-    monkeypatch.setattr(launcher_mod, "is_mp_server_healthy", lambda _: False)
+    monkeypatch.setattr(
+        launcher_mod,
+        "is_mp_server_healthy",
+        lambda server_url, zmq_context: False,
+    )
     monkeypatch.setattr(launcher_mod.subprocess, "Popen", popen_mock)
     monkeypatch.setattr(launcher_mod.time, "monotonic", lambda: 0.0)
     config = MPServerAutostartConfig.from_extra_config(
@@ -275,29 +316,57 @@ def test_launcher_early_exit_raises_connection_error(monkeypatch) -> None:
     )
 
     with pytest.raises(ConnectionError, match="exited before becoming healthy"):
-        MPServerLauncher(config).start()
+        MPServerLauncher(config).start("tcp://localhost:5555", MagicMock())
 
 
-def test_health_probe_requires_healthy_json(monkeypatch) -> None:
+def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
+    FakeMessageQueueClient.instances = []
+    FakeMessageQueueClient.future = FakeFuture(True)
     monkeypatch.setattr(
         launcher_mod,
-        "urlopen",
-        lambda *args, **kwargs: FakeResponse(200, b'{"status": "healthy"}'),
+        "_create_message_queue_client",
+        FakeMessageQueueClient,
+    )
+    monkeypatch.setattr(
+        launcher_mod,
+        "_submit_ping",
+        lambda client: client.submit_request("PING", [], bool),
+    )
+    zmq_context = MagicMock()
+
+    assert launcher_mod.is_mp_server_healthy(
+        "tcp://localhost:5555",
+        zmq_context,
+        timeout=0.25,
     )
 
-    assert launcher_mod.is_mp_server_healthy("http://127.0.0.1:8080/healthcheck")
+    client = FakeMessageQueueClient.instances[0]
+    assert client.server_url == "tcp://localhost:5555"
+    assert client.context is zmq_context
+    assert client.closed
+    assert client.requests == [("PING", [], bool)]
+    assert FakeMessageQueueClient.future.timeout == 0.25
 
 
-def test_health_probe_returns_false_for_non_healthy_json(monkeypatch) -> None:
+def test_health_probe_returns_false_on_zmq_ping_timeout(monkeypatch) -> None:
+    FakeMessageQueueClient.instances = []
+    FakeMessageQueueClient.future = FakeFuture(error=TimeoutError())
     monkeypatch.setattr(
         launcher_mod,
-        "urlopen",
-        lambda *args, **kwargs: FakeResponse(200, b'{"status": "starting"}'),
+        "_create_message_queue_client",
+        FakeMessageQueueClient,
+    )
+    monkeypatch.setattr(
+        launcher_mod,
+        "_submit_ping",
+        lambda client: client.submit_request("PING", [], bool),
     )
 
     assert not launcher_mod.is_mp_server_healthy(
-        "http://127.0.0.1:8080/healthcheck"
+        "tcp://localhost:5555",
+        MagicMock(),
     )
+    assert FakeMessageQueueClient.instances[0].closed
 
 
 def test_shutdown_kills_process_after_terminate_timeout(monkeypatch) -> None:
@@ -316,7 +385,9 @@ def test_shutdown_kills_process_after_terminate_timeout(monkeypatch) -> None:
     )
     health_results = iter([False, True])
     monkeypatch.setattr(
-        launcher_mod, "is_mp_server_healthy", lambda _: next(health_results)
+        launcher_mod,
+        "is_mp_server_healthy",
+        lambda server_url, zmq_context: next(health_results),
     )
     process = StubbornProcess()
     monkeypatch.setattr(
@@ -324,7 +395,7 @@ def test_shutdown_kills_process_after_terminate_timeout(monkeypatch) -> None:
     )
     launcher = MPServerLauncher(config)
 
-    launcher.start()
+    launcher.start("tcp://localhost:5555", MagicMock())
     launcher.shutdown()
 
     assert process.terminate_called
