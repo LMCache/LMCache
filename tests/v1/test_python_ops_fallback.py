@@ -1417,7 +1417,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
     # Decide mode based on the running device.
     # The native CUDA/XPU backend only accepts a tensor of uint64 pointers;
     # only the Python fallback supports list[Tensor].
-    use_tensor_list = device not in ("cpu", "cuda")
+    use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
     for gpu_kv_format, is_mla in format_cases:
         k_or_v_size = 1 if is_mla else 2
