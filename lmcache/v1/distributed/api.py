@@ -183,7 +183,7 @@ class PrefetchHandle:
     sparse: bool = False
     """Sparse prefetch: every found key is loaded and read-locked (not just
     the contiguous prefix); result is a per-key found set via
-    ``wait_prefetch_found``."""
+    ``query_prefetch_found``."""
 
     l1_found_indices: tuple[int, ...] = ()
     """Sparse only: original-key indices found in L1 at submit time."""

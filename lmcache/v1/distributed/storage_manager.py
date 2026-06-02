@@ -406,7 +406,7 @@ class StorageManager:
             external_request_id: Request ID from the caller
                 for end-to-end log tracing.
             sparse: If True, retain every found key (L1+L2), not just the
-                contiguous prefix; results via :meth:`wait_prefetch_found`.
+                contiguous prefix; results via :meth:`query_prefetch_found`.
                 Coalesces scattered chunks into one L2 load.
             covered_keys: Sparse only. Keys already served elsewhere (e.g. the
                 parent prefix): excluded from the L2 load and found set, and
@@ -506,7 +506,7 @@ class StorageManager:
     ) -> PrefetchHandle:
         """Sparse prefetch: keep read locks on every found L1 key (not just the
         prefix) and send all L1-misses to L2 as one sparse request; found keys
-        reported via :meth:`wait_prefetch_found`. ``covered_keys`` (served by the
+        reported via :meth:`query_prefetch_found`. ``covered_keys`` (served by the
         parent prefix) are excluded and any probe lock on them released, so the
         locked set equals what the caller retrieves."""
         # L1-present keys kept read-locked, except parent-covered (released below).
@@ -568,26 +568,25 @@ class StorageManager:
             l2_orig_indices=tuple(l2_orig_indices),
         )
 
-    def wait_prefetch_found(
+    def query_prefetch_found(
         self,
         handle: PrefetchHandle,
-        timeout: float | None = None,
     ) -> set[int] | None:
-        """Event-driven result of a sparse prefetch (``sparse=True`` in
-        :meth:`submit_prefetch_task`).
+        """Non-blocking sparse counterpart of :meth:`query_prefetch_status`.
 
-        Args:
-            handle: The sparse :class:`PrefetchHandle` from submit.
-            timeout: Max seconds to wait; ``None`` blocks indefinitely.
+        Polls the per-key found set without blocking: returns the set of
+        ORIGINAL key indices found and read-locked in L1 (directly or via L2
+        promotion), or ``None`` if the sparse prefetch is still in progress.
+        For sparse handles only.
 
-        Returns:
-            Set of original key indices found and read-locked in L1 (directly
-            or via L2), or ``None`` on timeout (which releases the locks).
+        Note: the underlying ``query_prefetch_result`` is consume-once, so the
+        caller must stash the first non-``None`` result and not re-poll after
+        it arrives.
         """
         found: set[int] = set(handle.l1_found_indices)
         if handle.prefetch_request_id != -1:
-            l2_res = self._prefetch_controller.wait_prefetch_result(
-                handle.prefetch_request_id, timeout=timeout
+            l2_res = self._prefetch_controller.query_prefetch_result(
+                handle.prefetch_request_id
             )
             if l2_res is None:
                 return None

@@ -267,13 +267,11 @@ class PrefetchController(StorageControllerInterface):
         self._lookup_results_lock = threading.Lock()
         self._completed_lookups: dict[PrefetchRequestId, int] = {}
 
-        # Background → external. Condition notifies wait_prefetch_result.
-        self._prefetch_results_lock = threading.Condition()
+        # Thread-safe prefetch results (background -> external). Consumers poll
+        # (query_prefetch_result), never block-wait, so a plain Lock suffices.
+        self._prefetch_results_lock = threading.Lock()
         # int = prefix-hit count (normal); Bitmap = per-key found set (sparse).
         self._completed_results: dict[PrefetchRequestId, int | Bitmap] = {}
-        # Callers that timed out in wait_prefetch_result; _finalize_load
-        # releases their read locks and drops the result. Guarded by the lock.
-        self._abandoned_requests: set[PrefetchRequestId] = set()
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -417,37 +415,6 @@ class PrefetchController(StorageControllerInterface):
         if result is not None:
             with self._lookup_results_lock:
                 self._completed_lookups.pop(request_id, None)
-        return result
-
-    def wait_prefetch_result(
-        self, request_id: PrefetchRequestId, timeout: float | None = None
-    ) -> "int | Bitmap | None":
-        """Event-driven :meth:`query_prefetch_result`; blocks until ready.
-
-        Args:
-            request_id: ID from :meth:`submit_prefetch_request`.
-            timeout: Max seconds to wait; ``None`` blocks indefinitely.
-
-        Returns:
-            Result (``int`` count or per-key ``Bitmap``), or ``None`` on
-            timeout — which marks the request abandoned so the loader releases
-            its read locks at finalization (no leak). Consumed once.
-        """
-        with self._prefetch_results_lock:
-            if request_id in self._completed_results:
-                result = self._completed_results.pop(request_id)
-            else:
-                got = self._prefetch_results_lock.wait_for(
-                    lambda: request_id in self._completed_results,
-                    timeout=timeout,
-                )
-                if not got:
-                    # Abandon: _finalize_load releases locks + drops result.
-                    self._abandoned_requests.add(request_id)
-                    return None
-                result = self._completed_results.pop(request_id)
-        with self._lookup_results_lock:
-            self._completed_lookups.pop(request_id, None)
         return result
 
     def report_status(self) -> dict:
@@ -1006,12 +973,11 @@ class PrefetchController(StorageControllerInterface):
             )
 
         if request.sparse:
-            # Sparse: loaded keys keep their read lock for retrieval (per-key
-            # found bitmap, no prefix release). If abandoned (caller timed
-            # out), release them here so they don't leak.
-            abandoned = self._complete_request(request.request_id, result_bitmap)
-            if abandoned and loaded_keys:
-                l1_mgr.finish_read(loaded_keys, extra_count=request.extra_count)
+            # Sparse: every loaded key keeps its read lock for retrieval
+            # (per-key found bitmap, no prefix release). The caller polls the
+            # found set (query_prefetch_found) and defers until it lands — it
+            # never gives up mid-load, so there are no orphaned locks here.
+            self._complete_request(request.request_id, result_bitmap)
         else:
             # Partial load failures can create gaps in the prefix.
             # Release read locks for loaded keys beyond the prefix.
@@ -1055,21 +1021,11 @@ class PrefetchController(StorageControllerInterface):
 
     def _complete_request(
         self, request_id: PrefetchRequestId, result: int | Bitmap
-    ) -> bool:
-        """Store the result (prefix-hit ``int`` or sparse ``Bitmap``) and notify
-        ``wait_prefetch_result`` waiters.
-
-        Returns True if the caller already abandoned the request (timed out):
-        the result is dropped and the caller must release its read locks. The
-        abandon check + store are atomic under the lock, so a timeout racing
-        completion can't strand a lock.
-        """
+    ) -> None:
+        """Store the result (prefix-hit ``int`` or sparse ``Bitmap``) for the
+        caller to poll (query_prefetch_result / query_prefetch_found)."""
         with self._prefetch_results_lock:
-            abandoned = request_id in self._abandoned_requests
-            self._abandoned_requests.discard(request_id)
-            if not abandoned:
-                self._completed_results[request_id] = result
-                self._prefetch_results_lock.notify_all()
+            self._completed_results[request_id] = result
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1
@@ -1079,13 +1035,11 @@ class PrefetchController(StorageControllerInterface):
                 self._status_load_phase_count -= 1
         hit_count = result.popcount() if isinstance(result, Bitmap) else result
         logger.debug(
-            "Prefetch request %d completed: %d hits%s%s",
+            "Prefetch request %d completed: %d hits%s",
             request_id,
             hit_count,
             " (sparse)" if isinstance(result, Bitmap) else " prefix",
-            " [abandoned]" if abandoned else "",
         )
-        return abandoned
 
     def _cleanup_in_flight_requests(self) -> None:
         """Release resources for any in-flight requests during shutdown."""
