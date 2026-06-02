@@ -179,7 +179,7 @@ restart_lmcache() {
         kill "$old_pid" 2>/dev/null || true
         wait "$old_pid" 2>/dev/null || true
     fi
-    sleep 10
+    sleep 60
 
     echo "Relaunching LMCache on port ${LMCACHE_PORT} / HTTP ${LMCACHE_HTTP_PORT}..."
     lmcache server \
