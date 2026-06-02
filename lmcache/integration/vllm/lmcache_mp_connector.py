@@ -37,7 +37,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.vllm.kv_cache_groups import (
-    create_lmcache_kv_spec_from_vllm,
+    create_engine_groups_from_vllm,
 )
 from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
@@ -640,7 +640,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        lmc_kv_cache_groups = create_lmcache_kv_spec_from_vllm(
+        lmc_kv_cache_groups = create_engine_groups_from_vllm(
             kv_cache_config,
             kv_caches,
             layout_hints=vllm_layout_hints(),

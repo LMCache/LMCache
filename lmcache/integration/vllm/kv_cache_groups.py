@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 from lmcache.v1.multiprocess.custom_types import EngineGroup
 
 
-def create_lmcache_kv_spec_from_vllm(
+def create_engine_groups_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
