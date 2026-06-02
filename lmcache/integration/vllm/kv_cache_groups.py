@@ -13,14 +13,14 @@ if TYPE_CHECKING:
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import EngineGroup
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 
 
 def create_engine_groups_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
-) -> list[EngineGroup]:
+) -> list[LMCacheGroupView]:
     """Build the LMCache KV groups from vLLM metadata and registered tensors.
 
     This is the single entry point for the vLLM -> LMCache conversion. It reads
@@ -41,7 +41,7 @@ def create_engine_groups_from_vllm(
             detection (e.g. ``NHD``/``HND`` and compression metadata).
 
     Returns:
-        The list of ``EngineGroup`` in protocol order, i.e. the LMCache group
+        The list of ``LMCacheGroupView`` in protocol order, i.e. the LMCache group
         order used by store/retrieve block IDs.
     """
     # First Party
@@ -75,9 +75,9 @@ def create_engine_groups_from_vllm(
     per_layer_group_idx: list[int] | None = None
     if vllm_groups:
         per_layer_group_idx = [0] * num_layers
-        for engine_block_group_id, group in enumerate(vllm_groups):
+        for engine_group_id, group in enumerate(vllm_groups):
             for name in group.layer_names:
-                per_layer_group_idx[layer_to_idx[name]] = engine_block_group_id
+                per_layer_group_idx[layer_to_idx[name]] = engine_group_id
 
     # Within one vLLM engine group, layers can have different hidden dimensions
     # (e.g. a different head count), which require different GPU copy kernels.
@@ -87,8 +87,8 @@ def create_engine_groups_from_vllm(
     # the shared, engine-neutral primitive the server reuses to reproduce the
     # same grouping from the registered tensors.
     return [
-        EngineGroup(
-            engine_block_group_id=identity[4],
+        LMCacheGroupView(
+            engine_group_id=identity[4],
             layer_indices=tuple(indices),
         )
         for identity, indices in group_layers_by_identity(

@@ -583,7 +583,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.vllm_block_size = vllm_config.cache_config.block_size
         # The scheduler side only needs the number of engine KV cache groups
-        # (to slice per-engine-group block IDs); the full list[EngineGroup] is
+        # (to slice per-engine-group block IDs); the full list[LMCacheGroupView] is
         # built worker-side in register_kv_caches where the tensors are available.
         # Engine group ids are dense (0..N-1), so the count is just the number
         # of vLLM KV cache groups (>=1).

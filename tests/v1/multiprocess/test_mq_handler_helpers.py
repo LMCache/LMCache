@@ -11,9 +11,9 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    EngineGroup,
     KVCache,
 )
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 from lmcache.v1.multiprocess.protocol import KeyType
 
 # ==============================================================================
@@ -41,7 +41,7 @@ def register_kv_cache_handler(
     world_size: int,
     engine_type: EngineType,
     layout_hints: LayoutHints,
-    lmc_kv_cache_groups: list[EngineGroup],
+    lmc_kv_cache_groups: list[LMCacheGroupView],
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.

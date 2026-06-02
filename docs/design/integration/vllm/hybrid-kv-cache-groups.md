@@ -8,7 +8,7 @@ group design used by the multiprocess vLLM connector.
 The key idea is to separate three concepts that are easy to conflate:
 
 - Engine KV cache groups: groups defined by the serving engine.
-- The LMCache KV spec (`list[EngineGroup]`): LMCache's engine-neutral,
+- The LMCache KV spec (`list[LMCacheGroupView]`): LMCache's engine-neutral,
   `msgspec`-encoded group contract.
 - `KVLayerGroupInfo`: LMCache's runtime transfer-kernel dispatch groups.
 
@@ -57,36 +57,36 @@ optimizations are separate concerns layered on top of this contract.
 An engine KV cache group is a serving-engine-native group. In vLLM this comes
 from `KVCacheConfig.kv_cache_groups`.
 
-The engine group ID is recorded as `engine_block_group_id` because block IDs
+The engine group ID is recorded as `engine_group_id` because block IDs
 reported by vLLM are indexed by engine group (one distinct paged-block address
 space per group).
 
-### `EngineGroup`
+### `LMCacheGroupView`
 
-`EngineGroup` is LMCache's neutral group descriptor, a `msgspec.Struct`. It does
+`LMCacheGroupView` is LMCache's neutral group descriptor, a `msgspec.Struct`. It does
 not contain vLLM objects. Each group records:
 
-- `engine_block_group_id`;
+- `engine_group_id`;
 - `layer_indices`.
 
-Each `EngineGroup` corresponds to one protocol-visible LMCache KV group. Several
-`EngineGroup`s may share the same `engine_block_group_id` when one engine block
+Each `LMCacheGroupView` corresponds to one protocol-visible LMCache KV group. Several
+`LMCacheGroupView`s may share the same `engine_group_id` when one engine block
 group is split by physical transfer identity. Store and retrieve block IDs are
 indexed by this group order.
 
-### LMCache KV spec (`list[EngineGroup]`)
+### LMCache KV spec (`list[LMCacheGroupView]`)
 
-The registration contract is simply a `list[EngineGroup]` — there is no wrapper
+The registration contract is simply a `list[LMCacheGroupView]` — there is no wrapper
 type. Because each element is a `msgspec.Struct`, the multiprocess message queue
 encodes/decodes the list directly in the `REGISTER_KV_CACHE` payload (typed
-`list[EngineGroup]`); there is no separate JSON serialization step. An empty
+`list[LMCacheGroupView]`); there is no separate JSON serialization step. An empty
 list means a single non-hybrid group (the default for engines that do not report
 KV cache group metadata).
 
-Engine-neutral module-level helpers in `custom_types.py` operate on a
-`Sequence[EngineGroup]`:
+Engine-neutral module-level helpers in `group_view.py` operate on a
+`Sequence[LMCacheGroupView]`:
 
-- `num_engine_block_groups(groups)`;
+- `num_engine_groups(groups)`;
 - `num_lmc_kv_cache_groups(groups)`;
 - `expand_block_ids_to_lmc_groups(groups, engine_side_block_ids)`;
 - `get_engine_group_indices(groups, num_registered_layers)`.
@@ -101,7 +101,7 @@ dispatch group. It contains kernel-facing data such as:
 - dtype;
 - compression ratio;
 - physical chunk size;
-- engine block group index.
+- engine group index.
 
 It should not be serialized as the API contract because it depends on the real
 registered tensors and kernel implementation details.
@@ -113,11 +113,11 @@ vLLM KVCacheConfig + registered kv_caches
         |
         | lmcache.integration.vllm.kv_cache_groups
         v
-list[EngineGroup]
+list[LMCacheGroupView]
         |
         | REGISTER_KV_CACHE over ZMQ
         v
-LMCache server msgspec-decodes list[EngineGroup]
+LMCache server msgspec-decodes list[LMCacheGroupView]
         |
         | KVLayerGroupsManager validates against real tensors
         v
@@ -130,27 +130,27 @@ Transfer kernels
 
 ## Registration
 
-During `register_kv_caches`, the vLLM connector builds the `list[EngineGroup]`
-via `create_lmcache_kv_spec_from_vllm(...)`.
+During `register_kv_caches`, the vLLM connector builds the `list[LMCacheGroupView]`
+via `create_engine_groups_from_vllm(...)`.
 
 The process is:
 
 1. Inspect the registered KV tensors for physical layout and dtype.
 2. Read vLLM's native KV cache groups to map each registered layer to its
-   engine block group index (the only place that reads vLLM `KVCacheConfig`).
+   engine group index (the only place that reads vLLM `KVCacheConfig`).
 3. Reuse `group_layers_by_identity(...)` to split layers by LMCache physical
    transfer identity.
-4. Emit one `EngineGroup` per LMCache transfer identity.
-5. Pass the `list[EngineGroup]` in the `REGISTER_KV_CACHE` payload; the message
+4. Emit one `LMCacheGroupView` per LMCache transfer identity.
+5. Pass the `list[LMCacheGroupView]` in the `REGISTER_KV_CACHE` payload; the message
    queue `msgspec`-encodes it directly.
 
 The layer identity used for grouping is:
 
 ```text
-(kv_size, num_heads, head_size, block_size, engine_block_group_idx, dtype)
+(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype)
 ```
 
-The `engine_block_group_idx` component is important. It prevents layers with
+The `engine_group_idx` component is important. It prevents layers with
 identical tensor shape from being merged if their block IDs come from different
 engine KV cache groups.
 
@@ -166,8 +166,8 @@ block_ids[engine_group_idx] -> list[int]
 Before sending requests to the LMCache server, the worker adapter expands these
 block IDs to LMCache group order with
 `expand_block_ids_to_lmc_groups(groups, engine_side_block_ids)`, where each
-LMCache group reuses the block IDs from its source engine block group
-(`groups[lmc_group_idx].engine_block_group_id`).
+LMCache group reuses the block IDs from its source engine group
+(`groups[lmc_group_idx].engine_group_id`).
 
 The ZMQ `STORE` and `RETRIEVE` APIs therefore receive:
 
@@ -216,11 +216,11 @@ LMCache group 2: [10, 11]
 
 ## Invariants
 
-- The `list[EngineGroup]` order is the protocol-visible LMCache group order.
+- The `list[LMCacheGroupView]` order is the protocol-visible LMCache group order.
 - Store and retrieve request block IDs are indexed by that LMCache group order:
   callers must send one block-id list per LMCache group.
 - vLLM-specific metadata access stays in `lmcache.integration.vllm`.
-- `EngineGroup` contains neutral metadata only.
+- `LMCacheGroupView` contains neutral metadata only.
 - `KVLayerGroupsManager` derives runtime `KVLayerGroupInfo` from real tensors.
 - Server-side runtime grouping must use the same `group_layers_by_identity(...)`
   helper as vLLM-side group construction.
@@ -235,7 +235,7 @@ group). There is no server-side single-list fallback.
 - The vLLM worker adapter expands engine-group block IDs to LMCache group order
   via `expand_block_ids_to_lmc_groups(...)`.
 - Callers with a single block-id space (the TRT-LLM adapter, the
-  `lmcache bench kvcache` CLI) register an empty `list[EngineGroup]`. When the
+  `lmcache bench kvcache` CLI) register an empty `list[LMCacheGroupView]`. When the
   server derives several physical groups from a multi-shape registration, the
   caller sends one block-id list per group (the bench replicates its single
   logical list `num_lmc_groups` times).
@@ -252,7 +252,7 @@ They remain for tensor interpretation metadata such as:
   metadata.
 
 Future work may move logical block-size or compression policy into the
-`EngineGroup` metadata, but HMA group identity should not be carried in
+`LMCacheGroupView` metadata, but HMA group identity should not be carried in
 `layout_hints`.
 
 ## Alternatives Considered
@@ -284,7 +284,7 @@ separate API migration.
 
 ## Follow-Up Work
 
-- Add sliding-window and Mamba metadata fields to `EngineGroup` as neutral
+- Add sliding-window and Mamba metadata fields to `LMCacheGroupView` as neutral
   per-group or per-layer semantics.
 - Add a load-plan interface that trims retrieved tokens according to full
   attention and sliding-window cache availability.
@@ -297,9 +297,9 @@ separate API migration.
 
 | Area | File |
 |---|---|
-| Neutral msgspec group model (IPC type) + helpers | `lmcache/v1/multiprocess/custom_types.py` |
+| Neutral group view (IPC type) + helpers | `lmcache/v1/multiprocess/group_view.py` |
 | Shared physical grouping helper | `lmcache/v1/kv_layer_groups.py` |
-| vLLM conversion to `list[EngineGroup]` | `lmcache/integration/vllm/kv_cache_groups.py` |
+| vLLM conversion to `list[LMCacheGroupView]` | `lmcache/integration/vllm/kv_cache_groups.py` |
 | vLLM register/store/retrieve path | `lmcache/integration/vllm/lmcache_mp_connector.py`, `lmcache/integration/vllm/vllm_multi_process_adapter.py` |
 | Server-side GPU context | `lmcache/v1/multiprocess/gpu_context.py` |
 | Server-side transfer loop | `lmcache/v1/multiprocess/modules/gpu_transfer.py` |

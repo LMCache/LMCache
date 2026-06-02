@@ -14,11 +14,9 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
-from lmcache.v1.multiprocess.custom_types import (
-    EngineGroup,
-    RegisterNonGpuContextPayload,
-)
+from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.non_gpu_context import (
     NonGpuContext,
@@ -71,7 +69,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
+        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -177,7 +175,7 @@ class HandleTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
+        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
     ) -> None:
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
@@ -266,7 +264,7 @@ class DataTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
+        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
     ) -> None:
         """Register KV caches with the non-GPU context server.
 

@@ -37,10 +37,8 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import (
-    EngineGroup,
-    KVCache,
-)
+from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 
 # Backend selection (c_ops when CUDA is available, otherwise a pure-Python
 # fallback) is handled once in ``lmcache/__init__.py`` via ``_get_backend``,
@@ -75,7 +73,7 @@ class GPUCacheContext:
         kv_caches: KVCache,
         lmcache_logical_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
-        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
+        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)

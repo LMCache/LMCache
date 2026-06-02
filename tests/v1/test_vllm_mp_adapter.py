@@ -23,7 +23,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
-from lmcache.v1.multiprocess.custom_types import EngineGroup
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 from lmcache.v1.multiprocess.protocol import RequestType
 
 
@@ -158,9 +158,9 @@ def test_submit_store_request_expands_block_ids_to_lmc_groups(
     fake_tensor.device.type = "cuda"
     adapter.kv_caches = {"layer.0": fake_tensor}
     adapter.lmc_kv_cache_groups = [
-        EngineGroup(0, (0, 2)),
-        EngineGroup(0, (4,)),
-        EngineGroup(1, (1, 3)),
+        LMCacheGroupView(0, (0, 2)),
+        LMCacheGroupView(0, (4,)),
+        LMCacheGroupView(1, (1, 3)),
     ]
     transfer_ctx = MagicMock()
     fake_future = MagicMock()

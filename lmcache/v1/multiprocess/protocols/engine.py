@@ -19,11 +19,11 @@ from dataclasses import dataclass, field
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
-    EngineGroup,
     IPCCacheEngineKey,
     KVCache,
     RegisterNonGpuContextPayload,
 )
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 
@@ -86,7 +86,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - engine_type: EngineType - Which serving engine produced the
         #     caches (vLLM, SGLang, ...). Drives format detection.
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
-        #   - lmc_kv_cache_groups: list[EngineGroup] - Engine-neutral KV cache
+        #   - lmc_kv_cache_groups: list[LMCacheGroupView] - Engine-neutral KV cache
         #     group metadata (msgspec-encoded by the message queue).
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
@@ -97,7 +97,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
                 int,
                 EngineType,
                 LayoutHints,
-                list[EngineGroup],
+                list[LMCacheGroupView],
             ],
             response_class=None,
             handler_type=HandlerType.SYNC,

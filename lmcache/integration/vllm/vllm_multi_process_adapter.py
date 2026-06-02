@@ -19,9 +19,11 @@ from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
-    EngineGroup,
     IPCCacheEngineKey,
     KVCache,
+)
+from lmcache.v1.multiprocess.group_view import (
+    LMCacheGroupView,
     expand_block_ids_to_lmc_groups,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
@@ -400,7 +402,7 @@ class LoadStoreOp:
 
     block_ids: list[list[int]]
     """Block IDs for the load/store operation, indexed by engine KV cache
-    group (one inner list per engine block group). Worker submit paths expand
+    group (one inner list per engine group). Worker submit paths expand
     this to LMCache KV group order before sending requests to the server.
     """
 
@@ -846,7 +848,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self.lmc_kv_cache_groups: list[EngineGroup] = []
+        self.lmc_kv_cache_groups: list[LMCacheGroupView] = []
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -956,7 +958,7 @@ class LMCacheMPWorkerAdapter:
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
-        lmc_kv_cache_groups: Sequence[EngineGroup] = (),
+        lmc_kv_cache_groups: Sequence[LMCacheGroupView] = (),
     ) -> None:
         """
         Register the kv caches with LMCache server.
