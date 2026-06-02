@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # HMA (hybrid memory allocator) correctness test using a real hybrid model.
 #
-# openai/gpt-oss-20b interleaves sliding-window and full-attention layers, so
-# vLLM keeps its hybrid KV cache manager ON for it (LMCacheMPConnector subclasses
-# SupportsHMA, so vLLM does not auto-disable the hybrid manager). vLLM therefore
-# exposes multiple KV cache groups and the connector exercises the multi-engine-
-# group HMA store/retrieve path. gpt-oss-20b is ungated and uses standard paged
-# attention for both layer families (so it is supported by LMCache's transfer
-# kernels, unlike Mamba/linear-attention hybrids such as Qwen3.5/Qwen3-Next,
-# whose state caches LMCache cannot yet transfer).
+# google/gemma-3-4b-it interleaves local (sliding-window) and global (full-
+# attention) layers, so vLLM keeps its hybrid KV cache manager ON for it
+# (LMCacheMPConnector subclasses SupportsHMA, so vLLM does not auto-disable the
+# hybrid manager). vLLM therefore exposes multiple KV cache groups and the
+# connector exercises the multi-engine-group HMA store/retrieve path. gemma-3
+# uses standard paged attention for both layer families (so it is supported by
+# LMCache's transfer kernels, unlike Mamba/linear-attention hybrids such as
+# Qwen3.5/Qwen3-Next, whose state caches LMCache cannot yet transfer). gemma-3 is
+# gated, so CI must provide HF_TOKEN.
 #
 # Flow:
 #   1. Run lm_eval (gsm8k) against vLLM+LMCache       -> populates LMCache (STORE).
@@ -17,20 +18,19 @@
 #      false, so the LMCache-managed cache is preserved).
 #   3. Re-run lm_eval                                  -> vLLM APC misses, so the
 #      prefix KV is served by LMCache (RETRIEVE), exercising the HMA retrieve path.
-#   4. Assert the two runs' gsm8k scores are aligned (LMCache retrieve is
-#      numerically correct) and that run 2 is aligned with the no-LMCache
-#      baseline (full stack).
+#   4. Assert the two runs' gsm8k scores are identical (LMCache retrieve returns
+#      the KV bit-exactly) and that run 2 is identical to the no-LMCache baseline.
 #   5. Assert LMCache actually served retrieves during run 2 (non-vacuous).
 #
 # The reset endpoint requires VLLM_SERVER_DEV_MODE=1 (set by launch-processes.sh).
 #
-# NOTE on determinism: gpt-oss-20b's MXFP4 MoE kernels do not support vLLM's
-# batch-invariant mode, so this test runs with VLLM_BATCH_INVARIANT=0 (set by
-# run-single-test.sh). Generation is therefore not bit-deterministic and carries
-# a few-percent run-to-run noise floor, so the comparison uses a score TOLERANCE
-# rather than exact-sample matching. This still catches a broken HMA path: if
-# retrieve served corrupt KV, the gsm8k score would collapse far beyond the
-# tolerance.
+# NOTE on determinism: gemma-3 runs under vLLM's batch-invariant mode
+# (VLLM_BATCH_INVARIANT=1, the launch-processes.sh default), so generation is
+# bit-deterministic and independent of batch composition. A correct LMCache
+# retrieve returns the KV verbatim, so all three runs must produce the *same*
+# gsm8k score; the comparison therefore requires an exact match (SCORE_TOLERANCE
+# defaults to 0). A broken HMA retrieve (corrupt KV) changes the generated tokens
+# and the score diverges.
 set -e
 set -o pipefail
 
@@ -42,13 +42,14 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 # Configuration
 VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
-MODEL="${MODEL:-openai/gpt-oss-20b}"
+MODEL="${MODEL:-google/gemma-3-4b-it}"
 NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
 LIMIT="${LIMIT:-200}"
 # Max allowed absolute difference in the gsm8k exact_match score between runs.
-# Loose because gpt-oss runs without batch-invariance (see NOTE above); a broken
-# HMA retrieve would drop the score far more than this.
-SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.08}"
+# gemma-3 runs batch-invariant (see NOTE above), so a correct LMCache retrieve
+# reproduces the baseline exactly; the default of 0 requires an exact match.
+# Override only when intentionally testing a non-batch-invariant configuration.
+SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.0}"
 # Seconds to wait after run 1 so async LMCache stores drain before run 2.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 BUILD_ID="${BUILD_ID:-local_$$}"
@@ -262,8 +263,8 @@ if failures:
     sys.exit(1)
 
 print(
-    f"\nPASS: retrieve and baseline scores aligned within {tol}, and LMCache "
-    f"served {retrieves_after - retrieves_before} retrieves during run 2."
+    f"\nPASS: store, retrieve, and baseline gsm8k scores match (tol={tol}); "
+    f"LMCache served {retrieves_after - retrieves_before} retrieves during run 2."
 )
 PYEOF
 

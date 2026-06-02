@@ -24,18 +24,15 @@ export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 # Per-test default model (overridable via the MODEL env var). The HMA test needs
 # a hybrid (sliding-window + full-attention) model so vLLM exposes multiple KV
 # cache groups and the connector exercises the hybrid-memory-allocator path.
-# gpt-oss-20b is ungated and uses paged attention for both layer families.
+# gemma-3 interleaves local (sliding-window) and global (full) attention layers,
+# so it is hybrid, and -- unlike gpt-oss's MXFP4 MoE -- it runs under vLLM's
+# batch-invariant mode. That lets the hma test assert the gsm8k score is
+# *identical* with and without LMCache (see run-hma-lm-eval.sh) rather than only
+# within a tolerance. gemma-3 is gated, so CI must provide HF_TOKEN. The
+# batch-invariant / FLASH_ATTN / non-Marlin settings come from
+# launch-processes.sh defaults, which are exactly what gemma-3 needs.
 if [ "$TEST_NAME" = "hma_lm_eval" ]; then
-    export MODEL="${MODEL:-openai/gpt-oss-20b}"
-    # gpt-oss-20b ships MXFP4 weights whose MoE kernels do not support vLLM's
-    # batch-invariant mode, so disable it and load via the Marlin MXFP4 backend.
-    # The hma test therefore compares gsm8k scores within a tolerance (see
-    # run-hma-lm-eval.sh) rather than requiring bit-identical samples.
-    export VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-0}"
-    export VLLM_MXFP4_USE_MARLIN="${VLLM_MXFP4_USE_MARLIN:-1}"
-    # gpt-oss uses attention sinks, unsupported by FLASH_ATTN; let vLLM
-    # auto-select a sink-capable attention backend.
-    export ATTENTION_BACKEND="${ATTENTION_BACKEND-}"
+    export MODEL="${MODEL:-google/gemma-3-4b-it}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi

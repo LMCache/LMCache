@@ -27,16 +27,20 @@ steps:
         artifact_paths: ["*.log"]
 
       # HMA (hybrid memory allocator) correctness check on a real hybrid model.
-      # openai/gpt-oss-20b interleaves sliding-window and full-attention layers,
-      # so vLLM exposes multiple KV cache groups and the connector exercises the
-      # hybrid-memory-allocator store/retrieve path. Runs gsm8k, resets vLLM's
-      # local prefix cache (LMCache preserved), reruns, and asserts the scores
-      # align. Needs 2 GPUs (LMCache+vLLM + baseline). gpt-oss-20b is ungated, so
-      # the HF cache at /data/huggingface can download it on demand (no token).
+      # google/gemma-3-4b-it interleaves local (sliding-window) and global
+      # (full) attention layers, so vLLM exposes multiple KV cache groups and the
+      # connector exercises the hybrid-memory-allocator store/retrieve path. It
+      # also runs under vLLM's batch-invariant mode, so the test asserts the
+      # gsm8k score is *identical* with and without LMCache (not just within a
+      # tolerance). Runs gsm8k, resets vLLM's local prefix cache (LMCache
+      # preserved), reruns, and asserts the scores match exactly. Needs 2 GPUs
+      # (LMCache+vLLM + baseline). gemma-3 is gated: the build provides HF_TOKEN
+      # so the HF cache at /data/huggingface can fetch it (or it is pre-populated
+      # on the host).
       - label: ":compression: hma_lm_eval"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval
         timeout_in_minutes: 40
-        env: { MODEL: "openai/gpt-oss-20b" }
+        env: { MODEL: "google/gemma-3-4b-it", HF_TOKEN: "${HF_TOKEN}" }
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
