@@ -94,25 +94,11 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def reformat_block_ids(
-    block_ids: tuple[list[int], ...] | None,
-) -> tuple[list[int], ...]:
-    """Return vLLM's per-engine-group block IDs as a concrete tuple.
-
-    vLLM reports allocated block IDs as a tuple with one ``list[int]`` per
-    engine KV cache group (or ``None`` when nothing is allocated yet). This
-    coerces the ``None`` case to an empty tuple.
-
-    Args:
-        block_ids: Per-engine-group block IDs from vLLM, or ``None``.
-
-    Returns:
-        The block IDs as a tuple of per-engine-group lists; an empty tuple
-        when ``block_ids`` is ``None``.
-    """
+def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
+    """Flatten vLLM's per-engine-group block IDs to the primary group's list."""
     if block_ids is None:
-        return ()
-    return block_ids
+        return []
+    return block_ids[0]
 
 
 def extract_world_size_and_kv_rank(
@@ -921,7 +907,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
-        block_ids = reformat_block_ids(blocks.get_block_ids())
+        block_ids = blocks.get_block_ids() or ()
 
         # Only append blocks beyond what's already tracked, per engine group.
         existing_counts = tracker.num_allocated_blocks()
@@ -1182,7 +1168,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request_tracker = self._get_request_tracker(request_id)
 
             # Update block ids
-            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
+            new_block_ids = cached_reqs.new_block_ids[idx] or ()
             if request_id not in cached_reqs.resumed_req_ids:
                 request_tracker.append_block_ids(new_block_ids)
 
@@ -1237,8 +1223,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # can correctly identify block content.
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
-            block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
-            new_block_ids = list(block_ids[0]) if block_ids else []
+            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
             if not new_block_ids:
                 continue
             tracker = self.request_trackers.get(request_id)
