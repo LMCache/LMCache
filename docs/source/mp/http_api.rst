@@ -82,6 +82,11 @@ compatibility with the vLLM-embedded API server.
      - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
+     - ``/kvcache/check``
+     - Compute MD5 checksums over the GPU KV cache for a set of block IDs.
+       Intended for diagnostics and round-trip integrity checks from
+       ``lmcache bench server``.
+   * - GET
      - ``/quota``
      - List every registered ``cache_salt`` quota with live usage.
    * - PUT
@@ -298,6 +303,76 @@ The request body is ignored.
 .. code-block:: bash
 
     curl -s -X POST http://localhost:8080/clear-cache
+
+``GET /kvcache/check``
+~~~~~~~~~~~~~~~~~~~~~~
+
+Compute MD5 checksums over the GPU KV cache, grouped ``chunk_size`` blocks
+per hashed chunk. MP mode addresses KV storage by block IDs natively (the
+same units used by ``STORE`` / ``RETRIEVE``), so the endpoint is fully
+block-centric: ``block_ids`` enumerates the target blocks and
+``chunk_size`` counts blocks per chunk. Intended for diagnostics and
+round-trip integrity checks from ``lmcache bench server`` — not for the
+inference data path.
+
+**Query parameters:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Name
+     - Required
+     - Description
+   * - ``block_ids``
+     - yes
+     - GPU block IDs in mixed format, e.g. ``"0,[2,5],8"``.
+   * - ``chunk_size``
+     - yes
+     - Positive integer — number of blocks per hashed chunk.
+   * - ``instance_id``
+     - no (default ``0``)
+     - Registered GPU context ID on the engine.
+   * - ``layerwise``
+     - no (default ``false``)
+     - If ``true``, return per-layer checksums keyed by ``"layer_<idx>"``;
+       otherwise a single aggregated digest per chunk over all layers.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "chunk_size": 2,
+      "num_chunks": 2,
+      "chunk_checksums": ["<md5>", "<md5>"],
+      "layerwise": false,
+      "block_id_ranges": "0,[2,5],8"
+    }
+
+When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
+``"layer_<idx>"`` whose values are per-layer lists.
+
+**HTTP status codes:**
+
+- ``200``: success.
+- ``400``: ``block_ids`` missing/malformed, or ``chunk_size`` missing or
+  non-positive.
+- ``404``: ``instance_id`` not registered, or the registered KV tensors
+  are empty.
+- ``501``: engine has no ``gpu_contexts``, or the GPU KV format is not
+  supported by this endpoint (page-buffer-fused and cross-layer layouts
+  are declined until a real need appears).
+- ``503``: engine not yet initialized on ``app.state``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2"
+
+    curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2&layerwise=true"
 
 .. _mp-http-quota-api:
 
