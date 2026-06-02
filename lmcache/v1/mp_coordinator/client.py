@@ -33,7 +33,13 @@ from lmcache.v1.mp_coordinator.message import (
     RegisterMsg,
     RegisterRetMsg,
 )
-from lmcache.v1.rpc_utils import close_zmq_socket, get_ip, get_zmq_socket
+from lmcache.v1.rpc_utils import (
+    DEFAULT_SOCKET_SEND_TIMEOUT_MS,
+    close_zmq_socket,
+    get_ip,
+    get_zmq_socket,
+    get_zmq_socket_with_timeout,
+)
 
 logger = init_logger(__name__)
 
@@ -41,6 +47,9 @@ logger = init_logger(__name__)
 CommandHandler = Callable[[bytes], bytes]
 
 _CONTROL_POLL_TIMEOUT_MS = 500
+# Default ceiling for the blocking registration round-trip so a wrong or dead
+# coordinator URL fails fast instead of hanging mp server startup forever.
+_DEFAULT_REGISTER_TIMEOUT_MS = 10_000
 
 
 def _default_command_handler(payload: bytes) -> bytes:
@@ -69,6 +78,9 @@ class CoordinatorClient:
             machine's outbound IP.
         command_handler: Callable invoked for each pushed command, returning the
             reply payload. Defaults to a fixed acknowledgement.
+        register_timeout_ms: Maximum time to wait for the registration reply
+            before giving up, so a wrong or unreachable coordinator URL fails
+            fast instead of hanging startup.
     """
 
     def __init__(
@@ -81,6 +93,7 @@ class CoordinatorClient:
         heartbeat_interval: float = 5.0,
         advertise_ip: str = "",
         command_handler: CommandHandler = _default_command_handler,
+        register_timeout_ms: int = _DEFAULT_REGISTER_TIMEOUT_MS,
     ) -> None:
         """Initialize client state; no sockets are opened until ``start``."""
         self.instance_id = instance_id
@@ -91,6 +104,7 @@ class CoordinatorClient:
         self.heartbeat_interval = heartbeat_interval
         self.advertise_ip = advertise_ip or get_ip()
         self.command_handler = command_handler
+        self.register_timeout_ms = register_timeout_ms
 
         self._context = zmq.Context.instance()
         self._control_socket: zmq.Socket | None = None
@@ -125,7 +139,8 @@ class CoordinatorClient:
             The coordinator's registration reply.
 
         Raises:
-            RuntimeError: If the coordinator returns an unexpected reply type.
+            RuntimeError: If registration times out, errors, or the coordinator
+                returns an unexpected reply type.
         """
         self._control_socket = get_zmq_socket(
             self._context,
@@ -136,20 +151,31 @@ class CoordinatorClient:
         )
         self._control_socket.setsockopt(zmq.RCVTIMEO, _CONTROL_POLL_TIMEOUT_MS)
 
-        register_socket = get_zmq_socket(
+        register_socket = get_zmq_socket_with_timeout(
             self._context,
             self.reply_url,
             protocol="tcp",
             role=zmq.REQ,  # type: ignore[attr-defined]
             bind_or_connect="connect",
+            recv_timeout_ms=self.register_timeout_ms,
+            send_timeout_ms=DEFAULT_SOCKET_SEND_TIMEOUT_MS,
         )
         try:
             register_socket.send(msgspec.msgpack.encode(self._build_register_msg()))
-            reply = msgspec.msgpack.decode(register_socket.recv(), type=CoordMsg)
+            raw_reply = register_socket.recv()
+        except zmq.ZMQError as e:
+            close_zmq_socket(self._control_socket)
+            self._control_socket = None
+            raise RuntimeError(
+                f"Registration with coordinator at {self.reply_url} failed: {e}"
+            ) from e
         finally:
             close_zmq_socket(register_socket)
 
+        reply = msgspec.msgpack.decode(raw_reply, type=CoordMsg)
         if not isinstance(reply, RegisterRetMsg):
+            close_zmq_socket(self._control_socket)
+            self._control_socket = None
             raise RuntimeError(f"Unexpected registration reply: {type(reply).__name__}")
 
         self._control_thread.start()
@@ -182,8 +208,12 @@ class CoordinatorClient:
                 reply = b"error"
             control_socket.send(reply)
 
-    def _heartbeat_loop(self) -> None:
-        """Send heartbeats to the coordinator until shutdown."""
+    def _make_heartbeat_socket(self) -> zmq.Socket:
+        """Open a fresh REQ socket for sending heartbeats.
+
+        Returns:
+            A connected REQ socket with a receive timeout set.
+        """
         socket = get_zmq_socket(
             self._context,
             self.heartbeat_url,
@@ -192,6 +222,41 @@ class CoordinatorClient:
             bind_or_connect="connect",
         )
         socket.setsockopt(zmq.RCVTIMEO, int(self.heartbeat_interval * 1000) + 5000)
+        return socket
+
+    def _heartbeat_once(self, socket: zmq.Socket, encoded: bytes) -> zmq.Socket:
+        """Send one heartbeat, rebuilding the socket if the exchange fails.
+
+        A REQ socket has a strict send/recv state machine: after a recv timeout
+        it refuses the next send. So on any failure the socket is closed and a
+        fresh one returned, otherwise a single transient miss would permanently
+        stop heartbeats (and the coordinator would evict this instance).
+
+        Args:
+            socket: The current heartbeat REQ socket.
+            encoded: The pre-encoded heartbeat payload.
+
+        Returns:
+            The same socket on success, or a fresh socket if the exchange
+            failed and the old one was rebuilt.
+        """
+        try:
+            socket.send(encoded)
+            socket.recv()
+            return socket
+        except zmq.ZMQError as e:
+            logger.warning("Heartbeat failed, rebuilding socket: %s", e)
+            close_zmq_socket(socket)
+            return self._make_heartbeat_socket()
+
+    def _heartbeat_loop(self) -> None:
+        """Send heartbeats to the coordinator until shutdown.
+
+        A plain REQ socket is used so the wire framing matches the coordinator's
+        ROUTER; :meth:`_heartbeat_once` rebuilds it on failure so a transient
+        miss does not permanently stop heartbeats.
+        """
+        socket = self._make_heartbeat_socket()
         heartbeat = HeartbeatMsg(
             instance_id=self.instance_id,
             ip=self.advertise_ip,
@@ -200,11 +265,7 @@ class CoordinatorClient:
         encoded = msgspec.msgpack.encode(heartbeat)
         try:
             while not self._shutdown.wait(self.heartbeat_interval):
-                try:
-                    socket.send(encoded)
-                    socket.recv()
-                except zmq.ZMQError as e:
-                    logger.warning("Heartbeat failed: %s", e)
+                socket = self._heartbeat_once(socket, encoded)
         finally:
             close_zmq_socket(socket)
 

@@ -13,6 +13,9 @@ import contextlib
 import dataclasses
 import socket as _socket
 
+# Third Party
+import pytest
+
 # First Party
 from lmcache.v1.mp_coordinator.client import CoordinatorClient
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
@@ -64,6 +67,26 @@ def test_dispatch_table_built_from_controllers():
         assert DeregisterMsg in manager._push_dispatch
     finally:
         manager.close()
+
+
+def test_client_start_times_out_when_coordinator_down():
+    # reply_url points at a free port with nothing listening: connect succeeds
+    # lazily, send succeeds, recv times out -> start() must raise (not hang) and
+    # release the already-bound control socket.
+    control_port = _free_port()
+    client = CoordinatorClient(
+        instance_id="x",
+        reply_url=f"127.0.0.1:{_free_port()}",
+        heartbeat_url="127.0.0.1:1",
+        pull_url="127.0.0.1:1",
+        control_port=control_port,
+        advertise_ip="127.0.0.1",
+        register_timeout_ms=300,
+    )
+    with pytest.raises(RuntimeError):
+        client.start()
+    # Control socket was closed on failure, leaving a clean state.
+    assert client._control_socket is None
 
 
 def test_dispatch_unknown_request_returns_error():

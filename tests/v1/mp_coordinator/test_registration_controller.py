@@ -54,7 +54,7 @@ def _build():
     lifecycle.on_leave(leaves.append)
     ctx = ControllerContext(
         registry=registry,
-        command_sender=CommandSender(registry),
+        command_sender=CommandSender(registry, zmq_context),
         lifecycle=lifecycle,
         zmq_context=zmq_context,
     )

@@ -16,6 +16,7 @@ import zmq
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.command import open_command_socket
 from lmcache.v1.mp_coordinator.controllers.base import (
     Controller,
     ControllerContext,
@@ -34,12 +35,7 @@ from lmcache.v1.mp_coordinator.message import (
     ReqRetMsg,
 )
 from lmcache.v1.mp_coordinator.registry import MPInstanceNode
-from lmcache.v1.rpc_utils import (
-    DEFAULT_SOCKET_RECV_TIMEOUT_MS,
-    DEFAULT_SOCKET_SEND_TIMEOUT_MS,
-    close_zmq_socket,
-    get_zmq_socket_with_timeout,
-)
+from lmcache.v1.rpc_utils import close_zmq_socket
 
 logger = init_logger(__name__)
 
@@ -173,14 +169,8 @@ class RegistrationController(Controller):
 
         control_addr = f"{msg.ip}:{msg.control_port}"
         try:
-            command_socket = get_zmq_socket_with_timeout(
-                self.ctx.zmq_context,
-                control_addr,
-                protocol="tcp",
-                role=zmq.REQ,  # type: ignore[attr-defined]
-                bind_or_connect="connect",
-                recv_timeout_ms=DEFAULT_SOCKET_RECV_TIMEOUT_MS,
-                send_timeout_ms=DEFAULT_SOCKET_SEND_TIMEOUT_MS,
+            command_socket = open_command_socket(
+                self.ctx.zmq_context, msg.ip, msg.control_port
             )
         except zmq.ZMQError as e:
             logger.error("Failed to open command socket to %s: %s", control_addr, e)

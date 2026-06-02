@@ -87,7 +87,7 @@ class MPCoordinatorManager:
         # Shared state and collaborators.
         self.registry = InstanceRegistry()
         self.lifecycle = LifecycleHooks()
-        self.command_sender = CommandSender(self.registry)
+        self.command_sender = CommandSender(self.registry, self.zmq_context)
         self._ctx = ControllerContext(
             registry=self.registry,
             command_sender=self.command_sender,
