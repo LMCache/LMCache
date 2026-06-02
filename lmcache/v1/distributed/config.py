@@ -8,6 +8,7 @@ Configuration for distributed storage manager
 from dataclasses import dataclass, field
 from typing import Literal
 import argparse
+import os
 
 # First Party
 from lmcache import torch_dev
@@ -38,6 +39,9 @@ class L1MemoryManagerConfig:
 
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
+
+    shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
+    """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
 
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
