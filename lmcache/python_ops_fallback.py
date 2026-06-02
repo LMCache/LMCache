@@ -5,12 +5,13 @@
 #
 # Standard
 from concurrent.futures import ThreadPoolExecutor
-from enum import Enum, IntEnum
+from enum import IntEnum
 from multiprocessing import shared_memory
 from typing import Optional, Tuple
 import ctypes
 import ctypes.util
 import os
+import threading
 import warnings
 
 # Third Party
@@ -243,8 +244,14 @@ def _copy_bytes_with_tensor(dst: int, src: int, num_bytes: int) -> None:
     dst_tensor.copy_(src_tensor)
 
 
-class TransferDirection(Enum):
-    """Specifies the direction of a memory transfer."""
+class TransferDirection(IntEnum):
+    """Specifies the direction of a memory transfer.
+
+    Inherits from IntEnum so that members compare equal to plain ints
+    and to native pybind11 enum members with the same integer value.
+    Several call sites (and the fallback ops themselves) use
+    ``int(direction)`` to compare across backend / fallback boundaries.
+    """
 
     H2D = 0
     D2H = 1
@@ -279,6 +286,9 @@ class GPUKVFormat(IntEnum):
 
     # used by: TRT-LLM cross-layer (HND layout)
     NB_NL_TWO_NH_BS_HS = 8
+
+    # used by: SGLang MHA via the MP daemon path
+    TWO_X_NL_X_NB_BS_NH_HS = 9
 
 
 class PageBufferShapeDesc:
@@ -522,9 +532,9 @@ def multi_layer_kv_transfer(
 
     # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
     # NL_X_NB_TWO_NH_BS_HS) as next step.
-    if gpu_kv_format in (
-        GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
-        GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
+    if int(gpu_kv_format) in (
+        int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS),
+        int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS),
     ):
         raise NotImplementedError(
             "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
@@ -552,11 +562,11 @@ def multi_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
-    is_mla = gpu_kv_format in (
-        GPUKVFormat.NL_X_NB_BS_HS,
-        GPUKVFormat.NL_X_NBBS_ONE_HS,
+    is_mla = int(gpu_kv_format) in (
+        int(GPUKVFormat.NL_X_NB_BS_HS),
+        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
     )
-    is_flash_infer = gpu_kv_format == GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
+    is_flash_infer = int(gpu_kv_format) == int(GPUKVFormat.NL_X_NB_TWO_BS_NH_HS)
 
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
@@ -594,7 +604,7 @@ def multi_layer_kv_transfer(
         if is_mla:
             # Paged layout : [page_buffer_size, hidden_size]
             # key_value layout: [1, num_layers, num_tokens, hidden_size]
-            if direction == TransferDirection.H2D:
+            if int(direction) == int(TransferDirection.H2D):
                 lmc_valid = key_value[0, layer_id, valid_mask_kv, :]
                 paged_tensor.index_copy_(
                     0, valid_slots, lmc_valid.to(paged_tensor.device)
@@ -607,7 +617,7 @@ def multi_layer_kv_transfer(
         elif is_flash_infer:
             # Paged layout : [num_blocks, 2, block_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]
-            if direction == TransferDirection.H2D:
+            if int(direction) == int(TransferDirection.H2D):
                 lmc_valid = key_value[:, layer_id, valid_mask_kv, :]
                 src_data = lmc_valid.transpose(0, 1).to(paged_memory_device)
                 # src_data: [num_valid, 2, hidden_size]
@@ -621,7 +631,7 @@ def multi_layer_kv_transfer(
         else:
             # Paged layout : [2, page_buffer_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]
-            if direction == TransferDirection.H2D:
+            if int(direction) == int(TransferDirection.H2D):
                 lmc_valid = key_value[:, layer_id, valid_mask_kv, :]
                 paged_tensor.index_copy_(
                     1, valid_slots, lmc_valid.to(paged_memory_device)
@@ -663,9 +673,9 @@ def multi_layer_kv_transfer_unilateral(
         H2D = LMCache  -> PagedBuffer
         D2H = PagedBuffer -> LMCache
     """
-    is_mla = gpu_kv_format in (
-        GPUKVFormat.NL_X_NB_BS_HS,
-        GPUKVFormat.NL_X_NBBS_ONE_HS,
+    is_mla = int(gpu_kv_format) in (
+        int(GPUKVFormat.NL_X_NB_BS_HS),
+        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
     )
 
     # MLA case collapses back to multi_layer_kv_transfer
@@ -681,7 +691,6 @@ def multi_layer_kv_transfer_unilateral(
             gpu_kv_format,
             0,  # block_size unused for MLA formats
         )
-
     # ── Non-MLA path: unilateral (separate K/V buffers per layer) ──
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
@@ -706,7 +715,7 @@ def multi_layer_kv_transfer_unilateral(
                     ptr, layer_shape, key_value.dtype, paged_memory_device
                 )
 
-            if direction == TransferDirection.H2D:
+            if int(direction) == int(TransferDirection.H2D):
                 lmc_valid = key_value[kv_idx, layer_id, valid_mask_kv, :]
                 paged_tensor.index_copy_(
                     0, valid_slots, lmc_valid.to(paged_memory_device)
@@ -759,9 +768,9 @@ def single_layer_kv_transfer(
     valid_token_indices = torch.nonzero(valid_mask_kv, as_tuple=True)[0]
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
-    is_mla = gpu_kv_format in (
-        GPUKVFormat.NL_X_NB_BS_HS,
-        GPUKVFormat.NL_X_NBBS_ONE_HS,
+    is_mla = int(gpu_kv_format) in (
+        int(GPUKVFormat.NL_X_NB_BS_HS),
+        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
     )
 
     if is_mla:
@@ -772,7 +781,7 @@ def single_layer_kv_transfer(
         block_indices = valid_slots // block_size
         block_offsets = valid_slots % block_size
 
-        if direction == TransferDirection.D2H:
+        if int(direction) == int(TransferDirection.D2H):
             # vLLM -> LMCache
             lmc_key_value_cache[valid_token_indices] = vllm_key_value_cache[
                 block_indices, block_offsets
@@ -786,7 +795,7 @@ def single_layer_kv_transfer(
     else:
         # ── Non-MLA format ──
         # Determine vLLM layout and block_size
-        is_two_major = gpu_kv_format == GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+        is_two_major = int(gpu_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS)
         # flash attn:
         #   [2, num_blocks, block_size, num_heads, head_size]
         #   -> dim2 = block_size
@@ -800,7 +809,7 @@ def single_layer_kv_transfer(
         block_offsets = valid_slots % block_size
 
         for kv in range(2):
-            if direction == TransferDirection.D2H:
+            if int(direction) == int(TransferDirection.D2H):
                 if is_two_major:
                     gathered = vllm_key_value_cache[kv, block_indices, block_offsets]
                 else:
@@ -882,7 +891,7 @@ def single_layer_kv_transfer_sgl(
         lmc_v = lmc_key_value_cache[1, :, :]
 
     # 4. Perform the transfer
-    if direction == TransferDirection.H2D:
+    if int(direction) == int(TransferDirection.H2D):
         # --- Direction: LMCache to SGLang (Paged Buffer) ---
         # Reshape LMC flat tensors to match SGL [num_heads, head_size]
         src_k_reshaped = (
@@ -1053,7 +1062,7 @@ def lmcache_memcpy_async(
         raise ValueError("host_buffer_alignments must be power of two")
 
     # 2. Validate direction
-    if direction not in (TransferDirection.H2D, TransferDirection.D2H):
+    if int(direction) not in (int(TransferDirection.H2D), int(TransferDirection.D2H)):
         raise ValueError(f"Unsupported direction: {direction}")
 
     # 3. Tensor-backed mode.
@@ -1515,3 +1524,37 @@ def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
         pass
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Completion recorder fallback (no CUDA stream ordering; enqueue immediately)
+# ---------------------------------------------------------------------------
+
+_completion_lock = threading.Lock()
+_completion_buffer: list[tuple[str, bytes]] = []
+
+
+def record_completion_on_stream(
+    cuda_stream_ptr: int, kind: str, payload: bytes
+) -> None:
+    """Fallback: immediately enqueue the completion without stream ordering.
+
+    Args:
+        cuda_stream_ptr: Ignored on non-CUDA path.
+        kind: Dispatch key identifying the handler (e.g. "finish_write").
+        payload: Opaque msgpack-encoded bytes forwarded to the handler.
+    """
+    with _completion_lock:
+        _completion_buffer.append((kind, payload))
+
+
+def drain_recorded_completions() -> list[tuple[str, bytes]]:
+    """Fallback: atomically drain and return all pending completions.
+
+    Returns:
+        List of (kind, payload) pairs recorded since the last drain.
+    """
+    with _completion_lock:
+        items = list(_completion_buffer)
+        _completion_buffer.clear()
+    return items

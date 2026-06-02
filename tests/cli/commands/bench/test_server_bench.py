@@ -240,7 +240,7 @@ class _ChecksumHandler(BaseHTTPRequestHandler):
     """Tiny HTTP handler that returns fake checksums."""
 
     def do_GET(self):
-        if "/api/kvcache/check" in self.path:
+        if "/kvcache/check" in self.path:
             body = json.dumps(
                 {
                     "status": "success",

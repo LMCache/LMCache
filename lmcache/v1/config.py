@@ -156,6 +156,9 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
+    # MP-server configurations required by SGLang
+    "mp_host": {"type": Optional[str], "default": None, "env_converter": str},
+    "mp_port": {"type": int, "default": 5555, "env_converter": int},
     # Controller configurations
     "enable_controller": {
         "type": bool,
