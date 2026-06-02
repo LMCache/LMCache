@@ -79,6 +79,11 @@ def msgspec_encode(obj: Any, cls: Any) -> bytes:
     if cls in _SPECIAL_ENCODER_DECODERS:
         encoder, _ = _SPECIAL_ENCODER_DECODERS[cls]
         return encoder.encode(obj)
+    # Defensive guard: coerce obj to the declared cls so that
+    # e.g. a bool passed as int (or vice-versa) is encoded in the
+    # wire format that msgspec_decode expects for that cls.
+    if cls in (bool, int):
+        obj = cls(obj)
     return msgspec.msgpack.encode(obj)
 
 
@@ -87,6 +92,11 @@ def msgspec_decode(b_obj: bytes, cls: Any) -> Any:
     if cls in _SPECIAL_ENCODER_DECODERS:
         _, decoder = _SPECIAL_ENCODER_DECODERS[cls]
         return decoder.decode(b_obj)
+    # Defensive guard: msgspec strict-validates wire format
+    # (bool ≠ int in msgpack), but runtime type may not match
+    # declared cls. Decode untyped, then coerce.
+    if cls in (bool, int):
+        return cls(msgspec.msgpack.decode(b_obj))
     return msgspec.msgpack.decode(b_obj, type=cls)
 
 

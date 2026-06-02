@@ -3,6 +3,7 @@
 
 # Standard
 from dataclasses import dataclass
+from typing import TypedDict
 import threading
 
 # First Party
@@ -20,6 +21,13 @@ from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
 logger = init_logger(__name__)
+
+
+class ShmPoolInfo(TypedDict):
+    """Shared-memory pool metadata returned during registration."""
+
+    shm_name: str
+    pool_size: int
 
 
 @dataclass
@@ -133,6 +141,9 @@ class MPCacheEngineContext:
         hash_algorithm: str = "blake3",
     ) -> None:
         self._chunk_size = chunk_size
+        self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
+            storage_manager_config
+        )
         self._storage_manager = StorageManager(storage_manager_config)
         self._token_hasher = TokenHasher(
             chunk_size=chunk_size, hash_algorithm=hash_algorithm
@@ -194,3 +205,22 @@ class MPCacheEngineContext:
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
         return ipc_key_to_object_keys(key, chunk_hashes)
+
+    @staticmethod
+    def _compute_shm_pool_info(
+        storage_manager_config: StorageManagerConfig,
+    ) -> ShmPoolInfo:
+        """Compute normalized SHM pool metadata from storage config.
+
+        Returns an empty pool (disabled SHM transport) when ``shm_name`` is
+        empty or lazy memory mode is enabled. Otherwise strips any leading ``/``
+        and ensures the name starts with ``lmcache_l1_pool_``.
+        """
+        mem_cfg = storage_manager_config.l1_manager_config.memory_config
+        shm_name = mem_cfg.shm_name or ""
+        if not shm_name or mem_cfg.use_lazy:
+            return {"shm_name": "", "pool_size": 0}
+        bare = shm_name.lstrip("/")
+        if not bare.startswith("lmcache_l1_pool_"):
+            shm_name = f"lmcache_l1_pool_{bare}"
+        return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
