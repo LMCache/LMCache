@@ -419,9 +419,7 @@ Key Source Files
    * - File
      - Purpose
    * - ``lmcache/v1/multiprocess/server.py``
-     - MPCacheEngine compositor + ZMQ server entry point;
-       ``build_engine_modules()`` assembles modules per
-       ``--engine-type`` / ``--supported-transfer-mode``.
+     - MPCacheEngine + ZMQ server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
    * - ``lmcache/v1/multiprocess/engine_context.py``
