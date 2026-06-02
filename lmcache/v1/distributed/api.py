@@ -8,6 +8,7 @@ Could be implemented by native code in the future
 
 # Standard
 from dataclasses import dataclass
+import enum
 
 # Third Party
 import torch
@@ -17,6 +18,18 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 
 logger = init_logger(__name__)
+
+
+class TrimPolicy(enum.Enum):
+    """How to pick the retained subset of found keys for a prefetch.
+
+    PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
+    keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
+    (gaps and all).
+    """
+
+    PREFIX = enum.auto()
+    SEGMENTED_PREFIX = enum.auto()
 
 
 @dataclass(frozen=True)
@@ -180,7 +193,7 @@ class PrefetchHandle:
     submit_time: float
     """Monotonic timestamp when the prefetch task was submitted."""
 
-    l2_found_indices: tuple[int, ...] = ()
+    l2_orig_indices: tuple[int, ...] = ()
     """Original-key index of each key submitted to L2; maps the controller's
     local result bitmap back to original positions."""
 

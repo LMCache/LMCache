@@ -23,7 +23,7 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -57,18 +57,6 @@ def merge_bitmaps(bitmaps: Iterable[Bitmap], num_keys: int) -> Bitmap:
     for bm in bitmaps:
         merged = merged | bm
     return merged
-
-
-class TrimPolicy(enum.Enum):
-    """How to pick the retained subset of found keys for a prefetch.
-
-    PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
-    keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
-    (gaps and all).
-    """
-
-    PREFIX = enum.auto()
-    SEGMENTED_PREFIX = enum.auto()
 
 
 def build_trim_mask(

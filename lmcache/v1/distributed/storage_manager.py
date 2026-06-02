@@ -448,7 +448,7 @@ class StorageManager:
         # Submit remaining keys to L2 prefetch controller
         remaining_keys = keys[hit_count:]
         prefetch_request_id = -1
-        l2_found_indices: tuple[int, ...] = ()
+        l2_orig_indices: tuple[int, ...] = ()
         if remaining_keys and self._l2_adapters:
             prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                 remaining_keys,
@@ -457,7 +457,7 @@ class StorageManager:
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.
-            l2_found_indices = tuple(range(hit_count, len(keys)))
+            l2_orig_indices = tuple(range(hit_count, len(keys)))
 
         submit_time = time.monotonic()
         logger.debug(
@@ -479,7 +479,7 @@ class StorageManager:
             l1_found_indices=tuple(range(hit_count)),
             total_requested_keys=len(keys),
             submit_time=submit_time,
-            l2_found_indices=l2_found_indices,
+            l2_orig_indices=l2_orig_indices,
         )
 
     def _combine_found(
@@ -490,13 +490,13 @@ class StorageManager:
 
         ``l2_local`` is indexed over the keys submitted to L2 (0-based); its
         set bits are mapped back to original positions via
-        ``handle.l2_found_indices``.
+        ``handle.l2_orig_indices``.
         """
         found = Bitmap(handle.total_requested_keys)
         for i in handle.l1_found_indices:
             found.set(i)
         if l2_local is not None:
-            orig = handle.l2_found_indices
+            orig = handle.l2_orig_indices
             for local_i in l2_local.get_indices_list():
                 found.set(orig[local_i])
         return found
