@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 import time
 
 # First Party
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 from lmcache.v1.multiprocess.protocol import (
@@ -134,11 +133,9 @@ def _make_module_with_job(
         requested_tokens=0,
     )
     module._prefetch_jobs[request_id] = job
-    # The storage layer now returns a found bitmap; the module reduces it to a
-    # chunk count via count_leading_ones() // world_size.
-    ctx.storage_manager.query_prefetch_lookup_hits.return_value = (
-        None if storage_return is None else Bitmap(storage_return, storage_return)
-    )
+    # The storage layer returns the prefix-hit count; the module divides it by
+    # world_size.
+    ctx.storage_manager.query_prefetch_lookup_hits.return_value = storage_return
 
     return module, request_id
 

@@ -71,7 +71,7 @@ class TestPrefetchHandle:
             l1_found_indices=(0, 1, 2),
             total_requested_keys=10,
             submit_time=12345.6,
-            l2_orig_indices=(3, 4, 5),
+            l2_found_indices=(3, 4, 5),
         )
         out = _roundtrip(h)
         assert out == h

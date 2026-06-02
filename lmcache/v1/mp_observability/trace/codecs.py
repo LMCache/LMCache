@@ -193,10 +193,12 @@ def _enc_prefetch_handle(h: PrefetchHandle) -> dict[str, Any]:
     return {
         "prefetch_request_id": h.prefetch_request_id,
         "external_request_id": h.external_request_id,
+        # Derived count kept for readable traces; decode rebuilds from indices.
+        "l1_prefix_hit_count": len(h.l1_found_indices),
         "l1_found_indices": list(h.l1_found_indices),
         "total_requested_keys": h.total_requested_keys,
         "submit_time": h.submit_time,
-        "l2_orig_indices": list(h.l2_orig_indices),
+        "l2_found_indices": list(h.l2_found_indices),
     }
 
 
@@ -207,7 +209,7 @@ def _dec_prefetch_handle(d: dict[str, Any]) -> PrefetchHandle:
         l1_found_indices=tuple(d["l1_found_indices"]),
         total_requested_keys=d["total_requested_keys"],
         submit_time=d["submit_time"],
-        l2_orig_indices=tuple(d.get("l2_orig_indices", ())),
+        l2_found_indices=tuple(d.get("l2_found_indices", ())),
     )
 
 

@@ -313,7 +313,7 @@ class LookupModule:
         if found is None:
             return None
 
-        found_count = found.count_leading_ones() // job.world_size
+        found_count = found // job.world_size
         return found_count
 
     def query_prefetch_status(

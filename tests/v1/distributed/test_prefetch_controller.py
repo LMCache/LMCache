@@ -30,6 +30,7 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
     TrimPolicy,
+    build_trim_mask,
     merge_bitmaps,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
@@ -113,7 +114,7 @@ def wait_for_lookup_result(
     while time.monotonic() < deadline:
         result = ctrl.query_lookup_result(req_id)
         if result is not None:
-            return result.count_leading_ones()
+            return result
         time.sleep(poll_interval)
     return None
 
@@ -1113,7 +1114,7 @@ class TestQueryLookupResult:
         assert lookup_hits == 2
 
         # Second query should still return the same value (not consumed)
-        assert ctrl.query_lookup_result(req_id).count_leading_ones() == 2
+        assert ctrl.query_lookup_result(req_id) == 2
 
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2
@@ -1167,51 +1168,33 @@ class TestQueryLookupResult:
         ctrl.stop()
 
 
-class TestSegmentedPrefixPolicy:
-    """SEGMENTED_PREFIX retains a caller-supplied mask, not just the prefix."""
+class TestBuildTrimMask:
+    """build_trim_mask picks the retained subset per policy: PREFIX trims at
+    the first gap; SEGMENTED_PREFIX keeps every set bit (gaps and all). The
+    retained bitmap is consumed unchanged at the controller's load sites, so
+    testing the mask directly covers the policy semantics."""
 
-    def test_segmented_retains_masked_keys_across_gaps(self, l1_manager):
-        """Keys inside the segment mask are retained even past a gap (e.g.
-        {0,1,3,4}), unlike PREFIX which would stop at the first excluded key."""
-        adapter = make_adapter()
-        layout = make_layout()
-        keys = [make_object_key(i) for i in range(5)]
-        store_keys_in_l2(adapter, keys, layout)  # all five present in L2
+    @staticmethod
+    def _bm(n, idxs):
+        bm = Bitmap(n)
+        for i in idxs:
+            bm.set(i)
+        return bm
 
-        ctrl = PrefetchController(
-            l1_manager=l1_manager,
-            l2_adapters=[adapter],
-            adapter_descriptors=[make_descriptor(0)],
-            policy=DefaultPrefetchPolicy(),
-        )
-        ctrl.start()
+    def test_prefix_trims_at_first_gap(self):
+        found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
+        assert build_trim_mask(found, 5, TrimPolicy.PREFIX).get_indices_list() == [
+            0,
+            1,
+        ]
 
-        # Retain {0, 1, 3, 4}; index 2 is excluded by the segment mask.
-        segments = Bitmap(5)
-        for i in (0, 1, 3, 4):
-            segments.set(i)
-
-        req_id = ctrl.submit_prefetch_request(
-            keys, layout, policy=TrimPolicy.SEGMENTED_PREFIX, segments=segments
-        )
-        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
-
-        assert result is not None
-        assert result.get_indices_list() == [0, 1, 3, 4]
-
-        # The retained keys are read-locked in L1.
-        retained_keys = [keys[i] for i in (0, 1, 3, 4)]
-        read_results = l1_manager.unsafe_read(retained_keys)
-        for key in retained_keys:
-            assert read_results[key][0] == L1Error.SUCCESS
-
-        # The excluded key (index 2) is never loaded.
-        excluded = l1_manager.reserve_read([keys[2]])
-        assert excluded[keys[2]][0] == L1Error.KEY_NOT_EXIST
-
-        l1_manager.finish_read(retained_keys)
-        ctrl.stop()
-        adapter.close()
+    def test_segmented_prefix_keeps_gaps(self):
+        # Models an L2 hit whose L1 load failed mid-prefix (e.g. OOM at index
+        # 2): the keys that did load are kept, not trimmed to the first gap.
+        found = self._bm(5, [0, 1, 3, 4])
+        assert build_trim_mask(
+            found, 5, TrimPolicy.SEGMENTED_PREFIX
+        ).get_indices_list() == [0, 1, 3, 4]
 
 
 class TestMergeBitmaps:

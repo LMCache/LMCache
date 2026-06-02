@@ -180,7 +180,7 @@ class PrefetchHandle:
     submit_time: float
     """Monotonic timestamp when the prefetch task was submitted."""
 
-    l2_orig_indices: tuple[int, ...] = ()
+    l2_found_indices: tuple[int, ...] = ()
     """Original-key index of each key submitted to L2; maps the controller's
     local result bitmap back to original positions."""
 

@@ -63,30 +63,30 @@ class TrimPolicy(enum.Enum):
     """How to pick the retained subset of found keys for a prefetch.
 
     PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
-    retains a caller-supplied set of key indices (a segment mask).
+    keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
+    (gaps and all).
     """
 
     PREFIX = enum.auto()
     SEGMENTED_PREFIX = enum.auto()
 
 
-def retained_mask(
+def build_trim_mask(
     found: Bitmap,
     num_keys: int,
     policy: TrimPolicy = TrimPolicy.PREFIX,
-    segments: Bitmap | None = None,
 ) -> Bitmap:
     """Subset of ``found`` to keep (load + read-lock + report); the rest is
     released.
 
-    PREFIX = the leading contiguous run; SEGMENTED_PREFIX = the intersection
-    with ``segments``.
+    PREFIX trims at the first gap (leading contiguous run). The non-PREFIX
+    policies keep every set bit, gaps included, and differ only in intent:
+    SEGMENTED_PREFIX keeps the keys that loaded when an L2 hit fails to load
+    into L1 (e.g. OOM) mid-prefix.
     """
     if policy is TrimPolicy.PREFIX:
         return Bitmap(num_keys, found.count_leading_ones())
-    if segments is None:
-        raise ValueError("SEGMENTED_PREFIX policy requires a segments mask")
-    return found & segments
+    return found
 
 
 def trim_load_plan_with_mask(
@@ -137,9 +137,6 @@ class InFlightPrefetchRequest:
 
     policy: TrimPolicy = TrimPolicy.PREFIX
     """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
-
-    segments: Bitmap | None = None
-    """SEGMENTED_PREFIX only: caller-supplied mask of key indices to retain."""
 
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
@@ -216,7 +213,6 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
-                "Bitmap | None",
             ]
         ] = []
 
@@ -235,7 +231,6 @@ class PrefetchController(StorageControllerInterface):
                 MemoryLayoutDesc,
                 int,
                 TrimPolicy,
-                "Bitmap | None",
             ]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
@@ -243,7 +238,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Thread-safe lookup results (background -> external)
         self._lookup_results_lock = threading.Lock()
-        self._completed_lookups: dict[PrefetchRequestId, Bitmap] = {}
+        self._completed_lookups: dict[PrefetchRequestId, int] = {}
 
         # Thread-safe prefetch results (background -> external)
         self._prefetch_results_lock = threading.Lock()
@@ -301,7 +296,6 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        segments: Bitmap | None = None,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
@@ -328,7 +322,6 @@ class PrefetchController(StorageControllerInterface):
                 workers can each consume one read lock.
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  Defaults to ``PREFIX``.
-            segments: ``SEGMENTED_PREFIX`` only — mask of key indices to retain.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -337,16 +330,16 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
             self._submission_queue.append(
-                (request_id, keys, layout_desc, extra_count, policy, segments)
+                (request_id, keys, layout_desc, extra_count, policy)
             )
         self._submission_efd.notify()
         return request_id
 
-    def query_lookup_result(self, request_id: PrefetchRequestId) -> Bitmap | None:
+    def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
         """
-        Query the retained-key bitmap from the lookup phase.
+        Query the keys that are found during the lookup for a specific request.
 
-        Thread-safe. Returns the retained bitmap if the lookup phase
+        Thread-safe. Returns the prefix-hit count if the lookup phase
         has completed, None if still in progress, or the prefetch request
         has already been consumed by query_prefetch_result.
 
@@ -565,13 +558,11 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count, policy, segments = (
+            request_id, keys, layout_desc, extra_count, policy = (
                 self._pending_queue.pop(0)
             )
             self._status_pending_count -= 1
-            self._start_lookup_phase(
-                request_id, keys, layout_desc, extra_count, policy, segments
-            )
+            self._start_lookup_phase(request_id, keys, layout_desc, extra_count, policy)
 
     # =========================================================================
     # Lookup phase
@@ -584,7 +575,6 @@ class PrefetchController(StorageControllerInterface):
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        segments: Bitmap | None = None,
     ) -> None:
         """Submit lookup_and_lock to all adapters for a new request."""
         if not self._l2_adapters:
@@ -603,7 +593,6 @@ class PrefetchController(StorageControllerInterface):
             phase=PrefetchPhase.LOOKUP,
             extra_count=extra_count,
             policy=policy,
-            segments=segments,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
@@ -640,16 +629,14 @@ class PrefetchController(StorageControllerInterface):
         # Step 2: trim the load plan to the policy's retained subset
         num_keys = len(request.keys)
         merged_lookup = merge_bitmaps(load_plan.values(), num_keys)
-        retained = retained_mask(
-            merged_lookup, num_keys, request.policy, request.segments
-        )
+        retained = build_trim_mask(merged_lookup, num_keys, request.policy)
         trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
 
         if not trimmed_plan:
             # Nothing to load after trimming. Unlock all lookup locks and
             # complete with an empty retained set.
             self._unlock_all_lookups(request)
-            self._update_lookup_results(request.request_id, Bitmap(num_keys))
+            self._update_lookup_results(request.request_id, 0)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
@@ -715,9 +702,7 @@ class PrefetchController(StorageControllerInterface):
             if key in reserved_key_set:
                 reserved_bitmap.set(i)
 
-        retained = retained_mask(
-            reserved_bitmap, num_keys, request.policy, request.segments
-        )
+        retained = build_trim_mask(reserved_bitmap, num_keys, request.policy)
         trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
         request.load_plan = trimmed_plan
 
@@ -729,7 +714,7 @@ class PrefetchController(StorageControllerInterface):
             if request.write_reserved_keys:
                 l1_mgr.finish_write(request.write_reserved_keys)
                 l1_mgr.delete(request.write_reserved_keys)
-            self._update_lookup_results(request.request_id, Bitmap(num_keys))
+            self._update_lookup_results(request.request_id, 0)
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
@@ -776,7 +761,7 @@ class PrefetchController(StorageControllerInterface):
             )
 
         ## Step 8: update the lookup result based on the final load plan
-        self._update_lookup_results(request.request_id, retained)
+        self._update_lookup_results(request.request_id, retained.count_leading_ones())
 
         self._event_bus.publish(
             Event(
@@ -806,11 +791,11 @@ class PrefetchController(StorageControllerInterface):
         )
 
     def _update_lookup_results(
-        self, request_id: PrefetchRequestId, retained: Bitmap
+        self, request_id: PrefetchRequestId, prefix_hit_count: int
     ) -> None:
-        """Store the retained-key bitmap from the lookup phase."""
+        """Store the prefix-hit count from the lookup phase."""
         with self._lookup_results_lock:
-            self._completed_lookups[request_id] = retained
+            self._completed_lookups[request_id] = prefix_hit_count
 
     def _advance_request(
         self,
@@ -951,9 +936,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Release read locks for any loaded key outside the retained set
         # (partial load failures can create gaps).
-        retained = retained_mask(
-            result_bitmap, num_keys, request.policy, request.segments
-        )
+        retained = build_trim_mask(result_bitmap, num_keys, request.policy)
         released_bitmap = result_bitmap & (~retained)
         released = released_bitmap.gather(request.keys)
         if released:

@@ -475,7 +475,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             timeout=5.0,
         )
         lookup_hits = sm.query_prefetch_lookup_hits(handle)
-        assert lookup_hits.count_leading_ones() == 1
+        assert lookup_hits == 1
 
         final_result: dict[str, int | None] = {"value": None}
 
