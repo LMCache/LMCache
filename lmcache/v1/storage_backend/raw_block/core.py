@@ -669,7 +669,6 @@ class RawBlockCore:
         deleted: list[bool] = []
         with self._lock:
             for encoded_key in encoded_keys:
-                existed = encoded_key in self._index or encoded_key in self._inflight
                 entry = self._index.get(encoded_key)
                 locked = self._lock_refcnt.get(encoded_key, 0) > 0
                 if entry is not None and locked and not force:
@@ -686,9 +685,7 @@ class RawBlockCore:
                         self._offset_to_slot(int(removed_entry.offset))
                     )
                     self._meta_dirty_total += 1
-                deleted.append(
-                    existed and (removed_entry is not None or inflight is not None)
-                )
+                deleted.append(removed_entry is not None or inflight is not None)
         return deleted
 
     def usage(self) -> tuple[float, float]:
@@ -1224,7 +1221,7 @@ class RawBlockCore:
         if rel % self.slot_bytes != 0:
             return False
         slot = rel // self.slot_bytes
-        if slot < 0 or slot >= self._max_slots:
+        if slot >= self._max_slots:
             return False
         return 0 < size <= (self.slot_bytes - self.header_bytes)
 
@@ -1234,7 +1231,8 @@ class RawBlockCore:
             return False
         if int(data.get("version", 0)) != 1:
             return False
-        if data.get("device_path") and data.get("device_path") != self.device_path:
+        checkpoint_device_path = data.get("device_path")
+        if checkpoint_device_path and checkpoint_device_path != self.device_path:
             logger.warning("Device metadata device_path mismatch; ignoring metadata")
             return False
         if int(data.get("slot_bytes", self.slot_bytes)) != self.slot_bytes:

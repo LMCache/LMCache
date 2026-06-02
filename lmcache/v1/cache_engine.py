@@ -1442,7 +1442,8 @@ class LMCacheEngine:
         for memory_obj in memory_objs:
             assert memory_obj is not None
             compressed_memory_obj = serializer.serialize(memory_obj)
-            memory_obj.unpin()
+            if memory_obj.is_pinned:
+                memory_obj.unpin()
             compressed_memory_objs.append(compressed_memory_obj)
 
         self.storage_manager.batched_remove(keys, locations=[location])
@@ -1502,7 +1503,8 @@ class LMCacheEngine:
         for compressed_memory_obj in compressed_memory_objs:
             assert compressed_memory_obj is not None
             memory_obj = deserializer.deserialize(compressed_memory_obj)
-            compressed_memory_obj.unpin()
+            if compressed_memory_obj.is_pinned:
+                compressed_memory_obj.unpin()
             memory_objs.append(memory_obj)
 
         self.storage_manager.batched_remove(keys, locations=[location])

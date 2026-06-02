@@ -21,111 +21,111 @@ msgstr ""
 
 #: ../../source/recipes/phi3.rst:4
 msgid "Phi3ForCausalLM"
-msgstr ""
+msgstr "Phi3ForCausalLM"
 
 #: ../../source/recipes/phi3.rst:7
 msgid "Validated models"
-msgstr ""
+msgstr "验证过的模型"
 
 #: ../../source/recipes/phi3.rst:9
 msgid ""
 "`microsoft/Phi-4-mini-instruct <https://huggingface.co/microsoft/Phi-4"
 "-mini-instruct>`_"
-msgstr ""
+msgstr "`microsoft/Phi-4-mini-instruct <https://huggingface.co/microsoft/Phi-4-mini-instruct>`_"
 
 #: ../../source/recipes/phi3.rst:10
 msgid ""
 "`microsoft/Phi-3-medium-128k-instruct "
 "<https://huggingface.co/microsoft/Phi-3-medium-128k-instruct>`_"
-msgstr ""
+msgstr "`microsoft/Phi-3-medium-128k-instruct <https://huggingface.co/microsoft/Phi-3-medium-128k-instruct>`_"
 
 #: ../../source/recipes/phi3.rst
 msgid "vLLM"
-msgstr ""
+msgstr "vLLM"
 
 #: ../../source/recipes/phi3.rst:17
 msgid ""
 "**Engine documentation:** `Phi3ForCausalLM in vLLM supported models "
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
 "generation>`_ (architecture `Phi3ForCausalLM`)."
-msgstr ""
+msgstr "**引擎文档：** `vLLM 支持的模型中的 Phi3ForCausalLM <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ （架构 `Phi3ForCausalLM`）。"
 
 #: ../../source/recipes/phi3.rst:22
 msgid "**Status:** Validated with LMCache."
-msgstr ""
+msgstr "**状态:** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/phi3.rst:24
 msgid "Start the LMCache MP server:"
-msgstr ""
+msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/phi3.rst:32
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr ""
+msgstr "启动 vLLM 与 LMCache MP 连接器："
 
 #: ../../source/recipes/phi3.rst:34
 msgid "**Phi-4-mini-instruct** (1 GPU):"
-msgstr ""
+msgstr "**Phi-4-mini-instruct** (1 GPU):"
 
 #: ../../source/recipes/phi3.rst:47
 msgid "**Phi-3-medium-128k-instruct** (1 GPU):"
-msgstr ""
+msgstr "**Phi-3-medium-128k-instruct** (1 GPU):"
 
 #: ../../source/recipes/phi3.rst:58
 msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts, in-process mode), see "
 ":doc:`../mp/quickstart`."
-msgstr ""
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机、进程内模式），请参见 :doc:`../mp/quickstart`。"
 
 #: ../../source/recipes/phi3.rst
 msgid "SGLang"
-msgstr ""
+msgstr "SGLang"
 
 #: ../../source/recipes/phi3.rst:64
 msgid "**Status:** Not validated with LMCache."
-msgstr ""
+msgstr "**状态：** 未通过 LMCache 验证。"
 
 #: ../../source/recipes/phi3.rst
 msgid "TRT-LLM"
-msgstr ""
+msgstr "TRT-LLM"
 
 #: ../../source/recipes/phi3.rst:68
 msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr ""
+msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 
 #: ../../source/recipes/phi3.rst:71
 msgid "CacheBlend support"
-msgstr ""
+msgstr "CacheBlend 支持"
 
 #: ../../source/recipes/phi3.rst:74
 msgid "Compression support"
-msgstr ""
+msgstr "压缩支持"
 
 #: ../../source/recipes/phi3.rst:80
 msgid "Method"
-msgstr ""
+msgstr "方法"
 
 #: ../../source/recipes/phi3.rst:81
 msgid "Status"
-msgstr ""
+msgstr "状态"
 
 #: ../../source/recipes/phi3.rst:82
 msgid "Notes"
-msgstr ""
+msgstr "备注"
 
 #: ../../source/recipes/phi3.rst:83
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
-msgstr ""
+msgstr ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
 
 #: ../../source/recipes/phi3.rst:84
 msgid "Not validated"
-msgstr ""
+msgstr "未验证"
 
 #: ../../source/recipes/phi3.rst:88
 msgid "Caveats"
-msgstr ""
+msgstr "注意事项"
 
 #: ../../source/recipes/phi3.rst:90
 msgid "None known."
-msgstr ""
+msgstr "没有已知的问题。"
 
