@@ -171,14 +171,18 @@ class PrefetchHandle:
     external_request_id: str
     """Request ID from the caller for end-to-end tracing."""
 
-    l1_prefix_hit_count: int
-    """Number of leading keys already in L1 at submission time."""
+    l1_found_indices: tuple[int, ...]
+    """Original-key indices found (read-locked) in L1 at submission time."""
 
     total_requested_keys: int
-    """Total number of keys originally requested."""
+    """Total number of keys originally requested (the result-bitmap size)."""
 
     submit_time: float
     """Monotonic timestamp when the prefetch task was submitted."""
+
+    l2_orig_indices: tuple[int, ...] = ()
+    """Original-key index of each key submitted to L2; maps the controller's
+    local result bitmap back to original positions."""
 
 
 def ipc_key_to_object_keys(

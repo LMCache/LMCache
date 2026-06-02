@@ -18,6 +18,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
@@ -28,6 +29,8 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
+    TrimPolicy,
+    merge_bitmaps,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
@@ -94,7 +97,7 @@ def wait_for_prefetch_result(
     while time.monotonic() < deadline:
         result = ctrl.query_prefetch_result(req_id)
         if result is not None:
-            return result
+            return result.count_leading_ones()
         time.sleep(poll_interval)
     return None
 
@@ -109,6 +112,26 @@ def wait_for_lookup_result(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = ctrl.query_lookup_result(req_id)
+        if result is not None:
+            return result.count_leading_ones()
+        time.sleep(poll_interval)
+    return None
+
+
+def wait_for_prefetch_result_bitmap(
+    ctrl: PrefetchController,
+    req_id: int,
+    timeout: float = 5.0,
+    poll_interval: float = 0.05,
+):
+    """Poll query_prefetch_result, returning the raw retained Bitmap.
+
+    Unlike :func:`wait_for_prefetch_result`, this keeps the full bitmap so a
+    caller can inspect non-contiguous retained sets (e.g. SEGMENTED_PREFIX).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = ctrl.query_prefetch_result(req_id)
         if result is not None:
             return result
         time.sleep(poll_interval)
@@ -1090,7 +1113,7 @@ class TestQueryLookupResult:
         assert lookup_hits == 2
 
         # Second query should still return the same value (not consumed)
-        assert ctrl.query_lookup_result(req_id) == 2
+        assert ctrl.query_lookup_result(req_id).count_leading_ones() == 2
 
         result = wait_for_prefetch_result(ctrl, req_id)
         assert result == 2
@@ -1142,3 +1165,76 @@ class TestQueryLookupResult:
         assert ctrl.query_lookup_result(999) is None
 
         ctrl.stop()
+
+
+class TestSegmentedPrefixPolicy:
+    """SEGMENTED_PREFIX retains a caller-supplied mask, not just the prefix."""
+
+    def test_segmented_retains_masked_keys_across_gaps(self, l1_manager):
+        """Keys inside the segment mask are retained even past a gap (e.g.
+        {0,1,3,4}), unlike PREFIX which would stop at the first excluded key."""
+        adapter = make_adapter()
+        layout = make_layout()
+        keys = [make_object_key(i) for i in range(5)]
+        store_keys_in_l2(adapter, keys, layout)  # all five present in L2
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        # Retain {0, 1, 3, 4}; index 2 is excluded by the segment mask.
+        segments = Bitmap(5)
+        for i in (0, 1, 3, 4):
+            segments.set(i)
+
+        req_id = ctrl.submit_prefetch_request(
+            keys, layout, policy=TrimPolicy.SEGMENTED_PREFIX, segments=segments
+        )
+        result = wait_for_prefetch_result_bitmap(ctrl, req_id)
+
+        assert result is not None
+        assert result.get_indices_list() == [0, 1, 3, 4]
+
+        # The retained keys are read-locked in L1.
+        retained_keys = [keys[i] for i in (0, 1, 3, 4)]
+        read_results = l1_manager.unsafe_read(retained_keys)
+        for key in retained_keys:
+            assert read_results[key][0] == L1Error.SUCCESS
+
+        # The excluded key (index 2) is never loaded.
+        excluded = l1_manager.reserve_read([keys[2]])
+        assert excluded[keys[2]][0] == L1Error.KEY_NOT_EXIST
+
+        l1_manager.finish_read(retained_keys)
+        ctrl.stop()
+        adapter.close()
+
+
+class TestMergeBitmaps:
+    """merge_bitmaps always returns a num_keys-sized bitmap."""
+
+    def test_empty_input_returns_sized_bitmap(self):
+        """Empty input -> num_keys-sized all-zeros bitmap (not Bitmap(0)), so a
+        downstream ``&`` with a same-sized mask never hits a size mismatch."""
+        merged = merge_bitmaps([], 5)
+        assert merged.popcount() == 0
+        mask = Bitmap(5)
+        mask.set(2)
+        assert (merged & mask).popcount() == 0  # would raise on size mismatch
+
+    def test_empty_generator_returns_sized_bitmap(self):
+        """A generator is truthy even when empty; the result is still size-5."""
+        merged = merge_bitmaps((b for b in []), 5)
+        assert merged.popcount() == 0
+        assert (merged & Bitmap(5)).popcount() == 0
+
+    def test_union_of_bitmaps(self):
+        """Non-empty inputs are OR-merged into one num_keys-sized bitmap."""
+        a, b = Bitmap(5), Bitmap(5)
+        a.set(0)
+        b.set(3)
+        assert merge_bitmaps([a, b], 5).get_indices_list() == [0, 3]
