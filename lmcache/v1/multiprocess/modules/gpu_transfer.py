@@ -320,11 +320,22 @@ class GPUTransferModule:
         Returns:
             A tuple where the first element is the IPC handle of the event
             that signals the completion of the store operation, and the second
-            element indicates whether the store operation was successful.
+            element indicates whether the store operation completed without a
+            fatal error (not whether every requested chunk was stored; see
+            Notes).
 
         Raises:
             ValueError: If no GPU context is registered for the given instance ID.
             RuntimeError: If the backend does not support IPC event handles.
+
+        Notes:
+            Store is incremental. If ``gpu_block_ids`` cover fewer chunks than
+            ``key`` resolves to (e.g. a caller/protocol bug), only the longest
+            chunk prefix that every LMCache group can fully cover is stored; the
+            remainder is skipped (logged at WARNING) and may be stored by a
+            later request for the same prefix. Skipped chunks are never
+            committed, so a subsequent retrieve simply misses them and the
+            engine recomputes — there is no partially written cache entry.
         """
         st = time.perf_counter()
         obj_keys = self._ctx.resolve_obj_keys(key)
@@ -356,6 +367,29 @@ class GPUTransferModule:
             block_ids_per_lmc_group_gpu = gpu_context.copy_lmc_group_block_ids_to_gpu(
                 gpu_block_ids
             )
+
+            # Store is incremental: cache only the chunks whose block IDs are
+            # fully present. ``storable_chunks`` is the longest chunk prefix that
+            # every LMCache group can fully cover; a shorter block-id list (e.g.
+            # a caller/protocol bug) would otherwise drive the transfer kernel to
+            # read out-of-bounds GPU memory. Capping ``obj_keys`` here means only
+            # storable chunks are reserved and finalized below — the rest are
+            # never committed and may be stored by a later request.
+            storable_chunks = min(
+                group_block_ids.shape[0] // blocks_per_chunk
+                for group_block_ids in block_ids_per_lmc_group_gpu
+            )
+            if storable_chunks < len(obj_keys):
+                logger.warning(
+                    "STORE block ID underflow for request_id=%s: requested %d "
+                    "chunks but block IDs cover only %d; storing the %d-chunk "
+                    "prefix and skipping the rest.",
+                    key.request_id,
+                    len(obj_keys),
+                    storable_chunks,
+                    storable_chunks,
+                )
+                obj_keys = obj_keys[:storable_chunks]
 
             if not hasattr(torch_dev.Event, "from_ipc_handle"):
                 raise RuntimeError(
@@ -410,24 +444,16 @@ class GPUTransferModule:
                     else:
                         continue
 
-                    # Copy from GPU paged buffer to tmp buffer, then to CPU — per group
-                    for lmc_group_idx, group in enumerate(groups):
+                    # Copy from GPU paged buffer to tmp buffer, then to CPU — per
+                    # group. The block-id slice is always full: ``obj_keys`` was
+                    # capped to the prefix every group can cover (storable_chunks).
+                    for lmc_group_idx in range(len(groups)):
                         lmc_group_block_ids_gpu = block_ids_per_lmc_group_gpu[
                             lmc_group_idx
                         ]
                         chunk_block_ids_gpu = lmc_group_block_ids_gpu[
                             idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
                         ]
-                        if chunk_block_ids_gpu.shape[0] != blocks_per_chunk:
-                            # Fail closed: a short block-id slice would make the
-                            # transfer kernel read out-of-bounds GPU memory.
-                            raise ValueError(
-                                "STORE block ID underflow: "
-                                f"lmc_group_idx={lmc_group_idx} "
-                                f"engine_group={group.engine_block_group_idx} "
-                                f"chunk={idx} expected={blocks_per_chunk} "
-                                f"got={chunk_block_ids_gpu.shape[0]}"
-                            )
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(lmc_group_idx)
                         group_kv_pointers = gpu_context.get_group_kv_pointers(
                             lmc_group_idx

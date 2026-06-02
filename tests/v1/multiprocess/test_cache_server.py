@@ -452,6 +452,51 @@ def test_store_and_lookup(
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
+    reason="Store requires CUDA",
+)
+def test_store_skips_chunks_without_block_ids(
+    client: MessageQueueClient,
+    client_context: ClientContext,
+    registered_instance: int,
+):
+    """An under-length block-id list commits no chunk it cannot fully cover.
+
+    Regression guard for the incremental-store contract: a ``gpu_block_ids``
+    list too short to cover a chunk (e.g. a caller/protocol bug) must complete
+    without error and store nothing — the previous fail-open path raised
+    internally but then ``finish_write``-committed the reservation anyway,
+    turning the key into a retrievable garbage entry (lookup would find it).
+
+    The assertion is on a *miss* (lookup == 0), which is robust to this
+    harness's known store->lookup race (that race can only turn a true hit into
+    a miss, never the reverse).
+    """
+    # One-chunk key (256 tokens == BLOCKS_PER_KEY blocks) but only half the
+    # block IDs needed, so no chunk is fully covered.
+    key = create_cache_key(90001)
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
+    result = (
+        client.submit_request(
+            RequestType.STORE,
+            [
+                key,
+                registered_instance,
+                [list(range(BLOCKS_PER_KEY // 2))],
+                event.ipc_handle(),
+            ],
+            get_response_class(RequestType.STORE),
+        )
+        .to_cuda_future()
+        .result(timeout=DEFAULT_TIMEOUT)
+    )
+    assert result is True, "Store should complete without error on a short list"
+    assert lookup_all(client, [key]) == 0, "An uncovered chunk must not be committed"
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
     reason="Store, Retrieve, and Verify require CUDA",
 )
 def test_store_retrieve_verify(
