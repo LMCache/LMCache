@@ -261,8 +261,8 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GBs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
-| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GBs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GB_per_second` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
@@ -305,8 +305,8 @@ entirely. The load path continues to use the submitted `total_bytes`.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GBs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `bytes_transferred / (completed_ts - submitted_ts) / 1e9` per task. `bytes_transferred` is read from the `L2_STORE_COMPLETED` event (populated from the `L2StoreResult` returned by `pop_completed_store_tasks()`); samples where `bytes_transferred <= 0` (e.g. duplicate-key fast paths that skip the write) are dropped, so the histogram reflects real work, not submitted-but-skipped bytes. |
-| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
+| `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GB_per_second` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `bytes_transferred / (completed_ts - submitted_ts) / 1e9` per task. `bytes_transferred` is read from the `L2_STORE_COMPLETED` event (populated from the `L2StoreResult` returned by `pop_completed_store_tasks()`); samples where `bytes_transferred <= 0` (e.g. duplicate-key fast paths that skip the write) are dropped, so the histogram reflects real work, not submitted-but-skipped bytes. |
+| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GB_per_second` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
 
 **What it answers:** What end-to-end throughput is each L2 adapter
 delivering? Which backends are keeping up with demand, and which are
@@ -323,13 +323,17 @@ distinct from any scheduler-scoped id used elsewhere.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.num_chunks_loaded` | `lmcache_mp_num_chunks_loaded_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`) | `MP_RETRIEVE_END` | `+retrieved_count` per event |
+| `lmcache_mp.l0_l1_load_requests` | `lmcache_mp_l0_l1_load_requests_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`, `device`) | `MP_RETRIEVE_END` | `+1` per retrieve that loaded at least one chunk |
+| `lmcache_mp.l0_l1_load_bytes` | `lmcache_mp_l0_l1_load_bytes_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`, `device`) | `MP_RETRIEVE_END` | `+total_bytes` per retrieve that loaded at least one chunk and reports positive bytes |
 
 **What it answers:** How many LMCache chunks is each vLLM worker loading
-from LMCache into its engine?  Compare across workers to spot uneven
-demand or underserved ranks.  Slice by `model_name` to see per-model
-load volume in multi-model deployments, or by `cache_salt` for per-tenant
-attribution (note: `cache_salt` can be high-cardinality — drop it at
-scrape time with `metric_relabel_configs` if storage cost matters).
+from LMCache into its engine, how many completed CPU-to-GPU load operations
+occurred, and how many bytes crossed the L1-to-L0 boundary? Compare across
+workers/devices to spot uneven demand or underserved ranks. Slice by
+`model_name` to see per-model load volume in multi-model deployments, or by
+`cache_salt` for per-tenant attribution (note: `cache_salt` can be
+high-cardinality — drop it at scrape time with `metric_relabel_configs` if
+storage cost matters).
 
 ---
 

@@ -494,7 +494,8 @@ Engine Counters
 Worker-scoped counters tied to what the MP server delivers back to each
 vLLM worker via ``retrieve()``.  Labeled by ``worker_id`` (the vLLM
 worker instance id) — distinct from any scheduler-scoped id that may
-appear on other metrics.
+appear on other metrics. CPU→GPU load counters also carry ``device`` so
+operators can distinguish workers that serve more than one GPU.
 
 .. list-table::
    :header-rows: 1
@@ -510,6 +511,17 @@ appear on other metrics.
        model, and per tenant / isolation domain (``cache_salt``).
        ``cache_salt`` may be high-cardinality; drop it at scrape time
        with ``metric_relabel_configs`` if storage cost matters.
+   * - ``lmcache_mp.l0_l1_load_requests``
+     - Counter (attrs: ``worker_id``, ``model_name``, ``cache_salt``,
+       ``device``)
+     - Number of completed L1 CPU to L0 GPU ``retrieve()`` operations
+       that loaded at least one LMCache chunk.
+   * - ``lmcache_mp.l0_l1_load_bytes``
+     - Counter (attrs: ``worker_id``, ``model_name``, ``cache_salt``,
+       ``device``)
+     - Total bytes copied from L1 CPU memory into L0 GPU KV blocks
+       during ``retrieve()`` operations that loaded at least one chunk
+       and reported a positive byte count.
 
 Observable Gauges
 ~~~~~~~~~~~~~~~~~
