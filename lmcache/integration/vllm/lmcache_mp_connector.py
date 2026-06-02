@@ -101,7 +101,7 @@ def normalize_block_ids(
 
     vLLM reports allocated block IDs as a tuple with one ``list[int]`` per
     engine KV cache group (or ``None`` when nothing is allocated yet). This
-    coerces the ``None`` case to an empty tuple and validates the shape.
+    coerces the ``None`` case to an empty tuple.
 
     Args:
         block_ids: Per-engine-group block IDs from vLLM, or ``None``.
@@ -109,16 +109,9 @@ def normalize_block_ids(
     Returns:
         The block IDs as a tuple of per-engine-group lists; an empty tuple
         when ``block_ids`` is ``None``.
-
-    Raises:
-        TypeError: If ``block_ids`` is neither ``None`` nor a tuple.
     """
     if block_ids is None:
         return ()
-    if not isinstance(block_ids, tuple):
-        raise TypeError(
-            f"Expected block_ids to be a tuple of lists, but got {type(block_ids)}"
-        )
     return block_ids
 
 

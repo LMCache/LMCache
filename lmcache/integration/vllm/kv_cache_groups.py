@@ -43,9 +43,6 @@ def create_lmcache_kv_spec_from_vllm(
     Returns:
         The list of ``EngineGroup`` in protocol order, i.e. the LMCache group
         order used by store/retrieve block IDs.
-
-    Raises:
-        ValueError: If no KV cache tensors are registered (empty ``kv_caches``).
     """
     # First Party
     from lmcache.utils import EngineType
@@ -62,10 +59,6 @@ def create_lmcache_kv_spec_from_vllm(
         layout_hints=layout_hints,
     )
     num_layers = get_num_layers(normalized_kv_caches, gpu_kv_format)
-    if num_layers == 0:
-        raise ValueError(
-            "No KV cache tensors were registered; cannot build LMCache KV groups."
-        )
 
     # vLLM-specific field access (confined to this function): map each
     # registered KV tensor to its vLLM engine KV cache group index. vLLM places

@@ -510,23 +510,11 @@ def expand_block_ids_to_lmc_groups(
     Returns:
         Block IDs re-indexed by LMCache group order: one inner list per LMCache
         group, copied from that group's source engine block group.
-
-    Raises:
-        ValueError: If a group references an engine block group id beyond the
-            supplied ``engine_side_block_ids``.
     """
-    block_ids_per_lmc_group: list[list[int]] = []
-    for engine_block_group_id in _engine_block_group_id_per_lmc_group(groups):
-        if engine_block_group_id >= len(engine_side_block_ids):
-            raise ValueError(
-                "Missing block IDs for engine block group "
-                f"{engine_block_group_id}; got "
-                f"{len(engine_side_block_ids)} groups"
-            )
-        block_ids_per_lmc_group.append(
-            list(engine_side_block_ids[engine_block_group_id])
-        )
-    return block_ids_per_lmc_group
+    return [
+        list(engine_side_block_ids[engine_block_group_id])
+        for engine_block_group_id in _engine_block_group_id_per_lmc_group(groups)
+    ]
 
 
 def get_engine_group_indices(
