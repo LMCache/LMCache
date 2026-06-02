@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.http_api_registry import (
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
+from lmcache.v1.multiprocess.server import run_cache_server
 
 logger = init_logger(__name__)
 
@@ -61,12 +62,6 @@ async def lifespan(app: FastAPI):
         torch_dev.is_available(),
     )
     mp_config = _configs["mp"]
-    if mp_config.engine_type == "blend":
-        # First Party
-        from lmcache.v1.multiprocess.blend_server_v2 import run_cache_server
-    else:
-        # First Party
-        from lmcache.v1.multiprocess.server import run_cache_server
 
     result = run_cache_server(
         mp_config=mp_config,

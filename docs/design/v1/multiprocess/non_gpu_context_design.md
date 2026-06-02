@@ -20,12 +20,25 @@ across non-CUDA backends.
 
 ```text
 Worker adapter (vLLM MP adapter)
-  └─ TransferContext
-      ├─ HandleTransferContext  (CUDA IPC path)
-      └─ DataTransferContext    (non-CUDA data path)
-          └─ NonGpuContext
-             ├─ NonGpuContextPickle
-             └─ NonGpuContextShm (TODO)
+  └─ TransferContext (transfer_context/worker_transfer.py)
+      ├─ HandleTransferContext  (IPC path via stream/event)
+      └─ DataTransferContext    (data path via data copying in adapter)
+          └─ NonGpuContext (transfer_context/base.py)
+             ├─ NonGpuContextPickle (transfer_context/pickle.py)
+             └─ NonGpuContextShm    (transfer_context/shm.py)
+
+MPCacheEngine (server)
+  └─ MPCacheEngineContext (engine_context.py)
+      ├─ StorageManager
+      ├─ TokenHasher
+      ├─ SessionManager
+      ├─ EventBus
+      ├─ LayoutDescRegistry
+      └─ shm_pool_info (pre-computed once)
+  └─ NonGPUTransferModule (modules/non_gpu_transfer.py)
+      └─ TransferStrategy (modules/server_transfer.py)
+         ├─ PickleTransferStrategy
+         └─ ShmTransferStrategy
 ```
 
 State machine overview (worker-side):
@@ -94,6 +107,10 @@ four lifecycle and transfer operations.
 - **submit_store**: `prepare_store` → `gather_paged_kv_to_cpu` → `commit_store`
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
+During `register`, worker receives `RegisterNonGpuContextResponse(shm_name, pool_size)`
+from server and then calls `create_non_gpu_context(...)` to construct
+`NonGpuContextPickle` or `NonGpuContextShm`.
+
 Why `prepare → data operation → commit`:
 - `prepare_*`: set up transport state (for SHM this allocates/returns shared buffers;
   for pickle it is a protocol RPC that does not allocate transfer buffers).
@@ -115,17 +132,23 @@ mixed-device configurations by raising an error.
 
 - **GPU Context (existing path):** server uses CUDA IPC handles to access worker
   device memory directly.
-- **Non-GPU Context:** server participates in two separate two-phase protocols
-  exposed by `NonGpuContext`: `prepare_store/commit_store` for store, and
-  `prepare_retrieve/commit_retrieve` for retrieve, plus lifecycle cleanup via
-  `close`.
+- **Non-GPU Context:** server uses `NonGPUTransferModule`, which stores
+  per-instance `NonGPUContextEntry` metadata and delegates transfer logic to a
+  `TransferStrategy`.
 
-`NonGpuContext` implementations:
-- **NonGpuContextPickle**: serialize/deserialize chunk payloads with pickle.
-- **NonGpuContextShm**: shared-memory transport (planned/TODO).
+Server transfer strategy implementations:
+- **PickleTransferStrategy**: pure pickle prepare/commit behavior.
+- **ShmTransferStrategy**: SHM slot-based prepare/commit behavior, with pickle
+  fallback when inline bytes are provided.
 
-This split keeps server protocol stable while allowing transport-specific behavior
-behind one interface contract.
+This mirrors the worker split (`NonGpuContextPickle` / `NonGpuContextShm`):
+both sides keep common request flow while isolating transport-specific logic.
+
+`MPCacheEngineContext` is the shared container injected into modules at init.
+It also computes `shm_pool_info` once from `StorageManagerConfig`:
+- disable SHM when `shm_name` is empty or `use_lazy=True`
+- normalize name (`lstrip("/")` and enforce `lmcache_l1_pool_` prefix)
+- keep final `{shm_name, pool_size}` for all later registrations
 
 ### 2.4 Transport Comparison
 
@@ -135,7 +158,7 @@ behind one interface contract.
 |---|---|---|
 | Handle (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
 | Pickle | 4 | GPU KV → CPU chunk → serialize → deserialize → CPU memory object |
-| SHM (TODO) | 1 | GPU KV → CPU memory object (SHM mapped) |
+| SHM | 1 | GPU KV → CPU memory object (SHM mapped) |
 
 **Retrieve (server storage → worker):**
 
@@ -143,13 +166,22 @@ behind one interface contract.
 |---|---|---|
 | Handle (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
 | Pickle | 4 | CPU memory object → serialize → deserialize → CPU chunk → GPU KV |
-| SHM (TODO) | 1 | CPU memory object (SHM mapped) → GPU KV |
+| SHM | 1 | CPU memory object (SHM mapped) → GPU KV |
 
 | Transport | Pros | Cons | Best fit |
 |---|---|---|---|
 | Handle (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
 | Pickle | Works everywhere, no SHM setup | Extra serialization + copy overhead | Universal fallback |
-| SHM (TODO) | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput non-CUDA setups |
+| SHM | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput non-CUDA setups |
+
+### 2.5 Current File Layout (Key Components)
+
+- `lmcache/v1/multiprocess/modules/non_gpu_transfer.py`: `NonGPUTransferModule`
+- `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
+- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `DataTransferContext`, `HandleTransferContext`
+- `lmcache/v1/multiprocess/transfer_context/base.py`: `NonGpuContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
+- `lmcache/v1/multiprocess/transfer_context/pickle.py`: `NonGpuContextPickle`
+- `lmcache/v1/multiprocess/transfer_context/shm.py`: `NonGpuContextShm`
 
 ## 3. Protocol & Data Flow
 
@@ -158,8 +190,11 @@ behind one interface contract.
 The non-GPU path uses five request types:
 
 1. `REGISTER_KV_CACHE_NON_GPU_CONTEXT`  
-   Worker registers non-CUDA KV layout metadata so the server can reconstruct
-   the worker KV memory layout for store/retrieve operations.
+   Worker registers non-CUDA KV layout metadata. Server then:
+   - stores `NonGPUContextEntry` (metadata + model/world info)
+   - registers `MemoryLayoutDesc` in `LayoutDescRegistry`
+   - creates `TransferStrategy` from engine-level `shm_pool_info`
+   - returns `shm_name/pool_size` so worker creates matching `NonGpuContext`
 
 2. `PREPARE_STORE`  
    Worker asks server/transport to prepare store-side transfer state.
@@ -203,15 +238,23 @@ Worker: deserialize -> scatter to paged KV
 Worker: commit_retrieve --> Server
 ```
 
-### 3.3 Data Flow: SHM Path (TODO)
+### 3.3 Data Flow: SHM Path
 
 Store:
-1. Worker `prepare_store` obtains SHM slot/offset.
-2. Worker gathers directly into SHM-backed buffers.
-3. Worker `commit_store` notifies server to consume SHM data.
+1. Worker `prepare_store` gets `slots` and `chunk_indices`.
+2. Server includes only chunks that still need writes (already-cached chunks are skipped).
+3. Worker gathers only `chunk_indices` into SHM-backed buffers.
+4. Worker `commit_store` notifies server to finalize reserved write locks.
+
+If all chunks are already cached, server returns empty `slots/chunk_indices` and
+worker short-circuits store as success (no gather, no commit payload).
 
 Retrieve:
 1. Worker `prepare_retrieve` asks server to populate SHM.
-2. Server writes retrieved chunks into SHM.
+2. Server reads from storage and returns SHM slot descriptors.
 3. Worker scatters from SHM-backed buffers into paged KV.
 4. Worker `commit_retrieve` releases/read-completes SHM state.
+
+Notes:
+- SHM pool metadata is computed once in `MPCacheEngineContext` init, not per registration.
+- `chunk_indices` optimization reduces unnecessary gather/copy work on partial cache hits.

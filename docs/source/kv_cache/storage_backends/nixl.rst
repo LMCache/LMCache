@@ -37,7 +37,8 @@ Example ``lmcache-config.yaml`` for POSIX backend:
       nixl_backend: POSIX
       nixl_pool_size: 64
       nixl_path: /mnt/nixl/cache/
-      use_direct_io: True
+      use_direct_io: true
+      nixl_use_hugepages: true  # optional, requires pre-allocated hugepages
 
 Key settings:
 
@@ -50,6 +51,8 @@ Key settings:
 - ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS" & "AZURE_BLOB", must be "cpu".
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
+
+- ``nixl_use_hugepages``: whether to use Linux hugepages (2 MiB) for the NIXL CPU buffer. Not supported for GPU buffers. Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``.
 
 .. note::
 

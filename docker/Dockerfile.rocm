@@ -4,7 +4,7 @@
 # Please update any changes made here to:
 # docs/source/developer_guide/docker_file.rst
 # docs/source/getting_started/installation.rst
-# docs/production/docker_deployment.rst
+# docs/source/production/docker_deployment.rst
 #
 # Key differences from the CUDA Dockerfile:
 # - Uses ROCm base image instead of CUDA

@@ -218,3 +218,37 @@ A larger L1 cache means fewer L2 round-trips.
 **Logging:**
 Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to verify L2 store/load
 activity.  Switch to ``INFO`` (default) for production to reduce log volume.
+
+Non-GPU Transfer Mode (``--shm-name``)
+--------------------------------------
+
+By default, LMCache creates a shared-memory (SHM) pool for non-GPU KV
+transfers between the server and vLLM workers.  The ``--shm-name`` option
+lets you control this behavior:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Value
+     - Effect
+   * - *(not set)* (default)
+     - Auto-allocate a SHM pool (current default behavior).
+   * - ``""`` (empty string)
+     - Disable the SHM pool entirely and fall back to the pickle-based
+       transfer path.  Useful when ``/dev/shm`` is unavailable or when
+       running without ``--ipc host`` in Docker.
+   * - ``"my_pool"`` (any non-empty name)
+     - Use that exact name for the SHM segment instead of the
+       auto-generated one.  Handy when you need a deterministic,
+       human-readable segment name for monitoring or debugging.
+
+**Examples:**
+
+.. code-block:: bash
+
+    # Force pickle (no SHM):
+    lmcache server --l1-size-gb 60 --eviction-policy LRU --shm-name ""
+
+    # Named SHM segment:
+    lmcache server --l1-size-gb 60 --eviction-policy LRU --shm-name "lmcache_pool"

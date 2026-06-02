@@ -65,3 +65,4 @@ LMCache ships three server entry points:
    observability
    tracing_and_debugging
    architecture
+   frontend_dashboard
