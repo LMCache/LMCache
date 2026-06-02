@@ -37,8 +37,9 @@ class MPInstanceNode:
         command_socket: REQ socket connected to the mp server's control REP
             socket, used by the coordinator to push commands. Owned by the
             event loop thread.
-        registration_time: Wall-clock time the instance registered.
-        last_heartbeat_time: Wall-clock time of the most recent heartbeat.
+        registration_time: Wall-clock time the instance registered (for display).
+        last_heartbeat_time: Monotonic-clock time of the most recent heartbeat,
+            used for stale detection so an NTP step cannot skew liveness.
         metadata: Free-form string key/value pairs supplied at registration.
     """
 
@@ -125,7 +126,8 @@ class InstanceRegistry:
 
         Args:
             instance_id: Identifier of the instance.
-            timestamp: Wall-clock time of the heartbeat.
+            timestamp: Monotonic-clock time of the heartbeat (see
+                :meth:`stale`); must come from the same clock as ``stale``.
 
         Returns:
             ``True`` if the instance was found and updated, ``False`` if it is
@@ -148,7 +150,7 @@ class InstanceRegistry:
             A list of instance ids that have not sent a heartbeat within
             ``timeout`` seconds.
         """
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             return [
                 instance_id

@@ -117,7 +117,7 @@ class RegistrationController(Controller):
         if not isinstance(msg, HeartbeatMsg):
             return ErrorMsg(error=f"Expected HeartbeatMsg, got {type(msg).__name__}")
 
-        updated = self.ctx.registry.update_heartbeat(msg.instance_id, time.time())
+        updated = self.ctx.registry.update_heartbeat(msg.instance_id, time.monotonic())
         if updated:
             return HeartbeatRetMsg(re_registered=False)
 
@@ -176,14 +176,13 @@ class RegistrationController(Controller):
             logger.error("Failed to open command socket to %s: %s", control_addr, e)
             return ErrorMsg(error=f"Cannot connect to {control_addr}: {e}")
 
-        now = time.time()
         node = MPInstanceNode(
             instance_id=msg.instance_id,
             ip=msg.ip,
             control_port=msg.control_port,
             command_socket=command_socket,
-            registration_time=now,
-            last_heartbeat_time=now,
+            registration_time=time.time(),
+            last_heartbeat_time=time.monotonic(),
             metadata=dict(msg.metadata),
         )
         self.ctx.registry.register(node)

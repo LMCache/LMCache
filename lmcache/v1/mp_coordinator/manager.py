@@ -261,6 +261,6 @@ class MPCoordinatorManager:
             removed = self.registry.deregister(node.instance_id)
             if removed is not None:
                 close_zmq_socket(removed.command_socket)
-        self.pull_socket.close()
-        self.reply_socket.close()
-        self.heartbeat_socket.close()
+        close_zmq_socket(self.pull_socket)
+        close_zmq_socket(self.reply_socket)
+        close_zmq_socket(self.heartbeat_socket)

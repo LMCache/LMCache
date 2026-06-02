@@ -64,7 +64,9 @@ def test_update_heartbeat():
 
 def test_stale_detects_expired():
     registry = InstanceRegistry()
-    now = time.time()
+    # stale() compares against the monotonic clock, so seed heartbeat times
+    # from the same clock.
+    now = time.monotonic()
     registry.register(_node("fresh", heartbeat=now))
     registry.register(_node("old", heartbeat=now - 100.0))
     stale = registry.stale(timeout=30.0)
