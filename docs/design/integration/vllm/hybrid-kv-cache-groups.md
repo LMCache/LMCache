@@ -131,7 +131,7 @@ Transfer kernels
 ## Registration
 
 During `register_kv_caches`, the vLLM connector builds the `list[LMCacheGroupView]`
-via `create_engine_groups_from_vllm(...)`.
+via `create_group_views_from_vllm(...)`.
 
 The process is:
 

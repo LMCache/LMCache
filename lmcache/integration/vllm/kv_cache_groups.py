@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Convert vLLM KV cache group metadata into LMCache's neutral model."""
+"""Build LMCache group views from vLLM KV cache group metadata."""
 
 # Future
 from __future__ import annotations
@@ -16,12 +16,12 @@ if TYPE_CHECKING:
 from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 
 
-def create_engine_groups_from_vllm(
+def create_group_views_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
 ) -> list[LMCacheGroupView]:
-    """Build the LMCache KV groups from vLLM metadata and registered tensors.
+    """Build the LMCache group views from vLLM metadata and registered tensors.
 
     This is the single entry point for the vLLM -> LMCache conversion. It reads
     the vLLM-specific fields (``KVCacheConfig.kv_cache_groups`` and
