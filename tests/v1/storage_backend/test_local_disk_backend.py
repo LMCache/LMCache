@@ -5,6 +5,8 @@ import asyncio
 import os
 import shutil
 import tempfile
+import threading
+import time
 
 # Third Party
 import pytest
@@ -16,8 +18,10 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+import lmcache.v1.storage_backend.local_disk_backend as local_disk_backend_module
 
 
 class MockLookupServer:
@@ -73,11 +77,52 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
     """Create a test CacheEngineKey."""
     return CacheEngineKey(
         model_name="test_model",
-        world_size=3,
-        worker_id=1,
+        world_size=1,
+        worker_id=0,
         chunk_hash=hash(key_id),
         dtype=torch.bfloat16,
     )
+
+
+def create_memory_obj(
+    local_cpu_backend: LocalCPUBackend,
+    shape: torch.Size,
+    dtype: torch.dtype,
+    fill_value: int,
+    fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+):
+    """Create a CPU memory object filled with a deterministic value."""
+    memory_obj = local_cpu_backend.allocate(shape, dtype, fmt=fmt)
+    assert memory_obj is not None
+    assert memory_obj.tensor is not None
+    memory_obj.tensor.fill_(fill_value)
+    return memory_obj
+
+
+def wait_for_disk_store(
+    backend: LocalDiskBackend,
+    key: CacheEngineKey,
+    timeout: float = 5.0,
+) -> None:
+    """Wait until an asynchronous disk store becomes visible."""
+    start = time.time()
+    while backend.exists_in_put_tasks(key):
+        if time.time() - start > timeout:
+            raise TimeoutError(f"Timed out waiting for disk store of {key}")
+        time.sleep(0.01)
+
+    while not backend.contains(key):
+        if time.time() - start > timeout:
+            raise TimeoutError(f"Timed out waiting for disk cache entry {key}")
+        time.sleep(0.01)
+
+
+def list_manifest_files(path: str) -> list[str]:
+    return [
+        name
+        for name in os.listdir(path)
+        if name.startswith(".lmcache-local-disk-manifest-")
+    ]
 
 
 @pytest.fixture
@@ -97,6 +142,20 @@ def async_loop():
     asyncio.set_event_loop(loop)
     yield loop
     loop.close()
+
+
+@pytest.fixture
+def loop_in_thread():
+    """Create a background event loop for async disk stores."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
 
 
 # ----------------------------------------------------------------------------
@@ -195,6 +254,561 @@ class TestLocalDiskBackend:
         assert result is None
 
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_contains_recovers_after_restart_using_filename(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test local disk cache recovery across backend restarts."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend1 = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(11)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=7,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        expected = bytes(memory_obj.byte_array)
+
+        try:
+            backend1.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend1, key)
+            memory_obj.ref_count_down()
+            backend1.close()
+
+            backend2 = LocalDiskBackend(
+                config=config,
+                loop=loop_in_thread,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cpu",
+                metadata=metadata,
+            )
+            try:
+                assert key not in backend2.dict
+                assert list_manifest_files(temp_disk_path) == []
+                assert backend2.contains(key)
+                assert key in backend2.dict
+                restored = backend2.get_blocking(key)
+                assert restored is not None
+                assert bytes(restored.byte_array) == expected
+                restored.ref_count_down()
+            finally:
+                backend2.close()
+        finally:
+            local_cpu_backend.memory_allocator.close()
+
+    def test_contains_recovers_partial_chunk_after_restart_using_file_size(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test restart recovery infers partial chunk metadata from file size."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend1 = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(14)
+        partial_tokens = metadata.chunk_size // 2
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes(partial_tokens)[0],
+            metadata.get_dtypes()[0],
+            fill_value=8,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        expected = bytes(memory_obj.byte_array)
+
+        try:
+            backend1.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend1, key)
+            memory_obj.ref_count_down()
+            backend1.close()
+
+            backend2 = LocalDiskBackend(
+                config=config,
+                loop=loop_in_thread,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cpu",
+                metadata=metadata,
+            )
+            try:
+                assert backend2.contains(key)
+                restored = backend2.get_blocking(key)
+                assert restored is not None
+                assert restored.get_shape() == metadata.get_shapes(partial_tokens)[0]
+                assert bytes(restored.byte_array) == expected
+                restored.ref_count_down()
+            finally:
+                backend2.close()
+        finally:
+            local_cpu_backend.memory_allocator.close()
+
+    def test_contains_recovers_mla_format_after_restart(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test restart recovery preserves MLA memory format."""
+        config = create_test_config(temp_disk_path)
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=torch.bfloat16,
+            kv_shape=(28, 1, 256, 8, 128),
+            use_mla=True,
+        )
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend1 = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(15)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=6,
+            fmt=MemoryFormat.KV_MLA_FMT,
+        )
+        expected = bytes(memory_obj.byte_array)
+
+        try:
+            backend1.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend1, key)
+            memory_obj.ref_count_down()
+            backend1.close()
+
+            backend2 = LocalDiskBackend(
+                config=config,
+                loop=loop_in_thread,
+                local_cpu_backend=local_cpu_backend,
+                dst_device="cpu",
+                metadata=metadata,
+            )
+            try:
+                restored = backend2.get_blocking(key)
+                assert restored is not None
+                assert restored.metadata.fmt == MemoryFormat.KV_MLA_FMT
+                assert bytes(restored.byte_array) == expected
+                restored.ref_count_down()
+            finally:
+                backend2.close()
+        finally:
+            local_cpu_backend.memory_allocator.close()
+
+    def test_batched_async_contains_recovers_consecutive_files(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test batched lookup lazily recovers files until the first miss."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key1 = create_test_key(21)
+        key2 = create_test_key(22)
+        missing_key = create_test_key(23)
+        memory_obj1 = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=1,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        memory_obj2 = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=2,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        memory_obj1_released = False
+        memory_obj2_released = False
+
+        try:
+            with open(backend._key_to_path(key1), "wb") as f:
+                f.write(memory_obj1.byte_array)
+            with open(backend._key_to_path(key2), "wb") as f:
+                f.write(memory_obj2.byte_array)
+            memory_obj1.ref_count_down()
+            memory_obj1_released = True
+            memory_obj2.ref_count_down()
+            memory_obj2_released = True
+
+            assert len(backend.dict) == 0
+            future = asyncio.run_coroutine_threadsafe(
+                backend.batched_async_contains(
+                    "lookup",
+                    [key1, key2, missing_key],
+                ),
+                loop_in_thread,
+            )
+            hits = future.result(timeout=5)
+
+            assert hits == 2
+            assert key1 in backend.dict
+            assert key2 in backend.dict
+            assert missing_key not in backend.dict
+            assert list_manifest_files(temp_disk_path) == []
+        finally:
+            backend.close()
+            if not memory_obj1_released:
+                memory_obj1.ref_count_down()
+            if not memory_obj2_released:
+                memory_obj2.ref_count_down()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_batched_async_contains_pin_true_does_not_leak_disk_pin(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test async disk lookup pins are released after prefetch cleanup."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(26)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=4,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        loaded_mem_objs: list[MemoryObj] = []
+        memory_obj_released = False
+        PinMonitor.GetOrCreate(config, metadata)
+
+        try:
+            backend.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend, key)
+            memory_obj.ref_count_down()
+            memory_obj_released = True
+
+            assert backend.dict[key].pin_count == 0
+            contains_future = asyncio.run_coroutine_threadsafe(
+                backend.batched_async_contains("lookup", [key], pin=True),
+                loop_in_thread,
+            )
+            assert contains_future.result(timeout=5) == 1
+            assert backend.dict[key].pin_count == 0
+
+            get_future = asyncio.run_coroutine_threadsafe(
+                backend.batched_get_non_blocking("lookup", [key]),
+                loop_in_thread,
+            )
+            loaded_mem_objs = get_future.result(timeout=5)
+            assert len(loaded_mem_objs) == 1
+
+            for loaded_mem_obj in loaded_mem_objs:
+                if loaded_mem_obj.is_pinned:
+                    loaded_mem_obj.unpin()
+                loaded_mem_obj.ref_count_down()
+            loaded_mem_objs = []
+
+            assert backend.dict[key].pin_count == 0
+        finally:
+            backend.close()
+            for loaded_mem_obj in loaded_mem_objs:
+                if loaded_mem_obj.is_pinned:
+                    loaded_mem_obj.unpin()
+                loaded_mem_obj.ref_count_down()
+            if not memory_obj_released:
+                memory_obj.ref_count_down()
+            PinMonitor.DestroyInstance()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_contains_handles_file_disappearing_before_getsize(
+        self, temp_disk_path, loop_in_thread, memory_allocator, monkeypatch
+    ):
+        """Test stale files racing with lazy recovery degrade to a miss."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(24)
+        path = backend._key_to_path(key)
+
+        try:
+            with open(path, "wb") as f:
+                f.write(b"stale")
+
+            original_getsize = local_disk_backend_module.os.path.getsize
+
+            def disappearing_getsize(target_path: str) -> int:
+                if target_path == path:
+                    os.remove(path)
+                    raise FileNotFoundError(path)
+                return original_getsize(target_path)
+
+            monkeypatch.setattr(
+                local_disk_backend_module.os.path,
+                "getsize",
+                disappearing_getsize,
+            )
+
+            assert not backend.contains(key)
+            assert key not in backend.dict
+        finally:
+            backend.close()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_contains_rejects_uninferrable_file_size(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test file sizes that cannot map to KV metadata remain misses."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(25)
+
+        try:
+            with open(backend._key_to_path(key), "wb") as f:
+                f.write(b"stale")
+
+            assert not backend.contains(key)
+            assert key not in backend.dict
+        finally:
+            backend.close()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_get_blocking_prunes_missing_file(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test missing disk files degrade to a cache miss."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(12)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=9,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+
+        try:
+            backend.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend, key)
+            memory_obj.ref_count_down()
+
+            path = backend.dict[key].path
+            os.remove(path)
+
+            assert backend.get_blocking(key) is None
+            assert key not in backend.dict
+            assert backend.current_cache_size == 0
+            assert backend.usage == 0
+            assert list_manifest_files(temp_disk_path) == []
+        finally:
+            backend.close()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_contains_ignores_file_while_put_task_is_active(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test in-progress disk writes do not recover as cache hits."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(13)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=5,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        write_started = threading.Event()
+        finish_write = threading.Event()
+        memory_obj_released = False
+        original_write_file = backend.write_file
+        original_remove_put_task = backend.disk_worker.remove_put_task
+        written_paths: list[str] = []
+        remove_put_task_started = threading.Event()
+        finish_remove_put_task = threading.Event()
+
+        def blocking_write_file(buffer: memoryview, path: str) -> None:
+            written_paths.append(path)
+            with open(path, "wb"):
+                pass
+            write_started.set()
+            assert finish_write.wait(timeout=5)
+            original_write_file(buffer, path)
+
+        def blocking_remove_put_task(task_key: CacheEngineKey) -> None:
+            remove_put_task_started.set()
+            assert finish_remove_put_task.wait(timeout=5)
+            original_remove_put_task(task_key)
+
+        backend.write_file = blocking_write_file
+        backend.disk_worker.remove_put_task = blocking_remove_put_task
+
+        try:
+            backend.submit_put_task(key, memory_obj)
+            assert write_started.wait(timeout=5)
+            assert backend.exists_in_put_tasks(key)
+            assert written_paths
+            assert os.path.isfile(written_paths[0])
+
+            assert not backend.contains(key)
+
+            finish_write.set()
+            assert remove_put_task_started.wait(timeout=5)
+            assert backend.exists_in_put_tasks(key)
+            assert backend.contains(key)
+
+            finish_remove_put_task.set()
+            wait_for_disk_store(backend, key)
+            memory_obj.ref_count_down()
+            memory_obj_released = True
+            assert backend.contains(key)
+        finally:
+            finish_write.set()
+            finish_remove_put_task.set()
+            backend.close()
+            if not memory_obj_released:
+                memory_obj.ref_count_down()
+            local_cpu_backend.memory_allocator.close()
+
+    def test_no_manifest_file_created_for_put_remove_close(
+        self, temp_disk_path, loop_in_thread, memory_allocator
+    ):
+        """Test local disk operations do not persist a manifest file."""
+        config = create_test_config(temp_disk_path)
+        metadata = create_test_metadata()
+        local_cpu_backend = LocalCPUBackend(
+            config=config,
+            metadata=metadata,
+            dst_device="cpu",
+            memory_allocator=memory_allocator,
+        )
+        backend = LocalDiskBackend(
+            config=config,
+            loop=loop_in_thread,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cpu",
+            metadata=metadata,
+        )
+        key = create_test_key(31)
+        memory_obj = create_memory_obj(
+            local_cpu_backend,
+            metadata.get_shapes()[0],
+            metadata.get_dtypes()[0],
+            fill_value=3,
+            fmt=MemoryFormat.KV_2LTD,
+        )
+
+        try:
+            backend.submit_put_task(key, memory_obj)
+            wait_for_disk_store(backend, key)
+            memory_obj.ref_count_down()
+            assert backend.remove(key)
+            backend.close()
+            assert list_manifest_files(temp_disk_path) == []
+        finally:
+            backend.close()
+            local_cpu_backend.memory_allocator.close()
 
 
 class TestMultiPathDiskBackend:
