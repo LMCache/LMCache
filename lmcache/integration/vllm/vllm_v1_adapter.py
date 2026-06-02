@@ -767,7 +767,10 @@ class LMCacheConnectorV1Impl:
             logger.debug("In connector.start_load_kv, but the attn_metadata is None")
             return
 
-        assert self.lmcache_engine is not None
+        # LMCache failed to initialize and is running in degraded mode; skip the
+        # KV load so vLLM falls back to recompute instead of crashing EngineCore.
+        if self.lmcache_engine is None:
+            return
 
         self.layerwise_retrievers = []
 
@@ -989,7 +992,9 @@ class LMCacheConnectorV1Impl:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
-        assert self.lmcache_engine is not None
+        # Degraded mode (LMCache init failed): nothing to save, fall back silently.
+        if self.lmcache_engine is None:
+            return
 
         if not self.use_layerwise:
             return
@@ -1076,6 +1081,10 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
+
+        # Degraded mode (LMCache init failed): no engine to save to / unpin from.
+        if self.lmcache_engine is None:
+            return
 
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
