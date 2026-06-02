@@ -94,10 +94,10 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def normalize_block_ids(
+def reformat_block_ids(
     block_ids: tuple[list[int], ...] | None,
 ) -> tuple[list[int], ...]:
-    """Normalize vLLM per-engine-group block IDs to a concrete tuple.
+    """Return vLLM's per-engine-group block IDs as a concrete tuple.
 
     vLLM reports allocated block IDs as a tuple with one ``list[int]`` per
     engine KV cache group (or ``None`` when nothing is allocated yet). This
@@ -921,7 +921,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
-        block_ids = normalize_block_ids(blocks.get_block_ids())
+        block_ids = reformat_block_ids(blocks.get_block_ids())
 
         # Only append blocks beyond what's already tracked, per engine group.
         existing_counts = tracker.num_allocated_blocks()
@@ -1182,7 +1182,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request_tracker = self._get_request_tracker(request_id)
 
             # Update block ids
-            new_block_ids = normalize_block_ids(cached_reqs.new_block_ids[idx])
+            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
             if request_id not in cached_reqs.resumed_req_ids:
                 request_tracker.append_block_ids(new_block_ids)
 
@@ -1237,7 +1237,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # can correctly identify block content.
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
-            block_ids = normalize_block_ids(cached_reqs.new_block_ids[idx])
+            block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
             new_block_ids = list(block_ids[0]) if block_ids else []
             if not new_block_ids:
                 continue
