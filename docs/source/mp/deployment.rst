@@ -438,7 +438,7 @@ Send the same long prompt twice:
 .. code-block:: bash
 
     kubectl -n dynamo-lmcache port-forward svc/vllm-agg-lmcache-frontend 8000:8000 >/dev/null &
-    trap 'kill %1' EXIT
+    PF_PID=$!
     sleep 4
 
     PROMPT=$(python3 -c "print('the quick brown fox jumps over the lazy dog '*60)")
@@ -450,6 +450,8 @@ Send the same long prompt twice:
         -H "Content-Type: application/json" -d "$REQ" \
         | python3 -m json.tool | grep -E "prompt_tokens|cached_tokens"
     done
+
+    kill $PF_PID
 
 Then check LMCache server metrics:
 
