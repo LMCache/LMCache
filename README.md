@@ -64,7 +64,7 @@ LMCache is **vendor-neutral**. It can be used as a KV cache layer for a range of
 
 ### Key features
 
-- **Engine-independent deployment**: LMCache, as a standalone damon process, manages KV cache independently from the inference engine process, and the inference engines connect to LMCache through connectors over ZMQ. A single LMCache server can connect with multiple engine instances, share cache across them, and expose unified management and observability endpoints. KV cache will not be lost even if the inference engine crashes (i.e., no fate-sharing with engines). 
+- **Engine-independent deployment**: LMCache, as a standalone damon process, manages KV cache independently from the inference engine process, so that KV cache will not be lost even if the inference engine crashes (i.e., no fate-sharing with engines).
 
 - **Persistent, tiered KV cache offloading and reuse**: Move KV caches out of GPU memory into a tiered storage hierarchy spanning CPU memory, local storage, and remote backends, enabling reuse across requests, sessions, and engine instances to reduce repeated prefill computation and improve TTFT.
 
