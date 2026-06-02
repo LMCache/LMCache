@@ -67,7 +67,7 @@ LMCache is **vendor-neutral**. It can be used as a KV cache layer for a range of
 - **Engine-independent deployment**: LMCache, as a standalone damon process, manages KV cache independently from the inference engine process, so that KV cache will not be lost even if the inference engine crashes (i.e., no fate-sharing with engines).
 
 - **Prompt caching all over the cluster**: By enabling KV cache offloading and reuse using tiered storage hierarchy spanning CPU memory, local storage, and remote backends, LMCache allows you to perform prompt caching all over the cluster and significantly reduces repeated prefill computation and improve TTFT.
-
+Production-level KV cache observability support: LMCache provides KV cache observability metrics, ranging from typical k8s metrics (health monitoring, performance diagnostics), KV-cache-specific metrics (request-level and token-level prefix cache hits, lifecycle, request-level KV cache performance), management metrics (user-specific usage) and more.
 - **Pluggable storage and transport backends**: Easily integrate remote storage and KV transfer backends through a unified interface, enabling KV cache offloading and sharing across storage providers. Through the interface, LMCache support storage backend including CPU RAM, local disk (SSD), Redis/Valkey, Mooncake, InfiniStore, S3-compatible object storage, NIXL, and GDS.
 
 - **Non-prefix KV reuse**: Extend KV reuse beyond prefix caching by reusing cached KV blocks for repeated text chunks at any position in prompt. This leverages CacheBlend to selectively recompute tokens for quality recovery.
