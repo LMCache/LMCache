@@ -265,7 +265,8 @@ Eviction
      - Description
    * - ``eviction.policy``
      - ``LRU``
-     - Only ``LRU`` is supported.
+     - ``LRU`` or ``noop``.  Use ``noop`` with ``l2Backend.storePolicy: skip_l1``
+       for buffer-only mode.
    * - ``eviction.triggerWatermark``
      - ``0.8``
      - Usage ratio (0.0--1.0] to trigger eviction.
@@ -480,7 +481,7 @@ The operator validates the CR spec at apply time:
    * - ``l1.sizeGB``
      - Required, must be > 0.
    * - ``eviction.policy``
-     - Must be ``LRU`` (if set).
+     - Must be ``LRU`` or ``noop`` (if set).
    * - ``eviction.triggerWatermark``
      - Must be in (0.0, 1.0].
    * - ``eviction.evictionRatio``
