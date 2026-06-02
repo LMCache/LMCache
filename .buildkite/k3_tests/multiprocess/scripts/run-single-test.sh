@@ -15,6 +15,46 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 cd "${REPO_ROOT}"
 source .buildkite/k3_tests/common_scripts/helpers.sh
 
+# Preflight for gated HuggingFace models (e.g. gemma-3 used by hma_lm_eval).
+# Fails fast with an actionable message when HF_TOKEN is missing or cannot
+# access the model, instead of letting vLLM fail later with a confusing
+# model-download / startup timeout.
+# Arguments:
+#   $1 model - HuggingFace model id to check access for.
+# Exits:
+#   1 if HF_TOKEN is unset/empty, or the HuggingFace API denies access (401/403).
+check_hf_token_access() {
+    local model="$1"
+    local token="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+    if [ -z "$token" ]; then
+        echo "ERROR: '$model' is a gated model but HF_TOKEN is not set."
+        echo "       Provide HF_TOKEN from an account that has accepted the license at"
+        echo "       https://huggingface.co/${model}"
+        exit 1
+    fi
+    echo "Checking HuggingFace access to gated model '$model' (token: ${#token} chars)..."
+    # Follow redirects (-L): the resolve endpoint 302-redirects to the CDN, and
+    # we want the final status. --max-time bounds transient network hangs.
+    local code
+    code=$(curl -s -L --max-time 15 -o /dev/null -w "%{http_code}" \
+        -H "Authorization: Bearer ${token}" \
+        "https://huggingface.co/${model}/resolve/main/config.json")
+    case "$code" in
+        200)
+            echo "HF token OK: '$model' is accessible."
+            ;;
+        401 | 403)
+            echo "ERROR: HF_TOKEN cannot access '$model' (HTTP $code)."
+            echo "       The token is invalid, or the account has not accepted the license at"
+            echo "       https://huggingface.co/${model}"
+            exit 1
+            ;;
+        *)
+            echo "WARNING: could not verify '$model' access (HTTP $code); continuing."
+            ;;
+    esac
+}
+
 # ── Configuration ────────────────────────────────────────────
 export LMCACHE_PORT="${LMCACHE_PORT:-6555}"
 export VLLM_PORT="${VLLM_PORT:-8000}"
@@ -33,6 +73,7 @@ export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 # launch-processes.sh defaults, which are exactly what gemma-3 needs.
 if [ "$TEST_NAME" = "hma_lm_eval" ]; then
     export MODEL="${MODEL:-google/gemma-3-4b-it}"
+    check_hf_token_access "$MODEL"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi
