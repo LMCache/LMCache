@@ -483,7 +483,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             result = sm.query_prefetch_status(handle)
             if result is None:
                 return False
-            final_result["value"] = result
+            final_result["value"] = result.count_leading_ones()
             return True
 
         assert wait_for_condition(_capture_prefetch_result, timeout=5.0)

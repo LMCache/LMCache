@@ -52,6 +52,9 @@ class EventType(Enum):
     L2_LOAD_TASK_SUBMITTED = "l2.load_task.submitted"
     L2_LOAD_TASK_COMPLETED = "l2.load_task.completed"
 
+    # L2 Eviction Controller events
+    L2_KEYS_EVICTED = "l2.keys.evicted"
+
     # L2 failure events (LM-291 health monitoring)
     L2_PREFETCH_FAILED = "l2.prefetch.failed"
 

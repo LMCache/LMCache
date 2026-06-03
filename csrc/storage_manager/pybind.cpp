@@ -4,11 +4,13 @@
 #include <pybind11/stl.h>
 #include "ttl_lock.h"
 #include "bitmap.h"
+#include "periodic_event_notifier.h"
 #include "utils.h"
 
 namespace py = pybind11;
 
 using lmcache::storage_manager::Bitmap;
+using lmcache::storage_manager::PeriodicEventNotifier;
 using lmcache::storage_manager::TTLLock;
 using lmcache::utils::ParallelPatternMatcher;
 using lmcache::utils::RangePatternMatcher;
@@ -57,9 +59,11 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Return a list of indices where the bit is set to 1.")
       .def("get_indices_set", &Bitmap::get_indices_set,
            "Return a set of indices where the bit is set to 1.")
+      .def("batched_set", &Bitmap::batched_set, py::arg("indices"),
+           "Set every bit in indices to 1 (positions >= size ignored).")
       .def(
           "gather",
-          [](const Bitmap& self, const py::list& items) {
+          [](const Bitmap& self, const py::sequence& items) {
             auto indices = self.get_indices();
             py::list result;
             for (auto idx : indices) {
@@ -91,4 +95,24 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "pattern and end_pos is the exclusive index after the end pattern. "
            "When multiple end patterns exist after a start pattern, matches "
            "the first one (minimal range).");
+
+  py::class_<PeriodicEventNotifier>(m, "PeriodicEventNotifier")
+      .def_static("create", &PeriodicEventNotifier::create,
+                  py::call_guard<py::gil_scoped_release>(),
+                  py::arg("interval_ms"), py::arg("use_eventfd"),
+                  "Create the singleton PeriodicEventNotifier. "
+                  "Idempotent -- second call is a no-op.")
+      .def_static("get", &PeriodicEventNotifier::get,
+                  py::return_value_policy::reference,
+                  "Get the singleton instance, or None if not created.")
+      .def_static("shutdown", &PeriodicEventNotifier::shutdown,
+                  py::call_guard<py::gil_scoped_release>(),
+                  "Shut down the singleton. Idempotent.")
+      .def("register_fd", &PeriodicEventNotifier::register_fd, py::arg("fd"),
+           "Register a file descriptor for periodic signaling.")
+      .def("unregister_fd", &PeriodicEventNotifier::unregister_fd,
+           py::arg("fd"), "Unregister a file descriptor.")
+      .def("set_interval_ms", &PeriodicEventNotifier::set_interval_ms,
+           py::arg("interval_ms"),
+           "Change the notification interval in milliseconds.");
 }

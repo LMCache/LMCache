@@ -834,6 +834,7 @@ def registered_instance(
             1,
             EngineType.VLLM,
             {"inference_engine_logical_block_size": 16},
+            [],
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
@@ -1266,7 +1267,7 @@ def test_cb_lookup_v2_cannot_find_normal_store(
     store_key = create_cache_key(token_ids, request_id="isolation-normal-v2")
     client.submit_request(
         RequestType.STORE,
-        [store_key, registered_instance, list(range(16)), event.ipc_handle()],
+        [store_key, registered_instance, [list(range(16))], event.ipc_handle()],
         get_response_class(RequestType.STORE),
     ).to_cuda_future().result(timeout=DEFAULT_TIMEOUT)
 
@@ -1944,7 +1945,13 @@ def test_cb_store_final_v2_then_normal_lookup(
     retrieve_result = (
         client.submit_request(
             RequestType.RETRIEVE,
-            [retrieve_key, registered_instance, gpu_block_ids, event2.ipc_handle(), 0],
+            [
+                retrieve_key,
+                registered_instance,
+                [gpu_block_ids],
+                event2.ipc_handle(),
+                0,
+            ],
             get_response_class(RequestType.RETRIEVE),
         )
         .to_cuda_future()

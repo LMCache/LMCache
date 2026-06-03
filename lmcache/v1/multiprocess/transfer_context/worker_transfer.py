@@ -3,6 +3,7 @@
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any, Callable, Protocol
 
 # Third Party
@@ -15,6 +16,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
 from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import RegisterNonGpuContextResponse
@@ -40,6 +42,13 @@ class IPCEvent(Protocol):
 SendRequest = Callable[[MessageQueueClient, RequestType, list[object]], MessagingFuture]
 
 
+def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
+    """Return the flat block-id list for transports without HMA support."""
+    if len(block_ids) != 1:
+        raise RuntimeError("non-GPU transfer does not support hybrid KV cache groups")
+    return block_ids[0]
+
+
 class TransferContext(ABC):
     """Abstract transport layer for worker-side KV transfer.
 
@@ -61,6 +70,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -74,6 +84,7 @@ class TransferContext(ABC):
             mq_timeout: Timeout in seconds for synchronous request wait.
             send_request: Request sender callable used to issue MQ requests.
             layout_hints: Optional inference-engine-provided layout hints.
+            group_views: LMCache-owned engine KV cache group metadata.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -88,7 +99,7 @@ class TransferContext(ABC):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -99,7 +110,7 @@ class TransferContext(ABC):
             key: LMCache key object for the store range.
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store.
+            block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
             event: Synchronization event object.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
 
@@ -117,7 +128,7 @@ class TransferContext(ABC):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -129,7 +140,8 @@ class TransferContext(ABC):
             key: LMCache key object for the retrieve range.
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to retrieve into.
+            block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
+                group id.
             event: Synchronization event object.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
@@ -164,6 +176,7 @@ class HandleTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
@@ -180,6 +193,7 @@ class HandleTransferContext(TransferContext):
                 world_size,
                 EngineType.VLLM,
                 layout_hints,
+                list(group_views),
             ],
         )
         future.result(timeout=mq_timeout)
@@ -190,7 +204,7 @@ class HandleTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -211,7 +225,7 @@ class HandleTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -251,7 +265,15 @@ class DataTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
+        """Register KV caches with the non-GPU context server.
+
+        ``group_views`` is accepted to satisfy the base interface but
+        is currently a no-op: the non-GPU transfer path does not support
+        hybrid KV cache groups and rejects multi-group transfers at store /
+        retrieve time (see ``_single_group_block_ids``).
+        """
         # TODO: inference_engine_logical_block_size is currently used by
         # DeepSeek V4 on the CUDA path. The non-CUDA path is yet to be
         # implemented.
@@ -324,7 +346,7 @@ class DataTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         _event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -344,7 +366,7 @@ class DataTransferContext(TransferContext):
             return future
         cpu_chunks = gather_paged_kv_to_cpu(
             kv_caches,
-            block_ids,
+            _single_group_block_ids(block_ids),
             blocks_in_chunk,
             layout_hints=self._layout_hints,
             gpu_kv_format=self._gpu_kv_format,
@@ -366,7 +388,7 @@ class DataTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         _event: IPCEvent,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -383,7 +405,7 @@ class DataTransferContext(TransferContext):
             try:
                 scatter_cpu_to_paged_kv(
                     kv_caches,
-                    block_ids,
+                    _single_group_block_ids(block_ids),
                     src_buffers,
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,

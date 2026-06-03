@@ -259,6 +259,9 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
 
         # Parse KV shape spec
         layer_groups = parse_kvcache_shape_spec(args.kvcache_shape_spec)
+        # One block-id list is sent per LMCache KV group; each shape-spec
+        # group becomes its own group server-side.
+        num_group_views = len(layer_groups) or 1
         # Echo the resolved spec so operators can verify that their
         # input was interpreted as intended. The echoed string is a
         # valid ``--kvcache-shape-spec`` itself.
@@ -391,6 +394,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                 http_base=http_base,
                 block_size=block_size,
                 total_blocks=num_blocks,
+                num_group_views=num_group_views,
             )
 
             time.sleep(args.interval)
@@ -405,6 +409,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                 http_base=http_base,
                 block_size=block_size,
                 total_blocks=num_blocks,
+                num_group_views=num_group_views,
             )
 
             # Compare checksums

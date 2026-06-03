@@ -8,6 +8,7 @@ This module provides GPU-side KV cache management functionality, including:
 """
 
 # Standard
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 import array
 
@@ -36,9 +37,8 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import (
-    KVCache,
-)
+from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 
 # Backend selection (c_ops when CUDA is available, otherwise a pure-Python
 # fallback) is handled once in ``lmcache/__init__.py`` via ``_get_backend``,
@@ -73,6 +73,7 @@ class GPUCacheContext:
         kv_caches: KVCache,
         lmcache_logical_chunk_size: int = 256,
         layout_hints: LayoutHints | None = None,
+        group_views: Sequence[LMCacheGroupView] = (),
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
@@ -92,6 +93,7 @@ class GPUCacheContext:
             gpu_kv_format=self.gpu_kv_format_,
             num_blocks=self.num_blocks_,
             layout_hints=layout_hints,
+            group_views=group_views,
             lmcache_logical_chunk_size=lmcache_logical_chunk_size,
         )
 
@@ -360,22 +362,35 @@ class GPUCacheContext:
             for i in range(batch_size)
         ]
 
-    def stage_block_ids(self, block_ids: list[int]) -> torch.Tensor:
-        """Copy block_ids into the pre-allocated GPU buffer and return a
-        view of the occupied region. Uses non-blocking copy via a pinned
-        CPU tensor created from the list's underlying buffer.
+    def copy_view_block_ids_to_gpu(
+        self, block_ids_per_group: list[list[int]]
+    ) -> list[torch.Tensor]:
+        """Copy block IDs for each LMCache KV layer group to GPU.
 
-        Args:
-            block_ids: Block indices as a Python list of ints.
-
-        Returns:
-            A GPU int64 tensor view into the pre-allocated buffer.
+        The outer list is indexed by LMCache KV group index. All inner lists
+        are packed into the shared GPU buffer once, and this returns one
+        non-overlapping tensor view per LMCache group.
         """
-        n = len(block_ids)
-        cpu_tensor = torch.frombuffer(array.array("l", block_ids), dtype=torch.long)
-        buf = self.block_ids_buffer_[:n]
-        buf.copy_(cpu_tensor, non_blocking=True)
-        return buf
+        offsets = [0]
+        flat: array.array = array.array("l")
+        for view_block_ids in block_ids_per_group:
+            flat.extend(view_block_ids)
+            offsets.append(len(flat))
+
+        total = offsets[-1]
+        if total > self.block_ids_buffer_.shape[0]:
+            raise ValueError(
+                f"block ID total {total} exceeds the pre-allocated buffer "
+                f"size {self.block_ids_buffer_.shape[0]}"
+            )
+        if total:
+            cpu_tensor = torch.frombuffer(flat, dtype=torch.long)
+            self.block_ids_buffer_[:total].copy_(cpu_tensor, non_blocking=True)
+
+        return [
+            self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
+            for i in range(len(block_ids_per_group))
+        ]
 
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0

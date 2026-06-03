@@ -53,10 +53,12 @@ LMCache ships two server entry points:
 
    quickstart
    configuration
+   hybrid_models
    l2_storage
    serde
    deployment
    operator
+   coordinator
    http_api
    observability
    tracing_and_debugging
