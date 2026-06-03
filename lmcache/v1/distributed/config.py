@@ -43,8 +43,18 @@ class L1MemoryManagerConfig:
     shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
     """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
 
+    devdax_path: str | None = None
+    """ Optional Device-DAX path to use as the L1 backing arena. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
+
+        if self.devdax_path is not None:
+            self.devdax_path = self.devdax_path.strip()
+
+        if self.devdax_path:
+            self.use_lazy = False
+            self.shm_name = ""
 
         # LazyMemoryAllocator requires cudart (CUDA host-pinned memory).
         # Auto-disable on non-CUDA backends to avoid a RuntimeError.
@@ -168,7 +178,16 @@ def add_storage_manager_args(
         default=4096,
         help="The alignment size in bytes. Default is 4KB (4096 bytes).",
     )
-
+    memory_group.add_argument(
+        "--l1-devdax-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional /dev/dax device or mmap-able file to use as the L1 "
+            "backing arena. When set, L1 lazy allocation and SHM transfer "
+            "advertising are disabled because the L1 bytes live in the DAX map."
+        ),
+    )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
         "L1 Manager TTL", "TTL configuration for L1 manager locks"
@@ -296,6 +315,7 @@ def parse_args_to_config(
         use_lazy=args.l1_use_lazy,
         init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
         align_bytes=args.l1_align_bytes,
+        devdax_path=args.l1_devdax_path,
     )
 
     l1_manager_config = L1ManagerConfig(

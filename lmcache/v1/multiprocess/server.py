@@ -232,6 +232,8 @@ def run_cache_server(
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         if mp_config.shm_name is not None:
             mem_cfg.shm_name = mp_config.shm_name
+        if mem_cfg.devdax_path:
+            mem_cfg.shm_name = ""
         if mem_cfg.shm_name and sys.platform.startswith("linux"):
             logger.info("Checking if shm capacity is larger than L1 request")
             try:

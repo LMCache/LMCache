@@ -11,6 +11,7 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
+    DevDaxMemoryAllocator,
     MemoryAllocatorInterface,
     MemoryObj,
     MixedMemoryAllocator,
@@ -50,7 +51,20 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
-    if config.use_lazy:
+    if config.devdax_path:
+        logger.debug(
+            "use devdax memory allocator, path is %s, total size is %d bytes, "
+            "align bytes is %d bytes",
+            config.devdax_path,
+            config.size_in_bytes,
+            config.align_bytes,
+        )
+        return DevDaxMemoryAllocator(
+            config.size_in_bytes,
+            config.devdax_path,
+            align_bytes=config.align_bytes,
+        )
+    elif config.use_lazy:
         logger.debug(
             "use lazy memory allocator, init size is %d bytes, "
             "final size is %d bytes, align bytes is %d bytes",
@@ -165,6 +179,8 @@ class L1MemoryManager:
                 allocator.pin_allocator, "address_manager"
             ):
                 return allocator.pin_allocator.address_manager
+            elif isinstance(allocator, DevDaxMemoryAllocator):
+                return allocator.address_manager
             elif isinstance(allocator, LazyMemoryAllocator):
                 return allocator.get_address_manager()
             else:
@@ -189,6 +205,8 @@ class L1MemoryManager:
             NotImplementedError: If the allocator type does not support this operation.
         """
         if isinstance(self._allocator, MixedMemoryAllocator):
+            buffer = self._allocator.buffer
+        elif isinstance(self._allocator, DevDaxMemoryAllocator):
             buffer = self._allocator.buffer
         elif isinstance(self._allocator, LazyMemoryAllocator):
             # TODO(ApostaC): need to test if the RDMA registration works

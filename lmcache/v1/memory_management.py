@@ -8,6 +8,7 @@ from functools import wraps
 from typing import Any, List, Optional, Tuple, Union
 import abc
 import ctypes
+import mmap
 import os
 import threading
 
@@ -2353,6 +2354,214 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
     def __str__(self):
         return "MixedMemoryAllocator"
+
+
+class DevDaxMemoryAllocator(MemoryAllocatorInterface):
+    """Allocates L1 objects from an mmap-backed Device-DAX arena.
+
+    The mapped bytes are exposed as a flat CPU ``torch.uint8`` tensor so the
+    existing L1 state machine and tensor slicing logic can run unchanged while
+    the backing storage is the configured Device-DAX device rather than DRAM or
+    SHM. This is a direct mapped arena: it does not register shadow pages in
+    L1Manager.
+    """
+
+    def __init__(
+        self,
+        size: int,
+        device_path: str,
+        align_bytes: int = AddressManager.ALIGN_BYTES,
+    ):
+        if not device_path:
+            raise ValueError("device_path must be a non-empty string")
+        if size <= 0:
+            raise ValueError("size must be > 0")
+        if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
+            raise ValueError("align_bytes must be a positive power of two")
+
+        self.size = size
+        self.device_path = device_path
+        self.align_bytes = align_bytes
+        self.host_mem_lock = threading.Lock()
+        self.buffer_allocator = BufferAllocator("cpu")
+        self.pin_allocator: TensorMemoryAllocator | None = None
+        self._fd: int | None = None
+        self._mmap_obj: mmap.mmap | None = None
+        self._mmap_buffer: Any | None = None
+        self._unregistered = False
+
+        self.buffer = self._map_devdax()
+        self.pin_allocator = TensorMemoryAllocator(
+            self.buffer, align_bytes=self.align_bytes
+        )
+        self.address_manager = self.pin_allocator.address_manager
+
+    def _map_devdax(self) -> torch.Tensor:
+        fd: int | None = None
+        mmap_obj: mmap.mmap | None = None
+        try:
+            fd = os.open(self.device_path, os.O_RDWR)
+            capacity = os.fstat(fd).st_size
+            if capacity > 0 and self.size > capacity:
+                raise RuntimeError(
+                    f"l1 devdax size ({self.size} bytes) exceeds "
+                    f"{self.device_path} capacity ({capacity} bytes)"
+                )
+
+            mmap_obj = mmap.mmap(
+                fd,
+                self.size,
+                flags=mmap.MAP_SHARED,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+            array_type = ctypes.c_uint8 * self.size
+            mmap_buffer = array_type.from_buffer(mmap_obj)
+            buffer = torch.frombuffer(mmap_buffer, dtype=torch.uint8)
+
+            self._fd = fd
+            self._mmap_obj = mmap_obj
+            self._mmap_buffer = mmap_buffer
+            return buffer
+        except Exception:
+            if mmap_obj is not None:
+                mmap_obj.close()
+            if fd is not None:
+                os.close(fd)
+            raise
+
+    @_lmcache_nvtx_annotate
+    def allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[MemoryObj]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.allocate(shapes, dtypes, fmt)
+        elif fmt in [
+            MemoryFormat.KV_2LTD,
+            MemoryFormat.KV_2TD,
+            MemoryFormat.KV_T2D,
+            MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_TD,
+        ]:
+            with self.host_mem_lock:
+                assert self.pin_allocator is not None
+                obj = self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
+                if isinstance(obj, TensorMemoryObj):
+                    obj.parent_allocator = self
+                return obj
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    @_lmcache_nvtx_annotate
+    def batched_allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[List[MemoryObj]]:
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            return self.buffer_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt
+            )
+        elif fmt in [
+            MemoryFormat.KV_2LTD,
+            MemoryFormat.KV_2TD,
+            MemoryFormat.KV_T2D,
+            MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_TD,
+        ]:
+            with self.host_mem_lock:
+                assert self.pin_allocator is not None
+                objs = self.pin_allocator.batched_allocate(
+                    shapes, dtypes, batch_size, fmt, str(self)
+                )
+                if objs is not None:
+                    for obj in objs:
+                        if isinstance(obj, TensorMemoryObj):
+                            obj.parent_allocator = self
+                return objs
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    @_lmcache_nvtx_annotate
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+        fmt = memory_obj.meta.fmt
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            self.buffer_allocator.free(memory_obj)
+        elif fmt in [
+            MemoryFormat.KV_2LTD,
+            MemoryFormat.KV_2TD,
+            MemoryFormat.KV_T2D,
+            MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_TD,
+        ]:
+            with self.host_mem_lock:
+                assert self.pin_allocator is not None
+                self.pin_allocator.free(memory_obj)
+                if isinstance(memory_obj, TensorMemoryObj):
+                    memory_obj.raw_data = torch.empty(0, dtype=torch.uint8)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    @_lmcache_nvtx_annotate
+    def batched_free(
+        self,
+        memory_objs: List[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ):
+        if not memory_objs:
+            return
+
+        fmt = memory_objs[0].meta.fmt
+        if fmt == MemoryFormat.BINARY_BUFFER:
+            self.buffer_allocator.batched_free(memory_objs)
+        elif fmt in [
+            MemoryFormat.KV_2LTD,
+            MemoryFormat.KV_2TD,
+            MemoryFormat.KV_T2D,
+            MemoryFormat.KV_MLA_FMT,
+            MemoryFormat.EC_TD,
+        ]:
+            with self.host_mem_lock:
+                assert self.pin_allocator is not None
+                self.pin_allocator.batched_free(memory_objs, update_stats=update_stats)
+                for memory_obj in memory_objs:
+                    if isinstance(memory_obj, TensorMemoryObj):
+                        memory_obj.raw_data = torch.empty(0, dtype=torch.uint8)
+        else:
+            raise ValueError(f"Unsupported memory format: {fmt}")
+
+    def memcheck(self):
+        with self.host_mem_lock:
+            assert self.pin_allocator is not None
+            return self.pin_allocator.memcheck()
+
+    def close(self):
+        if self._unregistered:
+            return
+        if torch_dev.is_available():
+            torch_dev.synchronize()
+
+        self.pin_allocator = None
+        self.buffer = torch.empty(0, dtype=torch.uint8)
+        self._mmap_buffer = None
+
+        if self._mmap_obj is not None:
+            self._mmap_obj.close()
+            self._mmap_obj = None
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
+        self._unregistered = True
+
+    def __str__(self):
+        return "DevDaxMemoryAllocator"
 
 
 class GPUMemoryAllocator(MemoryAllocatorInterface):
