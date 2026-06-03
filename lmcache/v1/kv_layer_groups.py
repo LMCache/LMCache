@@ -548,6 +548,7 @@ def parse_kvcache_shape_spec(
         shape_desc.nh = nh
         shape_desc.hs = hs
         shape_desc.element_size = dtype.itemsize
+        lmc_ops.set_shape_desc_dtype(shape_desc, dtype)
 
         indices = list(range(layer_offset, layer_offset + layer_count))
         groups.append(
