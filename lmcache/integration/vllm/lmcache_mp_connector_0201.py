@@ -67,6 +67,13 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 
+def _make_transfer_event() -> Any:
+    """Create a device event compatible with the active MP transfer backend."""
+    if torch_device_type == "xpu":
+        return torch_dev.Event()
+    return torch_dev.Event(interprocess=True)
+
+
 # Helper functions
 def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     if block_ids is None:
@@ -488,8 +495,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        # fast-fail if interprocess is not supported
-        check_interprocess_event_support()
+        # fast-fail if CUDA interprocess events are required but unavailable
+        if torch_device_type == "cuda":
+            check_interprocess_event_support()
 
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -599,7 +607,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             return
 
         with torch_dev.stream(torch_dev.current_stream()):
-            event = torch_dev.Event(interprocess=True)
+            event = _make_transfer_event()
             event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(
@@ -673,7 +681,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             return
 
         with torch_dev.stream(torch_dev.current_stream()):
-            event = torch_dev.Event(interprocess=True)
+            event = _make_transfer_event()
             event.record()
 
         self.worker_adapter.batched_submit_store_requests(

@@ -8,6 +8,7 @@
 #include <torch/torch.h>
 #include "mem_kernels_sycl.h"
 #include "cachegen_kernels_sycl.h"
+#include "ipc_sycl.h"
 
 namespace py = pybind11;
 
@@ -29,6 +30,17 @@ PYBIND11_MODULE(xpu_ops, m) {
       .value("TWO_X_NL_X_NB_BS_NH_HS", EngineKVFormat::TWO_X_NL_X_NB_BS_NH_HS)
       .value("NL_X_NB_NH_BS_TWO_HS", EngineKVFormat::NL_X_NB_NH_BS_TWO_HS)
       .export_values();
+  py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc")
+      .def(py::init<>())
+      .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
+      .def_readwrite("nl", &PageBufferShapeDesc::nl)
+      .def_readwrite("nb", &PageBufferShapeDesc::nb)
+      .def_readwrite("bs", &PageBufferShapeDesc::bs)
+      .def_readwrite("nh", &PageBufferShapeDesc::nh)
+      .def_readwrite("hs", &PageBufferShapeDesc::hs)
+      .def_readwrite("element_size", &PageBufferShapeDesc::element_size)
+      .def_readwrite("block_stride_elems",
+                     &PageBufferShapeDesc::block_stride_elems);
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
         py::arg("key_value"), py::arg("key_value_ptrs"),
         py::arg("slot_mapping"), py::arg("paged_memory_device"),
@@ -56,6 +68,17 @@ PYBIND11_MODULE(xpu_ops, m) {
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
+  m.def("xpu_get_ipc_handle", &xpu_get_ipc_handle, py::arg("data_ptr"),
+        py::arg("device_index"), py::call_guard<py::gil_scoped_release>());
+  m.def("xpu_get_ipc_handle_with_fd", &xpu_get_ipc_handle_with_fd,
+        py::arg("data_ptr"), py::arg("device_index"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("xpu_open_ipc_handle", &xpu_open_ipc_handle, py::arg("handle_bytes"),
+        py::arg("nbytes"), py::arg("device_index"),
+        py::call_guard<py::gil_scoped_release>());
+  m.def("xpu_open_ipc_handle_with_local_fd", &xpu_open_ipc_handle_with_local_fd,
+        py::arg("handle_bytes"), py::arg("local_fd"), py::arg("nbytes"),
+        py::arg("device_index"), py::call_guard<py::gil_scoped_release>());
 
   // CacheGen / RoPE kernels (Intel XPU).  Names match the
   // lmcache.python_ops_fallback module so the backend selection in

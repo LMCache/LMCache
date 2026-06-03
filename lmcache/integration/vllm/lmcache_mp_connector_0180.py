@@ -10,7 +10,10 @@ import torch
 import zmq
 from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import check_interprocess_event_support, init_logger as lmcache_init_logger
+from lmcache.utils import (
+    check_interprocess_event_support,
+    init_logger as lmcache_init_logger,
+)
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -58,6 +61,13 @@ def _adapter_accepts_tp_size() -> bool:
     """Check if the imported adapter accepts tp_size."""
     sig = inspect.signature(LMCacheMPSchedulerAdapter.__init__)
     return "tp_size" in sig.parameters
+
+
+def _make_transfer_event() -> Any:
+    """Create a device event compatible with the active MP transfer backend."""
+    if torch_device_type == "xpu":
+        return torch_dev.Event()
+    return torch_dev.Event(interprocess=True)
 
 
 # Helper functions
@@ -467,8 +477,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        # fast-fail if interprocess is not supported
-        check_interprocess_event_support()
+        # fast-fail if CUDA interprocess events are required but unavailable
+        if torch_device_type == "cuda":
+            check_interprocess_event_support()
 
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -572,7 +583,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         with torch_dev.stream(torch_dev.current_stream()):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            event = torch_dev.Event(interprocess=True)
+            event = _make_transfer_event()
             event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
@@ -635,7 +646,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         with torch_dev.stream(torch_dev.current_stream()):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            event = torch_dev.Event(interprocess=True)
+            event = _make_transfer_event()
             event.record()
 
         self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)

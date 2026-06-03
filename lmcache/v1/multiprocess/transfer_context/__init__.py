@@ -23,6 +23,7 @@ from .worker_transfer import (
     LMCacheDrivenTransferContext,
     MPTransferMode,
     TransferContext,
+    XpuHandleTransferContext,
     create_transfer_context,
 )
 
@@ -37,6 +38,7 @@ __all__ = [
     "EngineDrivenContextShm",
     "ShmSlotDescriptor",
     "TransferContext",
+    "XpuHandleTransferContext",
     "compute_kv_layout",
     "create_engine_driven_context",
     "create_transfer_context",

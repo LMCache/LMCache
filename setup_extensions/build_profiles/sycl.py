@@ -48,6 +48,7 @@ class SyclProfile(BuildProfile):
             "csrc/sycl/pos_kernels_sycl.cpp",
             "csrc/sycl/ac_enc_sycl.cpp",
             "csrc/sycl/ac_dec_sycl.cpp",
+            "csrc/sycl/ipc_sycl.cpp",
         ]
         ext_modules = [
             cpp_extension.SyclExtension(

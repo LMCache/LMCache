@@ -7,6 +7,17 @@
 #include <c10/util/Exception.h>
 #include "../kv_transfer_types.h"
 
+struct PageBufferShapeDesc {
+  int kv_size = 0;
+  int nl = 0;
+  int nb = 0;
+  int bs = 0;
+  int nh = 0;
+  int hs = 0;
+  int element_size = 0;
+  int block_stride_elems = 0;
+};
+
 void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
