@@ -73,7 +73,7 @@ def _get_enum_members(enum_cls):
     return {}
 
 
-def _public_descriptor_classes(module):
+def _public_descriptor_classes(module: object) -> dict[str, type]:
     """Return {name: cls} for public classes that are neither enums
     nor plain functions — e.g. pybind11 ``py::class_<>`` types like
     ``PageBufferShapeDesc``.
@@ -326,7 +326,7 @@ def test_enum_parity(enum_name):
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
-def test_all_c_ops_callables_have_fallback():
+def test_all_c_ops_callables_have_fallback() -> None:
     """Every public callable in c_ops must exist in
     python_ops_fallback."""
     missing = sorted(set(_c_ops_callables) - set(_fallback_callables))
@@ -334,7 +334,7 @@ def test_all_c_ops_callables_have_fallback():
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
-def test_all_c_ops_enums_have_fallback():
+def test_all_c_ops_enums_have_fallback() -> None:
     """Every public enum in c_ops must exist in
     python_ops_fallback."""
     missing = sorted(set(_c_ops_enums) - set(_fallback_enums))
@@ -342,7 +342,7 @@ def test_all_c_ops_enums_have_fallback():
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
-def test_all_c_ops_descriptors_have_fallback():
+def test_all_c_ops_descriptors_have_fallback() -> None:
     """Every public descriptor class in c_ops must exist in
     python_ops_fallback."""
     missing = sorted(set(_c_ops_descs) - set(_fallback_descs))
@@ -356,7 +356,7 @@ def test_all_c_ops_descriptors_have_fallback():
     "cls_name",
     _shared_desc_names if _shared_desc_names else ["__placeholder__"],
 )
-def test_descriptor_class_parity(cls_name):
+def test_descriptor_class_parity(cls_name: str) -> None:
     """For every descriptor class shared between c_ops and the fallback,
     every public, non-callable attribute on the c_ops instance must also
     be present on the fallback instance.
@@ -367,7 +367,7 @@ def test_descriptor_class_parity(cls_name):
     c_inst = _c_ops_descs[cls_name]()
     py_inst = _fallback_descs[cls_name]()
 
-    def _public_data_attrs(inst):
+    def _public_data_attrs(inst: object) -> set[str]:
         return {
             a
             for a in dir(inst)
