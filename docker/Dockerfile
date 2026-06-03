@@ -4,7 +4,7 @@
 # Please update any changes made here to
 # docs/source/developer_guide/docker_file.rst
 # docs/source/getting_started/installation.rst
-# docs/production/docker_deployment.rst
+# docs/source/production/docker_deployment.rst
 
 ARG CUDA_VERSION=13.0
 ARG UBUNTU_VERSION=24.04

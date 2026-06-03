@@ -12,10 +12,12 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.native_storage_ops import Bitmap, PeriodicEventNotifier
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchHandle,
+    TrimPolicy,
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
@@ -49,6 +51,7 @@ from lmcache.v1.mp_observability.trace.decorator import (
     is_tracing_enabled,
     publish_call_event,
 )
+from lmcache.v1.platform import HAS_EVENTFD
 
 logger = init_logger(__name__)
 
@@ -122,6 +125,11 @@ class StorageManager:
                     l1_manager=self._l1_manager,
                 )
             self._l2_adapters.append(adapter)
+
+        PeriodicEventNotifier.create(
+            interval_ms=config.periodic_notifier_interval_ms,
+            use_eventfd=HAS_EVENTFD,
+        )
 
         # Per-cache_salt quota registry. Shared across the L2 eviction
         # controller (reads quotas each cycle) and the HTTP quota
@@ -436,6 +444,7 @@ class StorageManager:
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
         external_request_id: str = "",
+        policy: TrimPolicy = TrimPolicy.PREFIX,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -447,6 +456,9 @@ class StorageManager:
                 key.  Total locks = 1 + extra_count.
             external_request_id: Request ID from the caller
                 for end-to-end log tracing.
+            policy: Which retained-subset policy to apply (see
+                :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
+                ``SPARSE`` keeps every found key (gap-tolerant).
 
         Returns:
             PrefetchHandle to track the task.
@@ -455,6 +467,52 @@ class StorageManager:
         # objects are already in L1, and adding read locks to them.
 
         l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
+
+        if policy is TrimPolicy.SPARSE:
+            # SPARSE: retain a read lock on every L1 hit (not just the leading
+            # prefix) and send all L1 misses to L2 as one coalesced request.
+            # reserve_read locks only SUCCESS keys, so the found-set already
+            # equals the locked set -- nothing to release.
+            l1_found_indices: list[int] = []
+            succeeded_keys: list[ObjectKey] = []
+            sparse_l2_indices: list[int] = []
+            remaining_keys: list[ObjectKey] = []
+            for i, key in enumerate(keys):
+                ent = l1_read_result.get(key)
+                if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
+                    l1_found_indices.append(i)
+                    succeeded_keys.append(key)
+                else:
+                    sparse_l2_indices.append(i)
+                    remaining_keys.append(key)
+
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.SM_READ_PREFETCHED,
+                    metadata={
+                        "succeeded_keys": succeeded_keys,
+                        "failed_keys": remaining_keys,
+                    },
+                )
+            )
+
+            prefetch_request_id = -1
+            if remaining_keys and self._l2_adapters:
+                prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
+                    remaining_keys,
+                    layout_desc,
+                    extra_count=extra_count,
+                    policy=TrimPolicy.SPARSE,
+                )
+            return PrefetchHandle(
+                prefetch_request_id=prefetch_request_id,
+                external_request_id=external_request_id,
+                l1_found_indices=tuple(l1_found_indices),
+                total_requested_keys=len(keys),
+                submit_time=time.monotonic(),
+                l2_orig_indices=tuple(sparse_l2_indices),
+            )
+
         hit_count = 0
         for key in keys:
             entry = l1_read_result.get(key, None)
@@ -492,12 +550,16 @@ class StorageManager:
         # Submit remaining keys to L2 prefetch controller
         remaining_keys = keys[hit_count:]
         prefetch_request_id = -1
+        l2_orig_indices: tuple[int, ...] = ()
         if remaining_keys and self._l2_adapters:
             prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                 remaining_keys,
                 layout_desc,
                 extra_count=extra_count,
             )
+            # The controller indexes its result bitmap over remaining_keys
+            # (0-based); map those local indices back to original positions.
+            l2_orig_indices = tuple(range(hit_count, len(keys)))
 
         submit_time = time.monotonic()
         logger.debug(
@@ -516,25 +578,44 @@ class StorageManager:
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,
             external_request_id=external_request_id,
-            l1_prefix_hit_count=hit_count,
+            l1_found_indices=tuple(range(hit_count)),
             total_requested_keys=len(keys),
             submit_time=submit_time,
+            l2_orig_indices=l2_orig_indices,
         )
+
+    def _combine_found(
+        self, handle: PrefetchHandle, l2_local: "Bitmap | None"
+    ) -> Bitmap:
+        """Merge the L1 found indices with an L2 result bitmap into one bitmap
+        over the original key positions.
+
+        ``l2_local`` is indexed over the keys submitted to L2 (0-based); its
+        set bits are mapped back to original positions via
+        ``handle.l2_orig_indices``.
+        """
+        found = Bitmap(handle.total_requested_keys)
+        found.batched_set(handle.l1_found_indices)
+        if l2_local is not None:
+            # gather maps each L2 set bit i to its original position
+            # ``l2_orig_indices[i]``; batched_set drops any position >= size.
+            found.batched_set(l2_local.gather(handle.l2_orig_indices))
+        return found
 
     def query_prefetch_lookup_hits(
         self,
         handle: PrefetchHandle,
     ) -> int | None:
         """
-        Query the number of prefix hit chunks for a prefetch task before
-        the L2 prefetching is done.
+        Query the number of prefix-hit chunks for a prefetch task before the
+        L2 prefetching is done.
 
         Args:
             handle (PrefetchHandle): The handle of the lookup task.
 
         Returns:
-            the number of prefix hit chunks if the lookup is done, None if
-            it's still in progress,  or the prefetch task is already done.
+            the number of prefix-hit chunks (L1 + L2) if the lookup is done,
+            None if it's still in progress or the prefetch task is already done.
 
         Note:
             This function is designed for the scenario where the caller wants
@@ -546,25 +627,23 @@ class StorageManager:
             Therefore, it's the caller’s responsibility to make sure not calling
             this function after the prefetch task is done.
         """
+        # Prefix-path only: l1_found_indices is contiguous, so len() == prefix hits.
+        l1_hits = len(handle.l1_found_indices)
         if handle.prefetch_request_id == -1:
-            # No L2 request, the prefix hit count is final
-            return handle.l1_prefix_hit_count
+            # No L2 request: the L1 prefix hit count is final.
+            return l1_hits
 
-        # Have L2 request, need to check the status from prefetch controller
         l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
-
         if l2_r is None:
-            # L2 prefetch is still in progress or it's already done and
-            # the result has been consumed by `query_prefetch_status`
+            # Still in progress, or already consumed by query_prefetch_status.
             return None
-
-        # L2 lookup is done, return the total prefix hit count (L1 + L2)
-        return handle.l1_prefix_hit_count + l2_r
+        # L2 lookup done: total prefix hits are L1 plus the L2 continuation.
+        return l1_hits + l2_r
 
     def query_prefetch_status(
         self,
         handle: PrefetchHandle,
-    ) -> int | None:
+    ) -> Bitmap | None:
         """
         Query the status of the prefetch task.
 
@@ -572,40 +651,41 @@ class StorageManager:
             handle (PrefetchHandle): The handle of the prefetch task.
 
         Returns:
-            the number of prefix hit chunks if the prefetch is done, None if
-            it's still in progress.
+            the found-key bitmap (over original positions) if the prefetch is
+            done, None if it's still in progress. Derive the prefix hit count
+            via ``count_leading_ones``.
         """
-        l2_result: int = 0
-
-        # Have L2 request, need to check the result from prefetch controller
+        l2_r: Bitmap | None = None
         if handle.prefetch_request_id != -1:
             l2_r = self._prefetch_controller.query_prefetch_result(
                 handle.prefetch_request_id
             )
-
             if l2_r is None:
                 return None
-            l2_result = l2_r  # Just to make linter happy
 
-        total_hits = handle.l1_prefix_hit_count + l2_result
+        found = self._combine_found(handle, l2_r)
+        # popcount (not count_leading_ones) so the log is accurate for
+        # non-contiguous policies (SEGMENTED_PREFIX / SPARSE) too.
+        total_hits = found.popcount()
         elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
 
         if total_hits > 0:
+            # L1 and L2 sets are disjoint (only L1-misses go to L2).
+            l1_hits = len(handle.l1_found_indices)
+            l2_hits = l2_r.popcount() if l2_r is not None else 0
             logger.info(
                 "Prefetch request completed (L1+L2): "
-                "%d/%d prefix hits (%d L1, %d L2) "
-                "in %.1f ms "
-                "(external_request_id=%s, "
-                "prefetch_request_id=%d)",
+                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
+                "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
-                handle.l1_prefix_hit_count,
-                l2_result,
+                l1_hits,
+                l2_hits,
                 elapsed_ms,
                 handle.external_request_id,
                 handle.prefetch_request_id,
             )
-        return total_hits
+        return found
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
@@ -616,6 +696,21 @@ class StorageManager:
             keys (list[ObjectKey]): List of object keys to touch.
         """
         self._l1_manager.touch_keys(keys)
+
+    def unsafe_read(
+        self, keys: list[ObjectKey]
+    ) -> tuple[list[ObjectKey], list[MemoryObj]]:
+        """Read already read-locked objects without acquiring new read locks."""
+        read_results = self._l1_manager.unsafe_read(keys)
+        good_keys: list[ObjectKey] = []
+        good_objs: list[MemoryObj] = []
+        for key in keys:
+            err, obj = read_results.get(key, (L1Error.KEY_NOT_EXIST, None))
+            if err != L1Error.SUCCESS or obj is None:
+                continue
+            good_keys.append(key)
+            good_objs.append(obj)
+        return good_keys, good_objs
 
     @property
     def quota_manager(self) -> QuotaManager:
@@ -704,6 +799,8 @@ class StorageManager:
         self._store_controller.stop()
         self._eviction_controller.stop()
         self._l2_eviction_controller.stop()
+
+        PeriodicEventNotifier.shutdown()
 
         for adapter in self._l2_adapters:
             adapter.close()
