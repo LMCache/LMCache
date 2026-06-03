@@ -188,6 +188,13 @@ def _make_local_cpu_paged(
         "_allocate_cpu_memory",
         lambda size, *a, **kw: real_buf,
     )
+    # real_buf is a plain (pageable) tensor, not cudaHostAlloc'd. The real
+    # _free_cpu_memory would call cudaFreeHost on it on a CUDA build and raise
+    # "cudaFreeHost failed" — so neutralize free symmetrically with alloc; the
+    # tensor is reclaimed by normal Python GC.
+    monkeypatch.setattr(
+        memory_management_module, "_free_cpu_memory", lambda *a, **kw: None
+    )
     return LocalCPUBackend(config=config, metadata=metadata, dst_device="cpu")
 
 

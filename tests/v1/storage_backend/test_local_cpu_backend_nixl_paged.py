@@ -93,6 +93,12 @@ class TestInitializeAllocatorNixlCpuMode:
             "_allocate_cpu_memory",
             lambda size, *args, **kwargs: real_buffer,
         )
+        # real_buffer is a plain (pageable) tensor; the real _free_cpu_memory
+        # would call cudaFreeHost on it on a CUDA build and raise
+        # "cudaFreeHost failed". Neutralize free to match the faked alloc.
+        monkeypatch.setattr(
+            memory_management_module, "_free_cpu_memory", lambda *a, **kw: None
+        )
 
         backend = LocalCPUBackend(config=config, metadata=metadata, dst_device="cpu")
         try:
@@ -183,6 +189,12 @@ class TestInitializeAllocatorNixlCpuMode:
             memory_management_module,
             "_allocate_cpu_memory",
             fake_allocate_cpu_memory,
+        )
+        # real_buffer is a plain (pageable) tensor; the real _free_cpu_memory
+        # would call cudaFreeHost on it on a CUDA build and raise
+        # "cudaFreeHost failed". Neutralize free to match the faked alloc.
+        monkeypatch.setattr(
+            memory_management_module, "_free_cpu_memory", lambda *a, **kw: None
         )
 
         # Patch the module-level logger to capture warning calls
