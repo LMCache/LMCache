@@ -79,11 +79,15 @@ def _make_desync_request(
 def _make_connector(
     requests: list[SimpleNamespace],
 ) -> tuple[LMCacheConnectorV1Impl, _FakeEngine]:
-    metadata = LMCacheConnectorMetadata(requests=requests)
+    metadata = LMCacheConnectorMetadata(requests=requests)  # type: ignore[arg-type]
     engine = _FakeEngine()
     connector = LMCacheConnectorV1Impl.__new__(LMCacheConnectorV1Impl)
     connector._parent = _FakeParent(metadata)
-    connector.lmcache_engine = engine
+    # ``lmcache_engine`` is a read-only property backed by ``self._manager``;
+    # inject the fake engine through the manager so the property resolves to it.
+    connector._manager = SimpleNamespace(  # type: ignore[assignment]
+        lmcache_engine=engine
+    )
     connector.kv_role = "kv_producer"
     connector.use_layerwise = False
     connector.enable_blending = False
@@ -102,9 +106,7 @@ def test_wait_for_save_skips_desynced_request_and_keeps_engine_alive(
 
     Regression for https://github.com/LMCache/LMCache/issues/3318.
     """
-    desync_req = _make_desync_request(
-        "req-desync", token_ids_len=4, slot_mapping_len=3
-    )
+    desync_req = _make_desync_request("req-desync", token_ids_len=4, slot_mapping_len=3)
     connector, engine = _make_connector([desync_req])
 
     with caplog.at_level(logging.WARNING):
@@ -123,4 +125,7 @@ def test_wait_for_save_skips_desynced_request_and_keeps_engine_alive(
         and "slot_mapping=3" in r.getMessage()
         and "token_ids=4" in r.getMessage()
         for r in warnings
-    ), f"Expected desync warning naming req-desync; got {[r.getMessage() for r in warnings]}"
+    ), (
+        "Expected desync warning naming req-desync; "
+        f"got {[r.getMessage() for r in warnings]}"
+    )
