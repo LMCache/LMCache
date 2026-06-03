@@ -194,6 +194,19 @@ def _build_modules(
 
         modules.append(BlendModule(ctx))
 
+    if mp_config.engine_type == "blend_v3":
+        if mp_config.supported_transfer_mode == "non_gpu":
+            raise ValueError(
+                "blend_v3 engine requires supported_transfer_mode 'gpu' or "
+                f"'auto', got '{mp_config.supported_transfer_mode}'"
+            )
+        # First Party
+        from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
+
+        gpu_transfer = next(m for m in modules if isinstance(m, GPUTransferModule))
+        lookup_module = next(m for m in modules if isinstance(m, LookupModule))
+        modules.append(BlendV3Module(ctx, gpu_transfer, lookup_module))
+
     return modules
 
 
