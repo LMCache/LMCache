@@ -45,7 +45,7 @@ Server Variants
 All server entry points share the same ``MPCacheEngine`` and
 ``StorageManager`` core. ``MPCacheEngine`` is now a thin compositor:
 it holds an ``MPCacheEngineContext`` and a list of ``EngineModule``
-instances assembled by ``build_engine_modules()`` (in ``server.py``)
+instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
@@ -97,12 +97,47 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``UNREGISTER_KV_CACHE``
      - SYNC
      - Unregister KV cache tensors.
+   * - ``REGISTER_KV_CACHE_NON_GPU_CONTEXT``
+     - SYNC
+     - Register a non-GPU KV cache context (CPU/accelerator workers using
+       the PREPARE/COMMIT transfer path). Loaded only when
+       ``--supported-transfer-mode`` is ``non_gpu`` or ``auto``. Returns a
+       ``RegisterNonGpuContextResponse`` carrying the SHM segment name and
+       pool size when the SHM path is in use (empty for the pickle path).
+   * - ``UNREGISTER_KV_CACHE_NON_GPU_CONTEXT``
+     - SYNC
+     - Unregister a non-GPU KV cache context.
    * - ``STORE``
      - BLOCKING
-     - Store KV cache chunks from GPU to L1 (CPU).
+     - Store KV cache chunks from GPU to L1 (CPU). GPU transfer path
+       (CUDA IPC); loaded only when ``--supported-transfer-mode`` is
+       ``gpu`` or ``auto``.
    * - ``RETRIEVE``
      - BLOCKING
-     - Copy KV cache chunks from L1 (CPU) back to GPU.
+     - Copy KV cache chunks from L1 (CPU) back to GPU. GPU transfer path
+       (CUDA IPC); loaded only when ``--supported-transfer-mode`` is
+       ``gpu`` or ``auto``.
+   * - ``PREPARE_STORE``
+     - BLOCKING
+     - (Non-GPU path) Worker asks the server to prepare store-side
+       transfer state for a key. Loaded when ``--supported-transfer-mode``
+       is ``non_gpu`` or ``auto``.
+   * - ``COMMIT_STORE``
+     - BLOCKING
+     - (Non-GPU path) Worker commits the chunk's serialized bytes (pickle
+       path) or releases the prepared SHM slot (SHM path) so the server
+       can persist into L1 storage.
+   * - ``PREPARE_RETRIEVE``
+     - BLOCKING
+     - (Non-GPU path) Worker asks the server to prepare the retrieval
+       payload for a key. The pickle path returns the bytes inline; the
+       SHM path returns slot info so the worker can read from shared
+       memory.
+   * - ``COMMIT_RETRIEVE``
+     - BLOCKING
+     - (Non-GPU path) Worker acknowledges retrieval completion so the
+       server can release the underlying read locks and reclaim any
+       transport state.
    * - ``LOOKUP``
      - BLOCKING
      - Submit a prefix lookup; the prefetch job is tracked server-side by
