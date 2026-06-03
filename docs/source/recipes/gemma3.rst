@@ -67,6 +67,8 @@ Validated models
 CacheBlend support
 ------------------
 
+Not validated.
+
 Compression support
 -------------------
 
