@@ -172,6 +172,11 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).
+   * - ``--l1-devdax-path``
+     - *(not set)*
+     - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
+       backing arena.  When set, lazy allocation and SHM transfer advertising
+       are disabled because the L1 bytes live in the DAX mapping.
 
 L1 Manager TTLs
 ----------------
