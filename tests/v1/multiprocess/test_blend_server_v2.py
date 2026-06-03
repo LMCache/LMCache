@@ -67,7 +67,7 @@ SERVER_PORT = (
 SERVER_URL = f"tcp://{SERVER_HOST}:{SERVER_PORT}"
 CHUNK_SIZE = 256
 CPU_BUFFER_SIZE = 5.0
-DEFAULT_TIMEOUT = 10.0
+DEFAULT_TIMEOUT = 20.0
 
 
 # =============================================================================

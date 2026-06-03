@@ -32,7 +32,7 @@ Prerequisites
 Server Variants
 ---------------
 
-LMCache ships three server entry points:
+LMCache ships two server entry points:
 
 .. list-table::
    :header-rows: 1
@@ -41,15 +41,11 @@ LMCache ships three server entry points:
    * - Entry Point
      - Description
    * - ``lmcache server``
-     - **Recommended.** ZMQ + FastAPI HTTP frontend (adds ``/healthcheck``
-       for K8s probes, ``/clear-cache``, ``/status`` — see
-       :doc:`http_api`). Use ``--engine-type blend`` to enable BlendEngineV2
-       for cross-request KV reuse.
+     - **Recommended.** ZMQ + FastAPI HTTP frontend — see :doc:`http_api`.
    * - ``python3 -m lmcache.v1.multiprocess.server``
-     - (Legacy) ZMQ-only server using MPCacheEngine (no HTTP endpoints).
-       Prefer ``lmcache server``.
-   * - ``python3 -m lmcache.v1.multiprocess.blend_server_v2``
-     - (Legacy) CacheBlend-enabled server. Prefer ``lmcache server --engine-type blend``.
+     - (Legacy) ZMQ-only server with no HTTP endpoints; same
+       ``--engine-type`` / ``--supported-transfer-mode`` flags as
+       ``lmcache server``. Prefer ``lmcache server``.
 
 .. toctree::
    :maxdepth: 2

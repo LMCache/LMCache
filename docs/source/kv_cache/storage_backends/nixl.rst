@@ -48,7 +48,7 @@ Key settings:
 
 - ``nixl_path``: directory under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file.
 
-- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS" & "AZURE_BLOB", must be "cpu".
+- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu".
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
@@ -56,7 +56,7 @@ Key settings:
 
 .. note::
 
-    Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AZURE_BLOB"].
+    Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AZURE_BLOB", "DOCA_MEMOS"].
 
     Backend specific params should be provided via ``extra_config.nixl_backend_params``. Please refer to NIXL documentation for specifics.
 
@@ -144,6 +144,10 @@ round-robin order based on its ``local_worker_id`` (the worker ID within its hos
     When ``nixl_endpoint_list`` is set, any ``endpoint_override`` value in
     ``nixl_backend_params`` is ignored (a warning is logged).
 
+    ``nixl_endpoint_list`` is only honored for the OBJ backend; it is ignored
+    for all other backends (including DOCA_MEMOS, AZURE_BLOB, and the file
+    backends).
+
 Dynamic Mode
 ~~~~~~~~~~~~~
 
@@ -154,7 +158,7 @@ In order to use dynamic mode, extra_config.nixl_pool_size should be set to 0.
 Restrictions
 ^^^^^^^^^^^^
 
-- Dynamic mode is currently only supported for nixl OBJ and AZURE_BLOB backends.
+- Dynamic mode is supported for object backends ("OBJ", "AZURE_BLOB", "DOCA_MEMOS") and file backends ("POSIX", "GDS", "GDS_MT", "HF3FS").
 - save_unfull_chunk must be set to False.
 
 Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:
@@ -205,3 +209,30 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend with dynamic mode:
     nixl_backend_params:
       account_url: https://<your_azure_storage_account_name>.blob.core.windows.net
       container_name: <your_container_name>
+
+DOCA_MEMOS Backend (NVIDIA CMX)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``DOCA_MEMOS`` stores KV cache on NVIDIA CMX (Context Memory Storage), a
+BlueField-4 context-memory tier accessed through NIXL. It is an object-style
+backend (like ``OBJ``), supported in both static (``nixl_pool_size`` > 0) and
+dynamic (``nixl_pool_size`` = 0) mode. ``nixl_buffer_device`` must be ``cpu``.
+``nixl_endpoint_list`` is not supported for DOCA_MEMOS.
+
+Object names are 128-bit lowercase-hex strings: the NIXL DOCA_MEMOS plugin
+passes object names as strings and hex-decodes them on the device side, so
+each name is exactly 32 hex characters. In dynamic mode this name is a
+truncated SHA-256 of the cache key, so names are opaque (they carry no
+model/chunk debug information) and uniqueness is probabilistic at 128 bits.
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    nixl_buffer_size: 1073741824 # 1GB
+    nixl_buffer_device: cpu
+    extra_config:
+      enable_nixl_storage: true
+      nixl_backend: DOCA_MEMOS
+      nixl_pool_size: 64
+      nixl_backend_params:
+        # refer to NIXL DOCA_MEMOS plugin docs for connection params

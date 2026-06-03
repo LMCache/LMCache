@@ -453,8 +453,10 @@ class BlendModule:
                 to unregister.
         """
         if instance_id in self._cb_gpu_contexts:
+            model_name, world_size = self._cb_gpu_context_meta[instance_id]
             del self._cb_gpu_contexts[instance_id]
             del self._cb_gpu_context_meta[instance_id]
+            self._ctx.layout_desc_registry.unregister(model_name, world_size)
             logger.info("Unregistered CB KV cache for instance_id %d", instance_id)
         else:
             logger.warning(
