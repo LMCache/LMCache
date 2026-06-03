@@ -7,24 +7,28 @@ mp server (when it registers) imports the same models to build its request
 bodies and parse replies, so both sides agree on the schema in one place.
 """
 
+# Standard
+from typing import Annotated
+
 # Third Party
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 
 class RegisterRequest(BaseModel):
     """Body of a ``POST /instances`` registration request.
 
     Attributes:
-        instance_id: Identifier of the mp server. Optional -- if empty, the
-            coordinator generates one and returns it in the response.
-        ip: IP address of the mp server's HTTP server.
-        http_port: Port of the mp server's HTTP server, where the coordinator
-            POSTs pushed commands.
+        instance_id: Identifier of the mp server. Optional -- if empty (or
+            whitespace-only), the coordinator generates one and returns it.
+        ip: IP/host of the mp server's HTTP server. Whitespace is stripped and a
+            blank value is rejected, since the coordinator calls this address.
+        http_port: Port of the mp server's HTTP server, which the coordinator
+            calls to push work to this instance.
         metadata: Free-form registration hints.
     """
 
-    instance_id: str = ""
-    ip: str = Field(min_length=1)
+    instance_id: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
+    ip: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     http_port: int = Field(ge=1, le=65535)
     metadata: dict[str, str] = Field(default_factory=dict)
 

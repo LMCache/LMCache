@@ -7,7 +7,7 @@ health-check eviction); access is lock-guarded to stay correct.
 
 The registry stores plain membership data only -- ip, http_port, heartbeat
 timestamps, metadata. How to reach an instance for push is derived from its
-address by the push client.
+``ip`` + ``http_port`` by whichever router needs to call it.
 """
 
 # Standard
@@ -28,8 +28,8 @@ class MPInstance:
     Attributes:
         instance_id: Globally unique identifier of the mp server.
         ip: IP address the mp server's HTTP server is reachable at.
-        http_port: Port of the mp server's HTTP server, where the coordinator
-            POSTs pushed commands.
+        http_port: Port of the mp server's HTTP server, which the coordinator
+            calls to push work to this instance.
         registration_time: Wall-clock time the instance registered (for display).
         last_heartbeat_time: Monotonic-clock time of the most recent heartbeat,
             used for stale detection so an NTP step cannot skew liveness.
@@ -56,15 +56,23 @@ class InstanceRegistry:
         self._lock = threading.Lock()
         self._instances: dict[str, MPInstance] = {}
 
-    def register(self, instance: MPInstance) -> None:
-        """Insert or replace an mp server entry.
+    def register(self, instance: MPInstance) -> bool:
+        """Insert or replace an mp server entry atomically.
 
         Args:
             instance: The instance to store. If one with the same
                 ``instance_id`` already exists it is overwritten.
+
+        Returns:
+            ``True`` if an instance with the same id already existed (i.e. this
+            was a re-registration), else ``False``. The check and the write
+            happen under one lock, so concurrent registrations of the same id
+            cannot both report ``False``.
         """
         with self._lock:
+            existed = instance.instance_id in self._instances
             self._instances[instance.instance_id] = instance
+            return existed
 
     def deregister(self, instance_id: str) -> MPInstance | None:
         """Remove an mp server entry and return it.

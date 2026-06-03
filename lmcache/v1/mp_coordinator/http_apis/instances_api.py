@@ -63,11 +63,11 @@ async def register_instance(
         A :class:`RegisterResponse` carrying the (possibly generated) id.
     """
     instance_id = body.instance_id or f"mp-{uuid.uuid4().hex}"
-    registry = _registry(request)
-    re_registered = registry.contains(instance_id)
     # Wall-clock registration_time for display; monotonic last_heartbeat_time for
-    # NTP-safe stale detection (see registry.stale).
-    registry.register(
+    # NTP-safe stale detection (see registry.stale). register() does the
+    # exists-check and write under one lock, so the re_registered flag is correct
+    # even under concurrent registrations of the same id.
+    re_registered = _registry(request).register(
         MPInstance(
             instance_id=instance_id,
             ip=body.ip,

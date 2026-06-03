@@ -81,6 +81,24 @@ def test_register_generates_id_when_empty():
         assert [i["instance_id"] for i in listed] == [assigned]
 
 
+def test_register_rejects_blank_ip():
+    with _client() as client:
+        # Whitespace-only ip is stripped to empty and rejected.
+        bad = {"instance_id": "x", "ip": "   ", "http_port": 8080}
+        assert client.post("/instances", json=bad).status_code == 422
+
+
+def test_whitespace_instance_id_is_generated():
+    with _client() as client:
+        # Whitespace-only id strips to empty -> coordinator assigns one.
+        resp = client.post(
+            "/instances",
+            json={"instance_id": "  ", "ip": "127.0.0.1", "http_port": 8080},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["instance_id"].strip()
+
+
 def test_healthz():
     with _client() as client:
         assert client.get("/healthz").json() == {"status": "healthy"}

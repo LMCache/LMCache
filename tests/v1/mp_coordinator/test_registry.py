@@ -29,6 +29,12 @@ def test_register_and_get():
     assert registry.get("missing") is None
 
 
+def test_register_returns_replaced_flag():
+    registry = InstanceRegistry()
+    assert registry.register(_instance("a")) is False
+    assert registry.register(_instance("a")) is True
+
+
 def test_deregister_returns_instance():
     registry = InstanceRegistry()
     instance = _instance("a")
