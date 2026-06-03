@@ -882,6 +882,46 @@ def _query_checksum(
 
 
 # ------------------------------------------------------------------ #
+#  Client-side checksum fallback (non_gpu mode)                        #
+# ------------------------------------------------------------------ #
+
+
+def _compute_local_checksum(
+    kv_caches: dict[str, torch.Tensor],
+    block_offset: int,
+    num_blocks: int,
+    chunk_size: int,
+    block_size: int,
+) -> list[str]:
+    """Compute MD5 checksums over local KV cache tensors.
+
+    Used as a fallback when the server-side HTTP checksum endpoint
+    is unavailable (e.g. non_gpu mode where no GPU contexts exist).
+    Reads blocks ``[block_offset, block_offset + num_blocks)`` along
+    axis 1 (NB dimension, NHD layout) across all layers.
+    """
+    block_ids = list(range(block_offset, block_offset + num_blocks))
+    chunk_size_blocks = chunk_size // block_size
+    num_chunks = (len(block_ids) + chunk_size_blocks - 1) // chunk_size_blocks
+    block_axis = 1  # NHD: (2, NB, BS, NH, HS)
+
+    hashes: list[str] = []
+    for ci in range(num_chunks):
+        s = ci * chunk_size_blocks
+        e = min(s + chunk_size_blocks, len(block_ids))
+        chunk_blocks = block_ids[s:e]
+        hasher = hashlib.md5()
+        for _name, tensor in kv_caches.items():
+            idx = torch.tensor(chunk_blocks, dtype=torch.long, device=tensor.device)
+            selected = tensor.index_select(block_axis, idx).contiguous().cpu()
+            if selected.dtype == torch.bfloat16:
+                selected = selected.to(torch.float32)
+            hasher.update(selected.numpy().tobytes())
+        hashes.append(hasher.hexdigest())
+    return hashes
+
+
+# ------------------------------------------------------------------ #
 #  Per-request flow                                                    #
 # ------------------------------------------------------------------ #
 
