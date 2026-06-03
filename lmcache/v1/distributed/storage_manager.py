@@ -394,7 +394,6 @@ class StorageManager:
         extra_count: int = 0,
         external_request_id: str = "",
         policy: TrimPolicy = TrimPolicy.PREFIX,
-        covered_keys: set[ObjectKey] | None = None,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -409,10 +408,6 @@ class StorageManager:
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
                 ``SPARSE`` keeps every found key (gap-tolerant).
-            covered_keys: ``SPARSE`` only. Keys already served elsewhere (e.g.
-                the parent prefix): excluded from the L2 load and the found
-                set, and any probe read-lock on them is released — so the
-                locked set equals what the caller retrieves (no leak).
 
         Returns:
             PrefetchHandle to track the task.
@@ -423,47 +418,28 @@ class StorageManager:
         l1_read_result = self._l1_manager.reserve_read(keys, extra_count=extra_count)
 
         if policy is TrimPolicy.SPARSE:
-            # SPARSE: keep a read lock on every L1-found key (not just the
-            # leading prefix) and send all L1-misses to L2 as one sparse
-            # request so scattered chunks coalesce into one load. covered_keys
-            # (served elsewhere, e.g. the parent prefix) are excluded and any
-            # probe lock on them released, so the locked set == what the
-            # caller retrieves.
-            covered: set[ObjectKey] | frozenset[ObjectKey] = covered_keys or frozenset()
-            l1_found_indices = [
-                i
-                for i, key in enumerate(keys)
-                if key not in covered
-                and (ent := l1_read_result.get(key)) is not None
-                and ent[0] == L1Error.SUCCESS
-                and ent[1] is not None
-            ]
-            l1_found_set = {keys[i] for i in l1_found_indices}
-
-            # Release every probe read-lock we won't retain: covered keys plus
-            # any other L1 hit not in the retained found-set.
-            keys_to_release = [
-                key
-                for key, ent in l1_read_result.items()
-                if ent is not None and ent[1] is not None and key not in l1_found_set
-            ]
-            if keys_to_release:
-                self._l1_manager.finish_read(keys_to_release, extra_count=extra_count)
-
-            # L1 misses (minus covered) -> L2 sparse; keep each original index.
-            found_set = set(l1_found_indices)
-            sparse_l2_indices = [
-                i
-                for i in range(len(keys))
-                if i not in found_set and keys[i] not in covered
-            ]
-            remaining_keys = [keys[i] for i in sparse_l2_indices]
+            # SPARSE: retain a read lock on every L1 hit (not just the leading
+            # prefix) and send all L1 misses to L2 as one coalesced request.
+            # reserve_read locks only SUCCESS keys, so the found-set already
+            # equals the locked set -- nothing to release.
+            l1_found_indices: list[int] = []
+            succeeded_keys: list[ObjectKey] = []
+            sparse_l2_indices: list[int] = []
+            remaining_keys: list[ObjectKey] = []
+            for i, key in enumerate(keys):
+                ent = l1_read_result.get(key)
+                if ent is not None and ent[0] == L1Error.SUCCESS and ent[1] is not None:
+                    l1_found_indices.append(i)
+                    succeeded_keys.append(key)
+                else:
+                    sparse_l2_indices.append(i)
+                    remaining_keys.append(key)
 
             self._event_bus.publish(
                 Event(
                     event_type=EventType.SM_READ_PREFETCHED,
                     metadata={
-                        "succeeded_keys": [keys[i] for i in l1_found_indices],
+                        "succeeded_keys": succeeded_keys,
                         "failed_keys": remaining_keys,
                     },
                 )

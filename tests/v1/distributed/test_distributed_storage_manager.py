@@ -804,8 +804,8 @@ class TestFailureEventProduction:
 
 
 class TestStorageManagerSparsePrefetch:
-    """SPARSE prefetch (retain every found key, not just the prefix) +
-    ``covered_keys`` reconcile-before-prefetch."""
+    """SPARSE prefetch: retain a read lock on every found key, not just the
+    leading contiguous prefix."""
 
     def test_sparse_keeps_all_found_not_just_prefix(
         self, basic_storage_manager_config, basic_layout
@@ -868,36 +868,4 @@ class TestStorageManagerSparsePrefetch:
         assert found == {0, 1, 3, 4}
 
         sm.finish_read_prefetched(existing)
-        sm.close()
-
-    def test_sparse_covered_keys_excluded_and_released(
-        self, basic_storage_manager_config, basic_layout
-    ):
-        """``covered_keys`` are excluded from the found set and any probe
-        read-lock on them released — so they never leak a read lock."""
-        sm = StorageManager(basic_storage_manager_config)
-        all_keys = [make_object_key(i) for i in range(5)]
-        ret = sm.reserve_write(all_keys, basic_layout, mode="new")
-        sm.finish_write(list(ret.keys()))
-
-        covered = {all_keys[2], all_keys[3]}
-        handle = sm.submit_prefetch_task(
-            all_keys, basic_layout, policy=TrimPolicy.SPARSE, covered_keys=covered
-        )
-        found = wait_for_sparse_found(sm, handle, timeout=10.0)
-
-        # Covered indices 2, 3 excluded; only the complement is found.
-        assert found == {0, 1, 4}
-
-        # Non-covered found keys remain read-locked.
-        complement = [all_keys[i] for i in (0, 1, 4)]
-        assert len(sm.reserve_write(complement, basic_layout, mode="update")) == 0
-
-        # Covered keys are write-reservable again -> their probe lock was
-        # released (no leak), even though they were never retrieved.
-        covered_keys_list = [all_keys[2], all_keys[3]]
-        freed = sm.reserve_write(covered_keys_list, basic_layout, mode="update")
-        assert len(freed) == len(covered_keys_list)
-
-        sm.finish_read_prefetched(complement)
         sm.close()
