@@ -5,16 +5,16 @@
 import time
 
 # First Party
-from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstanceNode
+from lmcache.v1.mp_coordinator.registry import InstanceRegistry, MPInstance
 
 
-def _node(instance_id: str, heartbeat: float = 0.0) -> MPInstanceNode:
-    """Build a pure-membership MPInstanceNode for tests."""
+def _instance(instance_id: str, heartbeat: float = 0.0) -> MPInstance:
+    """Build a pure-membership MPInstance for tests."""
     now = heartbeat or time.time()
-    return MPInstanceNode(
+    return MPInstance(
         instance_id=instance_id,
         ip="127.0.0.1",
-        control_port=5000,
+        http_port=8080,
         registration_time=now,
         last_heartbeat_time=now,
     )
@@ -22,27 +22,27 @@ def _node(instance_id: str, heartbeat: float = 0.0) -> MPInstanceNode:
 
 def test_register_and_get():
     registry = InstanceRegistry()
-    node = _node("a")
-    registry.register(node)
+    instance = _instance("a")
+    registry.register(instance)
     assert registry.contains("a")
-    assert registry.get("a") is node
+    assert registry.get("a") is instance
     assert registry.get("missing") is None
 
 
-def test_deregister_returns_node():
+def test_deregister_returns_instance():
     registry = InstanceRegistry()
-    node = _node("a")
-    registry.register(node)
+    instance = _instance("a")
+    registry.register(instance)
     removed = registry.deregister("a")
-    assert removed is node
+    assert removed is instance
     assert not registry.contains("a")
     assert registry.deregister("a") is None
 
 
 def test_all_instances_snapshot_is_independent():
     registry = InstanceRegistry()
-    registry.register(_node("a"))
-    registry.register(_node("b"))
+    registry.register(_instance("a"))
+    registry.register(_instance("b"))
     snapshot = registry.all_instances()
     assert {n.instance_id for n in snapshot} == {"a", "b"}
     registry.deregister("a")
@@ -52,8 +52,8 @@ def test_all_instances_snapshot_is_independent():
 
 def test_update_heartbeat():
     registry = InstanceRegistry()
-    node = _node("a", heartbeat=100.0)
-    registry.register(node)
+    instance = _instance("a", heartbeat=100.0)
+    registry.register(instance)
     assert registry.update_heartbeat("a", 200.0) is True
     assert registry.get("a").last_heartbeat_time == 200.0
     # Unknown instance signals a needed re-register.
@@ -65,7 +65,7 @@ def test_stale_detects_expired():
     # stale() compares against the monotonic clock, so seed heartbeat times
     # from the same clock.
     now = time.monotonic()
-    registry.register(_node("fresh", heartbeat=now))
-    registry.register(_node("old", heartbeat=now - 100.0))
+    registry.register(_instance("fresh", heartbeat=now))
+    registry.register(_instance("old", heartbeat=now - 100.0))
     stale = registry.stale(timeout=30.0)
     assert stale == ["old"]

@@ -2,13 +2,12 @@
 """Thread-safe registry of live mp servers known to the coordinator.
 
 The registry is the single source of truth for fleet membership. It is mutated
-by the coordinator event loop (register / deregister / heartbeat) and read by
-the health-check thread (stale detection), so every access is guarded by a
-lock.
+and read on the coordinator event loop (register / deregister / heartbeat /
+health-check eviction); access is lock-guarded to stay correct.
 
-The registry stores plain membership data only -- it holds no sockets and has
-no transport dependency. How to reach an instance for server-initiated push is
-the transport's concern, keyed by instance id.
+The registry stores plain membership data only -- ip, http_port, heartbeat
+timestamps, metadata. How to reach an instance for push is derived from its
+address by the push client.
 """
 
 # Standard
@@ -23,13 +22,14 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class MPInstanceNode:
+class MPInstance:
     """A single registered mp server.
 
     Attributes:
         instance_id: Globally unique identifier of the mp server.
-        ip: IP address the mp server is reachable at.
-        control_port: Port of the mp server's control REP socket.
+        ip: IP address the mp server's HTTP server is reachable at.
+        http_port: Port of the mp server's HTTP server, where the coordinator
+            POSTs pushed commands.
         registration_time: Wall-clock time the instance registered (for display).
         last_heartbeat_time: Monotonic-clock time of the most recent heartbeat,
             used for stale detection so an NTP step cannot skew liveness.
@@ -38,7 +38,7 @@ class MPInstanceNode:
 
     instance_id: str
     ip: str
-    control_port: int
+    http_port: int
     registration_time: float
     last_heartbeat_time: float
     metadata: dict[str, str] = field(default_factory=dict)
@@ -47,47 +47,46 @@ class MPInstanceNode:
 class InstanceRegistry:
     """Thread-safe in-memory registry of mp servers.
 
-    All public methods acquire an internal lock, so the registry is safe to
-    share between the coordinator event loop and the health-check thread.
+    All public methods acquire an internal lock, so the registry stays
+    consistent under concurrent access.
     """
 
     def __init__(self) -> None:
         """Initialize an empty registry."""
         self._lock = threading.Lock()
-        self._instances: dict[str, MPInstanceNode] = {}
+        self._instances: dict[str, MPInstance] = {}
 
-    def register(self, node: MPInstanceNode) -> None:
+    def register(self, instance: MPInstance) -> None:
         """Insert or replace an mp server entry.
 
         Args:
-            node: The instance node to store. If an instance with the same
-                ``instance_id`` already exists it is overwritten; the caller is
-                responsible for closing any prior command socket first.
+            instance: The instance to store. If one with the same
+                ``instance_id`` already exists it is overwritten.
         """
         with self._lock:
-            self._instances[node.instance_id] = node
+            self._instances[instance.instance_id] = instance
 
-    def deregister(self, instance_id: str) -> MPInstanceNode | None:
+    def deregister(self, instance_id: str) -> MPInstance | None:
         """Remove an mp server entry and return it.
 
         Args:
             instance_id: Identifier of the instance to remove.
 
         Returns:
-            The removed node, or ``None`` if no such instance was registered.
-            The caller closes the returned node's command socket.
+            The removed instance, or ``None`` if no such instance was
+            registered.
         """
         with self._lock:
             return self._instances.pop(instance_id, None)
 
-    def get(self, instance_id: str) -> MPInstanceNode | None:
-        """Return the node for an instance, or ``None`` if unknown.
+    def get(self, instance_id: str) -> MPInstance | None:
+        """Return the instance with the given id, or ``None`` if unknown.
 
         Args:
             instance_id: Identifier to look up.
 
         Returns:
-            The matching node, or ``None``.
+            The matching instance, or ``None``.
         """
         with self._lock:
             return self._instances.get(instance_id)
@@ -104,11 +103,11 @@ class InstanceRegistry:
         with self._lock:
             return instance_id in self._instances
 
-    def all_instances(self) -> list[MPInstanceNode]:
-        """Return a snapshot list of all registered nodes.
+    def all_instances(self) -> list[MPInstance]:
+        """Return a snapshot list of all registered instances.
 
         Returns:
-            A new list containing every currently registered node.
+            A new list containing every currently registered instance.
         """
         with self._lock:
             return list(self._instances.values())
@@ -126,10 +125,10 @@ class InstanceRegistry:
             not registered (the caller should treat this as a re-register).
         """
         with self._lock:
-            node = self._instances.get(instance_id)
-            if node is None:
+            instance = self._instances.get(instance_id)
+            if instance is None:
                 return False
-            node.last_heartbeat_time = timestamp
+            instance.last_heartbeat_time = timestamp
             return True
 
     def stale(self, timeout: float) -> list[str]:
@@ -146,6 +145,6 @@ class InstanceRegistry:
         with self._lock:
             return [
                 instance_id
-                for instance_id, node in self._instances.items()
-                if now - node.last_heartbeat_time > timeout
+                for instance_id, instance in self._instances.items()
+                if now - instance.last_heartbeat_time > timeout
             ]
