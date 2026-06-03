@@ -249,7 +249,7 @@ def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
             lambda: _make_kv_caches(num_layers=2, num_blocks=8, block_size=4),
             4,
             16,
-            None,
+            {"kv_layout": "NHD"},
             id="nhd",
         ),
         pytest.param(
@@ -292,9 +292,22 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
     assert detected_kv_format is not None
 
     blocks_per_chunk = 2
-    gathered = gather_paged_kv_to_cpu(source, [0, 1], blocks_per_chunk)
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        [0, 1],
+        blocks_per_chunk,
+        layout_hints=layout_hints,
+        gpu_kv_format=detected_kv_format,
+    )
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
-    scatter_cpu_to_paged_kv(destination, [4, 5], gathered, blocks_per_chunk)
+    scatter_cpu_to_paged_kv(
+        destination,
+        [4, 5],
+        gathered,
+        blocks_per_chunk,
+        layout_hints=layout_hints,
+        gpu_kv_format=detected_kv_format,
+    )
 
     for name in source:
         if source[name].dim() == 5:
@@ -379,6 +392,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 @pytest.mark.parametrize(
     (
         "builder_fn",
+        "layout_hints",
         "skip_tokens",
         "expected_unchanged_blocks",
         "expected_copied_blocks",
@@ -386,6 +400,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
     [
         pytest.param(
             lambda: _make_kv_caches(num_layers=2, num_blocks=8, block_size=4),
+            {"kv_layout": "NHD"},
             8,
             [0, 1],
             [2, 3],
@@ -395,6 +410,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
             lambda: _make_mla_kv_caches(
                 num_layers=2, num_blocks=8, block_size=4, hidden_size=16
             ),
+            None,
             8,
             [0, 1],
             [2, 3],
@@ -404,6 +420,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
             lambda: _make_mla_kv_caches(
                 num_layers=2, num_blocks=8, block_size=4, hidden_size=16
             ),
+            None,
             40,
             [0, 1, 2, 3],
             [],
@@ -413,6 +430,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 )
 def test_scatter_respects_skip_first_n_tokens(
     builder_fn: Callable[[], dict[str, torch.Tensor]],
+    layout_hints: "LayoutHints | None",
     skip_tokens: int,
     expected_unchanged_blocks: list[int],
     expected_copied_blocks: list[int],
@@ -428,13 +446,19 @@ def test_scatter_respects_skip_first_n_tokens(
     destination = {
         name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
     }
-    gathered = gather_paged_kv_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        [0, 1, 2, 3],
+        blocks_per_chunk=4,
+        layout_hints=layout_hints,
+    )
     scatter_cpu_to_paged_kv(
         destination,
         [0, 1, 2, 3],
         gathered,
         blocks_per_chunk=4,
         skip_first_n_tokens=skip_tokens,
+        layout_hints=layout_hints,
     )
 
     for name in destination:
@@ -821,10 +845,12 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
 
     # With chunk_indices=[0, 2], gather only chunks at positions 0 and 2
     # block_ids has 6 entries: [0,1] for chunk 0, [2,3] for chunk 1, [4,5] for chunk 2
+    layout_hints: LayoutHints = {"kv_layout": "NHD"}
     result = gather_paged_kv_to_cpu(
         source,
         block_ids=[0, 1, 2, 3, 4, 5],
         blocks_per_chunk=blocks_per_chunk,
+        layout_hints=layout_hints,
         out=out_buffers,
         chunk_indices=[0, 2],
     )
@@ -835,7 +861,12 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     # out_buffers[0] should contain chunk 0 (blocks 0,1) data
     # out_buffers[1] should contain chunk 2 (blocks 4,5) data
     # Verify by independently gathering all chunks and comparing
-    all_chunks = gather_paged_kv_to_cpu(source, [0, 1, 2, 3, 4, 5], blocks_per_chunk)
+    all_chunks = gather_paged_kv_to_cpu(
+        source,
+        [0, 1, 2, 3, 4, 5],
+        blocks_per_chunk,
+        layout_hints=layout_hints,
+    )
     assert torch.allclose(out_buffers[0], all_chunks[0])
     assert torch.allclose(out_buffers[1], all_chunks[2])
 

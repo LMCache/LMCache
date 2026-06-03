@@ -587,7 +587,7 @@ def normalize_kv_and_discover_format(
         # however, get_kv_cache_layout from vllm.v1.attention.backends.utils
         # does not return the right layout for CPU attention.
         # Right fix should come from vllm side, but hardcode here as safeguard.
-        if torch_device_type == "cpu":
+        if torch_device_type == "cpu" and kv_layout is None:
             kv_layout = "HND"
             logger.info("CPU backend detected, using HND KV cache layout")
         elif kv_layout is None:
