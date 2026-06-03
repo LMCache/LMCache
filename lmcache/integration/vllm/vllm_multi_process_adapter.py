@@ -18,7 +18,6 @@ from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
 )
@@ -34,6 +33,7 @@ from lmcache.v1.multiprocess.transfer_context import (
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform import _registry as platform_registry
 
 logger = init_logger(__name__)
 
@@ -52,6 +52,13 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Routing mode for ``create_transfer_context``: ``auto`` keeps the
+    # historical CUDA -> handle / others -> data dispatch; ``handle``
+    # forces the IPC / SHM zero-copy path; ``data`` forces the
+    # worker-side gather/scatter copy path. Mirrors the
+    # ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config key wins
+    # when both are set.
+    mp_transfer_mode = "auto"
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -134,7 +141,52 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
         ),
     )
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
-    return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
+    # Per-iteration resource management: if wrapping the N-th tensor
+    # raises, ``shm_unlink`` whatever earlier iterations already
+    # registered with POSIX SHM so the named segments do not outlive
+    # the failed batch. CUDA wrappers do not own a named segment and
+    # are skipped via the duck-typed ``shm_name`` check.
+    wrappers: KVCache = []
+    try:
+        for tensor in kv_caches.values():
+            wrappers.append(_wrap_one_kv_cache(tensor))
+    except BaseException:
+        _release_partial_kv_wrappers(wrappers)
+        raise
+    return wrappers
+
+
+def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
+    """Best-effort unlink of SHM segments owned by partially built wrappers.
+
+    Used by :func:`wrap_kv_caches` to roll back a half-finished batch
+    when a later iteration raises. Only POSIX-SHM-backed wrappers carry
+    a ``shm_name`` attribute, so other wrapper kinds (e.g. CUDA-IPC)
+    are silently skipped.
+    """
+    # First Party
+    from lmcache.v1.platform.cpu.shm import shm_unlink
+
+    for w in wrappers:
+        name = getattr(w, "shm_name", None)
+        if name is None:
+            continue
+        try:
+            shm_unlink(name)
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("shm_unlink failed during rollback", exc_info=True)
+
+
+def _wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
+    """Dispatch by ``tensor.device.type`` via the platform registry.
+
+    Concrete factories self-register at import time (CUDA in
+    ``lmcache.v1.platform.cuda``, CPU SHM in
+    ``lmcache.v1.platform.cpu``), so this call site stays free of
+    if/elif chains and new accelerators plug in by registering a
+    sibling factory.
+    """
+    return platform_registry.get_kv_wrapper_factory(tensor.device.type)(tensor)
 
 
 def send_lmcache_request(
@@ -845,6 +897,9 @@ class LMCacheMPWorkerAdapter:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
+        else:
+            self._mp_transfer_mode = ExtraConfigDefault.mp_transfer_mode.value
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -1005,7 +1060,9 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        self.transfer_ctx = create_transfer_context(kv_caches)
+        self.transfer_ctx = create_transfer_context(
+            kv_caches, mode=self._mp_transfer_mode
+        )
         layout_hints = vllm_layout_hints()
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
