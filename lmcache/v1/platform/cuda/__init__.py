@@ -7,15 +7,20 @@ in :mod:`lmcache.integration.vllm.vllm_multi_process_adapter` can
 locate it by ``tensor.device.type``.
 """
 
+# Standard
+from typing import Any
+
+# Third Party
+import torch
+
 # First Party
-from lmcache import torch_dev
 from lmcache.v1.platform._registry import (
     register_availability,
     register_kv_wrapper,
 )
 
 
-def _kv_wrapper_factory(tensor):
+def _kv_wrapper_factory(tensor: torch.Tensor) -> Any:
     """Indirect-dispatch wrapper.
 
     Re-imports :class:`CudaIPCWrapper` on every call so test suites
@@ -27,5 +32,13 @@ def _kv_wrapper_factory(tensor):
     return CudaIPCWrapper(tensor)
 
 
-register_availability("cuda", lambda: torch_dev.is_available())
+def _cuda_is_available() -> bool:
+    """Lazy availability check to avoid circular import at module load."""
+    # First Party
+    from lmcache import torch_dev
+
+    return torch_dev.is_available()
+
+
+register_availability("cuda", _cuda_is_available)
 register_kv_wrapper("cuda", _kv_wrapper_factory)
