@@ -161,33 +161,40 @@ Checksum:                                OK
 
 ### `lmcache bench`
 
-**`bench kvcache`** -- exercises store/retrieve/lookup over ZMQ. Includes a
-correctness check: each retrieved KV cache chunk is checksummed against the original
-stored data to verify integrity under load.
+**`bench server`** -- end-to-end sanity test for a running LMCache MP cache
+server (ZMQ + HTTP). For each sequence in ``[--start, --end)`` the tool runs a
+cold pass (``LOOKUP`` miss → ``STORE``) and a warm pass (``LOOKUP`` hit →
+``RETRIEVE``), then cross-checks per-chunk checksums against the server's HTTP
+API. Exercises the full RPC path
+(``REGISTER_KV_CACHE → GET_CHUNK_SIZE → LOOKUP → QUERY_PREFETCH_STATUS →
+RETRIEVE → STORE → END_SESSION``).
 
 ```bash
-$ lmcache bench kvcache --url localhost:5555 --duration 30
+$ lmcache bench server \
+    --rpc-url tcp://localhost:5555 \
+    --url http://localhost:8080 \
+    --start 0 --end 2
 
-========= Bench KV Cache Result (30s) =========
---------------Operations (ops/s)----------------
-Store:                                   41.3
-Retrieve:                                127.3
-Lookup:                                  281.7
------------------Hit Rate-----------------------
-L1:                                      92.3%
-L2:                                      67.8%
----------------Bandwidth (GB/s)-----------------
-L1 read:                                 12.4
-L1 write:                                8.7
-L2 read:                                 2.1
-L2 write:                                1.4
---------------Correctness-----------------------
-Checksums:                               5060/5060 OK
-================================================
+Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu) ...
+Server chunk_size = 256
+Resolved KV shape spec: (2,1024,16,8,128):float16:32
+[seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
+[seq=0] STORE:        2 chunks stored (1.74 ms)
+[seq=0] LOOKUP warm:  2/2 chunks hit (1.31 ms)
+[seq=0] RETRIEVE:     2 chunks retrieved (1.48 ms)
+[seq=0] CHECKSUM MATCH OK
+[seq=1] ...
 ```
 
-Use `--verify-only` to run the correctness check without reporting throughput
-(useful in CI), or `--no-verify` to skip checksums for pure throughput measurement.
+With ``--end`` unset, the loop runs forever; stop with ``Ctrl-C``. The KV
+tensor layout is controlled by ``--kvcache-shape-spec`` (see
+``lmcache/v1/kv_layer_groups.py``); see :doc:`bench_server` in the user guide
+for the full flag list.
+
+**`bench l2`** -- store / lookup / load throughput benchmark against an
+``L2AdapterInterface`` implementation (no MP server required). Implemented at
+``lmcache/cli/commands/bench/l2_adapter_bench/``; see the
+``docs/source/cli/bench_l2.rst`` user guide for full options.
 
 **`bench engine`** -- **superset of `vllm bench serve`**. Same CLI args, same output
 format, plus an extra LMCache KV cache metrics section:

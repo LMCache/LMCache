@@ -16,10 +16,11 @@ A subset of routes defined under
 ``lmcache/v1/internal_api_server/common/`` is also exposed on this HTTP
 server. The module
 ``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates those
-routers (skipping modules listed in ``_MP_INCOMPATIBLE_MODULES``, such as
-``run_script_api``) and forwards them to the auto-discovery pipeline.
-Adding a new compatible module under ``internal_api_server/common``
-therefore requires no wiring changes on the MP side.
+routers (skipping any module listed in ``_MP_INCOMPATIBLE_MODULES``,
+which is currently empty) and forwards them to the auto-discovery
+pipeline. Adding a new compatible module under
+``internal_api_server/common`` therefore requires no wiring changes on
+the MP side.
 
 .. contents::
    :local:
@@ -82,6 +83,11 @@ compatibility with the vLLM-embedded API server.
      - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
+     - ``/kvcache/check``
+     - Compute MD5 checksums over the GPU KV cache for a set of block IDs.
+       Intended for diagnostics and round-trip integrity checks from
+       ``lmcache bench server``.
+   * - GET
      - ``/quota``
      - List every registered ``cache_salt`` quota with live usage.
    * - PUT
@@ -131,6 +137,10 @@ compatibility with the vLLM-embedded API server.
    * - GET
      - ``/periodic-threads-health``
      - Quick health check for critical/high-level periodic threads.
+   * - POST
+     - ``/run_script``
+     - Execute an uploaded Python script in a restricted sandbox. Only
+       modules listed in ``--script-allowed-imports`` can be imported.
 
 ``GET /``
 ~~~~~~~~~
@@ -298,6 +308,76 @@ The request body is ignored.
 .. code-block:: bash
 
     curl -s -X POST http://localhost:8080/clear-cache
+
+``GET /kvcache/check``
+~~~~~~~~~~~~~~~~~~~~~~
+
+Compute MD5 checksums over the GPU KV cache, grouped ``chunk_size`` blocks
+per hashed chunk. MP mode addresses KV storage by block IDs natively (the
+same units used by ``STORE`` / ``RETRIEVE``), so the endpoint is fully
+block-centric: ``block_ids`` enumerates the target blocks and
+``chunk_size`` counts blocks per chunk. Intended for diagnostics and
+round-trip integrity checks from ``lmcache bench server`` — not for the
+inference data path.
+
+**Query parameters:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Name
+     - Required
+     - Description
+   * - ``block_ids``
+     - yes
+     - GPU block IDs in mixed format, e.g. ``"0,[2,5],8"``.
+   * - ``chunk_size``
+     - yes
+     - Positive integer — number of blocks per hashed chunk.
+   * - ``instance_id``
+     - no (default ``0``)
+     - Registered GPU context ID on the engine.
+   * - ``layerwise``
+     - no (default ``false``)
+     - If ``true``, return per-layer checksums keyed by ``"layer_<idx>"``;
+       otherwise a single aggregated digest per chunk over all layers.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "chunk_size": 2,
+      "num_chunks": 2,
+      "chunk_checksums": ["<md5>", "<md5>"],
+      "layerwise": false,
+      "block_id_ranges": "0,[2,5],8"
+    }
+
+When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
+``"layer_<idx>"`` whose values are per-layer lists.
+
+**HTTP status codes:**
+
+- ``200``: success.
+- ``400``: ``block_ids`` missing/malformed, or ``chunk_size`` missing or
+  non-positive.
+- ``404``: ``instance_id`` not registered, or the registered KV tensors
+  are empty.
+- ``501``: engine has no ``gpu_contexts``, or the GPU KV format is not
+  supported by this endpoint (page-buffer-fused and cross-layer layouts
+  are declined until a real need appears).
+- ``503``: engine not yet initialized on ``app.state``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2"
+
+    curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2&layerwise=true"
 
 .. _mp-http-quota-api:
 
@@ -706,9 +786,9 @@ registration list to edit.
 If the route is generic enough to be shared with the vLLM-embedded API
 server, add it under ``lmcache/v1/internal_api_server/common/`` instead.
 It will be picked up on the MP side via ``common_api.py`` unless its
-module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (used for
-modules that require vLLM-specific ``app.state`` attributes, e.g.
-``run_script_api``).
+module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved
+for modules that require vLLM-specific ``app.state`` attributes; the
+list is currently empty).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and

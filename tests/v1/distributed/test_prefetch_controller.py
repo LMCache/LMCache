@@ -18,7 +18,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.native_storage_ops import Bitmap
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -28,6 +29,8 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
     PrefetchController,
+    build_trim_mask,
+    merge_bitmaps,
 )
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     DefaultPrefetchPolicy,
@@ -94,7 +97,7 @@ def wait_for_prefetch_result(
     while time.monotonic() < deadline:
         result = ctrl.query_prefetch_result(req_id)
         if result is not None:
-            return result
+            return result.count_leading_ones()
         time.sleep(poll_interval)
     return None
 
@@ -109,6 +112,26 @@ def wait_for_lookup_result(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = ctrl.query_lookup_result(req_id)
+        if result is not None:
+            return result
+        time.sleep(poll_interval)
+    return None
+
+
+def wait_for_prefetch_result_bitmap(
+    ctrl: PrefetchController,
+    req_id: int,
+    timeout: float = 5.0,
+    poll_interval: float = 0.05,
+):
+    """Poll query_prefetch_result, returning the raw retained Bitmap.
+
+    Unlike :func:`wait_for_prefetch_result`, this keeps the full bitmap so a
+    caller can inspect non-contiguous retained sets (e.g. SEGMENTED_PREFIX).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = ctrl.query_prefetch_result(req_id)
         if result is not None:
             return result
         time.sleep(poll_interval)
@@ -1142,3 +1165,58 @@ class TestQueryLookupResult:
         assert ctrl.query_lookup_result(999) is None
 
         ctrl.stop()
+
+
+class TestBuildTrimMask:
+    """build_trim_mask picks the retained subset per policy: PREFIX trims at
+    the first gap; SEGMENTED_PREFIX keeps every set bit (gaps and all). The
+    retained bitmap is consumed unchanged at the controller's load sites, so
+    testing the mask directly covers the policy semantics."""
+
+    @staticmethod
+    def _bm(n, idxs):
+        bm = Bitmap(n)
+        for i in idxs:
+            bm.set(i)
+        return bm
+
+    def test_prefix_trims_at_first_gap(self):
+        found = self._bm(5, [0, 1, 3, 4])  # gap at index 2
+        assert build_trim_mask(found, 5, TrimPolicy.PREFIX).get_indices_list() == [
+            0,
+            1,
+        ]
+
+    def test_segmented_prefix_keeps_gaps(self):
+        # Models an L2 hit whose L1 load failed mid-prefix (e.g. OOM at index
+        # 2): the keys that did load are kept, not trimmed to the first gap.
+        found = self._bm(5, [0, 1, 3, 4])
+        assert build_trim_mask(
+            found, 5, TrimPolicy.SEGMENTED_PREFIX
+        ).get_indices_list() == [0, 1, 3, 4]
+
+
+class TestMergeBitmaps:
+    """merge_bitmaps always returns a num_keys-sized bitmap."""
+
+    def test_empty_input_returns_sized_bitmap(self):
+        """Empty input -> num_keys-sized all-zeros bitmap (not Bitmap(0)), so a
+        downstream ``&`` with a same-sized mask never hits a size mismatch."""
+        merged = merge_bitmaps([], 5)
+        assert merged.popcount() == 0
+        mask = Bitmap(5)
+        mask.set(2)
+        assert (merged & mask).popcount() == 0  # would raise on size mismatch
+
+    def test_empty_generator_returns_sized_bitmap(self):
+        """A generator is truthy even when empty; the result is still size-5."""
+        merged = merge_bitmaps((b for b in []), 5)
+        assert merged.popcount() == 0
+        assert (merged & Bitmap(5)).popcount() == 0
+
+    def test_union_of_bitmaps(self):
+        """Non-empty inputs are OR-merged into one num_keys-sized bitmap."""
+        a, b = Bitmap(5), Bitmap(5)
+        a.set(0)
+        b.set(3)
+        assert merge_bitmaps([a, b], 5).get_indices_list() == [0, 3]
