@@ -100,12 +100,23 @@ def _make_connector(
 
 def test_wait_for_save_skips_desynced_request_and_keeps_engine_alive(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Length mismatch must drop only the affected request's save, log a
     warning, and let ``wait_for_save`` return normally.
 
     Regression for https://github.com/LMCache/LMCache/issues/3318.
     """
+    # lmcache's ``init_logger`` sets ``propagate = False``, so ``caplog``
+    # (which attaches to the root logger) cannot see the adapter's records.
+    # Re-enable propagation for the duration of the test so the warning is
+    # captured; monkeypatch restores it afterwards.
+    monkeypatch.setattr(
+        logging.getLogger("lmcache.integration.vllm.vllm_v1_adapter"),
+        "propagate",
+        True,
+    )
+
     desync_req = _make_desync_request("req-desync", token_ids_len=4, slot_mapping_len=3)
     connector, engine = _make_connector([desync_req])
 
