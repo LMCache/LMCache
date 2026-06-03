@@ -95,6 +95,9 @@ resolve_port_csv() {
 finalize() {
   local rc=$?
   echo ""
+  if declare -F scrape_blend_metrics >/dev/null 2>&1; then
+    scrape_blend_metrics || true
+  fi
   echo "[INFO] Shutting down all processes..."
   cleanup_pids
   echo "[INFO] Logs: ${LOG_DIR}/"
@@ -134,6 +137,7 @@ SERVICE_PORT_REQUESTED="${SERVICE_PORT:-10001}"
 PREFILLER_PORT_REQUESTED="${PREFILLER_PORT:-8100}"
 DECODER_PORT_REQUESTED="${DECODER_PORT:-8200}"
 TELEMETRY_PORT_REQUESTED="${TELEMETRY_PORT:-5768}"
+PROMETHEUS_PORT_REQUESTED="${PROMETHEUS_PORT:-9090}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.5}"
@@ -156,14 +160,21 @@ SHUFFLE_DOCUMENT_LENGTH="${SHUFFLE_DOCUMENT_LENGTH:-1000}"
 SHUFFLE_OUTPUT_LEN="${SHUFFLE_OUTPUT_LEN:-200}"
 PREFILLER_VLLM_BIN="${PREFILLER_VLLM_BIN:-${DEFAULT_VENV_BIN}/vllm}"
 DECODER_VLLM_BIN="${DECODER_VLLM_BIN:-${TEST_VENV_BIN}/vllm}"
+BLEND_SERVER_MODULE="${BLEND_SERVER_MODULE:-lmcache.v1.multiprocess.server}"
+PREFILLER_KV_CONNECTOR="${PREFILLER_KV_CONNECTOR:-LMCacheMPCBConnector}"
+PREFILLER_KV_CONNECTOR_MODULE_PATH="${PREFILLER_KV_CONNECTOR_MODULE_PATH:-}"
+DECODER_KV_CONNECTOR="${DECODER_KV_CONNECTOR:-LMCacheMPConnector}"
+DECODER_KV_CONNECTOR_MODULE_PATH="${DECODER_KV_CONNECTOR_MODULE_PATH:-lmcache.integration.vllm.lmcache_mp_connector}"
 LMCACHE_MP_PORT="$(reserve_port "${LMCACHE_MP_PORT_REQUESTED}" "blend_server")"
 TELEMETRY_PORT="$(reserve_port "${TELEMETRY_PORT_REQUESTED}" "telemetry_server")"
+PROMETHEUS_PORT="$(reserve_port "${PROMETHEUS_PORT_REQUESTED}" "prometheus_metrics")"
 SERVICE_PORT="$(reserve_port "${SERVICE_PORT_REQUESTED}" "proxy_service")"
 PREFILLER_PORT="$(resolve_port_csv "prefiller" "${PREFILLER_PORT_REQUESTED}")"
 DECODER_PORT="$(resolve_port_csv "decoder" "${DECODER_PORT_REQUESTED}")"
 IFS=',' read -ra PREFILLER_PORTS <<< "$PREFILLER_PORT"
 IFS=',' read -ra DECODER_PORTS <<< "$DECODER_PORT"
 export SERVICE_PORT
+METRICS_SCRAPED=0
 
 NUM_PREFILLERS=${#PREFILLER_PORTS[@]}
 NUM_DECODERS=${#DECODER_PORTS[@]}
@@ -173,28 +184,76 @@ echo "  Prefiller ports: ${PREFILLER_PORTS[*]}"
 echo "  Decoder ports:   ${DECODER_PORTS[*]}"
 echo "  Service port:    ${SERVICE_PORT}"
 echo "  Telemetry port:  ${TELEMETRY_PORT}"
+echo "  Prometheus port: ${PROMETHEUS_PORT}"
 echo "  Blend MP port:   ${LMCACHE_MP_PORT}"
 echo "  GPUs per instance: ${TENSOR_PARALLEL}"
 echo "  Default venv dir: ${DEFAULT_VENV_DIR} (prefiller vLLM: image-built)"
 echo "  Test venv dir:    ${TEST_VENV_DIR} (blend server / decoder vLLM / proxy / benchmark: nightly)"
 echo "  Prefiller vLLM:   ${PREFILLER_VLLM_BIN}"
 echo "  Decoder vLLM:     ${DECODER_VLLM_BIN}"
+echo "  Blend server:     ${TEST_PYTHON} -m ${BLEND_SERVER_MODULE}"
+echo "  Prefiller connector: ${PREFILLER_KV_CONNECTOR} module_path=${PREFILLER_KV_CONNECTOR_MODULE_PATH:-<default>}"
+echo "  Decoder connector:   ${DECODER_KV_CONNECTOR} module_path=${DECODER_KV_CONNECTOR_MODULE_PATH:-<default>}"
 
 
 export MAX_MODEL_LEN
 export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2025.1.0/host/linux-desktop-glibc_2_11_3-x64/:$LD_LIBRARY_PATH
 
+build_kv_transfer_config() {
+  local connector="$1"
+  local module_path="$2"
+  local port="$3"
+
+  if [[ -n "${module_path}" ]]; then
+    printf '{"kv_connector":"%s","kv_connector_module_path":"%s","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.port":%s}}' \
+      "${connector}" "${module_path}" "${port}"
+  else
+    printf '{"kv_connector":"%s","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.port":%s}}' \
+      "${connector}" "${port}"
+  fi
+}
+
+scrape_blend_metrics() {
+  if [[ "${METRICS_SCRAPED:-0}" == "1" ]]; then
+    return 0
+  fi
+  METRICS_SCRAPED=1
+
+  local metrics_log="${LOG_DIR}/build_${BUILD_ID}_blend_metrics.log"
+  {
+    echo "--- CacheBlend metrics scrape $(date -u '+%Y-%m-%dT%H:%M:%SZ') ---"
+    echo "GET http://127.0.0.1:${PROMETHEUS_PORT}/metrics"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsS "http://127.0.0.1:${PROMETHEUS_PORT}/metrics" \
+        | grep -E '^(# HELP |# TYPE |lmcache_blend_)' || true
+    else
+      "${TEST_PYTHON}" - "${PROMETHEUS_PORT}" <<'PY' || true
+import sys
+from urllib.request import urlopen
+
+port = sys.argv[1]
+with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=10) as resp:
+    for line in resp.read().decode("utf-8", errors="replace").splitlines():
+        if line.startswith(("# HELP ", "# TYPE ", "lmcache_blend_")):
+            print(line)
+PY
+    fi
+  } >>"${metrics_log}" 2>&1
+}
+
 # ---------------------------------------------------------------------------
 # 1. Start the LMCache blend server
 # ---------------------------------------------------------------------------
 
-"${TEST_PYTHON}" -m lmcache.v1.multiprocess.blend_server_v2 \
+"${TEST_PYTHON}" -m "${BLEND_SERVER_MODULE}" \
+  --engine-type blend \
   --max-workers 1 \
   --port "${LMCACHE_MP_PORT}" \
-  --l1-size 70 \
+  --l1-size-gb 70 \
   --eviction-policy LRU \
   --chunk-size 1024 \
   --l1-align-bytes 16777216 \
+  --prometheus-port "${PROMETHEUS_PORT}" \
   >>"${BLEND_SERVER_LOG}" 2>&1 &
 TRACKED_PIDS+=($!)
 
@@ -224,7 +283,7 @@ for port in "${PREFILLER_PORTS[@]}"; do
     --no-enable-prefix-caching \
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --kv-transfer-config \
-      "{\"kv_connector\":\"LMCacheMPCBConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":${LMCACHE_MP_PORT}}}" \
+      "$(build_kv_transfer_config "${PREFILLER_KV_CONNECTOR}" "${PREFILLER_KV_CONNECTOR_MODULE_PATH}" "${LMCACHE_MP_PORT}")" \
     >>"${PREFILLER_LOG}" 2>&1 &
   TRACKED_PIDS+=($!)
   GPU_IDX=$((GPU_IDX + TENSOR_PARALLEL))
@@ -252,7 +311,7 @@ for port in "${DECODER_PORTS[@]}"; do
     --no-enable-prefix-caching \
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --kv-transfer-config \
-      "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"lmcache.mp.port\":${LMCACHE_MP_PORT}}}" \
+      "$(build_kv_transfer_config "${DECODER_KV_CONNECTOR}" "${DECODER_KV_CONNECTOR_MODULE_PATH}" "${LMCACHE_MP_PORT}")" \
     >>"${DECODER_LOG}" 2>&1 &
   TRACKED_PIDS+=($!)
   GPU_IDX=$((GPU_IDX + TENSOR_PARALLEL))
@@ -303,6 +362,7 @@ if ! timeout "${BENCHMARK_TIMEOUT_SEC}" \
   exit 1
 fi
 
+scrape_blend_metrics
 check_build_logs_for_errors
 
 echo "[PASS] Blend integration test completed successfully."
