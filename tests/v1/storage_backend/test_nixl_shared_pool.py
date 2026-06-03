@@ -3,7 +3,9 @@
 
 Verifies that local_cpu_backend is wired up at construction time (no post_init),
 get_allocator_backend() returns the correct backend, and error cases are caught
-early. No real NIXL hardware needed — nixl package is mocked at sys.modules level.
+early. No real NIXL hardware needed — agent constructors are stubbed per test,
+and when the nixl package is not installed it is shadowed at sys.modules level
+only for the duration of this module's import (see _install_nixl_mock_if_absent).
 """
 
 # Standard
@@ -21,7 +23,32 @@ import torch
 # ---------------------------------------------------------------------------
 
 
-def _make_nixl_mock() -> None:
+def _install_nixl_mock_if_absent() -> list:
+    """Install a fake ``nixl`` package so this module can import
+    ``nixl_storage_backend`` and exercise its construction paths without a real
+    NIXL build. Returns the list of ``sys.modules`` keys it inserted.
+
+    The fake is removed again immediately after the imports below — it must NOT
+    outlive this module's import. Other nixl test modules gate on
+    ``pytest.importorskip("nixl")`` and import ``nixl`` at module top; a fake
+    left in ``sys.modules`` during collection would make those modules run
+    against the mock instead of skipping (or, with real nixl present, shadow it)
+    and fail. Removing it at import time — rather than in a teardown — closes
+    that window, because pytest imports each module to completion during
+    collection before collecting the next one (a teardown runs far too late).
+
+    When real nixl is installed we install nothing and use it as-is; the
+    per-test agent ``__init__`` stubs keep the tests off any real transport.
+    """
+    try:
+        # Third Party
+        import nixl  # noqa: F401
+        import nixl._api  # noqa: F401
+
+        return []
+    except ImportError:
+        pass
+
     nixlBind_mock = MagicMock()
     nixlBind_mock.nixlRegDList = object
     nixlBind_mock.nixlXferDList = object
@@ -41,11 +68,16 @@ def _make_nixl_mock() -> None:
     nixl_mock = types.ModuleType("nixl")
     nixl_mock._api = api_mock  # type: ignore[attr-defined]
 
-    sys.modules.setdefault("nixl", nixl_mock)
-    sys.modules.setdefault("nixl._api", api_mock)
+    inserted = []
+    for name, mod in (("nixl", nixl_mock), ("nixl._api", api_mock)):
+        if name not in sys.modules:
+            sys.modules[name] = mod
+            inserted.append(name)
+    return inserted
 
 
-_make_nixl_mock()
+_NIXL_MOCK_KEYS = _install_nixl_mock_if_absent()
+
 
 # First Party
 from lmcache.utils import CacheEngineKey  # noqa: E402
@@ -58,6 +90,13 @@ from lmcache.v1.metadata import LMCacheMetadata  # noqa: E402
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend  # noqa: E402
 import lmcache.v1.memory_management as memory_management_module  # noqa: E402
 import lmcache.v1.storage_backend.nixl_storage_backend as nixl_module  # noqa: E402
+
+# nixl_module has now captured whatever it needs from the (possibly fake) nixl
+# package. Drop the fake from sys.modules so it cannot leak into other test
+# modules' pytest.importorskip("nixl") during collection. No-op when real nixl
+# is installed (nothing was inserted).
+for _name in _NIXL_MOCK_KEYS:
+    sys.modules.pop(_name, None)
 
 # ---------------------------------------------------------------------------
 # Helpers
