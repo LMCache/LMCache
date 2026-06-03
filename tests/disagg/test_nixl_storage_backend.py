@@ -116,7 +116,7 @@ def test_nixl_storage_config():
         config.nixl_buffer_device, metadata.worker_id
     )
     assert nixl_config.backend == config.extra_config["nixl_backend"]
-    assert nixl_config.file_pool_size == config.extra_config["nixl_file_pool_size"]
+    assert nixl_config.pool_size == config.extra_config["nixl_pool_size"]
     assert nixl_config.path == config.extra_config["nixl_path"]
 
     # Test validation
