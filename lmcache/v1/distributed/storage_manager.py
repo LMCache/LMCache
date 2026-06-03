@@ -493,12 +493,11 @@ class StorageManager:
         ``handle.l2_orig_indices``.
         """
         found = Bitmap(handle.total_requested_keys)
-        for i in handle.l1_found_indices:
-            found.set(i)
+        found.batched_set(handle.l1_found_indices)
         if l2_local is not None:
-            orig = handle.l2_orig_indices
-            for local_i in l2_local.get_indices_list():
-                found.set(orig[local_i])
+            # gather maps each L2 set bit i to its original position
+            # ``l2_orig_indices[i]``; batched_set drops any position >= size.
+            found.batched_set(l2_local.gather(handle.l2_orig_indices))
         return found
 
     def query_prefetch_lookup_hits(

@@ -57,9 +57,11 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Return a list of indices where the bit is set to 1.")
       .def("get_indices_set", &Bitmap::get_indices_set,
            "Return a set of indices where the bit is set to 1.")
+      .def("batched_set", &Bitmap::batched_set, py::arg("indices"),
+           "Set every bit in indices to 1 (positions >= size ignored).")
       .def(
           "gather",
-          [](const Bitmap& self, const py::list& items) {
+          [](const Bitmap& self, const py::sequence& items) {
             auto indices = self.get_indices();
             py::list result;
             for (auto idx : indices) {

@@ -4,6 +4,7 @@
 """Native storage operations for LMCache."""
 
 # Standard
+from collections.abc import Sequence
 from typing import Any, Set, overload
 
 class TTLLock:
@@ -79,6 +80,10 @@ class Bitmap:
         """Set the bit at the specified index to 1."""
         ...
 
+    def batched_set(self, indices: Sequence[int]) -> None:
+        """Set every bit in ``indices`` to 1 (positions >= size ignored)."""
+        ...
+
     def clear(self, index: int) -> None:
         """Clear the bit at the specified index to 0."""
         ...
@@ -130,12 +135,12 @@ class Bitmap:
         """Return a set of indices where the bit is set to 1."""
         ...
 
-    def gather(self, items: list[Any]) -> list[Any]:
+    def gather(self, items: Sequence[Any]) -> list[Any]:
         """
         Return elements from items at indices where the bit is set to 1.
 
         Args:
-            items: A list of objects. Length should match the bitmap size.
+            items: A sequence of objects. Length should match the bitmap size.
 
         Returns:
             A list of objects from items at positions where the bitmap bit is 1.

@@ -392,6 +392,13 @@ class TestBitmapGather:
         b.set(0)
         assert b.gather(["only"]) == ["only"]
 
+    def test_gather_accepts_tuple(self):
+        # gather takes any sequence, not just list (e.g. l2_orig_indices tuple).
+        b = Bitmap(5)
+        b.set(1)
+        b.set(3)
+        assert b.gather((10, 11, 12, 13, 14)) == [11, 13]
+
 
 class TestBitmapInvert:
     """Test bitwise NOT (~) operation."""
@@ -564,3 +571,61 @@ class TestBitmapNonMultipleOfEight:
             b2.set(i)
         assert b2.count_leading_ones() == size - 1
         assert b2.count_leading_zeros() == 0
+
+
+class TestBatchedSet:
+    """Bitmap.batched_set(indices): set every listed bit; positions >= size
+    are ignored (bounds-checked, like set())."""
+
+    def test_sets_listed_bits(self):
+        b = Bitmap(8)
+        b.batched_set([1, 3, 7])
+        assert b.get_indices_set() == {1, 3, 7}
+
+    def test_accumulates_with_existing(self):
+        b = Bitmap(8)
+        b.set(0)
+        b.batched_set([2, 4])
+        assert b.get_indices_set() == {0, 2, 4}
+
+    def test_out_of_range_ignored(self):
+        b = Bitmap(5)
+        b.batched_set([1, 5, 99])  # 5 and 99 are >= size -> dropped
+        assert b.get_indices_set() == {1}
+
+    def test_empty_is_noop(self):
+        b = Bitmap(4)
+        b.set(2)
+        b.batched_set([])
+        assert b.get_indices_set() == {2}
+
+    def test_duplicates_idempotent(self):
+        b = Bitmap(4)
+        b.batched_set([1, 1, 1])
+        assert b.get_indices_set() == {1}
+
+    def test_accepts_tuple(self):
+        b = Bitmap(4)
+        b.batched_set((0, 3))
+        assert b.get_indices_set() == {0, 3}
+
+    def test_matches_python_reference(self):
+        rng = random.Random(1234)
+        for _ in range(50):
+            size = rng.randint(1, 64)
+            indices = rng.sample(range(size), k=rng.randint(0, size))
+            b = Bitmap(size)
+            b.batched_set(indices)
+            assert b.get_indices_set() == set(indices)
+
+    def test_combine_found_pattern(self):
+        # The _combine_found composition: seed L1 indices, then batched_set the
+        # L2 set bits gathered through their original-position map.
+        l2 = Bitmap(3)  # L2 result over the 3 L2-submitted keys
+        l2.set(0)
+        l2.set(2)
+        l2_orig = (3, 5, 7)  # L2-local i -> original position
+        found = Bitmap(10)
+        found.batched_set([0, 1, 2])  # L1 prefix
+        found.batched_set(l2.gather(l2_orig))  # -> {3, 7}
+        assert found.get_indices_set() == {0, 1, 2, 3, 7}
