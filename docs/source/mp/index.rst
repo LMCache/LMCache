@@ -61,6 +61,7 @@ LMCache ships three server entry points:
    serde
    deployment
    operator
+   coordinator
    http_api
    observability
    tracing_and_debugging
