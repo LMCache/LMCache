@@ -4,7 +4,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, patch
-import mmap
 import os
 import pickle
 import sys
@@ -15,6 +14,12 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.multiprocess.posix_shm import (
+    shm_create_readwrite,
+    shm_munmap,
+    shm_open_pool_as_mmap,
+    shm_unlink,
+)
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
@@ -214,19 +219,30 @@ def _default_key(tokens: int = 8) -> "IPCCacheEngineKey":
     )
 
 
-def test_wrap_kv_caches_wraps_all_tensors(monkeypatch: Any) -> None:
+def test_wrap_kv_caches_wraps_all_tensors() -> None:
     """Verify wrap_kv_caches wraps all provided KV tensors."""
     # First Party
     from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
+    from lmcache.v1.platform import _registry as platform_registry
 
     kv_caches = _make_kv_caches()
-    monkeypatch.setattr(
-        adapter_mod,
-        "CudaIPCWrapper",
-        lambda tensor: ("wrapped", tensor),
-    )
+    # ``wrap_kv_caches`` dispatches through ``platform_registry``: each
+    # accelerator self-registers a wrapper factory keyed by
+    # ``tensor.device.type``. Override the relevant entries through the
+    # registry's documented API (snapshot + register + restore on
+    # teardown) instead of poking the adapter's private helper.
+    saved = platform_registry.snapshot()
 
-    wrapped = adapter_mod.wrap_kv_caches(kv_caches)
+    def _fake_factory(tensor: Any) -> tuple[str, Any]:
+        return ("wrapped", tensor)
+
+    try:
+        for device_type in {t.device.type for t in kv_caches.values()}:
+            platform_registry.register_kv_wrapper(device_type, _fake_factory)
+        wrapped = adapter_mod.wrap_kv_caches(kv_caches)
+    finally:
+        platform_registry.restore(saved)
+
     assert len(wrapped) == len(kv_caches)
 
 
@@ -888,22 +904,25 @@ class _CompletedFuture:
         return self._value
 
 
-def _create_shm_file(shm_name: str, size: int) -> str:
-    path = os.path.join("/dev/shm", shm_name.lstrip("/"))
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-    os.ftruncate(fd, size)
-    os.close(fd)
-    return path
+def _create_shm_segment(shm_name: str, size: int) -> int:
+    """Create a POSIX SHM segment via the project facade.
+
+    Returns the owner mmap address so the test can release the segment
+    with ``shm_munmap`` + ``shm_unlink`` regardless of platform
+    (Linux/macOS), instead of hard-coding ``/dev/shm`` paths.
+    """
+    return shm_create_readwrite(shm_name, size)
 
 
 def test_non_gpu_context_shm_tensor_view_from_buffer() -> None:
     shm_name = f"lmcache_test_view_{os.getpid()}"
-    shm_path = _create_shm_file(shm_name, 4096)
+    addr = _create_shm_segment(shm_name, 4096)
     try:
-        with open(shm_path, "r+b") as f:
-            mm = mmap.mmap(f.fileno(), 4096, access=mmap.ACCESS_WRITE)
+        mm = shm_open_pool_as_mmap(shm_name, 4096)
+        try:
             src = torch.arange(8, dtype=torch.float32).reshape(2, 4)
             mm[: src.numel() * src.element_size()] = src.numpy().tobytes()
+        finally:
             mm.close()
 
         context = NonGpuContextShm(
@@ -931,13 +950,13 @@ def test_non_gpu_context_shm_tensor_view_from_buffer() -> None:
         finally:
             context.close()
     finally:
-        if os.path.exists(shm_path):
-            os.unlink(shm_path)
+        shm_munmap(addr, 4096)
+        shm_unlink(shm_name)
 
 
 def test_non_gpu_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
     shm_name = f"lmcache_test_flow_{os.getpid()}"
-    shm_path = _create_shm_file(shm_name, 4096)
+    addr = _create_shm_segment(shm_name, 4096)
     slots = [
         {
             "offset": 0,
@@ -1003,8 +1022,8 @@ def test_non_gpu_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
         assert context.commit_retrieve(key, 1)
     finally:
         context.close()
-        if os.path.exists(shm_path):
-            os.unlink(shm_path)
+        shm_munmap(addr, 4096)
+        shm_unlink(shm_name)
 
 
 def test_non_gpu_context_shm_init_raises_when_segment_missing() -> None:
@@ -1064,7 +1083,7 @@ def test_create_non_gpu_context_use_pickle_ignores_valid_shm_info() -> None:
 
 def test_non_gpu_context_shm_close_is_idempotent() -> None:
     shm_name = f"lmcache_test_close_{os.getpid()}"
-    shm_path = _create_shm_file(shm_name, 4096)
+    addr = _create_shm_segment(shm_name, 4096)
     try:
         context = NonGpuContextShm(
             metadata=NonGpuContextMetadata(
@@ -1083,5 +1102,5 @@ def test_non_gpu_context_shm_close_is_idempotent() -> None:
         context.close()
         context.close()
     finally:
-        if os.path.exists(shm_path):
-            os.unlink(shm_path)
+        shm_munmap(addr, 4096)
+        shm_unlink(shm_name)

@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Platform-agnostic cache-context factory.
+
+The concrete implementations live in their respective sub-packages:
+
+* :class:`~lmcache.v1.multiprocess.gpu_context.GPUCacheContext` --
+  CUDA-backed.
+* :class:`~lmcache.v1.platform.cpu.cache_context.CpuCacheContext` --
+  CPU-only fallback (POSIX-SHM-backed KV tensors).
+
+:func:`create_cache_context` keeps the dispatch out of the call site
+in :mod:`lmcache.v1.multiprocess.server` so adding a new accelerator
+only requires shipping a new sub-package + extending the wrapper
+isinstance check below.
+"""
+
+# Future
+from __future__ import annotations
+
+# Standard
+from typing import Any, Sequence
+
+# First Party
+from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.platform.cpu.cache_context import CpuCacheContext
+
+
+def create_cache_context(
+    kv_caches: KVCache,
+    lmcache_logical_chunk_size: int = 256,
+    layout_hints: LayoutHints | None = None,
+    group_views: Sequence[LMCacheGroupView] = (),
+    engine_type: EngineType = EngineType.VLLM,
+) -> Any:
+    """Create the appropriate cache context.
+
+    The signature mirrors :class:`GPUCacheContext` so callers can
+    forward their kwargs verbatim and stay agnostic of the active
+    backend.
+
+    Selection is driven by the wrapper type of *kv_caches*:
+
+    * Any element is a :class:`CpuShmTensorWrapper` -> a
+      :class:`CpuCacheContext` is built and the underlying CPU
+      tensors are mapped from the client-owned POSIX shared-memory
+      segments.
+    * Otherwise (real ``CudaIPCWrapper`` instances) ->
+      :class:`GPUCacheContext` is built.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
+    from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
+
+    if not kv_caches:
+        raise ValueError("create_cache_context requires a non-empty kv_caches list")
+
+    if any(isinstance(w, CpuShmTensorWrapper) for w in kv_caches):
+        # CpuCacheContext doesn't yet honour group_views; the CPU SHM
+        # path uses a flat per-tensor layout so the multi-group split
+        # is currently a GPU-only concept.
+        return CpuCacheContext(
+            kv_caches,
+            lmcache_logical_chunk_size,
+            layout_hints,
+            engine_type,
+        )
+    return GPUCacheContext(
+        kv_caches,
+        lmcache_logical_chunk_size,
+        layout_hints,
+        group_views,
+        engine_type,
+    )

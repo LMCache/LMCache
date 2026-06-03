@@ -113,7 +113,15 @@ class MPCacheEngine:
 
     @property
     def gpu_contexts(self) -> dict[int, GPUCacheContext] | None:
-        """Used by ``/kvcache/check``; unwraps :class:`GPUContextEntry`."""
+        """Used by ``/kvcache/check``; unwraps :class:`GPUContextEntry`.
+
+        The map's values are whatever :func:`create_cache_context` produced at
+        registration time -- :class:`GPUCacheContext` for CUDA-IPC wrappers,
+        :class:`~lmcache.v1.platform.cpu.cache_context.CpuCacheContext` for
+        POSIX-SHM wrappers. The ``GPUCacheContext`` annotation is kept for
+        readability since both concrete classes expose the same duck-typed
+        surface used by ``/kvcache/check``.
+        """
         for module in self._modules:
             if isinstance(module, GPUTransferModule):
                 return {i: e.gpu_context for i, e in module.gpu_contexts.items()}
