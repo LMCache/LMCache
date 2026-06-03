@@ -22,6 +22,7 @@ import torch
 # First Party
 from lmcache import torch_device_type
 from lmcache.logging import init_logger
+from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 
@@ -1369,7 +1370,7 @@ def make_page_buffer_shape_desc(
     # The C++ PageBufferShapeDesc has no ``dtype`` field, but the
     # pure-Python CPU fallback (``python_ops_fallback``) does -- and
     # needs it to disambiguate float16 vs bfloat16. Set best-effort.
-    lmc_ops.set_shape_desc_dtype(desc, dtype)
+    set_shape_desc_dtype(desc, dtype)
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride
