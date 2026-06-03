@@ -322,7 +322,7 @@ def test_enum_parity(enum_name):
     )
 
 
-# ── 1:1 mapping tests ──
+# ── Coverage tests: every c_ops API must have a fallback ──
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
@@ -330,9 +330,7 @@ def test_all_c_ops_callables_have_fallback():
     """Every public callable in c_ops must exist in
     python_ops_fallback."""
     missing = sorted(set(_c_ops_callables) - set(_fallback_callables))
-    assert not missing, (
-        f"c_ops callables missing from python_ops_fallback: {missing}"
-    )
+    assert not missing, f"c_ops callables missing from python_ops_fallback: {missing}"
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
@@ -340,9 +338,7 @@ def test_all_c_ops_enums_have_fallback():
     """Every public enum in c_ops must exist in
     python_ops_fallback."""
     missing = sorted(set(_c_ops_enums) - set(_fallback_enums))
-    assert not missing, (
-        f"c_ops enums missing from python_ops_fallback: {missing}"
-    )
+    assert not missing, f"c_ops enums missing from python_ops_fallback: {missing}"
 
 
 @pytest.mark.skipif(not HAS_C_OPS, reason="c_ops not available (no CUDA)")
@@ -380,6 +376,5 @@ def test_descriptor_class_parity(cls_name):
 
     missing = sorted(_public_data_attrs(c_inst) - _public_data_attrs(py_inst))
     assert not missing, (
-        f"{cls_name}: fallback is missing attributes present on c_ops: "
-        f"{missing}"
+        f"{cls_name}: fallback is missing attributes present on c_ops: {missing}"
     )
