@@ -392,7 +392,9 @@ class LMCacheMPConnector:
                     request_id=request_id,
                 ),
                 self.instance_id,
-                block_ids,
+                # RETRIEVE takes per-group block IDs (list[list[int]]); SGLang is
+                # non-hybrid, so wrap the flat list as a single group.
+                [block_ids],
                 event.ipc_handle(),
                 skip_prefix_n_blocks,
             ],
@@ -506,7 +508,9 @@ class LMCacheMPConnector:
                         request_id=request_id,
                     ),
                     self.instance_id,
-                    block_ids,
+                    # STORE takes per-group block IDs (list[list[int]]); SGLang is
+                    # non-hybrid, so wrap the flat list as a single group.
+                    [block_ids],
                     event.ipc_handle(),
                 ],
             )
