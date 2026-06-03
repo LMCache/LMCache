@@ -233,8 +233,8 @@ model/chunk debug information) and uniqueness is probabilistic at 128 bits.
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
     extra_config:
       enable_nixl_storage: true
       nixl_backend: DOCA_MEMOS
