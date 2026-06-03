@@ -61,8 +61,8 @@ is what unlocks batch-level parallelism.
 - `lmcache/v1/distributed/l2_adapters/valkey_l2_adapter.py` —
   registers adapter type `valkey`. Defines `ValkeyL2AdapterConfig`,
   `ValkeyL2Adapter`, the `_BatchState` helper, and the factory.
-- `_parse_startup_nodes` — accepts node specs as `"host:port"`,
-  comma-separated strings, list-of-pairs, or list-of-dicts.
+- `_parse_startup_nodes` — parses the seed list from a single
+  comma-separated `"host:port[,host:port...]"` string.
 - Reuses `_object_key_to_string` from `native_connector_l2_adapter.py`
   to compute the standard wire key (model, kv_rank, chunk hash,
   optional `cache_salt`).
@@ -339,7 +339,7 @@ JSON schema (CLI `--l2-adapter`):
 ```json
 {
   "type": "valkey",
-  "startup_nodes": [["host1", 6379], ["host2", 6379]],
+  "startup_nodes": "host1:6379,host2:6379",
   "cluster_mode": true,
   "username": "...",
   "password": "...",

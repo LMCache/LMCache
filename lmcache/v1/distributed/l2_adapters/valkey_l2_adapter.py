@@ -547,19 +547,28 @@ class ValkeyL2Adapter(L2AdapterInterface):
     def _on_store_done(self, batch: _BatchState, idx: int, fut: Future) -> None:
         """Per-key callback for a store batch; finalizes when last done.
 
-        Runs in the worker thread that completed ``fut``. Exceptions
-        from glide are logged and recorded as per-key failure; the
-        callback never re-raises.
+        Runs in the worker thread that completed ``fut``. A cancelled or
+        failed future is recorded as a per-key failure; the callback
+        never re-raises (so it always decrements the batch counter and
+        the batch can never hang).
         """
-        exc = fut.exception()
-        ok = exc is None
-        if not ok:
+        if fut.cancelled():
+            ok = False
             logger.warning(
-                "Valkey SET failed (batch task_id=%d, key idx=%d): %s",
+                "Valkey SET cancelled (batch task_id=%d, key idx=%d)",
                 batch.task_id,
                 idx,
-                exc,
             )
+        else:
+            exc = fut.exception()
+            ok = exc is None
+            if not ok:
+                logger.warning(
+                    "Valkey SET failed (batch task_id=%d, key idx=%d): %s",
+                    batch.task_id,
+                    idx,
+                    exc,
+                )
         with batch.lock:
             batch.per_key_ok[idx] = ok
             batch.remaining -= 1
@@ -644,25 +653,32 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
     def _on_lookup_done(self, batch: _BatchState, idx: int, fut: Future) -> None:
         """Per-key callback for a lookup batch."""
-        exc = fut.exception()
         exists = False
-        if exc is None:
-            try:
-                exists = bool(fut.result())
-            except Exception as e:  # defensive — result() shouldn't raise here
-                logger.warning(
-                    "Valkey EXISTS unexpected error (batch=%d, idx=%d): %s",
-                    batch.task_id,
-                    idx,
-                    e,
-                )
-        else:
+        if fut.cancelled():
             logger.warning(
-                "Valkey EXISTS failed (batch=%d, idx=%d): %s",
+                "Valkey EXISTS cancelled (batch=%d, idx=%d)",
                 batch.task_id,
                 idx,
-                exc,
             )
+        else:
+            exc = fut.exception()
+            if exc is None:
+                try:
+                    exists = bool(fut.result())
+                except Exception as e:  # defensive — result() shouldn't raise here
+                    logger.warning(
+                        "Valkey EXISTS unexpected error (batch=%d, idx=%d): %s",
+                        batch.task_id,
+                        idx,
+                        e,
+                    )
+            else:
+                logger.warning(
+                    "Valkey EXISTS failed (batch=%d, idx=%d): %s",
+                    batch.task_id,
+                    idx,
+                    exc,
+                )
         with batch.lock:
             batch.per_key_ok[idx] = exists
             batch.remaining -= 1
@@ -769,35 +785,42 @@ class ValkeyL2Adapter(L2AdapterInterface):
         expected chunk size, so a stale or truncated value is rejected
         as a cache miss.
         """
-        exc = fut.exception()
         loaded = False
-        if exc is None:
-            try:
-                nbytes = int(fut.result())
-                loaded = nbytes == batch.sizes[idx]
-                if nbytes >= 0 and not loaded:
-                    logger.debug(
-                        "Valkey GET size mismatch (batch=%d, idx=%d): "
-                        "got %d bytes, expected %d",
-                        batch.task_id,
-                        idx,
-                        nbytes,
-                        batch.sizes[idx],
-                    )
-            except Exception as e:
-                logger.warning(
-                    "Valkey GET unexpected error (batch=%d, idx=%d): %s",
-                    batch.task_id,
-                    idx,
-                    e,
-                )
-        else:
+        if fut.cancelled():
             logger.warning(
-                "Valkey GET failed (batch=%d, idx=%d): %s",
+                "Valkey GET cancelled (batch=%d, idx=%d)",
                 batch.task_id,
                 idx,
-                exc,
             )
+        else:
+            exc = fut.exception()
+            if exc is None:
+                try:
+                    nbytes = int(fut.result())
+                    loaded = nbytes == batch.sizes[idx]
+                    if nbytes >= 0 and not loaded:
+                        logger.debug(
+                            "Valkey GET size mismatch (batch=%d, idx=%d): "
+                            "got %d bytes, expected %d",
+                            batch.task_id,
+                            idx,
+                            nbytes,
+                            batch.sizes[idx],
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Valkey GET unexpected error (batch=%d, idx=%d): %s",
+                        batch.task_id,
+                        idx,
+                        e,
+                    )
+            else:
+                logger.warning(
+                    "Valkey GET failed (batch=%d, idx=%d): %s",
+                    batch.task_id,
+                    idx,
+                    exc,
+                )
         with batch.lock:
             batch.per_key_ok[idx] = loaded
             batch.remaining -= 1

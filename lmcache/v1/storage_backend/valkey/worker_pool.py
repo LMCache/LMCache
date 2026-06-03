@@ -61,7 +61,7 @@ def _parse_memory_info(text: str) -> dict[str, int]:
 
     Returns:
         ``{"used_memory": int, "maxmemory": int}``. Missing or
-        unparseable fields default to ``0``.
+        unparsable fields default to ``0``.
     """
     used = 0
     maxm = 0
@@ -154,6 +154,7 @@ class ValkeyWorkerPool:
         self._local: threading.local = threading.local()
         self._has_buffer_get: Optional[bool] = None
         self._capability_lock: threading.Lock = threading.Lock()
+        self._closed: bool = False
 
         self._executor: ThreadPoolExecutor = ThreadPoolExecutor(
             max_workers=num_workers,
@@ -451,9 +452,14 @@ class ValkeyWorkerPool:
         """
         try:
             barrier.wait(timeout=self._request_timeout)
-        except threading.BrokenBarrierError:
-            # Fall through to best-effort close of whatever this thread owns.
-            logger.debug("ValkeyWorkerPool close barrier broke; best-effort close")
+        except Exception as exc:
+            # BrokenBarrierError, TimeoutError (3.12+), etc. — fall through
+            # to a best-effort close of whatever this thread owns so a
+            # broken barrier never skips client cleanup.
+            logger.debug(
+                "ValkeyWorkerPool close barrier did not gather (%s); best-effort close",
+                exc,
+            )
         client = getattr(self._local, "client", None)
         if client is None:
             return
@@ -468,9 +474,11 @@ class ValkeyWorkerPool:
 
         Each client is closed on its owning thread (matching glide's
         per-thread client model) with 1:1 coverage guaranteed by a
-        barrier. Safe to call once; the executor must not receive new
-        submissions afterward.
+        barrier. Idempotent — repeated calls are no-ops.
         """
+        if self._closed:
+            return
+        self._closed = True
         barrier = threading.Barrier(self.num_workers)
         close_futs = [
             self._executor.submit(self._close_local_client, barrier)
