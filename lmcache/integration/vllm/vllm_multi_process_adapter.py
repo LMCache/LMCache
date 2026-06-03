@@ -986,7 +986,7 @@ class LMCacheMPWorkerAdapter:
         self.group_views = list(group_views)
         self._send_register_kv_caches_request(kv_caches)
 
-    def _block_ids_per_view(self, op: LoadStoreOp) -> list[list[int]]:
+    def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_block_ids_to_views(self.group_views, op.block_ids)
 
     def _send_register_kv_caches_request(
@@ -1122,7 +1122,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            self._block_ids_per_view(op),
+            self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
         )
@@ -1171,7 +1171,7 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            self._block_ids_per_view(op),
+            self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,

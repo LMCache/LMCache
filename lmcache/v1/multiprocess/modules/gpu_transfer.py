@@ -363,7 +363,7 @@ class GPUTransferModule:
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            block_ids_per_view_gpu = gpu_context.copy_view_block_ids_to_gpu(
+            block_ids_per_group_gpu = gpu_context.copy_view_block_ids_to_gpu(
                 gpu_block_ids
             )
 
@@ -376,7 +376,7 @@ class GPUTransferModule:
             required_blocks = len(obj_keys) * blocks_per_chunk
             if any(
                 group_block_ids.shape[0] < required_blocks
-                for group_block_ids in block_ids_per_view_gpu
+                for group_block_ids in block_ids_per_group_gpu
             ):
                 logger.warning(
                     "STORE block ID underflow for request_id=%s: need %d block "
@@ -445,7 +445,7 @@ class GPUTransferModule:
                     # Copy from GPU paged buffer to tmp buffer, then to CPU — per
                     # group. Each group uses its own block-id list (HMA).
                     for group_idx in range(num_groups):
-                        chunk_block_ids_gpu = block_ids_per_view_gpu[group_idx][
+                        chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
                             idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
                         ]
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
@@ -634,7 +634,7 @@ class GPUTransferModule:
                         gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
                     )
                 for group_idx, group in enumerate(groups):
-                    chunk_block_ids_gpu = block_ids_per_view_gpu[group_idx][
+                    chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
                         start_chunk_id * blocks_per_chunk : end_chunk_id
                         * blocks_per_chunk
                     ]
@@ -674,7 +674,7 @@ class GPUTransferModule:
             torch_dev.stream(gpu_context.stream),
         ):
             # Copy all block_ids to GPU once before the loop
-            block_ids_per_view_gpu = gpu_context.copy_view_block_ids_to_gpu(
+            block_ids_per_group_gpu = gpu_context.copy_view_block_ids_to_gpu(
                 gpu_block_ids
             )
 

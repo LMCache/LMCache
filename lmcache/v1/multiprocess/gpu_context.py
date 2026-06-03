@@ -363,7 +363,7 @@ class GPUCacheContext:
         ]
 
     def copy_view_block_ids_to_gpu(
-        self, block_ids_per_view: list[list[int]]
+        self, block_ids_per_group: list[list[int]]
     ) -> list[torch.Tensor]:
         """Copy block IDs for each LMCache KV layer group to GPU.
 
@@ -373,7 +373,7 @@ class GPUCacheContext:
         """
         offsets = [0]
         flat: array.array = array.array("l")
-        for view_block_ids in block_ids_per_view:
+        for view_block_ids in block_ids_per_group:
             flat.extend(view_block_ids)
             offsets.append(len(flat))
 
@@ -389,7 +389,7 @@ class GPUCacheContext:
 
         return [
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
-            for i in range(len(block_ids_per_view))
+            for i in range(len(block_ids_per_group))
         ]
 
     def get_kv_buffer_shape(
