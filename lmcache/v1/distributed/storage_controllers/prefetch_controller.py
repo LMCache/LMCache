@@ -71,6 +71,14 @@ def build_trim_mask(
     policies keep every set bit, gaps included, and differ only in intent:
     SEGMENTED_PREFIX keeps the keys that loaded when an L2 hit fails to load
     into L1 (e.g. OOM) mid-prefix; SPARSE keeps an intentionally scattered set.
+
+    Args:
+        found: Bitmap of found keys, over key indices ``0..num_keys-1``.
+        num_keys: Total number of requested keys.
+        policy: Trim policy to apply (see :class:`TrimPolicy`).
+
+    Returns:
+        Bitmap of the retained key indices.
     """
     if policy is TrimPolicy.PREFIX:
         return Bitmap(num_keys, found.count_leading_ones())
