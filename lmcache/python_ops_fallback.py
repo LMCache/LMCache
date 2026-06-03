@@ -7,7 +7,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
 from multiprocessing import shared_memory
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 import ctypes
 import ctypes.util
 import os
@@ -335,7 +335,7 @@ class PageBufferShapeDesc:
         self.dtype: torch.dtype | None = None
 
 
-def set_shape_desc_dtype(shape_desc, dtype: torch.dtype) -> None:
+def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
     """Best-effort ``shape_desc.dtype = dtype``.
 
     The pure-Python ``PageBufferShapeDesc`` exposes a ``dtype`` slot so
@@ -344,6 +344,11 @@ def set_shape_desc_dtype(shape_desc, dtype: torch.dtype) -> None:
     ``csrc/pybind.cpp`` has no such field; assignment raises
     ``AttributeError`` and is silently swallowed here so call sites
     don't need to branch on the active backend.
+
+    Args:
+        shape_desc: A ``PageBufferShapeDesc`` instance (either the
+            pure-Python fallback or the C++ pybind struct).
+        dtype: The torch dtype to assign.
     """
     try:
         shape_desc.dtype = dtype
