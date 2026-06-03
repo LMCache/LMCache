@@ -440,14 +440,15 @@ class StorageManager:
             ]
             l1_found_set = {keys[i] for i in l1_found_indices}
 
-            # Release probe read-locks we won't retain (covered + stray).
-            stray_keys = [
+            # Release every probe read-lock we won't retain: covered keys plus
+            # any other L1 hit not in the retained found-set.
+            keys_to_release = [
                 key
                 for key, ent in l1_read_result.items()
                 if ent is not None and ent[1] is not None and key not in l1_found_set
             ]
-            if stray_keys:
-                self._l1_manager.finish_read(stray_keys, extra_count=extra_count)
+            if keys_to_release:
+                self._l1_manager.finish_read(keys_to_release, extra_count=extra_count)
 
             # L1 misses (minus covered) -> L2 sparse; keep each original index.
             found_set = set(l1_found_indices)
