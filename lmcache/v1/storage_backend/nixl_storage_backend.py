@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Sequence, Set, Tuple, Union, cast
 from urllib.parse import quote as url_quote
 import asyncio
+import hashlib
 import os
 import threading
 import time
@@ -77,6 +78,10 @@ DEFAULT_FILE_CREATE_MODE = 0o644
 # Max concurrency for parallel S3 HEAD requests in batched_contains().
 _CONTAINS_BATCH_SIZE = 16
 
+# Max static b128 pool size: the slot index occupies 8 hex chars (32 bits) of
+# the 32-hex-char (128-bit) name, so the index must be <= 0xffffffff.
+B128_MAX_POOL_SIZE = 0x100000000  # 2**32
+
 
 @dataclass
 class NixlStorageConfig:
@@ -99,7 +104,7 @@ class NixlStorageConfig:
         device = device.split(":", 1)[0]
         if backend in ("GDS", "GDS_MT", "OBJ"):
             return device == "cpu" or device == "cuda"
-        elif backend in ("POSIX", "HF3FS", "AZURE_BLOB"):
+        elif backend in ("POSIX", "HF3FS", "AZURE_BLOB", "DOCA_MEMOS"):
             return device == "cpu"
         else:
             return False
@@ -281,12 +286,38 @@ class NixlFilePool(NixlDescPool):
 
 
 class NixlObjectPool(NixlDescPool):
-    def __init__(self, size: int):
+    def __init__(self, size: int, b128: bool = False) -> None:
+        """Create a pool of ``size`` NIXL object slot names.
+
+        Args:
+            size: Number of object slots to pre-generate.
+            b128: If True, generate 128-bit hex slot names (32 hex chars) for
+                the DOCA_MEMOS backend instead of the default ``obj_{i}_{uuid}``
+                names.
+
+        Raises:
+            ValueError: If ``b128`` is True and ``size`` exceeds
+                ``B128_MAX_POOL_SIZE`` (the slot index would no longer fit in
+                8 hex chars).
+        """
+        if b128 and size > B128_MAX_POOL_SIZE:
+            raise ValueError(
+                "b128 object pool supports at most 2**32 slots "
+                f"(got {size}); the slot index must fit in 8 hex chars"
+            )
         super().__init__(size)
         self.keys: List[str] = []
 
         for i in reversed(range(size)):
-            key = f"obj_{i}_{uuid.uuid4().hex[0:4]}"
+            if b128:
+                # DOCA_MEMOS requires slot names that fit in 128 bits and are
+                # hex-decodable (the NIXL plugin hex-decodes the name on the
+                # other side). 8 hex chars (32 bits) encode the slot index for
+                # in-pool uniqueness; 24 hex chars (96 bits) of randomness avoid
+                # collisions across LMCache instances on the shared backend.
+                key = f"{i:08x}{uuid.uuid4().hex[:24]}"
+            else:
+                key = f"obj_{i}_{uuid.uuid4().hex[0:4]}"
             self.keys.append(key)
 
     def close(self):
@@ -573,7 +604,7 @@ class NixlDynamicStorageAgent(NixlStorageAgent):
             allocator, device, backend, backend_params, enable_prog_thread, sync_mode
         )
 
-        if backend in ("OBJ", "AZURE_BLOB"):
+        if backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS"):
             self.mem_type = "OBJ"
         else:
             self.mem_type = "FILE"
@@ -891,8 +922,8 @@ class NixlStaticStorageBackend(NixlStorageBackend):
     def createPool(backend: str, size: int, path: str, use_direct_io: bool):
         if backend in ("GDS", "GDS_MT", "POSIX", "HF3FS"):
             return NixlFilePool(size, path, use_direct_io)
-        elif backend in ("OBJ", "AZURE_BLOB"):
-            return NixlObjectPool(size)
+        elif backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS"):
+            return NixlObjectPool(size, b128=(backend == "DOCA_MEMOS"))
         else:
             raise ValueError(f"Unsupported NIXL backend: {backend}")
 
@@ -1166,7 +1197,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         cache_policy: Optional[PresenceCache] = None,
-    ):
+    ) -> None:
         super().__init__(nixl_config, config, metadata, loop)
 
         self.async_mode = nixl_config.enable_async_put
@@ -1181,6 +1212,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
                     "use_direct_io is True, but O_DIRECT is not available on "
                     "this system. Falling back to buffered I/O."
                 )
+        # DOCA_MEMOS needs object names that fit into 128 bits; other OBJ
+        # backends use URL-safe names. See _format_object_key.
+        self._use_b128_object_keys = nixl_config.backend == "DOCA_MEMOS"
         # Presence cache to reduce remote contains checks
         self.hit_counter = 0
         self.total_counter = 0
@@ -1281,9 +1315,27 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         )
 
     def _format_object_key(self, key: CacheEngineKey) -> str:
+        """Format the NIXL object name for ``key`` per the configured backend."""
+        if self._use_b128_object_keys:
+            return self._format_object_key_b128(key)
+        return self._format_object_key_url_safe(key)
+
+    def _format_object_key_b128(self, key: CacheEngineKey) -> str:
         """
-        Generate object key name based on CacheEngineKey information.
-        Similar to s3_connector._format_safe_path()
+        Generate a 128-bit object key for the DOCA_MEMOS backend.
+
+        Returns a 32-char hex string (sha256 truncated to 128 bits). Hex encoding
+        is required because the key is passed via NIXL metadata as a string; the
+        NIXL plugin hex-decodes it on the other side.
+        """
+        return hashlib.sha256(key.to_string().encode("utf-8")).hexdigest()[:32]
+
+    def _format_object_key_url_safe(self, key: CacheEngineKey) -> str:
+        """
+        Generate a URL-safe object key for non-DOCA_MEMOS backends.
+
+        Replaces slashes and @ signs with underscores, then percent-encodes
+        the result for safe use as an object storage key.
         """
         key_str = key.to_string()
         # Replace slashes with underscores to make it safe for object storage/FS

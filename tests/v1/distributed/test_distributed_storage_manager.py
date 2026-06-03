@@ -161,12 +161,16 @@ def wait_for_prefetch_status(
     timeout: float = 10.0,
     poll_interval: float = 0.05,
 ) -> int | None:
-    """Poll query_prefetch_status until it returns a non-None value."""
+    """Poll query_prefetch_status until it returns a non-None value.
+
+    Returns the contiguous prefix-hit count (``count_leading_ones``) of the
+    found bitmap, matching the dense semantics these tests assert on.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
         if result is not None:
-            return result
+            return result.count_leading_ones()
         time.sleep(poll_interval)
     return None
 
@@ -246,7 +250,7 @@ class TestStorageManagerBasic:
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
-        hit_count = storage_manager.query_prefetch_status(handle)
+        hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
         assert hit_count == len(object_keys)
 
@@ -272,7 +276,7 @@ class TestStorageManagerBasic:
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
-        hit_count = storage_manager.query_prefetch_status(handle)
+        hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
         assert hit_count == 2  # Only 2 keys were written
 
@@ -302,7 +306,7 @@ class TestStorageManagerBasic:
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
-        hit_count = storage_manager.query_prefetch_status(handle)
+        hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
         assert hit_count == len(object_keys)
 
@@ -339,7 +343,7 @@ class TestStorageManagerBasic:
 
         # Prefetch objects except the first one
         handle = storage_manager.submit_prefetch_task(object_keys[1:], basic_layout)
-        hit_count = storage_manager.query_prefetch_status(handle)
+        hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
         assert hit_count == len(object_keys) - 1
 
@@ -384,7 +388,7 @@ class TestStorageManagerMultiReader:
 
         extra_count = 2  # total = 1 + 2 = 3 locks
         handle = sm.submit_prefetch_task(keys, basic_layout, extra_count=extra_count)
-        hit = sm.query_prefetch_status(handle)
+        hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
 
         # Release with matching extra_count
@@ -408,7 +412,7 @@ class TestStorageManagerMultiReader:
 
         extra_count = 3  # total = 1 + 3 = 4 locks
         handle = sm.submit_prefetch_task(keys, basic_layout, extra_count=extra_count)
-        hit = sm.query_prefetch_status(handle)
+        hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
 
         # Release 2 of 4 (1 + extra_count=1)
@@ -447,7 +451,7 @@ class TestStorageManagerMultiReader:
         handle = sm.submit_prefetch_task(
             all_keys, basic_layout, extra_count=extra_count
         )
-        hit = sm.query_prefetch_status(handle)
+        hit = sm.query_prefetch_status(handle).count_leading_ones()
         # Only prefix {0,1} count as hits
         assert hit is not None
         assert hit == 2
@@ -476,7 +480,7 @@ class TestStorageManagerMultiReader:
         sm.finish_write(list(ret.keys()))
 
         handle = sm.submit_prefetch_task(keys, basic_layout)
-        hit = sm.query_prefetch_status(handle)
+        hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
 
         # Single finish is enough

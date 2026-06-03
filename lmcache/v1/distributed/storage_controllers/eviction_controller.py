@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from abc import abstractmethod
+from collections import Counter
 from typing import TYPE_CHECKING
 import threading
 import time
@@ -367,3 +368,16 @@ class L2EvictionController(StorageControllerInterface):
             logger.error("Unsupported eviction destination: %s", action.destination)
             logger.error("Treating it as DISCARD.")
             adapter.delete(action.keys)
+
+        if action.keys:
+            get_event_bus().publish(
+                Event(
+                    event_type=EventType.L2_KEYS_EVICTED,
+                    metadata={
+                        "key_count": len(action.keys),
+                        "key_count_per_salt": Counter(
+                            k.cache_salt for k in action.keys
+                        ),
+                    },
+                )
+            )

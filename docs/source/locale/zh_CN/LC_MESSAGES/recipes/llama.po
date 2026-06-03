@@ -21,72 +21,72 @@ msgstr ""
 
 #: ../../source/recipes/llama.rst:4
 msgid "LlamaForCausalLM"
-msgstr ""
+msgstr "LlamaForCausalLM"
 
 #: ../../source/recipes/llama.rst:7
 msgid "Validated models"
-msgstr ""
+msgstr "验证过的模型"
 
 #: ../../source/recipes/llama.rst:9
 msgid ""
 "`meta-llama/Meta-Llama-3.1-8B <https://huggingface.co/meta-"
 "llama/Llama-3.1-8B>`_"
-msgstr ""
+msgstr "`meta-llama/Meta-Llama-3.1-8B <https://huggingface.co/meta-llama/Llama-3.1-8B>`_"
 
 #: ../../source/recipes/llama.rst:10
 msgid ""
 "`meta-llama/Meta-Llama-3.1-8B-Instruct <https://huggingface.co/meta-"
 "llama/Llama-3.1-8B-Instruct>`_"
-msgstr ""
+msgstr "`meta-llama/Meta-Llama-3.1-8B-Instruct <https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct>`_"
 
 #: ../../source/recipes/llama.rst:11
 msgid ""
 "`meta-llama/Meta-Llama-3.1-70B <https://huggingface.co/meta-"
 "llama/Llama-3.1-70B>`_"
-msgstr ""
+msgstr "`meta-llama/Meta-Llama-3.1-70B <https://huggingface.co/meta-llama/Llama-3.1-70B>`_"
 
 #: ../../source/recipes/llama.rst:12
 msgid ""
 "`meta-llama/Meta-Llama-3.1-70B-Instruct <https://huggingface.co/meta-"
 "llama/Llama-3.1-70B-Instruct>`_"
-msgstr ""
+msgstr "`meta-llama/Meta-Llama-3.1-70B-Instruct <https://huggingface.co/meta-llama/Llama-3.1-70B-Instruct>`_"
 
 #: ../../source/recipes/llama.rst
 msgid "vLLM"
-msgstr ""
+msgstr "vLLM"
 
 #: ../../source/recipes/llama.rst:19
 msgid ""
 "**Engine documentation:** `LlamaForCausalLM in vLLM supported models "
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
 "generation>`_ (architecture `LlamaForCausalLM`)."
-msgstr ""
+msgstr "**引擎文档：** `vLLM 支持的模型中的 LlamaForCausalLM <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ （架构 `LlamaForCausalLM`）。"
 
 #: ../../source/recipes/llama.rst:24
 msgid "**Status:** Validated with LMCache."
-msgstr ""
+msgstr "**状态:** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/llama.rst:26
 msgid ""
 "Apply for access on the model card page and add your `huggingface token "
 "<https://huggingface.co/docs/hub/en/security-tokens>`_ as an environment "
 "variable:"
-msgstr ""
+msgstr "在模型卡页面申请访问权限，并将您的 `huggingface token <https://huggingface.co/docs/hub/en/security-tokens>`_ 添加为环境变量："
 
 #: ../../source/recipes/llama.rst:36
 msgid "Start the LMCache MP server:"
-msgstr ""
+msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/llama.rst:44
 msgid ""
 "Get the chat templates for tool calling by following the `Llama tool "
 "calling guide <https://docs.vllm.ai/en/latest/features/tool_calling"
 "/#llama-models-llama3_json>`_ from vLLM."
-msgstr ""
+msgstr "通过遵循 vLLM 的 `Llama 工具调用指南 <https://docs.vllm.ai/en/latest/features/tool_calling/#llama-models-llama3_json>`_ 获取工具调用的聊天模板。"
 
 #: ../../source/recipes/llama.rst:46
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr ""
+msgstr "使用 LMCache MP 连接器启动 vLLM："
 
 #: ../../source/recipes/llama.rst:48
 msgid "**Meta-Llama-3.1-8B** (1 GPU):"

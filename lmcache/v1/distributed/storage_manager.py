@@ -10,6 +10,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
     MemoryLayoutDesc,
     ObjectKey,
@@ -447,12 +448,16 @@ class StorageManager:
         # Submit remaining keys to L2 prefetch controller
         remaining_keys = keys[hit_count:]
         prefetch_request_id = -1
+        l2_orig_indices: tuple[int, ...] = ()
         if remaining_keys and self._l2_adapters:
             prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                 remaining_keys,
                 layout_desc,
                 extra_count=extra_count,
             )
+            # The controller indexes its result bitmap over remaining_keys
+            # (0-based); map those local indices back to original positions.
+            l2_orig_indices = tuple(range(hit_count, len(keys)))
 
         submit_time = time.monotonic()
         logger.debug(
@@ -471,25 +476,45 @@ class StorageManager:
         return PrefetchHandle(
             prefetch_request_id=prefetch_request_id,
             external_request_id=external_request_id,
-            l1_prefix_hit_count=hit_count,
+            l1_found_indices=tuple(range(hit_count)),
             total_requested_keys=len(keys),
             submit_time=submit_time,
+            l2_orig_indices=l2_orig_indices,
         )
+
+    def _combine_found(
+        self, handle: PrefetchHandle, l2_local: "Bitmap | None"
+    ) -> Bitmap:
+        """Merge the L1 found indices with an L2 result bitmap into one bitmap
+        over the original key positions.
+
+        ``l2_local`` is indexed over the keys submitted to L2 (0-based); its
+        set bits are mapped back to original positions via
+        ``handle.l2_orig_indices``.
+        """
+        found = Bitmap(handle.total_requested_keys)
+        for i in handle.l1_found_indices:
+            found.set(i)
+        if l2_local is not None:
+            orig = handle.l2_orig_indices
+            for local_i in l2_local.get_indices_list():
+                found.set(orig[local_i])
+        return found
 
     def query_prefetch_lookup_hits(
         self,
         handle: PrefetchHandle,
     ) -> int | None:
         """
-        Query the number of prefix hit chunks for a prefetch task before
-        the L2 prefetching is done.
+        Query the number of prefix-hit chunks for a prefetch task before the
+        L2 prefetching is done.
 
         Args:
             handle (PrefetchHandle): The handle of the lookup task.
 
         Returns:
-            the number of prefix hit chunks if the lookup is done, None if
-            it's still in progress,  or the prefetch task is already done.
+            the number of prefix-hit chunks (L1 + L2) if the lookup is done,
+            None if it's still in progress or the prefetch task is already done.
 
         Note:
             This function is designed for the scenario where the caller wants
@@ -501,25 +526,23 @@ class StorageManager:
             Therefore, it's the caller’s responsibility to make sure not calling
             this function after the prefetch task is done.
         """
+        # Prefix-path only: l1_found_indices is contiguous, so len() == prefix hits.
+        l1_hits = len(handle.l1_found_indices)
         if handle.prefetch_request_id == -1:
-            # No L2 request, the prefix hit count is final
-            return handle.l1_prefix_hit_count
+            # No L2 request: the L1 prefix hit count is final.
+            return l1_hits
 
-        # Have L2 request, need to check the status from prefetch controller
         l2_r = self._prefetch_controller.query_lookup_result(handle.prefetch_request_id)
-
         if l2_r is None:
-            # L2 prefetch is still in progress or it's already done and
-            # the result has been consumed by `query_prefetch_status`
+            # Still in progress, or already consumed by query_prefetch_status.
             return None
-
-        # L2 lookup is done, return the total prefix hit count (L1 + L2)
-        return handle.l1_prefix_hit_count + l2_r
+        # L2 lookup done: total prefix hits are L1 plus the L2 continuation.
+        return l1_hits + l2_r
 
     def query_prefetch_status(
         self,
         handle: PrefetchHandle,
-    ) -> int | None:
+    ) -> Bitmap | None:
         """
         Query the status of the prefetch task.
 
@@ -527,40 +550,41 @@ class StorageManager:
             handle (PrefetchHandle): The handle of the prefetch task.
 
         Returns:
-            the number of prefix hit chunks if the prefetch is done, None if
-            it's still in progress.
+            the found-key bitmap (over original positions) if the prefetch is
+            done, None if it's still in progress. Derive the prefix hit count
+            via ``count_leading_ones``.
         """
-        l2_result: int = 0
-
-        # Have L2 request, need to check the result from prefetch controller
+        l2_r: Bitmap | None = None
         if handle.prefetch_request_id != -1:
             l2_r = self._prefetch_controller.query_prefetch_result(
                 handle.prefetch_request_id
             )
-
             if l2_r is None:
                 return None
-            l2_result = l2_r  # Just to make linter happy
 
-        total_hits = handle.l1_prefix_hit_count + l2_result
+        found = self._combine_found(handle, l2_r)
+        # popcount (not count_leading_ones) so the log is accurate for
+        # non-contiguous policies (SEGMENTED_PREFIX / SPARSE) too.
+        total_hits = found.popcount()
         elapsed_ms = (time.monotonic() - handle.submit_time) * 1000
 
         if total_hits > 0:
+            # L1 and L2 sets are disjoint (only L1-misses go to L2).
+            l1_hits = len(handle.l1_found_indices)
+            l2_hits = l2_r.popcount() if l2_r is not None else 0
             logger.info(
                 "Prefetch request completed (L1+L2): "
-                "%d/%d prefix hits (%d L1, %d L2) "
-                "in %.1f ms "
-                "(external_request_id=%s, "
-                "prefetch_request_id=%d)",
+                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
+                "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
-                handle.l1_prefix_hit_count,
-                l2_result,
+                l1_hits,
+                l2_hits,
                 elapsed_ms,
                 handle.external_request_id,
                 handle.prefetch_request_id,
             )
-        return total_hits
+        return found
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """

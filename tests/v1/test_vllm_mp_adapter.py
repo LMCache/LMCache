@@ -25,6 +25,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 from lmcache.v1.multiprocess.protocol import RequestType
 
 
@@ -157,13 +158,45 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     fake_future = MagicMock()
     transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
-    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[0], start=0, end=4)
+    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
 
     adapter.submit_store_request("req-1", op, event=MagicMock())
 
     assert transfer_ctx.submit_store.called
     assert transfer_ctx.submit_store.call_args.kwargs == {}
+    assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
     assert adapter.store_futures["req-1"] is fake_future
+
+
+def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypatch):
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.kv_caches = {"layer.0": fake_tensor}
+    adapter.group_views = [
+        LMCacheGroupView(0, (0, 2)),
+        LMCacheGroupView(0, (4,)),
+        LMCacheGroupView(1, (1, 3)),
+    ]
+    transfer_ctx = MagicMock()
+    fake_future = MagicMock()
+    transfer_ctx.submit_store.return_value = fake_future
+    adapter.transfer_ctx = transfer_ctx
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[[0, 1], [10, 11]],
+        start=0,
+        end=4,
+    )
+
+    adapter.submit_store_request("req-1", op, event=MagicMock())
+
+    assert transfer_ctx.submit_store.call_args.args[4] == [
+        [0, 1],
+        [0, 1],
+        [10, 11],
+    ]
 
 
 def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatch):
@@ -179,7 +212,7 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
         token_ids=[1, 2, 3, 4],
-        block_ids=[0],
+        block_ids=[[0]],
         start=0,
         end=4,
         skip_first_n_tokens=1,
@@ -189,7 +222,20 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
 
     assert transfer_ctx.submit_retrieve.called
     assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
+    assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
+
+
+def test_load_store_op_accepts_per_group_block_ids():
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[[0, 1], [10, 11]],
+        start=0,
+        end=4,
+    )
+
+    assert op.block_ids == [[0, 1], [10, 11]]
+    assert op.flat_block_ids == [0, 1, 10, 11]
 
 
 def test_store_keeps_event_until_future_finishes(fake_adapter):
@@ -203,7 +249,7 @@ def test_store_keeps_event_until_future_finishes(fake_adapter):
 
     event = FakeCudaEvent()
     event_ref = weakref.ref(event)
-    op = LoadStoreOp(token_ids=[1, 2], block_ids=[7], start=0, end=2)
+    op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
 
     adapter.submit_store_request("req-1", op, event)
     del event
@@ -233,7 +279,7 @@ def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
 
     event = FakeCudaEvent()
     event_ref = weakref.ref(event)
-    op = LoadStoreOp(token_ids=[1, 2], block_ids=[7], start=0, end=2)
+    op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
 
     adapter.submit_retrieve_request("req-1", op, event)
     del event
