@@ -403,8 +403,7 @@ def parse_args_to_coordinator_config(
                 heartbeat_interval = float(raw)
             except ValueError as exc:
                 raise ValueError(
-                    "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL is not a number: "
-                    "%r" % raw
+                    "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL is not a number: %r" % raw
                 ) from exc
         else:
             heartbeat_interval = 5.0
