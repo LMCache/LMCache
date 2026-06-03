@@ -9,8 +9,9 @@ operations (pin, prefetch, ...).
 The coordinator exposes a REST API; mp servers register / heartbeat / deregister
 over HTTP, and the coordinator pushes commands back to each mp server's own HTTP
 server. The package currently ships the framework -- the FastAPI app with
-auto-discovered ``http_apis`` routers, an instance registry, a health-check
-loop, and an HTTP push client -- plus the ``/instances`` membership resource.
-Further capabilities are added as new ``http_apis`` routers without framework
-changes.
+auto-discovered ``http_apis`` routers, an instance registry, and a health-check
+loop -- plus the ``/instances`` membership resource. Further capabilities are
+added as new ``http_apis`` routers without framework changes; to push to an mp
+server, a router resolves its address from the registry and POSTs to that
+server's specific endpoint.
 """

@@ -2,10 +2,9 @@
 
 The mp coordinator is a standalone **FastAPI / REST** process that coordinates
 LMCache multi-process (mp) cache servers running across nodes as a fleet. This
-document describes the backbone: the REST API, the instance registry, the
-health-check loop, and the HTTP push channel. Domain capabilities (quota
-reconcile, blend-lookup routing, KV-op fan-out) are not implemented yet; they
-are added as new REST routers.
+document describes the backbone: the REST API, the instance registry, and the
+health-check loop. Domain capabilities (quota reconcile, blend-lookup routing,
+KV-op fan-out) are not implemented yet; they are added as new REST routers.
 
 Code: `lmcache/v1/mp_coordinator/`.
 
@@ -20,10 +19,7 @@ without re-architecting.
 ## Transport
 
 The coordinator is a FastAPI app served by uvicorn. mp servers register /
-heartbeat / deregister over REST. For server-initiated push (future quota
-broadcast, KV-op fan-out) the coordinator POSTs to each mp server's **existing**
-HTTP server — so it opens no listener on the mp side and there is no per-instance
-connection state.
+heartbeat / deregister over REST.
 
 | Method & path | Direction | Purpose |
 | --- | --- | --- |
@@ -32,7 +28,12 @@ connection state.
 | `DELETE /instances/{id}` | mp → coordinator | deregister (idempotent, 204) |
 | `GET /instances` | operator/tools | list the fleet |
 | `GET /healthz` | k8s probe | liveness |
-| `POST /coordinator/command` | coordinator → mp | pushed command (mp's HTTP API; no-op stub today) |
+
+For server-initiated work (future quota reconcile, KV-op fan-out) a coordinator
+router resolves an instance's address from the registry (`ip` + `http_port`) and
+POSTs to that mp server's **specific** existing endpoint (e.g. `/pin`,
+`/quota`). There is no generic command channel and no per-instance connection
+state — just an HTTP call to the relevant resource.
 
 ## Layout
 
@@ -43,7 +44,6 @@ lmcache/v1/mp_coordinator/
   config.py         # MPCoordinatorConfig (LMCACHE_MP_COORDINATOR_*)
   registry.py       # InstanceRegistry + MPInstance (pure membership)
   schemas.py        # Pydantic request/response models (shared wire contract)
-  push_client.py    # HttpPushClient: coordinator -> mp commands over HTTP
   http_apis/
     instances_api.py  # the /instances REST resource
     health_api.py     # /healthz
@@ -67,35 +67,36 @@ sequenceDiagram
 
 Heartbeat is `PUT /instances/{id}/heartbeat` → `registry.update_heartbeat`; a
 404 tells the client to re-register. The health loop (in `app.py`, started by
-the lifespan) evicts instances whose heartbeat lapsed. Server push reuses the
-reach (`ip` + `http_port`) from the registry:
+the lifespan) evicts instances whose heartbeat lapsed. Future server push
+resolves the address (`ip` + `http_port`) from the registry and calls the mp
+server's specific endpoint directly:
 
 ```mermaid
 sequenceDiagram
-    participant Ctl as Controller / future caller
-    participant P as HttpPushClient
-    participant M as mp server HTTP API<br/>POST /coordinator/command
+    participant Ctl as future router
+    participant Reg as InstanceRegistry
+    participant M as mp server HTTP API
 
-    Ctl->>P: send_command(id, payload) / broadcast(payload)
-    P->>P: look up ip:http_port in registry
-    P->>M: POST http://ip:http_port/coordinator/command
-    M-->>P: 200 JSON
-    P-->>Ctl: reply
+    Ctl->>Reg: get(instance_id) -> ip, http_port
+    Ctl->>M: POST http://ip:http_port/<resource> (e.g. /pin)
+    M-->>Ctl: 200 JSON
 ```
 
 ## Extension seam (adding a capability)
 
 `app.state` carries the **shared collaborators** every capability composes from:
-`config`, `registry`, `push_client`. Endpoints use them directly — membership is
-thin enough to have no service layer (the `/instances` router calls the registry
-straight, matching the mp server's own `http_apis` convention).
+`config` and `registry`. Endpoints use them directly — membership is thin enough
+to have no service layer (the `/instances` router calls the registry straight,
+matching the mp server's own `http_apis` convention).
 
 To add a capability (e.g. quota):
 
 1. `http_apis/quota_api.py` — a module-level `router` (FastAPI `APIRouter`).
    `create_app` auto-discovers it (via `lmcache/v1/utils/router_discovery.py`,
    the same convention as the mp server's HTTP API). No edits elsewhere for the
-   route to appear; the router reads `app.state.registry` / `push_client`.
+   route to appear; the router reads `app.state.registry`, and to push it
+   resolves an instance's `ip`/`http_port` and POSTs to that mp server's
+   endpoint.
 2. Only if the domain has real logic/state of its own (e.g. quota: persistence,
    broadcast-on-join) add a `quota_service.py` over the shared collaborators and
    stash it on `app.state` in `create_app`. Thin domains skip this.
@@ -126,8 +127,6 @@ liveness.
 - The health-check loop is an asyncio task started in the app lifespan; it
   evicts instances whose heartbeat lapsed (`instance_timeout`) and is cancelled
   on shutdown. `health_check_interval = 0` disables it.
-- The shared `httpx.AsyncClient` (push channel) is created in the lifespan and
-  closed on shutdown.
 - Registration is idempotent: re-registering replaces the entry. The registry
   is ephemeral — rebuilt from heartbeats after a coordinator restart; durable
   state (quota) belongs in an external store (Redis), not here.
