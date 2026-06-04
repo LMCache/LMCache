@@ -646,8 +646,8 @@ def test_raw_block_l2_adapter_blkdiscard_on_init_calls_discard(monkeypatch):
     discard_calls: list[tuple[int, int]] = []
 
     def tracking_discard(self):
-        # Record the call, then invoke the real method to exercise the full path.
-        # We intercept at the core level so we don't need the Rust extension.
+        # Record the call and bypass the real method to avoid requiring the
+        # Rust extension.
         discard_calls.append((0, self._effective_capacity_bytes))
 
     monkeypatch.setattr(RawBlockCore, "_discard_full_device", tracking_discard)

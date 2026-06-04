@@ -20,10 +20,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::fs;
 use std::io;
 use std::os::unix::io::RawFd;
-use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -665,13 +663,20 @@ struct NvmeCmdData {
     dspec: u16,     // Directive Specific
 }
 
-fn read_positive_u64(path: &Path) -> Option<u64> {
+#[cfg(target_os = "linux")]
+fn read_positive_u64(path: &std::path::Path) -> Option<u64> {
+    use std::fs;
+
     let text = fs::read_to_string(path).ok()?;
     let value = text.trim().parse::<u64>().ok()?;
     (value > 0).then_some(value)
 }
 
+#[cfg(target_os = "linux")]
 fn detect_blkdiscard_max_bytes(path: &str) -> Option<u64> {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
     let real_path = fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
     let block_name = real_path.file_name()?.to_str()?;
     let mut sysfs_path = fs::canonicalize(Path::new("/sys/class/block").join(block_name)).ok()?;
