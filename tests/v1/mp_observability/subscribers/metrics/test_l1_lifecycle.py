@@ -95,7 +95,7 @@ class TestL1Lifecycle:
         assert "life-b" in subscriber._shadow
 
     def test_eviction_records_lifetime(self, bus, subscriber):
-        count_before = _get_histogram_count("lmcache_mp.l1_chunk_lifetime_seconds")
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_lifetime")
         keys = ["lt-1"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -103,13 +103,11 @@ class TestL1Lifecycle:
         bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count("lmcache_mp.l1_chunk_lifetime_seconds")
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_lifetime")
         assert count_after == count_before + 1
 
     def test_eviction_records_idle(self, bus, subscriber):
-        count_before = _get_histogram_count(
-            "lmcache_mp.l1_chunk_idle_before_evict_seconds"
-        )
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_idle_before_evict")
         keys = ["idle-1"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -117,9 +115,7 @@ class TestL1Lifecycle:
         bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count(
-            "lmcache_mp.l1_chunk_idle_before_evict_seconds"
-        )
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_idle_before_evict")
         assert count_after == count_before + 1
 
     def test_eviction_removes_from_shadow(self, bus, subscriber):
@@ -147,7 +143,7 @@ class TestL1Lifecycle:
 
 class TestL1ReuseGap:
     def test_read_after_write_records_reuse_gap(self, bus, subscriber):
-        count_before = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap_seconds")
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap")
         keys = ["rg-1"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -155,11 +151,11 @@ class TestL1ReuseGap:
         bus.publish(_make_event(EventType.L1_READ_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap_seconds")
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap")
         assert count_after == count_before + 1
 
     def test_rewrite_records_reuse_gap(self, bus, subscriber):
-        count_before = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap_seconds")
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap")
         keys = ["rg-2"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -167,17 +163,17 @@ class TestL1ReuseGap:
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap_seconds")
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap")
         assert count_after == count_before + 1
 
     def test_read_untracked_key_no_gap(self, bus, subscriber):
         """Reading a key never written should not record a gap."""
-        count_before = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap_seconds")
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap")
         bus.start()
         bus.publish(_make_event(EventType.L1_READ_FINISHED, ["nowrite-1"]))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap_seconds")
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_reuse_gap")
         assert count_after == count_before
 
 
@@ -188,9 +184,7 @@ class TestL1ReuseGap:
 
 class TestL1EvictReuseGap:
     def test_rewrite_after_eviction_records_gap(self, bus, subscriber):
-        count_before = _get_histogram_count(
-            "lmcache_mp.l1_chunk_evict_reuse_gap_seconds"
-        )
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_evict_reuse_gap")
         keys = ["erg-1"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -200,9 +194,7 @@ class TestL1EvictReuseGap:
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count(
-            "lmcache_mp.l1_chunk_evict_reuse_gap_seconds"
-        )
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_evict_reuse_gap")
         assert count_after == count_before + 1
 
     def test_evicted_key_tracked_in_evicted_at(self, bus, subscriber):
@@ -272,7 +264,7 @@ class TestL1Sampling:
 
     def test_unsampled_key_ignored_on_eviction(self, bus, sampled_subscriber):
         """Evicting an unsampled key should not record lifetime."""
-        count_before = _get_histogram_count("lmcache_mp.l1_chunk_lifetime_seconds")
+        count_before = _get_histogram_count("lmcache_mp.l1_chunk_lifetime")
         keys = ["skip-ev-1"]
         bus.start()
         bus.publish(_make_event(EventType.L1_WRITE_FINISHED, keys))
@@ -280,7 +272,7 @@ class TestL1Sampling:
         bus.publish(_make_event(EventType.L1_KEYS_EVICTED, keys))
         time.sleep(_DRAIN_WAIT)
         bus.stop()
-        count_after = _get_histogram_count("lmcache_mp.l1_chunk_lifetime_seconds")
+        count_after = _get_histogram_count("lmcache_mp.l1_chunk_lifetime")
         assert count_after == count_before
 
 

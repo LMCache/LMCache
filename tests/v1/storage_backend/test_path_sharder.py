@@ -95,7 +95,10 @@ class TestPathSharder:
             for d in dirs:
                 shutil.rmtree(d, ignore_errors=True)
 
-    @patch("torch.cuda.is_available", return_value=False)
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.is_available",
+        return_value=False,
+    )
     def test_cpu_device_selects_first_path(self, _avail):
         dirs = [tempfile.mkdtemp() for _ in range(2)]
         try:
@@ -118,10 +121,16 @@ class TestPathSharder:
 
     # -- device-resolution edge cases (exercised via public API) -----------
 
-    @patch("torch.cuda.is_available", return_value=True)
-    @patch("torch.cuda.current_device", return_value=1)
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.is_available",
+        return_value=True,
+    )
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.current_device",
+        return_value=1,
+    )
     def test_bare_cuda_uses_current_device(self, _cur, _avail):
-        """Bare 'cuda' resolves to torch.cuda.current_device()."""
+        """Bare 'cuda' resolves to torch_dev.current_device()."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]
         try:
             csv = ",".join(dirs)
@@ -131,7 +140,10 @@ class TestPathSharder:
             for d in dirs:
                 shutil.rmtree(d, ignore_errors=True)
 
-    @patch("torch.cuda.is_available", return_value=False)
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.is_available",
+        return_value=False,
+    )
     def test_bare_cuda_no_gpu_selects_first(self, _avail):
         """Bare 'cuda' with no GPU falls back to device 0."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]
@@ -143,8 +155,14 @@ class TestPathSharder:
             for d in dirs:
                 shutil.rmtree(d, ignore_errors=True)
 
-    @patch("torch.cuda.is_available", return_value=True)
-    @patch("torch.cuda.current_device", return_value=2)
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.is_available",
+        return_value=True,
+    )
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.current_device",
+        return_value=2,
+    )
     def test_cpu_device_always_selects_first(self, _cur, _avail):
         """'cpu' always resolves to index 0, even when CUDA is available."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]
@@ -156,8 +174,14 @@ class TestPathSharder:
             for d in dirs:
                 shutil.rmtree(d, ignore_errors=True)
 
-    @patch("torch.cuda.is_available", return_value=True)
-    @patch("torch.cuda.current_device", return_value=2)
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.is_available",
+        return_value=True,
+    )
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.current_device",
+        return_value=2,
+    )
     def test_malformed_device_empty_index_falls_back(self, _cur, _avail):
         """'cuda:' (no int) falls back to current_device."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]
@@ -169,7 +193,10 @@ class TestPathSharder:
             for d in dirs:
                 shutil.rmtree(d, ignore_errors=True)
 
-    @patch("torch.cuda.is_available", return_value=False)
+    @patch(
+        "lmcache.v1.storage_backend.path_sharder.torch_dev.is_available",
+        return_value=False,
+    )
     def test_malformed_device_non_numeric_falls_back(self, _avail):
         """'cuda:foo' falls back to 0 when CUDA is unavailable."""
         dirs = [tempfile.mkdtemp() for _ in range(3)]

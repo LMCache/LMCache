@@ -120,6 +120,10 @@ lmcache/experimental/tests
 /csrc/*.hip
 /csrc/*_hip.cuh
 /csrc/*_hip.cpp
+/csrc/*_hip.h
+
+# SYCL build artifacts
+/build_sycl/
 
 # Ignore all log files
 *.log
@@ -139,3 +143,7 @@ operator/dist/
 operator/cover.out
 operator/coverage.html
 operator/Dockerfile.cross
+*.spv
+
+# Compiled gettext catalogs (built from .po at HTML build time)
+docs/source/locale/**/*.mo

@@ -8,11 +8,14 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 
 - Kubernetes 1.20+
 - `kubectl` configured to access your cluster
-- NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
+- For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
+- For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
 - (Optional) [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) for ServiceMonitor support
 
 > [!IMPORTANT]
-> The operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
+> By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
+>
+> On AMD ROCm clusters, `spec.gpuVendor: amd` omits `runtimeClassName` and skips NVIDIA-specific env vars.
 
 ## Quick Start
 
@@ -85,11 +88,7 @@ spec:
       hostIPC: true
       containers:
         - name: vllm
-          image: lmcache/vllm-openai:latest
-          env:
-            # Deterministic hashing required by LMCache
-            - name: PYTHONHASHSEED
-              value: "0"
+          image: lmcache/vllm-openai:<pinned-tag>
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -117,9 +116,12 @@ spec:
 Key points for vLLM pods:
 
 - **`hostIPC: true` is required** — CUDA IPC (`cudaIpcOpenMemHandle`) needs a shared IPC namespace between vLLM and LMCache. Without this, GPU memory mapping fails.
-- **`PYTHONHASHSEED=0`** — ensures deterministic token hashing so vLLM and LMCache produce consistent cache keys.
 - **ConfigMap mount** — the `$(cat ...)` pattern reads the connection JSON and passes it inline to `--kv-transfer-config`. The ConfigMap name is always `<LMCacheEngine name>-connection`.
+- **External LMCache connector required** — the operator-generated config now sets `kv_connector_module_path=lmcache.integration.vllm.lmcache_mp_connector` so vLLM loads the external LMCache MP connector instead of silently resolving a vendored builtin path.
 - **No `hostNetwork` needed** — the operator creates a ClusterIP Service with `internalTrafficPolicy=Local`. kube-proxy routes traffic to the LMCache pod on the same node automatically. The ConfigMap points to the service DNS name, so neither LMCache nor vLLM pods need `hostNetwork`.
+
+> [!IMPORTANT]
+> Use a pinned vLLM image that is new enough to honor `kv_connector_module_path` for KV connector loading. In practice, that means a build that includes the external-module selection fix from vLLM PR #38301 (merged April 7, 2026). Builds that also include vLLM PR #42596 (merged May 15, 2026) are preferred because they default LMCache MP to the external connector with builtin fallback. If your existing vLLM build predates those changes or you are unsure, upgrade it before enabling this operator path.
 
 > [!WARNING]
 > **Do NOT mount an emptyDir at `/dev/shm`** on either LMCache or vLLM pods. With `hostIPC: true`, both pods share the host's `/dev/shm`. Mounting an emptyDir (even with `medium: Memory`) shadows it with a private tmpfs, breaking CUDA IPC — `cudaIpcOpenMemHandle` fails because IPC handles from one pod become invisible to the other.
@@ -164,6 +166,25 @@ spec:
   l1:
     sizeGB: 60
 ```
+
+### AMD GPUs (ROCm)
+
+Set `spec.gpuVendor: amd` to run on AMD GPU nodes. The operator omits `runtimeClassName` from the pod spec and skips the NVIDIA env vars. AMD GPU nodes don't have a universal label equivalent to `nvidia.com/gpu.present`, so supply a `nodeSelector` that matches the label your platform exposes (e.g. `feature.node.kubernetes.io/amd-gpu: "true"` when using the [ROCm/gpu-operator](https://github.com/ROCm/gpu-operator)):
+
+```yaml
+apiVersion: lmcache.lmcache.ai/v1alpha1
+kind: LMCacheEngine
+metadata:
+  name: amd-cache
+spec:
+  gpuVendor: amd
+  nodeSelector:
+    feature.node.kubernetes.io/amd-gpu: "true"
+  l1:
+    sizeGB: 60
+```
+
+vLLM connects to LMCache via HIP IPC over `hostIPC` exactly the same way as CUDA IPC on NVIDIA — the `hostIPC: true` and `PYTHONHASHSEED=0` requirements above apply unchanged. Use a ROCm-built LMCache image for `spec.image`.
 
 ### Custom Server Port
 
@@ -257,7 +278,7 @@ spec:
 
 ### L2 Storage: Other Adapters (Raw Escape Hatch)
 
-For adapter types not yet natively supported by the operator (e.g. `nixl_store`, `fs`, `mock`), use the `raw` escape hatch. The JSON is passed through to `--l2-adapter` as-is:
+For adapter types not yet natively supported by the operator (e.g. `nixl_store`, `fs`, `mock`, `raw_block`), use the `raw` escape hatch. The JSON is passed through to `--l2-adapter` as-is:
 
 ```yaml
 spec:
@@ -271,6 +292,27 @@ spec:
           use_direct_io: "false"
         pool_size: 64
 ```
+
+Example `raw_block` configuration via the same escape hatch:
+
+```yaml
+spec:
+  l2Backend:
+    raw:
+      type: raw_block
+      config:
+        device_path: "/dev/nvme0n1"
+        slot_bytes: 1048576
+        block_align: 4096
+        header_bytes: 4096
+        meta_total_bytes: 268435456
+        use_odirect: true
+        num_store_workers: 2
+        num_lookup_workers: 1
+        num_load_workers: 4
+```
+
+Use an unmounted raw block device or a dedicated file path reserved for LMCache. With `use_odirect: true`, the LMCache server's `--l1-align-bytes` setting must be at least `block_align`.
 
 > [!NOTE]
 > Currently only a single L2 adapter is supported at a time. While LMCache multiprocess mode is designed to support multiple L2 adapters in cascade, this functionality is not yet fully tested. Once the multi-adapter pipeline is validated and performance is confirmed, the operator will be updated to support multiple adapters.
@@ -299,9 +341,100 @@ make manifests    # Generate CRD YAML + RBAC
 make build        # Compile operator binary
 make fmt          # go fmt
 make vet          # go vet
-make test         # Run unit tests
+make test         # Run unit tests (envtest, CPU-only)
 make lint         # Run golangci-lint
 ```
+
+### End-to-End Tests
+
+Four `make` targets cover the e2e tiers. The `-kind` variants create
+a throwaway Kind cluster and tear it down on exit; the `-cluster`
+variants run against whatever your current `KUBECONFIG` points at.
+M2 (GPU) targets additionally run a runtime HTTP check against the
+LMCache server and a vLLM round-trip that proves the KV cache
+stores on the first request and retrieves on the second.
+
+```bash
+make test-e2e-kind                                   # local Kind, no GPU, ~5 min
+make test-e2e-cluster        IMG=<registry/image:tag>  # existing cluster, no GPU
+make test-e2e-gpu-kind                               # local Kind, GPU, ~30 min
+make test-e2e-gpu-cluster    IMG=<registry/image:tag>  # existing GPU cluster
+```
+
+#### Tool prerequisites
+
+| Target | Tools to install |
+|---|---|
+| `test-e2e-kind` | `kind`, `kubectl`, `docker` |
+| `test-e2e-cluster` | `kubectl` (cluster access via `KUBECONFIG`) |
+| `test-e2e-gpu-kind` | `kind`, `kubectl`, `docker`, `helm` (v3) |
+| `test-e2e-gpu-cluster` | `kubectl`, `helm` (cluster access via `KUBECONFIG`) |
+
+```bash
+# Install kind (the other tools are distro-specific)
+go install sigs.k8s.io/kind/cmd/kind@latest
+```
+
+#### One-time host setup for `test-e2e-gpu-kind`
+
+Beyond the tools above, your host needs the NVIDIA driver and
+`nvidia-container-toolkit` installed (distro-specific), plus two
+`nvidia-ctk` commands that flip docker's default runtime to `nvidia`
+and toggle the volume-mount-based GPU injection mechanism the
+target's inline Kind config relies on:
+
+```bash
+sudo nvidia-ctk runtime configure --runtime=docker --set-as-default --cdi.enabled
+sudo nvidia-ctk config --set accept-nvidia-visible-devices-as-volume-mounts=true --in-place
+sudo systemctl restart docker
+```
+
+The target fails fast with a copy-pasteable fix command if either
+piece of host config is missing. Note that flipping docker's default
+runtime is a **host-wide** change — every container on the host then
+starts through `nvidia-container-runtime`. Non-GPU workloads still
+work but go through one extra hook.
+
+The target installs the [NVIDIA GPU Operator](https://github.com/NVIDIA/gpu-operator)
+inside the Kind cluster to handle the toolkit / containerd reconfig
+that lets pods scheduled by Kind's inner containerd see the driver
+libraries. That install takes 5-10 min, which is the bulk of the
+`test-e2e-gpu-kind` runtime. (`nvkind` is **not** required — we
+tried it and the current target uses a hand-rolled Kind config
+instead.)
+
+#### Cluster prerequisites for `test-e2e-gpu-cluster`
+
+The existing cluster must have:
+
+- at least one node labeled `nvidia.com/gpu.present=true`
+- the `nvidia` `RuntimeClass` installed (GPU Operator or equivalent)
+- the operator image pushed to a registry the cluster's image puller can reach (pass as `IMG=…`)
+
+#### Knobs (env vars)
+
+| Variable | Default | Used by |
+|---|---|---|
+| `KIND_CLUSTER` | `operator-test-e2e-<id>` | `test-e2e-kind` — set to target an existing Kind cluster |
+| `GPU_KIND_CLUSTER` | `operator-test-e2e-gpu-<id>` | `test-e2e-gpu-kind` — same idea |
+| `KEEP_CLUSTER_ON_FAILURE` | unset | `test-e2e-gpu-kind` — set to `1` to keep the cluster alive after a failure for live debugging |
+| `VLLM_MODEL` | `Qwen/Qwen2.5-0.5B` | vLLM integration spec — Hugging Face model id |
+| `VLLM_IMAGE` | `lmcache/vllm-openai:latest` | vLLM integration spec |
+| `SKIP_VLLM_INTEGRATION` | unset | set to `true` to skip the heavyweight vLLM spec but still run the runtime HTTP check |
+
+If a GPU run fails during setup, use the diagnostic target:
+
+```bash
+make diagnose-test-e2e-gpu-kind GPU_KIND_CLUSTER=<name>
+```
+
+It dumps `ClusterPolicy` status, GPU-Operator pod state, events,
+toolkit/device-plugin daemonset logs, `/dev/nvidia*` inside the Kind
+worker, and the `nvidia` stanza of the worker's containerd config.
+
+For deeper design notes (why GPU Operator over the bare device plugin,
+how the volume-mount marker propagates GPUs into the Kind worker, the
+test specs themselves), see [`AGENTS.md`](./AGENTS.md).
 
 ### Pushing a Custom Operator Image
 

@@ -9,6 +9,7 @@ import time
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
@@ -46,11 +47,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         config: LMCacheEngineConfig,
         metadata: Optional[LMCacheMetadata] = None,
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         memory_allocator: Optional[MemoryAllocatorInterface] = None,
     ):
-        if torch.cuda.is_available():
+        if torch_dev.is_available():
             super().__init__(dst_device)
         else:
             super().__init__("cpu")
@@ -102,15 +103,20 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         self._setup_metrics()
 
-    def _setup_metrics(self):
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.local_cpu_hot_cache_count.set_function(
-                lambda: len(self.hot_cache)
-            )
-            prometheus_logger.local_cpu_keys_in_request_count.set_function(
-                lambda: len(self.keys_in_request)
-            )
+    def _setup_metrics(self) -> None:
+        if self.metadata is None:
+            return
+
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            self.metadata,
+            config=self.config,
+        )
+        prometheus_logger.local_cpu_hot_cache_count.set_function(
+            lambda: len(self.hot_cache)
+        )
+        prometheus_logger.local_cpu_keys_in_request_count.set_function(
+            lambda: len(self.keys_in_request)
+        )
 
     def __str__(self):
         return self.__class__.__name__
@@ -349,6 +355,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
         metadata: Optional[LMCacheMetadata] = None,
     ) -> MemoryAllocatorInterface:
         cpu_size = config.max_local_cpu_size
+        use_hugepages = config.local_cpu_use_hugepages
 
         if metadata is not None:
             # save_only_first_rank only works when use mla
@@ -380,6 +387,9 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
 
         if config.enable_p2p:
+            if use_hugepages:
+                raise ValueError("Hugepages are not supported with P2P mode")
+
             # TODO(baoloongmao): Add lazy memory allocator support for P2P mode
             # For now, keep the original P2P implementation
             assert metadata is not None
@@ -406,8 +416,17 @@ class LocalCPUBackend(AllocatorBackendInterface):
             return paged_mem_allocator
         else:
             # Check if io_uring is enabled for fixed buffer support
-            use_uring = bool(
-                config.get_extra_config_value("rust_raw_block.use_uring", False)
+            io_engine = str(
+                config.get_extra_config_value("rust_raw_block.io_engine", "") or ""
+            ).lower()
+            use_uring = (
+                io_engine == "io_uring"
+                or bool(
+                    config.get_extra_config_value("rust_raw_block.use_iouring", False)
+                )
+                or bool(
+                    config.get_extra_config_value("rust_raw_block.use_uring", False)
+                )
             )
 
             # Check if lazy memory allocator should be enabled
@@ -473,6 +492,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                 return MixedMemoryAllocator(
                     align_cpu_size_bytes,
                     use_paging=True,
+                    use_hugepages=False,
                     **kwargs,
                 )
 
@@ -482,11 +502,13 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     cpu_size_bytes,
                     numa_mapping=numa_mapping,
                     align_bytes=allocator_align_bytes,
+                    use_hugepages=use_hugepages,
                 )
             return MixedMemoryAllocator(
                 cpu_size_bytes,
                 numa_mapping=numa_mapping,
                 config=config,
+                use_hugepages=use_hugepages,
             )
 
     @staticmethod
@@ -522,7 +544,12 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         rust_device_path = extra.get("rust_raw_block.device_path")
         rust_use_odirect = bool(extra.get("rust_raw_block.use_odirect", False))
-        rust_use_uring = bool(extra.get("rust_raw_block.use_uring", False))
+        rust_io_engine = str(extra.get("rust_raw_block.io_engine", "") or "").lower()
+        rust_use_uring = (
+            rust_io_engine == "io_uring"
+            or bool(extra.get("rust_raw_block.use_iouring", False))
+            or bool(extra.get("rust_raw_block.use_uring", False))
+        )
         rust_auto_align = bool(
             extra.get("rust_raw_block.align_local_cpu_allocator", True)
         )
@@ -706,7 +733,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if self.use_hot:
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
                 # Accurate estimation is hard due to fragmentation
-                num_candidates = 1
+                num_candidates = min(64, max(1, len(self.hot_cache)))
                 evict_keys = None
                 with self.cpu_lock:
                     evict_keys = self.cache_policy.get_evict_candidates(
@@ -718,17 +745,26 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     # then the other layers are also ref_count > 1 or
                     # pinned in the cpu memory. This might not be true.
                     if evict_keys:
-                        evict_keys_count += len(evict_keys)
-                        wait_other_requests = False
                         for evict_key in evict_keys:
                             evict_key_all_layer = evict_key.split_layers(batch_size)
 
                             # TODO(Jiayi): batched allocate is not supported through
                             # `batched_remove`. Therefore, features like usage tracking
                             # is not supported.
-                            old_mem_objs = []
+                            old_mem_objs: list[MemoryObj] = []
                             for key in evict_key_all_layer:
-                                old_mem_objs.append(self.hot_cache[key])
+                                old_mem_obj = self.hot_cache.get(key)
+                                if old_mem_obj is None or not old_mem_obj.can_evict:
+                                    old_mem_objs = []
+                                    break
+                                old_mem_objs.append(old_mem_obj)
+
+                            if not old_mem_objs:
+                                continue
+
+                            wait_other_requests = False
+                            evict_keys_count += len(old_mem_objs)
+                            for key in evict_key_all_layer:
                                 self.cache_policy.update_on_force_evict(key)
                                 self.hot_cache.pop(key, None)
 
@@ -737,7 +773,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                             logger.debug(
                                 f"Evicting {len(old_mem_objs)} chunks from cpu memory"
                             )
-                    else:
+                            break
+                    if wait_other_requests:
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
@@ -763,7 +800,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             memory_objs = self.memory_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
             )
-            if memory_objs:
+            if memory_objs is not None:
                 break
 
             num_attempts += 1

@@ -36,10 +36,10 @@ class L1LifecycleSubscriber(EventSubscriber):
     """Tracks L1 chunk lifecycle via shadow monitoring.
 
     Histograms (chunk lifecycle):
-    - ``lmcache_mp.l1_chunk_lifetime_seconds`` — allocation to eviction
-    - ``lmcache_mp.l1_chunk_idle_before_evict_seconds`` — last access to eviction
-    - ``lmcache_mp.l1_chunk_reuse_gap_seconds`` — gap between consecutive touches
-    - ``lmcache_mp.l1_chunk_evict_reuse_gap_seconds`` — eviction to
+    - ``lmcache_mp.l1_chunk_lifetime`` — allocation to eviction
+    - ``lmcache_mp.l1_chunk_idle_before_evict`` — last access to eviction
+    - ``lmcache_mp.l1_chunk_reuse_gap`` — gap between consecutive touches
+    - ``lmcache_mp.l1_chunk_evict_reuse_gap`` — eviction to
       next reuse (capped at ``max_evict_reuse_wait``)
 
     Parameters:
@@ -64,19 +64,19 @@ class L1LifecycleSubscriber(EventSubscriber):
         self._sample_threshold = int(sample_rate * self._sample_prime)
         meter = metrics.get_meter("lmcache.l1")
         self._lifetime_hist = meter.create_histogram(
-            "lmcache_mp.l1_chunk_lifetime_seconds",
+            "lmcache_mp.l1_chunk_lifetime",
             description=(
                 "Histogram of L1 chunk lifetime from allocation to eviction (seconds)."
             ),
             unit="s",
         )
         self._idle_hist = meter.create_histogram(
-            "lmcache_mp.l1_chunk_idle_before_evict_seconds",
+            "lmcache_mp.l1_chunk_idle_before_evict",
             description=("Histogram of idle time before L1 chunk eviction (seconds)."),
             unit="s",
         )
         self._reuse_gap_hist = meter.create_histogram(
-            "lmcache_mp.l1_chunk_reuse_gap_seconds",
+            "lmcache_mp.l1_chunk_reuse_gap",
             description=(
                 "Histogram of time gaps between consecutive "
                 "touches (write or read) of the same L1 chunk (seconds)."
@@ -84,7 +84,7 @@ class L1LifecycleSubscriber(EventSubscriber):
             unit="s",
         )
         self._evict_reuse_gap_hist = meter.create_histogram(
-            "lmcache_mp.l1_chunk_evict_reuse_gap_seconds",
+            "lmcache_mp.l1_chunk_evict_reuse_gap",
             description=(
                 "Histogram of time from L1 chunk eviction to "
                 "next reuse.  Capped at max_evict_reuse_wait."

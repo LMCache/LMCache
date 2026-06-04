@@ -13,6 +13,7 @@ from maru_lmcache import CxlMemoryAdapter
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
@@ -49,7 +50,7 @@ class MaruBackend(AllocatorBackendInterface):
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
     ):
         super().__init__(dst_device=dst_device)
 

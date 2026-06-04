@@ -10,7 +10,7 @@ The controller runs a background thread with an event-driven loop that:
 """
 
 # Standard
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 import enum
 import select
@@ -181,6 +181,9 @@ class InFlightStoreTask:
 
     l2_store_result: bool | None = None
     """L2 outcome (True=success, False=failure, None=still in flight)."""
+
+    l2_bytes_transferred: int = 0
+    """Bytes actually transferred by the adapter for this task."""
 
 
 # Main class
@@ -505,6 +508,9 @@ class StoreController(StorageControllerInterface):
                         "l2_name": self._adapter_descriptors[adapter_index].type_name,
                         "key_count": len(successful_keys),
                         "total_bytes": total_bytes,
+                        "key_count_per_salt": Counter(
+                            k.cache_salt for k in successful_keys
+                        ),
                     },
                 )
             )
@@ -522,7 +528,7 @@ class StoreController(StorageControllerInterface):
         for adapter_index in signaled_adapters:
             adapter = self._l2_adapters[adapter_index]
             completed = adapter.pop_completed_store_tasks()
-            for task_id, success in completed.items():
+            for task_id, result in completed.items():
                 task = self._in_flight_tasks.get((adapter_index, task_id))
                 if task is None:
                     logger.warning(
@@ -531,7 +537,8 @@ class StoreController(StorageControllerInterface):
                         adapter_index,
                     )
                     continue
-                task.l2_store_result = success
+                task.l2_store_result = result.is_successful()
+                task.l2_bytes_transferred = result.bytes_transferred()
 
     def _advance_request(
         self,
@@ -561,16 +568,21 @@ class StoreController(StorageControllerInterface):
         self._status_in_flight_count -= 1
 
         l2_name = self._adapter_descriptors[adapter_index].type_name
+        completion_meta: dict[str, object] = {
+            "adapter_index": adapter_index,
+            "task_id": task_id,
+            "l2_name": l2_name,
+            "bytes_transferred": task.l2_bytes_transferred,
+        }
         if success:
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_STORE_COMPLETED,
                     metadata={
-                        "adapter_index": adapter_index,
-                        "task_id": task_id,
-                        "l2_name": l2_name,
+                        **completion_meta,
                         "succeeded_count": len(task.keys),
                         "failed_count": 0,
+                        "key_count_per_salt": Counter(k.cache_salt for k in task.keys),
                     },
                 )
             )
@@ -588,9 +600,7 @@ class StoreController(StorageControllerInterface):
                 Event(
                     event_type=EventType.L2_STORE_COMPLETED,
                     metadata={
-                        "adapter_index": adapter_index,
-                        "task_id": task_id,
-                        "l2_name": l2_name,
+                        **completion_meta,
                         "succeeded_count": 0,
                         "failed_count": len(task.keys),
                     },

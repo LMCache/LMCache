@@ -16,10 +16,11 @@ A subset of routes defined under
 ``lmcache/v1/internal_api_server/common/`` is also exposed on this HTTP
 server. The module
 ``lmcache/v1/multiprocess/http_apis/common_api.py`` aggregates those
-routers (skipping modules listed in ``_MP_INCOMPATIBLE_MODULES``, such as
-``run_script_api``) and forwards them to the auto-discovery pipeline.
-Adding a new compatible module under ``internal_api_server/common``
-therefore requires no wiring changes on the MP side.
+routers (skipping any module listed in ``_MP_INCOMPATIBLE_MODULES``,
+which is currently empty) and forwards them to the auto-discovery
+pipeline. Adding a new compatible module under
+``internal_api_server/common`` therefore requires no wiring changes on
+the MP side.
 
 .. contents::
    :local:
@@ -56,10 +57,10 @@ All examples below assume the server is reachable at
 Endpoints
 ---------
 
-The table below groups the routes by purpose. Paths under ``/api/`` are
-the operational surface (health, status, cache control). Routes without
-the ``/api/`` prefix are inherited from the shared
-``internal_api_server`` package and kept at their original paths for
+The table below groups the routes by purpose. The operational surface
+(health, status, cache control) is exposed at top-level paths. Routes
+inherited from the shared
+``internal_api_server`` package are kept at their original paths for
 compatibility with the vLLM-embedded API server.
 
 .. list-table::
@@ -73,14 +74,32 @@ compatibility with the vLLM-embedded API server.
      - ``/``
      - Basic liveness ping.
    * - GET
-     - ``/api/healthcheck``
+     - ``/healthcheck``
      - K8s liveness/readiness probe.
    * - GET
-     - ``/api/status``
+     - ``/status``
      - Detailed engine status for inspection and debugging.
    * - POST
-     - ``/api/clear-cache``
+     - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
+   * - GET
+     - ``/kvcache/check``
+     - Compute MD5 checksums over the GPU KV cache for a set of block IDs.
+       Intended for diagnostics and round-trip integrity checks from
+       ``lmcache bench server``.
+   * - GET
+     - ``/quota``
+     - List every registered ``cache_salt`` quota with live usage.
+   * - PUT
+     - ``/quota/{cache_salt}``
+     - Set or update the quota (in GB) for a ``cache_salt``.
+   * - GET
+     - ``/quota/{cache_salt}``
+     - Read the quota and live usage for a single ``cache_salt``.
+   * - DELETE
+     - ``/quota/{cache_salt}``
+     - Remove a ``cache_salt``'s quota entry (its data is evicted next
+       cycle).
    * - GET
      - ``/conf``
      - Dump merged server configurations (mp, storage_manager,
@@ -118,12 +137,16 @@ compatibility with the vLLM-embedded API server.
    * - GET
      - ``/periodic-threads-health``
      - Quick health check for critical/high-level periodic threads.
+   * - POST
+     - ``/run_script``
+     - Execute an uploaded Python script in a restricted sandbox. Only
+       modules listed in ``--script-allowed-imports`` can be imported.
 
 ``GET /``
 ~~~~~~~~~
 
 Basic liveness check. Returns a static payload indicating the HTTP server
-is running. Use ``/api/healthcheck`` instead for probes that also verify
+is running. Use ``/healthcheck`` instead for probes that also verify
 the cache engine is initialized.
 
 **Response** (``200 OK``):
@@ -141,8 +164,8 @@ the cache engine is initialized.
 
     curl -s http://localhost:8080/
 
-``GET /api/healthcheck``
-~~~~~~~~~~~~~~~~~~~~~~~~
+``GET /healthcheck``
+~~~~~~~~~~~~~~~~~~~~
 
 Health check endpoint suitable for Kubernetes liveness and readiness
 probes. A ``200`` response implies the HTTP server is alive **and** the
@@ -170,7 +193,7 @@ is not yet ready (still initializing, or failed to initialize).
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/api/healthcheck
+    curl -s http://localhost:8080/healthcheck
 
 **Kubernetes probe snippet:**
 
@@ -178,19 +201,19 @@ is not yet ready (still initializing, or failed to initialize).
 
     livenessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 10
       periodSeconds: 10
     readinessProbe:
       httpGet:
-        path: /api/healthcheck
+        path: /healthcheck
         port: 8080
       initialDelaySeconds: 5
       periodSeconds: 5
 
-``GET /api/status``
-~~~~~~~~~~~~~~~~~~~
+``GET /status``
+~~~~~~~~~~~~~~~
 
 Returns a detailed snapshot of the MP engine's internal state: L1 cache,
 L2 adapters, registered GPU contexts, active sessions, and in-flight
@@ -248,10 +271,10 @@ been initialized:
 
 .. code-block:: bash
 
-    curl -s http://localhost:8080/api/status | jq
+    curl -s http://localhost:8080/status | jq
 
-``POST /api/clear-cache``
-~~~~~~~~~~~~~~~~~~~~~~~~~
+``POST /clear-cache``
+~~~~~~~~~~~~~~~~~~~~~
 
 Force-clears **all** KV cache data currently held in L1 (CPU) memory.
 
@@ -284,7 +307,180 @@ The request body is ignored.
 
 .. code-block:: bash
 
-    curl -s -X POST http://localhost:8080/api/clear-cache
+    curl -s -X POST http://localhost:8080/clear-cache
+
+``GET /kvcache/check``
+~~~~~~~~~~~~~~~~~~~~~~
+
+Compute MD5 checksums over the GPU KV cache, grouped ``chunk_size`` blocks
+per hashed chunk. MP mode addresses KV storage by block IDs natively (the
+same units used by ``STORE`` / ``RETRIEVE``), so the endpoint is fully
+block-centric: ``block_ids`` enumerates the target blocks and
+``chunk_size`` counts blocks per chunk. Intended for diagnostics and
+round-trip integrity checks from ``lmcache bench server`` — not for the
+inference data path.
+
+**Query parameters:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 15 60
+
+   * - Name
+     - Required
+     - Description
+   * - ``block_ids``
+     - yes
+     - GPU block IDs in mixed format, e.g. ``"0,[2,5],8"``.
+   * - ``chunk_size``
+     - yes
+     - Positive integer — number of blocks per hashed chunk.
+   * - ``instance_id``
+     - no (default ``0``)
+     - Registered GPU context ID on the engine.
+   * - ``layerwise``
+     - no (default ``false``)
+     - If ``true``, return per-layer checksums keyed by ``"layer_<idx>"``;
+       otherwise a single aggregated digest per chunk over all layers.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "status": "success",
+      "chunk_size": 2,
+      "num_chunks": 2,
+      "chunk_checksums": ["<md5>", "<md5>"],
+      "layerwise": false,
+      "block_id_ranges": "0,[2,5],8"
+    }
+
+When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
+``"layer_<idx>"`` whose values are per-layer lists.
+
+**HTTP status codes:**
+
+- ``200``: success.
+- ``400``: ``block_ids`` missing/malformed, or ``chunk_size`` missing or
+  non-positive.
+- ``404``: ``instance_id`` not registered, or the registered KV tensors
+  are empty.
+- ``501``: engine has no ``gpu_contexts``, or the GPU KV format is not
+  supported by this endpoint (page-buffer-fused and cross-layer layouts
+  are declined until a real need appears).
+- ``503``: engine not yet initialized on ``app.state``.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2"
+
+    curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2&layerwise=true"
+
+.. _mp-http-quota-api:
+
+``/quota`` — per-``cache_salt`` quota management
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These endpoints manage the per-``cache_salt`` storage budgets consumed by
+the ``IsolatedLRU`` eviction policy (selected via
+``--eviction-policy IsolatedLRU``). Quotas are **soft**: setting a limit
+does not reject writes — any over-budget ``cache_salt`` is evicted at
+the next eviction cycle (~1 s).
+A ``cache_salt`` with no registered quota has an effective limit of
+``0`` bytes, so its data is cleared next cycle (allowlist semantics).
+
+These endpoints are no-ops on engines that did not start with
+``--eviction-policy IsolatedLRU``: the ``QuotaManager`` is still
+present, but the LRU policy ignores the registered quotas.
+
+**URL escaping for the empty salt.** ``cache_salt=""`` (un-salted /
+anonymous traffic) cannot appear in a URL path parameter, so the API
+accepts the sentinel ``_default`` in its place. ``PUT /quota/_default``
+sets the quota for ``cache_salt=""``. A user that legitimately stores
+data with ``cache_salt="_default"`` cannot be managed via this HTTP API
+distinctly from anonymous traffic — both map to the same path parameter;
+pick any other value (e.g. ``"default"``) to disambiguate.
+
+``PUT /quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Create or update a quota.
+
+**Body:** ``{"limit_gb": <float>}`` (required, finite, non-negative).
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"cache_salt": "alice", "limit_gb": 10.0, "status": "ok"}
+
+**Errors:** ``400`` for malformed JSON, missing ``limit_gb``, non-numeric
+``limit_gb``, ``nan`` / ``inf``, or negative values; ``503`` if the
+engine is not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X PUT http://localhost:8080/quota/alice \
+        -H 'Content-Type: application/json' \
+        -d '{"limit_gb": 10.0}'
+
+``GET /quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Read the current quota and live usage for one ``cache_salt``.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "cache_salt": "alice",
+      "limit_gb": 10.0,
+      "current_usage_gb": 2.137,
+      "exists": true
+    }
+
+``exists`` is ``false`` when no quota was ever registered for this
+``cache_salt`` (``limit_gb`` is then ``0.0`` and ``current_usage_gb``
+reflects whatever bytes are currently cached for that salt — those bytes
+will evict next cycle under ``IsolatedLRU``).
+
+``DELETE /quota/{cache_salt}``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Remove a ``cache_salt``'s quota entry. Any bytes still cached under this
+``cache_salt`` become over-budget on the next eviction cycle (effective
+limit drops to ``0``) and will be evicted.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {"cache_salt": "alice", "status": "removed"}
+
+When no quota was registered for the given ``cache_salt``, the response
+is ``{"cache_salt": "...", "status": "not_found"}`` (still ``200 OK``).
+
+``GET /quota``
+^^^^^^^^^^^^^^^^^^
+
+List every registered quota alongside its live usage.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "users": {
+        "alice": {"limit_gb": 10.0, "current_usage_gb": 2.137},
+        "bob":   {"limit_gb":  4.0, "current_usage_gb": 0.812}
+      }
+    }
 
 ``GET /conf``
 ~~~~~~~~~~~~~
@@ -590,9 +786,9 @@ registration list to edit.
 If the route is generic enough to be shared with the vLLM-embedded API
 server, add it under ``lmcache/v1/internal_api_server/common/`` instead.
 It will be picked up on the MP side via ``common_api.py`` unless its
-module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (used for
-modules that require vLLM-specific ``app.state`` attributes, e.g.
-``run_script_api``).
+module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved
+for modules that require vLLM-specific ``app.state`` attributes; the
+list is currently empty).
 
 When adding a new endpoint, please also add a matching section to this
 page documenting the endpoint's purpose, request/response schema, and

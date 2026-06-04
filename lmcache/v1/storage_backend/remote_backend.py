@@ -7,6 +7,7 @@ import threading
 import time
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, _lmcache_nvtx_annotate
@@ -30,7 +31,7 @@ class RemoteBackend(StorageBackendInterface):
         metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: Optional[LocalCPUBackend],
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
         plugin_name: Optional[str] = None,
     ):
         super().__init__(dst_device=dst_device)
@@ -95,23 +96,21 @@ class RemoteBackend(StorageBackendInterface):
         # health monitoring. The HealthMonitor in LMCacheEngine will
         # register RemoteBackendHealthCheck for each RemoteBackend.
 
-        self._setup_metrics()
-
         self._get_blocking_failed_count = 0
         self._put_failed_count = 0
 
-    def _setup_metrics(self):
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.remote_put_task_num.set_function(
-                lambda: len(self.put_tasks)
-            )
-            prometheus_logger.get_blocking_failed_count.set_function(
-                lambda: self._get_blocking_failed_count
-            )
-            prometheus_logger.put_failed_count.set_function(
-                lambda: self._put_failed_count
-            )
+        self._setup_metrics()
+
+    def _setup_metrics(self) -> None:
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            self.metadata,
+            config=self.config,
+        )
+        prometheus_logger.remote_put_task_num.set_function(lambda: len(self.put_tasks))
+        prometheus_logger.get_blocking_failed_count.set_function(
+            lambda: self._get_blocking_failed_count
+        )
+        prometheus_logger.put_failed_count.set_function(lambda: self._put_failed_count)
 
     def __str__(self):
         return self.__class__.__name__

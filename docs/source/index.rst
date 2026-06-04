@@ -75,7 +75,6 @@ Documentation
    getting_started/quickstart/index
    getting_started/benchmarking
    getting_started/kv_cache_calculator
-   getting_started/cli
    getting_started/troubleshoot
    getting_started/faq
    getting_started/quickstart/standalone_starter
@@ -85,9 +84,9 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Serving engine integrations
+   :caption: Recipes
 
-   integrations/index
+   recipes/index
 
 :raw-html:`<br />`
 
@@ -99,6 +98,7 @@ Documentation
    kv_cache/async_loading
    kv_cache/caching_policies
    kv_cache/p2p_sharing
+
 :raw-html:`<br />`
 
 .. toctree::
@@ -106,6 +106,7 @@ Documentation
    :caption: Non-KV caching
 
    non_kv_cache/encoder_cache
+
 :raw-html:`<br />`
 
 .. toctree::

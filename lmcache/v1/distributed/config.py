@@ -8,13 +8,18 @@ Configuration for distributed storage manager
 from dataclasses import dataclass, field
 from typing import Literal
 import argparse
+import os
 
 # First Party
+from lmcache import torch_dev
+from lmcache.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     add_l2_adapters_args,
     parse_args_to_l2_adapters_config,
 )
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -35,8 +40,20 @@ class L1MemoryManagerConfig:
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
 
+    shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
+    """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
+
+        # LazyMemoryAllocator requires cudart (CUDA host-pinned memory).
+        # Auto-disable on non-CUDA backends to avoid a RuntimeError.
+        if self.use_lazy and not hasattr(torch_dev, "cudart"):
+            logger.warning(
+                "LazyMemoryAllocator requires cudart which is not available "
+                "on the current backend. Disabling l1-use-lazy."
+            )
+            self.use_lazy = False
 
 
 @dataclass
@@ -61,7 +78,7 @@ class EvictionConfig:
     The configuration for eviction policies (L1 and optionally L2).
     """
 
-    eviction_policy: Literal["LRU", "noop"]
+    eviction_policy: Literal["LRU", "IsolatedLRU", "noop"]
     """ The eviction policy to use. """
 
     trigger_watermark: float = field(default=0.8)
@@ -96,6 +113,9 @@ class StorageManagerConfig:
 
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
+
+    periodic_notifier_interval_ms: int = 5
+    """ Interval (ms) for the periodic event notifier heartbeat. """
 
 
 def add_storage_manager_args(
@@ -176,9 +196,11 @@ def add_storage_manager_args(
     eviction_group.add_argument(
         "--eviction-policy",
         type=str,
-        choices=["LRU", "noop"],
+        choices=["LRU", "IsolatedLRU", "noop"],
         required=True,
-        help="The eviction policy to use ('LRU' or 'noop').",
+        help="The eviction policy to use ('LRU', 'IsolatedLRU', or 'noop'). "
+        "'IsolatedLRU' maintains one LRU list per cache_salt and requires "
+        "quotas keyed by cache_salt to be configured via the HTTP API.",
     )
     eviction_group.add_argument(
         "--eviction-trigger-watermark",
@@ -235,6 +257,12 @@ def add_storage_manager_args(
         type=int,
         default=8,
         help="Maximum number of concurrent prefetch requests. Default is 8.",
+    )
+    policy_group.add_argument(
+        "--periodic-notifier-interval-ms",
+        type=int,
+        default=5,
+        help="Interval in ms for the periodic event notifier heartbeat. Default is 5.",
     )
 
     # Adapter config
@@ -300,6 +328,7 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
 
 

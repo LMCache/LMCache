@@ -111,7 +111,7 @@ spec:
         name: string
     # Option B: Raw escape hatch for other adapter types
     raw:
-      type: string              # adapter type name (nixl_store, fs, mock, etc.)
+      type: string              # adapter type name (nixl_store, fs, mock, raw_block, etc.)
       config: map[string]any    # type-specific config as free-form map
 
   # -- Resources (auto-computed, no user input needed) --
@@ -288,6 +288,7 @@ For `LMCacheEngine` named `production-cache`:
 ```json
 {
   "kv_connector": "LMCacheMPConnector",
+  "kv_connector_module_path": "lmcache.integration.vllm.lmcache_mp_connector",
   "kv_role": "kv_both",
   "kv_connector_extra_config": {
     "lmcache.mp.host": "tcp://<name>.<namespace>.svc.cluster.local",
@@ -296,7 +297,7 @@ For `LMCacheEngine` named `production-cache`:
 }
 ```
 
-The ConfigMap uses the lookup Service's cluster DNS name. Because the Service has `internalTrafficPolicy=Local`, kube-proxy routes traffic only to the LMCache pod on the same node as the vLLM pod. vLLM pods mount this ConfigMap and pass the JSON to `--kv-transfer-config` — no downward API or shell variable substitution required. vLLM pods should also set `PYTHONHASHSEED=0` for deterministic token hashing.
+The ConfigMap uses the lookup Service's cluster DNS name. Because the Service has `internalTrafficPolicy=Local`, kube-proxy routes traffic only to the LMCache pod on the same node as the vLLM pod. vLLM pods mount this ConfigMap and pass the JSON to `--kv-transfer-config` — no downward API or shell variable substitution required. The explicit `kv_connector_module_path` makes the external LMCache MP connector path load-bearing and avoids silent fallback to an older vendored builtin connector path.
 
 ---
 
@@ -340,13 +341,25 @@ OnEvent(LMCacheEngine create/update/delete):
 
 **Secondary watches:** DaemonSet, Pods (readiness changes → update endpoints), Nodes (new GPU node → DaemonSet auto-schedules)
 
-**Finalizer** `lmcache.ai/cleanup`: on CR deletion, cascading delete of owned resources.
+**Deletion / cleanup**: every child resource the operator creates
+(DaemonSet, lookup Service, metrics Service, connection ConfigMap,
+managed RESP auth Secret, optional ServiceMonitor) carries an
+`ownerReference` to the LMCacheEngine, so Kubernetes garbage
+collection cascade-deletes them when the CR goes away. **No finalizer
+is used.** An earlier design added a `lmcache.ai/cleanup` finalizer
+to mirror that GC behavior, but it was a no-op that only created
+deadlocks when the controller pod was not running (e.g. during
+cluster issues or a single-step `kubectl delete -k config/default`).
+The reconciler now actively strips that legacy finalizer from any CR
+it sees, so migration from older operator versions is automatic.
+Finalizers will return when we need to clean up state K8s GC cannot
+reach (Redis L2 keys, federation deregistration, etc.).
 
 ---
 
 ## Future Extensibility
 
-- **L2 backends:** The RESP (Redis/Valkey) adapter is natively supported with typed CRD fields and Secret-based auth injection. Other adapter types (nixl_store, fs, mock, mooncake_store) can be configured via the `raw` escape hatch. Currently only a single L2 adapter is supported at a time. LMCache MP mode is designed to support multiple adapters in cascade, but this is not yet fully tested — once validated, the operator will support multiple adapters.
+- **L2 backends:** The RESP (Redis/Valkey) adapter is natively supported with typed CRD fields and Secret-based auth injection. Other adapter types (nixl_store, fs, mock, mooncake_store, raw_block) can be configured via the `raw` escape hatch. Currently only a single L2 adapter is supported at a time. LMCache MP mode is designed to support multiple adapters in cascade, but this is not yet fully tested — once validated, the operator will support multiple adapters.
 - **Blend mode:** Future `LMCacheEngine` field `blend.enabled` to switch entrypoint from `server.py` to `blend_server.py` (deferred from v1alpha1).
 - **Update strategy:** Future `spec.updateStrategy` field for `RollingUpdate`/`OnDelete` control on the DaemonSet.
 - **Additional CRDs:** `LMCacheKeyManager` (global key management), `LMCacheMonitor` (engine state monitoring), `LMCacheFederation` (cross-cluster P2P topology).
@@ -360,7 +373,7 @@ OnEvent(LMCacheEngine create/update/delete):
 | `lmcache/v1/distributed/config.py` | `L1MemoryManagerConfig`, `L1ManagerConfig`, `EvictionConfig`, `StorageManagerConfig`, argparse |
 | `lmcache/v1/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
 | `lmcache/v1/multiprocess/server.py` | `MPCacheEngine`, server CLI entry point, argparse (lines 629–653) |
-| `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/api/healthcheck` endpoint (FastAPI + ZMQ) |
+| `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/healthcheck` endpoint (FastAPI + ZMQ) |
 | `lmcache/v1/distributed/l2_adapters/config.py` | L2 adapter registry pattern, `L2AdapterConfigBase`, `L2AdaptersConfig` |
 | `examples/multi_process/lmcache-daemonset.yaml` | Reference DaemonSet manifest |
 | `examples/multi_process/vllm-deployment.yaml` | Reference vLLM deployment with kv-transfer-config |

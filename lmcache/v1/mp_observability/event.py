@@ -25,6 +25,7 @@ class EventType(Enum):
     L1_WRITE_FINISHED = "l1.write.finished"
     L1_WRITE_FINISHED_AND_READ_RESERVED = "l1.write_finished_and_read_reserved"
     L1_KEYS_EVICTED = "l1.keys.evicted"
+    L1_EVICTION_LOOP_TICK = "l1.eviction.loop_tick"
 
     # L1 failure events (LM-291 health monitoring)
     L1_ALLOCATION_FAILED = "l1.allocation.failed"
@@ -50,6 +51,9 @@ class EventType(Enum):
     # L2_PREFETCH_LOAD_* events above which aggregate across adapters.
     L2_LOAD_TASK_SUBMITTED = "l2.load_task.submitted"
     L2_LOAD_TASK_COMPLETED = "l2.load_task.completed"
+
+    # L2 Eviction Controller events
+    L2_KEYS_EVICTED = "l2.keys.evicted"
 
     # L2 failure events (LM-291 health monitoring)
     L2_PREFETCH_FAILED = "l2.prefetch.failed"

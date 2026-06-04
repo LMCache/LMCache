@@ -226,10 +226,21 @@ def patch_s3_request(monkeypatch):
 
     Also patch HttpRequest so body_stream is preserved as a plain Python
     object (real HttpRequest wraps it in an opaque awscrt InputStream).
+
+    Stubs the credentials provider so tests don't depend on boto3 or any
+    AWS credentials being present in the environment; mocked requests
+    never reach a real signer.
     """
     _BACKEND.reset()
     monkeypatch.setattr(s3mod.s3, "S3Request", _FakeS3Request)
     monkeypatch.setattr(s3mod, "HttpRequest", _FakeHttpRequest)
+    monkeypatch.setattr(
+        s3mod,
+        "_make_credentials_provider",
+        lambda _config: s3mod.auth.AwsCredentialsProvider.new_static(
+            "test-key", "test-secret"
+        ),
+    )
     yield
 
 
@@ -369,7 +380,7 @@ class TestStoreLookupLoad:
         tid = adapter.submit_store_task([key], [obj])
         assert wait_for_event_fd(adapter.get_store_event_fd())
         completed = adapter.pop_completed_store_tasks()
-        assert completed == {tid: True}
+        assert completed[tid].is_successful()
 
         # Lookup
         tid = adapter.submit_lookup_and_lock_task([key])
@@ -553,7 +564,7 @@ class TestCircuitBreaker:
         )
         wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
         completed = adapter.pop_completed_store_tasks()
-        assert completed[disabled_tid] is False
+        assert not completed[disabled_tid].is_successful()
         assert _BACKEND.counts()["put"] == put_before  # never reached the backend
 
         # Lookup and load also short-circuit to all-zero bitmaps.
