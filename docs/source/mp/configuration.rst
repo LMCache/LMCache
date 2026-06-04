@@ -246,8 +246,8 @@ Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
-``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
-``native_plugin``, ``raw_block``, ``dax``.
+``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``s3``, ``resp``,
+``plugin``, ``native_plugin``, ``raw_block``, ``dax``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -346,6 +346,33 @@ Example:
 .. code-block:: bash
 
     --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
+
+``aerospike`` -- Aerospike native connector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Native C++ Aerospike L2 adapter (optional; build with ``BUILD_AEROSPIKE=1``).
+See :doc:`l2_storage` for build prerequisites and the full field list.
+
+Fields:
+
+- ``hosts`` *(required)*: Seed hosts ``host:port[,host:port...]``.
+- ``namespace`` *(optional, default ``"lmcache"``)*: Aerospike namespace.
+- ``set_name`` / ``set`` *(optional, default ``"kv_chunks"``)*: Aerospike set.
+- ``num_workers`` *(optional, default ``8``)*: C++ I/O worker threads.
+- ``read_timeout_ms`` / ``write_timeout_ms`` *(optional)*: Client timeouts.
+- ``default_ttl_seconds`` *(optional, default ``86400``)*: Record TTL
+  (``0`` = namespace default).
+- ``target_segment_bytes`` / ``max_record_bytes`` *(optional, default ``0``)*:
+  Shard target and record-cap override (``0`` = auto-discover).
+- ``username`` / ``password`` *(optional)*: Enterprise Edition auth.
+- ``max_capacity_gb`` *(optional, default ``0``)*: L2 capacity for eviction
+  (``0`` disables tracking).
+
+Example:
+
+.. code-block:: bash
+
+    --l2-adapter '{"type": "aerospike", "hosts": "127.0.0.1:3000", "namespace": "lmcache", "set_name": "kv_chunks", "num_workers": 8}'
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
