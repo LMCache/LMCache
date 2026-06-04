@@ -115,7 +115,9 @@ def _aerospike_extension(
 
     as_include = os.environ.get("AEROSPIKE_INCLUDE_DIR", "")
     as_lib = os.environ.get("AEROSPIKE_LIBRARY_DIR", "")
-    deps_yaml_lib = ROOT_DIR / ".deps" / "libyaml-install" / "usr" / "lib" / "x86_64-linux-gnu"
+    deps_yaml_lib = (
+        ROOT_DIR / ".deps" / "libyaml-install" / "usr" / "lib" / "x86_64-linux-gnu"
+    )
     include_dirs = [
         "csrc/storage_backends",
         "csrc/storage_backends/aerospike",

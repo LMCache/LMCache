@@ -15,6 +15,9 @@ on:
       - ".github/workflows/aerospike_integration.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   AEROSPIKE_CLIENT_C_VERSION: "7.3.0"
   AEROSPIKE_CLIENT_C_UBUNTU: "ubuntu22.04"
@@ -110,10 +113,12 @@ jobs:
             fi
             sleep 1
           done
-          echo "AEROSPIKE_TEST_HOST=127.0.0.1" >> "${GITHUB_ENV}"
-          echo "AEROSPIKE_TEST_PORT=${HOST_PORT}" >> "${GITHUB_ENV}"
-          echo "AEROSPIKE_TEST_NAMESPACE=lmcache" >> "${GITHUB_ENV}"
-          echo "RUN_AEROSPIKE_INTEGRATION=1" >> "${GITHUB_ENV}"
+          {
+            echo "AEROSPIKE_TEST_HOST=127.0.0.1"
+            echo "AEROSPIKE_TEST_PORT=${HOST_PORT}"
+            echo "AEROSPIKE_TEST_NAMESPACE=lmcache"
+            echo "RUN_AEROSPIKE_INTEGRATION=1"
+          } >> "${GITHUB_ENV}"
 
       - name: Integration tests
         run: |
