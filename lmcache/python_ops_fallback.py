@@ -1061,6 +1061,24 @@ def multi_layer_block_kv_transfer(
     Signature intentionally mirrors the C++ binding so callers can invoke
     ``lmcache.c_ops.multi_layer_block_kv_transfer`` uniformly on native and
     fallback backends.
+
+    Args:
+        paged_buffer_ptrs_tensor: Paged buffer pointers or tensors.
+        lmcache_objects_ptrs: LMCache object pointers or chunk tensors.
+        block_ids: Ordered engine block IDs for the transfer.
+        device: Target device for the transfer.
+        direction: Transfer direction (H2D or D2H).
+        shape_desc: Shape descriptor of the page buffer.
+        lmcache_chunk_size: Chunk size of LMCache objects.
+        gpu_kv_format: GPU KV cache format.
+        skip_prefix_n_blocks: Number of leading blocks to skip.
+
+    Returns:
+        None
+
+    Raises:
+        ValueError: If chunk size is invalid, or transfer direction is unsupported.
+        TypeError: If input types do not match expected types.
     """
     if lmcache_chunk_size <= 0:
         raise ValueError("lmcache_chunk_size must be positive")
