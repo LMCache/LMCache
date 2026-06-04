@@ -27,7 +27,12 @@ from typing import Any, Callable
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, PrefetchHandle
+from lmcache.v1.distributed.api import (
+    MemoryLayoutDesc,
+    ObjectKey,
+    PrefetchHandle,
+    TrimPolicy,
+)
 
 
 @dataclass(frozen=True)
@@ -229,6 +234,22 @@ def _dec_torch_dtype(name: str) -> torch.dtype:
     return _resolve_dtype(name)
 
 
+def _enc_trim_policy(p: TrimPolicy) -> str:
+    return p.name
+
+
+def _dec_trim_policy(name: str) -> TrimPolicy:
+    return TrimPolicy[name]
+
+
+def _enc_set(s: set) -> list:
+    return [encode_value(x) for x in s]
+
+
+def _dec_set(items: list) -> set:
+    return {decode_value(x) for x in items}
+
+
 register_codec(
     ObjectKey,
     TypeCodec(tag="ObjectKey", encode=_enc_object_key, decode=_dec_object_key),
@@ -256,4 +277,12 @@ register_codec(
 register_codec(
     torch.dtype,
     TypeCodec(tag="torch.dtype", encode=_enc_torch_dtype, decode=_dec_torch_dtype),
+)
+register_codec(
+    TrimPolicy,
+    TypeCodec(tag="TrimPolicy", encode=_enc_trim_policy, decode=_dec_trim_policy),
+)
+register_codec(
+    set,
+    TypeCodec(tag="set", encode=_enc_set, decode=_dec_set),
 )

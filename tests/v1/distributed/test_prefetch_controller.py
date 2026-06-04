@@ -1169,9 +1169,9 @@ class TestQueryLookupResult:
 
 class TestBuildTrimMask:
     """build_trim_mask picks the retained subset per policy: PREFIX trims at
-    the first gap; SEGMENTED_PREFIX keeps every set bit (gaps and all). The
-    retained bitmap is consumed unchanged at the controller's load sites, so
-    testing the mask directly covers the policy semantics."""
+    the first gap; SEGMENTED_PREFIX and SPARSE keep every set bit (gaps and
+    all). The retained bitmap is consumed unchanged at the controller's load
+    sites, so testing the mask directly covers the policy semantics."""
 
     @staticmethod
     def _bm(n, idxs):
@@ -1194,6 +1194,14 @@ class TestBuildTrimMask:
         assert build_trim_mask(
             found, 5, TrimPolicy.SEGMENTED_PREFIX
         ).get_indices_list() == [0, 1, 3, 4]
+
+    def test_sparse_keeps_all_found(self):
+        found = self._bm(5, [0, 2, 4])
+        assert build_trim_mask(found, 5, TrimPolicy.SPARSE).get_indices_list() == [
+            0,
+            2,
+            4,
+        ]
 
 
 class TestMergeBitmaps:
