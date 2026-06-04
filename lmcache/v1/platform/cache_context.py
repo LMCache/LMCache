@@ -43,6 +43,22 @@ def create_cache_context(
 
     Currently only :class:`GPUCacheContext` is supported.  CPU and
     other accelerator backends will be added in follow-up PRs.
+
+    Args:
+        kv_caches: KV cache tensor wrappers from the serving engine.
+            Must be non-empty.
+        lmcache_logical_chunk_size: Number of tokens per LMCache chunk.
+        layout_hints: Optional hints for GPU KV format detection.
+            Forwarded verbatim to the concrete context constructor.
+        group_views: Engine-neutral KV cache group metadata.
+        engine_type: Which serving engine produced the caches.
+
+    Returns:
+        A concrete cache context instance (currently always
+        :class:`~lmcache.v1.multiprocess.gpu_context.GPUCacheContext`).
+
+    Raises:
+        ValueError: If *kv_caches* is empty.
     """
     # First Party
     from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
