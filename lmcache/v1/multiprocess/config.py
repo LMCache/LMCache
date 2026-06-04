@@ -157,9 +157,10 @@ def add_mp_server_args(
         "--engine-type",
         type=str,
         default="default",
-        choices=["default", "blend", "blend_v3"],
-        help="Cache engine backend type. 'default' uses standard prefix caching, "
-        "'blend'/'blend_v3' when cacheblend is enabled. Default is 'default'.",
+        choices=["default", "blend", "blend_legacy"],
+        help="Cache engine backend type. 'default' uses standard prefix caching; "
+        "'blend' selects CacheBlend V3 (the current implementation); "
+        "'blend_legacy' selects the original CacheBlend. Default is 'default'.",
     )
     mp_group.add_argument(
         "--supported-transfer-mode",
