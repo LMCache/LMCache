@@ -641,6 +641,7 @@ def test_raw_block_l2_adapter_error_bitmaps_keep_submitted_size():
             adapter.close()
 
 
+@requires_raw_block_ext
 def test_raw_block_l2_adapter_blkdiscard_on_init_calls_discard(monkeypatch):
     """Adapter forwards blkdiscard_on_init to RawBlockCore discard setup."""
     discard_calls: list[tuple[int, int]] = []
