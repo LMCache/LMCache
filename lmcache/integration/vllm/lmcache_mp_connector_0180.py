@@ -13,6 +13,7 @@ from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import (
     check_interprocess_event_support,
     init_logger as lmcache_init_logger,
+    make_transfer_event,
 )
 
 from vllm.config import VllmConfig
@@ -61,13 +62,6 @@ def _adapter_accepts_tp_size() -> bool:
     """Check if the imported adapter accepts tp_size."""
     sig = inspect.signature(LMCacheMPSchedulerAdapter.__init__)
     return "tp_size" in sig.parameters
-
-
-def _make_transfer_event() -> Any:
-    """Create a device event compatible with the active MP transfer backend."""
-    if torch_device_type == "xpu":
-        return torch_dev.Event()
-    return torch_dev.Event(interprocess=True)
 
 
 # Helper functions
@@ -583,8 +577,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         with torch_dev.stream(torch_dev.current_stream()):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            event = _make_transfer_event()
-            event.record()
+            event = make_transfer_event()
 
         self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
 
@@ -646,8 +639,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         with torch_dev.stream(torch_dev.current_stream()):
             # Not all backends support interprocess Events (CUDA IPC specific)
-            event = _make_transfer_event()
-            event.record()
+            event = make_transfer_event()
 
         self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
 
