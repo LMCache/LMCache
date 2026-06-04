@@ -11,7 +11,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -161,12 +161,36 @@ def wait_for_prefetch_status(
     timeout: float = 10.0,
     poll_interval: float = 0.05,
 ) -> int | None:
-    """Poll query_prefetch_status until it returns a non-None value."""
+    """Poll query_prefetch_status until it returns a non-None value.
+
+    Returns the contiguous prefix-hit count (``count_leading_ones``) of the
+    found bitmap, matching the dense semantics these tests assert on.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
         if result is not None:
-            return result
+            return result.count_leading_ones()
+        time.sleep(poll_interval)
+    return None
+
+
+def wait_for_sparse_found(
+    sm: StorageManager,
+    handle,
+    timeout: float = 10.0,
+    poll_interval: float = 0.05,
+) -> set[int] | None:
+    """Poll query_prefetch_status; return the found-key index set.
+
+    For SPARSE prefetches the result bitmap is gap-tolerant, so callers read
+    the full set via ``get_indices_list`` rather than ``count_leading_ones``.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = sm.query_prefetch_status(handle)
+        if result is not None:
+            return set(result.get_indices_list())
         time.sleep(poll_interval)
     return None
 
@@ -246,7 +270,7 @@ class TestStorageManagerBasic:
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
-        hit_count = storage_manager.query_prefetch_status(handle)
+        hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
         assert hit_count == len(object_keys)
 
@@ -272,7 +296,7 @@ class TestStorageManagerBasic:
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
-        hit_count = storage_manager.query_prefetch_status(handle)
+        hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
         assert hit_count == 2  # Only 2 keys were written
 
@@ -302,7 +326,7 @@ class TestStorageManagerBasic:
         # Prefetch all the objects
         handle = storage_manager.submit_prefetch_task(object_keys, basic_layout)
 
-        hit_count = storage_manager.query_prefetch_status(handle)
+        hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
         assert hit_count == len(object_keys)
 
@@ -339,7 +363,7 @@ class TestStorageManagerBasic:
 
         # Prefetch objects except the first one
         handle = storage_manager.submit_prefetch_task(object_keys[1:], basic_layout)
-        hit_count = storage_manager.query_prefetch_status(handle)
+        hit_count = storage_manager.query_prefetch_status(handle).count_leading_ones()
         assert hit_count is not None
         assert hit_count == len(object_keys) - 1
 
@@ -384,7 +408,7 @@ class TestStorageManagerMultiReader:
 
         extra_count = 2  # total = 1 + 2 = 3 locks
         handle = sm.submit_prefetch_task(keys, basic_layout, extra_count=extra_count)
-        hit = sm.query_prefetch_status(handle)
+        hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
 
         # Release with matching extra_count
@@ -408,7 +432,7 @@ class TestStorageManagerMultiReader:
 
         extra_count = 3  # total = 1 + 3 = 4 locks
         handle = sm.submit_prefetch_task(keys, basic_layout, extra_count=extra_count)
-        hit = sm.query_prefetch_status(handle)
+        hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
 
         # Release 2 of 4 (1 + extra_count=1)
@@ -447,7 +471,7 @@ class TestStorageManagerMultiReader:
         handle = sm.submit_prefetch_task(
             all_keys, basic_layout, extra_count=extra_count
         )
-        hit = sm.query_prefetch_status(handle)
+        hit = sm.query_prefetch_status(handle).count_leading_ones()
         # Only prefix {0,1} count as hits
         assert hit is not None
         assert hit == 2
@@ -476,7 +500,7 @@ class TestStorageManagerMultiReader:
         sm.finish_write(list(ret.keys()))
 
         handle = sm.submit_prefetch_task(keys, basic_layout)
-        hit = sm.query_prefetch_status(handle)
+        hit = sm.query_prefetch_status(handle).count_leading_ones()
         assert hit == len(keys)
 
         # Single finish is enough
@@ -777,3 +801,71 @@ class TestFailureEventProduction:
             assert keys[1] in meta["keys"]
         finally:
             sm.close()
+
+
+class TestStorageManagerSparsePrefetch:
+    """SPARSE prefetch: retain a read lock on every found key, not just the
+    leading contiguous prefix."""
+
+    def test_sparse_keeps_all_found_not_just_prefix(
+        self, basic_storage_manager_config, basic_layout
+    ):
+        """Sparse L1 prefetch retains + read-locks every found key, including
+        those past a gap (unlike the contiguous-prefix default)."""
+        sm = StorageManager(basic_storage_manager_config)
+        all_keys = [make_object_key(i) for i in range(5)]
+        # Write {0,1,3,4}; key 2 is the gap.
+        existing = [all_keys[i] for i in (0, 1, 3, 4)]
+        ret = sm.reserve_write(existing, basic_layout, mode="new")
+        sm.finish_write(list(ret.keys()))
+
+        handle = sm.submit_prefetch_task(
+            all_keys, basic_layout, policy=TrimPolicy.SPARSE
+        )
+        found = wait_for_sparse_found(sm, handle, timeout=10.0)
+
+        # Sparse: all four found indices, NOT just the prefix {0, 1}.
+        assert found == {0, 1, 3, 4}
+
+        # Every found key is read-locked (none write-reservable).
+        locked = sm.reserve_write(existing, basic_layout, mode="update")
+        assert len(locked) == 0
+
+        # Releasing the full found set frees them.
+        sm.finish_read_prefetched(existing)
+        freed = sm.reserve_write(existing, basic_layout, mode="update")
+        assert len(freed) == len(existing)
+
+        sm.close()
+
+    def test_sparse_from_l2_loads_all_found(
+        self, l2_storage_manager_config, basic_layout
+    ):
+        """Sparse prefetch from L2 loads every found key (controller skips the
+        prefix-only trim), not just the prefix before a gap."""
+        sm = StorageManager(l2_storage_manager_config)
+        all_keys = [make_object_key(i) for i in range(5)]
+        # L2 has {0,1,3,4}; gap at 2.
+        existing = [all_keys[i] for i in (0, 1, 3, 4)]
+        wret = sm.reserve_write(existing, basic_layout, mode="new")
+        sm.finish_write(list(wret.keys()))
+        adapter = sm._l2_adapters[0]
+        assert wait_for_condition(
+            lambda: all(adapter.debug_has_key(k) for k in existing),  # type: ignore
+            timeout=10.0,
+        )
+        time.sleep(0.05)
+        sm.clear()
+        used, _ = sm._l1_manager.get_memory_usage()
+        assert used == 0
+
+        handle = sm.submit_prefetch_task(
+            all_keys, basic_layout, policy=TrimPolicy.SPARSE
+        )
+        found = wait_for_sparse_found(sm, handle, timeout=10.0)
+
+        # Sparse from L2: all found {0,1,3,4}, NOT the contiguous prefix {0,1}.
+        assert found == {0, 1, 3, 4}
+
+        sm.finish_read_prefetched(existing)
+        sm.close()
