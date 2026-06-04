@@ -217,7 +217,7 @@ def _enforce_ipc_path_limit(socket_path: str, base_url: str) -> str:
         return socket_path
 
     digest = hashlib.sha256(os.fsencode(socket_path)).hexdigest()[:16]
-    shortened = f"{base_url}/lmcache_rpc_{digest}"
+    shortened = os.path.join(base_url, f"lmcache_rpc_{digest}")
 
     if _ipc_path_nbytes(shortened) > IPC_SOCKET_PATH_MAX_LEN:
         raise ValueError(
