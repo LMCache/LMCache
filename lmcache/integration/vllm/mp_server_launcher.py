@@ -20,6 +20,8 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 _AUTOSTART_KEY = "lmcache.mp.autostart"
+_HOST_KEY = "lmcache.mp.host"
+_PORT_KEY = "lmcache.mp.port"
 _SERVER_ARGS_KEY = "lmcache.mp.autostart.server_args"
 _WAIT_TIMEOUT_KEY = "lmcache.mp.autostart.wait_timeout"
 
@@ -123,7 +125,7 @@ def maybe_autostart_mp_server(
         zmq_context: ZMQ context used for health probing.
 
     Returns:
-        The launcher that owns the server process, or ``None`` when no process
+        The launcher tracking the server process, or ``None`` when no process
         was started by this connector.
 
     Raises:
@@ -144,14 +146,48 @@ def maybe_autostart_mp_server(
     return launcher
 
 
-def shutdown_mp_server_launcher(launcher: "MPServerLauncher | None") -> None:
-    """Shutdown an owned MP server launcher when it exists.
+def maybe_autostart_mp_server_from_url(
+    *,
+    extra_config: object | None,
+    server_url: str,
+    zmq_context: zmq.Context,
+) -> "MPServerLauncher | None":
+    """Start the LMCache MP server from a connector server URL when configured.
 
     Args:
-        launcher: Launcher instance to shut down, or ``None``.
+        extra_config: vLLM ``kv_connector_extra_config`` mapping.
+        server_url: ZMQ URL used by the connector to reach the MP server.
+        zmq_context: ZMQ context used for health probing.
+
+    Returns:
+        The launcher tracking the server process, or ``None`` when no process
+        was started.
+
+    Raises:
+        ValueError: If an auto-start configuration value or server URL is
+            invalid.
+        ConnectionError: If auto-start is enabled and the server does not
+            become reachable before the configured timeout.
     """
-    if launcher is not None:
-        launcher.shutdown()
+    if not _parse_bool(_get_extra_config_value(extra_config, _AUTOSTART_KEY)):
+        return None
+
+    server_host = _get_extra_config_value(extra_config, _HOST_KEY)
+    server_port = _get_extra_config_value(extra_config, _PORT_KEY)
+    if server_host is None or server_port is None:
+        parsed = urlparse(server_url if "://" in server_url else f"tcp://{server_url}")
+        if parsed.hostname is None or parsed.port is None:
+            raise ValueError(f"Invalid LMCache MP server URL: {server_url!r}")
+        server_host = parsed.hostname if server_host is None else server_host
+        server_port = parsed.port if server_port is None else server_port
+
+    return maybe_autostart_mp_server(
+        extra_config=extra_config,
+        server_host=str(server_host),
+        server_port=server_port,
+        server_url=server_url,
+        zmq_context=zmq_context,
+    )
 
 
 def _get_extra_config_value(
@@ -322,7 +358,7 @@ class MPServerAutostartConfig:
 
 
 class MPServerLauncher:
-    """Owns the lifecycle of an auto-started LMCache MP server process."""
+    """Starts a local LMCache MP server and cleans up failed startup attempts."""
 
     def __init__(self, config: MPServerAutostartConfig) -> None:
         """Initialize the launcher.
@@ -364,7 +400,11 @@ class MPServerLauncher:
             raise
 
     def shutdown(self) -> None:
-        """Terminate the auto-started MP server process, if one is owned."""
+        """Terminate the auto-started MP server process.
+
+        This is used for startup failure cleanup. Normal vLLM shutdown does not
+        call it because other vLLM instances may share the same MP server.
+        """
         if self._process is None:
             return
 

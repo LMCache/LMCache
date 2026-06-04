@@ -23,10 +23,6 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
-from lmcache.integration.vllm.mp_server_launcher import (
-    maybe_autostart_mp_server,
-    shutdown_mp_server_launcher,
-)
 from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
@@ -506,28 +502,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
-        extra_config = getattr(
-            vllm_config.kv_transfer_config, "kv_connector_extra_config", None
-        )
-        self._mp_server_launcher = None
         if self.role == KVConnectorRole.SCHEDULER:
-            self._mp_server_launcher = maybe_autostart_mp_server(
-                extra_config=extra_config,
-                server_host=str(server_host),
-                server_port=server_port,
-                server_url=server_url,
-                zmq_context=zmq_context,
+            self.scheduler_adapter = create_scheduler_adapter(
+                server_url,
+                zmq_context,
+                vllm_config,
             )
-            try:
-                self.scheduler_adapter = create_scheduler_adapter(
-                    server_url,
-                    zmq_context,
-                    vllm_config,
-                )
-                self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
-            except Exception:
-                shutdown_mp_server_launcher(self._mp_server_launcher)
-                raise
+            self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
             self.worker_adapter = create_worker_adapter(
                 server_url,
@@ -728,16 +709,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
     def shutdown(self):
         """
-        Shutdown the connector. This is called when the scheduler or worker
-        process is shutting down to ensure that all the async operations are
-        completed and the connector is cleaned up properly.
+        Shutdown the connector and worker adapter resources when present.
         """
-        try:
-            if hasattr(self, "worker_adapter"):
-                self.worker_adapter.shutdown()
-        finally:
-            launcher = getattr(self, "_mp_server_launcher", None)
-            shutdown_mp_server_launcher(launcher)
+        if hasattr(self, "worker_adapter"):
+            self.worker_adapter.shutdown()
         return None
 
     def get_kv_connector_stats(self) -> "KVConnectorStats | None":

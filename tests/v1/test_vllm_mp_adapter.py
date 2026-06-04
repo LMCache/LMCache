@@ -19,11 +19,35 @@ import torch
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
+    LMCacheMPSchedulerAdapter,
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
     ParallelStrategy,
 )
 from lmcache.v1.multiprocess.protocol import RequestType
+
+
+class FakeMQClient:
+    """MessageQueueClient double that records close calls."""
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        """Record that the client was closed."""
+        self.closed = True
+
+
+def _parallel_strategy() -> ParallelStrategy:
+    return ParallelStrategy(
+        use_mla=False,
+        kv_world_size=1,
+        kv_worker_id=0,
+        actual_world_size=1,
+        actual_worker_id=0,
+        tp_size=1,
+        pp_size=1,
+    )
 
 
 @pytest.fixture
@@ -78,6 +102,75 @@ def fake_adapter(monkeypatch):
     # so individual tests start with a clean call count.
     send_mock.reset_mock()
     return adapter, send_mock, future
+
+
+def test_scheduler_adapter_autostarts_before_mq_client(monkeypatch) -> None:
+    """Scheduler adapter starts the server before connecting to MQ."""
+    events: list[str] = []
+    launcher = MagicMock(name="launcher")
+
+    def fake_autostart(**kwargs):
+        events.append("autostart")
+        assert kwargs["server_url"] == "tcp://localhost:5555"
+        return launcher
+
+    class RecordingMQClient(FakeMQClient):
+        def __init__(self, *_args, **_kwargs) -> None:
+            events.append("mq_client")
+            super().__init__(*_args, **_kwargs)
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "maybe_autostart_mp_server_from_url",
+        fake_autostart,
+    )
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", RecordingMQClient)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+
+    LMCacheMPSchedulerAdapter(
+        server_url="tcp://localhost:5555",
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=_parallel_strategy(),
+        extra_config={"lmcache.mp.autostart": True},
+    )
+
+    assert events == ["autostart", "mq_client"]
+    launcher.shutdown.assert_not_called()
+
+
+def test_scheduler_adapter_does_not_shutdown_autostarted_server_on_init_failure(
+    monkeypatch,
+) -> None:
+    """A shared auto-started server is not stopped by scheduler init failure."""
+    launcher = MagicMock(name="launcher")
+    fake_client = FakeMQClient()
+
+    monkeypatch.setattr(
+        adapter_mod,
+        "maybe_autostart_mp_server_from_url",
+        MagicMock(return_value=launcher),
+    )
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(
+        adapter_mod,
+        "get_lmcache_chunk_size",
+        MagicMock(side_effect=TimeoutError),
+    )
+
+    with pytest.raises(ConnectionError, match="Cannot reach the LMCache MP server"):
+        LMCacheMPSchedulerAdapter(
+            server_url="tcp://localhost:5555",
+            context=MagicMock(name="zmq_context"),
+            model_name="test-model",
+            vllm_block_size=16,
+            parallel_strategy=_parallel_strategy(),
+            extra_config={"lmcache.mp.autostart": True},
+        )
+
+    assert fake_client.closed
+    launcher.shutdown.assert_not_called()
 
 
 def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):

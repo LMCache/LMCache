@@ -13,6 +13,9 @@ import zmq
 
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
+from lmcache.integration.vllm.mp_server_launcher import (
+    maybe_autostart_mp_server_from_url,
+)
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
@@ -459,9 +462,16 @@ class LMCacheMPSchedulerAdapter:
             mq_timeout,
         )
         if extra_config is not None:
+            self._mp_server_launcher = maybe_autostart_mp_server_from_url(
+                extra_config=extra_config,
+                server_url=server_url,
+                zmq_context=context,
+            )
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+        else:
+            self._mp_server_launcher = None
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
