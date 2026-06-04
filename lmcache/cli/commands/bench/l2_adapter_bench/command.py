@@ -152,6 +152,45 @@ def register_l2_parser(
         default=None,
         help="Run only the specified operation (default: run all).",
     )
+    parser.add_argument(
+        "--profile-enabled",
+        action="store_true",
+        help=(
+            "Capture a flame graph of the measured phases. The benchmark "
+            "profiles itself and renders an SVG -- no second terminal or "
+            "external profiler needed. Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--profile-mode",
+        choices=["on-cpu", "off-cpu"],
+        default="on-cpu",
+        help=(
+            "Flame-graph mode for --profile-enabled. 'on-cpu' (perf "
+            "record) shows where CPU time goes; 'off-cpu' (perf off-CPU "
+            "via offcputime-bpfcc) shows time blocked on I/O / locks and "
+            "is best for I/O-bound adapters. Default: on-cpu."
+        ),
+    )
+    parser.add_argument(
+        "--profile-output",
+        default="",
+        metavar="PATH",
+        help=(
+            "SVG output path for --profile-enabled. Default: "
+            "/tmp/lmcache_bench_flames/<adapter>.<mode>.svg."
+        ),
+    )
+    parser.add_argument(
+        "--profile-flamegraph-dir",
+        default="",
+        metavar="DIR",
+        help=(
+            "Directory with the FlameGraph scripts (flamegraph.pl, "
+            "stackcollapse-perf.pl). Default: $FLAMEGRAPH_DIR or "
+            "~/FlameGraph."
+        ),
+    )
 
     # Common ``--format / --output / --quiet`` flags. Attached only
     # to the L2 subparser; the ``engine`` and ``kvcache`` subparsers
@@ -184,6 +223,12 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         make_memory_objects,
         make_object_keys,
         verify_round_trip,
+    )
+    from lmcache.cli.commands.bench.l2_adapter_bench.profiling import (
+        FlameProfiler,
+        ProfileError,
+        default_output_path,
+        resolve_flamegraph_dir,
     )
     from lmcache.cli.commands.bench.l2_adapter_bench.runner import (
         bench_load,
@@ -269,6 +314,28 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     except Exception as e:
         print(f"[Init] Failed to create adapter: {e}", file=sys.stderr)
         sys.exit(1)
+
+    # Optional self-profiling: record a flame graph of the measured
+    # phases. Built here, after the adapter (and its worker threads)
+    # exist, so the recorder attaches to a fully-started process. On a
+    # toolchain error we warn and continue the benchmark unprofiled.
+    profiler: FlameProfiler | None = None
+    if getattr(args, "profile_enabled", False):
+        adapter_name = type(adapter).__name__
+        try:
+            profiler = FlameProfiler(
+                mode=args.profile_mode,
+                output=(
+                    args.profile_output
+                    or default_output_path(adapter_name, args.profile_mode)
+                ),
+                flamegraph_dir=resolve_flamegraph_dir(args.profile_flamegraph_dir, log),
+                pid=os.getpid(),
+                title=f"{args.profile_mode} ({adapter_name})",
+            )
+        except ProfileError as e:
+            print(f"[Profile] disabled: {e}", file=sys.stderr)
+            profiler = None
 
     # ------------------------------------------------------------------
     # Idx layout
@@ -385,6 +452,9 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     last_load_round_keys: list[list] | None = None
 
     try:
+        if profiler is not None:
+            profiler.start(log)
+
         # ---- Store ----
         if args.only is None or args.only == "store":
             log(f"[Store] Running {warmup} warmup + {rounds} measurement rounds...")
@@ -436,6 +506,11 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             last_load_round_keys = _build_round_keys(total_rounds - 1)
             log("")
 
+        # Stop profiling before verification / summary so the flame
+        # graph reflects only the measured store/lookup/load work.
+        if profiler is not None:
+            profiler.stop(log)
+
         # ---- Round-trip verification (last measured round only) ----
         if (
             not args.skip_verify
@@ -471,6 +546,10 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             results=results,
         )
     finally:
+        # Idempotent: a no-op if profiling already stopped on the normal
+        # path; tears the recorder down if a phase raised.
+        if profiler is not None:
+            profiler.stop(log)
         log("[Cleanup] Closing adapter...")
         try:
             adapter.close()

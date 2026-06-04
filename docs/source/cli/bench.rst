@@ -1164,6 +1164,24 @@ Options
      - *(unset)*
      - Run only the specified operation. When omitted, all three
        operations are run in the order ``store -> lookup -> load``.
+   * - ``--profile-enabled``
+     - *(off)*
+     - Capture a flame graph of the measured phases. The benchmark
+       profiles itself and renders an SVG. See
+       :ref:`Profiling / flame charts <lmcache-bench-l2-profiling>`.
+   * - ``--profile-mode {on-cpu,off-cpu}``
+     - ``on-cpu``
+     - Flame-graph mode for ``--profile-enabled``. ``on-cpu`` shows
+       where CPU time goes; ``off-cpu`` shows time blocked on I/O /
+       locks (best for I/O-bound adapters).
+   * - ``--profile-output PATH``
+     - *(auto)*
+     - SVG output path. Default:
+       ``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``.
+   * - ``--profile-flamegraph-dir DIR``
+     - *($FLAMEGRAPH_DIR or ~/FlameGraph)*
+     - Directory with the FlameGraph scripts (``flamegraph.pl``,
+       ``stackcollapse-perf.pl``).
 
 
 Adapter JSON spec
@@ -1288,6 +1306,56 @@ round against the byte pattern that ``store`` wrote (see
 Verification is **off** by default because the stricter byte pattern
 requires both the store and load object batches to stay resident so the
 loaded data can be compared against the original store pattern.
+
+
+.. _lmcache-bench-l2-profiling:
+
+Profiling / flame charts
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Because ``lmcache bench l2`` drives the adapter through its real
+submit/wait path in a single process, it can profile **itself** and
+render a flame graph of the measured phases -- one command, one
+terminal, no externally attached profiler. Pass ``--profile-enabled``:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"fs","base_path":"/data/lmcache-bench"}' \
+       --rounds 300 --profile-enabled --profile-mode on-cpu
+   #   [Profile] on-cpu recording started (pid=12345) -> .../FSL2Adapter.oncpu.svg
+   #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
+
+The recorder samples every thread of the process (including native
+worker threads), so there is nothing adapter-specific to target. Two
+modes are available via ``--profile-mode``:
+
+* **on-cpu** (default) -- ``perf record``; where CPU cycles go
+  (serialization, copies, hashing).
+* **off-cpu** -- ``offcputime-bpfcc`` (bcc); time spent blocked
+  (waiting on I/O, locks, eventfds). Often the more informative view
+  for I/O-bound adapters such as ``fs``, ``s3`` or ``valkey``.
+
+Recording covers only the measured store/lookup/load work, so make the
+run long enough to collect samples (a few seconds is plenty -- use a
+large ``--rounds``). The SVG is written to ``--profile-output`` (default
+``/tmp/lmcache_bench_flames/<adapter>.<mode>.svg``).
+
+**Requirements.** Rendering needs Brendan Gregg's
+`FlameGraph <https://github.com/brendangregg/FlameGraph>`__ scripts
+(``--profile-flamegraph-dir`` or ``FLAMEGRAPH_DIR``, default
+``~/FlameGraph``). ``on-cpu`` needs ``perf`` (and
+``kernel.perf_event_paranoid`` low enough to profile non-root, or run
+as root); ``off-cpu`` needs ``bcc`` (``offcputime-bpfcc``) and ``sudo``.
+If the toolchain is missing, the benchmark prints ``[Profile] disabled:
+...`` and runs normally without a flame graph.
+
+.. note::
+
+   When comparing a change, profile each variant with the same
+   ``--rounds`` and ``--profile-mode`` and distinct ``--profile-output``
+   paths (e.g. ``baseline.svg`` vs ``after.svg``) so the two flame
+   graphs are directly comparable.
 
 
 Exit codes
