@@ -434,19 +434,26 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
         parallel_strategy = from_vllm_config(vllm_config)
-        common_adapter_kwargs: dict[str, Any] = dict(
-            server_url=server_url,
-            context=zmq_context,
-            model_name=vllm_config.model_config.model,
-            vllm_block_size=vllm_config.cache_config.block_size,
-            parallel_strategy=parallel_strategy,
-            extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
-        )
+
         if self.role == KVConnectorRole.SCHEDULER:
-            self.scheduler_adapter = LMCacheMPSchedulerAdapter(**common_adapter_kwargs)
+            self.scheduler_adapter = LMCacheMPSchedulerAdapter(
+                server_url=server_url,
+                context=zmq_context,
+                model_name=vllm_config.model_config.model,
+                vllm_block_size=vllm_config.cache_config.block_size,
+                parallel_strategy=parallel_strategy,
+                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+            )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
-            self.worker_adapter = LMCacheMPWorkerAdapter(**common_adapter_kwargs)
+            self.worker_adapter = LMCacheMPWorkerAdapter(
+                server_url=server_url,
+                context=zmq_context,
+                model_name=vllm_config.model_config.model,
+                vllm_block_size=vllm_config.cache_config.block_size,
+                parallel_strategy=parallel_strategy,
+                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
+            )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
