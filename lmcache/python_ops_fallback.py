@@ -1040,7 +1040,7 @@ def _to_block_id_list(block_ids: torch.Tensor | list[int]) -> list[int]:
     """Convert block IDs from tensor/list form into a Python ``list[int]``."""
     if isinstance(block_ids, torch.Tensor):
         return [int(x) for x in block_ids.to(dtype=torch.int64).cpu().tolist()]
-    if isinstance(block_ids, list) and all(isinstance(x, int) for x in block_ids):
+    if isinstance(block_ids, list):
         return [int(x) for x in block_ids]
     raise TypeError("block_ids must be a torch.Tensor or list[int]")
 
