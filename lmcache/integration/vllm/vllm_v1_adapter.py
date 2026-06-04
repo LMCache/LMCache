@@ -37,7 +37,7 @@ from lmcache.integration.vllm.utils import (
 from lmcache.integration.vllm.vllm_service_factory import VllmServiceFactory
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
-from lmcache.utils import CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
+from lmcache.utils import LORA_TAG_KEY, CacheStoreEvent, _lmcache_nvtx_annotate, cdiv
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.compute.blend import LMCBlenderBuilder
 from lmcache.v1.config import LMCacheEngineConfig
@@ -102,6 +102,22 @@ def extract_request_configs(sampling_params: SamplingParams) -> Optional[dict]:
                     if request_configs is None:
                         request_configs = {}
                     request_configs[k] = v
+    return request_configs
+
+
+def _inject_lora_metadata(
+    request_configs: Optional[dict],
+    request_or_new_request: Any,
+) -> Optional[dict]:
+    lora_request = getattr(request_or_new_request, "lora_request", None)
+    if lora_request is None:
+        return request_configs
+    lora_name = getattr(lora_request, "lora_name", None)
+    if lora_name is None:
+        return request_configs
+    if request_configs is None:
+        request_configs = {}
+    request_configs[LORA_TAG_KEY] = str(lora_name)
     return request_configs
 
 
@@ -187,6 +203,7 @@ class RequestTracker:
         disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
 
         request_configs = extract_request_configs(new_request.sampling_params)
+        request_configs = _inject_lora_metadata(request_configs, new_request)
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
 
@@ -1393,6 +1410,7 @@ class LMCacheConnectorV1Impl:
                 token_ids = token_ids.tolist()
 
             request_configs = extract_request_configs(request.sampling_params)
+            request_configs = _inject_lora_metadata(request_configs, request)
             if self.skip_last_n_tokens > 0:
                 token_ids = token_ids[: -self.skip_last_n_tokens]
 

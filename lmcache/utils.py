@@ -41,6 +41,8 @@ logger = init_logger(__name__)
 
 # Type definition
 KVCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
+LORA_TAG_NAME = "lora"
+LORA_TAG_KEY = f"lmcache.tag.{LORA_TAG_NAME}"
 
 
 # Device utility functions
@@ -550,6 +552,15 @@ class CacheEngineKey:
             dtype=self.dtype,
             request_configs=self.request_configs,
         )
+
+    @property
+    def lora_name(self) -> str:
+        if self.tags is None:
+            return ""
+        for key, value in self.tags:
+            if key == LORA_TAG_NAME:
+                return str(value)
+        return ""
 
     @property
     def chunk_hash_hex(self) -> str:

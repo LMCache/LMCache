@@ -304,6 +304,16 @@ class TestCacheEngineKey:
         restored = CacheEngineKey.from_string(s)
         assert restored == key_with_tags
 
+    def test_lora_tag_is_exposed_as_cache_engine_key_identity(self, key_with_tags):
+        assert key_with_tags.lora_name == "adapter1"
+
+        restored = CacheEngineKey.from_string(key_with_tags.to_string())
+
+        assert restored.lora_name == "adapter1"
+
+    def test_no_lora_tag_exposes_empty_lora_name(self, basic_key):
+        assert basic_key.lora_name == ""
+
     def test_from_string_invalid(self):
         with pytest.raises(ValueError):
             CacheEngineKey.from_string("invalid")
