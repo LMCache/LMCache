@@ -62,6 +62,54 @@ def test_ipc_cache_engine_key_serialization_with_cache_salt():
     assert decoded_key.cache_salt == "alice"
 
 
+def test_ipc_cache_engine_key_lora_name_participates_in_identity():
+    """Different LoRA adapters must not resolve to the same MP cache key."""
+    key_a = IPCCacheEngineKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=None,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="request-a",
+        lora_name="adapter_a",
+    )
+    key_b = IPCCacheEngineKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=None,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="request-b",
+        lora_name="adapter_b",
+    )
+
+    assert key_a != key_b
+    assert hash(key_a) != hash(key_b)
+
+
+def test_ipc_cache_engine_key_serialization_with_lora_name():
+    original_key = IPCCacheEngineKey.from_token_ids(
+        model_name="test_model",
+        world_size=4,
+        worker_id=1,
+        token_ids=list(range(256)),
+        start=0,
+        end=256,
+        request_id="test_request",
+        cache_salt="alice",
+        lora_name="adapter_a",
+    )
+
+    encoded = msgspec.msgpack.encode(original_key)
+    decoded_key = msgspec.msgpack.decode(encoded, type=IPCCacheEngineKey)
+
+    assert original_key == decoded_key
+    assert decoded_key.cache_salt == "alice"
+    assert decoded_key.lora_name == "adapter_a"
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="CUDA is required for CudaIPCWrapper tests",

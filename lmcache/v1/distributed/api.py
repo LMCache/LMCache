@@ -71,23 +71,36 @@ class ObjectKey:
     hash, and extension are added.
     """
 
-    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
-    _SALT_MAX_LEN = 128
+    lora_name: str = ""
+    """ Active LoRA adapter identity. Empty string means base model/no
+    adapter. Non-empty values produce different ObjectKeys so adapter-
+    dependent K/V tensors cannot be reused across LoRAs.
+
+    Invariant: same separator/path restrictions and length cap as
+    cache_salt because L2 adapters serialize both fields into keys and
+    filenames.
+    """
+
+    _IDENTITY_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+    _IDENTITY_MAX_LEN = 128
 
     def __post_init__(self) -> None:
         if "@" in self.model_name:
             raise ValueError(
                 f"model_name must not contain '@' (got {self.model_name!r})"
             )
-        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
+        self._validate_identity_field("cache_salt", self.cache_salt)
+        self._validate_identity_field("lora_name", self.lora_name)
+
+    @classmethod
+    def _validate_identity_field(cls, field_name: str, value: str) -> None:
+        bad = cls._IDENTITY_FORBIDDEN_CHARS & set(value)
         if bad:
+            raise ValueError(f"{field_name} must not contain {bad!r} (got {value!r})")
+        if len(value) > cls._IDENTITY_MAX_LEN:
             raise ValueError(
-                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
-            )
-        if len(self.cache_salt) > self._SALT_MAX_LEN:
-            raise ValueError(
-                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
-                f"(got {len(self.cache_salt)})"
+                f"{field_name} exceeds max length {cls._IDENTITY_MAX_LEN} "
+                f"(got {len(value)})"
             )
 
     @staticmethod
@@ -209,21 +222,22 @@ def ipc_key_to_object_keys(
     When the ipc_key's worker_id is None, each chunk hash is exploded into
     multiple ObjectKeys (one per worker in world_size).
 
-    ``cache_salt`` is read directly from ``ipc_key`` so the produced
-    ObjectKeys are per-user isolated whenever the sender set a non-empty
-    salt. There is intentionally no separate ``cache_salt`` parameter —
-    duplicating the source of truth would risk silent isolation bugs
-    where a caller passes ``ipc_key`` but forgets the salt.
+    ``cache_salt`` and ``lora_name`` are read directly from ``ipc_key`` so
+    the produced ObjectKeys preserve tenant and adapter cache identity.
+    There are intentionally no separate parameters — duplicating the source
+    of truth would risk silent isolation bugs where a caller passes
+    ``ipc_key`` but forgets one identity dimension.
 
     Args:
         ipc_key: The IPC key providing model_name, world_size, worker_id,
-            and cache_salt.
+            cache_salt, and lora_name.
         chunk_hashes: List of chunk hash bytes, one per chunk.
 
     Returns:
         list[ObjectKey]: The converted list of ObjectKey.
     """
     cache_salt = ipc_key.cache_salt
+    lora_name = ipc_key.lora_name
     storage_keys = []
     for chunk_hash in chunk_hashes:
         if ipc_key.worker_id is None:
@@ -244,6 +258,7 @@ def ipc_key_to_object_keys(
                         model_name=ipc_key.model_name,
                         kv_rank=kv_rank,
                         cache_salt=cache_salt,
+                        lora_name=lora_name,
                     )
                 )
         else:
@@ -260,6 +275,7 @@ def ipc_key_to_object_keys(
                     model_name=ipc_key.model_name,
                     kv_rank=kv_rank,
                     cache_salt=cache_salt,
+                    lora_name=lora_name,
                 )
             )
 

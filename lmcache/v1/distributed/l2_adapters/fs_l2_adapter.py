@@ -106,6 +106,10 @@ def _object_key_to_filename(key: ObjectKey) -> str:
 
         <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
 
+    LoRA-aware (trailing ``cache_salt`` + ``lora_name``)::
+
+        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>@<lora_name>.data
+
     The 3-field unsalted shape is bit-identical to the pre-cache_salt
     format, so existing un-salted cache directories remain valid and
     no migration is needed.
@@ -116,6 +120,8 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
     base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    if key.lora_name:
+        return f"{base}{_KEY_SEP}{key.cache_salt}{_KEY_SEP}{key.lora_name}{_FILE_EXT}"
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
     return f"{base}{_FILE_EXT}"
@@ -126,10 +132,11 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
-    Accepts both the 3-field unsalted shape and the 4-field salted
-    shape (trailing ``cache_salt``). Returns ``None`` for anything
-    else. Since ``model_name`` is guaranteed not to contain ``@``,
-    plain ``split`` suffices — no marker, no rsplit.
+    Accepts the 3-field unsalted shape, the 4-field salted shape
+    (trailing ``cache_salt``), and the 5-field LoRA-aware shape
+    (trailing ``cache_salt`` + ``lora_name``). Returns ``None`` for
+    anything else. Since ``model_name`` is guaranteed not to contain
+    ``@``, plain ``split`` suffices — no marker, no rsplit.
     """
     if not filename.endswith(_FILE_EXT):
         return None
@@ -138,8 +145,12 @@ def _filename_to_object_key(
     if len(parts) == 3:
         safe_model, kv_rank_str, chunk_hash_hex = parts
         cache_salt = ""
+        lora_name = ""
     elif len(parts) == 4:
         safe_model, kv_rank_str, chunk_hash_hex, cache_salt = parts
+        lora_name = ""
+    elif len(parts) == 5:
+        safe_model, kv_rank_str, chunk_hash_hex, cache_salt, lora_name = parts
     else:
         return None
 
@@ -157,6 +168,7 @@ def _filename_to_object_key(
             model_name=model_name,
             kv_rank=kv_rank,
             cache_salt=cache_salt,
+            lora_name=lora_name,
         )
     except ValueError:
         return None

@@ -241,6 +241,29 @@ class TestObjectKeySerialization:
         s = _object_key_to_string(key)
         assert s == "llama@000000ff@00010203@alice"
 
+    def test_lora_serialization_format(self):
+        """LoRA-aware keys use a 5-field shape to avoid reinterpreting the
+        legacy 4th field, which already means cache_salt."""
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            lora_name="adapter_a",
+        )
+        s = _object_key_to_string(key)
+        assert s == "llama@000000ff@00010203@@adapter_a"
+
+    def test_salt_and_lora_serialization_format(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            cache_salt="alice",
+            lora_name="adapter_a",
+        )
+        s = _object_key_to_string(key)
+        assert s == "llama@000000ff@00010203@alice@adapter_a"
+
     def test_different_salts_produce_different_strings(self):
         base = {
             "chunk_hash": b"\x00\x01\x02\x03",
@@ -259,6 +282,18 @@ class TestObjectKeySerialization:
         assert s_empty.count("@") == 2  # 3 fields
         assert s_alice.endswith("@alice")
         assert s_bob.endswith("@bob")
+
+    def test_different_loras_produce_different_strings(self):
+        base = {
+            "chunk_hash": b"\x00\x01\x02\x03",
+            "model_name": "llama",
+            "kv_rank": 0,
+        }
+        k_empty = ObjectKey(**base)
+        k_a = ObjectKey(**base, lora_name="adapter_a")
+        k_b = ObjectKey(**base, lora_name="adapter_b")
+        assert _object_key_to_string(k_empty) != _object_key_to_string(k_a)
+        assert _object_key_to_string(k_a) != _object_key_to_string(k_b)
 
 
 class TestObjectKeyModelNameValidation:
@@ -368,6 +403,42 @@ class TestObjectKeyCacheSaltValidation:
         assert key.cache_salt == "user-abc_123.xyz:42"
 
 
+class TestObjectKeyLoraNameValidation:
+    """lora_name is serialized into ObjectKey strings and filenames, so it
+    follows the same separator and path safety rules as cache_salt."""
+
+    def test_reject_at_in_lora_name(self):
+        with pytest.raises(ValueError, match="lora_name"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                lora_name="adapter@a",
+            )
+
+    def test_reject_slash_in_lora_name(self):
+        with pytest.raises(ValueError, match="lora_name"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                lora_name="org/adapter",
+            )
+
+    def test_reject_too_long_lora_name(self):
+        with pytest.raises(ValueError, match="max length"):
+            ObjectKey(
+                chunk_hash=b"\x00",
+                model_name="m",
+                kv_rank=0,
+                lora_name="x" * 129,
+            )
+
+    def test_empty_lora_name_is_accepted(self):
+        key = ObjectKey(chunk_hash=b"\x00", model_name="m", kv_rank=0)
+        assert key.lora_name == ""
+
+
 class TestObjectKeyIsolation:
     """cache_salt must participate in eq/hash so the L1/L2 caches treat
     same-content/different-user entries as distinct."""
@@ -391,6 +462,13 @@ class TestObjectKeyIsolation:
         b = ObjectKey(**base, cache_salt="alice")
         assert a == b
         assert hash(a) == hash(b)
+
+    def test_different_loras_are_unequal(self):
+        base = {"chunk_hash": b"x", "model_name": "m", "kv_rank": 0}
+        a = ObjectKey(**base, lora_name="adapter_a")
+        b = ObjectKey(**base, lora_name="adapter_b")
+        assert a != b
+        assert hash(a) != hash(b)
 
 
 # =============================================================================

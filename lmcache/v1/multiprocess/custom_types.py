@@ -255,21 +255,29 @@ class IPCCacheEngineKey:
     # ObjectKey.cache_salt). Validated in __post_init__.
     cache_salt: str = ""
 
+    # === LoRA adapter identity (part of cache identity) ===
+    # Empty string is the base-model/no-adapter path. Non-empty values
+    # partition MP cache keys by active adapter so two LoRAs cannot cross-hit.
+    lora_name: str = ""
+
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
     # circular dependency (api.py imports IPCCacheEngineKey).
-    _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
-    _SALT_MAX_LEN = 128
+    _IDENTITY_FORBIDDEN_CHARS = frozenset("@/\\\x00")
+    _IDENTITY_MAX_LEN = 128
 
     def __post_init__(self) -> None:
-        bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
+        self._validate_identity_field("cache_salt", self.cache_salt)
+        self._validate_identity_field("lora_name", self.lora_name)
+
+    @classmethod
+    def _validate_identity_field(cls, field_name: str, value: str) -> None:
+        bad = cls._IDENTITY_FORBIDDEN_CHARS & set(value)
         if bad:
+            raise ValueError(f"{field_name} must not contain {bad!r} (got {value!r})")
+        if len(value) > cls._IDENTITY_MAX_LEN:
             raise ValueError(
-                f"cache_salt must not contain {bad!r} (got {self.cache_salt!r})"
-            )
-        if len(self.cache_salt) > self._SALT_MAX_LEN:
-            raise ValueError(
-                f"cache_salt exceeds max length {self._SALT_MAX_LEN} "
-                f"(got {len(self.cache_salt)})"
+                f"{field_name} exceeds max length {cls._IDENTITY_MAX_LEN} "
+                f"(got {len(value)})"
             )
 
     # Helper function for unit tests only
@@ -284,6 +292,7 @@ class IPCCacheEngineKey:
         end: int = 0,
         request_id: str = "",
         cache_salt: str = "",
+        lora_name: str = "",
     ) -> "IPCCacheEngineKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
@@ -295,6 +304,7 @@ class IPCCacheEngineKey:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            lora_name=lora_name,
         )
 
     def no_worker_id_version(self) -> "IPCCacheEngineKey":
@@ -308,6 +318,7 @@ class IPCCacheEngineKey:
             end=self.end,
             request_id=self.request_id,
             cache_salt=self.cache_salt,
+            lora_name=self.lora_name,
         )
 
 

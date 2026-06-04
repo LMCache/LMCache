@@ -35,3 +35,34 @@ def test_raw_block_object_key_codec_roundtrips_slash_and_sep() -> None:
 
     assert "%2F" in encoded
     assert decoded == key
+
+
+def test_raw_block_object_key_codec_roundtrips_lora_name() -> None:
+    key = ObjectKey(
+        chunk_hash=ObjectKey.IntHash2Bytes(789),
+        model_name="org/model",
+        kv_rank=3,
+        lora_name="adapter-a",
+    )
+
+    encoded = object_key_to_string(key)
+    decoded = decode_object_key(encoded)
+
+    assert encoded.endswith("@@adapter-a")
+    assert decoded == key
+
+
+def test_raw_block_object_key_codec_roundtrips_cache_salt_and_lora_name() -> None:
+    key = ObjectKey(
+        chunk_hash=ObjectKey.IntHash2Bytes(789),
+        model_name="org/model",
+        kv_rank=3,
+        cache_salt="tenant",
+        lora_name="adapter-a",
+    )
+
+    encoded = object_key_to_string(key)
+    decoded = decode_object_key(encoded)
+
+    assert encoded.endswith("@tenant@adapter-a")
+    assert decoded == key

@@ -35,13 +35,15 @@ def object_key_to_string(key: ObjectKey) -> str:
 
     Returns:
         A stable string containing model name, KV rank, chunk hash, and
-        optional cache salt.
+        optional cache salt and LoRA adapter identity.
 
     Raises:
         AttributeError: If ``key`` does not expose the ObjectKey fields.
     """
     safe_model = urllib.parse.quote(key.model_name, safe="")
     base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    if key.lora_name:
+        return f"{base}{_KEY_SEP}{key.cache_salt}{_KEY_SEP}{key.lora_name}"
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"
     return base
@@ -64,8 +66,12 @@ def decode_object_key(encoded: str) -> ObjectKey:
     if len(parts) == 3:
         safe_model, kv_rank_str, chunk_hash_hex = parts
         cache_salt = ""
+        lora_name = ""
     elif len(parts) == 4:
         safe_model, kv_rank_str, chunk_hash_hex, cache_salt = parts
+        lora_name = ""
+    elif len(parts) == 5:
+        safe_model, kv_rank_str, chunk_hash_hex, cache_salt, lora_name = parts
     else:
         raise ValueError(f"Invalid raw-block ObjectKey encoding: {encoded!r}")
 
@@ -74,6 +80,7 @@ def decode_object_key(encoded: str) -> ObjectKey:
         model_name=urllib.parse.unquote(safe_model),
         kv_rank=int(kv_rank_str, 16),
         cache_salt=cache_salt,
+        lora_name=lora_name,
     )
 
 

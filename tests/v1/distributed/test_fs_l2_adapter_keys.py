@@ -69,6 +69,37 @@ class TestFilenameRoundtrip:
             cache_salt="alice",
         )
 
+    def test_lora_format_with_empty_salt_slot(self):
+        """LoRA-only keys keep the legacy 4-field salted shape unambiguous
+        by using a 5-field shape with an empty cache_salt slot."""
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            lora_name="adapter_a",
+        )
+
+        fn = _object_key_to_filename(key)
+        parsed = _filename_to_object_key(fn)
+
+        assert fn == "llama@0x0000002a@deadbeef@@adapter_a.data"
+        assert parsed == key
+
+    def test_salt_and_lora_format(self):
+        key = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            cache_salt="alice",
+            lora_name="adapter_a",
+        )
+
+        fn = _object_key_to_filename(key)
+        parsed = _filename_to_object_key(fn)
+
+        assert fn == "llama@0x0000002a@deadbeef@alice@adapter_a.data"
+        assert parsed == key
+
     def test_non_data_file_returns_none(self):
         assert _filename_to_object_key("not-a-data-file.txt") is None
 
@@ -76,7 +107,7 @@ class TestFilenameRoundtrip:
         assert _filename_to_object_key("just-one-field.data") is None
 
     def test_too_many_fields_returns_none(self):
-        assert _filename_to_object_key("a@b@c@d@e.data") is None
+        assert _filename_to_object_key("a@b@c@d@e@f.data") is None
 
     def test_salt_with_forbidden_char_returns_none(self):
         # A filename that parses into 4 fields but whose trailing "salt"
@@ -124,6 +155,26 @@ class TestIpcKeyToObjectKeys:
         out = ipc_key_to_object_keys(k, [b"h1"])
         assert len(out) == 4
         assert all(o.cache_salt == "alice" for o in out)
+
+    def test_forwards_lora_name_scheduler_path(self):
+        """LoRA identity must be carried from the IPC key to every expanded
+        ObjectKey so MP lookup/store paths cannot cross-hit adapters."""
+        # First Party
+        from lmcache.v1.distributed.api import ipc_key_to_object_keys
+        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+
+        k = IPCCacheEngineKey.from_token_ids(
+            model_name="m",
+            world_size=4,
+            worker_id=None,
+            token_ids=[1, 2, 3],
+            cache_salt="alice",
+            lora_name="adapter_a",
+        )
+        out = ipc_key_to_object_keys(k, [b"h1"])
+        assert len(out) == 4
+        assert all(o.cache_salt == "alice" for o in out)
+        assert all(o.lora_name == "adapter_a" for o in out)
 
     def test_empty_salt_passes_through(self):
         # First Party

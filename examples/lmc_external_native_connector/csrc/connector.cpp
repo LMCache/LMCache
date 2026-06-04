@@ -67,14 +67,18 @@ std::string ExampleFSConnector::safe_filename(const std::string& key) {
   // Input key format (from _object_key_to_string):
   //   Unsalted: <model_name>@<kv_rank_hex>@<chunk_hash_hex>
   //   Salted  : <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
+  //   LoRA    :
+  //   <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>@<lora_name>
   //
   // Output filename:
   //   Unsalted: <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>.data
   //   Salted  :
   //   <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
+  //   LoRA    :
+  //   <model_name_safe>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>@<lora_name>.data
   //
-  // Both model_name and cache_salt are forbidden from containing '@'
-  // (invariant enforced on the Python side), so splitting on '@' is
+  // model_name, cache_salt, and lora_name are forbidden from containing
+  // '@' (invariant enforced on the Python side), so splitting on '@' is
   // unambiguous.
 
   std::vector<std::string> parts;
@@ -85,31 +89,37 @@ std::string ExampleFSConnector::safe_filename(const std::string& key) {
       start = pos + 1;
     }
   }
-  if (parts.size() != 3 && parts.size() != 4) {
+  if (parts.size() != 3 && parts.size() != 4 && parts.size() != 5) {
     throw std::runtime_error(
         "ExampleFSConnector: malformed key "
-        "(expected 3 or 4 '@'-separated fields): " +
+        "(expected 3, 4, or 5 '@'-separated fields): " +
         key);
   }
 
   const std::string& model = parts[0];
   const std::string& kv_rank_hex = parts[1];
   const std::string& chunk_hash = parts[2];
-  const std::string cache_salt = parts.size() == 4 ? parts[3] : std::string();
+  const std::string cache_salt = parts.size() >= 4 ? parts[3] : std::string();
+  const std::string lora_name = parts.size() == 5 ? parts[4] : std::string();
 
   // Replace '/' with '-SEP-' for filesystem safety
   std::string safe_model = replace_all(model, "/", PATH_SLASH_REPLACEMENT);
 
   std::string result;
   result.reserve(safe_model.size() + kv_rank_hex.size() + chunk_hash.size() +
-                 cache_salt.size() + 32);
+                 cache_salt.size() + lora_name.size() + 32);
   result += safe_model;
   result += KEY_SEP;
   result += "0x";
   result += kv_rank_hex;
   result += KEY_SEP;
   result += chunk_hash;
-  if (!cache_salt.empty()) {
+  if (!lora_name.empty()) {
+    result += KEY_SEP;
+    result += cache_salt;
+    result += KEY_SEP;
+    result += lora_name;
+  } else if (!cache_salt.empty()) {
     result += KEY_SEP;
     result += cache_salt;
   }

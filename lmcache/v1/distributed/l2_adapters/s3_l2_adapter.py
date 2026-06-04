@@ -68,6 +68,10 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
         <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
 
+    LoRA-aware (trailing ``cache_salt`` + ``lora_name``)::
+
+        <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>@<lora_name>
+
     Keys with ``cache_salt=""`` produce the 3-field shape (bit-identical
     to the pre-``cache_salt`` format), so existing un-salted caches
     remain valid with no migration. ``@`` in ``model_name`` and
@@ -75,6 +79,8 @@ def _object_key_to_string(key: ObjectKey) -> str:
     format is unambiguous.
     """
     base = f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+    if key.lora_name:
+        return f"{base}@{key.cache_salt}@{key.lora_name}"
     if key.cache_salt:
         return f"{base}@{key.cache_salt}"
     return base

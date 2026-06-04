@@ -351,6 +351,33 @@ class TestObjectKeySerialization:
         assert _object_key_to_string(salted) == "llama@000000ff@00010203@user-42"
         assert _object_key_to_string(base_key) != _object_key_to_string(salted)
 
+    def test_lora_name_appended_after_cache_salt_slot(self):
+        base_key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+        )
+        lora_key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            lora_name="adapter-a",
+        )
+        salted_lora_key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            cache_salt="user-42",
+            lora_name="adapter-a",
+        )
+
+        assert _object_key_to_string(base_key) == "llama@000000ff@00010203"
+        assert _object_key_to_string(lora_key) == "llama@000000ff@00010203@@adapter-a"
+        assert (
+            _object_key_to_string(salted_lora_key)
+            == "llama@000000ff@00010203@user-42@adapter-a"
+        )
+
 
 # =============================================================================
 # Event fd interface
