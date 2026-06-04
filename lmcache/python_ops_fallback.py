@@ -851,7 +851,7 @@ def _infer_kv_dtype(
                 f"Supported sizes: {sorted(_ELEMENT_SIZE_TO_DTYPE)}"
             )
         return dtype
-    return torch.float16
+    return torch.bfloat16
 
 
 def _normalize_paged_layers(
