@@ -709,7 +709,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
     def shutdown(self):
         """
-        Shutdown the connector and worker adapter resources when present.
+        Shutdown the connector. This is called when the scheduler or worker
+        process is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
         """
         if hasattr(self, "worker_adapter"):
             self.worker_adapter.shutdown()

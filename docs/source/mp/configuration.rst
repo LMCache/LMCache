@@ -469,6 +469,10 @@ To let the vLLM scheduler start a local MP server automatically:
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.autostart": true, "lmcache.mp.autostart.server_args": "--l1-size-gb 20 --eviction-policy LRU"}}'
 
+The auto-started MP server is treated as a shared local service. vLLM shutdown
+does not terminate it, because other vLLM instances may still be connected.
+Stop the server process separately when it is no longer needed.
+
 Environment Variables
 ---------------------
 
