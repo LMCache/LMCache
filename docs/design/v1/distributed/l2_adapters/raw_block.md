@@ -147,6 +147,30 @@ The legacy `RustRawBlockBackend` now acts as a thin facade over `RawBlockCore`.
 It preserves non-MP behavior such as prefix-oriented contains/get semantics,
 while the MP adapter uses the core's full-bitmap lookup/load API.
 
+### Backend-level LRU Eviction (Non-MP only)
+
+`RustRawBlockBackend` maintains its own LRU eviction layer independent of the
+L2 eviction framework described in `l2_eviction.md`. When a `put` fails because
+no free slot is available, the backend evicts the least-recently-used unpinned
+key and retries once before raising an error.
+
+Key properties:
+
+- LRU order is tracked in an `OrderedDict` (`_lru_keys`) inside the backend
+  wrapper, not inside `RawBlockCore`.
+- Pinned keys (held by an in-flight `get`) are skipped during eviction.
+- Eviction is triggered only on confirmed capacity misses
+  (`no_free_slot_keys`). Other write failures do not evict.
+- LRU state is **not** persisted in the checkpoint. After restart,
+  `_sync_lru_with_index()` initialises the order from the index insertion
+  order (i.e., the order keys appear in the recovered checkpoint), not from
+  prior access history. This matches the behaviour of widely-used caching
+  systems such as Redis, where persisting access history is considered too
+  expensive relative to the benefit.
+
+This mechanism is specific to `RustRawBlockBackend`. The MP-mode
+`RawBlockL2Adapter` delegates eviction entirely to the `L2EvictionController`.
+
 ## References
 
 - Implementation: `lmcache/v1/distributed/l2_adapters/raw_block_l2_adapter.py`
