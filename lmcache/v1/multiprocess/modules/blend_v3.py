@@ -739,7 +739,7 @@ class BlendV3Module:
         self,
         key: IPCCacheEngineKey,
         instance_id: int,
-        gpu_block_ids: list[int],
+        gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
         """Paged store + matcher fingerprint registration (skips pos-0
