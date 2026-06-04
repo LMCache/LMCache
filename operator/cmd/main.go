@@ -34,11 +34,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 	"github.com/LMCache/LMCache/internal/controller"
+	cbwebhook "github.com/LMCache/LMCache/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -187,6 +189,23 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "LMCacheEngine")
 		os.Exit(1)
+	}
+	if err := (&controller.CacheBlendEngineReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "CacheBlendEngine")
+		os.Exit(1)
+	}
+	// ENABLE_WEBHOOKS=false skips registering the pod-mutating webhook, so a
+	// local `make run` (which has no serving certs on the host) can start the
+	// controller without the webhook server failing on a missing tls.crt. The
+	// deployed manager leaves it unset, so the webhook is on by default.
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		mgr.GetWebhookServer().Register("/mutate--v1-pod", &webhook.Admission{Handler: &cbwebhook.PodInjector{
+			Client:  mgr.GetClient(),
+			Decoder: admission.NewDecoder(mgr.GetScheme()),
+		}})
 	}
 	// +kubebuilder:scaffold:builder
 

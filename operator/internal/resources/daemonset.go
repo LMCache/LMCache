@@ -29,9 +29,32 @@ import (
 
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
-	spec := &engine.Spec
-	selectorLabels := SelectorLabels(engine.Name)
-	podLabels := MergeLabels(StandardLabels(engine.Name), spec.PodLabels)
+	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
+}
+
+// buildDaemonSetCore constructs the DaemonSet shared by the LMCacheEngine and
+// CacheBlendEngine controllers. It is the single source of truth for the
+// GPU/security pod-template scaffolding (hostIPC, runtimeClassName, privileged,
+// NVIDIA_VISIBLE_DEVICES, resources without a device-plugin GPU claim) so those
+// settings cannot drift between the two engines.
+//
+// Parameters:
+//   - name, namespace: the owning object's identity, used for labels and metadata.
+//   - spec: the engine spec (LMCacheEngine and CacheBlendEngine reuse the same
+//     shared sub-structs, so callers project the CacheBlendEngine spec into an
+//     *LMCacheEngineSpec before calling).
+//   - containerArgs: the fully serialized server CLI args (callers append any
+//     engine-specific flags such as --engine-type before passing them in).
+//   - defaultImageRepo: the container image repository to use when spec.Image
+//     does not set one.
+func buildDaemonSetCore(
+	name, namespace string,
+	spec *lmcachev1alpha1.LMCacheEngineSpec,
+	containerArgs []string,
+	defaultImageRepo string,
+) *appsv1.DaemonSet {
+	selectorLabels := SelectorLabels(name)
+	podLabels := MergeLabels(StandardLabels(name), spec.PodLabels)
 	podAnnotations := spec.PodAnnotations
 
 	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
@@ -43,7 +66,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	privileged := true
 
 	serverPort := derefInt32(getServerPort(spec), 5555)
-	imgRepo := "lmcache/vllm-openai"
+	imgRepo := defaultImageRepo
 	imgTag := "latest"
 	imgPullPolicy := corev1.PullIfNotPresent
 	if spec.Image != nil {
@@ -86,7 +109,7 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	// The DaemonSet references the local (same-namespace) managed copy
 	// created by the controller via reconcileRESPAuthSecret.
 	if spec.L2Backend != nil && spec.L2Backend.RESP != nil && spec.L2Backend.RESP.AuthSecretRef != nil {
-		secretName := RESPAuthSecretName(engine.Name)
+		secretName := RESPAuthSecretName(name)
 		optional := true
 		envVars = append(envVars,
 			corev1.EnvVar{
@@ -127,7 +150,6 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 		"/opt/venv/bin/lmcache",
 		"server",
 	}
-	containerArgs := BuildContainerArgs(spec)
 
 	// Probes
 	tcpProbe := &corev1.TCPSocketAction{
@@ -189,9 +211,9 @@ func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      engine.Name,
-			Namespace: engine.Namespace,
-			Labels:    StandardLabels(engine.Name),
+			Name:      name,
+			Namespace: namespace,
+			Labels:    StandardLabels(name),
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
