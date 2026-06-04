@@ -154,8 +154,22 @@ def CreateStorageBackends(
             local_cpu_backend = _existing_cpu
 
     if metadata.role == "scheduler":
-        # For scheduler role, local_cpu_backend is None
-        pass
+        # For scheduler role, local_cpu_backend is None. NIXL CPU mode shares
+        # LocalCPUBackend's pinned pool, which is not created for the scheduler,
+        # so the backend cannot be constructed here. Reject early with a clear
+        # error instead of letting NixlStorageBackend.__init__ raise deep in the
+        # stack. (The scheduler only needs contains(), which never allocates, so
+        # a query-only NIXL agent could in principle support this; it is not
+        # worth the surface area while the separate scheduler process is being
+        # removed in multiprocess mode.)
+        if enable_nixl_storage and config.nixl_buffer_device == "cpu":
+            raise ValueError(
+                "nixl_buffer_device='cpu' is not supported in the scheduler "
+                "role (e.g. enable_scheduler_bypass_lookup=True): the shared "
+                "LocalCPUBackend pool is not created for the scheduler. Use "
+                "nixl_buffer_device='cuda', or disable "
+                "enable_scheduler_bypass_lookup."
+            )
     elif (
         not config.enable_pd
         or config.local_cpu

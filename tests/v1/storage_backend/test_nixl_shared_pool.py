@@ -87,6 +87,7 @@ from lmcache.v1.memory_management import (  # noqa: E402
     PagedTensorMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata  # noqa: E402
+from lmcache.v1.storage_backend import CreateStorageBackends  # noqa: E402
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend  # noqa: E402
 import lmcache.v1.memory_management as memory_management_module  # noqa: E402
 import lmcache.v1.storage_backend.nixl_storage_backend as nixl_module  # noqa: E402
@@ -641,3 +642,47 @@ class TestAllocatorMethodsRouteThroughLocalCpu:
             backend.close()
             loop.close()
             local_cpu.memory_allocator.close()
+
+
+def _scheduler_metadata() -> LMCacheMetadata:
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+        role="scheduler",
+    )
+
+
+class TestSchedulerRoleRejection:
+    """The scheduler role never creates a LocalCPUBackend, so NIXL CPU mode —
+    which shares that backend's pool — cannot run there. CreateStorageBackends
+    rejects the combo with a clear ValueError instead of letting it crash deep
+    in the NIXL constructor. See plans/pr-nixl-cpu-shared-pool-review."""
+
+    def test_scheduler_role_nixl_cpu_rejected(self):
+        config = _nixl_cpu_config()
+        loop = asyncio.new_event_loop()
+        try:
+            with pytest.raises(ValueError, match="scheduler"):
+                CreateStorageBackends(config, _scheduler_metadata(), loop)
+        finally:
+            loop.close()
+
+    def test_scheduler_role_without_nixl_ok(self):
+        # The guard is specific to NIXL CPU mode: a scheduler with no NIXL
+        # storage must still build (no LocalCPUBackend, no rejection).
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=256,
+            local_cpu=True,
+            lmcache_instance_id="test_sched_no_nixl",
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            backends = CreateStorageBackends(config, _scheduler_metadata(), loop)
+            assert "LocalCPUBackend" not in backends
+        finally:
+            loop.close()
