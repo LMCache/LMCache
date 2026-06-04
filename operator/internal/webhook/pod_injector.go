@@ -187,11 +187,10 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	// M1: shared emptyDir volume.
 	pod.Spec.Volumes = appendVolumeIfAbsent(pod.Spec.Volumes, BuildCBPluginVolume())
 
-	// M2: payload init container.
-	payloadImage := deref(engine.Spec.Injection.PayloadImage)
-	pullPolicy := corev1.PullPolicy(deref(engine.Spec.Injection.PayloadImagePullPolicy))
+	// M2: payload init container (payloadImage is an ImageSpec: repo/tag/policy).
+	payloadRef, payloadPullPolicy := resolvePayloadImage(engine.Spec.Injection.PayloadImage)
 	pod.Spec.InitContainers = appendInitContainerIfAbsent(pod.Spec.InitContainers,
-		BuildCBInitContainer(payloadImage, pullPolicy))
+		BuildCBInitContainer(payloadRef, payloadPullPolicy))
 
 	// M3: read-only mount on the target container.
 	target.VolumeMounts = appendVolumeMountIfAbsent(target.VolumeMounts, BuildCBVolumeMount())
@@ -366,4 +365,23 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// resolvePayloadImage builds the "<repository>:<tag>" reference and pull policy
+// for the payload init container from the engine's injection.payloadImage. Tag
+// and pull policy fall back to "latest" / IfNotPresent when unset; repository is
+// taken as-is (it has no sensible cluster-wide default — see InjectionSpec docs).
+func resolvePayloadImage(img *lmcachev1alpha1.ImageSpec) (string, corev1.PullPolicy) {
+	if img == nil || deref(img.Repository) == "" {
+		return "", corev1.PullIfNotPresent
+	}
+	tag := deref(img.Tag)
+	if tag == "" {
+		tag = "latest"
+	}
+	policy := corev1.PullPolicy(deref(img.PullPolicy))
+	if policy == "" {
+		policy = corev1.PullIfNotPresent
+	}
+	return deref(img.Repository) + ":" + tag, policy
 }

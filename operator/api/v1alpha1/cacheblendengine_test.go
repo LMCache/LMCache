@@ -143,11 +143,26 @@ func TestCBSetDefaults_InjectionDefaults(t *testing.T) {
 	if e.Spec.Injection == nil {
 		t.Fatal("expected Injection to be defaulted, got nil")
 	}
-	if e.Spec.Injection.PayloadImagePullPolicy == nil || *e.Spec.Injection.PayloadImagePullPolicy != "IfNotPresent" {
-		t.Fatalf("expected PayloadImagePullPolicy=IfNotPresent, got %v", e.Spec.Injection.PayloadImagePullPolicy)
-	}
 	if e.Spec.Injection.Cudagraph == nil || *e.Spec.Injection.Cudagraph != CudagraphEager {
 		t.Fatalf("expected Cudagraph=eager, got %v", e.Spec.Injection.Cudagraph)
+	}
+	// payloadImage was not set, so it stays nil (no cluster-wide default).
+	if e.Spec.Injection.PayloadImage != nil {
+		t.Fatalf("expected PayloadImage nil when unset, got %v", e.Spec.Injection.PayloadImage)
+	}
+
+	// When payloadImage is set, tag and pullPolicy default.
+	e2 := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: &InjectionSpec{PayloadImage: &ImageSpec{Repository: ptr("myreg/cacheblend-plugin")}},
+	}}
+	e2.SetDefaults()
+	pi := e2.Spec.Injection.PayloadImage
+	if pi.Tag == nil || *pi.Tag != "latest" {
+		t.Fatalf("expected payloadImage.Tag=latest, got %v", pi.Tag)
+	}
+	if pi.PullPolicy == nil || *pi.PullPolicy != "IfNotPresent" {
+		t.Fatalf("expected payloadImage.PullPolicy=IfNotPresent, got %v", pi.PullPolicy)
 	}
 }
 
@@ -155,13 +170,16 @@ func TestCBSetDefaults_InjectionPreserved(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
 		L1: L1BackendSpec{SizeGB: 10},
 		Injection: &InjectionSpec{
-			PayloadImagePullPolicy: ptr("Always"),
-			Cudagraph:              ptr(CudagraphFullDecodeOnly),
+			PayloadImage: &ImageSpec{Repository: ptr("myreg/cacheblend-plugin"), Tag: ptr("v1"), PullPolicy: ptr("Always")},
+			Cudagraph:    ptr(CudagraphFullDecodeOnly),
 		},
 	}}
 	e.SetDefaults()
-	if *e.Spec.Injection.PayloadImagePullPolicy != "Always" {
-		t.Fatalf("expected PayloadImagePullPolicy preserved at Always, got %s", *e.Spec.Injection.PayloadImagePullPolicy)
+	if *e.Spec.Injection.PayloadImage.PullPolicy != "Always" {
+		t.Fatalf("expected payloadImage.PullPolicy preserved at Always, got %s", *e.Spec.Injection.PayloadImage.PullPolicy)
+	}
+	if *e.Spec.Injection.PayloadImage.Tag != "v1" {
+		t.Fatalf("expected payloadImage.Tag preserved at v1, got %s", *e.Spec.Injection.PayloadImage.Tag)
 	}
 	if *e.Spec.Injection.Cudagraph != CudagraphFullDecodeOnly {
 		t.Fatalf("expected Cudagraph preserved at full_decode_only, got %s", *e.Spec.Injection.Cudagraph)

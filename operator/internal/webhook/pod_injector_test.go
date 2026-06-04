@@ -55,13 +55,14 @@ func newTestScheme() *runtime.Scheme {
 // newTestEngine returns a defaulted CacheBlendEngine with the given injection
 // overrides applied via mutate (nil = pure defaults).
 func newTestEngine(mutate func(*lmcachev1alpha1.CacheBlendEngine)) *lmcachev1alpha1.CacheBlendEngine {
-	payload := "registry.example.com/lmcache/cacheblend-payload:pinned"
+	payloadRepo := "registry.example.com/lmcache/cacheblend-payload"
+	payloadTag := "pinned"
 	engine := &lmcachev1alpha1.CacheBlendEngine{
 		ObjectMeta: metav1.ObjectMeta{Name: testEngineName, Namespace: testNamespace},
 		Spec: lmcachev1alpha1.CacheBlendEngineSpec{
 			L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
 			Injection: &lmcachev1alpha1.InjectionSpec{
-				PayloadImage: &payload,
+				PayloadImage: &lmcachev1alpha1.ImageSpec{Repository: &payloadRepo, Tag: &payloadTag},
 				ImagePullSecrets: []corev1.LocalObjectReference{
 					{Name: "cb-payload-pull"},
 				},

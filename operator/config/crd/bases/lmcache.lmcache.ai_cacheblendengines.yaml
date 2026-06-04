@@ -1266,22 +1266,31 @@ spec:
                     type: array
                   payloadImage:
                     description: |-
-                      payloadImage is the container image for the injected init container that
-                      stages the lmcache-cacheblend vLLM plugin into a shared emptyDir. This
-                      may live in a PRIVATE registry / private DockerHub repo, in which case
-                      imagePullSecrets must reference Secret(s) that exist in the vLLM pod's
-                      namespace.
-                    type: string
-                  payloadImagePullPolicy:
-                    default: IfNotPresent
-                    description: |-
-                      payloadImagePullPolicy is the image pull policy for the injected payload
-                      init container.
-                    enum:
-                    - Always
-                    - Never
-                    - IfNotPresent
-                    type: string
+                      payloadImage is the init-container image (repository/tag/pullPolicy, like
+                      spec.image) that stages the lmcache-cacheblend vLLM plugin into a shared
+                      emptyDir. It is a SEPARATE, usually PRIVATE image: set
+                      payloadImage.repository to your cacheblend-plugin image — the repository
+                      default inherited from ImageSpec is the engine image and is NOT a valid
+                      payload. For private registries, imagePullSecrets must reference Secret(s)
+                      that exist in the vLLM pod's namespace.
+                    properties:
+                      pullPolicy:
+                        default: IfNotPresent
+                        description: pullPolicy is the image pull policy.
+                        enum:
+                        - Always
+                        - Never
+                        - IfNotPresent
+                        type: string
+                      repository:
+                        default: lmcache/vllm-openai
+                        description: repository is the container image repository.
+                        type: string
+                      tag:
+                        default: latest
+                        description: tag is the container image tag.
+                        type: string
+                    type: object
                   targetContainer:
                     description: |-
                       targetContainer is the name of the vLLM container to inject into. Empty

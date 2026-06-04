@@ -57,20 +57,15 @@ type BlendSpec struct {
 // InjectionSpec defines the defaults the mutating webhook reads when injecting
 // the CacheBlend payload into vLLM pods bound to this engine (see design §7, §8).
 type InjectionSpec struct {
-	// payloadImage is the container image for the injected init container that
-	// stages the lmcache-cacheblend vLLM plugin into a shared emptyDir. This
-	// may live in a PRIVATE registry / private DockerHub repo, in which case
-	// imagePullSecrets must reference Secret(s) that exist in the vLLM pod's
-	// namespace.
+	// payloadImage is the init-container image (repository/tag/pullPolicy, like
+	// spec.image) that stages the lmcache-cacheblend vLLM plugin into a shared
+	// emptyDir. It is a SEPARATE, usually PRIVATE image: set
+	// payloadImage.repository to your cacheblend-plugin image — the repository
+	// default inherited from ImageSpec is the engine image and is NOT a valid
+	// payload. For private registries, imagePullSecrets must reference Secret(s)
+	// that exist in the vLLM pod's namespace.
 	// +optional
-	PayloadImage *string `json:"payloadImage,omitempty"`
-
-	// payloadImagePullPolicy is the image pull policy for the injected payload
-	// init container.
-	// +optional
-	// +kubebuilder:default="IfNotPresent"
-	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
-	PayloadImagePullPolicy *string `json:"payloadImagePullPolicy,omitempty"`
+	PayloadImage *ImageSpec `json:"payloadImage,omitempty"`
 
 	// imagePullSecrets are appended to the vLLM pod's spec.imagePullSecrets so
 	// the PRIVATE payload init-container image can pull. The referenced

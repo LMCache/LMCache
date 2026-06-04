@@ -66,9 +66,17 @@ func (e *CacheBlendEngine) SetDefaults() {
 	if spec.Injection == nil {
 		spec.Injection = &InjectionSpec{}
 	}
-	if spec.Injection.PayloadImagePullPolicy == nil {
-		pp := "IfNotPresent"
-		spec.Injection.PayloadImagePullPolicy = &pp
+	// payloadImage tag/pullPolicy default when the image is set; repository is
+	// required (no cluster-wide default for the private payload image).
+	if spec.Injection.PayloadImage != nil {
+		if spec.Injection.PayloadImage.Tag == nil {
+			t := "latest"
+			spec.Injection.PayloadImage.Tag = &t
+		}
+		if spec.Injection.PayloadImage.PullPolicy == nil {
+			pp := "IfNotPresent"
+			spec.Injection.PayloadImage.PullPolicy = &pp
+		}
 	}
 	if spec.Injection.Cudagraph == nil {
 		cg := CudagraphEager

@@ -348,13 +348,8 @@ func (in *InjectionSpec) DeepCopyInto(out *InjectionSpec) {
 	*out = *in
 	if in.PayloadImage != nil {
 		in, out := &in.PayloadImage, &out.PayloadImage
-		*out = new(string)
-		**out = **in
-	}
-	if in.PayloadImagePullPolicy != nil {
-		in, out := &in.PayloadImagePullPolicy, &out.PayloadImagePullPolicy
-		*out = new(string)
-		**out = **in
+		*out = new(ImageSpec)
+		(*in).DeepCopyInto(*out)
 	}
 	if in.ImagePullSecrets != nil {
 		in, out := &in.ImagePullSecrets, &out.ImagePullSecrets

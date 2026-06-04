@@ -35,10 +35,13 @@ spec:
   # -- Injection: how the webhook injects the plugin into annotated vLLM pods --
   injection:
     # payloadImage is the PRIVATE cacheblend-plugin init-container image (not
-    # open-source). Pin it to a tag matching the target vLLM/lmcache version
-    # window. The webhook injects this as an init container into vLLM pods.
-    payloadImage: cacheblend-plugin:latest
-    # payloadImagePullPolicy: IfNotPresent   # Always | Never | IfNotPresent
+    # open-source) — repository/tag/pullPolicy, like spec.image. Set repository
+    # to YOUR cacheblend-plugin image and pin the tag to the target vLLM/lmcache
+    # window. The webhook injects it as an init container into vLLM pods.
+    payloadImage:
+      repository: lmcache/cacheblend-plugin
+      tag: latest
+      pullPolicy: IfNotPresent             # Always | Never | IfNotPresent
     # imagePullSecrets pulls the PRIVATE payload image. The webhook appends these
     # to the vLLM pod's spec.imagePullSecrets — the Secret(s) must exist in the
     # vLLM pod's namespace.
