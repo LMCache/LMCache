@@ -272,11 +272,11 @@ service so that a centralized frontend can track live LMCache nodes.
 
 **Components**:
 
-| Component | Repository | Description |
+| Component | Path | Description |
 |---|---|---|
-| `lmcache_mp_frontend_plugin.py` | [lmcache_frontend](https://github.com/LMCache/lmcache_frontend/blob/lmcache_mp_frontend/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py) | Plugin script; reads config and launches the frontend app |
-| `simple_discover_service.py` | [lmcache_frontend](https://github.com/LMCache/lmcache_frontend/blob/lmcache_mp_frontend/lmcache_frontend/simple_discover_service.py) | Simple discovery service that receives heartbeats |
-| `app.py` | [lmcache_frontend](https://github.com/LMCache/lmcache_frontend/blob/lmcache_mp_frontend/lmcache_frontend/app.py) | Centralized LMCache frontend; proxies requests to backend nodes |
+| `lmcache_mp_frontend_plugin.py` | `lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py` | Plugin script; reads config and launches the frontend app |
+| `simple_discover_service.py` | `lmcache/tools/simple_discover_service.py` | Simple discovery service that receives heartbeats |
+| `app.py` | `lmcache/lmcache_frontend/app.py` | Centralized LMCache frontend; proxies requests to backend nodes |
 
 **Data Flow**:
 
@@ -301,14 +301,14 @@ sequenceDiagram
 
 ```bash
 # 1. Start discover service
-python -m lmcache_frontend.simple_discover_service
+python -m lmcache.tools.simple_discover_service
 
 # 2. Start LMCache MP server with frontend plugin
 python -m lmcache.v1.multiprocess.http_server \
     --host localhost --port 5555 \
     --l1-size-gb 10 \
     --http-host 0.0.0.0 --http-port 8080 \
-    --runtime-plugin-locations /path/to/lmcache_frontend/lmcache_frontend/lmcache_mp_plugin/ \
+    --runtime-plugin-locations lmcache/lmcache_frontend/lmcache_mp_plugin/lmcache_mp_frontend_plugin.py \
     --runtime-plugin-config '{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'
 ```
 
