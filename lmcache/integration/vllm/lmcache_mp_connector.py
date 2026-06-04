@@ -23,6 +23,7 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
+from lmcache.integration.vllm.utils import mla_enabled
 from lmcache.utils import init_logger as lmcache_init_logger
 
 try:
@@ -77,6 +78,27 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
+def from_vllm_config(vllm_config: "VllmConfig") -> ParallelStrategy:
+    """Build a ParallelStrategy from a vLLM config.
+
+    Centralises the (vllm_config -> KV parallel geometry) mapping.
+
+    Args:
+        vllm_config: The vLLM configuration object.
+
+    Returns:
+        The constructed ParallelStrategy.
+    """
+    pc = vllm_config.parallel_config
+    return ParallelStrategy(
+        use_mla=mla_enabled(vllm_config.model_config),
+        vllm_world_size=pc.world_size,
+        vllm_worker_id=pc.rank,
+        tp_size=pc.tensor_parallel_size,
+        pp_size=pc.pipeline_parallel_size,
+    )
+
+
 def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     if block_ids is None:
         return []
@@ -411,7 +433,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
-        parallel_strategy = ParallelStrategy.from_vllm_config(vllm_config)
+        parallel_strategy = from_vllm_config(vllm_config)
         common_adapter_kwargs: dict[str, Any] = dict(
             server_url=server_url,
             context=zmq_context,
