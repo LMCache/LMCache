@@ -140,6 +140,12 @@ image ENTRYPOINT — a `sh -c` wrapper is skipped). Editable samples:
 > namespaces `pod-security.kubernetes.io/enforce=privileged` — the webhook injects
 > `hostIPC`/`privileged`, which `baseline`/`restricted` reject.
 
+> [!IMPORTANT]
+> CacheBlend is still in early stage development and under heavy testing. Its
+> docker image will not be publicly released until we are confident that it is
+> ready to be shipped for general use cases. If you would like to try it first,
+> please contact us in Slack Channel.
+
 The webhook mutates **Pods**, not the Deployment, so verify on a pod
 (`kubectl get pod -l app=vllm-cacheblend -o yaml | grep -E "cb-plugin|cacheblend-injected|skip-reason"`).
 If nothing was injected, check the pod's `lmcache.ai/cacheblend-skip-reason`
