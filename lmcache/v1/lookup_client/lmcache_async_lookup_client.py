@@ -195,6 +195,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
         token_ids: Union[torch.Tensor, list[int]],
         lookup_id: str,
         request_configs: Optional[dict] = None,
+        num_computed_tokens: int = 0,
     ) -> Optional[int]:
         hashes: list[int] = []
         offsets = []
@@ -210,6 +211,7 @@ class LMCacheAsyncLookupClient(LookupClientInterface):
             hashes=hashes,
             offsets=offsets,
             request_configs=request_configs,
+            num_computed_tokens=num_computed_tokens,
         )
 
         # Serialize message using msgspec
@@ -372,6 +374,7 @@ class LMCacheAsyncLookupServer:
                         offsets=msg.offsets,
                         pin=True,
                         request_configs=msg.request_configs,
+                        num_computed_tokens=msg.num_computed_tokens,
                     )
 
                 elif isinstance(msg, LookupCleanupMsg):

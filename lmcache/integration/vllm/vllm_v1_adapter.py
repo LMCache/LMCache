@@ -1386,6 +1386,7 @@ class LMCacheConnectorV1Impl:
                 token_ids,
                 lookup_id=req_id,
                 request_configs=request_configs,
+                num_computed_tokens=num_computed_tokens,
             )
 
         if num_external_hit_tokens is None:
