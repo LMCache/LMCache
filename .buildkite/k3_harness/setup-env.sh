@@ -27,7 +27,7 @@ find /opt/venv/lib/python3.12/site-packages -type d -name __pycache__ \
     -exec rm -rf {} + 2>/dev/null || true
 uv cache clean 2>/dev/null || true
 
-echo "--- :python: Installing vLLM nightly (pinned to cu130 index)"
+echo "--- :python: Installing vLLM nightly (PINNED commit, cu130 torch)"
 # The base image is nvidia/cuda:13.0.2-devel-ubuntu24.04 (system nvcc 13).
 # vLLM's generic nightly index (wheels.vllm.ai/nightly/vllm/) non-deterministically
 # resolves to either a cu128 or a cu130 torch wheel depending on which wheel
@@ -48,13 +48,34 @@ echo "--- :python: Installing vLLM nightly (pinned to cu130 index)"
 # minimum set to put the full `vllm serve` import chain on a freshly
 # extracted wheel, which bypasses whatever filesystem-level mismatch in
 # the base image was causing the GenerationConfig ImportError.
-uv pip install -U "vllm[runai,tensorizer,flashinfer]" --pre \
+# ── TEMPORARY vLLM PIN ──────────────────────────────────────
+# vLLM nightly after 0.22.1rc1.dev116 standardized the CPU attention
+# backend KV cache layout to a "blocks first" packed 4-D tensor
+# ([num_blocks, num_kv_heads, block_size, 2*head_size]) in
+# vllm/v1/attention/backends/cpu_attn.py::get_kv_cache_shape
+# (https://github.com/vllm-project/vllm/pull/44393, merged 2026-06-03).
+# LMCache's normalize_kv_and_discover_format (lmcache/v1/gpu_connector/
+# utils.py) only recognizes the previous 5-D / 3-D vLLM layouts, so the
+# new 4-D tensor falls through and breaks the k3 integration tests.
+#
+# Pin to the last known-good nightly to unblock CI. A follow-up PR adds a
+# GPUKVFormat entry + detection/offset logic for the packed layout and
+# unpins this back to the rolling nightly.
+#
+# The rolling nightly/cu130 index only retains the *latest* build, so an
+# old version is unresolvable there; vLLM also publishes per-commit wheels
+# at https://wheels.vllm.ai/<full-commit-sha>/ — point at that instead.
+# torch still resolves from the pytorch cu130 index below (the reason the
+# generic nightly index was avoided in the first place — see above).
+VLLM_PIN_VERSION="0.22.1rc1.dev116+g71df063c4"
+VLLM_PIN_COMMIT="71df063c494c111ab60f6a33c54aafe7b9ae1d02"
+uv pip install -U "vllm[runai,tensorizer,flashinfer]==${VLLM_PIN_VERSION}" --pre \
     --reinstall-package transformers \
     --reinstall-package tokenizers \
     --reinstall-package huggingface-hub \
     --reinstall-package safetensors \
     --reinstall-package vllm \
-    --extra-index-url https://wheels.vllm.ai/nightly/cu130 \
+    --extra-index-url "https://wheels.vllm.ai/${VLLM_PIN_COMMIT}/" \
     --extra-index-url https://download.pytorch.org/whl/cu130 \
     --index-strategy unsafe-best-match
 
