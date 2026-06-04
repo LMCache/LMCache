@@ -7,7 +7,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
 from multiprocessing import shared_memory
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 import ctypes
 import ctypes.util
 import os
@@ -318,6 +318,7 @@ class PageBufferShapeDesc:
         "hs",
         "element_size",
         "block_stride_elems",
+        "dtype",
     )
 
     def __init__(self) -> None:
@@ -331,6 +332,28 @@ class PageBufferShapeDesc:
         # 0 means "unset — fall back to tight stride"; any downstream
         # consumer that needs exact addressing must check this.
         self.block_stride_elems: int = 0
+        self.dtype: torch.dtype | None = None
+
+
+def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
+    """Best-effort ``shape_desc.dtype = dtype``.
+
+    The pure-Python ``PageBufferShapeDesc`` exposes a ``dtype`` slot so
+    the CPU fallback kernel can disambiguate float16 vs bfloat16 (both
+    have ``element_size == 2``). The pybind C++ struct in
+    ``csrc/pybind.cpp`` has no such field; assignment raises
+    ``AttributeError`` and is silently swallowed here so call sites
+    don't need to branch on the active backend.
+
+    Args:
+        shape_desc: A ``PageBufferShapeDesc`` instance (either the
+            pure-Python fallback or the C++ pybind struct).
+        dtype: The torch dtype to assign.
+    """
+    try:
+        shape_desc.dtype = dtype
+    except AttributeError:
+        pass
 
 
 # Cuda path goes through func cudaHostAlloc, which is
