@@ -41,6 +41,7 @@ from lmcache.integration.vllm.kv_cache_groups import (
 )
 from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 try:
     # First Party
@@ -314,64 +315,6 @@ class LMCacheMPRequestMetadata:
     cache_salt: str = ""
 
     @staticmethod
-    def _slice_block_ids(
-        tracker: LMCacheMPRequestTracker,
-        group_block_sizes: list[int],
-        vllm_block_size: int,
-        start: int,
-        end: int,
-    ) -> list[list[int]]:
-        """Slice every engine group's block IDs for the block range.
-
-        Block accounting (``start``/``end``, hit counts, chunk sizes) is
-        expressed in the canonical ``vllm_block_size`` unit -- the GCD of all
-        groups' block sizes, which equals ``cache_config.block_size`` and is
-        the granularity at which vLLM hashes blocks for the connector. The
-        block IDs stored per group, however, are in that group's *own* block
-        size (``group_block_sizes[g]``), which can be a larger multiple of
-        ``vllm_block_size`` for hybrid models: ``google/gemma-4-E4B-it`` gives
-        its sliding-window groups block_size=32 and its full-attention groups
-        block_size=16, while the canonical unit is 16. So a canonical block
-        index maps to a per-group index by dividing by
-        ``k_g = group_block_sizes[g] // vllm_block_size``; the full group has
-        twice as many block IDs per chunk as the sliding group.
-
-        Args:
-            tracker: Request tracker holding the per-engine-group block IDs.
-            group_block_sizes: Per-engine-group vLLM block size, in engine-group
-                order; the result has one inner list per group.
-            vllm_block_size: The canonical (GCD) block size in which ``start``
-                and ``end`` are expressed.
-            start: Start **canonical block** index (inclusive), not a token index.
-            end: End **canonical block** index (exclusive), not a token index.
-
-        Returns:
-            One ``list[int]`` of block IDs per engine group. Group ``g`` is
-            sliced to ``[start // k_g, end // k_g)`` so the slice spans the
-            same token range expressed in that group's own block size.
-
-        Raises:
-            ValueError: If ``start``/``end`` do not align to a group's per-group
-                block boundary. (That each group's block size is a positive
-                multiple of ``vllm_block_size`` is validated once in
-                ``LMCacheMPConnector.__init__``.)
-        """
-        # ``block_size % vllm_block_size == 0`` is validated once at connector
-        # construction (see ``LMCacheMPConnector.__init__``), so here we only
-        # guard the per-call range alignment.
-        sliced: list[list[int]] = []
-        for engine_group_idx, block_size in enumerate(group_block_sizes):
-            k = block_size // vllm_block_size
-            if start % k != 0 or end % k != 0:
-                raise ValueError(
-                    f"canonical block range [{start}, {end}) does not align to "
-                    f"group {engine_group_idx} block factor {k}"
-                )
-            group_block_ids = tracker.allocated_block_ids.get(engine_group_idx, [])
-            sliced.append(group_block_ids[start // k : end // k])
-        return sliced
-
-    @staticmethod
     def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
@@ -446,8 +389,12 @@ class LMCacheMPRequestMetadata:
         if num_chunks >= 1:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
-            block_ids = LMCacheMPRequestMetadata._slice_block_ids(
-                tracker, group_block_sizes, vllm_block_size, start, end
+            block_ids = slice_block_ids_per_group(
+                tracker.allocated_block_ids,
+                group_block_sizes,
+                vllm_block_size,
+                start,
+                end,
             )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
@@ -512,8 +459,12 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit blocks. "
         )
         if end > start:
-            block_ids = LMCacheMPRequestMetadata._slice_block_ids(
-                tracker, group_block_sizes, vllm_block_size, start, end
+            block_ids = slice_block_ids_per_group(
+                tracker.allocated_block_ids,
+                group_block_sizes,
+                vllm_block_size,
+                start,
+                end,
             )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size

@@ -16,7 +16,7 @@ corresponding ``lmcache.integration.<engine>`` package, not here.
 """
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 # Third Party
 import msgspec
@@ -116,6 +116,59 @@ def expand_block_ids_to_views(
         list(engine_side_block_ids[engine_group_id])
         for engine_group_id in _engine_group_id_per_view(groups)
     ]
+
+
+def slice_block_ids_per_group(
+    allocated_block_ids: Mapping[int, Sequence[int]],
+    group_block_sizes: Sequence[int],
+    canonical_block_size: int,
+    start: int,
+    end: int,
+) -> list[list[int]]:
+    """Slice each engine group's block IDs for a canonical block range.
+
+    Block accounting (``start``/``end``, hit counts, chunk sizes) is expressed
+    in the *canonical* block size -- the GCD of all groups' block sizes (the
+    granularity at which the engine hashes blocks). Each group's block IDs,
+    however, are counted in that group's own block size, which can be a larger
+    multiple of the canonical size for hybrid models (e.g.
+    ``google/gemma-4-E4B-it``: sliding-window groups block_size=32,
+    full-attention groups block_size=16, canonical=16). A canonical block index
+    maps to a per-group index by dividing by
+    ``k_g = group_block_sizes[g] // canonical_block_size``; the full group has
+    twice as many block IDs per chunk as the sliding group.
+
+    Args:
+        allocated_block_ids: Block IDs keyed by engine group id; a missing group
+            is treated as an empty list.
+        group_block_sizes: Per-engine-group block size, in engine-group order;
+            the result has one inner list per group. Each must be a positive
+            multiple of ``canonical_block_size`` (callers validate this once).
+        canonical_block_size: The GCD block size in which ``start``/``end`` are
+            expressed.
+        start: Start **canonical block** index (inclusive), not a token index.
+        end: End **canonical block** index (exclusive), not a token index.
+
+    Returns:
+        One ``list[int]`` of block IDs per engine group. Group ``g`` is sliced
+        to ``[start // k_g, end // k_g)`` so it spans the same token range
+        expressed in that group's own block size.
+
+    Raises:
+        ValueError: If ``start``/``end`` do not align to a group's per-group
+            block boundary.
+    """
+    sliced: list[list[int]] = []
+    for engine_group_idx, block_size in enumerate(group_block_sizes):
+        k = block_size // canonical_block_size
+        if start % k != 0 or end % k != 0:
+            raise ValueError(
+                f"canonical block range [{start}, {end}) does not align to "
+                f"group {engine_group_idx} block factor {k}"
+            )
+        group_block_ids = allocated_block_ids.get(engine_group_idx, [])
+        sliced.append(list(group_block_ids[start // k : end // k]))
+    return sliced
 
 
 def get_engine_group_indices(

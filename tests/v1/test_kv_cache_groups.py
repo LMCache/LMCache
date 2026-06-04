@@ -9,6 +9,7 @@ from lmcache.v1.multiprocess.group_view import (
     get_engine_group_indices,
     num_engine_groups,
     num_group_views,
+    slice_block_ids_per_group,
 )
 
 
@@ -85,3 +86,77 @@ def test_group_views_reject_out_of_range_layer():
         assert "outside registered layer range" in str(exc)
     else:
         raise AssertionError("Expected out-of-range layer index to fail")
+
+
+def test_slice_block_ids_uniform_block_sizes():
+    """Groups sharing the canonical block size slice to equal counts."""
+    allocated = {0: list(range(16)), 1: list(range(100, 116))}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_block_sizes=[16, 16],
+        canonical_block_size=16,
+        start=0,
+        end=16,
+    )
+    assert sliced == [list(range(16)), list(range(100, 116))]
+
+
+def test_slice_block_ids_heterogeneous_block_sizes():
+    """A block_size-32 group gets half the IDs of a block_size-16 group.
+
+    The canonical range [0, 16) spans 256 tokens: the block_size-16 group needs
+    16 block IDs, the block_size-32 group 8, for the same token span.
+    """
+    allocated = {0: list(range(16)), 1: list(range(8))}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_block_sizes=[16, 32],
+        canonical_block_size=16,
+        start=0,
+        end=16,
+    )
+    assert sliced == [list(range(16)), list(range(8))]
+
+
+def test_slice_block_ids_nonzero_start_offset():
+    """Start/end offsets are divided per group by the block factor."""
+    allocated = {0: list(range(32)), 1: list(range(16))}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_block_sizes=[16, 32],
+        canonical_block_size=16,
+        start=16,
+        end=32,
+    )
+    assert sliced == [list(range(16, 32)), list(range(8, 16))]
+
+
+def test_slice_block_ids_missing_group_yields_empty():
+    """A group with no allocated block IDs slices to an empty list."""
+    allocated = {0: list(range(16))}  # group 1 absent
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_block_sizes=[16, 16],
+        canonical_block_size=16,
+        start=0,
+        end=16,
+    )
+    assert sliced == [list(range(16)), []]
+
+
+def test_slice_block_ids_misaligned_range_raises():
+    """A range that is not a whole number of a group's blocks is rejected."""
+    allocated = {0: list(range(8)), 1: list(range(8))}
+    # group 1 block_size 48 -> factor 3; end=8 is not a multiple of 3.
+    try:
+        slice_block_ids_per_group(
+            allocated,
+            group_block_sizes=[16, 48],
+            canonical_block_size=16,
+            start=0,
+            end=8,
+        )
+    except ValueError as exc:
+        assert "does not align" in str(exc)
+    else:
+        raise AssertionError("Expected misaligned range to fail")

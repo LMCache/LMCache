@@ -66,6 +66,11 @@ steps:
           # 31B weights are large; allow longer for download + load before the
           # readiness probe gives up (other models keep the 300s default).
           MAX_WAIT_SECONDS: "400"
+          # 31B has a large per-token KV footprint, so the default 80GB CPU pool
+          # evicts mid-run (gsm8k stores then re-reads the whole set). Enlarge it
+          # so the working set fits and run 2 actually hits LMCache. Bounded by
+          # node RAM (the 2-GPU pod sets no memory limit).
+          CPU_BUFFER_SIZE: "150"
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
