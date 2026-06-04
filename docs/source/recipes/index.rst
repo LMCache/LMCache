@@ -42,36 +42,69 @@ Supported architectures
      - SGLang
      - TRT-LLM
      - Recipe
+
    * - ``MiniMaxM2ForCausalLM``
      - ``MiniMaxAI/MiniMax-M2``
      - ✓
      - —
      - —
      - :doc:`minimax_m2`
+
    * - ``Gemma4ForConditionalGeneration``
      - ``google/gemma-4-31B-it``
      - ✓
      - —
      - —
      - :doc:`gemma4`
+
+   * - ``Gemma3ForConditionalGeneration``
+     - ``google/gemma-3-4b-it``
+     - ✓
+     - —
+     - —
+     - :doc:`gemma3`
+
    * - ``MistralForCausalLM``
      - ``mistralai/Devstral-2-123B-Instruct-2512``
      - ✓
      - —
      - —
      - :doc:`devstral`
+
    * - ``GptOssForCausalLM``
      - ``openai/gpt-oss-120b``
      - ✓
      - —
      - —
      - :doc:`gpt_oss`
+
    * - ``Qwen3MoeForCausalLM``
      - ``Qwen/Qwen3-235B-A22B``
      - ✓
      - —
      - —
      - :doc:`qwen3`
+
+   * - ``LlamaForCausalLM``
+     - ``meta-llama/Meta-Llama-3.1-70B-Instruct``
+     - ✓
+     - —
+     - —
+     - :doc:`llama`
+
+   * - ``Phi3ForCausalLM``
+     - ``microsoft/Phi-4-mini-instruct``
+     - ✓
+     - —
+     - —
+     - :doc:`phi3`
+
+   * - ``MixtralForCausalLM``
+     - ``mistralai/Mixtral-8x7B-Instruct-v0.1``
+     - ✓
+     - —
+     - —
+     - :doc:`mixtral`
 
 Legend: ``✓`` validated, ``—`` not validated.
 
@@ -93,6 +126,10 @@ To add a new architecture:
 
    minimax_m2
    gemma4
+   gemma3
    devstral
    gpt_oss
    qwen3
+   llama
+   phi3
+   mixtral

@@ -140,7 +140,11 @@ Install LMCache
                             uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.0
 
                             # Build LMCache. BUILD_WITH_HIP=1 makes setup.py pick cupy-rocm-7-0 automatically.
-                            PYTORCH_ROCM_ARCH="gfx942" \
+                            # PYTORCH_ROCM_ARCH selects the target GPU(s):
+                            #   gfx942  -> MI300X / MI325X
+                            #   gfx950  -> MI350X / MI355X
+                            # Comma-separate to build a fat binary for multiple archs.
+                            PYTORCH_ROCM_ARCH="gfx942,gfx950" \
                             TORCH_DONT_CHECK_COMPILER_ABI=1 \
                             CXX=hipcc \
                             BUILD_WITH_HIP=1 \

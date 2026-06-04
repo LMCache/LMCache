@@ -2077,11 +2077,15 @@ def test_rust_raw_block_backend_uring_put_get_roundtrip(
                 out = backend.get_blocking(key)
                 assert out is not None, f"Failed to read key {i}"
                 actual_data = bytes(out.byte_array)
-                assert actual_data == expected_data[i], (
-                    f"Data mismatch for key {i}: "
-                    f"expected first bytes {expected_data[i][:16]}, "
-                    f"got {actual_data[:16]}"
-                )
+                # Use `raise AssertionError` instead of `assert ==` so pytest
+                # doesn't try to render a difflib diff between two large
+                # byte arrays on failure (effectively a hang on _fancy_replace).
+                if actual_data != expected_data[i]:
+                    raise AssertionError(
+                        f"Data mismatch for key {i}: "
+                        f"expected first bytes {expected_data[i][:16]!r}, "
+                        f"got {actual_data[:16]!r}"
+                    )
 
         finally:
             backend.close()
@@ -2136,7 +2140,16 @@ def test_rust_raw_block_backend_close_with_inflight(memory_allocator, loop_in_th
             for i, expected in enumerate(buffers):
                 actual = bytearray(payload_len)
                 reader.pread_into(i * payload_len, actual, payload_len, payload_len)
-                assert actual == expected
+                # Use `raise AssertionError` instead of `assert ==` so pytest
+                # doesn't try to render a difflib-based diff between two
+                # large byte arrays on failure, which is O(n^2) on
+                # `_fancy_replace` and effectively never returns.
+                if actual != expected:
+                    raise AssertionError(
+                        f"Data mismatch at offset {i * payload_len}: "
+                        f"expected first bytes {bytes(expected[:16])!r}, "
+                        f"got {bytes(actual[:16])!r}"
+                    )
         finally:
             reader.close()
 

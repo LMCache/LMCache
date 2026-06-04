@@ -79,3 +79,23 @@ def infer_attn_backend_from_vllm(
             f"Attention backend {attn_name} is not supported in LMCache. "
             f"enable_sparse={enable_sparse}"
         )
+
+
+def infer_attn_func_from_vllm(device_type):
+    if device_type == "cuda":
+        # Third Party
+        from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
+    elif device_type == "xpu":
+        # CUDA flash-attention extensions are unavailable on Intel XPU; use the
+        # vLLM-shipped XPU flash-attention ops instead.
+        # Third Party
+        from vllm._xpu_ops import xpu_ops
+
+        flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func
+        get_scheduler_metadata = xpu_ops.get_scheduler_metadata
+    else:
+        raise AssertionError(
+            f"Unsupported device type '{device_type}' for flash attention backends"
+        )
+
+    return flash_attn_varlen_func, get_scheduler_metadata

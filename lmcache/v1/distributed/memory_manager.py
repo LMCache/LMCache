@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+# Standard
+from multiprocessing import shared_memory
+
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
@@ -17,6 +20,26 @@ logger = init_logger(__name__)
 
 
 # HELPER FUNCTIONS
+def _unlink_stale_shm(shm_name: str) -> None:
+    """Remove a stale LMCache shm segment if it exists."""
+    normalized = shm_name.lstrip("/")
+    if "/" in normalized or "\\" in normalized:
+        logger.warning("Refusing to unlink invalid shm name %s", shm_name)
+        return
+    if not normalized.startswith("lmcache_l1_pool_"):
+        return
+    try:
+        shm = shared_memory.SharedMemory(name=normalized, create=False)
+        shm.close()
+        shm.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning(
+            "Failed to remove stale shm segment %s", normalized, exc_info=True
+        )
+
+
 def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInterface:
     """
     Create a memory allocator based on the provided configuration.
@@ -45,6 +68,19 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.size_in_bytes,
             config.align_bytes,
         )
+        shm_name = config.shm_name
+        if shm_name:
+            # Keep the lmcache_l1_pool_ prefix in normalized SHM names so
+            # stale-segment cleanup can recognize and unlink user-provided names.
+            bare = shm_name.lstrip("/")
+            if not bare.startswith("lmcache_l1_pool_"):
+                shm_name = f"lmcache_l1_pool_{bare}"
+            _unlink_stale_shm(shm_name)
+            return MixedMemoryAllocator(
+                config.size_in_bytes,
+                align_bytes=config.align_bytes,
+                shm_name=shm_name,
+            )
         return MixedMemoryAllocator(
             config.size_in_bytes,
             align_bytes=config.align_bytes,
