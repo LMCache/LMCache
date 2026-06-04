@@ -821,14 +821,23 @@ def _infer_kv_dtype(
     """Infer the KV element dtype from whichever inputs carry it.
 
     Inference order (first match wins):
-    1. ``paged_buffer_ptrs_tensor`` — if it is a non-pointer tensor or a list
+    1. ``shape_desc.dtype`` — authoritative when set (requires the
+       ``set_shape_desc_dtype`` helper from PR #3514; correctly distinguishes
+       float16 vs bfloat16 which share ``element_size == 2``).
+    2. ``paged_buffer_ptrs_tensor`` — if it is a non-pointer tensor or a list
        of tensors (including nested SGLang MHA lists), the dtype of the first
        tensor is used.
-    2. ``lmcache_objects_ptrs`` — if it is a list of tensors, the dtype of the
+    3. ``lmcache_objects_ptrs`` — if it is a list of tensors, the dtype of the
        first chunk tensor is used.
-    3. ``shape_desc.element_size`` — looked up in :data:`_ELEMENT_SIZE_TO_DTYPE`.
-    4. ``torch.float16`` — silent default when no other source is available.
+    4. ``shape_desc.element_size`` — looked up in :data:`_ELEMENT_SIZE_TO_DTYPE`
+       (ambiguous for 2-byte types; kept only as last-resort fallback).
+    5. ``torch.bfloat16`` — silent default when no other source is available.
     """
+    # Prefer shape_desc.dtype — it is exact and avoids the element_size ambiguity.
+    if shape_desc is not None:
+        sd_dtype = getattr(shape_desc, "dtype", None)
+        if sd_dtype is not None:
+            return sd_dtype
     if isinstance(paged_buffer_ptrs_tensor, list) and paged_buffer_ptrs_tensor:
         first = paged_buffer_ptrs_tensor[0]
         if isinstance(first, list) and first and isinstance(first[0], torch.Tensor):
