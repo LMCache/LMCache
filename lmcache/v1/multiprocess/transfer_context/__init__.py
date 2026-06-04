@@ -20,6 +20,7 @@ from .shm import NonGpuContextShm, ShmSlotDescriptor
 from .worker_transfer import (
     DataTransferContext,
     HandleTransferContext,
+    MPTransferMode,
     TransferContext,
     create_transfer_context,
 )
@@ -27,6 +28,7 @@ from .worker_transfer import (
 __all__ = [
     "DataTransferContext",
     "HandleTransferContext",
+    "MPTransferMode",
     "NonGpuContext",
     "NonGpuContextMetadata",
     "NonGpuContextPickle",
