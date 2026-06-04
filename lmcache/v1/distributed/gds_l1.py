@@ -48,6 +48,8 @@ lets a fresh backend instance recover the
 """
 
 # Standard
+from collections import OrderedDict
+from typing import Optional, Union
 import asyncio
 import bisect
 import ctypes
@@ -55,13 +57,12 @@ import json
 import os
 import threading
 import time
-from collections import OrderedDict
-from typing import Optional, Union
 
 # Third Party
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed import _cufile_async as ca
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
@@ -112,9 +113,7 @@ def _round_up(n: int, align: int) -> int:
 
 def _object_key_to_string(key: ObjectKey) -> str:
     """Stable string form of an ObjectKey for index serialisation."""
-    return (
-        f"{key.model_name}@{key.kv_rank}@{key.chunk_hash.hex()}@{key.cache_salt}"
-    )
+    return f"{key.model_name}@{key.kv_rank}@{key.chunk_hash.hex()}@{key.cache_salt}"
 
 
 def _string_to_object_key(s: str) -> Optional[ObjectKey]:
@@ -206,7 +205,8 @@ class SlabAddressManager:
             )
         if align <= 0 or (align & (align - 1)) != 0:
             raise ValueError(
-                f"SlabAddressManager: align must be a positive power of two, got {align}"
+                "SlabAddressManager: align must be a positive power of two, "
+                f"got {align}"
             )
         self._total = total_size
         self._align = align
@@ -549,7 +549,6 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         """``True`` once at least one ``register_gpu_buffer`` succeeded."""
         return len(self._buffers) > 0
 
-
     # --- Buffer registration ----------------------------------------
 
     def register_gpu_buffer(self, buffer: torch.Tensor) -> None:
@@ -632,7 +631,7 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         if not self._buffers:
             return
         if self._backend.use_gds:
-            torch.cuda.synchronize(device=self._buffers[0].device)
+            torch_dev.synchronize(device=self._buffers[0].device)
             for buf in self._buffers:
                 try:
                     ca.deregister_buffer(buf)
@@ -739,7 +738,7 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         allocator_type: Optional[str] = None,
     ) -> None:
         if isinstance(memory_obj, GdsMemoryObj):
-            self._backend.free_entry(memory_obj)
+            self._backend.free_entry_from_index(memory_obj)
 
     def batched_free(
         self,
@@ -841,7 +840,7 @@ class GdsL1Backend:
          returns a :class:`GdsMemoryObj`.
        - ``slab_read`` / ``slab_write`` submit one ``cuFileReadAsync``
          / ``WriteAsync`` per call, no sync.
-       - ``record_entry`` / ``free_entry`` keep the index in sync.
+       - ``record_entry`` / ``free_entry_from_index`` keep the index in sync.
     3. ``close``: stream-syncs, writes the index file, deregisters
        the cuFile handle, closes the slab fd.
 
@@ -863,9 +862,7 @@ class GdsL1Backend:
         if not config.gds_path:
             raise ValueError("GdsL1Backend requires gds_path to be set")
         if not dst_device.startswith("cuda"):
-            raise ValueError(
-                f"GdsL1Backend requires cuda dst_device, got {dst_device}"
-            )
+            raise ValueError(f"GdsL1Backend requires cuda dst_device, got {dst_device}")
         self.config = config
         self._loop = loop
         self.dst_device = dst_device
@@ -888,9 +885,7 @@ class GdsL1Backend:
 
         self.use_gds: bool = config.use_gds
         if self.fstype in ("tmpfs", "overlayfs") and config.use_gds:
-            logger.info(
-                "GdsL1Backend: auto-disabling cuFile on fstype=%r", self.fstype
-            )
+            logger.info("GdsL1Backend: auto-disabling cuFile on fstype=%r", self.fstype)
             self.use_gds = False
 
         self._slab_path = os.path.join(self.gds_path, _SLAB_FILENAME)
@@ -1062,12 +1057,16 @@ class GdsL1Backend:
                 self._address_manager.free(existing.slab_offset, existing.size)
             self._index[memory_obj.key] = entry
 
-    def free_entry(self, memory_obj: GdsMemoryObj) -> None:
+    def free_entry_from_index(self, memory_obj: GdsMemoryObj) -> None:
         """Free the slab region and drop the index entry."""
         with self._index_lock:
             entry = self._index.pop(memory_obj.key, None)
         if entry is not None:
             self._address_manager.free(entry.slab_offset, entry.size)
+
+    def free_entry(self, memory_obj: GdsMemoryObj) -> None:
+        """Return a slab region without an idex."""
+        self._address_manager.free(memory_obj.slab_offset, memory_obj.size)
 
     def slab_read(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
@@ -1144,7 +1143,7 @@ class GdsL1Backend:
     def close(self) -> None:
         """Sync stream, persist index, deregister cuFile state, close slab."""
         if self.scratch_allocator._buffers:  # noqa: SLF001
-            torch.cuda.synchronize(
+            torch_dev.synchronize(
                 device=self.scratch_allocator._buffers[0].device  # noqa: SLF001
             )
         self._persist_index()
@@ -1193,7 +1192,7 @@ class GdsL1Backend:
         with self._stream_lock:
             if self._registered_stream is not None:
                 return
-            raw_stream = torch.cuda.current_stream().cuda_stream
+            raw_stream = torch_dev.current_stream().cuda_stream
             ca.register_stream(raw_stream)
             self._registered_stream = raw_stream
 
@@ -1233,6 +1232,7 @@ class GdsL1Backend:
             flags |= os.O_DIRECT
         fd = os.open(self._slab_path, flags)
         try:
+            # Third Party
             from cufile.bindings import cuFileHandleRegister
 
             handle = cuFileHandleRegister(fd)
@@ -1262,9 +1262,7 @@ class GdsL1Backend:
         finally:
             os.close(creator_fd)
         self._posix_fd = os.open(self._slab_path, os.O_RDWR)
-        logger.info(
-            "GdsL1Backend: slab opened at %s (POSIX fallback)", self._slab_path
-        )
+        logger.info("GdsL1Backend: slab opened at %s (POSIX fallback)", self._slab_path)
 
     def _posix_slab_read(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
@@ -1305,9 +1303,7 @@ class GdsL1Backend:
             raise RuntimeError(f"POSIX slab_write cudaMemcpy failed: {res}")
         written = os.pwrite(self._posix_fd, host_buf.raw[:size], slab_offset)
         if written != size:
-            raise RuntimeError(
-                f"POSIX slab_write: short write at offset {slab_offset}"
-            )
+            raise RuntimeError(f"POSIX slab_write: short write at offset {slab_offset}")
 
     def _load_index(self) -> None:
         """Read the on-disk index and replay it into the address manager.
@@ -1371,9 +1367,7 @@ class GdsL1Backend:
             self._index[key] = entry
             loaded += 1
         elapsed = time.perf_counter() - start
-        logger.info(
-            "GdsL1Backend: loaded %d index entries in %.2fs", loaded, elapsed
-        )
+        logger.info("GdsL1Backend: loaded %d index entries in %.2fs", loaded, elapsed)
 
     def _persist_index(self) -> None:
         """Write the current in-memory index to ``self._index_path``."""

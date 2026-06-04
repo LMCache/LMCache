@@ -5,7 +5,7 @@ Focus is on the parts that do not require a real cuFile driver:
 
 - :class:`SlabAddressManager` — allocator semantics, coalescing,
   OOM, ``mark_used`` overlap rejection.
-- :class:`GdsL1Backend` — lookup / create_memory_obj / free_entry,
+- :class:`GdsL1Backend` — lookup / create_memory_obj / free_entry_from_index,
   ``get_memory_usage``, index persistence + reload.
 - :class:`GdsMemoryObj` — disk-anchored surface (``tensor`` is None,
   ``byte_array`` / ``data_ptr`` raise).
@@ -31,10 +31,9 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.gds_l1 import (
-    GdsL1Backend,
-    GdsMemoryObj,
-    SlabAddressManager,
     _CUFILE_ALIGNMENT,
+    GdsL1Backend,
+    SlabAddressManager,
 )
 from lmcache.v1.memory_management import MemoryFormat
 
@@ -200,7 +199,8 @@ class TestGdsMemoryObjSurface:
 
 
 class TestGdsL1BackendIndex:
-    """``lookup`` / ``create_memory_obj`` / ``record_entry`` / ``free_entry``."""
+    """``lookup`` / ``create_memory_obj`` / ``record_entry`` /
+    ``free_entry_from_index``."""
 
     @pytest.fixture
     def backend(self, gds_root, loop):
@@ -231,7 +231,7 @@ class TestGdsL1BackendIndex:
             key=key, layout_desc=_layout(torch.Size([4096]), torch.uint8)
         )
         backend.record_entry(mo)
-        backend.free_entry(mo)
+        backend.free_entry_from_index(mo)
         assert backend.lookup([key]) == [False]
 
     def test_create_memory_obj_from_index(self, backend):
@@ -254,11 +254,13 @@ class TestGdsL1BackendIndex:
         )
         try:
             mo1 = b.create_memory_obj(
-                key=_object_key(seed=1), layout_desc=_layout(torch.Size([4096]), torch.uint8)
+                key=_object_key(seed=1),
+                layout_desc=_layout(torch.Size([4096]), torch.uint8),
             )
             assert mo1 is not None
             mo2 = b.create_memory_obj(
-                key=_object_key(seed=2), layout_desc=_layout(torch.Size([4096]), torch.uint8)
+                key=_object_key(seed=2),
+                layout_desc=_layout(torch.Size([4096]), torch.uint8),
             )
             assert mo2 is None
         finally:
@@ -361,9 +363,7 @@ class TestPosixRoundTrip:
                 torch.cuda.synchronize()
                 b.scratch_allocator.cufile_read_into(mo, buf)
                 torch.cuda.synchronize()
-                expected = torch.full(
-                    (chunk_bytes,), 0xAB, dtype=torch.uint8
-                )
+                expected = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8)
                 assert torch.equal(buf.cpu(), expected)
             finally:
                 b.scratch_allocator.deregister_gpu_buffer()

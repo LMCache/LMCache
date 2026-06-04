@@ -3,7 +3,7 @@
 import torch
 
 # First Party
-from lmcache.v1.distributed.gds_l1 import GdsScratchAllocator
+from lmcache.v1.distributed.gds_l1 import GdsMemoryObj, GdsScratchAllocator
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 import lmcache.c_ops as lmc_ops
@@ -31,6 +31,11 @@ def lmcache_memcpy_async_h2d(
         # NVMe -> registered VRAM via cuFile DMA. memory_obj has no live
         # in-memory body; the allocator computes dev_offset from
         # gpu_buffer.data_ptr() relative to the registered base.
+        if not isinstance(memory_obj, GdsMemoryObj):
+            raise TypeError(
+                "GdsScratchAllocator parent requires a GdsMemoryObj, got "
+                f"{type(memory_obj).__name__}"
+            )
         parent.cufile_read_into(memory_obj, gpu_buffer)
         return
 
@@ -81,6 +86,11 @@ def lmcache_memcpy_async_d2h(
         # Registered VRAM -> NVMe via cuFile DMA. Sizes are taken from
         # memory_obj.meta, so gpu_buffer can be a slice of the
         # registered staging buffer.
+        if not isinstance(memory_obj, GdsMemoryObj):
+            raise TypeError(
+                "GdsScratchAllocator parent requires a GdsMemoryObj, got "
+                f"{type(memory_obj).__name__}"
+            )
         parent.cufile_write_from(memory_obj, gpu_buffer)
         return
 

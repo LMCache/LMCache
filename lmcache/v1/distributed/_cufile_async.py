@@ -178,7 +178,7 @@ def register_stream(raw_stream: int) -> None:
     """Register a CUDA stream with cuFile.
 
     ``raw_stream`` is the integer ``CUstream`` handle — get it via
-    ``torch.cuda.current_stream().cuda_stream``.
+    ``torch_dev.current_stream().cuda_stream``.
     """
     _check(
         libcufile.cuFileStreamRegister(ctypes.c_void_p(raw_stream), 0),
@@ -318,7 +318,7 @@ class AsyncHandle:
 
     def close(self) -> None:
         """Deregister the cuFile handle and close the fd."""
-        if self._fd is None:
+        if self._fd < 0:
             return
         try:
             cuFileHandleDeregister(self._handle)
@@ -326,7 +326,7 @@ class AsyncHandle:
             try:
                 os.close(self._fd)
             finally:
-                self._fd = None
+                self._fd = -1
 
     def __enter__(self) -> "AsyncHandle":
         return self

@@ -24,17 +24,18 @@ inside that slab.
 """
 
 # Standard
+from dataclasses import dataclass
 import asyncio
 import os
 import shutil
 import threading
 import time
-from dataclasses import dataclass
 
 # Third Party
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
@@ -156,7 +157,7 @@ def verify_round_trip(
     allocator.register_gpu_buffer(buf)
     try:
         buf.fill_(pattern_val)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
         key = _object_key(seed=0xCAFE)
         mo = backend.create_memory_obj(
@@ -172,13 +173,11 @@ def verify_round_trip(
         allocator.cufile_write_from(mo, buf)
 
         buf.zero_()
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         allocator.cufile_read_into(mo, buf)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
 
-        expected = torch.full(
-            (chunk_bytes,), pattern_val, dtype=torch.uint8
-        )
+        expected = torch.full((chunk_bytes,), pattern_val, dtype=torch.uint8)
         if not torch.equal(buf.cpu(), expected):
             raise RuntimeError(
                 "GDS round-trip mismatch: bytes read back do not match the "
@@ -222,9 +221,7 @@ def benchmark(
     try:
         # Deterministic payload — content doesn't matter, just needs
         # to be on the GPU so cuFile sees a registered source.
-        pattern = torch.full(
-            (chunk_bytes,), 0xAB, dtype=torch.uint8, device="cuda:0"
-        )
+        pattern = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8, device="cuda:0")
 
         slot_views = [
             tmp_buf[i * chunk_bytes : (i + 1) * chunk_bytes]
@@ -244,23 +241,23 @@ def benchmark(
                 )
             mem_objs.append(mo)
 
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         t0 = time.perf_counter()
         for i, mo in enumerate(mem_objs):
             slot = slot_views[i % max_batch_size]
             slot.copy_(pattern, non_blocking=False)
             allocator.cufile_write_from(mo, slot)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         store_secs = time.perf_counter() - t0
 
         for s in slot_views:
             s.zero_()
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         t0 = time.perf_counter()
         for i, mo in enumerate(mem_objs):
             slot = slot_views[i % max_batch_size]
             allocator.cufile_read_into(mo, slot)
-        torch.cuda.synchronize()
+        torch_dev.synchronize()
         retrieve_secs = time.perf_counter() - t0
     finally:
         allocator.deregister_gpu_buffer()
@@ -371,7 +368,7 @@ def run_gds_check(
             for k in list(backend._index.keys()):  # noqa: SLF001
                 mo = backend.create_memory_obj_from_index(k)
                 if mo is not None:
-                    backend.free_entry(mo)
+                    backend.free_entry_from_index(mo)
 
         if not skip_bench:
             _run_bench_phase(
@@ -386,7 +383,7 @@ def run_gds_check(
             for k in list(backend._index.keys()):  # noqa: SLF001
                 mo = backend.create_memory_obj_from_index(k)
                 if mo is not None:
-                    backend.free_entry(mo)
+                    backend.free_entry_from_index(mo)
             _run_bench_phase(
                 backend,
                 label="large chunks (bandwidth-dominated)",

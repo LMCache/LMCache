@@ -5,7 +5,7 @@ Managing objects and memory for L1 cache
 
 # Standard
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 import threading
 
 # First Party
@@ -14,7 +14,7 @@ from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.gds_l1 import GdsL1Backend
+from lmcache.v1.distributed.gds_l1 import GdsL1Backend, GdsMemoryObj
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
@@ -507,12 +507,18 @@ class L1Manager:
         # is unused on this path; the disk file is created later when
         # the caller does ``lmcache_memcpy_async_d2h`` which dispatches
         # to ``cufile_write_from``.
+        gds_objs: list[GdsMemoryObj | None] = []
         if self._gds_backend is not None:
-            allocated_objs = [
+            gds_objs = [
                 self._gds_backend.create_memory_obj(key, layout_desc)
                 for key, _ in need_to_allocate
             ]
-            err = L1Error.SUCCESS
+            allocated_objs = cast("list[MemoryObj]", gds_objs)
+            err = (
+                L1Error.SUCCESS
+                if all(obj is not None for obj in gds_objs)
+                else L1Error.OUT_OF_MEMORY
+            )
         else:
             err, allocated_objs = self._memory_manager.allocate(
                 layout_desc, len(need_to_allocate)
@@ -523,7 +529,11 @@ class L1Manager:
                 ret[key] = (L1Error.OUT_OF_MEMORY, None)
 
             # Free the memory if partial allocation succeeded
-            if allocated_objs:
+            if self._gds_backend is not None:
+                for obj in gds_objs:
+                    if obj is not None:
+                        self._gds_backend.free_entry(obj)
+            elif allocated_objs:
                 self._memory_manager.free(allocated_objs)
 
         else:
