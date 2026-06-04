@@ -77,6 +77,16 @@ def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     return block_ids[0]
 
 
+def _extract_lora_name(request: "Request") -> str:
+    lora_request = getattr(request, "lora_request", None)
+    if lora_request is None:
+        return ""
+    lora_name = getattr(lora_request, "lora_name", None)
+    if lora_name is None:
+        return ""
+    return str(lora_name)
+
+
 def extract_world_size_and_kv_rank(
     world_size: int,
     rank: int,
@@ -200,9 +210,11 @@ class LMCacheMPRequestTracker:
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
+    lora_name: str = ""
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
+        self.lora_name = _extract_lora_name(request)
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
@@ -275,6 +287,7 @@ class LMCacheMPRequestMetadata:
     request_id: str
     direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
+    lora_name: str = ""
 
     @staticmethod
     def GetStoreMetadata(
@@ -341,6 +354,7 @@ class LMCacheMPRequestMetadata:
                 request_id=tracker.request_id,
                 direction="STORE",
                 op=op,
+                lora_name=tracker.lora_name,
             )
 
             # Update the request tracker
@@ -407,6 +421,7 @@ class LMCacheMPRequestMetadata:
                 request_id=tracker.request_id,
                 direction="RETRIEVE",
                 op=op,
+                lora_name=tracker.lora_name,
             )
             return ret
 
@@ -553,12 +568,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         request_ids = []
         ops = []
+        lora_names = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
+            lora_names.append(meta.lora_name)
 
         if len(request_ids) == 0:
             return
@@ -568,7 +585,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             event = torch_dev.Event(interprocess=True)
             event.record()
 
-        self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
+        self.worker_adapter.batched_submit_retrieve_requests(
+            request_ids, ops, event, lora_names=lora_names
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -617,11 +636,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         request_ids = []
         ops = []
+        lora_names = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
+            lora_names.append(meta.lora_name)
 
         if len(request_ids) == 0:
             return
@@ -631,7 +652,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             event = torch_dev.Event(interprocess=True)
             event.record()
 
-        self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
+        self.worker_adapter.batched_submit_store_requests(
+            request_ids, ops, event, lora_names=lora_names
+        )
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -733,6 +756,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=list(request.all_token_ids),
+            lora_name=tracker.lora_name,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -831,6 +855,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
+                        lora_name=tracker.lora_name,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",
