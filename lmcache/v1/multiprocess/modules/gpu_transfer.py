@@ -42,6 +42,7 @@ from lmcache.v1.multiprocess.native_completion import (
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -93,11 +94,15 @@ def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None
 
 @dataclass
 class GPUContextEntry:
-    """Registered GPU context metadata for a single worker instance.
+    """Registered cache context metadata for a single worker instance.
+
+    The ``gpu_context`` field name is kept for backwards compatibility.
+    The actual concrete type is whatever :func:`create_cache_context`
+    returned -- currently always a :class:`GPUCacheContext`.
 
     Args:
-        gpu_context: The GPU cache context managing shape and pointers
-            to vLLM GPU KV cache tensors.
+        gpu_context: Platform cache context managing shape and pointers
+            to the registered KV cache tensors.
         model_name: The name of the model associated with this KV cache.
         world_size: The world size associated with this KV cache.
     """
@@ -260,7 +265,7 @@ class GPUTransferModule:
             )
             return
 
-        gpu_context = GPUCacheContext(
+        gpu_context = create_cache_context(
             kv_caches,
             self._ctx.chunk_size,
             layout_hints=layout_hints or None,
