@@ -6,15 +6,6 @@ Talks to a **real** Valkey (or Redis) deployment via the ``glide_sync``
 client (from the ``valkey-glide-sync`` package). Skipped unless that
 package is importable and a server is reachable at the configured target.
 
-Scope: this suite intentionally covers **only what a real server can
-verify and the mock cannot** — real glide wire serialization (byte-exact
-round-trips), real cluster slot routing across nodes, and real per-node
-``INFO memory``. Pure adapter logic (bitmap assembly, lock refcounting,
-``cache_salt`` wire keys, byte accounting, partial-failure handling,
-size-mismatch-as-miss, config validation) is exhaustively covered by the
-mock-based unit tests in ``test_valkey_l2_adapter.py`` and is **not**
-duplicated here.
-
 Target selection via pytest CLI options (see ``conftest.py``):
 
   * ``--valkey-cluster`` + ``--valkey-nodes=h:p,h:p`` — **cluster** mode.
@@ -157,17 +148,8 @@ def valkey_reachable(valkey_target) -> bool:
     return _probe_reachable(*valkey_target)
 
 
-# ---------------------------------------------------------------------------
-# Tests — real-server-only behaviors
-# ---------------------------------------------------------------------------
-
-
 class TestValkeyL2AdapterIntegration:
-    """E2E tests that exercise the real glide↔Valkey wire path.
-
-    Logic-level behavior is covered by the mock unit tests; here we only
-    assert the things that require a live server.
-    """
+    """E2E tests that exercise the real glide↔Valkey wire path."""
 
     @pytest.fixture
     def adapter(self, valkey_target, valkey_reachable):

@@ -16,19 +16,6 @@ Concurrency model:
     per-key callbacks atomically decrement the batch's ``remaining``
     counter and the last finisher publishes the result and signals the
     matching event fd.
-
-Capabilities:
-    1. Cluster discovery — delegated to ``GlideClusterClient``.
-    2. Authentication — ``username``/``password`` via glide credentials.
-    3. Deployment key prefix — ``key_prefix`` joined with the standard
-       ``_object_key_to_string`` wire format.
-    4. ``cache_salt`` isolation — already part of the wire key produced
-       by ``_object_key_to_string``.
-    5. Size validation on load — buffer GET return value is compared
-       against the expected buffer length; size mismatch → cache miss.
-    6. Partial-failure accounting — per-key ``Future`` outcomes are
-       aggregated so per-salt byte accounting reflects only the keys
-       that actually wrote.
 """
 
 # Future
@@ -367,7 +354,7 @@ class ValkeyL2AdapterConfig(L2AdapterConfigBase):
 
 
 @dataclass
-class _BatchState:
+class _SubmitTaskBatchState:
     """Shared per-batch state used by per-key future callbacks.
 
     A batch holds one ``Future`` per key; each completion callback
@@ -389,11 +376,6 @@ class _BatchState:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-# ---------------------------------------------------------------------------
-# Adapter
-# ---------------------------------------------------------------------------
-
-
 class ValkeyL2Adapter(L2AdapterInterface):
     """
     L2 adapter that stores KV-cache chunks in Valkey (or Redis) via the
@@ -404,21 +386,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
     """
 
     def __init__(self, config: ValkeyL2AdapterConfig) -> None:
-        """Initialize the adapter and warm up worker clients.
-
-        The shared ``ValkeyWorkerPool`` builds (and warms up) one glide
-        client per worker thread, so connection / auth / missing-dependency
-        errors surface immediately here rather than on the first
-        ``submit_*_task`` call.
-
-        Args:
-            config: A fully validated ``ValkeyL2AdapterConfig``.
-
-        Raises:
-            RuntimeError: If ``valkey-glide`` is not installed.
-            Exception: Any connection / authentication error raised by
-                glide during warmup is propagated.
-        """
+        """Initialize the adapter and warm up worker clients."""
         super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config: ValkeyL2AdapterConfig = config
 
@@ -497,16 +465,6 @@ class ValkeyL2Adapter(L2AdapterInterface):
         ``bytes_transferred`` reflects only the keys that actually
         wrote (partial failures are accounted correctly).
 
-        Args:
-            keys: Keys to store. ``cache_salt`` is already encoded into
-                the wire key by ``_object_key_to_string``.
-            objects: Memory objects whose ``byte_array`` provides the
-                value bytes. Must be parallel to ``keys``.
-
-        Returns:
-            The assigned task id; result is retrievable once the store
-            event fd fires.
-
         Raises:
             ValueError: If ``keys`` and ``objects`` differ in length.
         """
@@ -528,7 +486,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         wire_keys = [self._wire_key(k) for k in keys]
         sizes = [obj.get_size() for obj in objects]
 
-        batch = _BatchState(
+        batch = _SubmitTaskBatchState(
             task_id=task_id,
             remaining=len(keys),
             per_key_ok=[False] * len(keys),
@@ -544,7 +502,9 @@ class ValkeyL2Adapter(L2AdapterInterface):
 
         return task_id
 
-    def _on_store_done(self, batch: _BatchState, idx: int, fut: Future) -> None:
+    def _on_store_done(
+        self, batch: _SubmitTaskBatchState, idx: int, fut: Future
+    ) -> None:
         """Per-key callback for a store batch; finalizes when last done.
 
         Runs in the worker thread that completed ``fut``. A cancelled or
@@ -576,7 +536,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         if done:
             self._finalize_store(batch)
 
-    def _finalize_store(self, batch: _BatchState) -> None:
+    def _finalize_store(self, batch: _SubmitTaskBatchState) -> None:
         """Publish the final ``L2StoreResult`` for ``batch``.
 
         Accounting (``_notify_keys_stored``) is fired outside
@@ -613,10 +573,6 @@ class ValkeyL2Adapter(L2AdapterInterface):
             self._completed_stores = {}
         return completed
 
-    # ---------------------------------------------------------------
-    # Lookup and Lock Interface
-    # ---------------------------------------------------------------
-
     def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
         """Submit a non-blocking batch EXISTS to Valkey.
 
@@ -640,7 +596,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
             return task_id
 
         wire_keys = [self._wire_key(k) for k in keys]
-        batch = _BatchState(
+        batch = _SubmitTaskBatchState(
             task_id=task_id,
             remaining=len(keys),
             per_key_ok=[False] * len(keys),
@@ -651,7 +607,9 @@ class ValkeyL2Adapter(L2AdapterInterface):
             fut.add_done_callback(functools.partial(self._on_lookup_done, batch, i))
         return task_id
 
-    def _on_lookup_done(self, batch: _BatchState, idx: int, fut: Future) -> None:
+    def _on_lookup_done(
+        self, batch: _SubmitTaskBatchState, idx: int, fut: Future
+    ) -> None:
         """Per-key callback for a lookup batch."""
         exists = False
         if fut.cancelled():
@@ -686,7 +644,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         if done:
             self._finalize_lookup(batch)
 
-    def _finalize_lookup(self, batch: _BatchState) -> None:
+    def _finalize_lookup(self, batch: _SubmitTaskBatchState) -> None:
         """Publish lookup bitmap and apply lock-refcount increments."""
         bitmap = Bitmap(len(batch.keys))
         accessed: list[ObjectKey] = []
@@ -719,10 +677,6 @@ class ValkeyL2Adapter(L2AdapterInterface):
                 else:
                     self._locked_keys[key] = count - 1
 
-    # ---------------------------------------------------------------
-    # Load Interface
-    # ---------------------------------------------------------------
-
     def submit_load_task(
         self,
         keys: list[ObjectKey],
@@ -733,17 +687,6 @@ class ValkeyL2Adapter(L2AdapterInterface):
         Uses glide's buffer GET (zero-copy) when available; otherwise
         falls back to copying through a ``bytes`` intermediate. In both
         paths a size mismatch is treated as a cache miss.
-
-        Args:
-            keys: Keys to load.
-            objects: Destination buffers; ``objects[i].byte_array`` must
-                be a writeable memoryview of the expected chunk size.
-
-        Returns:
-            The assigned task id.
-
-        Raises:
-            ValueError: If ``keys`` and ``objects`` differ in length.
         """
         if len(keys) != len(objects):
             raise ValueError(
@@ -765,7 +708,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         # treats any GET whose byte count differs as a cache miss (stale
         # or truncated value).
         expected_sizes = [obj.get_size() for obj in objects]
-        batch = _BatchState(
+        batch = _SubmitTaskBatchState(
             task_id=task_id,
             remaining=len(keys),
             per_key_ok=[False] * len(keys),
@@ -777,7 +720,9 @@ class ValkeyL2Adapter(L2AdapterInterface):
             fut.add_done_callback(functools.partial(self._on_load_done, batch, i))
         return task_id
 
-    def _on_load_done(self, batch: _BatchState, idx: int, fut: Future) -> None:
+    def _on_load_done(
+        self, batch: _SubmitTaskBatchState, idx: int, fut: Future
+    ) -> None:
         """Per-key callback for a load batch.
 
         The pool returns the number of bytes available for the key (or
@@ -828,7 +773,7 @@ class ValkeyL2Adapter(L2AdapterInterface):
         if done:
             self._finalize_load(batch)
 
-    def _finalize_load(self, batch: _BatchState) -> None:
+    def _finalize_load(self, batch: _SubmitTaskBatchState) -> None:
         """Publish the load result bitmap and notify access listeners."""
         bitmap = Bitmap(len(batch.keys))
         accessed: list[ObjectKey] = []
@@ -896,19 +841,8 @@ class ValkeyL2Adapter(L2AdapterInterface):
     # class maintains totals from ``_notify_keys_stored`` /
     # ``_notify_keys_deleted`` so no override is needed.
 
-    # ---------------------------------------------------------------
-    # Status Interface
-    # ---------------------------------------------------------------
-
     def report_status(self) -> dict[str, Any]:
-        """Return a JSON-serializable health/status snapshot.
-
-        Returns:
-            Dict with ``is_healthy`` (alive worker pool and not closed),
-            ``type`` (``"valkey"``), current byte usage / declared
-            capacity (``usage_fraction == -1`` when uncapped), and
-            adapter configuration that is safe to log (no credentials).
-        """
+        """Return a JSON-serializable health/status snapshot."""
         usage = self.get_usage()
         status: dict[str, Any] = {
             "is_healthy": not self._closed,
@@ -933,15 +867,8 @@ class ValkeyL2Adapter(L2AdapterInterface):
             status["node_memory"] = self._pool.node_memory_usage()
         return status
 
-    # ---------------------------------------------------------------
-    # Cleanup
-    # ---------------------------------------------------------------
-
     def close(self) -> None:
-        """Close the worker pool (and its glide clients) and event fds.
-
-        Idempotent — subsequent calls are no-ops.
-        """
+        """Close the worker pool (and its glide clients) and event fds."""
         if self._closed:
             return
         self._closed = True
@@ -950,10 +877,6 @@ class ValkeyL2Adapter(L2AdapterInterface):
         self._lookup_efd.close()
         self._load_efd.close()
         logger.info("ValkeyL2Adapter closed")
-
-    # ---------------------------------------------------------------
-    # Internal helpers
-    # ---------------------------------------------------------------
 
     def _new_task_id(self) -> L2TaskId:
         """Allocate the next task id. Caller must hold ``self._lock``."""

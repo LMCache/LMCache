@@ -44,47 +44,26 @@ is what unlocks batch-level parallelism.
 - `valkey-glide-sync >= 2.3.0` — the **sync** GLIDE client package
   (provides the `glide_sync` module), the first stable release with both
   zero-copy SET (`#5492`) and buffer GET (`#5493`). It bundles
-  `glide_shared` and `glide_sync`; the plain `valkey-glide` package ships
-  only the **async** client (under `glide`) and is **not** sufficient —
-  async glide cannot do zero-copy (see *Why glide sync*).
-- The import is **lazy** (inside the worker pool), so LMCache
-  installations that don't use this adapter never need it installed. A
-  missing dependency yields:
+  `glide_shared` and `glide_sync`. 
+  
+  It's lazy imported, won't get used unless triggered 
+  , if host is missing dependency, following error will be raised
+
+  If valkey is installed but version is outdated, 
+  valkey adaptor will fall back to use copying through a `bytes` 
 
   ```
   Valkey support requires the glide_sync module.
   Install: pip install 'valkey-glide-sync>=2.3.0'
   ```
 
-## Components
-
-- `lmcache/v1/distributed/l2_adapters/valkey_l2_adapter.py` —
-  registers adapter type `valkey`. Defines `ValkeyL2AdapterConfig`,
-  `ValkeyL2Adapter`, the `_BatchState` helper, and the factory.
-- `_parse_startup_nodes` — parses the seed list from a single
-  comma-separated `"host:port[,host:port...]"` string.
-- Reuses `_object_key_to_string` from `native_connector_l2_adapter.py`
-  to compute the standard wire key (model, kv_rank, chunk hash,
-  optional `cache_salt`).
-
 ## Wire key layout
 
-A key written to Valkey has the form:
+key be written to Valkey has the form:
 
 ```
 [<key_prefix>@]<model_name>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]
 ```
-
-- `key_prefix` is the deployment-level namespace (config field) and is
-  only present when non-empty. It must not contain `@`.
-- The standard 3-field shape (no trailing salt) is bit-identical to
-  the wire format used by all other native-connector adapters when
-  `cache_salt=""`, so a Valkey instance shared with other LMCache
-  backends does not see schema drift.
-
-This gives both deployment-level isolation (via `key_prefix`) and
-per-tenant isolation (via `cache_salt`) without adapter-specific
-parsing.
 
 ## Threading model
 
@@ -109,10 +88,10 @@ ValkeyL2Adapter │ submit one Future per key to ThreadPoolExecutor│
         └──────────────────────────────────────────────┘
 ```
 
-### Per-batch state (`_BatchState`)
+### Per-batch state (`_SubmitTaskBatchState`)
 
-Each `submit_*_task` allocates a `_BatchState` shared by N per-key
-futures:
+Each `submit_*_task` allocates a `_SubmitTaskBatchState` shared by N
+per-key futures:
 
 | Field         | Purpose                                                       |
 |---------------|---------------------------------------------------------------|
@@ -122,25 +101,6 @@ futures:
 | `keys`        | Original keys (for listener notifies + per-salt accounting).  |
 | `sizes`       | Bytes per key (store batches only — others leave empty).      |
 
-The last-finisher pattern avoids a separate demux thread and keeps the
-fast path entirely on worker threads.
-
-### Why per-key futures (not per-batch)
-
-A single `Future` for the whole batch would either (a) serialize all N
-keys on one worker — wasting `num_workers - 1` threads — or (b) require
-the worker to internally split work, duplicating ThreadPool logic. One
-future per key lets the executor distribute load naturally. Per-key
-callback overhead is negligible compared to the wire round-trip.
-
-## Capability detection
-
-After the first worker constructs its glide client, the adapter probes
-`inspect.signature(client.get).parameters` once and caches whether the
-`buffer=` parameter is supported. Older glide releases (<2.3.0) lack
-buffer GET — in that case the adapter falls back to copying through a
-`bytes` intermediate and still validates size, so correctness is
-preserved at the cost of performance.
 
 ## Size validation on load
 
@@ -159,22 +119,15 @@ the adapter.
 
 ## Partial-failure accounting
 
-`L2StoreResult` is **binary** by contract: `success=False` forces
-`bytes_transferred()` to `0`. A partial batch failure is therefore
-reported as a task failure (`is_successful() == False`). This is the
-**safe** choice — the store controller drops the task's keys from L1
-only when the task reports success (`select_l1_deletions`), so reporting
-success on a partial failure would evict the un-stored key from L1 and
-lose it entirely.
+A store task is reported as failed if **any** key in it fails to write.
+This is the safe choice: the store controller only drops a task's keys
+from L1 when the task succeeds, so reporting success on a partial failure
+would evict the un-stored keys from L1 and lose them.
 
-The *meaningful* byte accounting flows through
-`_notify_keys_stored`, which is fired with **only** the keys that
-actually wrote. The base class folds those into per-`cache_salt` and
-aggregate totals, so `get_usage()` stays accurate even under partial
-failure. This is more precise than `NativeConnectorL2Adapter` today
-(whose `do_batch_set` raises on the first failure and treats the whole
-batch as failed) because each key has its own Python `Future` and is
-accounted independently.
+Byte accounting is finer-grained. `_notify_keys_stored` is fired with
+**only** the keys that actually wrote, and the base class folds those
+into per-`cache_salt` and aggregate totals — so `get_usage()` stays
+accurate even when the task as a whole is marked failed.
 
 ## Cluster vs standalone
 
@@ -183,9 +136,28 @@ accounted independently.
 | standalone   | `GlideClient`          | honored       | first only (warned if >1) |
 | cluster      | `GlideClusterClient`   | ignored (warned) | full list — seeds for discovery |
 
-Cluster discovery, MOVED/ASK redirect handling, and topology refresh
-are entirely the responsibility of `GlideClusterClient`. The adapter
-delegates and does not parse RESP redirects itself.
+### Slot routing & redirects (handled by glide)
+
+Each key belongs to one of 16384 slots (`CRC16(key) % 16384`), and each
+slot is owned by one primary. The client caches a slot→node map and
+sends each request straight to the owning node. That map can go stale
+(after a reshard or a failover), so the request lands on the wrong node
+and the server replies with a **redirect** — the cluster's self-healing
+mechanism, not an error:
+
+- **MOVED** — the slot's owner has **permanently changed** (reshard
+  finished, or a replica was promoted). The client retries on the new
+  node and updates its cached map.
+- **ASK** — the slot is **mid-migration** and *this specific key* has
+  already moved to the target while the slot still officially belongs to
+  the source. The client sends `ASKING` + the command to the target for
+  this one request and does **not** update its map (the migration isn't
+  done).
+
+All of this — initial discovery (`CLUSTER SHARDS`), MOVED/ASK handling,
+`ASKING`, and topology refresh — is owned by `GlideClusterClient`. The
+adapter never parses redirects: a `client.get`/`set` call returns only
+the final, post-redirect result.
 
 ### Cluster routing & load balancing
 
@@ -219,18 +191,22 @@ Known imbalance sources / tuning levers:
   (via a `{cache_salt}` hashtag) is intentionally **not** done; it would
   aid pipelining but risk hot shards. Uniform spread is preferred.
 
-`report_status()`' `current_size_bytes` is LMCache's **aggregate logical**
-byte count, not per-node physical memory. In cluster mode this aggregate
-can mask a hot shard (one node full while others are nearly empty). For
-true per-node physical usage, query each node's `INFO memory` directly or
-use Valkey's own monitoring.
+`report_status()` exposes two different views of usage:
+
+- `current_size_bytes` — LMCache's **aggregate logical** byte count. In
+  cluster mode this aggregate can mask a hot shard (one node full while
+  others are nearly empty).
+- `node_memory` (cluster mode only) — the server's **real per-node
+  physical** memory, collected by routing `INFO memory` to all nodes
+  (`used_memory` / `maxmemory` per node). Use this to spot shard
+  imbalance. It is best-effort: an empty dict means the `INFO` query
+  failed and never blocks status reporting.
 
 **Resharding** (adding/removing nodes) is transparent to the adapter:
 glide handles `MOVED`/`ASK` redirects and topology refresh, and seed
 nodes need not be updated. A graceful reshard migrates keys and keeps the
 cache warm; dropping a node without migrating its slots loses those keys,
-which simply surface as cache misses (recomputed, never stale) — though
-LMCache's byte accounting may drift afterward (see *Two eviction layers*).
+which simply surface as cache misses and LMCache's byte accounting may drift afterward
 
 ## Authentication and TLS
 
@@ -354,20 +330,6 @@ JSON schema (CLI `--l2-adapter`):
 
 Shortcut for a single node: `{"host": "host1", "port": 6379, ...}`.
 
-All settings (including credentials) come from the config object; there
-are no environment-variable fallbacks.
-
-## Capability summary
-
-| Capability                           | Where implemented                                    |
-|--------------------------------------|------------------------------------------------------|
-| Cluster discovery + multiple seeds   | `GlideClusterClient` (glide handles `CLUSTER SHARDS`)|
-| Authentication                       | `ServerCredentials` from config                      |
-| Deployment key prefix                | `key_prefix` field, joined by `@`                    |
-| `cache_salt` integration             | Inherited from `_object_key_to_string`                |
-| Validate size on load                | `_do_get_into` rejects size mismatch                 |
-| Partial-failure accounting           | Per-key `Future` + accurate per-salt usage           |
-
 ## Non-goals
 
 - **Custom MOVED/ASK parsing**: delegated to glide.
@@ -384,10 +346,5 @@ are no environment-variable fallbacks.
 ## Testing
 
 - `tests/v1/distributed/test_valkey_l2_adapter.py` — unit tests
-  against an in-process fake `glide_sync` module. Covers config
-  validation, the L2AdapterInterface contract, partial-failure
-  bytes_transferred, size-mismatch handling, key prefix and cache_salt
-  isolation, and the fallback path when buffer GET is unavailable.
-- An integration test against a real Valkey-Cluster container can be
-  added as a follow-up (gated on `valkey-glide-sync` install and a
-  reachable cluster).
+  against an in-process fake `glide_sync` module. 
+- `tests/v1/distributed/test_valkey_l2_adapter_integration.py` - integration tests running with real local valkey instance

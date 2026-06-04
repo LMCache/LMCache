@@ -151,6 +151,10 @@ class ValkeyWorkerPool:
         # imported on worker threads, so this stays None until the first SET.
         self._expiry_obj: Any = None
 
+        # Per-thread glide client holder. The object itself is shared by
+        # the pool, but ``self._local.client`` resolves to a separate
+        # value per worker thread — so each thread builds and reuses its
+        # own client (glide clients are not shared across threads).
         self._local: threading.local = threading.local()
         self._has_buffer_get: Optional[bool] = None
         self._capability_lock: threading.Lock = threading.Lock()
