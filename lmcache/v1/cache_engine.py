@@ -122,6 +122,14 @@ class LMCacheEngine:
                 else torch_dev.Stream()
             )
 
+        # Holds GPU-resident copies of the broadcast send buffers on the
+        # leader rank so the subsequent batched_to_gpu can read from HBM
+        # rather than re-reading the same L1 bytes over PCIe. Always empty
+        # on non-leader ranks and outside the broadcast critical section.
+        # Typed as List[MemoryObj] (the supertype) so the list can be
+        # passed directly to batched_to_gpu without an invariance cast.
+        self._leader_gpu_substitute_objs: List[MemoryObj] = []
+
         self.enable_controller = config.enable_controller
 
         # NOTE: Unix systems use fork by default
@@ -209,7 +217,7 @@ class LMCacheEngine:
         InitializeUsageContext(config, metadata)
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         # Initialize PinMonitor singleton with config
-        PinMonitor.GetOrCreate(config)
+        PinMonitor.GetOrCreate(config, metadata)
 
         self.post_inited = False
 
@@ -852,9 +860,48 @@ class LMCacheEngine:
         if len(reordered_chunks) > 0:
             with retrieve_stats.profile_to_gpu():
                 _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
-                self.gpu_connector.batched_to_gpu(
-                    list(memory_objs), list(starts), list(ends), **kwargs
-                )
+                # When save_only_first_rank is enabled, the leader rank's
+                # memory_objs from L1 are CPU-resident. The broadcast above
+                # already created GPU-resident copies on the leader to use as
+                # the NCCL send buffer. Substitute those here so this kernel
+                # reads from HBM rather than re-reading the same L1 bytes
+                # over PCIe via zero-copy mapped pinned memory. Without this
+                # swap, batched_to_gpu on the leader takes ~9 ms (PCIe-bound)
+                # while passive ranks take ~0.5 ms (HBM-bound) — a structural
+                # asymmetry on the critical path of every retrieve.
+                if self.save_only_first_rank and self.metadata.is_first_rank():
+                    if len(self._leader_gpu_substitute_objs) == len(memory_objs):
+                        memory_objs_for_togpu = self._leader_gpu_substitute_objs
+                    else:
+                        # Substitute list should always match memory_objs after
+                        # _broadcast_or_receive_memory_objs has run on the
+                        # leader.  A mismatch indicates a bug or stale state;
+                        # fall back to the CPU L1 source so retrieval is still
+                        # correct, but warn so the issue is visible.
+                        logger.warning(
+                            "Leader rank: GPU substitute count (%d) does not "
+                            "match memory_objs count (%d); falling back to "
+                            "CPU L1 source for batched_to_gpu (PCIe-bound, "
+                            "~9 ms slower).",
+                            len(self._leader_gpu_substitute_objs),
+                            len(memory_objs),
+                        )
+                        memory_objs_for_togpu = list(memory_objs)
+                else:
+                    memory_objs_for_togpu = list(memory_objs)
+                try:
+                    self.gpu_connector.batched_to_gpu(
+                        memory_objs_for_togpu, list(starts), list(ends), **kwargs
+                    )
+                finally:
+                    # Release GPU substitute references so the temporary
+                    # buffers can be freed; original memory_objs in
+                    # reordered_chunks are still tracked for the cleanup
+                    # loop below. Done in `finally` so a raise from
+                    # batched_to_gpu (e.g. CUDA OOM) does not leave the
+                    # references dangling on this long-lived engine.
+                    if self.save_only_first_rank and self.metadata.is_first_rank():
+                        self._leader_gpu_substitute_objs = []
 
         # TODO(Jiayi): Remove the following for loop with batched operations
         # TODO(Jiayi): Need to refactor the `remove_after_retrieve` logic.
@@ -1277,6 +1324,12 @@ class LMCacheEngine:
         if search_range is None:
             search_range = self.retrieve_locations
 
+        # When layerwise is enabled, store_layer writes per-layer keys
+        # (LayerCacheEngineKey, chunk_hash + layer_id). Async lookup must
+        # split each chunk key into num_layers per-layer keys so the
+        # storage backend hot_cache lookups match the same key type.
+        keys_per_chunk = self.num_layers if self.use_layerwise else 1
+
         # TODO(Jiayi): make token database able to return list.
         for start, end, key in self.token_database.process_tokens(
             tokens=tokens,
@@ -1285,12 +1338,20 @@ class LMCacheEngine:
             request_configs=request_configs,
         ):
             assert isinstance(key, CacheEngineKey)
-            keys.append(key)
+            if self.use_layerwise:
+                keys.extend(key.split_layers(self.num_layers))
+            else:
+                keys.append(key)
             cum_chunk_lengths.append(end)
 
         asyncio.run_coroutine_threadsafe(
             self.storage_manager.async_lookup_and_prefetch(
-                lookup_id, keys, cum_chunk_lengths, search_range, pin
+                lookup_id,
+                keys,
+                cum_chunk_lengths,
+                search_range,
+                pin,
+                keys_per_chunk=keys_per_chunk,
             ),
             self.storage_manager.loop,
         )
@@ -1323,7 +1384,8 @@ class LMCacheEngine:
             for key, memory_obj in memory_objs_flat:
                 try:
                     logger.debug("Releasing memory object for lookup_id=%s", lookup_id)
-                    memory_obj.unpin()
+                    if memory_obj.is_pinned:
+                        memory_obj.unpin()
                     memory_obj.ref_count_down()
                 except Exception as e:
                     logger.error(f"Error releasing memory object: {e}")
@@ -1380,7 +1442,8 @@ class LMCacheEngine:
         for memory_obj in memory_objs:
             assert memory_obj is not None
             compressed_memory_obj = serializer.serialize(memory_obj)
-            memory_obj.unpin()
+            if memory_obj.is_pinned:
+                memory_obj.unpin()
             compressed_memory_objs.append(compressed_memory_obj)
 
         self.storage_manager.batched_remove(keys, locations=[location])
@@ -1440,7 +1503,8 @@ class LMCacheEngine:
         for compressed_memory_obj in compressed_memory_objs:
             assert compressed_memory_obj is not None
             memory_obj = deserializer.deserialize(compressed_memory_obj)
-            compressed_memory_obj.unpin()
+            if compressed_memory_obj.is_pinned:
+                compressed_memory_obj.unpin()
             memory_objs.append(memory_obj)
 
         self.storage_manager.batched_remove(keys, locations=[location])
@@ -1748,6 +1812,14 @@ class LMCacheEngine:
             chunk_count = len(reordered_chunks)
             self.broadcast_object_fn(chunk_count, self.metadata.first_rank)
 
+            # Reset the GPU-resident copy list. We populate it during this
+            # broadcast loop so the caller's subsequent batched_to_gpu can
+            # read from HBM instead of re-reading the same CPU L1 buffer
+            # over PCIe. (Declared in __init__; reassigning to a fresh list
+            # rather than .clear() to drop any references the caller's
+            # finally block missed if a previous retrieve raised.)
+            self._leader_gpu_substitute_objs = []
+
             # Broadcast each chunk's data
             for key, memory_obj, start, end in reordered_chunks:
                 # Combine (start, end) and metadata into single broadcast
@@ -1762,6 +1834,16 @@ class LMCacheEngine:
                     f"{torch_device_type}:{self.metadata.worker_id}"
                 )
                 self.broadcast_fn(tensor_to_broadcast, self.metadata.first_rank)
+
+                # Keep this GPU-resident copy alive so the subsequent
+                # batched_to_gpu can read from HBM rather than re-reading
+                # the L1 buffer over PCIe.
+                gpu_mo = TensorMemoryObj(
+                    raw_data=tensor_to_broadcast,
+                    metadata=memory_obj.metadata,
+                    parent_allocator=None,
+                )
+                self._leader_gpu_substitute_objs.append(gpu_mo)
         else:
             # Receive total chunk count
             chunk_count = self.broadcast_object_fn(None, self.metadata.first_rank)
@@ -2002,7 +2084,7 @@ class LMCacheEngineBuilder:
         raises: ValueError if the instance already exists with a different
             configuration.
         """
-        logger.info(f"Creating LMCacheEngine instance {instance_id}")
+        logger.info("Creating LMCacheEngine instance %s", instance_id)
         if instance_id not in cls._instances:
             numa_mapping = NUMADetector.get_numa_mapping(config)
             logger.info(f"NUMA mapping for instance {instance_id}: {numa_mapping}")
@@ -2048,7 +2130,7 @@ class LMCacheEngineBuilder:
     def destroy(cls, instance_id: str) -> None:
         """Close and delete the LMCacheEngine instance by the instance ID"""
         # TODO: unit test for this
-        logger.info(f"Destroying LMCacheEngine instance: {instance_id}")
+        logger.info("Destroying LMCacheEngine instance: %s", instance_id)
 
         if instance_id in cls._instances:
             stat_logger = cls._stat_loggers[instance_id]
@@ -2084,6 +2166,6 @@ class LMCacheEngineBuilder:
             except Exception as e:
                 logger.error(f"Error destroying stats monitor: {e}")
 
-            logger.info(f"LMCacheEngine instance {instance_id} destroyed")
+            logger.info("LMCacheEngine instance %s destroyed", instance_id)
         else:
             logger.warning(f"Instance {instance_id} not found for destruction")

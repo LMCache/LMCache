@@ -925,6 +925,12 @@ func TestBuildConnectionConfigMap_Default(t *testing.T) {
 	if config["kv_connector"] != "LMCacheMPConnector" {
 		t.Fatalf("expected kv_connector=LMCacheMPConnector, got %v", config["kv_connector"])
 	}
+	if config["kv_connector_module_path"] != "lmcache.integration.vllm.lmcache_mp_connector" {
+		t.Fatalf(
+			"expected kv_connector_module_path=lmcache.integration.vllm.lmcache_mp_connector, got %v",
+			config["kv_connector_module_path"],
+		)
+	}
 	if config["kv_role"] != "kv_both" {
 		t.Fatalf("expected kv_role=kv_both, got %v", config["kv_role"])
 	}

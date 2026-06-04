@@ -1,7 +1,7 @@
 # Example script to build the LMCache integrated with vLLM container image
 
 # Update the following variables accordingly
-CUDA_VERSION=12.8
+CUDA_VERSION=13.0
 DOCKERFILE_NAME='Dockerfile'
 VLLM_VERSION="nightly"
 DOCKER_BUILD_PATH='../' # This path should point to the LMCache root for access to 'requirements' directory

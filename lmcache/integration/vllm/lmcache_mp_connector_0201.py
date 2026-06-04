@@ -171,6 +171,7 @@ def create_worker_adapter(
         parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
     )
 
 
@@ -472,6 +473,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
+    - lmcache.mp.mp_transfer_mode: routing mode for the worker -> server
+      transfer context. One of ``auto`` (default; CUDA -> handle, others
+      -> data), ``handle`` (force IPC / SHM zero-copy), ``data`` (force
+      worker-side gather/scatter copy). Overrides the
+      ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
     """
 
     def __init__(

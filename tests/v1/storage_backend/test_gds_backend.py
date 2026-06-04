@@ -15,7 +15,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, LayerCacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
@@ -59,6 +59,18 @@ def create_test_key(key_id: int = 0) -> CacheEngineKey:
         worker_id=1,
         chunk_hash=key_id,
         dtype=torch.bfloat16,
+    )
+
+
+def create_test_layer_key(key_id: int = 0, layer_id: int = 0) -> LayerCacheEngineKey:
+    """Create a LayerCacheEngineKey for testing layer-wise GDS operations."""
+    return LayerCacheEngineKey(
+        model_name="testmodel",
+        world_size=3,
+        worker_id=1,
+        chunk_hash=key_id,
+        dtype=torch.bfloat16,
+        layer_id=layer_id,
     )
 
 
@@ -656,6 +668,41 @@ class TestGdsBackend:
         )
         future.result(timeout=10)
         assert gds_backend.contains(key)
+
+    def test_scan_metadata_layer_key(self, temp_gds_path, async_loop):
+        """
+        _scan_metadata_subdir must reconstruct LayerCacheEngineKey filenames with
+        a trailing layer_id (e.g. ...@dtype@4).
+        """
+        config = create_test_config(temp_gds_path)
+        metadata = create_test_metadata()
+        backend = GdsBackend(
+            config=config,
+            loop=async_loop,
+            metadata=metadata,
+            dst_device="cuda:0",
+        )
+
+        layer_key = create_test_layer_key(0xABCD, 4)
+
+        memory_obj = create_test_memory_obj(device="cuda")
+        future = backend.submit_put_task(layer_key, memory_obj)
+        future.result(timeout=10)
+        memory_obj.ref_count_down()
+        # Wait for async metadata write to land
+        backend.close()
+
+        # Re-create backend, which triggers _scan_metadata
+        backend2 = GdsBackend(
+            config=config,
+            loop=async_loop,
+            metadata=metadata,
+            dst_device="cuda:0",
+        )
+        # Wait for the background scan to complete
+        time.sleep(1)
+        assert layer_key in backend2.hot_cache
+        backend2.close()
 
 
 @pytest.mark.skipif(

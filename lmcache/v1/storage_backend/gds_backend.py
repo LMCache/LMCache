@@ -21,7 +21,12 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
+from lmcache.utils import (
+    CacheEngineKey,
+    DiskCacheMetadata,
+    _lmcache_nvtx_annotate,
+    parse_cache_key,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     CuFileMemoryAllocator,
@@ -287,11 +292,11 @@ class GdsBackend(AllocatorBackendInterface):
             elif self.gds_backend == "hipfile":
                 # HACK: hipfile import may be buggy on some hardware
                 # (e.g., without GPUDirect), so it's temporarily put here.
-                # Third Party
-                import hipfile
+                # First Party
+                from lmcache.v1.storage_backend import hipfile_shim
 
                 self.cudart = None
-                self.gds_module = hipfile
+                self.gds_module = hipfile_shim
                 self._gds_driver = self.gds_module.CuFileDriver()
             else:
                 raise ValueError(f"Unsupported gds_backend '{self.gds_backend}'")
@@ -391,7 +396,7 @@ class GdsBackend(AllocatorBackendInterface):
                         filename = os.path.basename(fentry.name)
                         key_str = urllib.parse.unquote(filename[: -len(target_suffix)])
                         try:
-                            key = CacheEngineKey.from_string(key_str)
+                            key = parse_cache_key(key_str)
                         except ValueError as e:
                             logger.error(
                                 f"Filename {filename} can't be converted "
