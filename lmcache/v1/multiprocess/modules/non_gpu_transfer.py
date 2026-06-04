@@ -156,6 +156,8 @@ class NonGPUTransferModule:
         """Release resources owned by this module."""
         self._non_gpu_contexts.clear()
         self._strategies.clear()
+        self._store_start_times.clear()
+        self._retrieve_start_times.clear()
 
     @staticmethod
     def _make_transfer_key(
@@ -255,6 +257,14 @@ class NonGPUTransferModule:
 
         self._strategies.pop(instance_id, None)
 
+        # Clean up any pending timing entries for this instance.
+        self._store_start_times = {
+            k: v for k, v in self._store_start_times.items() if k[0] != instance_id
+        }
+        self._retrieve_start_times = {
+            k: v for k, v in self._retrieve_start_times.items() if k[0] != instance_id
+        }
+
         with self._pending_shm_lock:
             stale_writes = []
             stale_reads = []
@@ -348,6 +358,7 @@ class NonGPUTransferModule:
             raise ValueError(
                 f"transfer strategy not registered for instance ID {instance_id}"
             )
+        st = self._store_start_times.pop((instance_id, key), None)
         result = strategy.commit_store(
             key=key,
             instance_id=instance_id,
@@ -355,7 +366,6 @@ class NonGPUTransferModule:
             context=entry.metadata,
             resolve_obj_keys=self._ctx.resolve_obj_keys,
         )
-        st = self._store_start_times.pop((instance_id, key), None)
         if st is not None and result:
             num_tokens = len(self._ctx.resolve_obj_keys(key)) * self._ctx.chunk_size
             logger.info(
@@ -417,8 +427,8 @@ class NonGPUTransferModule:
             raise ValueError(
                 f"transfer strategy not registered for instance ID {instance_id}"
             )
-        result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         st = self._retrieve_start_times.pop((instance_id, key), None)
+        result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         if st is not None:
             num_tokens = len(self._ctx.resolve_obj_keys(key)) * self._ctx.chunk_size
             logger.info(
