@@ -572,6 +572,20 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
         self._requests_priority: dict[str, int] = {}
+
+        # Chunked KV loading: cap the number of external tokens
+        # reported per scheduling step to prevent GPU block pool
+        # exhaustion at high concurrency with long contexts.
+        # Configurable via kv_connector_extra_config:
+        #   "lmcache.max_tokens_per_load": <int>
+        # Default 0 (no cap — original behavior, all matched tokens
+        # reported at once). Set to a positive value (e.g. 131072)
+        # to enable chunked loading.
+        self._max_tokens_per_load: int = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.max_tokens_per_load", 0
+            )
+        )
         self._invalid_block_ids: set[int] = set()
 
     def _check_legacy_register_kv_caches(self) -> None:
@@ -1437,9 +1451,44 @@ class LMCacheConnectorV1Impl:
                 max(need_to_allocate, 0),
             )
 
+        # Chunked KV loading: cap the number of tokens reported
+        # to the scheduler to avoid exhausting the GPU block pool
+        # when many concurrent requests each need large allocations.
+        # Remaining tokens beyond the cap will be computed locally
+        # via chunked prefill rather than loaded from external cache.
+        capped_lmcache_tokens = num_external_hit_tokens
+        if (
+            self._max_tokens_per_load > 0
+            and need_to_allocate > self._max_tokens_per_load
+        ):
+            # Align cap to LMCache chunk boundaries so that the
+            # retrieve path receives chunk-aligned token ranges.
+            cap = (
+                self._max_tokens_per_load
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            need_to_allocate = cap
+            # Align capped_lmcache_tokens to chunk boundary so that
+            # session.get_hashes() receives a chunk-aligned end value.
+            capped_lmcache_tokens = (
+                (num_computed_tokens + cap)
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            logger.debug(
+                "Reqid: %s, Chunked KV loading: capped from "
+                "%d to %d external tokens "
+                "(max_tokens_per_load=%d)",
+                req_id,
+                num_external_hit_tokens - num_computed_tokens,
+                need_to_allocate,
+                self._max_tokens_per_load,
+            )
+
         self.load_specs[req_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
-            lmcache_cached_tokens=num_external_hit_tokens,
+            lmcache_cached_tokens=capped_lmcache_tokens,
             can_load=False,
         )
 

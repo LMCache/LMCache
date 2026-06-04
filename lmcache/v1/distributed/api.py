@@ -25,11 +25,12 @@ class TrimPolicy(enum.Enum):
 
     PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
     keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
-    (gaps and all).
+    (gaps and all); SPARSE retains every found key for an intentional scatter.
     """
 
     PREFIX = enum.auto()
     SEGMENTED_PREFIX = enum.auto()
+    SPARSE = enum.auto()
 
 
 @dataclass(frozen=True)
