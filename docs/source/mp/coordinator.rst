@@ -76,7 +76,7 @@ Kubernetes downward API); an explicit flag wins over the env var.
    * - ``--coordinator-advertise-ip``
      - ``LMCACHE_COORDINATOR_ADVERTISE_IP``
      - IP the coordinator should reach this server at (defaults to the server's
-       outbound IP). In Kubernetes, set it to the pod IP via the downward API.
+       outbound IP).
    * - ``--coordinator-heartbeat-interval``
      - ``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``
      - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well

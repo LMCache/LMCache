@@ -108,8 +108,7 @@ class CoordinatorConfig:
 
     advertise_ip: str = ""
     """IP the coordinator should reach this server at. Empty defers to the
-    server's outbound IP (resolved by the registrar). In Kubernetes, set it to
-    the pod IP via the downward API."""
+    server's outbound IP (resolved by the registrar)."""
 
     heartbeat_interval: float = 5.0
     """Seconds between heartbeats. Must be strictly positive and kept well below
@@ -353,8 +352,7 @@ def add_coordinator_args(
         type=str,
         default=None,
         help="IP the coordinator should reach this server at. Defaults to "
-        "LMCACHE_COORDINATOR_ADVERTISE_IP, then the server's outbound IP. "
-        "In Kubernetes, set it to the pod IP via the downward API.",
+        "LMCACHE_COORDINATOR_ADVERTISE_IP, then the server's outbound IP.",
     )
     group.add_argument(
         "--coordinator-heartbeat-interval",
