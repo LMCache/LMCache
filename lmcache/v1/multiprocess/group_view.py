@@ -133,18 +133,24 @@ def get_engine_group_indices(
         A list of length ``num_registered_layers`` mapping each registered
         tensor index to its engine group id, or ``None`` when there is no group
         metadata (empty ``groups`` or zero layers) so callers fall back to
-        single-group behavior.
+        single-group behavior. Registered tensors not referenced by any group
+        are marked with ``EXCLUDED_ENGINE_GROUP`` (cross-layer KV-sharing layers
+        whose KV lives in their target owner's blocks); downstream grouping
+        skips them.
 
     Raises:
         ValueError: If a group references a layer index outside
-            ``[0, num_registered_layers)``, or if the groups cover only some
-            registered layers.
+            ``[0, num_registered_layers)``.
     """
+    # First Party
+    from lmcache.v1.kv_layer_groups import EXCLUDED_ENGINE_GROUP
+
     if not groups or num_registered_layers == 0:
         return None
 
-    per_layer_engine_group_idx = [0] * num_registered_layers
-    matched_indices: set[int] = set()
+    # Default to "excluded": layers no group references are intentionally left
+    # out of grouping (e.g. KV-sharing layers aliasing a target owner's cache).
+    per_layer_engine_group_idx = [EXCLUDED_ENGINE_GROUP] * num_registered_layers
 
     for group in groups:
         for layer_idx in group.layer_indices:
@@ -154,12 +160,5 @@ def get_engine_group_indices(
                     f"range [0, {num_registered_layers})"
                 )
             per_layer_engine_group_idx[layer_idx] = group.engine_group_id
-            matched_indices.add(layer_idx)
 
-    missing_indices = set(range(num_registered_layers)) - matched_indices
-    if missing_indices:
-        raise ValueError(
-            "Engine groups did not cover registered KV cache layer "
-            f"indices: {sorted(missing_indices)[:8]}"
-        )
     return per_layer_engine_group_idx

@@ -51,7 +51,8 @@ Supported architectures
      - :doc:`minimax_m2`
 
    * - ``Gemma4ForConditionalGeneration``
-     - ``google/gemma-4-31B-it``
+     - | ``google/gemma-4-31B-it``
+       | ``google/gemma-4-E4B-it``
      - ✓
      - —
      - —

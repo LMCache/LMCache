@@ -50,6 +50,15 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 LayerGroupIdentity = tuple[int, int, int, int, int, torch.dtype]
 
 
+# Sentinel ``per_layer_engine_group_idx`` value marking a registered KV tensor
+# that must be left out of every LMCache group. Used for cross-layer KV-sharing
+# layers (e.g. google/gemma-4-E4B-it), whose tensor aliases a target owner's KV
+# cache: the owner's group already stores/retrieves that memory, so the shared
+# layer is skipped rather than forming its own (potentially block-size-mismatched)
+# group. See ``create_group_views_from_vllm``.
+EXCLUDED_ENGINE_GROUP = -1
+
+
 def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
     gpu_kv_format: "lmc_ops.GPUKVFormat",
@@ -71,6 +80,9 @@ def group_layers_by_identity(
             block group id. When ``None`` every layer is treated as block group
             0 (non-hybrid); when present, layers from different engine block
             groups never share an identity even if their tensor shapes match.
+            Layers whose value is ``EXCLUDED_ENGINE_GROUP`` are left out of all
+            groups (e.g. cross-layer KV-sharing layers whose KV lives in their
+            target owner's blocks).
 
     Returns:
         A list of ``(identity, layer_indices)`` pairs sorted by each group's
@@ -90,15 +102,19 @@ def group_layers_by_identity(
     kv_size = 1 if mla else 2
     groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
     for idx in range(num_layers):
-        nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
-        hs = get_head_size(kv_caches, gpu_kv_format, idx)
-        dt = get_dtype(kv_caches, gpu_kv_format, idx)
-        bs = get_block_size(kv_caches, gpu_kv_format, idx)
         engine_group_idx = (
             per_layer_engine_group_idx[idx]
             if per_layer_engine_group_idx is not None
             else 0
         )
+        # Skip layers explicitly excluded from grouping (e.g. cross-layer
+        # KV-sharing layers, whose KV lives in their target owner's blocks).
+        if engine_group_idx == EXCLUDED_ENGINE_GROUP:
+            continue
+        nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
+        hs = get_head_size(kv_caches, gpu_kv_format, idx)
+        dt = get_dtype(kv_caches, gpu_kv_format, idx)
+        bs = get_block_size(kv_caches, gpu_kv_format, idx)
         groups_dict[(kv_size, nh, hs, bs, engine_group_idx, dt)].append(idx)
     return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
 
@@ -312,10 +328,30 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
+            # The inference-engine logical block size is *per group*, not a
+            # single global value. A hybrid model can give each KV cache group
+            # its own ``block_size``: e.g. ``google/gemma-4-E4B-it`` has full-
+            # attention layers with a larger head_dim than its sliding-window
+            # layers, so vLLM unifies the physical page size by *doubling* the
+            # sliding-window block_size (sliding=32, full=16) while
+            # ``cache_config.block_size`` (the global hint) stays at the GCD
+            # (16). For such a group the registered physical slot count ``bs``
+            # equals the group's own block_size and is *larger* than the global
+            # hint, so passing the global hint would make
+            # ``_derive_compression_metadata`` reject it (logical < bs). Using
+            # ``max(global_hint, bs)`` recovers the per-group logical block
+            # size: it equals ``bs`` for uncompressed groups (compress_ratio=1,
+            # e.g. gemma-4) and the global engine block size for compressed
+            # groups where ``bs < global_hint`` (compress_ratio>1, e.g. the
+            # DeepSeek V4 latent/indexer caches).
+            global_logical = self.inference_engine_logical_block_size_
+            group_logical_block_size = (
+                max(global_logical, bs) if global_logical is not None else None
+            )
             compress_ratio, physical_chunk_size = self._derive_compression_metadata(
                 group_idx=group_idx,
                 bs=bs,
-                ie_logical_block_size=self.inference_engine_logical_block_size_,
+                ie_logical_block_size=group_logical_block_size,
                 lmcache_logical_chunk_size=lmcache_logical_chunk_size,
             )
 

@@ -316,50 +316,87 @@ class LMCacheMPRequestMetadata:
     @staticmethod
     def _slice_block_ids(
         tracker: LMCacheMPRequestTracker,
-        num_engine_groups: int,
+        group_block_sizes: list[int],
+        vllm_block_size: int,
         start: int,
         end: int,
     ) -> list[list[int]]:
         """Slice every engine group's block IDs for the block range.
 
+        Block accounting (``start``/``end``, hit counts, chunk sizes) is
+        expressed in the canonical ``vllm_block_size`` unit -- the GCD of all
+        groups' block sizes, which equals ``cache_config.block_size`` and is
+        the granularity at which vLLM hashes blocks for the connector. The
+        block IDs stored per group, however, are in that group's *own* block
+        size (``group_block_sizes[g]``), which can be a larger multiple of
+        ``vllm_block_size`` for hybrid models: ``google/gemma-4-E4B-it`` gives
+        its sliding-window groups block_size=32 and its full-attention groups
+        block_size=16, while the canonical unit is 16. So a canonical block
+        index maps to a per-group index by dividing by
+        ``k_g = group_block_sizes[g] // vllm_block_size``; the full group has
+        twice as many block IDs per chunk as the sliding group.
+
         Args:
             tracker: Request tracker holding the per-engine-group block IDs.
-            num_engine_groups: Number of engine KV cache groups; the result
-                has one inner list per group, in engine-group order.
-            start: Start **block** index (inclusive), not a token index.
-            end: End **block** index (exclusive), not a token index.
+            group_block_sizes: Per-engine-group vLLM block size, in engine-group
+                order; the result has one inner list per group.
+            vllm_block_size: The canonical (GCD) block size in which ``start``
+                and ``end`` are expressed.
+            start: Start **canonical block** index (inclusive), not a token index.
+            end: End **canonical block** index (exclusive), not a token index.
 
         Returns:
-            One ``list[int]`` of block IDs per engine group, each sliced to
-            ``[start, end)``.
+            One ``list[int]`` of block IDs per engine group. Group ``g`` is
+            sliced to ``[start // k_g, end // k_g)`` so the slice spans the
+            same token range expressed in that group's own block size.
 
-        Notes:
-            Minimal HMA support assumes all groups share vLLM's scheduler
-            block size. DeepSeek-V4's per-group logical/physical block-size
-            mapping is intentionally left for a follow-up.
+        Raises:
+            ValueError: If a group's block size is not a positive multiple of
+                ``vllm_block_size``, or if ``start``/``end`` do not align to a
+                group's per-group block boundary.
         """
-        return [
-            tracker.allocated_block_ids.get(engine_group_idx, [])[start:end]
-            for engine_group_idx in range(num_engine_groups)
-        ]
+        sliced: list[list[int]] = []
+        for engine_group_idx, block_size in enumerate(group_block_sizes):
+            if block_size <= 0 or block_size % vllm_block_size != 0:
+                raise ValueError(
+                    f"group {engine_group_idx} block size {block_size} must be "
+                    f"a positive multiple of the canonical block size "
+                    f"{vllm_block_size}"
+                )
+            k = block_size // vllm_block_size
+            if start % k != 0 or end % k != 0:
+                raise ValueError(
+                    f"canonical block range [{start}, {end}) does not align to "
+                    f"group {engine_group_idx} block factor {k}"
+                )
+            group_block_ids = tracker.allocated_block_ids.get(engine_group_idx, [])
+            sliced.append(group_block_ids[start // k : end // k])
+        return sliced
 
     @staticmethod
     def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
         vllm_block_size: int,
-        num_engine_groups: int,
+        group_block_sizes: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            blocks_in_chunk: the number of blocks in a LMCache data chunk
-            vllm_block_size: the block size used in vLLM
-            num_engine_groups: number of engine KV cache groups; the op's
-                block IDs carry one inner list per group, in engine order.
+            blocks_in_chunk: the number of canonical (``vllm_block_size``)
+                blocks in a LMCache data chunk
+            vllm_block_size: the canonical (GCD) block size used in vLLM
+                accounting (= ``cache_config.block_size``)
+            group_block_sizes: per-engine-group vLLM block size, in engine
+                order; the op's block IDs carry one inner list per group. A
+                group's own block size may be a larger multiple of
+                ``vllm_block_size`` (hybrid models), so its block count is
+                normalized to the canonical unit before being compared across
+                groups.
         """
+        num_engine_groups = len(group_block_sizes)
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
@@ -385,10 +422,16 @@ class LMCacheMPRequestMetadata:
         computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
+        # Normalize each group's allocated-block count to the canonical
+        # ``vllm_block_size`` unit before taking the min: a group whose own
+        # block size is ``k`` times the canonical size holds ``k`` canonical
+        # blocks per stored block ID (e.g. gemma-4 sliding groups span 32
+        # tokens/ID = 2 canonical 16-token blocks).
         allocated_lengths = tracker.num_allocated_blocks()
         allocated_blocks = (
             min(
                 allocated_lengths.get(engine_group_idx, 0)
+                * (group_block_sizes[engine_group_idx] // vllm_block_size)
                 for engine_group_idx in range(num_engine_groups)
             )
             if num_engine_groups > 0
@@ -406,7 +449,7 @@ class LMCacheMPRequestMetadata:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
             block_ids = LMCacheMPRequestMetadata._slice_block_ids(
-                tracker, num_engine_groups, start, end
+                tracker, group_block_sizes, vllm_block_size, start, end
             )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
@@ -436,17 +479,21 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
         vllm_block_size: int,
-        num_engine_groups: int,
+        group_block_sizes: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            blocks_in_chunk: the number of blocks in a LMCache data chunk
-            vllm_block_size: the block size used in vLLM
-            num_engine_groups: number of engine KV cache groups; the op's
-                block IDs carry one inner list per group, in engine order.
+            blocks_in_chunk: the number of canonical (``vllm_block_size``)
+                blocks in a LMCache data chunk
+            vllm_block_size: the canonical (GCD) block size used in vLLM
+                accounting (= ``cache_config.block_size``)
+            group_block_sizes: per-engine-group vLLM block size, in engine
+                order; the op's block IDs carry one inner list per group. A
+                group's own block size may be a larger multiple of
+                ``vllm_block_size`` (hybrid models).
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -468,7 +515,7 @@ class LMCacheMPRequestMetadata:
         )
         if end > start:
             block_ids = LMCacheMPRequestMetadata._slice_block_ids(
-                tracker, num_engine_groups, start, end
+                tracker, group_block_sizes, vllm_block_size, start, end
             )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
@@ -575,18 +622,26 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
         self.vllm_block_size = vllm_config.cache_config.block_size
-        # The scheduler side only needs the number of engine KV cache groups
-        # (to slice per-engine-group block IDs); the full list[LMCacheGroupView] is
-        # built worker-side in register_kv_caches where the tensors are available.
-        # Engine group ids are dense (0..N-1), so the count is just the number
-        # of vLLM KV cache groups (>=1).
+        # The scheduler side slices per-engine-group block IDs; the full
+        # list[LMCacheGroupView] is built worker-side in register_kv_caches
+        # where the tensors are available. Engine group ids are dense
+        # (0..N-1), so per-group state is indexed positionally.
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         vllm_groups = (
             getattr(kv_cache_config, "kv_cache_groups", ()) or ()
             if kv_cache_config is not None
             else ()
         )
-        self._num_engine_groups = len(vllm_groups) or 1
+        # Per-engine-group vLLM block size, in engine order. Hybrid models can
+        # give each group its own block size (e.g. google/gemma-4-E4B-it:
+        # sliding-window groups block_size=32, full-attention groups
+        # block_size=16) while ``vllm_block_size`` stays at the GCD (16). Block
+        # IDs are sliced per group with these sizes; the number of engine
+        # groups is ``len(self._group_block_sizes)``. Falls back to the global
+        # block size when the engine exposes no per-group specs.
+        self._group_block_sizes: list[int] = [
+            group.kv_cache_spec.block_size for group in vllm_groups
+        ] or [self.vllm_block_size]
 
     @property
     def role(self) -> KVConnectorRole:
@@ -1119,7 +1174,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 blocks_per_chunk,
                 vllm_block_size=self.vllm_block_size,
-                num_engine_groups=self._num_engine_groups,
+                group_block_sizes=self._group_block_sizes,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -1142,7 +1197,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 blocks_per_chunk,
                 self.vllm_block_size,
-                self._num_engine_groups,
+                self._group_block_sizes,
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -1172,7 +1227,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 blocks_per_chunk,
                 self.vllm_block_size,
-                self._num_engine_groups,
+                self._group_block_sizes,
             )
 
             if r_meta is not None:

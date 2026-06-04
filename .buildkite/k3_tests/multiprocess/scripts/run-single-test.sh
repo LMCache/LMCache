@@ -74,6 +74,28 @@ export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 if [ "$TEST_NAME" = "hma_lm_eval" ]; then
     export MODEL="${MODEL:-google/gemma-3-4b-it}"
     check_hf_token_access "$MODEL"
+elif [ "$TEST_NAME" = "hma_lm_eval_gemma4" ]; then
+    # gemma-4-31B-it is public (no gating, so no HF token check) and has
+    # heterogeneous head dims (head_dim 256 / global_head_dim 512), so vLLM
+    # unifies its KV pages to a larger physical block_size -- this is what
+    # exercises the physical>logical block transition (and, unlike the E4B
+    # variant, it has no KV-sharing, isolating the transition cleanly). It
+    # forces TRITON_ATTN, which is not bit-exact under batch invariance, so the
+    # pipeline sets a small SCORE_TOLERANCE and ATTENTION_BACKEND=auto; its
+    # ~63GB of weights also need a higher GPU_MEMORY_UTILIZATION than the
+    # default (all set in pipeline.yml).
+    export MODEL="${MODEL:-google/gemma-4-31B-it}"
+elif [ "$TEST_NAME" = "hma_lm_eval_gemma4_e4b" ]; then
+    # gemma-4-E4B-it is public and, like the 31B variant, has heterogeneous
+    # head dims (head_dim 256 / global_head_dim 512) so vLLM unifies its KV
+    # pages to a larger physical block_size -- exercising LMCache's per-group
+    # block-size handling (sliding-window groups block_size=32, full-attention
+    # groups block_size=16). Unlike 31B it ALSO uses KV-cache sharing across
+    # layers, so it covers the combined per-group + shared-layer path. It is
+    # small enough to run on a single 2-GPU pod. Like 31B it forces TRITON_ATTN
+    # (not bit-exact under batch invariance), so the pipeline sets a small
+    # SCORE_TOLERANCE and ATTENTION_BACKEND=auto.
+    export MODEL="${MODEL:-google/gemma-4-E4B-it}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi
@@ -104,7 +126,7 @@ SELF_CONTAINED_TESTS=" deadlock "
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
-BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 hma_lm_eval "
+BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 hma_lm_eval hma_lm_eval_gemma4 hma_lm_eval_gemma4_e4b "
 if [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
     export LAUNCH_BASELINE=true
 else
@@ -145,6 +167,12 @@ case "$TEST_NAME" in
     hma_lm_eval)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
+    hma_lm_eval_gemma4)
+        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
+        ;;
+    hma_lm_eval_gemma4_e4b)
+        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
+        ;;
     vllm_bench)
         exec_script="${SCRIPT_DIR}/run-vllm-bench.sh"
         ;;
@@ -171,7 +199,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api"
+        echo "Valid tests: lm_eval, hma_lm_eval, hma_lm_eval_gemma4, hma_lm_eval_gemma4_e4b, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api"
         exit 1
         ;;
 esac
