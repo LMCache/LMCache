@@ -487,14 +487,13 @@ class RustRawBlockBackend(StoragePluginInterface):
                 if not ok:
                     break
                 loaded_count += 1
+            if loaded_count > 0:
+                self._touch_lru([spec.encoded for spec in load_specs[:loaded_count]])
             if loaded_count == len(allocated):
-                self._touch_lru([spec.encoded for spec in load_specs])
                 return allocated
 
             for obj in allocated[loaded_count:]:
                 obj.ref_count_down()
-            if loaded_count > 0:
-                self._touch_lru([spec.encoded for spec in load_specs[:loaded_count]])
             return allocated[:loaded_count]
         except Exception:
             for obj in allocated:
