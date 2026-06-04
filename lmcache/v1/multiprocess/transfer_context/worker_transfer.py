@@ -4,7 +4,9 @@
 # Standard
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from enum import Enum
 from typing import Any, Callable, Protocol
+import os
 
 # Third Party
 import torch
@@ -28,8 +30,62 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.platform import _registry as platform_registry
 
 logger = init_logger(__name__)
+
+# Environment variable that lets the user override the default routing
+# performed by :func:`create_transfer_context`. Accepted values match the
+# string values of :class:`MPTransferMode` (``auto`` / ``handle`` /
+# ``data``); ``auto`` reproduces the historical device-type-based dispatch.
+ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
+
+
+class MPTransferMode(str, Enum):
+    """Routing mode used by :func:`create_transfer_context`.
+
+    * ``AUTO``: dispatch by ``tensor.device.type`` (CUDA -> handle, others
+      -> data). Preserves the historical behaviour.
+    * ``HANDLE``: force :class:`HandleTransferContext` (IPC / SHM zero-copy
+      path). Requires a registered KV-wrapper factory for the device.
+    * ``DATA``: force :class:`DataTransferContext` (worker-side gather /
+      scatter copy path).
+    """
+
+    AUTO = "auto"
+    HANDLE = "handle"
+    DATA = "data"
+
+
+def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
+    """Coerce ``mode`` into :class:`MPTransferMode`, falling back to env."""
+    raw = (
+        mode
+        if mode is not None
+        else os.environ.get(ENV_MP_TRANSFER_MODE, MPTransferMode.AUTO.value)
+    )
+    if isinstance(raw, MPTransferMode):
+        return raw
+    try:
+        return MPTransferMode(str(raw).lower())
+    except ValueError as exc:
+        valid = ", ".join(m.value for m in MPTransferMode)
+        raise ValueError(
+            "Invalid MP transfer mode %r (valid: %s)" % (raw, valid)
+        ) from exc
+
+
+def _build_handle_context(device_type: str) -> "TransferContext":
+    """Build a :class:`HandleTransferContext` after capability check."""
+    try:
+        platform_registry.get_kv_wrapper_factory(device_type)
+    except ValueError as exc:
+        raise ValueError(
+            "MP transfer mode 'handle' is not supported for device type "
+            "%r: no KV-cache wrapper factory is registered. "
+            "Use mode 'data' or 'auto' instead." % device_type
+        ) from exc
+    return HandleTransferContext()
 
 
 class IPCEvent(Protocol):
@@ -432,21 +488,29 @@ class DataTransferContext(TransferContext):
 
 def create_transfer_context(
     kv_caches: dict[str, torch.Tensor],
+    mode: "str | MPTransferMode | None" = None,
     **_kwargs: Any,
 ) -> TransferContext:
     """Create a transfer context from KV cache device type.
 
-    The device check is intentionally centralized here.
+    The device check is intentionally centralized here. Routing can be
+    overridden via the ``mode`` argument or the ``LMCACHE_MP_TRANSFER_MODE``
+    environment variable; see :class:`MPTransferMode` for accepted values.
 
     Args:
         kv_caches: Worker KV cache tensors keyed by layer name.
+        mode: Optional routing override. When ``None`` the value of
+            ``LMCACHE_MP_TRANSFER_MODE`` is consulted, defaulting to
+            :attr:`MPTransferMode.AUTO`.
         **kwargs: Unused placeholder for forward-compatible factory extension.
 
     Returns:
         A concrete :class:`TransferContext` implementation.
 
     Raises:
-        ValueError: If ``kv_caches`` is empty or has mixed device types.
+        ValueError: If ``kv_caches`` is empty, has mixed device types, the
+            requested mode string is unknown, or the requested mode is not
+            supported for the worker device.
     """
     if not kv_caches:
         raise ValueError("kv_caches is empty")
@@ -456,7 +520,17 @@ def create_transfer_context(
             f"All KV cache tensors must share one device type, got {device_types}"
         )
     device_type = next(iter(device_types))
-    logger.info("Creating transfer context (device_type=%s)", device_type)
+    resolved_mode = _resolve_mode(mode)
+    logger.info(
+        "Creating transfer context (device_type=%s, mode=%s)",
+        device_type,
+        resolved_mode.value,
+    )
+    if resolved_mode is MPTransferMode.HANDLE:
+        return _build_handle_context(device_type)
+    if resolved_mode is MPTransferMode.DATA:
+        return DataTransferContext()
+    # AUTO: preserve the historical device-type-based dispatch.
     if device_type == "cuda":
         return HandleTransferContext()
     return DataTransferContext()

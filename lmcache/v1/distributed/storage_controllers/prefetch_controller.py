@@ -6,14 +6,14 @@ The controller runs a background thread with an event-driven loop that:
 1. Accepts prefetch requests from external threads via submit_prefetch_request.
 2. Submits lookup_and_lock tasks to all L2 adapters.
 3. Computes a load plan, keeping the keys retained by the TrimPolicy
-   (PREFIX or SEGMENTED_PREFIX).
+   (PREFIX, SEGMENTED_PREFIX, or SPARSE).
 4. Reserves L1 write buffers and submits load tasks to L2 adapters.
 5. On load completion, transitions L1 entries from write-locked to read-locked.
 6. Reports the retained-key bitmap.
 """
 
 # Standard
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 import enum
@@ -70,7 +70,15 @@ def build_trim_mask(
     PREFIX trims at the first gap (leading contiguous run). The non-PREFIX
     policies keep every set bit, gaps included, and differ only in intent:
     SEGMENTED_PREFIX keeps the keys that loaded when an L2 hit fails to load
-    into L1 (e.g. OOM) mid-prefix.
+    into L1 (e.g. OOM) mid-prefix; SPARSE keeps an intentionally scattered set.
+
+    Args:
+        found: Bitmap of found keys, over key indices ``0..num_keys-1``.
+        num_keys: Total number of requested keys.
+        policy: Trim policy to apply (see :class:`TrimPolicy`).
+
+    Returns:
+        Bitmap of the retained key indices.
     """
     if policy is TrimPolicy.PREFIX:
         return Bitmap(num_keys, found.count_leading_ones())
@@ -594,6 +602,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request_id,
                     "key_count": len(keys),
                     "adapter_count": len(pending_lookup_tasks),
+                    "key_count_per_salt": Counter(k.cache_salt for k in keys),
                 },
             )
         )
@@ -767,6 +776,9 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request.request_id,
                     "key_count": len(reserved_key_set),
                     "adapter_count": len(trimmed_plan),
+                    "key_count_per_salt": Counter(
+                        k.cache_salt for k in reserved_key_set
+                    ),
                 },
             )
         )
@@ -905,6 +917,7 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request.request_id,
                     "loaded_count": len(loaded_keys),
                     "failed_count": len(failed_keys),
+                    "key_count_per_salt": Counter(k.cache_salt for k in loaded_keys),
                 },
             )
         )
