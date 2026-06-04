@@ -39,7 +39,7 @@ REQUEST_LEN="${RR_REQUEST_LEN:-5000}"
 KV_CACHE_VOLUME="${RR_KV_CACHE_VOLUME:-5}"
 
 # Recovery timing
-RECOVER_TIMEOUT="${RR_RECOVER_TIMEOUT:-90}"
+RECOVER_TIMEOUT="${RR_RECOVER_TIMEOUT:-150}"
 
 # Output
 OUT_DIR="$RESULTS_DIR/restart_recovery"
@@ -179,7 +179,7 @@ restart_lmcache() {
         kill "$old_pid" 2>/dev/null || true
         wait "$old_pid" 2>/dev/null || true
     fi
-    sleep 10
+    sleep 60
 
     echo "Relaunching LMCache on port ${LMCACHE_PORT} / HTTP ${LMCACHE_HTTP_PORT}..."
     lmcache server \

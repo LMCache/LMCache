@@ -34,6 +34,7 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -391,7 +392,7 @@ class S3L2Adapter(L2AdapterInterface):
         self._load_efd = create_event_notifier()
 
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
 
@@ -462,7 +463,7 @@ class S3L2Adapter(L2AdapterInterface):
             task_id = self._next_task_id
             self._next_task_id += 1
             if self._connection_disabled:
-                self._completed_store_tasks[task_id] = False
+                self._completed_store_tasks[task_id] = L2StoreResult(False, 0)
                 disabled = True
             else:
                 disabled = False
@@ -477,7 +478,7 @@ class S3L2Adapter(L2AdapterInterface):
         )
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
@@ -876,8 +877,11 @@ class S3L2Adapter(L2AdapterInterface):
 
         self._record_connection_outcome(last_error if not success else None)
 
+        bytes_transferred = sum(newly_stored_sizes)
         with self._lock:
-            self._completed_store_tasks[task_id] = success
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
 
         if newly_stored_keys:
             self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
