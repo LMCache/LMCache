@@ -196,7 +196,7 @@ def store_keys(
         block_ids = gpu_block_ids[start:end]
         future = client.submit_request(
             RequestType.STORE,
-            [key, instance_id, block_ids, event.ipc_handle()],
+            [key, instance_id, [block_ids], event.ipc_handle()],
             get_response_class(RequestType.STORE),
         )
         result = future.to_cuda_future().result(timeout=timeout)
@@ -219,7 +219,7 @@ def retrieve_keys(
         block_ids = gpu_block_ids[start:end]
         future = client.submit_request(
             RequestType.RETRIEVE,
-            [key, instance_id, block_ids, event.ipc_handle(), 0],
+            [key, instance_id, [block_ids], event.ipc_handle(), 0],
             get_response_class(RequestType.RETRIEVE),
         )
         result = future.to_cuda_future().result(timeout=timeout)
@@ -343,6 +343,7 @@ def registered_instance(
             1,
             EngineType.VLLM,
             {"inference_engine_logical_block_size": 16},
+            [],
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
@@ -401,6 +402,7 @@ def test_register_unregister_kv_cache(
             1,
             EngineType.VLLM,
             {"inference_engine_logical_block_size": 16},
+            [],
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
     )
@@ -446,6 +448,52 @@ def test_store_and_lookup(
     non_existent_keys = [create_cache_key(i + 1000) for i in range(5)]
     lookup_result2 = lookup_all(client, non_existent_keys)
     assert lookup_result2 == 0, "Non-existent keys should not be found"
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="Store requires CUDA",
+)
+def test_store_fails_closed_on_incomplete_block_ids(
+    client: MessageQueueClient,
+    client_context: ClientContext,
+    registered_instance: int,
+):
+    """An under-length block-id list skips the whole store (fail-closed).
+
+    Regression guard for the all-or-nothing store contract: a ``gpu_block_ids``
+    list too short to fully cover a chunk (e.g. a caller/protocol bug) must skip
+    the store entirely (returning ``False``) and commit nothing — the previous
+    fail-open path raised internally but then ``finish_write``-committed the
+    reservation anyway, turning the key into a retrievable garbage entry (lookup
+    would find it).
+
+    The committed-state assertion is on a *miss* (lookup == 0), which is robust
+    to this harness's known store->lookup race (that race can only turn a true
+    hit into a miss, never the reverse).
+    """
+    # One-chunk key (256 tokens == BLOCKS_PER_KEY blocks) but only half the
+    # block IDs needed, so the chunk is not fully covered.
+    key = create_cache_key(90001)
+    event = torch.cuda.Event(interprocess=True)
+    event.record()
+
+    result = (
+        client.submit_request(
+            RequestType.STORE,
+            [
+                key,
+                registered_instance,
+                [list(range(BLOCKS_PER_KEY // 2))],
+                event.ipc_handle(),
+            ],
+            get_response_class(RequestType.STORE),
+        )
+        .to_cuda_future()
+        .result(timeout=DEFAULT_TIMEOUT)
+    )
+    assert result is False, "Store should fail closed (skip) on a short list"
+    assert lookup_all(client, [key]) == 0, "An uncovered chunk must not be committed"
 
 
 @pytest.mark.skipif(
