@@ -47,9 +47,9 @@ async def run_script(request: Request):
             try:
                 module = importlib.import_module(module_name)
                 allowed_modules[module_name] = module
-                logger.info(f"Imported allowed module: {module_name}")
+                logger.info("Imported allowed module: %s", module_name)
             except ImportError as e:
-                logger.warning(f"Failed to import module {module_name}: {e}")
+                logger.warning("Failed to import module %s: %s", module_name, e)
 
         # Create custom __import__ function that only allows configured modules
         def restricted_import(name, globals=None, locals=None, fromlist=(), level=0):

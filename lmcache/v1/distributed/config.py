@@ -8,6 +8,7 @@ Configuration for distributed storage manager
 from dataclasses import dataclass, field
 from typing import Literal
 import argparse
+import os
 
 # First Party
 from lmcache import torch_dev
@@ -38,6 +39,9 @@ class L1MemoryManagerConfig:
 
     align_bytes: int = field(default=0x1000)
     """ The alignment size in bytes. Default is 4KB. """
+
+    shm_name: str = field(default_factory=lambda: f"lmcache_l1_pool_{os.getpid()}")
+    """ POSIX shared-memory segment name for L1 pool. Empty disables SHM. """
 
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
@@ -109,6 +113,9 @@ class StorageManagerConfig:
 
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
+
+    periodic_notifier_interval_ms: int = 5
+    """ Interval (ms) for the periodic event notifier heartbeat. """
 
 
 def add_storage_manager_args(
@@ -251,6 +258,12 @@ def add_storage_manager_args(
         default=8,
         help="Maximum number of concurrent prefetch requests. Default is 8.",
     )
+    policy_group.add_argument(
+        "--periodic-notifier-interval-ms",
+        type=int,
+        default=5,
+        help="Interval in ms for the periodic event notifier heartbeat. Default is 5.",
+    )
 
     # Adapter config
     add_l2_adapters_args(parser)
@@ -315,6 +328,7 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
 
 

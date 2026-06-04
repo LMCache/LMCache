@@ -41,6 +41,13 @@ class Bitmap {
   void set(size_t index);
 
   /**
+   * @brief set every bit in ``indices`` to 1 (positions >= size ignored).
+   *
+   * @param indices Bit positions to set.
+   */
+  void batched_set(const std::vector<size_t>& indices);
+
+  /**
    * @brief clear the bit at the specified index to 0.
    */
   void clear(size_t index);

@@ -164,6 +164,7 @@ def _common_cpp_extensions(
 
     storage_manager_sources = [
         "csrc/storage_manager/bitmap.cpp",
+        "csrc/storage_manager/periodic_event_notifier.cpp",
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
         "csrc/storage_manager/utils.cpp",
@@ -326,6 +327,10 @@ def sycl_extension() -> tuple[list, dict]:
     sycl_sources = [
         "csrc/sycl/pybind_sycl.cpp",
         "csrc/sycl/mem_kernels_sycl.cpp",
+        "csrc/sycl/cal_cdf_sycl.cpp",
+        "csrc/sycl/pos_kernels_sycl.cpp",
+        "csrc/sycl/ac_enc_sycl.cpp",
+        "csrc/sycl/ac_dec_sycl.cpp",
     ]
     # Use CppExtension with DPC++ compiler (set CXX=icpx before invoking).
     # The -fsycl flag enables SYCL compilation and linking.

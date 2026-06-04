@@ -49,6 +49,7 @@ class RequestType(enum.Enum):
     FREE_LOOKUP_LOCKS = enum.auto()
     END_SESSION = enum.auto()
     REGISTER_KV_CACHE_NON_GPU_CONTEXT = enum.auto()
+    UNREGISTER_KV_CACHE_NON_GPU_CONTEXT = enum.auto()
     PREPARE_STORE = enum.auto()
     COMMIT_STORE = enum.auto()
     PREPARE_RETRIEVE = enum.auto()

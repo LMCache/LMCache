@@ -42,14 +42,19 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
-    transfer_mode: str = "gpu"
+    supported_transfer_mode: str = "auto"
     """Transfer mode: 'gpu' for GPU-based IPC transfer (STORE/RETRIEVE),
-    'non_gpu' for non-GPU-based transfer (PREPARE/COMMIT)."""
+    'non_gpu' for non-GPU-based transfer (PREPARE/COMMIT), or 'auto' to
+    enable both."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
     )
     """Runtime plugin configuration (locations + extra config)."""
+
+    shm_name: str | None = None
+    """SHM segment name for non-GPU KV transfer.
+    None: auto-allocate (default). "": force pickle. Other: use that name."""
 
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
@@ -157,13 +162,14 @@ def add_mp_server_args(
         "'blend' when cacheblend is enabled. Default is 'default'.",
     )
     mp_group.add_argument(
-        "--transfer-mode",
+        "--supported-transfer-mode",
         type=str,
-        default="gpu",
-        choices=["gpu", "non_gpu"],
-        help="Transfer mode: 'gpu' for GPU-based IPC transfer "
+        default="auto",
+        choices=["gpu", "non_gpu", "auto"],
+        help="Supported transfer mode: 'gpu' for GPU-based IPC transfer "
         "(STORE/RETRIEVE), 'non_gpu' for non-GPU-based transfer "
-        "(PREPARE/COMMIT). Default is 'gpu'.",
+        "(PREPARE/COMMIT), or 'auto' to enable both transfer paths. "
+        "Default is 'auto'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -181,6 +187,15 @@ def add_mp_server_args(
         "plugins via LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG. "
         'Example: \'{"plugin.frontend.heartbeat_url": '
         '"http://localhost:5000/heartbeat"}\'',
+    )
+    mp_group.add_argument(
+        "--shm-name",
+        type=str,
+        default=None,
+        help="SHM segment name for non-GPU KV transfer. "
+        "Default (not specified): auto-allocate. "
+        'Set to "" to force pickle path (disable SHM). '
+        "Set to a name to use that specific SHM segment.",
     )
     mp_group.add_argument(
         "--script-allowed-imports",
@@ -221,11 +236,12 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
-        transfer_mode=args.transfer_mode,
+        supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,
         ),
+        shm_name=args.shm_name,
         script_allowed_imports=args.script_allowed_imports or [],
     )
 
