@@ -214,19 +214,30 @@ def _default_key(tokens: int = 8) -> "IPCCacheEngineKey":
     )
 
 
-def test_wrap_kv_caches_wraps_all_tensors(monkeypatch: Any) -> None:
+def test_wrap_kv_caches_wraps_all_tensors() -> None:
     """Verify wrap_kv_caches wraps all provided KV tensors."""
     # First Party
     from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
+    from lmcache.v1.platform import _registry as platform_registry
 
     kv_caches = _make_kv_caches()
-    monkeypatch.setattr(
-        adapter_mod,
-        "CudaIPCWrapper",
-        lambda tensor: ("wrapped", tensor),
-    )
+    # ``wrap_kv_caches`` dispatches through ``platform_registry``: each
+    # accelerator self-registers a wrapper factory keyed by
+    # ``tensor.device.type``. Override the relevant entries through the
+    # registry's documented API (snapshot + register + restore on
+    # teardown) instead of poking the adapter's private helper.
+    saved = platform_registry.snapshot()
 
-    wrapped = adapter_mod.wrap_kv_caches(kv_caches)
+    def _fake_factory(tensor: Any) -> tuple[str, Any]:
+        return ("wrapped", tensor)
+
+    try:
+        for device_type in {t.device.type for t in kv_caches.values()}:
+            platform_registry.register_kv_wrapper(device_type, _fake_factory)
+        wrapped = adapter_mod.wrap_kv_caches(kv_caches)
+    finally:
+        platform_registry.restore(saved)
+
     assert len(wrapped) == len(kv_caches)
 
 
@@ -240,6 +251,72 @@ def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
 
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})
     assert isinstance(context, DataTransferContext)
+
+
+def test_resolve_extra_config_default_mp_transfer_mode_is_auto() -> None:
+    """Without override the resolved mp_transfer_mode must be ``auto``."""
+    # First Party
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        ExtraConfigDefault,
+        _resolve_extra_config,
+    )
+
+    cfg = _resolve_extra_config(None)
+    assert cfg[ExtraConfigDefault.mp_transfer_mode.name] == "auto"
+
+
+def test_resolve_extra_config_overrides_mp_transfer_mode() -> None:
+    """``lmcache.mp.mp_transfer_mode`` override flows through unchanged."""
+    # First Party
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        ExtraConfigDefault,
+        _resolve_extra_config,
+    )
+
+    cfg = _resolve_extra_config({"lmcache.mp.mp_transfer_mode": "data"})
+    assert cfg[ExtraConfigDefault.mp_transfer_mode.name] == "data"
+
+
+def test_create_transfer_context_force_data_mode() -> None:
+    """``mode='data'`` must always pick DataTransferContext, even for CUDA."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        DataTransferContext,
+        MPTransferMode,
+        create_transfer_context,
+    )
+
+    context = create_transfer_context(
+        {"layer_0": torch.randn(2, 2)}, mode=MPTransferMode.DATA
+    )
+    assert isinstance(context, DataTransferContext)
+
+
+def test_create_transfer_context_invalid_mode_raises() -> None:
+    """Unknown mode strings must raise a clear ValueError."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+
+    with pytest.raises(ValueError, match="Invalid MP transfer mode"):
+        create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="bogus")
+
+
+def test_create_transfer_context_handle_mode_unsupported_device_raises(
+    monkeypatch: Any,
+) -> None:
+    """``mode='handle'`` must raise when no wrapper factory exists for device."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import create_transfer_context
+    from lmcache.v1.platform import _registry as platform_registry
+
+    snapshot = platform_registry.snapshot()
+    try:
+        # Drop every registered factory so 'cpu' can never be resolved.
+        platform_registry.restore({"kv_wrapper": {}, "availability": {}})
+        with pytest.raises(ValueError, match="not supported for device type"):
+            create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="handle")
+    finally:
+        platform_registry.restore(snapshot)
 
 
 @pytest.mark.parametrize(

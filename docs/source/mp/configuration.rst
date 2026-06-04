@@ -445,9 +445,15 @@ On the vLLM side, specify the LMCache server host and port via the
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
 
+Connector ``extra_config`` Keys
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All connector-level options are passed through
+``kv_connector_extra_config`` and use the ``lmcache.mp.`` prefix.
+
 .. list-table::
    :header-rows: 1
-   :widths: 35 20 45
+   :widths: 30 15 55
 
    * - Key
      - Default
@@ -468,6 +474,12 @@ On the vLLM side, specify the LMCache server host and port via the
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.mp_transfer_mode``
+     - ``auto``
+     - Routing mode for the worker -> server transfer context. One of
+       ``auto`` (CUDA -> handle, others -> data), ``handle`` (force IPC /
+       SHM zero-copy), or ``data`` (force worker-side gather/scatter copy).
+       Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
 
 Environment Variables
 ---------------------
