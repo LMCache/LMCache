@@ -78,7 +78,9 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def from_vllm_config(vllm_config: "VllmConfig") -> ParallelStrategy:
+def build_parallel_strategy_from_vllm_config(
+    vllm_config: "VllmConfig",
+) -> ParallelStrategy:
     """Build a ParallelStrategy from a vLLM config.
 
     Centralises the (vllm_config -> KV parallel geometry) mapping.
@@ -433,7 +435,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
-        parallel_strategy = from_vllm_config(vllm_config)
+        parallel_strategy = build_parallel_strategy_from_vllm_config(vllm_config)
 
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = LMCacheMPSchedulerAdapter(
