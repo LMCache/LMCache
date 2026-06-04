@@ -27,8 +27,11 @@ caller-provided load buffers during prefetch.
 - ``load_checkpoint_on_init``: Load an existing on-device metadata checkpoint
   during startup (default ``true``). Set to ``false`` to start with an empty
   in-memory index instead.
-- ``blkdiscard_on_init``: Issue a ``BLKDISCARD`` ioctl to zero/trim the full
-  device range on startup (default ``false``). Requires
+- ``blkdiscard_on_init``: Issue a Linux ``BLKDISCARD`` ioctl to discard/TRIM
+  the full device range on startup (default ``false``). This is useful when
+  starting with an empty in-memory index because it tells the storage device
+  that bytes left by a previous run are no longer in use. It is a best-effort
+  storage hint rather than a secure erase or guaranteed zero-fill. Requires
   ``load_checkpoint_on_init=false``; combining the two raises an error. The
   discard is split automatically using the kernel ``discard_max_bytes`` limit
   when available.
