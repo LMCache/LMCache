@@ -9,6 +9,7 @@
 #include <aerospike/as_status.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -52,6 +53,12 @@ std::string status_message(as_status status, const as_error& err) {
   return oss.str();
 }
 
+// `as_record_get_int64` requires a default to return when a bin is absent or
+// not an int64, so a fallback is unavoidable at the API level. This helper also
+// treats non-positive values as "use the fallback" because the count/size bins
+// written by put_meta_record() are always >= 1 on a healthy record. Integrity-
+// critical fields (e.g. total size) are validated explicitly by the caller and
+// must not rely on this fallback to mask a missing bin.
 int64_t positive_int_bin(as_record* rec, const char* bin, int64_t fallback) {
   int64_t value = as_record_get_int64(rec, bin, fallback);
   return value > 0 ? value : fallback;
@@ -194,9 +201,10 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
 
   uint32_t nseg = static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
   size_t seg_b = static_cast<size_t>(positive_int_bin(rec, kBinSegBytes, len));
-  size_t total_b =
-      static_cast<size_t>(positive_int_bin(rec, kBinTotalBytes, len));
-  if (total_b != len) {
+  // Read the stored total directly with a sentinel so a missing or corrupt bin
+  // fails the integrity check instead of silently matching `len`.
+  int64_t total_raw = as_record_get_int64(rec, kBinTotalBytes, -1);
+  if (total_raw < 0 || static_cast<size_t>(total_raw) != len) {
     as_record_destroy(rec);
     throw std::runtime_error("meta record total size mismatch");
   }
@@ -472,6 +480,12 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
                       static_cast<int64_t>(std::time(nullptr)));
   as_record_set_bool(&rec, kBinPin, false);
   if (inline_buf != nullptr) {
+    // The inline payload path is only taken for single-record writes, where
+    // do_single_set() already guaranteed (via plan()) that
+    // total_bytes <= max_record_bytes_ -- the discovered server record cap
+    // minus a safety margin, which is far below UINT32_MAX. The narrowing cast
+    // below is therefore safe; assert the invariant in case that ever changes.
+    assert(total_bytes <= max_record_bytes_);
     as_record_set_raw(&rec, kBinPayload,
                       reinterpret_cast<const uint8_t*>(inline_buf),
                       static_cast<uint32_t>(total_bytes));

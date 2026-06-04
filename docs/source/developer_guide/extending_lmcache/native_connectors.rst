@@ -640,6 +640,23 @@ LMCache ships an optional in-tree Aerospike native connector (same
    source .deps/aerospike-client-c.env
    BUILD_AEROSPIKE=1 pip install -e .
 
+The ``aerospike-client-c.env`` file simply points the build at the C client
+headers and shared libraries you unpacked into ``.deps/``. Adjust the paths to
+match where the client was installed. Example:
+
+.. code-block:: bash
+
+   # .deps/aerospike-client-c.env
+   export AEROSPIKE_INCLUDE_DIR="${PWD}/.deps/aerospike-install/usr/include"
+   export AEROSPIKE_LIBRARY_DIR="${PWD}/.deps/aerospike-install/usr/lib"
+   # Needed at build and runtime so the loader can find libaerospike (and
+   # libyaml if you built it locally):
+   export LD_LIBRARY_PATH="${AEROSPIKE_LIBRARY_DIR}:${PWD}/.deps/libyaml-install/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+
+Setting ``AEROSPIKE_INCLUDE_DIR`` is enough to enable the extension, so
+``BUILD_AEROSPIKE=1`` is optional once the env file is sourced. Multiple include
+or library directories can be passed as ``;``-separated lists.
+
 **MP mode:**
 
 .. code-block:: bash

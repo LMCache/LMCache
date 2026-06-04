@@ -3,8 +3,21 @@ name: Aerospike integration
 
 on:
   push:
-    branches: [aerospike-native-backend]
+    branches:
+      - "dev"
+      - "release-**"
+    paths:
+      - "csrc/storage_backends/aerospike/**"
+      - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
+      - "lmcache/v1/storage_backend/native_clients/aerospike_client.py"
+      - "setup.py"
+      - "tests/aerospike_ce.conf.template"
+      - "tests/v1/distributed/test_aerospike_*"
+      - ".github/workflows/aerospike_integration.yml"
   pull_request:
+    branches:
+      - "dev"
+      - "release-**"
     paths:
       - "csrc/storage_backends/aerospike/**"
       - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
