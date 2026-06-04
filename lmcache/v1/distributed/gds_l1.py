@@ -84,6 +84,15 @@ _SLAB_FILENAME = "lmcache_gds_slab.bin"
 _INDEX_FILENAME = "lmcache_gds_index.json"
 _INDEX_VERSION = 1
 _CUFILE_ALIGNMENT = 4096
+# How many cuFile submissions to accumulate before recording a completion
+# event and draining the finished ones (see
+# ``GdsL1Backend._record_submission``). Change this value to tune the
+# trade-off: smaller = tighter memory bound but more frequent event
+# records on the submit hot path; larger = fewer events but a larger live
+# ``Submission`` set. 64 (~1.6 retrieves of 39 chunks) keeps the live set
+# in the low hundreds — negligible for GC — at negligible event overhead;
+# anything in ~32-256 behaves essentially the same.
+_SUBMISSION_CHECKPOINT_EVERY = 64
 _TORCH_DTYPE_TO_STR = {
     torch.half: "F16",
     torch.bfloat16: "BF16",
@@ -906,16 +915,41 @@ class GdsL1Backend:
         # ``cudaMemcpyAsync`` — so stream-ordering naturally
         # serialises the per-batch ``cuFile reads → kernel`` chain
         # without needing CUDA-event barriers.
-        self._registered_stream: Optional[int] = None
+        #
+        # We keep the same registered stream in two forms, set together
+        # in ``ensure_stream_registered``:
+        #  - ``_registered_stream``: the torch ``Stream`` object, used by
+        #    torch APIs (recording completion events in
+        #    ``_checkpoint_submissions_locked``).
+        #  - ``_registered_stream_handle``: the raw ``CUstream`` int, used
+        #    by cuFile's C API (``cuFileReadAsync`` / ``WriteAsync`` /
+        #    ``cuFileStreamRegister``).
+        self._registered_stream: Optional[torch.Stream] = None
+        self._registered_stream_handle: Optional[int] = None
         self._stream_lock = threading.Lock()
-        # cuFileReadAsync/WriteAsync writes through host-side
-        # ctypes storage held by each Submission. The store has to
-        # outlive the async op — cuFile dereferences these pointers
-        # when the CUDA stream eventually executes the op, not at
-        # submit time. We keep every Submission alive for the
-        # backend's lifetime; each one is ~40 bytes so even a
-        # million-chunk run is sub-megabyte.
-        self._pending_submissions: list[ca.Submission] = []
+        # cuFileReadAsync/WriteAsync write through host-side ctypes
+        # storage held by each Submission. That storage must outlive the
+        # async op — cuFile dereferences the pointers when the CUDA
+        # stream eventually executes the op, not at submit time. So a
+        # Submission can only be released once the stream has *passed*
+        # the op.
+        #
+        # We must not keep every Submission for the backend's lifetime:
+        # while each is small in bytes, the count grows by one per
+        # cuFile op forever, and Python's cyclic GC walks every tracked
+        # object on each gen-2 collection. A long-lived server therefore
+        # sees gen-2 pauses that grow with uptime (hundreds of ms),
+        # which show up as occasional ~3-4x retrieve-latency outliers.
+        #
+        # Instead we batch submissions and gate their release on a CUDA
+        # event recorded on the cuFile stream: once the event reports
+        # complete (non-blocking query), every submission enqueued
+        # before it is done and can be dropped. This keeps the live set
+        # bounded to the in-flight batches without ever synchronizing on
+        # the hot path.
+        self._uncommitted_submissions: list[ca.Submission] = []
+        self._inflight_submissions: list[tuple[torch.Event, list[ca.Submission]]] = []
+        self._ops_since_checkpoint = 0
         self._submissions_lock = threading.Lock()
         if self.use_gds:
             self._open_and_register_slab(config.use_direct_io)
@@ -1068,6 +1102,55 @@ class GdsL1Backend:
         """Return a slab region without an idex."""
         self._address_manager.free(memory_obj.slab_offset, memory_obj.size)
 
+    def _record_submission(self, sub: "ca.Submission") -> None:
+        """Track one in-flight cuFile submission, draining completed ones.
+
+        The ``Submission``'s ctypes storage must outlive the stream op,
+        so submissions are accumulated and only released once a CUDA
+        event recorded after them on the cuFile stream reports complete.
+        A checkpoint (event record + non-blocking drain) is taken every
+        ``_SUBMISSION_CHECKPOINT_EVERY`` ops, keeping the live set
+        bounded to a few in-flight batches instead of growing for the
+        backend's lifetime (which would inflate Python's gen-2 GC pause).
+
+        Args:
+            sub: The submission returned by ``read_async`` /
+                ``write_async``.
+        """
+        with self._submissions_lock:
+            self._uncommitted_submissions.append(sub)
+            self._ops_since_checkpoint += 1
+            if self._ops_since_checkpoint >= _SUBMISSION_CHECKPOINT_EVERY:
+                self._checkpoint_submissions_locked()
+
+    def _checkpoint_submissions_locked(self) -> None:
+        """Close the current submission batch and release completed ones.
+
+        Records a CUDA event on the registered cuFile stream that marks
+        the point after every currently-uncommitted submission, then
+        drops any earlier batch whose event has already completed. Uses
+        a non-blocking ``query()`` so the hot path never synchronizes.
+
+        Must be called while holding ``self._submissions_lock``.
+        """
+        if self._uncommitted_submissions:
+            event = torch_dev.Event()
+            # Record on the exact stream the cuFile ops were enqueued on;
+            # event completion then implies those ops have executed.
+            if self._registered_stream is not None:
+                event.record(self._registered_stream)
+            else:
+                event.record()
+            self._inflight_submissions.append((event, self._uncommitted_submissions))
+            self._uncommitted_submissions = []
+        self._ops_since_checkpoint = 0
+        # Drop batches whose event has completed (stream passed it).
+        self._inflight_submissions = [
+            (event, subs)
+            for (event, subs) in self._inflight_submissions
+            if not event.query()
+        ]
+
     def slab_read(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
     ) -> None:
@@ -1092,7 +1175,7 @@ class GdsL1Backend:
             return
         if self._slab_handle is None:
             raise RuntimeError("GdsL1Backend.slab_read: slab handle not open")
-        if self._registered_stream is None:
+        if self._registered_stream_handle is None:
             raise RuntimeError(
                 "GdsL1Backend.slab_read: cuFile stream not registered; "
                 "call register_gpu_buffer first"
@@ -1102,10 +1185,9 @@ class GdsL1Backend:
             size,
             slab_offset,
             dev_offset,
-            self._registered_stream,
+            self._registered_stream_handle,
         )
-        with self._submissions_lock:
-            self._pending_submissions.append(sub)
+        self._record_submission(sub)
 
     def slab_write(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
@@ -1125,7 +1207,7 @@ class GdsL1Backend:
             return
         if self._slab_handle is None:
             raise RuntimeError("GdsL1Backend.slab_write: slab handle not open")
-        if self._registered_stream is None:
+        if self._registered_stream_handle is None:
             raise RuntimeError(
                 "GdsL1Backend.slab_write: cuFile stream not registered; "
                 "call register_gpu_buffer first"
@@ -1135,10 +1217,9 @@ class GdsL1Backend:
             size,
             slab_offset,
             dev_offset,
-            self._registered_stream,
+            self._registered_stream_handle,
         )
-        with self._submissions_lock:
-            self._pending_submissions.append(sub)
+        self._record_submission(sub)
 
     def close(self) -> None:
         """Sync stream, persist index, deregister cuFile state, close slab."""
@@ -1146,14 +1227,21 @@ class GdsL1Backend:
             torch_dev.synchronize(
                 device=self.scratch_allocator._buffers[0].device  # noqa: SLF001
             )
+        # The synchronize above drains the stream, so every outstanding
+        # submission's op has executed and the ctypes storage is free.
+        with self._submissions_lock:
+            self._uncommitted_submissions = []
+            self._inflight_submissions = []
+            self._ops_since_checkpoint = 0
         self._persist_index()
         self.scratch_allocator.deregister_gpu_buffer()
         with self._stream_lock:
-            if self._registered_stream is not None and self.use_gds:
+            if self._registered_stream_handle is not None and self.use_gds:
                 try:
-                    ca.deregister_stream(self._registered_stream)
+                    ca.deregister_stream(self._registered_stream_handle)
                 except Exception as e:
                     logger.warning("GdsL1Backend.close: deregister_stream: %s", e)
+                self._registered_stream_handle = None
                 self._registered_stream = None
         if self._slab_handle is not None:
             try:
@@ -1190,11 +1278,13 @@ class GdsL1Backend:
         if not self.use_gds:
             return
         with self._stream_lock:
-            if self._registered_stream is not None:
+            if self._registered_stream_handle is not None:
                 return
-            raw_stream = torch_dev.current_stream().cuda_stream
+            current_stream = torch_dev.current_stream()
+            raw_stream = current_stream.cuda_stream
             ca.register_stream(raw_stream)
-            self._registered_stream = raw_stream
+            self._registered_stream_handle = raw_stream
+            self._registered_stream = current_stream
 
     def get_hot_cache_size(self) -> int:
         """Number of resident keys. Used by tests + ``gds-check``."""
