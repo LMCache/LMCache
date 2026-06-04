@@ -40,7 +40,7 @@ steps:
       - label: ":compression: hma_lm_eval"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval
         timeout_in_minutes: 40
-        env: { MODEL: "google/gemma-3-4b-it", HF_TOKEN: "${HF_TOKEN}" }
+        env: { MODEL: "google/gemma-3-4b-it", HF_TOKEN: "${HF_TOKEN}", ENFORCE_EAGER: "1" }
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
@@ -62,6 +62,10 @@ steps:
           SCORE_TOLERANCE: "0.05"
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.85"
+          ENFORCE_EAGER: "1"
+          # 31B weights are large; allow longer for download + load before the
+          # readiness probe gives up (other models keep the 300s default).
+          MAX_WAIT_SECONDS: "400"
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
@@ -83,6 +87,7 @@ steps:
           SCORE_TOLERANCE: "0.05"
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.4"
+          ENFORCE_EAGER: "1"
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]

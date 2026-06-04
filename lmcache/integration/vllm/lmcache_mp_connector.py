@@ -351,18 +351,16 @@ class LMCacheMPRequestMetadata:
             same token range expressed in that group's own block size.
 
         Raises:
-            ValueError: If a group's block size is not a positive multiple of
-                ``vllm_block_size``, or if ``start``/``end`` do not align to a
-                group's per-group block boundary.
+            ValueError: If ``start``/``end`` do not align to a group's per-group
+                block boundary. (That each group's block size is a positive
+                multiple of ``vllm_block_size`` is validated once in
+                ``LMCacheMPConnector.__init__``.)
         """
+        # ``block_size % vllm_block_size == 0`` is validated once at connector
+        # construction (see ``LMCacheMPConnector.__init__``), so here we only
+        # guard the per-call range alignment.
         sliced: list[list[int]] = []
         for engine_group_idx, block_size in enumerate(group_block_sizes):
-            if block_size <= 0 or block_size % vllm_block_size != 0:
-                raise ValueError(
-                    f"group {engine_group_idx} block size {block_size} must be "
-                    f"a positive multiple of the canonical block size "
-                    f"{vllm_block_size}"
-                )
             k = block_size // vllm_block_size
             if start % k != 0 or end % k != 0:
                 raise ValueError(
@@ -642,6 +640,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self._group_block_sizes: list[int] = [
             group.kv_cache_spec.block_size for group in vllm_groups
         ] or [self.vllm_block_size]
+        # Per-group slicing maps a canonical block index to a per-group index by
+        # dividing by ``block_size // vllm_block_size``, which assumes each
+        # group's block size is a positive multiple of the canonical
+        # ``vllm_block_size``. Validate once here (introduced by PR #3521) so
+        # the per-call slice path can rely on it.
+        for engine_group_idx, block_size in enumerate(self._group_block_sizes):
+            if block_size <= 0 or block_size % self.vllm_block_size != 0:
+                raise ValueError(
+                    f"group {engine_group_idx} block size {block_size} must be "
+                    f"a positive multiple of the canonical block size "
+                    f"{self.vllm_block_size}"
+                )
 
     @property
     def role(self) -> KVConnectorRole:

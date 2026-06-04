@@ -75,18 +75,11 @@ def create_group_views_from_vllm(
         if kv_cache_config is not None
         else ()
     )
-    # vLLM lists every KV-cache-*owning* layer in exactly one engine group.
-    # Layers absent from all groups are cross-layer KV-sharing layers (e.g.
-    # google/gemma-4-E4B-it): vLLM points them at a target layer's KV tensor
-    # (``kv_caches[layer] = kv_caches[target]``), so their KV physically lives
-    # in the target owner's blocks. Storing/retrieving the owner therefore
-    # already covers them, and they must NOT form their own LMCache group:
-    # doing so duplicates work and -- when a shared layer's block size differs
-    # from the group it would otherwise default into -- corrupts the per-group
-    # block-id counts (the server would expect more block IDs than the engine
-    # provides for that group). We tag such layers with EXCLUDED_ENGINE_GROUP
-    # so ``group_layers_by_identity`` skips them. ``None`` (no engine groups)
-    # keeps single-group (non-hybrid) behavior where every layer is grouped.
+    # Layers absent from every engine group's ``layer_names`` are cross-layer
+    # KV-sharing layers (e.g. google/gemma-4-E4B-it): vLLM aliases them to a
+    # target owner's KV tensor, so the owner's group already covers them. Tag
+    # them EXCLUDED_ENGINE_GROUP so they form no group of their own (a
+    # wrong-block-size group would corrupt the per-group block-id counts).
     per_layer_group_idx: list[int] | None = None
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers

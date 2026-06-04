@@ -51,6 +51,15 @@ if [ -n "$ATTENTION_BACKEND" ] && [ "$ATTENTION_BACKEND" != "auto" ]; then
     ATTENTION_BACKEND_ARG="--attention-backend $ATTENTION_BACKEND"
 fi
 
+# Optionally run vLLM in eager mode (skip CUDA graph capture) for both servers.
+# Graph capture dominates startup for large models; the HMA correctness tests do
+# not need graphs, so enabling this keeps vLLM from timing out during launch.
+# Set ENFORCE_EAGER=1 (or true) to enable.
+ENFORCE_EAGER_ARG=""
+if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
+    ENFORCE_EAGER_ARG="--enforce-eager"
+fi
+
 # Store PIDs in a file so cleanup.sh can find them
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 > "$PID_FILE"
@@ -96,6 +105,7 @@ vllm serve "$MODEL" \
     --port "$vllm_port" \
     --no-async-scheduling \
     --max-model-len auto \
+    $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
@@ -120,6 +130,7 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
         --port "$vllm_baseline_port" \
         --no-async-scheduling \
         --max-model-len auto \
+        $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
         > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 

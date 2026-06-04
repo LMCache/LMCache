@@ -328,22 +328,11 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
-            # The inference-engine logical block size is *per group*, not a
-            # single global value. A hybrid model can give each KV cache group
-            # its own ``block_size``: e.g. ``google/gemma-4-E4B-it`` has full-
-            # attention layers with a larger head_dim than its sliding-window
-            # layers, so vLLM unifies the physical page size by *doubling* the
-            # sliding-window block_size (sliding=32, full=16) while
-            # ``cache_config.block_size`` (the global hint) stays at the GCD
-            # (16). For such a group the registered physical slot count ``bs``
-            # equals the group's own block_size and is *larger* than the global
-            # hint, so passing the global hint would make
-            # ``_derive_compression_metadata`` reject it (logical < bs). Using
-            # ``max(global_hint, bs)`` recovers the per-group logical block
-            # size: it equals ``bs`` for uncompressed groups (compress_ratio=1,
-            # e.g. gemma-4) and the global engine block size for compressed
-            # groups where ``bs < global_hint`` (compress_ratio>1, e.g. the
-            # DeepSeek V4 latent/indexer caches).
+            # Per-group logical block size: a hybrid model can give each group
+            # its own block_size larger than the global GCD hint (e.g. gemma-4
+            # sliding=32, full=16, hint=16). ``max(hint, bs)`` yields
+            # compress_ratio=1 for such uncompressed groups and the engine block
+            # size for compressed groups (bs < hint, e.g. DeepSeek V4).
             global_logical = self.inference_engine_logical_block_size_
             group_logical_block_size = (
                 max(global_logical, bs) if global_logical is not None else None
