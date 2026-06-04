@@ -34,9 +34,6 @@ import ctypes
 import os
 
 # Third Party
-# The ``cufile`` Python package already loads libcufile.so via its
-# bindings module; reuse its loaded handle so we don't duplicate the
-# dlopen.
 from cufile.bindings import (
     CUfileError,
     cuFileDriverClose,
@@ -47,22 +44,7 @@ from cufile.bindings import (
 )
 import torch
 
-# --- Declare ctypes signatures for the async symbols ----------------
-#
-# Reference (cufile.h):
-#
-#   CUfileError_t cuFileReadAsync(
-#       CUfileHandle_t fh, void *bufPtr_base,
-#       size_t *size_p, off_t *file_offset_p, off_t *bufPtr_offset_p,
-#       ssize_t *bytes_read_p, CUstream stream);
-#
-#   CUfileError_t cuFileWriteAsync(
-#       CUfileHandle_t fh, void *bufPtr_base,
-#       size_t *size_p, off_t *file_offset_p, off_t *bufPtr_offset_p,
-#       ssize_t *bytes_write_p, CUstream stream);
-#
-#   CUfileError_t cuFileStreamRegister(CUstream stream, unsigned flags);
-#   CUfileError_t cuFileStreamDeregister(CUstream stream);
+# --- Declare ctypes signatures for the async symbols (see cufile.h) --
 
 
 def _declare_signatures() -> None:
@@ -101,11 +83,6 @@ def _declare_signatures() -> None:
 _declare_signatures()
 
 
-# Open the cuFile driver lazily on first ``register_buffer`` /
-# ``open AsyncHandle`` call. cuFile errors with 5043
-# (DRIVER_NOT_INITIALIZED) on any ``cuFileBufRegister`` /
-# ``cuFileHandleRegister`` before the driver is open. The driver is
-# process-global; opening it twice is harmless.
 _driver_opened = False
 
 

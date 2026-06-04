@@ -116,7 +116,7 @@ class TestSlabAddressManager:
 
     def test_allocate_aligns_up(self):
         sm = SlabAddressManager(total_size=64 * 1024)
-        # Request below the 4 KiB alignment rounds up.
+        # 100 bytes rounds up to 4 KiB.
         sm.allocate(100)
         assert sm.used_bytes() == 4096
 
@@ -133,20 +133,16 @@ class TestSlabAddressManager:
         c = sm.allocate(8192)
         sm.free(a, 8192)
         sm.free(c, 8192)
-        # Two disjoint free regions plus the tail: free_bytes = 16K + tail.
+        # Freeing the middle region coalesces all three.
         sm.free(b, 8192)
-        # Everything coalesced back to a single region.
         assert sm.used_bytes() == 0
-        # And the next big allocation should fit at offset 0.
         assert sm.allocate(64 * 1024) == 0
 
     def test_mark_used_carves_region(self):
         sm = SlabAddressManager(total_size=64 * 1024)
         sm.mark_used(8192, 4096)
-        # Allocation should skip past [8192, 12288).
+        # [0, 8192) too small for 16 KiB; first-fit lands at 12288.
         off = sm.allocate(16 * 1024)
-        # First-fit picks [0, 8192) which isn't big enough — moves on
-        # and picks the tail region.
         assert off == 12288
 
     def test_mark_used_rejects_overlap(self):
@@ -219,7 +215,7 @@ class TestGdsL1BackendIndex:
         )
         assert mo is not None
         assert mo.size == 4096
-        # Not yet recorded.
+        # Not in the index until record_entry.
         assert backend.lookup([key]) == [False]
         backend.record_entry(mo)
         assert backend.lookup([key]) == [True]
@@ -246,7 +242,7 @@ class TestGdsL1BackendIndex:
         assert resurrected.size == mo.size
 
     def test_oom_returns_none(self, gds_root, loop):
-        # Tiny slab — one 4 KiB chunk fits, the second must OOM.
+        # Slab sized to fit exactly one 4 KiB chunk.
         b = GdsL1Backend(
             _make_config(gds_root, slab_size_gb=4096 / (1 << 30)),
             loop=loop,
@@ -300,8 +296,7 @@ class TestGdsL1BackendPersistence:
         finally:
             b1.close()
 
-        # New backend over the same path — index loads, the region is
-        # still marked used, and lookup succeeds.
+        # Reopen over the same path.
         b2 = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
         try:
             assert b2.lookup([key]) == [True]
@@ -315,7 +310,7 @@ class TestGdsL1BackendPersistence:
             b2.close()
 
     def test_corrupt_index_starts_empty(self, gds_root, loop):
-        # Write a deliberately-broken index file.
+        # Write a corrupt index file before opening.
         with open(os.path.join(gds_root, "lmcache_gds_index.json"), "w") as f:
             f.write("not a json document")
         b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")

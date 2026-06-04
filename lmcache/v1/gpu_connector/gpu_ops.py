@@ -28,9 +28,6 @@ def lmcache_memcpy_async_h2d(
     """
     parent = memory_obj.parent()
     if isinstance(parent, GdsScratchAllocator):
-        # NVMe -> registered VRAM via cuFile DMA. memory_obj has no live
-        # in-memory body; the allocator computes dev_offset from
-        # gpu_buffer.data_ptr() relative to the registered base.
         if not isinstance(memory_obj, GdsMemoryObj):
             raise TypeError(
                 "GdsScratchAllocator parent requires a GdsMemoryObj, got "
@@ -83,9 +80,6 @@ def lmcache_memcpy_async_d2h(
     """
     parent = memory_obj.parent()
     if isinstance(parent, GdsScratchAllocator):
-        # Registered VRAM -> NVMe via cuFile DMA. Sizes are taken from
-        # memory_obj.meta, so gpu_buffer can be a slice of the
-        # registered staging buffer.
         if not isinstance(memory_obj, GdsMemoryObj):
             raise TypeError(
                 "GdsScratchAllocator parent requires a GdsMemoryObj, got "

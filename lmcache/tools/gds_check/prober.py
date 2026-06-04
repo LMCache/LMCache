@@ -219,8 +219,6 @@ def benchmark(
     )
     allocator.register_gpu_buffer(tmp_buf)
     try:
-        # Deterministic payload — content doesn't matter, just needs
-        # to be on the GPU so cuFile sees a registered source.
         pattern = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8, device="cuda:0")
 
         slot_views = [
@@ -333,18 +331,18 @@ def run_gds_check(
     if skip_verify and skip_bench:
         return
 
-    # Wipe the gds_path so verify/bench start fresh.
+    # Wipe gds_path.
     if os.path.isdir(gds_path):
         shutil.rmtree(gds_path)
     os.makedirs(gds_path, exist_ok=True)
 
-    # Slab must be big enough for the largest phase we'll run.
+    # Size the slab for the largest phase that will run.
     needed_bytes = max(
         small_num_chunks * small_chunk_bytes if not skip_bench else 0,
         large_num_chunks * large_chunk_bytes if not skip_bench else 0,
         small_chunk_bytes if not skip_verify else 0,
     )
-    # Round up to GiB and add 10% headroom for alignment padding.
+    # Round up to GiB with 10% headroom.
     slab_size_gb = max(1.0, (needed_bytes * 1.1) / (1 << 30))
 
     config = GdsL1Config(
@@ -362,9 +360,7 @@ def run_gds_check(
             print("--- VERIFY round-trip ---")
             verify_round_trip(backend, chunk_bytes=small_chunk_bytes)
             print("  PASS: bytes read back match the pattern.")
-            # Free the verify chunk so its slab region returns to the
-            # pool — otherwise the large-chunk bench can hit a stale
-            # allocation overlap.
+            # Free the verify chunk back to the slab pool.
             for k in list(backend._index.keys()):  # noqa: SLF001
                 mo = backend.create_memory_obj_from_index(k)
                 if mo is not None:
@@ -378,8 +374,7 @@ def run_gds_check(
                 chunk_bytes=small_chunk_bytes,
                 max_batch_size=4,
             )
-            # Free everything written by the small phase before the
-            # large phase, so the slab has room.
+            # Free the small phase's chunks back to the slab pool.
             for k in list(backend._index.keys()):  # noqa: SLF001
                 mo = backend.create_memory_obj_from_index(k)
                 if mo is not None:

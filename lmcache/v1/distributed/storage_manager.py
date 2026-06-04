@@ -77,12 +77,10 @@ def _start_background_loop() -> tuple[asyncio.AbstractEventLoop, threading.Threa
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
-        # Optional GDS L1 backend. Constructed before L1Manager so the
-        # manager can take it via its optional hook. The async metadata
-        # scan needs a running event loop; we own a small background
-        # one for the lifetime of the storage manager — torn down in
-        # ``close()``. CPU-pinned L1 path is unchanged when
-        # ``gds_l1_config is None``.
+        # Optional GDS L1 backend, built before L1Manager (which takes
+        # it via an optional hook). Owns a background event loop for the
+        # backend's async metadata scan, torn down in ``close()``.
+        # CPU-pinned path is unchanged when ``gds_l1_config is None``.
         self._gds_backend: GdsL1Backend | None = None
         self._gds_loop: asyncio.AbstractEventLoop | None = None
         self._gds_loop_thread: threading.Thread | None = None
@@ -807,10 +805,8 @@ class StorageManager:
 
         self._l1_manager.close()
 
-        # Tear down the GDS L1 asyncio loop after the L1 manager (which
-        # calls into the backend on close()). Order matters: backend
-        # closes during _l1_manager.close(); only then is it safe to
-        # stop the loop and join the thread.
+        # Tear down the GDS L1 loop after _l1_manager.close() (which
+        # closes the backend).
         if self._gds_loop is not None:
             self._gds_loop.call_soon_threadsafe(self._gds_loop.stop)
             if self._gds_loop_thread is not None:

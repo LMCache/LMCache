@@ -100,7 +100,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def _run(args: argparse.Namespace) -> None:
     """Dispatch into the prober implementation."""
     # First Party
-    # Lazy import — keeps `lmcache -h` fast on hosts without torch/libcufile.
     from lmcache.tools.gds_check.prober import run_gds_check
 
     run_gds_check(

@@ -84,14 +84,8 @@ _SLAB_FILENAME = "lmcache_gds_slab.bin"
 _INDEX_FILENAME = "lmcache_gds_index.json"
 _INDEX_VERSION = 1
 _CUFILE_ALIGNMENT = 4096
-# How many cuFile submissions to accumulate before recording a completion
-# event and draining the finished ones (see
-# ``GdsL1Backend._record_submission``). Change this value to tune the
-# trade-off: smaller = tighter memory bound but more frequent event
-# records on the submit hot path; larger = fewer events but a larger live
-# ``Submission`` set. 64 (~1.6 retrieves of 39 chunks) keeps the live set
-# in the low hundreds — negligible for GC — at negligible event overhead;
-# anything in ~32-256 behaves essentially the same.
+# cuFile submissions to accumulate before recording a completion event and
+# draining finished ones (see ``GdsL1Backend._record_submission``).
 _SUBMISSION_CHECKPOINT_EVERY = 64
 _TORCH_DTYPE_TO_STR = {
     torch.half: "F16",
@@ -220,8 +214,7 @@ class SlabAddressManager:
         self._total = total_size
         self._align = align
         self._lock = threading.Lock()
-        # Sorted list of (offset, size) free regions. Starts as one
-        # region covering the whole slab.
+        # Sorted (offset, size) free regions; starts covering the whole slab.
         self._free: list[tuple[int, int]] = [(0, total_size)]
         self._used = 0
 
@@ -523,14 +516,12 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
 
     def __init__(self, backend: "GdsL1Backend") -> None:
         self._backend = backend
-        # Parallel lists; index i describes one registered region.
-        # Sorted by ``_base_ptrs`` ascending so ``_resolve_buffer``
-        # can binary-search.
+        # Parallel lists, one entry per registered region, sorted by
+        # ``_base_ptrs`` ascending for ``_resolve_buffer``'s binary search.
         self._buffers: list[torch.Tensor] = []
         self._base_ptrs: list[int] = []
         self._nbytes: list[int] = []
-        # Cached scalar for callers that want a single representative
-        # pointer (e.g. logs). Not used in the hot path.
+        # Base pointer of the first registered region, for log messages.
         self._first_base_ptr: int = 0
 
     @property
@@ -608,14 +599,12 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                 )
         if self._backend.use_gds:
             ca.register_buffer(buffer)
-            # Stream registration is backend-owned (see backend.close
-            # for why) — the first registered buffer triggers it.
+            # Register the backend's CUDA stream on first buffer.
             self._backend.ensure_stream_registered()
             log_label = "cuFile"
         else:
             log_label = "POSIX fallback (no cuFile registration)"
-        # Insert keeping ``_base_ptrs`` sorted so ``_resolve_buffer``
-        # can use ``bisect``.
+        # Insert keeping ``_base_ptrs`` sorted for ``_resolve_buffer``.
         idx = bisect.bisect_left(self._base_ptrs, base)
         self._buffers.insert(idx, buffer)
         self._base_ptrs.insert(idx, base)
@@ -646,8 +635,7 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                     ca.deregister_buffer(buf)
                 except Exception as e:
                     logger.warning("deregister_gpu_buffer: %s", e)
-        # Stream stays registered for the backend's lifetime; the
-        # backend's close() deregisters it once on shutdown.
+        # The stream is deregistered in backend.close(), not here.
         self._buffers.clear()
         self._base_ptrs.clear()
         self._nbytes.clear()
@@ -778,8 +766,7 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                 "GdsScratchAllocator: no GPU buffer has been registered yet"
             )
         ptr = gpu_buffer.data_ptr()
-        # ``_base_ptrs`` is sorted ascending. The candidate region is
-        # the rightmost one whose base ≤ ptr.
+        # Candidate region is the rightmost one whose base ≤ ptr.
         idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
         if idx < 0:
             raise ValueError(
@@ -906,47 +893,17 @@ class GdsL1Backend:
         self._slab_handle: Optional[ca.AsyncHandle] = None
         self._posix_fd: int = -1
         self._cudart: Optional[ctypes.CDLL] = None
-        # cuFile requires the stream that ``cuFileReadAsync`` /
-        # ``cuFileWriteAsync`` will run on to be registered exactly
-        # once via ``cuFileStreamRegister``. We register the caller's
-        # current torch CUDA stream on first use and keep it for the
-        # backend's lifetime. cuFile + the scatter kernel share this
-        # one stream — same pattern CPU L1 uses with
-        # ``cudaMemcpyAsync`` — so stream-ordering naturally
-        # serialises the per-batch ``cuFile reads → kernel`` chain
-        # without needing CUDA-event barriers.
-        #
-        # We keep the same registered stream in two forms, set together
-        # in ``ensure_stream_registered``:
-        #  - ``_registered_stream``: the torch ``Stream`` object, used by
-        #    torch APIs (recording completion events in
-        #    ``_checkpoint_submissions_locked``).
-        #  - ``_registered_stream_handle``: the raw ``CUstream`` int, used
-        #    by cuFile's C API (``cuFileReadAsync`` / ``WriteAsync`` /
-        #    ``cuFileStreamRegister``).
+        # The torch CUDA stream the async ops run on, registered once via
+        # ``ensure_stream_registered`` and held for the backend's lifetime.
+        # Kept in two forms: ``_registered_stream`` is the torch ``Stream``
+        # object (for recording events); ``_registered_stream_handle`` is the
+        # raw ``CUstream`` int (for cuFile's C API).
         self._registered_stream: Optional[torch.Stream] = None
         self._registered_stream_handle: Optional[int] = None
         self._stream_lock = threading.Lock()
-        # cuFileReadAsync/WriteAsync write through host-side ctypes
-        # storage held by each Submission. That storage must outlive the
-        # async op — cuFile dereferences the pointers when the CUDA
-        # stream eventually executes the op, not at submit time. So a
-        # Submission can only be released once the stream has *passed*
-        # the op.
-        #
-        # We must not keep every Submission for the backend's lifetime:
-        # while each is small in bytes, the count grows by one per
-        # cuFile op forever, and Python's cyclic GC walks every tracked
-        # object on each gen-2 collection. A long-lived server therefore
-        # sees gen-2 pauses that grow with uptime (hundreds of ms),
-        # which show up as occasional ~3-4x retrieve-latency outliers.
-        #
-        # Instead we batch submissions and gate their release on a CUDA
-        # event recorded on the cuFile stream: once the event reports
-        # complete (non-blocking query), every submission enqueued
-        # before it is done and can be dropped. This keeps the live set
-        # bounded to the in-flight batches without ever synchronizing on
-        # the hot path.
+        # Submissions are batched and released once a CUDA event recorded
+        # after them on the cuFile stream completes (non-blocking
+        # ``query()``), bounding the live set to in-flight batches.
         self._uncommitted_submissions: list[ca.Submission] = []
         self._inflight_submissions: list[tuple[torch.Event, list[ca.Submission]]] = []
         self._ops_since_checkpoint = 0
@@ -1135,8 +1092,7 @@ class GdsL1Backend:
         """
         if self._uncommitted_submissions:
             event = torch_dev.Event()
-            # Record on the exact stream the cuFile ops were enqueued on;
-            # event completion then implies those ops have executed.
+            # Record on the stream the ops were enqueued on.
             if self._registered_stream is not None:
                 event.record(self._registered_stream)
             else:
@@ -1227,8 +1183,8 @@ class GdsL1Backend:
             torch_dev.synchronize(
                 device=self.scratch_allocator._buffers[0].device  # noqa: SLF001
             )
-        # The synchronize above drains the stream, so every outstanding
-        # submission's op has executed and the ctypes storage is free.
+        # The synchronize drained the stream; all submission ops have
+        # executed, so drop the tracking lists.
         with self._submissions_lock:
             self._uncommitted_submissions = []
             self._inflight_submissions = []
@@ -1307,9 +1263,7 @@ class GdsL1Backend:
             use_direct_io: If ``True``, opens with ``O_DIRECT`` (required
                 for the cuFile GDS DMA fast path on ext4).
         """
-        # Create the file first with a regular fd so posix_fallocate
-        # works even when we'd otherwise open with O_DIRECT (some
-        # kernels disallow fallocate via O_DIRECT fds).
+        # Create and fallocate via a regular (non-O_DIRECT) fd.
         creator_fd = os.open(self._slab_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             current_size = os.fstat(creator_fd).st_size
@@ -1329,8 +1283,7 @@ class GdsL1Backend:
         except Exception:
             os.close(fd)
             raise
-        # Build an AsyncHandle by hand so we share the same close/
-        # read_async/write_async surface as elsewhere in this module.
+        # Build an AsyncHandle exposing close/read_async/write_async.
         self._slab_handle = ca.AsyncHandle.__new__(ca.AsyncHandle)
         self._slab_handle._fd = fd  # noqa: SLF001
         self._slab_handle._handle = handle  # noqa: SLF001

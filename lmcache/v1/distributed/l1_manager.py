@@ -273,10 +273,8 @@ class L1Manager:
         for key in keys:
             entry = self._objects.get(key, None)
             if entry is None:
-                # GDS L1 fill-on-miss: if the key is durably resident
-                # on disk, synthesise an L1 entry for it. The cuFile
-                # read happens later via gpu_ops dispatch when the
-                # caller does the H2D copy, so no async fill is needed.
+                # GDS L1 fill-on-miss: synthesise an L1 entry if the key
+                # is resident on disk.
                 entry = self._try_gds_fill_on_miss_locked(key)
                 if entry is None:
                     ret[key] = (L1Error.KEY_NOT_EXIST, None)
@@ -502,11 +500,10 @@ class L1Manager:
                 ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
             return ret
 
-        # GDS L1 path: mint disk-anchored GdsMemoryObj instances per
-        # key directly via the backend. The CPU pinned memory manager
-        # is unused on this path; the disk file is created later when
-        # the caller does ``lmcache_memcpy_async_d2h`` which dispatches
-        # to ``cufile_write_from``.
+        # GDS L1 path: mint disk-anchored GdsMemoryObj per key via the
+        # backend (the CPU pinned memory manager is unused here). The
+        # disk write happens later on the caller's d2h copy. A None obj
+        # is treated as OOM.
         gds_objs: list[GdsMemoryObj | None] = []
         if self._gds_backend is not None:
             gds_objs = [
