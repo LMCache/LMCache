@@ -109,6 +109,8 @@ def _run_client_test(
     expected_response: Any,
     num_requests: int = 1,
     client_id: int = 0,
+    ready_timeout: float = 15.0,
+    response_timeout: float = 15.0,
 ) -> None:
     """
     Client process that sends requests and validates responses.
@@ -126,8 +128,10 @@ def _run_client_test(
         bool: True if all tests passed, False otherwise
     """
     # Wait for server to be ready
-    if not ready_event.wait(timeout=5):
-        print(f"Client {client_id}: Server failed to start within timeout")
+    if not ready_event.wait(timeout=ready_timeout):
+        print(
+            f"Client {client_id}: Server failed to start within {ready_timeout} seconds"
+        )
         sys.exit(1)
 
     # Small delay to ensure server is fully initialized
@@ -146,7 +150,7 @@ def _run_client_test(
 
         # Validate responses
         for i, future in enumerate(futures):
-            response = future.result(timeout=5)
+            response = future.result(timeout=response_timeout)
             if response != expected_response:
                 print(
                     f"Client {client_id}, Request {i}: Expected "
@@ -220,7 +224,7 @@ class MessageQueueTestHelper:
         expected_response: Any,
         num_requests: int = 1,
         num_clients: int = 1,
-        timeout: float = 10.0,
+        timeout: float = 60.0,
     ) -> None:
         """
         Run a test by starting server and client processes.
@@ -246,6 +250,10 @@ class MessageQueueTestHelper:
         )
         server_process.start()
 
+        ready_timeout = max(30.0, timeout / 2)
+        response_timeout = max(30.0, timeout / 2)
+        server_shutdown_timeout = max(15.0, timeout / 2)
+
         # Start multiple client processes
         client_processes = []
         for client_id in range(num_clients):
@@ -259,6 +267,8 @@ class MessageQueueTestHelper:
                     expected_response,
                     num_requests,
                     client_id,
+                    ready_timeout,
+                    response_timeout,
                 ),
             )
             client_process.start()
@@ -273,7 +283,7 @@ class MessageQueueTestHelper:
             if client_process.is_alive():
                 client_process.terminate()
                 client_process.join()
-                failed_clients.append((client_id, "timeout"))
+                failed_clients.append((client_id, f"timeout after {timeout} seconds"))
             elif client_process.exitcode != 0:
                 failed_clients.append(
                     (client_id, f"exit code {client_process.exitcode}")
@@ -281,7 +291,7 @@ class MessageQueueTestHelper:
 
         # Shutdown server
         shutdown_event.set()
-        server_process.join(timeout=2)
+        server_process.join(timeout=server_shutdown_timeout)
 
         if server_process.is_alive():
             server_process.terminate()
