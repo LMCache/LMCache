@@ -94,6 +94,16 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
+def _extract_lora_name(request: "Request") -> str:
+    lora_request = getattr(request, "lora_request", None)
+    if lora_request is None:
+        return ""
+    lora_name = getattr(lora_request, "lora_name", None)
+    if lora_name is None:
+        return ""
+    return str(lora_name)
+
+
 def extract_world_size_and_kv_rank(
     world_size: int,
     rank: int,
@@ -224,10 +234,12 @@ class LMCacheMPRequestTracker:
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
     cache_salt: str = ""
+    lora_name: str = ""
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
+        self.lora_name = _extract_lora_name(request)
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = {}
@@ -312,6 +324,7 @@ class LMCacheMPRequestMetadata:
     direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
     cache_salt: str = ""
+    lora_name: str = ""
 
     @staticmethod
     def _slice_block_ids(
@@ -423,6 +436,7 @@ class LMCacheMPRequestMetadata:
                 direction="STORE",
                 op=op,
                 cache_salt=tracker.cache_salt,
+                lora_name=tracker.lora_name,
             )
 
             # Update the request tracker
@@ -495,6 +509,7 @@ class LMCacheMPRequestMetadata:
                 direction="RETRIEVE",
                 op=op,
                 cache_salt=tracker.cache_salt,
+                lora_name=tracker.lora_name,
             )
             return ret
 
@@ -648,6 +663,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request_ids = []
         ops = []
         cache_salts = []
+        lora_names = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
@@ -655,6 +671,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            lora_names.append(meta.lora_name)
 
         if len(request_ids) == 0:
             return
@@ -664,7 +681,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids, ops, event, cache_salts=cache_salts, lora_names=lora_names
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -723,12 +740,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         request_ids = []
         ops = []
         cache_salts = []
+        lora_names = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
+            lora_names.append(meta.lora_name)
 
         if len(request_ids) == 0:
             return
@@ -738,7 +757,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             event.record()
 
         self.worker_adapter.batched_submit_store_requests(
-            request_ids, ops, event, cache_salts=cache_salts
+            request_ids, ops, event, cache_salts=cache_salts, lora_names=lora_names
         )
 
     def get_finished(
@@ -842,6 +861,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             request.request_id,
             token_ids=list(request.all_token_ids),
             cache_salt=tracker.cache_salt,
+            lora_name=tracker.lora_name,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
@@ -943,6 +963,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                         start=0,
                         end=free_end,
                         request_id=request.request_id,
+                        cache_salt=tracker.cache_salt,
+                        lora_name=tracker.lora_name,
                     )
                     logger.debug(
                         "Free locks of tokens %d-%d since it is cached by vLLM.",

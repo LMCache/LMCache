@@ -553,6 +553,7 @@ class LMCacheMPSchedulerAdapter:
         request_id: str,
         token_ids: list[int],
         cache_salt: str = "",
+        lora_name: str = "",
     ):
         """
         Submit a new lookup request to LMCache if there is no ongoing request.
@@ -567,6 +568,8 @@ class LMCacheMPSchedulerAdapter:
             token_ids: Token IDs to lookup from LMCache
             cache_salt: Per-user isolation salt. Requests with different
                 cache_salt values produce separate cache entries.
+            lora_name: Active LoRA adapter identity. Requests with different
+                adapters produce separate cache entries.
 
         Returns:
             None
@@ -595,6 +598,7 @@ class LMCacheMPSchedulerAdapter:
             end=aligned_end,
             request_id=request_id,
             cache_salt=cache_salt,
+            lora_name=lora_name,
         ).no_worker_id_version()
 
         future = send_lmcache_request(
@@ -689,6 +693,7 @@ class LMCacheMPSchedulerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        lora_name: str = "",
     ) -> None:
         """Release read locks acquired during lookup without a full retrieve.
 
@@ -709,6 +714,7 @@ class LMCacheMPSchedulerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            lora_name: Active LoRA adapter identity.
         """
         if not self.is_healthy:
             return
@@ -719,6 +725,7 @@ class LMCacheMPSchedulerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            lora_name=lora_name,
         ).no_worker_id_version()
         send_lmcache_request(
             self.mq_client,
@@ -771,6 +778,7 @@ class LMCacheMPSchedulerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        lora_name: str = "",
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -780,6 +788,7 @@ class LMCacheMPSchedulerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            lora_name: Active LoRA adapter identity.
 
         Returns:
             IPCCacheEngineKey: The constructed key.
@@ -795,6 +804,7 @@ class LMCacheMPSchedulerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            lora_name=lora_name,
         )
 
 
@@ -1088,6 +1098,7 @@ class LMCacheMPWorkerAdapter:
         op: LoadStoreOp,
         event: _IpcEvent,
         cache_salt: str = "",
+        lora_name: str = "",
     ):
         """
         Submit a KV cache store request to LMCache
@@ -1098,6 +1109,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
             cache_salt: Per-user isolation salt.
+            lora_name: Active LoRA adapter identity.
         """
         self._ensure_heartbeat_started()
 
@@ -1111,6 +1123,7 @@ class LMCacheMPWorkerAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
+            lora_name=lora_name,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -1136,6 +1149,7 @@ class LMCacheMPWorkerAdapter:
         op: LoadStoreOp,
         event: _IpcEvent,
         cache_salt: str = "",
+        lora_name: str = "",
     ):
         """
         Submit a KV cache retrieve request to LMCache
@@ -1146,6 +1160,7 @@ class LMCacheMPWorkerAdapter:
             event: The CUDA event that is recorded after the current
                 model inference step
             cache_salt: Per-user isolation salt.
+            lora_name: Active LoRA adapter identity.
         """
         self._ensure_heartbeat_started()
 
@@ -1160,6 +1175,7 @@ class LMCacheMPWorkerAdapter:
             op.end,
             request_id=request_id,
             cache_salt=cache_salt,
+            lora_name=lora_name,
         )
         if self.transfer_ctx is None:
             raise RuntimeError(
@@ -1186,6 +1202,7 @@ class LMCacheMPWorkerAdapter:
         ops: list[LoadStoreOp],
         event: _IpcEvent,
         cache_salts: list[str] | None = None,
+        lora_names: list[str] | None = None,
     ):
         """
         Submit a batched store request to LMCache
@@ -1199,11 +1216,25 @@ class LMCacheMPWorkerAdapter:
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be the same as
                 request_ids.
+            lora_names: Active LoRA adapter identities, one per request. If
+                None, all requests use lora_name="".
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
-        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
-            self.submit_store_request(request_id, op, event, cache_salt=salt)
+        if lora_names is None:
+            lora_names = [""] * len(request_ids)
+        if len(ops) != len(request_ids):
+            raise ValueError("ops length must match request_ids length")
+        if len(cache_salts) != len(request_ids):
+            raise ValueError("cache_salts length must match request_ids length")
+        if len(lora_names) != len(request_ids):
+            raise ValueError("lora_names length must match request_ids length")
+        for request_id, op, salt, lora_name in zip(
+            request_ids, ops, cache_salts, lora_names, strict=True
+        ):
+            self.submit_store_request(
+                request_id, op, event, cache_salt=salt, lora_name=lora_name
+            )
 
     @_lmcache_nvtx_annotate
     def batched_submit_retrieve_requests(
@@ -1212,6 +1243,7 @@ class LMCacheMPWorkerAdapter:
         ops: list[LoadStoreOp],
         event: _IpcEvent,
         cache_salts: list[str] | None = None,
+        lora_names: list[str] | None = None,
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -1225,11 +1257,25 @@ class LMCacheMPWorkerAdapter:
             cache_salts: Per-user isolation salts, one per request. If None,
                 all requests use cache_salt="". The list length should be same as
                 request_ids.
+            lora_names: Active LoRA adapter identities, one per request. If
+                None, all requests use lora_name="".
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
-        for request_id, op, salt in zip(request_ids, ops, cache_salts, strict=False):
-            self.submit_retrieve_request(request_id, op, event, cache_salt=salt)
+        if lora_names is None:
+            lora_names = [""] * len(request_ids)
+        if len(ops) != len(request_ids):
+            raise ValueError("ops length must match request_ids length")
+        if len(cache_salts) != len(request_ids):
+            raise ValueError("cache_salts length must match request_ids length")
+        if len(lora_names) != len(request_ids):
+            raise ValueError("lora_names length must match request_ids length")
+        for request_id, op, salt, lora_name in zip(
+            request_ids, ops, cache_salts, lora_names, strict=True
+        ):
+            self.submit_retrieve_request(
+                request_id, op, event, cache_salt=salt, lora_name=lora_name
+            )
 
     def _process_finished_stores(
         self,
@@ -1423,6 +1469,7 @@ class LMCacheMPWorkerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
+        lora_name: str = "",
     ) -> IPCCacheEngineKey:
         """Convert token IDs to an IPC cache engine key.
 
@@ -1432,6 +1479,7 @@ class LMCacheMPWorkerAdapter:
             end: End token index.
             request_id: The request ID.
             cache_salt: Per-user isolation salt.
+            lora_name: Active LoRA adapter identity.
 
         Returns:
             IPCCacheEngineKey: The constructed key.
@@ -1445,4 +1493,5 @@ class LMCacheMPWorkerAdapter:
             end=end,
             request_id=request_id,
             cache_salt=cache_salt,
+            lora_name=lora_name,
         )
