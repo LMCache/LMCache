@@ -2,7 +2,7 @@
 # Standard
 from collections import OrderedDict
 from copy import deepcopy
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import os
 import random
 import shlex
@@ -1904,3 +1904,154 @@ def test_process_tokens_first_block_fails():
     assert tot_kv_size == 0
     assert not ret_mask.any()
     mem1.ref_count_down.assert_called_once()
+
+
+def test_compress_decompress_unpin_not_pinned() -> None:
+    """Verify that compress and decompress check is_pinned before calling unpin()
+
+    This prevents negative pin counts and double unpin warnings on backends like
+    Remote/S3.
+    """
+    # Create mock memory objects
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.is_pinned = False  # Not pinned (e.g. from Remote/S3 backend)
+
+    mock_compressed_mem_obj = MagicMock()
+    mock_compressed_mem_obj.is_pinned = False  # Not pinned
+
+    # Mock serializer and deserializer
+    mock_serializer = MagicMock()
+    mock_serializer.serialize.return_value = mock_compressed_mem_obj
+    mock_deserializer = MagicMock()
+    mock_deserializer.deserialize.return_value = mock_mem_obj
+
+    # Create a mock engine
+    engine = MagicMock(spec=LMCacheEngine)
+    engine.metadata = MagicMock()
+    engine.config = MagicMock()
+    engine.lookup_pins = {"event_123": {"remote": ["key1"]}}
+
+    # Mock engine.lookup to return number of tokens (non-zero)
+    engine.lookup.return_value = 100
+
+    # Mock storage_manager methods
+    engine.storage_manager = MagicMock()
+    # For compress: batched_get returns mock_mem_obj
+    engine.storage_manager.batched_get.return_value = [mock_mem_obj]
+
+    with patch(
+        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        return_value=(mock_serializer, mock_deserializer),
+    ):
+        # Call compress on the engine
+        res = LMCacheEngine.compress(
+            engine,
+            tokens=[1, 2, 3],
+            method="cachegen",
+            location="remote",
+            event_id="event_123",
+        )
+
+        assert res == 100
+        # Verify that serialize was called
+        mock_serializer.serialize.assert_called_once_with(mock_mem_obj)
+        # Verify that unpin was NOT called since is_pinned = False
+        mock_mem_obj.unpin.assert_not_called()
+
+        # Verify batched_remove and batched_put were called on storage_manager
+        engine.storage_manager.batched_remove.assert_called_once_with(
+            ["key1"], locations=["remote"]
+        )
+        engine.storage_manager.batched_put.assert_called_once_with(
+            keys=["key1"],
+            memory_objs=[mock_compressed_mem_obj],
+            location="remote",
+        )
+
+    # Reset storage_manager mock
+    engine.storage_manager.reset_mock()
+    # For decompress: batched_get returns mock_compressed_mem_obj
+    engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
+
+    with patch(
+        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        return_value=(mock_serializer, mock_deserializer),
+    ):
+        res_decomp = LMCacheEngine.decompress(
+            engine,
+            tokens=[1, 2, 3],
+            method="cachegen",
+            location="remote",
+            event_id="event_123",
+        )
+
+        assert res_decomp == 100
+        # Verify that deserialize was called
+        mock_deserializer.deserialize.assert_called_once_with(mock_compressed_mem_obj)
+        # Verify that unpin was NOT called since is_pinned = False
+        mock_compressed_mem_obj.unpin.assert_not_called()
+
+        # Verify batched_remove and batched_put were called on storage_manager
+        engine.storage_manager.batched_remove.assert_called_once_with(
+            ["key1"], locations=["remote"]
+        )
+        engine.storage_manager.batched_put.assert_called_once_with(
+            keys=["key1"],
+            memory_objs=[mock_mem_obj],
+            location="remote",
+        )
+
+
+def test_compress_decompress_unpin_when_pinned() -> None:
+    """Verify that compress and decompress call unpin() if is_pinned is True"""
+    # Create mock memory objects
+    mock_mem_obj = MagicMock()
+    mock_mem_obj.is_pinned = True
+
+    mock_compressed_mem_obj = MagicMock()
+    mock_compressed_mem_obj.is_pinned = True
+
+    # Mock serializer and deserializer
+    mock_serializer = MagicMock()
+    mock_serializer.serialize.return_value = mock_compressed_mem_obj
+    mock_deserializer = MagicMock()
+    mock_deserializer.deserialize.return_value = mock_mem_obj
+
+    # Create a mock engine
+    engine = MagicMock(spec=LMCacheEngine)
+    engine.metadata = MagicMock()
+    engine.config = MagicMock()
+    engine.lookup_pins = {"event_123": {"local_cpu": ["key1"]}}
+    engine.lookup.return_value = 100
+    engine.storage_manager = MagicMock()
+
+    # Test compress
+    engine.storage_manager.batched_get.return_value = [mock_mem_obj]
+    with patch(
+        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        return_value=(mock_serializer, mock_deserializer),
+    ):
+        LMCacheEngine.compress(
+            engine,
+            tokens=[1, 2, 3],
+            method="cachegen",
+            location="local_cpu",
+            event_id="event_123",
+        )
+        mock_mem_obj.unpin.assert_called_once()
+
+    # Test decompress
+    engine.storage_manager.reset_mock()
+    engine.storage_manager.batched_get.return_value = [mock_compressed_mem_obj]
+    with patch(
+        "lmcache.v1.storage_backend.naive_serde.CreateSerde",
+        return_value=(mock_serializer, mock_deserializer),
+    ):
+        LMCacheEngine.decompress(
+            engine,
+            tokens=[1, 2, 3],
+            method="cachegen",
+            location="local_cpu",
+            event_id="event_123",
+        )
+        mock_compressed_mem_obj.unpin.assert_called_once()

@@ -1,0 +1,95 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-01 10:55+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/tool.rst:2
+msgid "lmcache tool"
+msgstr "lmcache 工具"
+
+#: ../../source/cli/tool.rst:4
+msgid ""
+"The ``lmcache tool`` command groups offline analysis utilities bundled "
+"with LMCache."
+msgstr "``lmcache tool`` 命令将与 LMCache 捆绑在一起的离线分析工具进行分组。"
+
+#: ../../source/cli/tool.rst:11
+msgid "Currently one tool is available: ``cache-simulator``."
+msgstr "目前可用的工具有一个：``cache-simulator``。"
+
+#: ../../source/cli/tool.rst:15
+msgid ""
+"``cache-simulator`` depends on the optional ``plot`` extras "
+"(``sortedcontainers`` / ``matplotlib``). If they are not installed, the "
+"sub-command is silently omitted from the CLI. Install the extras to "
+"enable it."
+msgstr "``cache-simulator`` 依赖于可选的 ``plot`` 附加组件（``sortedcontainers`` / ``matplotlib``）。如果它们未安装，子命令将会在 CLI 中静默省略。安装附加组件以启用它。"
+
+#: ../../source/cli/tool.rst:22
+msgid "cache-simulator"
+msgstr "cache-simulator"
+
+#: ../../source/cli/tool.rst:24
+msgid ""
+"Replay LMCache lookup-hash JSONL logs through an LRU cache to measure the"
+" KV-cache token hit rate. It has three actions:"
+msgstr "通过 LRU 缓存重放 LMCache 查找哈希 JSONL 日志，以测量 KV Cache 的令牌命中率。它有三个操作："
+
+#: ../../source/cli/tool.rst:35
+msgid "Action"
+msgstr "操作"
+
+#: ../../source/cli/tool.rst:36
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/tool.rst:37
+msgid "``simulate``"
+msgstr "``simulate``"
+
+#: ../../source/cli/tool.rst:38
+msgid ""
+"Replay logs at a fixed cache capacity; print a text report and save a "
+"7-panel statistics PNG."
+msgstr "在固定的缓存容量下重放日志；打印文本报告并保存 7 面板的统计 PNG。"
+
+#: ../../source/cli/tool.rst:40
+msgid "``sweep``"
+msgstr "``sweep``"
+
+#: ../../source/cli/tool.rst:41
+msgid ""
+"Sweep across a range of cache capacities and save a hit-rate vs. capacity"
+" PNG."
+msgstr "在一系列缓存容量中进行扫描，并保存命中率与容量的 PNG 图像。"
+
+#: ../../source/cli/tool.rst:43
+msgid "``gen-dataset``"
+msgstr "``gen-dataset``"
+
+#: ../../source/cli/tool.rst:44
+msgid ""
+"Generate a ``vllm bench serve`` custom dataset (JSONL) from lookup-hash "
+"JSONL logs, preserving prefix-sharing structure."
+msgstr "从查找哈希 JSONL 日志生成一个 ``vllm bench serve`` 自定义数据集 (JSONL)，保留前缀共享结构。"
+
+#: ../../source/cli/tool.rst:47
+msgid "Each action has its own flags. Run the built-in help for the full list:"
+msgstr "每个操作都有其自己的标志。运行内置帮助以获取完整列表："
+

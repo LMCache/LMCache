@@ -8,6 +8,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.utils import (
@@ -2058,6 +2059,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         shape_desc.nh = self.num_kv_heads
         shape_desc.hs = self.head_dim
         shape_desc.element_size = normalized.element_size()
+        set_shape_desc_dtype(shape_desc, self.dtype)
         self.shape_desc = shape_desc
 
         self.paged_buffer_ptrs = torch.tensor(
