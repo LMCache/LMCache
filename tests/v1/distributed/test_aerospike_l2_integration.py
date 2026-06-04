@@ -33,6 +33,7 @@ def _aerospike_available() -> bool:
     if not RUN_AEROSPIKE_IT:
         return False
     try:
+        # Third Party
         import aerospike
 
         client = aerospike.client(
@@ -47,6 +48,7 @@ def _aerospike_available() -> bool:
 
 def _native_extension_available() -> bool:
     try:
+        # First Party
         from lmcache.lmcache_aerospike import LMCacheAerospikeClient  # noqa: F401
 
         return True
@@ -101,6 +103,7 @@ def _object_key(suffix: int) -> ObjectKey:
 
 
 def _adapter_config():
+    # First Party
     from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
         AerospikeL2AdapterConfig,
     )

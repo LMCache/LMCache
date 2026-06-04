@@ -19,6 +19,7 @@ class TestAerospikeL2AdapterConfig:
 
     def test_from_dict_required_fields(self):
         ensure_adapter_loaded("aerospike")
+        # First Party
         from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
             AerospikeL2AdapterConfig,
         )
@@ -38,6 +39,7 @@ class TestAerospikeL2AdapterConfig:
 
     def test_set_alias(self):
         ensure_adapter_loaded("aerospike")
+        # First Party
         from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
             AerospikeL2AdapterConfig,
         )
@@ -49,6 +51,7 @@ class TestAerospikeL2AdapterConfig:
 
     def test_missing_hosts_raises(self):
         ensure_adapter_loaded("aerospike")
+        # First Party
         from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
             AerospikeL2AdapterConfig,
         )
@@ -61,6 +64,7 @@ class TestAerospikeL2AdapterConfig:
         assert raised
 
     def test_env_vars_used_when_config_empty(self, monkeypatch):
+        # First Party
         from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
             AerospikeL2AdapterConfig,
         )

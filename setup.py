@@ -99,8 +99,8 @@ def _aerospike_extension(
 ) -> list:
     """Build Aerospike CppExtension if enabled via env vars.
 
-    Set ``BUILD_AEROSPIKE=1`` or provide ``AEROSPIKE_INCLUDE_DIR`` (and
-  ``AEROSPIKE_LIBRARY_DIR``) pointing at libaerospike development files.
+      Set ``BUILD_AEROSPIKE=1`` or provide ``AEROSPIKE_INCLUDE_DIR`` (and
+    ``AEROSPIKE_LIBRARY_DIR``) pointing at libaerospike development files.
     """
     # Standard
     import ctypes.util

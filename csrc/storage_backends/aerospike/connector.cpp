@@ -95,8 +95,8 @@ AerospikeNativeConnector::AerospikeNativeConnector(
     }
     connected_ = true;
 
-    size_t discovered = max_record_bytes == 0 ? discover_record_cap()
-                                              : max_record_bytes;
+    size_t discovered =
+        max_record_bytes == 0 ? discover_record_cap() : max_record_bytes;
     if (discovered <= kSafetyMarginBytes) {
       throw std::runtime_error("Aerospike record cap is too small");
     }
@@ -177,8 +177,8 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
 
   as_error err;
   as_record* rec = nullptr;
-  as_status status =
-      aerospike_key_get(conn.client, &err, &conn.read_policy, &as_meta_key, &rec);
+  as_status status = aerospike_key_get(conn.client, &err, &conn.read_policy,
+                                       &as_meta_key, &rec);
   if (status != AEROSPIKE_OK) {
     throw_status("get-meta", status, err);
   }
@@ -192,10 +192,10 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
     throw std::runtime_error("meta record is not ready");
   }
 
-  uint32_t nseg =
-      static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
+  uint32_t nseg = static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
   size_t seg_b = static_cast<size_t>(positive_int_bin(rec, kBinSegBytes, len));
-  size_t total_b = static_cast<size_t>(positive_int_bin(rec, kBinTotalBytes, len));
+  size_t total_b =
+      static_cast<size_t>(positive_int_bin(rec, kBinTotalBytes, len));
   if (total_b != len) {
     as_record_destroy(rec);
     throw std::runtime_error("meta record total size mismatch");
@@ -222,8 +222,8 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
   for (uint32_t i = 0; i < nseg; ++i) {
     std::string segment_key_i = segment_user_key(key, i);
     size_t chunk_len = std::min(seg_b, len - offset);
-    if (!read_payload_record(conn, segment_key_i, static_cast<char*>(buf) + offset,
-                             chunk_len)) {
+    if (!read_payload_record(conn, segment_key_i,
+                             static_cast<char*>(buf) + offset, chunk_len)) {
       throw std::runtime_error("missing segment payload");
     }
     offset += chunk_len;
@@ -289,8 +289,8 @@ bool AerospikeNativeConnector::do_single_delete(WorkerAerospikeConn& conn,
 
   as_error err;
   as_record* rec = nullptr;
-  as_status status =
-      aerospike_key_get(conn.client, &err, &conn.read_policy, &as_meta_key, &rec);
+  as_status status = aerospike_key_get(conn.client, &err, &conn.read_policy,
+                                       &as_meta_key, &rec);
   if (status == AEROSPIKE_ERR_RECORD_NOT_FOUND) {
     return false;
   }
@@ -302,8 +302,8 @@ bool AerospikeNativeConnector::do_single_delete(WorkerAerospikeConn& conn,
     as_record_destroy(rec);
   }
 
-  status =
-      aerospike_key_remove(conn.client, &err, &conn.remove_policy, &as_meta_key);
+  status = aerospike_key_remove(conn.client, &err, &conn.remove_policy,
+                                &as_meta_key);
   if (status == AEROSPIKE_ERR_RECORD_NOT_FOUND) {
     return false;
   }
@@ -412,7 +412,8 @@ size_t AerospikeNativeConnector::discover_record_cap() {
     }
     pos += std::strlen(field);
     size_t end = text.find(';', pos);
-    std::string value = text.substr(pos, end == std::string::npos ? end : end - pos);
+    std::string value =
+        text.substr(pos, end == std::string::npos ? end : end - pos);
     size_t cap = 0;
     try {
       cap = static_cast<size_t>(std::stoull(value));
@@ -430,16 +431,15 @@ void AerospikeNativeConnector::configure_policies() {}
 
 void AerospikeNativeConnector::put_payload_record(WorkerAerospikeConn& conn,
                                                   const std::string& user_key,
-                                                  const void* buf,
-                                                  size_t len) {
+                                                  const void* buf, size_t len) {
   as_key key;
-  as_key_init_str(&key, conn.ns.c_str(), conn.set_name.c_str(), user_key.c_str());
+  as_key_init_str(&key, conn.ns.c_str(), conn.set_name.c_str(),
+                  user_key.c_str());
 
   as_record rec;
   as_record_inita(&rec, 1);
   rec.ttl = AS_RECORD_CLIENT_DEFAULT_TTL;
-  as_record_set_raw(&rec, kBinPayload,
-                    reinterpret_cast<const uint8_t*>(buf),
+  as_record_set_raw(&rec, kBinPayload, reinterpret_cast<const uint8_t*>(buf),
                     static_cast<uint32_t>(len));
 
   as_error err;
@@ -457,7 +457,8 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
                                                size_t total_bytes,
                                                const void* inline_buf) {
   as_key key;
-  as_key_init_str(&key, conn.ns.c_str(), conn.set_name.c_str(), user_key.c_str());
+  as_key_init_str(&key, conn.ns.c_str(), conn.set_name.c_str(),
+                  user_key.c_str());
 
   as_record rec;
   as_record_inita(&rec, inline_buf == nullptr ? 7 : 8);
@@ -467,7 +468,8 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
   as_record_set_int64(&rec, kBinNseg, shard.nseg);
   as_record_set_int64(&rec, kBinSegBytes, static_cast<int64_t>(shard.seg_b));
   as_record_set_int64(&rec, kBinTotalBytes, static_cast<int64_t>(total_bytes));
-  as_record_set_int64(&rec, kBinCreatedAt, static_cast<int64_t>(std::time(nullptr)));
+  as_record_set_int64(&rec, kBinCreatedAt,
+                      static_cast<int64_t>(std::time(nullptr)));
   as_record_set_bool(&rec, kBinPin, false);
   if (inline_buf != nullptr) {
     as_record_set_raw(&rec, kBinPayload,
@@ -488,7 +490,8 @@ bool AerospikeNativeConnector::read_payload_record(WorkerAerospikeConn& conn,
                                                    const std::string& user_key,
                                                    void* buf, size_t len) {
   as_key key;
-  as_key_init_str(&key, conn.ns.c_str(), conn.set_name.c_str(), user_key.c_str());
+  as_key_init_str(&key, conn.ns.c_str(), conn.set_name.c_str(),
+                  user_key.c_str());
 
   as_error err;
   as_record* rec = nullptr;

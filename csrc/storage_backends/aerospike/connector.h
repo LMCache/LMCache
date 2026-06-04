@@ -37,18 +37,14 @@ struct ShardPlan {
 // (``<key>|s|<i>``). Payloads that fit a single record are stored inline in
 // the meta record. The connector key is used verbatim as the Aerospike user
 // key base (the framework's ObjectKey-to-string format).
-class AerospikeNativeConnector
-    : public ConnectorBase<WorkerAerospikeConn> {
+class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
  public:
-  AerospikeNativeConnector(std::string hosts, std::string ns,
-                           std::string set_name, int num_workers,
-                           uint32_t read_timeout_ms = 1000,
-                           uint32_t write_timeout_ms = 2000,
-                           uint32_t default_ttl_seconds = 86400,
-                           size_t target_segment_bytes = 0,
-                           size_t max_record_bytes = 0,
-                           std::string username = "",
-                           std::string password = "");
+  AerospikeNativeConnector(
+      std::string hosts, std::string ns, std::string set_name, int num_workers,
+      uint32_t read_timeout_ms = 1000, uint32_t write_timeout_ms = 2000,
+      uint32_t default_ttl_seconds = 86400, size_t target_segment_bytes = 0,
+      size_t max_record_bytes = 0, std::string username = "",
+      std::string password = "");
   ~AerospikeNativeConnector() override;
 
   void close() override;
@@ -58,8 +54,7 @@ class AerospikeNativeConnector
   void do_single_get(WorkerAerospikeConn& conn, const std::string& key,
                      void* buf, size_t len, size_t chunk_size) override;
   void do_single_set(WorkerAerospikeConn& conn, const std::string& key,
-                     const void* buf, size_t len,
-                     size_t chunk_size) override;
+                     const void* buf, size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerAerospikeConn& conn,
                         const std::string& key) override;
   bool do_single_delete(WorkerAerospikeConn& conn,
@@ -86,8 +81,7 @@ class AerospikeNativeConnector
                        const ShardPlan& plan, size_t total_bytes,
                        const void* inline_buf);
   bool read_payload_record(WorkerAerospikeConn& conn,
-                           const std::string& user_key, void* buf,
-                           size_t len);
+                           const std::string& user_key, void* buf, size_t len);
 
   std::string hosts_;
   std::string ns_;
