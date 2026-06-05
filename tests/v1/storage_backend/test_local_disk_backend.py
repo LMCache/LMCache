@@ -169,6 +169,23 @@ class TestLocalDiskBackend:
         assert str(local_disk_backend) == "LocalDiskBackend"
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
+    def test_async_save_releases_ref_on_write_failure(self, local_disk_backend):
+        """A failed disk write must release the MemoryObj ref and not insert a key."""
+        backend = local_disk_backend
+        key = create_test_key(1)
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.byte_array = bytearray(64)
+        usage_before = backend.usage
+
+        with patch.object(backend, "write_file", side_effect=OSError("disk full")):
+            with pytest.raises(OSError):
+                backend.async_save_bytes_to_disk(key, memory_obj)
+
+        memory_obj.ref_count_down.assert_called_once()
+        assert key not in backend.dict
+        assert backend.usage == usage_before
+        backend.local_cpu_backend.memory_allocator.close()
+
     def test_key_to_path(self, local_disk_backend):
         """Test key to path conversion."""
         key = create_test_key(1)

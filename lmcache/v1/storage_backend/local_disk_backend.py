@@ -539,7 +539,17 @@ class LocalDiskBackend(StorageBackendInterface):
         self.stats_monitor.update_local_storage_usage(self.usage)
 
         # TODO(Jiayi): need to add ref count in disk memory object
-        self.write_file(buffer, path)
+        try:
+            self.write_file(buffer, path)
+        except Exception:
+            # On write failure, roll back the usage accounting and release the
+            # ref taken in `submit_put_task` so the MemoryObj is not leaked, and
+            # drop the task without inserting a key with no backing file.
+            self.usage -= size
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            memory_obj.ref_count_down()
+            self.disk_worker.remove_put_task(key)
+            raise
 
         # ref count down here because there's a ref_count_up in
         # `submit_put_task` above.
