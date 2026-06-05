@@ -14,7 +14,7 @@ On the HIT path the lifecycle is:
   CB_STORE_FINAL_SUBMITTED → CB_REQUEST_END → [store GPU op] → CB_STORE_FINAL_END
 
 During inference ``_pending_gpu_ops`` is 0, so a stray ``CB_REQUEST_END``
-(e.g. from a second ``cb_lookup_pre_computed`` call that misses) would
+(e.g. from a second CB lookup call that misses) would
 otherwise close the root span prematurely.  ``_waiting_for_store_final``
 bridges this gap: it is populated by ``CB_RETRIEVE_SUBMITTED`` and cleared by
 ``CB_STORE_FINAL_SUBMITTED``, so the root span cannot close until both

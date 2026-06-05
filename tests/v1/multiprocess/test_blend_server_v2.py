@@ -708,7 +708,7 @@ def server_process_runner_v2(
         host=host,
         port=port,
         chunk_size=chunk_size,
-        engine_type="blend",
+        engine_type="blend_legacy",  # original V2 blend ("blend" now selects V3)
     )
     storage_manager_config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
