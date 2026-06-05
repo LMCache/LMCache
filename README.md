@@ -1,120 +1,131 @@
 <div align="center">
   <p align="center">
-    <img src="https://raw.githubusercontent.com/LMCache/LMCache/dev/asset/logo.png" width="720" alt="lmcache logo">
+    <img src="asset/logo.png" alt="lmcache logo" width="45%">
   </p>
-  
-  [![Docs](https://img.shields.io/badge/docs-live-brightgreen)](https://docs.lmcache.ai/)
+  <h3 align="center">
+    A KV Cache Management Layer for Scalable LLM Inference
+  </h3>
+    <hr width="78%">
+
+  <h3 align="center">
+    <a href="https://blog.lmcache.ai/">Blog</a> |
+    <a href="https://docs.lmcache.ai/">Documentation</a> |
+    <a href="https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA">Join Slack</a> |
+    <a href="https://docs.lmcache.ai/community/meetings.html">Community Meeting</a> |
+    <a href="https://github.com/LMCache/LMCache/issues/2923">Roadmap</a>
+  </h3>
+
   [![PyPI](https://img.shields.io/pypi/v/lmcache)](https://pypi.org/project/lmcache/)
-  [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/lmcache)](https://pypi.org/project/lmcache/)
-  [![Unit Tests](https://badge.buildkite.com/ce25f1819a274b7966273bfa54f0e02f092c3de0d7563c5c9d.svg)](https://buildkite.com/lmcache/lmcache-unittests)
-  [![Code Quality](https://github.com/lmcache/lmcache/actions/workflows/code_quality_checks.yml/badge.svg?branch=dev&label=tests)](https://github.com/LMCache/LMCache/actions/workflows/code_quality_checks.yml)
-  [![Integration Tests](https://badge.buildkite.com/108ddd4ab482a2480999dec8c62a640a3315ed4e6c4e86798e.svg)](https://buildkite.com/lmcache/lmcache-vllm-integration-tests)
-
-   <br />
-
-  [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/10841/badge)](https://www.bestpractices.dev/projects/10841)
-  [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/LMCache/LMCache/badge)](https://scorecard.dev/viewer/?uri=github.com/LMCache/LMCache)
-  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LMCache/LMCache/)
-  [![GitHub commit activity](https://img.shields.io/github/commit-activity/w/LMCache/LMCache)](https://github.com/LMCache/LMCache/graphs/commit-activity)
   [![PyPI - Downloads](https://img.shields.io/pypi/dm/lmcache)](https://pypi.org/project/lmcache/)
-  [![YouTube Channel Views](https://img.shields.io/youtube/channel/views/UC58zMz55n70rtf1Ak2PULJA)](https://www.youtube.com/channel/UC58zMz55n70rtf1Ak2PULJA)
+  [![GitHub commit activity](https://img.shields.io/github/commit-activity/w/LMCache/LMCache)](https://github.com/LMCache/LMCache/graphs/commit-activity)
+  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LMCache/LMCache/)
 
 </div>
 
+## Updates
+- [2026/05] 🔥 Agentic workload benchmark on AMD MI300X ([blog](https://blog.lmcache.ai/en/2026/05/12/benchmarking-lmcache-for-multi-turn-agentic-workloads-on-amd-mi300x/)).
+- [2026/04] 🔥 LMCache's new multiprocess(MP) architecture release ([blog](https://blog.lmcache.ai/en/2026/04/03/lmcaches-new-architecture-boosts-moe-inference-performance-by-10x/)).
+- [2026/03] LMCache at GTC 2026 ([post](https://www.linkedin.com/posts/lmcache-lab_llm-opensource-nvidiagtc-activity-7442721875664826369-pMAu?utm_source=share&utm_medium=member_desktop&rcm=ACoAADkIIvQBTyG53kXXX70OZdE5rhpllYQqmIA)).
+- [2026/01] LMCache multi-node P2P CPU memory sharing, from experimental feature to production ([blog](https://blog.lmcache.ai/en/2026/01/21/p2p-1/)).
 
---------------------------------------------------------------------------------
+<details>
+<summary>More</summary>
 
-| [**Blog**](https://blog.lmcache.ai/)
-| [**Documentation**](https://docs.lmcache.ai/)
-| [**Join Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3g8e6xzz8-KzS_HI8bPERGFK5PTB~MYg)
-| [**Interest Form**](https://forms.gle/MHwLiYDU6kcW3dLj7)
-| [**Roadmap**](https://github.com/LMCache/LMCache/issues/1253)
+- [2025/11] LMCache x CoreWeave accelerate efficient LLM inference for Cohere ([blog](https://blog.lmcache.ai/en/2025/10/29/breaking-the-memory-barrier-how-lmcache-and-coreweave-power-efficient-llm-inference-for-cohere/)).
+- [2025/10] LMCache joins the PyTorch Foundation and Tensormesh unveiled ([blog](https://blog.lmcache.ai/en/2025/10/31/tensormesh-unveiled-and-lmcache-joins-the-pytorch-foundation/), [PyTorch](https://pytorch.org/blog/lmcache-joins-pytorch-ecosystem/)).
+- [2025/09] NVIDIA Dynamo integrates LMCache, accelerating LLM inference ([blog](https://blog.lmcache.ai/en/2025/09/18/nvidia-dynamo-integrates-lmcache-accelerating-llm-inference/)).
+- [2025/08] 🎉 LMCache hits 5,000+ GitHub stars ([blog](https://blog.lmcache.ai/en/2025/08/28/%f0%9f%8e%89-lmcache-hits-5000-github-stars-thank-you-community/)).
+- [2025/08] LMCache supports gpt-oss (20B/120B) on day 1 ([blog](https://blog.lmcache.ai/en/2025/08/05/lmcache-supports-gpt-oss-20b-120b-on-day-1/)).
+- [2025/07] Get faster LLM inference and cheaper responses with LMCache and Redis ([Redis blog](https://redis.io/blog/get-faster-llm-inference-and-cheaper-responses-with-lmcache-and-redis/)).
+- [2025/07] LMCache extends its turbo-boost to multimodal models in vLLM V1 ([blog](https://blog.lmcache.ai/en/2025/07/03/lmcache-extends-its-turbo-boost-to-multimodal-models-in-vllm-v1/)).
+- [2025/06] LLM Production Stack goes cross-hardware: AMD, Arm and Ascend ([blog](https://blog.lmcache.ai/en/2025/06/20/llm-production-stack-goes-cross-hardware-ascend-arm-and-amd-support-incoming/)).
 
-## Summary
+</details>
 
-LMCache is an **LLM** serving engine extension to **reduce TTFT** and **increase throughput**, especially under long-context scenarios. By storing the KV caches of reusable texts all over the datacenter (including GPU, CPU, Disk and even S3) with a wide range of acceleration technqiue (zero cpu copy, NIXL, GDS and more). LMCache reuses the KV caches of **_any_** reused text (not necessarily prefix) in **_any_** serving engine instance. Thus, LMCache saves precious GPU cycles and reduces user response delay.  
+## About
 
-By combining LMCache with vLLM, developers achieve 3-10x delay savings and GPU cycle reduction in many LLM use cases, including multi-round QA and RAG.
+LMCache is a **KV cache management layer** for LLM inference. It turns KV cache from a temporary state into reusable *AI-native knowledge* that can be *stored* persistently, *reused* across multiple serving engines, *monitored* with an observability stack, and *transformed* for better generation quality. As a result, LMCache **reduces TTFT** (time-to-first-token) and **improves throughput**, especially for long-context agentic, multi-turn conversation, and knowledge-augmented workloads (e.g., RAG).
 
-![performance](https://github.com/user-attachments/assets/86137f17-f216-41a0-96a7-e537764f7a4c)
+LMCache is **vendor-neutral**. It can be used as a KV cache layer for a range of mainstream open-source serving engines, inference frameworks, hardware vendors, storage systems, and infrastructure providers. The vendor neutrality allows users to freely switch between serving engines and storage vendors, while reusing the stored KV caches.
 
-LMCache is used, integrated, or referenced across a growing ecosystem of LLM serving platforms, infrastructure providers, and open-source projects:
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="asset/deployment_modes_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="asset/deployment_modes_light.png">
+  <img alt="LMCache Deployment Modes" src="asset/deployment_modes_light.png">
+</picture>
+</p>
 
-- Initiated and officially supported by: [Tensormesh](https://www.tensormesh.ai/)
-- Adopted by inference providers: GMI cloud ([blog post](https://www.gmicloud.ai/blog/gmi-cloud-achieves-4x-llm-performance-boost-with-tensormesh)), Google cloud ([blog post](https://cloud.google.com/blog/topics/developers-practitioners/boosting-llm-performance-with-tiered-kv-cache-on-google-kubernetes-engine)), CoreWeave ([blog post](https://www.coreweave.com/news/coreweave-unveils-ai-object-storage-redefining-how-ai-workloads-access-and-scale-data)) and more
-- Integrated with data and storage infrastructure providers: Redis ([blog post](https://redis.io/blog/get-faster-llm-inference-and-cheaper-responses-with-lmcache-and-redis/)), Weka ([blog post](https://www.weka.io/blog/ai-ml/open-sourcing-gds-integration-from-augmented-memory-grid-see-results-for-yourself/)), PliOps ([blog post](https://www.manilatimes.net/2025/03/12/tmt-newswire/globenewswire/pliops-announces-collaboration-with-vllm-production-stack-to-enhance-llm-inference-performance/2072000)) and more
-- Used by open-source projects and platforms: [vLLM](https://github.com/vllm-project/vllm) [![GitHub stars](https://img.shields.io/github/stars/vllm-project/vllm?style=social)](https://github.com/vllm-project/vllm)
-, [SGLang](https://github.com/sgl-project/sglang) [![GitHub stars](https://img.shields.io/github/stars/sgl-project/sglang?style=social)](https://github.com/sgl-project/sglang)
-, [vLLM Production Stack](https://github.com/vllm-project/production-stack) [![GitHub stars](https://img.shields.io/github/stars/vllm-project/production-stack?style=social)](https://github.com/vllm-project/production-stack), [llm-d](https://github.com/llm-d/llm-d/) [![GitHub stars](https://img.shields.io/github/stars/llm-d/llm-d?style=social)](https://github.com/llm-d/llm-d), [NVIDIA dynamo](https://github.com/ai-dynamo/dynamo) [![GitHub stars](https://img.shields.io/github/stars/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo), [KServe](https://github.com/kserve/kserve) [![GitHub stars](https://img.shields.io/github/stars/kserve/kserve?style=social)](https://github.com/kserve/kserve) and more.
+### Key features
 
-For more details, please check our [Ray Summit talk](https://www.youtube.com/watch?v=TwLd15HE6AM) and [technical report](https://lmcache.ai/tech_report.pdf).
+- **Engine-independent deployment**: LMCache, as a standalone daemon process, manages KV cache independently from the inference engine process, so that KV cache will not be lost even if the inference engine crashes (i.e., no fate-sharing with engines).
 
+- **Persistent, tiered KV cache offloading and reuse**: Move KV caches out of GPU memory into a tiered storage hierarchy spanning CPU memory, local storage, and remote backends, enabling reuse across requests, sessions, and engine instances to reduce repeated prefill computation and improve TTFT.
 
-## Features
+- **Production-level KV cache observability**: LMCache provides a rich set of KV cache observability metrics, including typical Kubernetes metrics (health monitoring, performance diagnostics), KV-cache-specific metrics (request-level and token-level prefix cache hits, lifecycle, request-level KV cache performance), management metrics (user-specific usage), and more.
 
-- [x] 🔥 Integration with vLLM v1 with the following features:
-  * High performance CPU KVCache offloading
-  * Disaggregated prefill
-  * P2P KVCache sharing
-- [x] Integration with SGLang for KV cache offloading
-- [x] Storage support as follows:
-  * CPU
-  * Disk
-  * [NIXL](https://github.com/ai-dynamo/nixl)
-- [x] Installation support through pip and latest vLLM
+- **Pluggable storage and transport backends**: Easily integrate remote storage and KV transfer backends through a unified interface, enabling KV cache offloading and sharing across storage providers. Through this interface, LMCache supports storage backends including CPU RAM, local disk (SSD), Redis/Valkey, Mooncake, InfiniStore, S3-compatible object storage, NIXL, and GDS.
 
-## Installation
+- **Non-prefix KV reuse**: Extend KV reuse beyond prefix caching by reusing cached KV blocks at any position in the prompt. This leverages CacheBlend to selectively recompute tokens for quality recovery.
+
+- **PD disaggregation and KV transfer**: Support KV cache transfer from prefill workers to decode workers over NVLink, RDMA, or TCP through transport layers such as NIXL.
+
+- **Pluggable KV transformation**: A simple interface for researchers to write compression, token dropping, and custom serialization through a flexible SERDE interface.
+
+LMCache is becoming an integral layer in the LLM inference *ecosystem*, with *community*-driven integration with serving engines, inference frameworks, hardware vendors, storage systems, and infrastructure providers:
+
+<p align="center">
+  <img src="asset/ecosystem.png" alt="LMCache ecosystem">
+</p>
+
+## Getting Started
 
 To use LMCache, simply install `lmcache` from your package manager, e.g. pip:
-
 ```bash
 pip install lmcache
 ```
 
-Works on Linux NVIDIA GPU platform.
-
-More [detailed installation instructions](https://docs.lmcache.ai/getting_started/installation) are available in the docs, particularly if you are not using the latest stable version of vllm or using another serving engine with different dependencies. Any "undefined symbol" or torch mismatch versions can be resolved in the documentation. 
-
-## Getting started
-
-The best way to get started is to checkout the [Quickstart Examples](https://docs.lmcache.ai/getting_started/quickstart/) in the docs.
-
-## Documentation
-
-Check out the LMCache [documentation](https://docs.lmcache.ai/) which is available online.
-
-We also post regularly in [LMCache blogs](https://blog.lmcache.ai/).
-
-## Examples
-
-Go hands-on with our [examples](https://github.com/LMCache/LMCache/tree/dev/examples),
-demonstrating how to address different use cases with LMCache.
-
-## Interested in Connecting?
-
-Fill out the [interest form](https://forms.gle/mQfQDUXbKfp2St1z7), [sign up for our newsletter](https://mailchi.mp/tensormesh/lmcache-sign-up-newsletter), [join LMCache slack](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3g8e6xzz8-KzS_HI8bPERGFK5PTB~MYg), or [drop an email](mailto:contact@lmcache.ai), and our team will reach out to you!
-
-## Community meeting
-
-The community meeting [Zoom Link]( https://uchicago.zoom.us/j/6603596916?pwd=Z1E5MDRWUSt2am5XbEt4dTFkNGx6QT09) for LMCache is hosted bi-weekly. All are welcome to join!
-
-Meetings are held bi-weekly on: Tuesdays at 9:00 AM PT – [Add to Google Calendar](https://calendar.google.com/calendar/u/0/r?cid=Y19mNGY2ZmMwZjUxMWYyYTZmZmE1ZTVlMGI2Yzk2NmFmZjNhM2Y4ODZiZmU5OTU5MDJlMmE3ZmUyOGZmZThlOWY5QGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20)
-
-We keep notes from each meeting on this [document](https://docs.google.com/document/d/1_Fl3vLtERFa3vTH00cezri78NihNBtSClK-_1tSrcow) for summaries of standups, discussion, and action items.
-
-Recordings of meetings are available on the [YouTube LMCache channel](https://www.youtube.com/channel/UC58zMz55n70rtf1Ak2PULJA).
+For more setup options and examples, see:
+- [Installation](https://docs.lmcache.ai/getting_started/installation.html)
+- [Quickstart](https://docs.lmcache.ai/getting_started/quickstart.html)
+- [LMCache Recipes](https://docs.lmcache.ai/recipes/index.html)
+- [CLI Reference](https://docs.lmcache.ai/cli/index.html)
+- [Benchmarking Guide](https://docs.lmcache.ai/getting_started/benchmarking.html)
+- [Production Deployment](https://docs.lmcache.ai/mp/deployment.html)
 
 ## Contributing
+We welcome and value contributions and collaborations. Join us in improving LMCache. Check out the [Contributing Guide](https://docs.lmcache.ai/developer_guide/contributing.html) or join our [Slack community](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA) to get started.
 
-We welcome and value all contributions and collaborations.  Please check out [Contributing Guide](CONTRIBUTING.md) on how to contribute.
+## Adoption and Partnerships
+LMCache has a growing community of developers, researchers, industry adopters, and partners building the next generation of efficient LLM inference systems.
 
-We continually update [[Onboarding] Welcoming contributors with good first issues!](https://github.com/LMCache/LMCache/issues/627)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="asset/partner_dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="asset/partner_light.png">
+    <img alt="LMCache Adoption and Partnerships" src="asset/partner_light.png">
+  </picture>
+</p>
+
+As an independent open-source project, LMCache is becoming the de-facto standard for KV Cache management in LLM inference. Its continued development and community work are supported in part by [Tensormesh](https://www.tensormesh.ai/).
 
 ## Citation
 
-If you use LMCache for your research, please cite our papers:
+LMCache builds on research in KV cache management, including cache reuse, offloading, compression, and serving optimization. If you use LMCache in your research, please cite the LMCache paper and related work.
 
-```
+~~~bibtex
+@article{cheng2025lmcache,
+  title={LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference},
+  author={Cheng, Yihua and Liu, Yuhan and Yao, Jiayi and An, Yuwei and Chen, Xiaokun and Feng, Shaoting and Huang, Yuyang and Shen, Samuel and Du, Kuntai and Jiang, Junchen},
+  journal={arXiv preprint arXiv:2510.09665},
+  year={2025}
+}
+~~~
+
+<details>
+<summary>Related papers</summary>
+
+~~~bibtex
 @inproceedings{liu2024cachegen,
   title={Cachegen: Kv cache compression and streaming for fast large language model serving},
   author={Liu, Yuhan and Li, Hanchen and Cheng, Yihua and Ray, Siddhant and Huang, Yuyang and Zhang, Qizheng and Du, Kuntai and Yao, Jiayi and Lu, Shan and Ananthanarayanan, Ganesh and others},
@@ -123,34 +134,16 @@ If you use LMCache for your research, please cite our papers:
   year={2024}
 }
 
-@article{cheng2024large,
-  title={Do Large Language Models Need a Content Delivery Network?},
-  author={Cheng, Yihua and Du, Kuntai and Yao, Jiayi and Jiang, Junchen},
-  journal={arXiv preprint arXiv:2409.13761},
-  year={2024}
-}
-
-@inproceedings{10.1145/3689031.3696098,
-  author = {Yao, Jiayi and Li, Hanchen and Liu, Yuhan and Ray, Siddhant and Cheng, Yihua and Zhang, Qizheng and Du, Kuntai and Lu, Shan and Jiang, Junchen},
-  title = {CacheBlend: Fast Large Language Model Serving for RAG with Cached Knowledge Fusion},
-  year = {2025},
-  url = {https://doi.org/10.1145/3689031.3696098},
-  doi = {10.1145/3689031.3696098},
-  booktitle = {Proceedings of the Twentieth European Conference on Computer Systems},
-  pages = {94–109},
-}
-
-@article{cheng2025lmcache,
-  title={LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference},
-  author={Cheng, Yihua and Liu, Yuhan and Yao, Jiayi and An, Yuwei and Chen, Xiaokun and Feng, Shaoting and Huang, Yuyang and Shen, Samuel and Du, Kuntai and Jiang, Junchen},
-  journal={arXiv preprint arXiv:2510.09665},
+@inproceedings{yao2025cacheblend,
+  title={Cacheblend: Fast large language model serving for rag with cached knowledge fusion},
+  author={Yao, Jiayi and Li, Hanchen and Liu, Yuhan and Ray, Siddhant and Cheng, Yihua and Zhang, Qizheng and Du, Kuntai and Lu, Shan and Jiang, Junchen},
+  booktitle={Proceedings of the twentieth European conference on computer systems},
+  pages={94--109},
   year={2025}
 }
-```
+~~~
 
-## Socials
-
-[Linkedin](https://www.linkedin.com/company/lmcache-lab/?viewAsMember=true) | [Twitter](https://x.com/lmcache) | [Youtube](https://www.youtube.com/@LMCacheTeam)
+</details>
 
 ## License
 
