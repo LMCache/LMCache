@@ -223,71 +223,61 @@ class ParallelStrategy:
     """vLLM parallelism layout snapshot consumed by the LMCache adapters."""
 
     use_mla: bool
-    """Whether the model uses MLA."""
+    """Whether to use the MLA."""
 
-    global_world_size: int
-    """Total number of vLLM worker processes."""
+    vllm_world_size: int
+    """vLLM-side world size."""
 
-    global_rank: int
-    """The current worker's rank in ``[0, global_world_size)``."""
+    vllm_worker_id: int
+    """vLLM-side rank of the sub-process."""
 
     tp_size: int
-    """Tensor-parallel size of the model."""
+    """The tensor parallel size."""
 
     pp_size: int
-    """Pipeline-parallel size of the model."""
+    """The pipeline parallel size."""
 
     n_servers: int
-    """Number of LMCache servers backing this deployment
-    (1 = single shared server, >1 = one server per node)."""
+    """Number of LMCache servers backing this deployment"""
 
     @property
     def kv_world_size(self) -> int:
-        """How many KV-cache pieces a single LMCache server is responsible for.
-
-        For MLA models, TP ranks share the same KV cache, so the effective
-        KV world size excludes the TP dimension.
-        For multi-server deployments, each server only handles its local slice."""
+        """Number of pieces a single token chunk's KV cache is split into
+        on a single LMCache server."""
         if self.use_mla:
-            return self.global_world_size // self.tp_size
-        return self.global_world_size // self.n_servers
+            return self.vllm_world_size // self.tp_size
+        return self.vllm_world_size // self.n_servers
 
     @property
     def kv_worker_id(self) -> int:
-        """This worker's KV-cache piece index within its LMCache server,
-        in ``[0, kv_world_size)``.
-
-        For MLA models, TP ranks share the same KV cache, so the effective
-        KV worker id excludes the TP dimension.
-        For multi-server deployments, the id is local to the server's slice."""
+        """Index of the piece a single token chunk's KV cache
+        this worker owns on its LMCache server,
+        in ``[0, kv_world_size)``."""
         if self.use_mla:
-            return self.global_rank // self.tp_size
-        return self.global_rank % (self.global_world_size // self.n_servers)
+            return self.vllm_worker_id // self.tp_size
+        return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
 
     @property
     def kv_tp_size(self) -> int:
-        """Tensor-parallel size as seen from a single LMCache server.
-
-        In multi-server deployments each server covers only its local TP slice."""
+        """Tensor-parallel size as seen from a single LMCache server."""
         return self.tp_size // self.n_servers
 
     @property
     def is_kv_writer(self) -> bool:
-        """Whether this rank is responsible for storing KV to LMCache.
-
-        For non-MLA models, every rank writes its own KV shard.
-        For MLA models, only one rank per TP group (the first rank of each
-        pipeline-parallel group) writes, since TP ranks share the same KV.
-        In multi-server deployments, only the first rank on each node writes
-        to its local LMCache server."""
+        """Whether this rank is responsible for storing KV to LMCache."""
         if not self.use_mla:
-            if self.n_servers <= 1:
-                return True
-            # Multi-server: only the first rank on each node writes.
-            ranks_per_node = self.global_world_size // self.n_servers
-            return self.global_rank % ranks_per_node == 0
-        # MLA: only the first rank of each TP group writes.
-        return self.global_rank % self.tp_size == 0
+            # Non-MLA: every rank owns a distinct KV shard and must write it.
+            return True
+        # MLA: KV is identical across all TP ranks within a PP stage, so each
+        # PP stage only needs one writer *per node it occupies*.  When a PP
+        # stage spans two nodes (e.g. tp=3, pp=8, n_servers=3 -> pp_rank=2
+        # owns ranks {6,7,8} which split across node0 and node1), both nodes
+        # must contribute a writer so that each LMCache server sees the
+        # stage's KV.
+        ranks_per_node = self.vllm_world_size // self.n_servers
+        pp_start = (self.vllm_worker_id // self.tp_size) * self.tp_size
+        node_start = (self.vllm_worker_id // ranks_per_node) * ranks_per_node
+        return self.vllm_worker_id == max(pp_start, node_start)
 
 
 def _normalize_adapter_init_args(
@@ -326,8 +316,8 @@ def _normalize_adapter_init_args(
     kv_worker_id = int(parallel_strategy)
     strategy = ParallelStrategy(
         use_mla=False,
-        global_world_size=kv_world_size,
-        global_rank=kv_worker_id,
+        vllm_world_size=kv_world_size,
+        vllm_worker_id=kv_worker_id,
         tp_size=kv_world_size,
         pp_size=1,
         n_servers=1,
