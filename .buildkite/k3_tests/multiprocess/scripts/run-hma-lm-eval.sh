@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # HMA (hybrid memory allocator) correctness test using a real hybrid model.
 #
-# google/gemma-4-31B-it interleaves sliding-window and full-attention layers
-# whose full layers have a larger head_dim (512 vs 256), so vLLM keeps its
-# hybrid KV cache manager ON (LMCacheMPConnector subclasses SupportsHMA) and
-# gives the groups different block sizes -- the connector then exercises the
-# per-group HMA store/retrieve path. It uses standard paged attention for both
-# layer families (so LMCache's transfer kernels support it, unlike Mamba/
-# linear-attention hybrids such as Qwen3.5/Qwen3-Next, whose state caches
-# LMCache cannot yet transfer). It is public, so no HF_TOKEN is required.
+# Why google/gemma-4-31B-it:
+#   - Hybrid (sliding-window + full-attention), so vLLM keeps its hybrid KV
+#     cache manager on and exposes multiple KV cache groups.
+#   - Its full layers have a larger head_dim, so the groups get different block
+#     sizes -- this exercises the per-group HMA store/retrieve path.
+#   - Standard paged attention for both layer families, so LMCache's transfer
+#     kernels support it (unlike Mamba/linear-attention hybrids like
+#     Qwen3.5/Qwen3-Next, whose state caches LMCache cannot yet transfer).
+#   - Public, so no HF_TOKEN is required.
 #
 # Flow:
 #   1. Run lm_eval (gsm8k) against vLLM+LMCache       -> populates LMCache (STORE).
@@ -23,11 +24,6 @@
 #   5. Assert LMCache actually served retrieves during run 2 (non-vacuous).
 #
 # The reset endpoint requires VLLM_SERVER_DEV_MODE=1 (set by launch-processes.sh).
-#
-# NOTE on determinism: gemma-4 forces the Triton attention backend, which is not
-# bit-exact under vLLM's batch-invariant mode, so a correct retrieve may differ
-# from a fresh compute by a small margin rather than being identical. The score
-# comparison therefore allows a small non-zero SCORE_TOLERANCE (default below).
 set -e
 set -o pipefail
 
@@ -44,9 +40,10 @@ NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
 # 31B has a large per-token KV footprint; cap the sample count so the working
 # set fits the CPU pool (a too-large set thrashes and run 2 misses LMCache).
 LIMIT="${LIMIT:-100}"
-# Max allowed absolute difference in the gsm8k exact_match score between runs.
-# gemma-4 uses the Triton backend (not bit-exact under batch invariance), so the
-# default allows a small tolerance rather than requiring an exact match.
+# Max allowed absolute difference in the gsm8k exact_match score across runs.
+# gemma-4 forces the Triton backend, which is not bit-exact under vLLM's
+# batch-invariant mode, so a correct retrieve can differ from a fresh compute by
+# a small margin; the default allows a small tolerance instead of an exact match.
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
 # Seconds to wait after run 1 so async LMCache stores drain before run 2.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"

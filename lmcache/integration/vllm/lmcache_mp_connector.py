@@ -326,10 +326,10 @@ class LMCacheMPRequestMetadata:
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            blocks_in_chunk: the number of canonical (``vllm_block_size``)
-                blocks in a LMCache data chunk
-            vllm_block_size: the canonical (GCD) block size used in vLLM
-                accounting (= ``cache_config.block_size``)
+            blocks_in_chunk: the number of ``vllm_block_size`` blocks in a
+                LMCache data chunk
+            vllm_block_size: the vLLM block size (= ``cache_config.block_size``);
+                block IDs and ranges are counted in this unit
             group_block_sizes: per-engine-group vLLM block size. A group's own
                 block size may be a larger multiple of ``vllm_block_size``
                 (hybrid models).
@@ -360,11 +360,11 @@ class LMCacheMPRequestMetadata:
         computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
-        # Normalize each group's allocated-block count to the canonical
-        # ``vllm_block_size`` unit before taking the min: a group whose own
-        # block size is ``k`` times the canonical size holds ``k`` canonical
-        # blocks per stored block ID (e.g. gemma-4 sliding groups span 32
-        # tokens/ID = 2 canonical 16-token blocks).
+        # Normalize each group's allocated-block count to ``vllm_block_size``
+        # units before taking the min: a group whose own block size is ``k``
+        # times ``vllm_block_size`` holds ``k`` such blocks per stored block ID
+        # (e.g. gemma-4 sliding groups span 32 tokens/ID = 2 of the 16-token
+        # blocks).
         allocated_lengths = tracker.num_allocated_blocks()
         allocated_blocks = (
             min(
@@ -428,10 +428,10 @@ class LMCacheMPRequestMetadata:
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            blocks_in_chunk: the number of canonical (``vllm_block_size``)
-                blocks in a LMCache data chunk
-            vllm_block_size: the canonical (GCD) block size used in vLLM
-                accounting (= ``cache_config.block_size``)
+            blocks_in_chunk: the number of ``vllm_block_size`` blocks in a
+                LMCache data chunk
+            vllm_block_size: the vLLM block size (= ``cache_config.block_size``);
+                block IDs and ranges are counted in this unit
             group_block_sizes: per-engine-group vLLM block size. A group's own
                 block size may be a larger multiple of ``vllm_block_size``
                 (hybrid models).
@@ -585,7 +585,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if block_size <= 0 or block_size % self.vllm_block_size != 0:
                 raise ValueError(
                     f"group {engine_group_idx} block size {block_size} must be "
-                    f"a positive multiple of the canonical block size "
+                    f"a positive multiple of vllm_block_size "
                     f"{self.vllm_block_size}"
                 )
 

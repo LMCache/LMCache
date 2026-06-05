@@ -121,27 +121,27 @@ def expand_block_ids_to_views(
 def slice_block_ids_per_group(
     allocated_block_ids: Mapping[int, Sequence[int]],
     group_block_sizes: Sequence[int],
-    canonical_block_size: int,
+    base_block_size: int,
     start_block_idx: int,
     end_block_idx: int,
 ) -> list[list[int]]:
     """Slice each engine group's block IDs for a block range.
 
-    The range is given in *canonical* blocks (the GCD of all groups' block
-    sizes). A group whose own block size is ``k`` times the canonical size holds
-    ``1/k`` as many block IDs over the same tokens, so the range is divided by
-    ``k = group_block_size // canonical_block_size`` for that group. Example: if
-    canonical=16, a block_size=32 group gets half the IDs of a block_size=16
-    group.
+    The range is given in *base* blocks -- the block size that every group's
+    block size is a multiple of. A group whose own block size is ``k`` times the
+    base size holds ``1/k`` as many block IDs over the same tokens, so the range
+    is divided by ``k = group_block_size // base_block_size`` for that group.
+    Example: with base 16, a block_size-32 group gets half the IDs of a
+    block_size-16 group.
 
     Args:
         allocated_block_ids: Block IDs keyed by engine group id; a missing group
             yields an empty list.
         group_block_sizes: Each group's block size, in engine-group order. Every
-            value must be a positive multiple of ``canonical_block_size``.
-        canonical_block_size: Block size the range indices are counted in.
-        start_block_idx: Range start canonical block index, inclusive.
-        end_block_idx: Range end canonical block index, exclusive.
+            value must be a positive multiple of ``base_block_size``.
+        base_block_size: Block size the range indices are counted in.
+        start_block_idx: Range start block index, inclusive.
+        end_block_idx: Range end block index, exclusive.
 
     Returns:
         One block-ID list per engine group, in engine-group order.
@@ -151,7 +151,7 @@ def slice_block_ids_per_group(
     """
     sliced: list[list[int]] = []
     for engine_group_idx, block_size in enumerate(group_block_sizes):
-        k = block_size // canonical_block_size
+        k = block_size // base_block_size
         if start_block_idx % k != 0 or end_block_idx % k != 0:
             raise ValueError(
                 f"block range [{start_block_idx}, {end_block_idx}) does not "

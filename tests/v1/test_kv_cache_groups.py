@@ -89,12 +89,12 @@ def test_group_views_reject_out_of_range_layer():
 
 
 def test_slice_block_ids_uniform_block_sizes():
-    """Groups sharing the canonical block size slice to equal counts."""
+    """Groups sharing the base block size slice to equal counts."""
     allocated = {0: list(range(16)), 1: list(range(100, 116))}
     sliced = slice_block_ids_per_group(
         allocated,
         group_block_sizes=[16, 16],
-        canonical_block_size=16,
+        base_block_size=16,
         start_block_idx=0,
         end_block_idx=16,
     )
@@ -104,14 +104,14 @@ def test_slice_block_ids_uniform_block_sizes():
 def test_slice_block_ids_heterogeneous_block_sizes():
     """A block_size-32 group gets half the IDs of a block_size-16 group.
 
-    The canonical range [0, 16) spans 256 tokens: the block_size-16 group needs
+    The range [0, 16) spans 256 tokens: the block_size-16 group needs
     16 block IDs, the block_size-32 group 8, for the same token span.
     """
     allocated = {0: list(range(16)), 1: list(range(8))}
     sliced = slice_block_ids_per_group(
         allocated,
         group_block_sizes=[16, 32],
-        canonical_block_size=16,
+        base_block_size=16,
         start_block_idx=0,
         end_block_idx=16,
     )
@@ -124,7 +124,7 @@ def test_slice_block_ids_nonzero_start_offset():
     sliced = slice_block_ids_per_group(
         allocated,
         group_block_sizes=[16, 32],
-        canonical_block_size=16,
+        base_block_size=16,
         start_block_idx=16,
         end_block_idx=32,
     )
@@ -137,7 +137,7 @@ def test_slice_block_ids_missing_group_yields_empty():
     sliced = slice_block_ids_per_group(
         allocated,
         group_block_sizes=[16, 16],
-        canonical_block_size=16,
+        base_block_size=16,
         start_block_idx=0,
         end_block_idx=16,
     )
@@ -152,7 +152,7 @@ def test_slice_block_ids_misaligned_range_raises():
         slice_block_ids_per_group(
             allocated,
             group_block_sizes=[16, 48],
-            canonical_block_size=16,
+            base_block_size=16,
             start_block_idx=0,
             end_block_idx=8,
         )

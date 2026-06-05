@@ -51,12 +51,12 @@ if [ -n "$ATTENTION_BACKEND" ] && [ "$ATTENTION_BACKEND" != "auto" ]; then
     ATTENTION_BACKEND_ARG="--attention-backend $ATTENTION_BACKEND"
 fi
 
-# Optionally run vLLM in eager mode (skip CUDA graph capture) for both servers.
-# Graph capture dominates startup for large models; the HMA correctness tests do
-# not need graphs, so enabling this keeps vLLM from timing out during launch.
-# Set ENFORCE_EAGER=1 (or true) to enable.
+# Run vLLM in eager mode (skip CUDA graph capture) for both servers. Graph
+# capture dominates startup for large models and the tests don't need graphs, so
+# this is on by default to keep vLLM from timing out during launch. Set
+# ENFORCE_EAGER=0 to disable.
 ENFORCE_EAGER_ARG=""
-if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
+if [ "${ENFORCE_EAGER:-1}" = "1" ] || [ "${ENFORCE_EAGER:-1}" = "true" ]; then
     ENFORCE_EAGER_ARG="--enforce-eager"
 fi
 
