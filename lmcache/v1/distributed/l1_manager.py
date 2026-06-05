@@ -415,7 +415,7 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
-        self._memory_manager.free(need_to_free)
+        self._free_objects(need_to_free)
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_read_finished(successful_keys)
@@ -509,8 +509,10 @@ class L1Manager:
         if err != L1Error.SUCCESS:
             for key, _ in need_to_allocate:
                 ret[key] = (L1Error.OUT_OF_MEMORY, None)
-            # Both backends free any partial allocation internally and
-            # return [], so there is nothing to roll back here.
+
+            # Free the memory if partial allocation succeeded
+            if allocated_objs:
+                self._memory_manager.free(allocated_objs)
 
         else:
             for (key, is_temp), mem_obj in zip(
@@ -702,7 +704,7 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
-        self._memory_manager.free(need_to_free)
+        self._free_objects(need_to_free)
 
         for listener in self._registered_listeners:
             listener.on_l1_keys_deleted_by_manager(successful_keys)
@@ -742,7 +744,7 @@ class L1Manager:
             )
             all_keys = list(self._objects.keys())
             all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
-            self._memory_manager.free(all_memory_objs)
+            self._free_objects(all_memory_objs)
             self._objects.clear()
             for listener in self._registered_listeners:
                 listener.on_l1_keys_deleted_by_manager(all_keys)
@@ -772,7 +774,7 @@ class L1Manager:
         for key in keys_to_clear:
             del self._objects[key]
 
-        self._memory_manager.free(objs_to_free)
+        self._free_objects(objs_to_free)
 
         if keys_to_clear:
             for listener in self._registered_listeners:
@@ -789,6 +791,30 @@ class L1Manager:
             len(keys_to_clear),
             locked_count,
         )
+
+    def _free_objects(self, mem_objs: list[MemoryObj]) -> None:
+        """Free removed objects, routing each to its owning tier.
+
+        GDS-resident objects drop their slab region and index entry via the
+        GDS backend; CPU-pinned objects go back to the L1 memory manager.
+        Used by the removal paths (finish_read / delete / clear / eviction).
+        Not for shutdown: ``close`` keeps GDS entries durable.
+        """
+        if not mem_objs:
+            return
+        if self._gds_backend is None:
+            self._memory_manager.free(mem_objs)
+            return
+        gds_objs: list[MemoryObj] = [
+            mo for mo in mem_objs if isinstance(mo, GdsMemoryObj)
+        ]
+        cpu_objs: list[MemoryObj] = [
+            mo for mo in mem_objs if not isinstance(mo, GdsMemoryObj)
+        ]
+        if gds_objs:
+            self._gds_backend.free_resident(gds_objs)
+        if cpu_objs:
+            self._memory_manager.free(cpu_objs)
 
     def _try_gds_fill_on_miss_locked(self, key: ObjectKey) -> L1ObjectState | None:
         """If GDS L1 has ``key`` resident on disk, synthesise an L1 entry.

@@ -51,6 +51,7 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
+    GdsL1Config,
     L1ManagerConfig,
     L1MemoryManagerConfig,
 )
@@ -1936,3 +1937,48 @@ class TestIsKeyEvictable:
         assert manager.is_key_evictable(key) is True
 
         manager.close()
+
+
+# =============================================================================
+# GDS-aware object teardown (delete / clear / eviction)
+# =============================================================================
+
+
+@pytest.fixture
+def gds_l1_config(tmp_path):
+    """A POSIX-fallback GDS config (no nvidia-fs needed)."""
+    root = tmp_path / "gds_l1_root"
+    root.mkdir()
+    return GdsL1Config(
+        gds_path=str(root),
+        gds_path_sharding="by_gpu",
+        use_gds=False,
+        use_direct_io=False,
+        slab_size_gb=0.25,
+    )
+
+
+class TestL1ManagerGdsTeardown:
+    """Removal paths route GDS objects to the slab, not the CPU manager."""
+
+    def test_free_objects_drops_gds_entry(
+        self, basic_l1_config, gds_l1_config, basic_layout
+    ):
+        manager = L1Manager(basic_l1_config, gds_l1_config=gds_l1_config)
+        try:
+            # White-box: create + record a GDS object as a completed write would.
+            allocator = manager._gds_backend._allocator
+            key = make_object_key(1)
+            mo = allocator.create_memory_obj(key, basic_layout)
+            allocator._record_entry(mo)
+            assert allocator.create_memory_obj_from_index(key) is not None
+            assert allocator.get_memory_usage()[0] > 0
+
+            # Routing GDS objects through _memory_manager.free would corrupt the
+            # CPU allocator; _free_objects must send them to the slab instead.
+            manager._free_objects([mo])
+
+            assert allocator.create_memory_obj_from_index(key) is None
+            assert allocator.get_memory_usage()[0] == 0
+        finally:
+            manager.close()

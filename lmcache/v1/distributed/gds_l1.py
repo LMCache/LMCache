@@ -1367,10 +1367,25 @@ class GdsL1Backend:
         return L1Error.SUCCESS, allocated
 
     def free(self, mem_objs: list[MemoryObj]) -> L1Error:
-        """Return the slab regions of ``mem_objs`` (does not touch the index)."""
+        """Return the slab regions of reserved-but-unrecorded ``mem_objs``.
+
+        For the reserve-time rollback path: the objects are not yet in the
+        index, so only the slab region is returned (no index touch).
+        """
         for mo in mem_objs:
             if isinstance(mo, GdsMemoryObj):
                 self._allocator.free_entry(mo)
+        return L1Error.SUCCESS
+
+    def free_resident(self, mem_objs: list[MemoryObj]) -> L1Error:
+        """Remove resident (recorded) ``mem_objs``: drop index entry + region.
+
+        For the removal paths (delete / clear / eviction): each object is in
+        the durable index, so both the index entry and its slab region go.
+        """
+        for mo in mem_objs:
+            if isinstance(mo, GdsMemoryObj):
+                self._allocator.free_entry_from_index(mo)
         return L1Error.SUCCESS
 
     @property
