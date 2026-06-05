@@ -53,20 +53,31 @@ based on ``--engine-type`` and ``--supported-transfer-mode``.
 (``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule``
 and/or ``NonGPUTransferModule`` depending on
 ``--supported-transfer-mode`` — ``gpu`` or ``non_gpu`` loads just one,
-``auto`` (default) loads both — plus ``BlendModule`` when
-``--engine-type blend``), starts a ``MessageQueueServer``, registers
-handlers for every ``RequestType`` exposed by the loaded modules, and
-blocks in a keep-alive loop.
+``auto`` (default) loads both — plus a CacheBlend module when
+``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
+current paged-aware implementation), and ``blend_legacy`` appends
+``BlendModule`` (the original). Starts a ``MessageQueueServer``,
+registers handlers for every ``RequestType`` exposed by the loaded
+modules, and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule`` and ``BlendEngineV2``,
-which add CacheBlend operations (``CB_REGISTER_KV_CACHE``,
+which add the original CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 ``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
 ``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL`` and their V2
 variants). Enables non-prefix KV cache reuse across document
-paragraphs. Selected by passing ``--engine-type blend`` to
-``lmcache server``; ``BlendModule`` requires
-``--supported-transfer-mode`` to be ``gpu`` or ``auto`` and will refuse
-to load when it is ``non_gpu``.
+paragraphs. Selected by passing ``--engine-type blend_legacy`` to
+``lmcache server``.
+
+**``modules/blend_v3.py``** -- Defines ``BlendV3Module``, the
+paged-aware CacheBlend V3 pipeline that runs on the sparse-prefetch
+path. Adds the V3 RPCs (``CB_REGISTER_ROPE_V3``,
+``CB_UNREGISTER_ROPE_V3``, ``CB_RETRIEVE_PRE_COMPUTED_V3``,
+``CB_UNIFIED_LOOKUP``) and reuses the existing ``GPUTransferModule``
+and ``LookupModule``. Selected by passing ``--engine-type blend`` to
+``lmcache server``.
+
+Both blend variants require ``--supported-transfer-mode`` to be ``gpu``
+or ``auto`` and will refuse to load when it is ``non_gpu``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
@@ -166,6 +177,24 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - BLOCKING
      - (Blend V2) Retrieve pre-computed chunks using the
        ``CBMatchResult`` list returned by ``CB_LOOKUP_PRE_COMPUTED_V2``.
+   * - ``CB_REGISTER_ROPE_V3``
+     - SYNC
+     - (Blend V3) Share the RoPE cos/sin cache onto a context already
+       registered via ``REGISTER_KV_CACHE``.
+   * - ``CB_UNREGISTER_ROPE_V3``
+     - SYNC
+     - (Blend V3) Drop the RoPE state (paged KV cache lives on; use
+       ``UNREGISTER_KV_CACHE`` to release that).
+   * - ``CB_RETRIEVE_PRE_COMPUTED_V3``
+     - BLOCKING
+     - (Blend V3) Scatter all matched chunks (prefix- and non-prefix-hit)
+       into paged KV by per-token block ID; re-RoPE only the shifted subset.
+   * - ``CB_UNIFIED_LOOKUP``
+     - BLOCKING
+     - (Blend V3) Sole live lookup path: one RPC runs prefix + non-prefix
+       match, reconciles, issues one sparse-coalesced prefetch, and
+       classifies per-TP-rank. Returns ``CBUnifiedLookupResult`` (or
+       ``None`` while the prefetch is still in flight).
 
 **Handler types:**
 
@@ -195,10 +224,12 @@ Each config module exposes a composable triple:
     add_observability_args(parser)    # from mp_observability/config.py
 
 ``http_server.py`` reuses this pattern, adding
-``add_http_frontend_args()`` for the HTTP variant. CacheBlend is no
-longer a separate entry point — it is opted into at runtime by passing
-``--engine-type blend`` to ``server.py`` (or ``lmcache server``), which
-appends ``BlendModule`` to the engine module list.
+``add_http_frontend_args()`` and ``add_coordinator_args()`` for the
+``lmcache server`` CLI. CacheBlend is no longer a separate entry point —
+it is opted into at runtime by passing ``--engine-type`` to
+``server.py`` (or ``lmcache server``). ``--engine-type blend`` appends
+``BlendV3Module`` (the current paged-aware implementation), while
+``--engine-type blend_legacy`` appends ``BlendModule`` (the original).
 
 Distributed Storage
 -------------------
