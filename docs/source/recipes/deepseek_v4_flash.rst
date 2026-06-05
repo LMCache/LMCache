@@ -24,8 +24,7 @@ Validated models
       backends and the ``fp8_ds_mla`` KV cache kernels, so install vLLM by
       following its own recipe rather than a bare ``pip install vllm``:
       `vLLM DeepSeek-V4-Flash recipe
-      <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_
-      (also mirrored at https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash).
+      <https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash>`_.
 
       .. warning::
 
@@ -60,15 +59,31 @@ Validated models
       ``--kv-cache-dtype fp8_ds_mla`` and ``--tokenizer-mode deepseek_v4`` are
       required for this model; ``--enable-expert-parallel`` distributes the MoE
       experts across the tensor-parallel ranks. Adjust
-      ``--tensor-parallel-size`` to match your hardware. For the generic
-      LMCache + vLLM wiring (ports, remote hosts), see
-      :doc:`../mp/quickstart`.
+      ``--tensor-parallel-size`` to match your hardware and ``--max-model-len``
+      according to your scenario. For the generic LMCache + vLLM wiring
+      (ports, remote hosts), see :doc:`../mp/quickstart`.
+
+      **Optional: enable tool-calling and reasoning.** To expose
+      DeepSeek-V4-Flash's function-calling and reasoning capabilities through
+      the OpenAI-compatible API, append the following flags to ``vllm serve``:
+
+      .. code-block:: bash
+
+             --tool-call-parser deepseek_v4 \
+             --enable-auto-tool-choice \
+             --reasoning-parser deepseek_v4
+
+      |
 
       If there are any issues with vLLM setup, please refer to the
-      `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_
+      `vLLM Recipes <https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash>`_
       for more details.
 
    .. tab-item:: SGLang
+
+      **Engine documentation:**
+      `DeepSeek-V4-Flash SGLang cookbook
+      <https://docs.sglang.io/cookbook/autoregressive/DeepSeek/DeepSeek-V4>`_
 
       **Status:** Not validated with LMCache.
 
