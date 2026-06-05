@@ -13,7 +13,7 @@ The coordinator is a FastAPI service. Start it with:
 
 .. code-block:: bash
 
-    python3 -m lmcache.v1.mp_coordinator
+    lmcache coordinator
 
 Expected log output:
 
@@ -21,9 +21,11 @@ Expected log output:
 
     LMCache INFO: MP coordinator listening on http://0.0.0.0:9300
 
-.. note::
-   A first-class ``lmcache`` CLI subcommand is planned; for now the coordinator
-   runs as the module above and is configured via environment variables.
+The CLI accepts ``--host``, ``--port``, ``--instance-timeout``, and
+``--health-check-interval``; any flag overrides the matching environment
+variable below. See :doc:`/cli/coordinator` for details. Equivalently, the
+coordinator can still be launched as a module with
+``python3 -m lmcache.v1.mp_coordinator``.
 
 Configuration
 -------------
