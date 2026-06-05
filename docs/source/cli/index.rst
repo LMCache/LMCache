@@ -51,6 +51,8 @@ Available Commands
      - Description
    * - :doc:`server`
      - Launch the LMCache MP server (ZMQ + HTTP). Requires the full install.
+   * - :doc:`coordinator`
+     - Launch the LMCache MP coordinator (HTTP instance registry).
    * - :doc:`describe`
      - Show detailed status of a running LMCache service.
    * - :doc:`ping`
@@ -92,6 +94,7 @@ See :doc:`/developer_guide/cli` for details.
    :maxdepth: 1
 
    server
+   coordinator
    describe
    ping
    query

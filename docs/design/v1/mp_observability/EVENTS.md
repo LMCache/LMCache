@@ -70,8 +70,15 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `str`, `int`, `int` |
-| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `bytes_transferred`, `succeeded_count`, `failed_count` | `int`, `int`, `str`, `int`, `int`, `int` |
+| `L2_STORE_SUBMITTED` | `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes`, `key_count_per_salt` | `int`, `int`, `str`, `int`, `int`, `dict[str, int]` |
+| `L2_STORE_COMPLETED` | `adapter_index`, `task_id`, `l2_name`, `bytes_transferred`, `succeeded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `str`, `int`, `int`, `int`, `dict[str, int]` |
+
+`key_count_per_salt` maps each `cache_salt` to its key count, pre-grouped
+at the emit site so the drain thread iterates tenants (O(T)) not keys (O(N)).
+Store tasks can batch keys from multiple tenants; `key_count_per_salt`
+enables per-tenant attribution on the subscriber side.
+On the failure path of `L2_STORE_COMPLETED`, `key_count_per_salt` is absent
+(no succeeded keys to attribute).
 
 ---
 
@@ -79,18 +86,35 @@ Producers:
 
 | EventType | Metadata keys | Types |
 |---|---|---|
-| `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
+| `L2_PREFETCH_LOOKUP_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
-| `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count` | `int`, `int`, `int` |
-| `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count` | `int`, `int`, `int` |
+| `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
+| `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
 | `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
+
+`key_count_per_salt` on `L2_PREFETCH_LOOKUP_SUBMITTED`,
+`L2_PREFETCH_LOAD_SUBMITTED`, and `L2_PREFETCH_LOAD_COMPLETED` enables
+per-tenant metric attribution. `key_count_per_salt` on load-completed
+covers only loaded (succeeded) keys.
 
 `L2_LOAD_TASK_*` events fire once per `(request_id, adapter_index)` pair
 — unlike the request-level `L2_PREFETCH_LOAD_*` events above, which
 aggregate across adapters.  Throughput subscribers that need per-adapter
 attribution (e.g. `L2ThroughputSubscriber`) consume these task-level
 events; key-count counters continue to consume the request-level events.
+
+---
+
+## L2 Eviction Controller Events
+
+| EventType | Metadata keys | Types |
+|---|---|---|
+| `L2_KEYS_EVICTED` | `key_count`, `key_count_per_salt` | `int`, `dict[str, int]` |
+
+Published by `L2EvictionController._execute_eviction_action` after
+`adapter.delete()` completes. Only emitted when at least one key was
+evicted. `key_count_per_salt` enables per-tenant eviction dashboards.
 
 ---
 

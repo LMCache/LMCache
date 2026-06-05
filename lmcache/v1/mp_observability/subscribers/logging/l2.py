@@ -24,6 +24,7 @@ class L2LoggingSubscriber(EventSubscriber):
             EventType.L2_PREFETCH_LOOKUP_COMPLETED: self._on_lookup_completed,
             EventType.L2_PREFETCH_LOAD_SUBMITTED: self._on_load_submitted,
             EventType.L2_PREFETCH_LOAD_COMPLETED: self._on_load_completed,
+            EventType.L2_KEYS_EVICTED: self._on_evicted,
         }
 
     def _on_store_submitted(self, event: Event) -> None:
@@ -70,4 +71,10 @@ class L2LoggingSubscriber(EventSubscriber):
             event.metadata["request_id"],
             event.metadata["loaded_count"],
             event.metadata["failed_count"],
+        )
+
+    def _on_evicted(self, event: Event) -> None:
+        logger.debug(
+            "L2 eviction: %d keys",
+            event.metadata["key_count"],
         )
