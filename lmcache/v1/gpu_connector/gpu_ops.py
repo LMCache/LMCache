@@ -10,6 +10,33 @@ import lmcache.c_ops as lmc_ops
 
 
 # Helper functions
+def _validate_obj_tensor(
+    memory_obj: MemoryObj,
+    gpu_buffer: torch.Tensor,
+) -> tuple[torch.Tensor, int]:
+    """Return the memory object's raw tensor and byte size, validated
+    against ``gpu_buffer``.
+
+    :param MemoryObj memory_obj: The memory object; must be allocated.
+    :param torch.Tensor gpu_buffer: The GPU buffer it transfers with.
+    :return: ``(raw_tensor, size_in_bytes)``.
+    :raises ValueError: If ``memory_obj`` is unallocated or its size
+        does not match ``gpu_buffer``.
+    """
+    tensor = memory_obj.raw_tensor
+    if tensor is None:
+        raise ValueError(
+            "memory_obj.raw_tensor is None; ensure the MemoryObj has been allocated."
+        )
+    size = memory_obj.get_size()
+    if size != gpu_buffer.nbytes:
+        raise ValueError(
+            f"Size mismatch: memory_obj nbytes={size}, "
+            f"gpu_buffer nbytes={gpu_buffer.nbytes}"
+        )
+    return tensor, size
+
+
 def lmcache_memcpy_async_h2d(
     memory_obj: MemoryObj,
     gpu_buffer: torch.Tensor,
@@ -34,20 +61,8 @@ def lmcache_memcpy_async_h2d(
                 f"{type(memory_obj).__name__}"
             )
         parent.cufile_read_into(memory_obj, gpu_buffer)
-        return
-
-    src_tensor = memory_obj.raw_tensor
-    if src_tensor is None:
-        raise ValueError(
-            "memory_obj.raw_tensor is None; ensure the MemoryObj has been allocated."
-        )
-    mem_obj_size = memory_obj.get_size()
-    if mem_obj_size != gpu_buffer.nbytes:
-        raise ValueError(
-            f"Size mismatch: memory_obj nbytes={mem_obj_size}, "
-            f"gpu_buffer nbytes={gpu_buffer.nbytes}"
-        )
-    if isinstance(parent, LazyMemoryAllocator):
+    elif isinstance(parent, LazyMemoryAllocator):
+        _, mem_obj_size = _validate_obj_tensor(memory_obj, gpu_buffer)
         lmc_ops.lmcache_memcpy_async(
             gpu_buffer.data_ptr(),
             memory_obj.data_ptr,
@@ -57,6 +72,7 @@ def lmcache_memcpy_async_h2d(
             LazyMemoryAllocator.PIN_CHUNK_SIZE,
         )
     else:
+        src_tensor, mem_obj_size = _validate_obj_tensor(memory_obj, gpu_buffer)
         gpu_buffer.view(torch.uint8).copy_(
             src_tensor.view(torch.uint8)[:mem_obj_size], non_blocking=True
         )
@@ -86,20 +102,8 @@ def lmcache_memcpy_async_d2h(
                 f"{type(memory_obj).__name__}"
             )
         parent.cufile_write_from(memory_obj, gpu_buffer)
-        return
-
-    dst_tensor = memory_obj.raw_tensor
-    if dst_tensor is None:
-        raise ValueError(
-            "memory_obj.raw_tensor is None; ensure the MemoryObj has been allocated."
-        )
-    mem_obj_size = memory_obj.get_size()
-    if mem_obj_size != gpu_buffer.nbytes:
-        raise ValueError(
-            f"Size mismatch: memory_obj nbytes={mem_obj_size}, "
-            f"gpu_buffer nbytes={gpu_buffer.nbytes}"
-        )
-    if isinstance(parent, LazyMemoryAllocator):
+    elif isinstance(parent, LazyMemoryAllocator):
+        _, mem_obj_size = _validate_obj_tensor(memory_obj, gpu_buffer)
         lmc_ops.lmcache_memcpy_async(
             memory_obj.data_ptr,
             gpu_buffer.data_ptr(),
@@ -109,6 +113,7 @@ def lmcache_memcpy_async_d2h(
             LazyMemoryAllocator.PIN_CHUNK_SIZE,
         )
     else:
+        dst_tensor, mem_obj_size = _validate_obj_tensor(memory_obj, gpu_buffer)
         dst_tensor.view(torch.uint8)[:mem_obj_size].copy_(
             gpu_buffer.view(torch.uint8), non_blocking=True
         )
