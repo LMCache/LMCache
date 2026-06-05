@@ -24,8 +24,15 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+
+_SUPPORTED_MUSA_KV_FORMATS = (
+    lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
+)
 
 
 class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
@@ -33,6 +40,18 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
 
     Follows the same contract as VLLMPagedMemXPUConnectorV2: pure torch ops
     (index_copy_ / index_select) with ``torch.musa`` stream and sync APIs.
+
+    Supported paged KV cache layouts:
+      - Non-MLA vLLM flash-attention layout:
+        ``NL x [2, NB, BS, NH, HS]`` with LMCache ``KV_2LTD`` memory shaped
+        ``[2, NL, T, NH * HS]``.
+      - MLA vLLM layout:
+        ``NL x [NB, BS, HS]`` with LMCache ``KV_MLA_FMT`` memory shaped
+        ``[1, NL, T, HS]``.
+
+    Other vLLM layouts, including flash-infer, HND, cross-layer, layerwise,
+    connector v3, and MP GPU-transfer kernel layouts, are not implemented by
+    this connector.
     """
 
     def __init__(
@@ -101,16 +120,23 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         self._initialize_attributes(self.kvcaches)
         self._validate_memory_format(memory_obj)
-        slices = slot_mapping[start:end].to(
+        self._validate_supported_kv_format()
+
+        vllm_cached = kwargs.get("vllm_cached_tokens", 0)
+        skip_prefix_n_tokens = min(end - start, max(0, vllm_cached - start))
+        transfer_start = start + skip_prefix_n_tokens
+        slices = slot_mapping[transfer_start:end].to(
             device=self.device, dtype=torch.long, non_blocking=True
         )
+        if slices.numel() == 0:
+            return
 
         if self.use_mla:
             tmp = memory_obj.tensor[0].to(self.device, non_blocking=True)
             total_blocks = self.num_blocks * self.block_size
             for i, kvcache in enumerate(self.kvcaches):
                 kvcache.view(total_blocks, self.head_size).index_copy_(
-                    0, slices, tmp[i]
+                    0, slices, tmp[i, skip_prefix_n_tokens:]
                 )
         else:
             tmp_k = memory_obj.tensor[0].to(self.device, non_blocking=True)
@@ -118,8 +144,12 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             total_blocks = self.num_blocks * self.block_size
             d = self.num_heads * self.head_size
             for i, (kcache, vcache) in enumerate(self.kvcaches):
-                kcache.view(total_blocks, d).index_copy_(0, slices, tmp_k[i])
-                vcache.view(total_blocks, d).index_copy_(0, slices, tmp_v[i])
+                kcache.view(total_blocks, d).index_copy_(
+                    0, slices, tmp_k[i, skip_prefix_n_tokens:]
+                )
+                vcache.view(total_blocks, d).index_copy_(
+                    0, slices, tmp_v[i, skip_prefix_n_tokens:]
+                )
 
     def from_gpu(
         self, memory_obj: MemoryObj, start: int, end: int, **kwargs: Any
@@ -150,6 +180,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
         self._initialize_attributes(self.kvcaches)
         self._validate_memory_format(memory_obj)
+        self._validate_supported_kv_format()
         slices = slot_mapping[start:end].to(
             device=self.device, dtype=torch.long, non_blocking=True
         )
@@ -290,4 +321,18 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.use_mla,
             self.dtype,
             self.num_heads,
+        )
+
+    def _validate_supported_kv_format(self) -> None:
+        """Reject KV layouts that this torch-based MUSA path cannot index."""
+        if self.gpu_kv_format in _SUPPORTED_MUSA_KV_FORMATS:
+            return
+
+        supported = (
+            "NL x [2, NB, BS, NH, HS] for non-MLA vLLM flash attention, "
+            "or NL x [NB, BS, HS] for vLLM MLA"
+        )
+        raise ValueError(
+            "VLLMPagedMemMUSAConnectorV2 supports only "
+            f"{supported}; got {self.gpu_kv_format}."
         )
