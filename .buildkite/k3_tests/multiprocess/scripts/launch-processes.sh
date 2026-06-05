@@ -51,13 +51,21 @@ if [ -n "$ATTENTION_BACKEND" ] && [ "$ATTENTION_BACKEND" != "auto" ]; then
     ATTENTION_BACKEND_ARG="--attention-backend $ATTENTION_BACKEND"
 fi
 
-# Run vLLM in eager mode (skip CUDA graph capture) for both servers. Graph
-# capture dominates startup for large models and the tests don't need graphs, so
-# this is on by default to keep vLLM from timing out during launch. Set
-# ENFORCE_EAGER=0 to disable.
+# Optionally run vLLM in eager mode (skip CUDA graph capture) for both servers.
+# Off by default: it changes the kernel path and can break the bit-exact run1 ==
+# run2 check in the determinism tests (lm_eval). Enable it (ENFORCE_EAGER=1) for
+# large models whose CUDA-graph capture would otherwise time out at launch.
 ENFORCE_EAGER_ARG=""
-if [ "${ENFORCE_EAGER:-1}" = "1" ] || [ "${ENFORCE_EAGER:-1}" = "true" ]; then
+if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
     ENFORCE_EAGER_ARG="--enforce-eager"
+fi
+
+# Optionally pin max model length for both servers. Unset by default (vLLM uses
+# the model default); the auto-derived value depends on free KV memory and can
+# perturb the bit-exact determinism tests, so opt in per model (MAX_MODEL_LEN).
+MAX_MODEL_LEN_ARG=""
+if [ -n "${MAX_MODEL_LEN:-}" ]; then
+    MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
 fi
 
 # Store PIDs in a file so cleanup.sh can find them
@@ -104,7 +112,7 @@ vllm serve "$MODEL" \
     $ATTENTION_BACKEND_ARG \
     --port "$vllm_port" \
     --no-async-scheduling \
-    --max-model-len auto \
+    $MAX_MODEL_LEN_ARG \
     $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
@@ -129,7 +137,7 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
         $ATTENTION_BACKEND_ARG \
         --port "$vllm_baseline_port" \
         --no-async-scheduling \
-        --max-model-len auto \
+        $MAX_MODEL_LEN_ARG \
         $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
         > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
