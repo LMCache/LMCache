@@ -360,11 +360,10 @@ class LMCacheMPRequestMetadata:
         computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
-        # Normalize each group's allocated-block count to ``vllm_block_size``
-        # units before taking the min: a group whose own block size is ``k``
-        # times ``vllm_block_size`` holds ``k`` such blocks per stored block ID
-        # (e.g. gemma-4 sliding groups span 32 tokens/ID = 2 of the 16-token
-        # blocks).
+        # Normalize each group's count to ``vllm_block_size`` units before the
+        # min: a group with block size ``k * vllm_block_size`` holds ``k`` such
+        # blocks per stored block ID (e.g. gemma-4 sliding: 32-token IDs = 2 of
+        # the 16-token blocks).
         allocated_lengths = tracker.num_allocated_blocks()
         allocated_blocks = (
             min(

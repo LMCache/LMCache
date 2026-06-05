@@ -51,12 +51,9 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 LayerGroupIdentity = tuple[int, int, int, int, int, torch.dtype]
 
 
-# Sentinel ``per_layer_engine_group_idx`` value marking a registered KV tensor
-# that must be left out of every LMCache group. Used for cross-layer KV-sharing
-# layers (e.g. google/gemma-4-E4B-it), whose tensor aliases a target owner's KV
-# cache: the owner's group already stores/retrieves that memory, so the shared
-# layer is skipped rather than forming its own (potentially block-size-mismatched)
-# group. See ``create_group_views_from_vllm``.
+# Sentinel ``per_layer_engine_group_idx`` value: a KV tensor tagged with it is
+# excluded from every LMCache group (used for cross-layer KV-sharing layers; see
+# ``create_group_views_from_vllm``).
 EXCLUDED_ENGINE_GROUP = -1
 
 
@@ -329,11 +326,10 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
-            # Per-group logical block size: a hybrid model can give each group
-            # its own block_size larger than the global GCD hint (e.g. gemma-4
-            # sliding=32, full=16, hint=16). ``max(hint, bs)`` yields
-            # compress_ratio=1 for such uncompressed groups and the engine block
-            # size for compressed groups (bs < hint, e.g. DeepSeek V4).
+            # Per-group logical block size: a group's own block_size can exceed
+            # the global GCD hint (e.g. gemma-4 sliding=32, hint=16).
+            # ``max(hint, bs)`` gives compress_ratio=1 for uncompressed groups
+            # and the engine block size for compressed ones (bs < hint, DeepSeek).
             global_logical = self.inference_engine_logical_block_size_
             group_logical_block_size = (
                 max(global_logical, bs) if global_logical is not None else None
