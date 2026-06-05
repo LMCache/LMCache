@@ -3,7 +3,10 @@
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
+from enum import Enum
 from typing import Any, Callable, Protocol
+import os
 
 # Third Party
 import torch
@@ -15,6 +18,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
 from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
+from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import RegisterNonGpuContextResponse
@@ -26,8 +30,62 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
+from lmcache.v1.platform import _registry as platform_registry
 
 logger = init_logger(__name__)
+
+# Environment variable that lets the user override the default routing
+# performed by :func:`create_transfer_context`. Accepted values match the
+# string values of :class:`MPTransferMode` (``auto`` / ``handle`` /
+# ``data``); ``auto`` reproduces the historical device-type-based dispatch.
+ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
+
+
+class MPTransferMode(str, Enum):
+    """Routing mode used by :func:`create_transfer_context`.
+
+    * ``AUTO``: dispatch by ``tensor.device.type`` (CUDA -> handle, others
+      -> data). Preserves the historical behaviour.
+    * ``HANDLE``: force :class:`HandleTransferContext` (IPC / SHM zero-copy
+      path). Requires a registered KV-wrapper factory for the device.
+    * ``DATA``: force :class:`DataTransferContext` (worker-side gather /
+      scatter copy path).
+    """
+
+    AUTO = "auto"
+    HANDLE = "handle"
+    DATA = "data"
+
+
+def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
+    """Coerce ``mode`` into :class:`MPTransferMode`, falling back to env."""
+    raw = (
+        mode
+        if mode is not None
+        else os.environ.get(ENV_MP_TRANSFER_MODE, MPTransferMode.AUTO.value)
+    )
+    if isinstance(raw, MPTransferMode):
+        return raw
+    try:
+        return MPTransferMode(str(raw).lower())
+    except ValueError as exc:
+        valid = ", ".join(m.value for m in MPTransferMode)
+        raise ValueError(
+            "Invalid MP transfer mode %r (valid: %s)" % (raw, valid)
+        ) from exc
+
+
+def _build_handle_context(device_type: str) -> "TransferContext":
+    """Build a :class:`HandleTransferContext` after capability check."""
+    try:
+        platform_registry.get_kv_wrapper_factory(device_type)
+    except ValueError as exc:
+        raise ValueError(
+            "MP transfer mode 'handle' is not supported for device type "
+            "%r: no KV-cache wrapper factory is registered. "
+            "Use mode 'data' or 'auto' instead." % device_type
+        ) from exc
+    return HandleTransferContext()
 
 
 class IPCEvent(Protocol):
@@ -38,6 +96,13 @@ class IPCEvent(Protocol):
 
 
 SendRequest = Callable[[MessageQueueClient, RequestType, list[object]], MessagingFuture]
+
+
+def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
+    """Return the flat block-id list for transports without HMA support."""
+    if len(block_ids) != 1:
+        raise RuntimeError("non-GPU transfer does not support hybrid KV cache groups")
+    return block_ids[0]
 
 
 class TransferContext(ABC):
@@ -61,6 +126,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -74,6 +140,7 @@ class TransferContext(ABC):
             mq_timeout: Timeout in seconds for synchronous request wait.
             send_request: Request sender callable used to issue MQ requests.
             layout_hints: Optional inference-engine-provided layout hints.
+            group_views: LMCache-owned engine KV cache group metadata.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -88,7 +155,7 @@ class TransferContext(ABC):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -99,7 +166,7 @@ class TransferContext(ABC):
             key: LMCache key object for the store range.
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to store.
+            block_ids: vLLM block IDs to store, indexed by LMCache KV group id.
             event: Synchronization event object.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
 
@@ -117,7 +184,7 @@ class TransferContext(ABC):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -129,7 +196,8 @@ class TransferContext(ABC):
             key: LMCache key object for the retrieve range.
             instance_id: Worker process instance identifier.
             kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to retrieve into.
+            block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
+                group id.
             event: Synchronization event object.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
@@ -164,6 +232,7 @@ class HandleTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
@@ -180,6 +249,7 @@ class HandleTransferContext(TransferContext):
                 world_size,
                 EngineType.VLLM,
                 layout_hints,
+                list(group_views),
             ],
         )
         future.result(timeout=mq_timeout)
@@ -190,7 +260,7 @@ class HandleTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -211,7 +281,7 @@ class HandleTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         _kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -251,7 +321,15 @@ class DataTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
+        group_views: Sequence[LMCacheGroupView] = (),
     ) -> None:
+        """Register KV caches with the non-GPU context server.
+
+        ``group_views`` is accepted to satisfy the base interface but
+        is currently a no-op: the non-GPU transfer path does not support
+        hybrid KV cache groups and rejects multi-group transfers at store /
+        retrieve time (see ``_single_group_block_ids``).
+        """
         # TODO: inference_engine_logical_block_size is currently used by
         # DeepSeek V4 on the CUDA path. The non-CUDA path is yet to be
         # implemented.
@@ -324,7 +402,7 @@ class DataTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         _event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
@@ -344,7 +422,7 @@ class DataTransferContext(TransferContext):
             return future
         cpu_chunks = gather_paged_kv_to_cpu(
             kv_caches,
-            block_ids,
+            _single_group_block_ids(block_ids),
             blocks_in_chunk,
             layout_hints=self._layout_hints,
             gpu_kv_format=self._gpu_kv_format,
@@ -366,7 +444,7 @@ class DataTransferContext(TransferContext):
         key: Any,
         instance_id: int,
         kv_caches: dict[str, torch.Tensor],
-        block_ids: list[int],
+        block_ids: list[list[int]],
         _event: IPCEvent,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
@@ -383,7 +461,7 @@ class DataTransferContext(TransferContext):
             try:
                 scatter_cpu_to_paged_kv(
                     kv_caches,
-                    block_ids,
+                    _single_group_block_ids(block_ids),
                     src_buffers,
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,
@@ -410,21 +488,29 @@ class DataTransferContext(TransferContext):
 
 def create_transfer_context(
     kv_caches: dict[str, torch.Tensor],
+    mode: "str | MPTransferMode | None" = None,
     **_kwargs: Any,
 ) -> TransferContext:
     """Create a transfer context from KV cache device type.
 
-    The device check is intentionally centralized here.
+    The device check is intentionally centralized here. Routing can be
+    overridden via the ``mode`` argument or the ``LMCACHE_MP_TRANSFER_MODE``
+    environment variable; see :class:`MPTransferMode` for accepted values.
 
     Args:
         kv_caches: Worker KV cache tensors keyed by layer name.
+        mode: Optional routing override. When ``None`` the value of
+            ``LMCACHE_MP_TRANSFER_MODE`` is consulted, defaulting to
+            :attr:`MPTransferMode.AUTO`.
         **kwargs: Unused placeholder for forward-compatible factory extension.
 
     Returns:
         A concrete :class:`TransferContext` implementation.
 
     Raises:
-        ValueError: If ``kv_caches`` is empty or has mixed device types.
+        ValueError: If ``kv_caches`` is empty, has mixed device types, the
+            requested mode string is unknown, or the requested mode is not
+            supported for the worker device.
     """
     if not kv_caches:
         raise ValueError("kv_caches is empty")
@@ -434,7 +520,17 @@ def create_transfer_context(
             f"All KV cache tensors must share one device type, got {device_types}"
         )
     device_type = next(iter(device_types))
-    logger.info("Creating transfer context (device_type=%s)", device_type)
+    resolved_mode = _resolve_mode(mode)
+    logger.info(
+        "Creating transfer context (device_type=%s, mode=%s)",
+        device_type,
+        resolved_mode.value,
+    )
+    if resolved_mode is MPTransferMode.HANDLE:
+        return _build_handle_context(device_type)
+    if resolved_mode is MPTransferMode.DATA:
+        return DataTransferContext()
+    # AUTO: preserve the historical device-type-based dispatch.
     if device_type == "cuda":
         return HandleTransferContext()
     return DataTransferContext()

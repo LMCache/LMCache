@@ -57,6 +57,13 @@ Supported architectures
      - —
      - :doc:`gemma4`
 
+   * - ``Gemma3ForConditionalGeneration``
+     - ``google/gemma-3-4b-it``
+     - ✓
+     - —
+     - —
+     - :doc:`gemma3`
+
    * - ``MistralForCausalLM``
      - ``mistralai/Devstral-2-123B-Instruct-2512``
      - ✓
@@ -119,6 +126,7 @@ To add a new architecture:
 
    minimax_m2
    gemma4
+   gemma3
    devstral
    gpt_oss
    qwen3

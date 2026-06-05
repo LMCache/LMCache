@@ -614,15 +614,15 @@ class BlendModule:
         # Collect only the CBMatchResults for chunks actually found in storage
         stale_hashes: list[bytes] = []
         for handle, group in zip(prefetch_handles, groups, strict=False):
-            found_count = None
+            found = None
             while True:
-                found_count = self._ctx.storage_manager.query_prefetch_status(handle)
-                if found_count is not None:
+                found = self._ctx.storage_manager.query_prefetch_status(handle)
+                if found is not None:
                     break
                 time.sleep(0.001)
 
             # Real found count after dedup the TP
-            found_count = found_count // world_size
+            found_count = found.count_leading_ones() // world_size
 
             start = group[0].cur_st
             end = group[-1].cur_ed

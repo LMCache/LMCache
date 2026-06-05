@@ -1796,6 +1796,61 @@ def scenario_dispatcher_integration(ops: Any, device: str) -> dict[str, torch.Te
     return {"dispatcher_integration": torch.tensor([1], dtype=torch.int32)}
 
 
+def scenario_record_drain_event(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test record_event_on_stream / drain_recorded_events contracts.
+
+    Verified backend-agnostic: native c_ops uses cudaLaunchHostFunc on the
+    default stream (ptr=0), which fires synchronously after device_sync; the
+    fallback enqueues immediately with time.time(). Both paths satisfy every
+    assertion below.
+    """
+    ops.drain_recorded_events()  # clear residual global state
+
+    assert ops.drain_recorded_events() == []
+
+    ops.record_event_on_stream(
+        0, "mp.store.start", "sess-1", {"device": "cuda:0"}, {"count": 10}
+    )
+    ops.record_event_on_stream(
+        0, "mp.store.end", "sess-1", {"device": "cuda:0"}, {"count": 10}
+    )
+    device_sync(device)
+    result = ops.drain_recorded_events()
+    assert len(result) == 2
+
+    # Each element is (event_type_name, session_id, timestamp, str_meta, int_meta)
+    name0, sid0, ts0, str_meta0, int_meta0 = result[0]
+    name1, sid1, ts1, str_meta1, int_meta1 = result[1]
+
+    assert name0 == "mp.store.start"
+    assert name1 == "mp.store.end"
+    assert sid0 == "sess-1"
+    assert sid1 == "sess-1"
+    assert ts0 > 0.0
+    assert ts1 >= ts0  # timestamps must be monotonically non-decreasing
+    assert str_meta0 == {"device": "cuda:0"}
+    assert int_meta0 == {"count": 10}
+    assert str_meta1 == {"device": "cuda:0"}
+    assert int_meta1 == {"count": 10}
+
+    # Drain clears the buffer
+    assert ops.drain_recorded_events() == []
+
+    # Multiple records on the default stream (ptr=0) must all enqueue.
+    for i in range(5):
+        ops.record_event_on_stream(0, f"mp.test.{i}", f"sess-{i}", {}, {"idx": i})
+    device_sync(device)
+    events = ops.drain_recorded_events()
+    assert len(events) == 5
+    for i, (name, sid, ts, str_meta, int_meta) in enumerate(events):
+        assert name == f"mp.test.{i}"
+        assert sid == f"sess-{i}"
+        assert int_meta == {"idx": i}
+        assert ts > 0.0
+
+    return {"record_drain_event": torch.tensor([1], dtype=torch.int32)}
+
+
 # ==========================================
 # 3. Registry
 # ==========================================
@@ -1822,6 +1877,7 @@ SCENARIO_REGISTRY = {
     "get_gpu_pci_bus_id": scenario_get_gpu_pci_bus_id,
     "record_drain_completion": scenario_record_drain_completion,
     "dispatcher_integration": scenario_dispatcher_integration,
+    "record_drain_event": scenario_record_drain_event,
 }
 
 
