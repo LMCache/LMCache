@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType
+from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
@@ -107,7 +107,7 @@ class GPUCacheContext:
         # Pre-allocated GPU buffer for block IDs (up to 1M elements).
         # The caller copies block_ids into this buffer before launching the
         # block-level kernel. Single-thread assumption: no lock needed.
-        _MAX_BLOCK_IDS = 1_000_000
+        _MAX_BLOCK_IDS = 1 << 20
         self.block_ids_buffer_ = torch.empty(
             _MAX_BLOCK_IDS, dtype=torch.long, device=self.device_
         )
@@ -156,14 +156,6 @@ class GPUCacheContext:
             self.cuda_stream_.cuda_stream, self.device_.index
         )
 
-        _, high_priority = torch_dev.Stream.priority_range()
-        self.high_priority_cuda_stream_ = torch_dev.Stream(
-            device=self.device_, priority=high_priority
-        )
-        self.high_priority_cupy_stream_ = cupy.cuda.ExternalStream(
-            self.high_priority_cuda_stream_.cuda_stream, self.device_.index
-        )
-
         # Extra initialization
         self.cupy_stream_.launch_host_func(
             lambda logger: logger.info(
@@ -196,20 +188,12 @@ class GPUCacheContext:
         return self.cupy_stream_
 
     @property
-    def high_priority_stream(self) -> Any:
-        return self.high_priority_cuda_stream_
-
-    @property
-    def high_priority_cupy_stream(self) -> "cupy.cuda.Stream":
-        return self.high_priority_cupy_stream_
-
-    @property
+    @lmcache_deprecate("will be refactored soon")
     def group_physical_block_sizes(self) -> list[int]:
         """Per-group physical slot count (``shape_desc.bs``) in group
-        order. For non-compressed groups this equals
-        ``inference_engine_logical_block_size``; for compressed groups
-        it equals
-        ``inference_engine_logical_block_size // compress_ratio``.
+        order.
+
+        Only used in metadata printing.
         """
         return [
             group.shape_desc.bs
@@ -217,10 +201,11 @@ class GPUCacheContext:
         ]
 
     @property
+    @lmcache_deprecate("will be refactored soon")
     def group_compress_ratios(self) -> list[int]:
         """Per-group compression ratio
-        (= ``inference_engine_logical_block_size // shape_desc.bs``)
-        in group order. ``1`` for non-compressed groups.
+
+        Only used in metadata printing
         """
         return [
             group.compress_ratio
@@ -256,6 +241,35 @@ class GPUCacheContext:
             for group in self.kv_layer_groups_manager_.kv_layer_groups
         ]
 
+    @property
+    def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
+        """Returns the KV layer groups manager."""
+        return self.kv_layer_groups_manager_
+
+    @property
+    @lmcache_deprecate("will be refactored soon")
+    def gpu_kv_format_name(self) -> str:
+        """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
+        return self.gpu_kv_format_.name
+
+    @property
+    @lmcache_deprecate("will be refactored soon")
+    def gpu_kv_shape(self) -> str:
+        """Returns a human-readable shape description of the GPU KV cache layout."""
+        return get_gpu_kv_shape_description(self.gpu_kv_format_)
+
+    @property
+    @lmcache_deprecate("will be refactored soon")
+    def attention_backend(self) -> str:
+        """Returns the attention backend name."""
+        return get_attention_backend(self.gpu_kv_format_)
+
+    @property
+    @lmcache_deprecate("will be refactored soon")
+    def concrete_gpu_kv_shape(self) -> str:
+        """Returns the GPU KV shape with actual numeric values substituted."""
+        return get_concrete_gpu_kv_shape(self.kv_caches_, self.gpu_kv_format_)
+
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given KV layer group."""
         return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
@@ -269,53 +283,17 @@ class GPUCacheContext:
         """
         return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
 
-    def blocks_for_tokens(self, num_logical_tokens: int, group_idx: int) -> int:
-        """Number of group ``group_idx`` blocks that span ``num_logical_tokens``.
-
-        Each group counts blocks in its own ``block_size`` (``shape_desc.bs``),
-        which can differ across groups. For compressed groups, ``compress_ratio``
-        logical tokens share one physical slot, so it is divided out first.
-
-        Args:
-            num_logical_tokens: Number of logical (engine-side) tokens.
-            group_idx: Index of the KV layer group.
-
-        Returns:
-            The number of this group's blocks spanning those tokens.
-        """
-        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        physical_slots = num_logical_tokens // group.compress_ratio
-        return physical_slots // group.shape_desc.bs
-
-    @property
-    def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
-        """Returns the KV layer groups manager."""
-        return self.kv_layer_groups_manager_
-
-    @property
-    def gpu_kv_format_name(self) -> str:
-        """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
-        return self.gpu_kv_format_.name
-
-    @property
-    def gpu_kv_shape(self) -> str:
-        """Returns a human-readable shape description of the GPU KV cache layout."""
-        return get_gpu_kv_shape_description(self.gpu_kv_format_)
-
-    @property
-    def attention_backend(self) -> str:
-        """Returns the attention backend name."""
-        return get_attention_backend(self.gpu_kv_format_)
-
-    @property
-    def concrete_gpu_kv_shape(self) -> str:
-        """Returns the GPU KV shape with actual numeric values substituted."""
-        return get_concrete_gpu_kv_shape(self.kv_caches_, self.gpu_kv_format_)
-
+    @lmcache_deprecate("please use get_kernel_group_kv_pointers instead")
     def get_group_kv_pointers(self, group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the
         given group."""
-        return self.group_kv_pointers_[group_idx]
+        return self.get_kernel_group_kv_pointers(group_idx)
+
+    def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
+        """Returns the pre-computed GPU tensor of KV cache pointers for the
+        given kernel group index.
+        """
+        return self.group_kv_pointers_[kernel_group_idx]
 
     def get_tmp_gpu_buffer_flat(self, chunk_idx: int) -> torch.Tensor:
         """Returns the flat uint8 view of the temporary GPU buffer for the
@@ -328,6 +306,7 @@ class GPUCacheContext:
         Args:
             chunk_idx: Chunk index (0 <= chunk_idx < max_batch_size).
         """
+        # TODO this one!
         if chunk_idx >= self.max_batch_size:
             raise ValueError(
                 f"chunk_idx {chunk_idx} exceeds max_batch_size {self.max_batch_size}"
@@ -346,6 +325,8 @@ class GPUCacheContext:
         Args:
             group_idx: Index of the KV layer group (default 0).
         """
+        raise NotImplementedError("get_tmp_chunk_gpu_buffer is no longer available")
+        # TODO: this one
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
         shape = self.get_kv_buffer_shape(self.lmcache_logical_chunk_size, group_idx)
         start = self.tmp_chunk_group_offsets_[group_idx]
@@ -364,6 +345,8 @@ class GPUCacheContext:
             batch_size: Number of concurrent requests (must be <= max_batch_size).
             group_idx: Index of the KV layer group (default 0).
         """
+        raise NotImplementedError("get_tmp_chunk_gpu_buffer is no longer available")
+        # TODO: this one!
         if batch_size > self.max_batch_size:
             raise ValueError(
                 f"batch_size {batch_size} exceeds max_batch_size {self.max_batch_size}"
@@ -442,6 +425,24 @@ class GPUCacheContext:
             (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
 
+    def blocks_for_tokens(self, num_logical_tokens: int, group_idx: int) -> int:
+        """Number of group ``group_idx`` blocks that span ``num_logical_tokens``.
+
+        Each group counts blocks in its own ``block_size`` (``shape_desc.bs``),
+        which can differ across groups. For compressed groups, ``compress_ratio``
+        logical tokens share one physical slot, so it is divided out first.
+
+        Args:
+            num_logical_tokens: Number of logical (engine-side) tokens.
+            group_idx: Index of the KV layer group.
+
+        Returns:
+            The number of this group's blocks spanning those tokens.
+        """
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        physical_slots = num_logical_tokens // group.compress_ratio
+        return physical_slots // group.shape_desc.bs
+
     def cache_size_per_token(self) -> int:
         """
         Returns the cache size per *logical* token (in bytes), summed
@@ -506,14 +507,6 @@ class PlainGPUCacheContext:
             self._cuda_stream.cuda_stream, self._device.index
         )
 
-        _, high_priority = torch_dev.Stream.priority_range()
-        self._high_priority_cuda_stream = torch_dev.Stream(
-            device=self._device, priority=high_priority
-        )
-        self._high_priority_cupy_stream = cupy.cuda.ExternalStream(
-            self._high_priority_cuda_stream.cuda_stream, self._device.index
-        )
-
         # Extra initialization
         self._cupy_stream.launch_host_func(
             lambda logger: logger.info(
@@ -556,14 +549,6 @@ class PlainGPUCacheContext:
     @property
     def cupy_stream(self) -> "cupy.cuda.Stream":
         return self._cupy_stream
-
-    @property
-    def high_priority_stream(self) -> Any:
-        return self._high_priority_cuda_stream
-
-    @property
-    def high_priority_cupy_stream(self) -> "cupy.cuda.Stream":
-        return self._high_priority_cupy_stream
 
     @property
     def num_layers(self) -> int:
