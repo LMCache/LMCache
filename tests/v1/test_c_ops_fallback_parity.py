@@ -47,6 +47,7 @@ def _public_callables(module):
         and callable(obj)
         and not (inspect.isclass(obj) and issubclass(obj, enum.Enum))
         and not hasattr(obj, "__members__")  # exclude pybind11 enums
+        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
     }
 
 
@@ -61,6 +62,7 @@ def _public_enums(module):
         for name, obj in inspect.getmembers(module, inspect.isclass)
         if not name.startswith("_")
         and (issubclass(obj, enum.Enum) or hasattr(obj, "__members__"))
+        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
     }
 
 
@@ -84,6 +86,7 @@ def _public_descriptor_classes(module: object) -> dict[str, type]:
         if not name.startswith("_")
         and not (issubclass(obj, enum.Enum) or hasattr(obj, "__members__"))
         and callable(obj)
+        and getattr(obj, "__module__", None) == getattr(module, "__name__", None)
     }
 
 
