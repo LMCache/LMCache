@@ -10,6 +10,7 @@ manager wiring while keeping CI portable.
 import gc
 import os
 
+import pytest
 import torch
 
 # First Party
@@ -85,6 +86,28 @@ def test_devdax_allocator_uses_mmap_backing_file(tmp_path):
 
     with open(path, "rb") as f:
         assert f.read(4096) == bytes([0x5A]) * 4096
+
+
+def test_devdax_close_failure_preserves_allocator_state(tmp_path):
+    path = _make_mmap_file(tmp_path)
+    allocator = DevDaxMemoryAllocator(
+        size=1024 * 1024,
+        device_path=path,
+        align_bytes=4096,
+    )
+    obj = allocator.allocate(torch.Size([4096]), torch.uint8)
+    assert obj is not None
+
+    with pytest.raises(BufferError):
+        allocator.close()
+
+    assert allocator.pin_allocator is not None
+    assert allocator.buffer.numel() == 1024 * 1024
+
+    allocator.free(obj)
+    del obj
+    gc.collect()
+    allocator.close()
 
 
 def test_l1_manager_round_trip_on_devdax_mapping(tmp_path):

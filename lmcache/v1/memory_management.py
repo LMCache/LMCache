@@ -2548,9 +2548,17 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         if torch_dev.is_available():
             torch_dev.synchronize()
 
-        self.pin_allocator = None
-        self.buffer = torch.empty(0, dtype=torch.uint8)
-        self._mmap_buffer = None
+        with self.host_mem_lock:
+            if (
+                self.pin_allocator is not None
+                and self.pin_allocator.num_active_allocations > 0
+            ):
+                raise BufferError(
+                    "cannot close DevDaxMemoryAllocator with active allocations"
+                )
+            self.pin_allocator = None
+            self.buffer = torch.empty(0, dtype=torch.uint8)
+            self._mmap_buffer = None
 
         if self._mmap_obj is not None:
             self._mmap_obj.close()
