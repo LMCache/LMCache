@@ -3,6 +3,7 @@
 from typing import Any, Union
 import ctypes
 import os
+import time
 import unittest.mock
 
 # Third Party
@@ -10,6 +11,10 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.native_completion import (
+    DeviceHostFuncDispatcher,
+    submit_callback_to_stream,
+)
 import lmcache.python_ops_fallback as _py_ops
 
 # ==========================================
@@ -52,6 +57,7 @@ def _build_backend_params() -> list:
     - cuda_c_ops: uses lmcache.c_ops (requires CUDA and the CUDA extension)
     - cuda_py_ops: uses lmcache.python_ops_fallback with GPU visible
     - cpy_py_ops: uses lmcache.python_ops_fallback with GPU mocked away
+    - xpu_sycl_ops: uses lmcache.xpu_ops (requires XPU and the SYCL extension)
     - xpu_py_ops: uses lmcache.python_ops_fallback with XPU visible
     """
     params = []
@@ -80,7 +86,15 @@ def _build_backend_params() -> list:
             )
 
     if hasattr(torch, "xpu") and torch.xpu.is_available():
-        params.append(pytest.param(("xpu_py_ops", _py_ops, "xpu"), id="xpu_py_ops"))
+        try:
+            # First Party
+            import lmcache.c_ops as xpu_sycl_ops
+
+            params.append(
+                pytest.param(("xpu_sycl_ops", xpu_sycl_ops, "xpu"), id="xpu_sycl_ops")
+            )
+        except ImportError:
+            pass
 
     return params
 
@@ -242,16 +256,17 @@ def scenario_lmcache_memcpy_async(ops: Any, device: str) -> dict[str, torch.Tens
     src_host = torch.randint(0, 256, (buf_size,), dtype=torch.uint8)
     gpu_buffer = torch.zeros(buf_size, dtype=torch.uint8, device=device)
 
-    if torch.cuda.is_available():
-        dst_host = torch.zeros(buf_size, dtype=torch.uint8).pin_memory()
-    else:
-        dst_host = torch.zeros(buf_size, dtype=torch.uint8)
+    dst_host = torch.zeros(buf_size, dtype=torch.uint8)
+    if device in ("cuda", "xpu"):
+        dst_host = dst_host.pin_memory()
 
     h2d_dir = ops.TransferDirection.H2D
     d2h_dir = ops.TransferDirection.D2H
 
-    # Tensor mode for non-CUDA/CPU devices (e.g., XPU, HPU)
-    use_tensor_mode = device not in ("cpu", "cuda")
+    # Decide mode based on the running device.
+    # The native CUDA/XPU backend only accepts a tensor of uint64 pointers;
+    # only the Python fallback supports list[Tensor].
+    use_tensor_mode = device not in ("cpu", "cuda", "xpu")
 
     # (host_buffer_offset, nbytes) boundary test cases:
     #   (0,  64): exactly one aligned block from the start
@@ -374,7 +389,7 @@ def scenario_load_and_reshape_flash(ops: Any, device: str) -> dict[str, torch.Te
         mem_obj_shape = (2, num_layers, len(slot_mapping_temp), num_heads * head_size)
         mem_obj_tensor = torch.zeros(mem_obj_shape, dtype=dtype, device=dst_device)
 
-        if device == "cuda":
+        if device in ("cuda", "xpu"):
             mem_obj_tensor = mem_obj_tensor.pin_memory()
 
         for layer_id in range(num_layers):
@@ -465,7 +480,7 @@ def scenario_reshape_and_cache_back_flash(
         src_buffer[0, :, i, :] = val  # Key
         src_buffer[1, :, i, :] = val + 0.5  # Value
 
-    if device == "cuda":
+    if device in ("cuda", "xpu"):
         src_buffer = src_buffer.pin_memory()
 
     # 3. Prepare Destination (Empty Cache)
@@ -1172,9 +1187,10 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
         (ops.GPUKVFormat.NL_X_NBBS_ONE_HS, True, 1),  # SGLang MLA
     ]
 
-    # Decide mode based on device: use pointer mode for CPU/CUDA
-    # tensor list mode for others
-    use_tensor_list = device not in ("cpu", "cuda")
+    # Decide mode based on the running device.
+    # The native CUDA/XPU backend only accepts a tensor of uint64 pointers;
+    # only the Python fallback supports list[Tensor].
+    use_tensor_list = device not in ("cpu", "cuda", "xpu")
 
     for gpu_kv_format, is_mla, bs_arg in format_cases:
         k_or_v_size = 1 if is_mla else 2
@@ -1186,7 +1202,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
             key_value = torch.zeros(lmc_shape, dtype=dtype, device="cpu")
-            if device == "cuda":
+            if device in ("cuda", "xpu"):
                 key_value = key_value.pin_memory()
 
             if not direction:  # LMC → Paged
@@ -1252,10 +1268,10 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
                 # Tensor list mode: pass the tensor objects directly
                 key_value_ptrs = page_buffers
             else:
-                # Pointer mode: create tensor of int64 pointers
+                # Pointer mode: create tensor of uint64 pointers
                 key_value_ptrs = torch.tensor(
                     [pb.data_ptr() for pb in page_buffers],
-                    dtype=torch.int64,
+                    dtype=torch.uint64,
                     device=device,
                 )
 
@@ -1341,7 +1357,7 @@ def scenario_multi_layer_kv_transfer(ops: Any, device: str) -> dict[str, torch.T
         else:
             key_value_ptrs = torch.tensor(
                 [pb.data_ptr() for pb in page_buffers],
-                dtype=torch.int64,
+                dtype=torch.uint64,
                 device=device,
             )
 
@@ -1398,8 +1414,9 @@ def scenario_multi_layer_kv_transfer_unilateral(
         ),  # SGLang MLA (delegates to multi_layer_kv_transfer)
     ]
 
-    # Decide mode based on device: use pointer mode for CPU/CUDA
-    # tensor list mode for others
+    # Decide mode based on the running device.
+    # The native CUDA/XPU backend only accepts a tensor of uint64 pointers;
+    # only the Python fallback supports list[Tensor].
     use_tensor_list = device not in ("cpu", "cuda")
 
     for gpu_kv_format, is_mla in format_cases:
@@ -1411,7 +1428,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
             # ── 1. LMCache Tensor ──
             lmc_shape = (k_or_v_size, num_layers, num_tokens, head_size)
             lmc_tensor = torch.zeros(lmc_shape, dtype=dtype, device="cpu")
-            if device == "cuda":
+            if device in ("cuda", "xpu"):
                 lmc_tensor = lmc_tensor.pin_memory()
 
             if not direction:  # LMC → Paged
@@ -1453,7 +1470,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
                 else:
                     key_value_ptrs = torch.tensor(
                         [pb.data_ptr() for pb in page_buffers],
-                        dtype=torch.int64,
+                        dtype=torch.uint64,
                         device=device,
                     )
             else:
@@ -1497,7 +1514,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
 
                     key_value_ptrs = torch.tensor(
                         ptr_list,
-                        dtype=torch.int64,
+                        dtype=torch.uint64,
                         device=device,
                     ).contiguous()
 
@@ -1596,7 +1613,7 @@ def scenario_multi_layer_kv_transfer_unilateral(
                 ptr_list.append(buffers[(1, ly)].data_ptr())
             key_value_ptrs = torch.tensor(
                 ptr_list,
-                dtype=torch.int64,
+                dtype=torch.uint64,
                 device=device,
             ).contiguous()
 
@@ -1710,9 +1727,79 @@ def scenario_transfer_direction_enum(ops: Any, device: str) -> dict[str, torch.T
     }
 
 
+def scenario_record_drain_completion(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test record_completion_on_stream / drain_recorded_completions contracts.
+
+    Verified backend-agnostic: native c_ops uses cudaLaunchHostFunc on the
+    default stream (ptr=0), which fires synchronously after device_sync; the
+    fallback enqueues immediately. Both paths satisfy every assertion below.
+    """
+    ops.drain_recorded_completions()  # clear residual global state
+
+    assert ops.drain_recorded_completions() == []
+
+    ops.record_completion_on_stream(0, "kind-a", b"payload-a")
+    ops.record_completion_on_stream(0, "kind-b", b"payload-b")
+    device_sync(device)
+    result = ops.drain_recorded_completions()
+    assert result == [("kind-a", b"payload-a"), ("kind-b", b"payload-b")]
+    assert all(isinstance(k, str) and isinstance(p, bytes) for k, p in result)
+
+    assert ops.drain_recorded_completions() == []
+
+    # Multiple records on the default stream (ptr=0) must all enqueue.
+    # Note: ptr=0 is the only value safe on both backends — the fallback
+    # ignores the field, but the native path casts it to cudaStream_t, so
+    # arbitrary values like -1 / 2**32 would be invalid there.
+    for _ in range(3):
+        ops.record_completion_on_stream(0, "k", b"v")
+    device_sync(device)
+    assert len(ops.drain_recorded_completions()) == 3
+
+    return {"record_drain_completion": torch.tensor([1], dtype=torch.int32)}
+
+
+def scenario_dispatcher_integration(ops: Any, device: str) -> dict[str, torch.Tensor]:
+    """Test submit_callback_to_stream -> DeviceHostFuncDispatcher -> handler.
+
+    Works on all backends: submit_callback_to_stream only reads stream.ptr, so
+    _FakeStream(ptr=0) is accepted; the native path routes through the CUDA
+    default stream which fires before the dispatcher's drain loop polls.
+    """
+    # First Party
+    import lmcache.v1.multiprocess.native_completion as nc
+
+    original = nc._lmc_ops
+    nc._lmc_ops = ops
+    try:
+        ops.drain_recorded_completions()
+
+        class _FakeStream:
+            ptr: int = 0
+
+        dispatcher = DeviceHostFuncDispatcher(drain_interval_seconds=0.001)
+        received: list[list[bytes]] = []
+        dispatcher.register("finish_write", received.append, payload_type=list[bytes])
+        dispatcher.start()
+        try:
+            submit_callback_to_stream(_FakeStream(), "finish_write", [b"k0", b"k1"])
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not received:
+                time.sleep(0.01)
+        finally:
+            dispatcher.stop()
+
+        assert received == [[b"k0", b"k1"]]
+    finally:
+        nc._lmc_ops = original
+
+    return {"dispatcher_integration": torch.tensor([1], dtype=torch.int32)}
+
+
 # ==========================================
 # 3. Registry
 # ==========================================
+
 # cover pybind list in csrc/pybind.cpp
 SCENARIO_REGISTRY = {
     "transfer_direction_enum": scenario_transfer_direction_enum,
@@ -1733,6 +1820,8 @@ SCENARIO_REGISTRY = {
     "alloc_free_numa_ptr": scenario_alloc_free_numa_ptr,
     "alloc_free_shm_pinned_ptr": scenario_alloc_free_shm_pinned_ptr,
     "get_gpu_pci_bus_id": scenario_get_gpu_pci_bus_id,
+    "record_drain_completion": scenario_record_drain_completion,
+    "dispatcher_integration": scenario_dispatcher_integration,
 }
 
 

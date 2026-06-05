@@ -565,6 +565,7 @@ class LocalDiskBackend(StorageBackendInterface):
             except Exception as e:
                 logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
+    @_lmcache_nvtx_annotate
     def batched_async_load_bytes_from_disk(
         self,
         paths: list[str],
@@ -634,6 +635,7 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
         )
 
+    @_lmcache_nvtx_annotate
     def read_file(self, key, buffer, path):
         start_time = time.time()
         size = len(buffer)

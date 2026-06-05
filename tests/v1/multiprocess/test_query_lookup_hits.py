@@ -121,7 +121,7 @@ def _make_module_with_job(
     handle = PrefetchHandle(
         prefetch_request_id=0,
         external_request_id="req-0",
-        l1_prefix_hit_count=0,
+        l1_found_indices=(),
         total_requested_keys=10,
         submit_time=time.monotonic(),
     )
@@ -133,6 +133,8 @@ def _make_module_with_job(
         requested_tokens=0,
     )
     module._prefetch_jobs[request_id] = job
+    # The storage layer returns the prefix-hit count; the module divides it by
+    # world_size.
     ctx.storage_manager.query_prefetch_lookup_hits.return_value = storage_return
 
     return module, request_id

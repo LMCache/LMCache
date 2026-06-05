@@ -93,8 +93,8 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
 
     module = gpu_transfer_mod.GPUTransferModule(ctx)
-    module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {})
-    module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {})
+    module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])
+    module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {}, [])
     assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
 
     module.unregister_kv_cache(1)
