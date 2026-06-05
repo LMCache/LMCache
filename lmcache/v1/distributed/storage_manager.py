@@ -6,8 +6,6 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from typing import Iterator, Literal
-import asyncio
-import threading
 import time
 
 # First Party
@@ -56,39 +54,15 @@ from lmcache.v1.platform import HAS_EVENTFD
 logger = init_logger(__name__)
 
 
-def _start_background_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread]:
-    """Spin up an asyncio loop in a background daemon thread.
-
-    Used by ``StorageManager`` to host the ``GdsL1Backend``'s startup
-    metadata scan without coupling to the MP server's threading model.
-    The thread is daemon so an unclean shutdown does not block process
-    exit, but ``close()`` still stops the loop and joins explicitly so
-    a clean shutdown drains pending tasks first.
-    """
-    loop = asyncio.new_event_loop()
-    thread = threading.Thread(
-        target=loop.run_forever,
-        name="gds-l1-asyncio",
-        daemon=True,
-    )
-    thread.start()
-    return loop, thread
-
-
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
         # Optional GDS L1 backend, built before L1Manager (which takes
-        # it via an optional hook). Owns a background event loop for the
-        # backend's async metadata scan, torn down in ``close()``.
-        # CPU-pinned path is unchanged when ``gds_l1_config is None``.
+        # it via an optional hook). CPU-pinned path is unchanged when
+        # ``gds_l1_config is None``.
         self._gds_backend: GdsL1Backend | None = None
-        self._gds_loop: asyncio.AbstractEventLoop | None = None
-        self._gds_loop_thread: threading.Thread | None = None
         if config.gds_l1_config is not None:
-            self._gds_loop, self._gds_loop_thread = _start_background_loop()
             self._gds_backend = GdsL1Backend(
                 config=config.gds_l1_config,
-                loop=self._gds_loop,
             )
             logger.info(
                 "StorageManager: GDS L1 backend enabled (gds_path=%r)",
@@ -804,14 +778,6 @@ class StorageManager:
             adapter.close()
 
         self._l1_manager.close()
-
-        # Tear down the GDS L1 loop after _l1_manager.close() (which
-        # closes the backend).
-        if self._gds_loop is not None:
-            self._gds_loop.call_soon_threadsafe(self._gds_loop.stop)
-            if self._gds_loop_thread is not None:
-                self._gds_loop_thread.join(timeout=5.0)
-            self._gds_loop.close()
 
     def report_status(self) -> dict:
         """Return a status dict aggregating all sub-component statuses."""

@@ -25,10 +25,8 @@ inside that slab.
 
 # Standard
 from dataclasses import dataclass
-import asyncio
 import os
 import shutil
-import threading
 import time
 
 # Third Party
@@ -67,27 +65,6 @@ class BenchResult:
     @property
     def mibs(self) -> float:
         return self.total_mib / self.seconds if self.seconds > 0 else float("nan")
-
-
-def _start_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread]:
-    """Spin up an asyncio loop on a background daemon thread.
-
-    The backend takes an event loop for API compatibility with prior
-    versions; the slab design does not run any async tasks itself.
-    """
-    loop = asyncio.new_event_loop()
-    thread = threading.Thread(
-        target=loop.run_forever, name="gds-check-loop", daemon=True
-    )
-    thread.start()
-    return loop, thread
-
-
-def _stop_loop(loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
-    """Stop the background loop and join the thread."""
-    loop.call_soon_threadsafe(loop.stop)
-    thread.join(timeout=2.0)
-    loop.close()
 
 
 def _object_key(seed: int) -> ObjectKey:
@@ -352,8 +329,7 @@ def run_gds_check(
         use_direct_io=use_direct_io,
         slab_size_gb=slab_size_gb,
     )
-    loop, thread = _start_loop()
-    backend = GdsL1Backend(config=config, loop=loop, dst_device="cuda:0")
+    backend = GdsL1Backend(config=config, dst_device="cuda:0")
     try:
         if not skip_verify:
             print()
@@ -388,7 +364,6 @@ def run_gds_check(
             )
     finally:
         backend.close()
-        _stop_loop(loop, thread)
 
 
 def _run_bench_phase(

@@ -18,10 +18,8 @@ without needing nvidia-fs loaded in CI.
 """
 
 # Standard
-import asyncio
 import os
 import shutil
-import threading
 
 # Third Party
 import pytest
@@ -47,23 +45,6 @@ def gds_root(tmp_path):
     root.mkdir()
     yield str(root)
     shutil.rmtree(root, ignore_errors=True)
-
-
-@pytest.fixture
-def loop():
-    """A fresh asyncio event loop running in a background thread.
-
-    The slab design doesn't use the loop today, but the constructor
-    still requires one to preserve API compatibility with the previous
-    async-scan design.
-    """
-    new_loop = asyncio.new_event_loop()
-    thread = threading.Thread(target=new_loop.run_forever, daemon=True)
-    thread.start()
-    yield new_loop
-    new_loop.call_soon_threadsafe(new_loop.stop)
-    thread.join(timeout=2.0)
-    new_loop.close()
 
 
 def _make_config(gds_path: str, slab_size_gb: float = 0.25) -> GdsL1Config:
@@ -159,8 +140,8 @@ class TestGdsMemoryObjSurface:
     """``.tensor`` is None, ``.byte_array`` / ``.data_ptr`` raise."""
 
     @pytest.fixture
-    def backend(self, gds_root, loop):
-        b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+    def backend(self, gds_root):
+        b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
         yield b
         b.close()
 
@@ -199,8 +180,8 @@ class TestGdsL1BackendIndex:
     ``free_entry_from_index``."""
 
     @pytest.fixture
-    def backend(self, gds_root, loop):
-        b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+    def backend(self, gds_root):
+        b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
         yield b
         b.close()
 
@@ -241,11 +222,10 @@ class TestGdsL1BackendIndex:
         assert resurrected.slab_offset == mo.slab_offset
         assert resurrected.size == mo.size
 
-    def test_oom_returns_none(self, gds_root, loop):
+    def test_oom_returns_none(self, gds_root):
         # Slab sized to fit exactly one 4 KiB chunk.
         b = GdsL1Backend(
             _make_config(gds_root, slab_size_gb=4096 / (1 << 30)),
-            loop=loop,
             dst_device="cuda:0",
         )
         try:
@@ -282,8 +262,8 @@ class TestGdsL1BackendIndex:
 class TestGdsL1BackendPersistence:
     """Index survives backend close + reopen."""
 
-    def test_persist_and_reload(self, gds_root, loop):
-        b1 = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+    def test_persist_and_reload(self, gds_root):
+        b1 = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
         try:
             key = _object_key(seed=123)
             mo = b1.create_memory_obj(
@@ -297,7 +277,7 @@ class TestGdsL1BackendPersistence:
             b1.close()
 
         # Reopen over the same path.
-        b2 = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+        b2 = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
         try:
             assert b2.lookup([key]) == [True]
             resurrected = b2.create_memory_obj_from_index(key)
@@ -309,11 +289,11 @@ class TestGdsL1BackendPersistence:
         finally:
             b2.close()
 
-    def test_corrupt_index_starts_empty(self, gds_root, loop):
+    def test_corrupt_index_starts_empty(self, gds_root):
         # Write a corrupt index file before opening.
         with open(os.path.join(gds_root, "lmcache_gds_index.json"), "w") as f:
             f.write("not a json document")
-        b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+        b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
         try:
             assert b.get_hot_cache_size() == 0
         finally:
@@ -337,8 +317,8 @@ class TestPosixRoundTrip:
     cudaMemcpy so this can run on any CUDA host (no nvidia-fs needed).
     """
 
-    def test_write_then_read_matches(self, gds_root, loop):
-        b = GdsL1Backend(_make_config(gds_root), loop=loop, dst_device="cuda:0")
+    def test_write_then_read_matches(self, gds_root):
+        b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
         try:
             chunk_bytes = 8192
             buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda:0")

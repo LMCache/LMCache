@@ -50,7 +50,6 @@ lets a fresh backend instance recover the
 # Standard
 from collections import OrderedDict
 from typing import Optional, Union
-import asyncio
 import bisect
 import ctypes
 import json
@@ -843,8 +842,6 @@ class GdsL1Backend:
     Args:
         config: :class:`GdsL1Config` with ``gds_path``,
             ``slab_size_gb``, ``use_direct_io``, etc.
-        loop: An asyncio event loop. Currently unused — preserved for
-            API stability with previous versions.
         dst_device: Target GPU device string used by
             :class:`PathSharder`.
     """
@@ -852,7 +849,6 @@ class GdsL1Backend:
     def __init__(
         self,
         config: GdsL1Config,
-        loop: asyncio.AbstractEventLoop,
         dst_device: str = "cuda",
     ) -> None:
         if not config.gds_path:
@@ -860,7 +856,6 @@ class GdsL1Backend:
         if not dst_device.startswith("cuda"):
             raise ValueError(f"GdsL1Backend requires cuda dst_device, got {dst_device}")
         self.config = config
-        self._loop = loop
         self.dst_device = dst_device
 
         sharder = PathSharder(
@@ -1246,10 +1241,6 @@ class GdsL1Backend:
         """Number of resident keys. Used by tests + ``gds-check``."""
         with self._index_lock:
             return len(self._index)
-
-    def wait_for_scan(self, timeout: float = 0.0) -> None:
-        """Compat stub: the slab design has no async scan to wait for."""
-        return
 
     # --- Internal ---------------------------------------------------
 
