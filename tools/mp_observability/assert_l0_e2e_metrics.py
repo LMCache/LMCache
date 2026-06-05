@@ -12,12 +12,12 @@ L0 GPU boundary.
 from __future__ import annotations
 
 # Standard
-import argparse
-import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
+import argparse
+import re
+import sys
 
 _SAMPLE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+"

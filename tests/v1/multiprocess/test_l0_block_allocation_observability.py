@@ -8,9 +8,10 @@ REPORT_BLOCK_ALLOCATION rather than only subscriber metric math:
 * MP server management handler -> EventBus event
 """
 
-# Standard
+# Future
 from __future__ import annotations
 
+# Standard
 from unittest.mock import MagicMock
 import threading
 import types
@@ -26,7 +27,7 @@ from lmcache.v1.multiprocess.protocol import RequestType
 
 class _RecordingEventBus:
     def __init__(self) -> None:
-        self.events = []
+        self.events: list[object] = []
 
     def publish(self, event) -> None:
         self.events.append(event)

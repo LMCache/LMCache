@@ -3,9 +3,9 @@
 """Tests for the L0 E2E Prometheus scrape assertion tool."""
 
 # Standard
+from pathlib import Path
 import importlib.util
 import sys
-from pathlib import Path
 
 # Third Party
 import pytest
