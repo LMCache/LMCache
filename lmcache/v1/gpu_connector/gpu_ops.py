@@ -44,11 +44,7 @@ def lmcache_memcpy_async_h2d(
     """Helper function to copy memory object allocated by different
     allocators to GPU buffer.
 
-    This function is non-blocking and won't do stream synchronization
-    on the CPU-pinned and lazy-pinned paths. For the GDS L1 path it
-    invokes a synchronous cuFile read into ``gpu_buffer`` — see
-    docs/design/v1/distributed/gds_l1_backend.md for why this is
-    still framed as an H2D.
+    This function is non-blocking and won't do stream synchronization.
 
     :param MemoryObj memory_obj: The memory object to be copied.
     :param torch.Tensor gpu_buffer: The GPU buffer to copy the data to.
@@ -85,11 +81,7 @@ def lmcache_memcpy_async_d2h(
     """Helper function to copy memory object allocated by different
     allocators from GPU buffer.
 
-    This function is non-blocking and won't do stream synchronization
-    on the CPU-pinned and lazy-pinned paths. For the GDS L1 path it
-    invokes a synchronous cuFile write from ``gpu_buffer`` — see
-    docs/design/v1/distributed/gds_l1_backend.md for why this is
-    still framed as a D2H.
+    This function is non-blocking and won't do stream synchronization.
 
     :param torch.Tensor gpu_buffer: The GPU buffer to copy the data from.
     :param MemoryObj memory_obj: The memory object to be copied to.

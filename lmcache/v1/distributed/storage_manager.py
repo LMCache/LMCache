@@ -56,8 +56,6 @@ logger = init_logger(__name__)
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
-        # L1Manager owns the optional GDS L1 backend (built from
-        # gds_l1_config), parallel to its in-memory L1MemoryManager.
         self._l1_manager = L1Manager(
             config.l1_manager_config,
             gds_l1_config=config.gds_l1_config,

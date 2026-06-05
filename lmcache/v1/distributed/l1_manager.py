@@ -5,7 +5,7 @@ Managing objects and memory for L1 cache
 
 # Standard
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal
 import threading
 
 # First Party
@@ -271,8 +271,6 @@ class L1Manager:
         for key in keys:
             entry = self._objects.get(key, None)
             if entry is None:
-                # GDS L1 fill-on-miss: synthesise an L1 entry if the key
-                # is resident on disk.
                 entry = self._try_gds_fill_on_miss_locked(key)
                 if entry is None:
                     ret[key] = (L1Error.KEY_NOT_EXIST, None)
@@ -498,22 +496,18 @@ class L1Manager:
                 ret[key] = (L1Error.KEY_NOT_WRITABLE, None)
             return ret
 
-        # GDS L1 path: mint disk-anchored GdsMemoryObj per key via the
-        # backend (the CPU pinned memory manager is unused here). The
-        # disk write happens later on the caller's d2h copy. A None obj
-        # is treated as OOM.
-        gds_objs: list[GdsMemoryObj | None] = []
+        allocated_objs: list[MemoryObj] = []
         if self._gds_backend is not None:
-            gds_objs = [
-                self._gds_backend.create_memory_obj(key, layout_desc)
-                for key, _ in need_to_allocate
-            ]
-            allocated_objs = cast("list[MemoryObj]", gds_objs)
-            err = (
-                L1Error.SUCCESS
-                if all(obj is not None for obj in gds_objs)
-                else L1Error.OUT_OF_MEMORY
-            )
+            # A None obj means the slab is full -> OUT_OF_MEMORY. Append
+            # (not assign) so allocated_objs stays list[MemoryObj] without
+            # a cast.
+            err = L1Error.SUCCESS
+            for key, _ in need_to_allocate:
+                obj = self._gds_backend.create_memory_obj(key, layout_desc)
+                if obj is None:
+                    err = L1Error.OUT_OF_MEMORY
+                else:
+                    allocated_objs.append(obj)
         else:
             err, allocated_objs = self._memory_manager.allocate(
                 layout_desc, len(need_to_allocate)
@@ -525,9 +519,9 @@ class L1Manager:
 
             # Free the memory if partial allocation succeeded
             if self._gds_backend is not None:
-                for obj in gds_objs:
-                    if obj is not None:
-                        self._gds_backend.free_entry(obj)
+                for mo in allocated_objs:
+                    if isinstance(mo, GdsMemoryObj):
+                        self._gds_backend.free_entry(mo)
             elif allocated_objs:
                 self._memory_manager.free(allocated_objs)
 

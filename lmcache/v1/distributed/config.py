@@ -90,12 +90,8 @@ class EvictionConfig:
 
 @dataclass
 class GdsL1Config:
-    """Configuration for the GDS L1 backend.
-
-    Carried inside :class:`StorageManagerConfig` and consumed by
-    ``GdsL1Backend``. ``StorageManager`` constructs the backend only
-    when ``StorageManagerConfig.gds_l1_config`` is non-``None``; the
-    CPU-pinned L1 path runs unchanged otherwise.
+    """
+    The configuration for the GDS L1 backend.
     """
 
     gds_path: str
@@ -154,11 +150,7 @@ class StorageManagerConfig:
     """ Maximum number of concurrent prefetch requests. """
 
     gds_l1_config: GdsL1Config | None = None
-    """Optional GDS L1 backend. When set, ``StorageManager`` builds a
-    ``GdsL1Backend`` and attaches it to ``L1Manager`` as
-    ``gds_backend``; ``MPCacheEngine`` then routes ``GPUCacheContext``
-    construction through the backend's scratch allocator. When
-    ``None`` (default), the CPU-pinned L1 path runs unchanged."""
+    """Optional GDS L1 backend. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
