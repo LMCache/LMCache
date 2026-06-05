@@ -3,7 +3,7 @@
 import torch
 
 # First Party
-from lmcache.v1.distributed.gds_l1 import GdsMemoryObj, GdsScratchAllocator
+from lmcache.v1.distributed.gds_l1 import GdsMemoryObj, GdsSlabAllocator
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import MemoryObj
 import lmcache.c_ops as lmc_ops
@@ -50,10 +50,10 @@ def lmcache_memcpy_async_h2d(
     :param torch.Tensor gpu_buffer: The GPU buffer to copy the data to.
     """
     parent = memory_obj.parent()
-    if isinstance(parent, GdsScratchAllocator):
+    if isinstance(parent, GdsSlabAllocator):
         if not isinstance(memory_obj, GdsMemoryObj):
             raise TypeError(
-                "GdsScratchAllocator parent requires a GdsMemoryObj, got "
+                "GdsSlabAllocator parent requires a GdsMemoryObj, got "
                 f"{type(memory_obj).__name__}"
             )
         parent.cufile_read_into(memory_obj, gpu_buffer)
@@ -87,10 +87,10 @@ def lmcache_memcpy_async_d2h(
     :param MemoryObj memory_obj: The memory object to be copied to.
     """
     parent = memory_obj.parent()
-    if isinstance(parent, GdsScratchAllocator):
+    if isinstance(parent, GdsSlabAllocator):
         if not isinstance(memory_obj, GdsMemoryObj):
             raise TypeError(
-                "GdsScratchAllocator parent requires a GdsMemoryObj, got "
+                "GdsSlabAllocator parent requires a GdsMemoryObj, got "
                 f"{type(memory_obj).__name__}"
             )
         parent.cufile_write_from(memory_obj, gpu_buffer)

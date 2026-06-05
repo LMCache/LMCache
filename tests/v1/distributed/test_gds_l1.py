@@ -13,7 +13,7 @@ Focus is on the parts that do not require a real cuFile driver:
 Tests skip themselves on hosts without CUDA. Where I/O is exercised
 end-to-end we force ``use_gds=False`` so the backend takes the POSIX
 fallback path; that path uses the same address manager and the same
-``GdsScratchAllocator`` surface, so it's a meaningful cross-check
+``GdsSlabAllocator`` surface, so it's a meaningful cross-check
 without needing nvidia-fs loaded in CI.
 """
 
@@ -28,9 +28,11 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.gds_l1 import (
     _CUFILE_ALIGNMENT,
     GdsL1Backend,
+    GdsSlabAllocator,
     SlabAddressManager,
 )
 
@@ -134,7 +136,7 @@ class TestGdsMemoryObjSurface:
 
     @pytest.fixture
     def backend(self, gds_root):
-        b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
+        b = GdsSlabAllocator(_make_config(gds_root), dst_device="cuda:0")
         yield b
         b.close()
 
@@ -165,16 +167,16 @@ class TestGdsMemoryObjSurface:
             _ = mo.data_ptr
 
 
-# --- GdsL1Backend lookup / create / free -----------------------------
+# --- GdsSlabAllocator lookup / create / free -----------------------------
 
 
-class TestGdsL1BackendIndex:
+class TestGdsSlabAllocatorIndex:
     """``lookup`` / ``create_memory_obj`` / ``record_entry`` /
     ``free_entry_from_index``."""
 
     @pytest.fixture
     def backend(self, gds_root):
-        b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
+        b = GdsSlabAllocator(_make_config(gds_root), dst_device="cuda:0")
         yield b
         b.close()
 
@@ -217,7 +219,7 @@ class TestGdsL1BackendIndex:
 
     def test_oom_returns_none(self, gds_root):
         # Slab sized to fit exactly one 4 KiB chunk.
-        b = GdsL1Backend(
+        b = GdsSlabAllocator(
             _make_config(gds_root, slab_size_gb=4096 / (1 << 30)),
             dst_device="cuda:0",
         )
@@ -252,11 +254,11 @@ class TestGdsL1BackendIndex:
 # --- Index persistence ------------------------------------------------
 
 
-class TestGdsL1BackendPersistence:
+class TestGdsSlabAllocatorPersistence:
     """Index survives backend close + reopen."""
 
     def test_persist_and_reload(self, gds_root):
-        b1 = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
+        b1 = GdsSlabAllocator(_make_config(gds_root), dst_device="cuda:0")
         try:
             key = _object_key(seed=123)
             mo = b1.create_memory_obj(
@@ -269,7 +271,7 @@ class TestGdsL1BackendPersistence:
             b1.close()
 
         # Reopen over the same path.
-        b2 = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
+        b2 = GdsSlabAllocator(_make_config(gds_root), dst_device="cuda:0")
         try:
             resurrected = b2.create_memory_obj_from_index(key)
             assert resurrected is not None
@@ -284,7 +286,7 @@ class TestGdsL1BackendPersistence:
         # Write a corrupt index file before opening.
         with open(os.path.join(gds_root, "lmcache_gds_index.json"), "w") as f:
             f.write("not a json document")
-        b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
+        b = GdsSlabAllocator(_make_config(gds_root), dst_device="cuda:0")
         try:
             assert len(b._index) == 0
         finally:
@@ -303,17 +305,17 @@ cuda_required = pytest.mark.skipif(
 class TestPosixRoundTrip:
     """End-to-end write→read via the POSIX fallback.
 
-    Same ``GdsScratchAllocator`` code path the production cuFile path
+    Same ``GdsSlabAllocator`` code path the production cuFile path
     uses; ``use_gds=False`` swaps the bottom layer for pread/pwrite +
     cudaMemcpy so this can run on any CUDA host (no nvidia-fs needed).
     """
 
     def test_write_then_read_matches(self, gds_root):
-        b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
+        b = GdsSlabAllocator(_make_config(gds_root), dst_device="cuda:0")
         try:
             chunk_bytes = 8192
             buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda:0")
-            b.scratch_allocator.register_gpu_buffer(buf)
+            b.register_gpu_buffer(buf)
             try:
                 buf.fill_(0xAB)
                 torch.cuda.synchronize()
@@ -323,15 +325,53 @@ class TestPosixRoundTrip:
                     key=key,
                     layout_desc=_layout(torch.Size([chunk_bytes]), torch.uint8),
                 )
-                b.scratch_allocator.cufile_write_from(mo, buf)
+                b.cufile_write_from(mo, buf)
 
                 buf.zero_()
                 torch.cuda.synchronize()
-                b.scratch_allocator.cufile_read_into(mo, buf)
+                b.cufile_read_into(mo, buf)
                 torch.cuda.synchronize()
                 expected = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8)
                 assert torch.equal(buf.cpu(), expected)
             finally:
-                b.scratch_allocator.deregister_gpu_buffer()
+                b.deregister_gpu_buffer()
         finally:
             b.close()
+
+
+# --- GdsL1Backend thin facade ----------------------------------------
+
+
+class TestGdsL1BackendFacade:
+    """The thin facade mirrors L1MemoryManager's allocate/free contract."""
+
+    def test_allocate_then_free(self, gds_root):
+        backend = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
+        try:
+            keys = [_object_key(seed=i) for i in range(3)]
+            layout = _layout(torch.Size([4096]), torch.uint8)
+            err, objs = backend.allocate(layout, keys)
+            assert err == L1Error.SUCCESS
+            assert len(objs) == 3
+            assert backend.get_memory_usage()[0] == 3 * 4096
+            assert backend.free(objs) == L1Error.SUCCESS
+            assert backend.get_memory_usage()[0] == 0
+        finally:
+            backend.close()
+
+    def test_allocate_oom_is_all_or_nothing(self, gds_root):
+        # Slab fits exactly two 4 KiB chunks; asking for three must fail
+        # and leave nothing reserved.
+        backend = GdsL1Backend(
+            _make_config(gds_root, slab_size_gb=2 * 4096 / (1 << 30)),
+            dst_device="cuda:0",
+        )
+        try:
+            keys = [_object_key(seed=i) for i in range(3)]
+            layout = _layout(torch.Size([4096]), torch.uint8)
+            err, objs = backend.allocate(layout, keys)
+            assert err == L1Error.OUT_OF_MEMORY
+            assert objs == []
+            assert backend.get_memory_usage()[0] == 0
+        finally:
+            backend.close()

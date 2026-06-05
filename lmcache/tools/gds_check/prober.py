@@ -8,7 +8,7 @@ Three phases, each independently skippable from the CLI:
   compatibility for the requested chunk size. Catches setup mistakes
   before any I/O happens.
 - ``verify``: write a known pattern through
-  ``GdsScratchAllocator.cufile_write_from``, read it back through
+  ``GdsSlabAllocator.cufile_write_from``, read it back through
   ``cufile_read_into``, byte-compare the result. Same code path as
   the production data path; if this passes, the GDS L1 backend works
   on this host.
@@ -37,7 +37,7 @@ from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
-from lmcache.v1.distributed.gds_l1 import GdsL1Backend
+from lmcache.v1.distributed.gds_l1 import GdsSlabAllocator
 
 logger = init_logger(__name__)
 
@@ -110,16 +110,16 @@ def probe_host(gds_path: str, chunk_bytes: int) -> HostInfo:
 
 
 def verify_round_trip(
-    backend: GdsL1Backend, chunk_bytes: int, pattern_val: int = 0xCD
+    backend: GdsSlabAllocator, chunk_bytes: int, pattern_val: int = 0xCD
 ) -> None:
     """Write a deterministic pattern, read it back, fail loudly on mismatch.
 
-    Uses the same ``GdsScratchAllocator`` code path as production —
+    Uses the same ``GdsSlabAllocator`` code path as production —
     ``create_memory_obj`` reserves a slab region, ``cufile_write_from``
     DMAs into it, ``cufile_read_into`` DMAs back.
 
     Args:
-        backend: An already-constructed :class:`GdsL1Backend`.
+        backend: An already-constructed :class:`GdsSlabAllocator`.
         chunk_bytes: Size of the test chunk in bytes (must be 4 KiB
             aligned).
         pattern_val: Byte value to fill the test chunk with.
@@ -128,7 +128,7 @@ def verify_round_trip(
         RuntimeError: If the bytes read back do not match what was
             written, or if the slab is too small for ``chunk_bytes``.
     """
-    allocator = backend.scratch_allocator
+    allocator = backend
     buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda:0")
     allocator.register_gpu_buffer(buf)
     try:
@@ -164,7 +164,7 @@ def verify_round_trip(
 
 
 def benchmark(
-    backend: GdsL1Backend,
+    backend: GdsSlabAllocator,
     num_chunks: int,
     chunk_bytes: int,
     max_batch_size: int = 4,
@@ -177,7 +177,7 @@ def benchmark(
     ``cudaStreamSynchronize`` at the end.
 
     Args:
-        backend: An already-constructed :class:`GdsL1Backend`.
+        backend: An already-constructed :class:`GdsSlabAllocator`.
         num_chunks: Number of distinct chunks to write / read.
         chunk_bytes: Bytes per chunk (4 KiB aligned).
         max_batch_size: Number of staging slots in the registered
@@ -187,7 +187,7 @@ def benchmark(
     Returns:
         ``(store_result, retrieve_result)``.
     """
-    allocator = backend.scratch_allocator
+    allocator = backend
 
     tmp_buf = torch.empty(
         max_batch_size * chunk_bytes, dtype=torch.uint8, device="cuda:0"
@@ -325,7 +325,7 @@ def run_gds_check(
         use_direct_io=use_direct_io,
         slab_size_gb=slab_size_gb,
     )
-    backend = GdsL1Backend(config=config, dst_device="cuda:0")
+    backend = GdsSlabAllocator(config=config, dst_device="cuda:0")
     try:
         if not skip_verify:
             print()
@@ -363,7 +363,7 @@ def run_gds_check(
 
 
 def _run_bench_phase(
-    backend: GdsL1Backend,
+    backend: GdsSlabAllocator,
     *,
     label: str,
     num_chunks: int,

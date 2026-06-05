@@ -19,7 +19,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.gds_l1 import GdsScratchAllocator
+from lmcache.v1.distributed.gds_l1 import GdsSlabAllocator
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
@@ -737,7 +737,7 @@ class StorageManager:
         """
         self._l1_manager.clear(force=force)
 
-    def get_gds_scratch_allocator(self) -> GdsScratchAllocator | None:
+    def get_gds_scratch_allocator(self) -> GdsSlabAllocator | None:
         """
         Return the GDS scratch allocator.
         """

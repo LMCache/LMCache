@@ -17,7 +17,7 @@ from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.gds_l1 import (
     GdsL1Backend,
     GdsMemoryObj,
-    GdsScratchAllocator,
+    GdsSlabAllocator,
 )
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
@@ -498,16 +498,9 @@ class L1Manager:
 
         allocated_objs: list[MemoryObj] = []
         if self._gds_backend is not None:
-            # A None obj means the slab is full -> OUT_OF_MEMORY. Append
-            # (not assign) so allocated_objs stays list[MemoryObj] without
-            # a cast.
-            err = L1Error.SUCCESS
-            for key, _ in need_to_allocate:
-                obj = self._gds_backend.create_memory_obj(key, layout_desc)
-                if obj is None:
-                    err = L1Error.OUT_OF_MEMORY
-                else:
-                    allocated_objs.append(obj)
+            err, allocated_objs = self._gds_backend.allocate(
+                layout_desc, [key for key, _ in need_to_allocate]
+            )
         else:
             err, allocated_objs = self._memory_manager.allocate(
                 layout_desc, len(need_to_allocate)
@@ -516,14 +509,8 @@ class L1Manager:
         if err != L1Error.SUCCESS:
             for key, _ in need_to_allocate:
                 ret[key] = (L1Error.OUT_OF_MEMORY, None)
-
-            # Free the memory if partial allocation succeeded
-            if self._gds_backend is not None:
-                for mo in allocated_objs:
-                    if isinstance(mo, GdsMemoryObj):
-                        self._gds_backend.free_entry(mo)
-            elif allocated_objs:
-                self._memory_manager.free(allocated_objs)
+            # Both backends free any partial allocation internally and
+            # return [], so there is nothing to roll back here.
 
         else:
             for (key, is_temp), mem_obj in zip(
@@ -870,7 +857,7 @@ class L1Manager:
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
 
-    def get_gds_scratch_allocator(self) -> GdsScratchAllocator | None:
+    def get_gds_scratch_allocator(self) -> GdsSlabAllocator | None:
         """Return the GDS scratch allocator, or None if GDS is not enabled."""
         if self._gds_backend is None:
             return None

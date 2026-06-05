@@ -22,9 +22,9 @@ Surface this module exposes:
 - :class:`SlabAddressManager` — first-fit free-list allocator over
   byte offsets within the slab file. Mirrors the role of
   ``TensorMemoryAllocator`` for the slab file.
-- :class:`GdsL1Backend` — owns the slab file, the cuFile handle, the
+- :class:`GdsSlabAllocator` — owns the slab file, the cuFile handle, the
   address manager, and the persisted index of resident keys.
-- :class:`GdsScratchAllocator` — tag class used for ``isinstance``
+- :class:`GdsSlabAllocator` — tag class used for ``isinstance``
   dispatch in ``gpu_ops.py``; also the home for
   :meth:`cufile_read_into` and :meth:`cufile_write_from`.
 - :class:`GdsMemoryObj` — slab-anchored ``MemoryObj``. Carries
@@ -67,6 +67,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed import _cufile_async as ca
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
+from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     MemoryFormat,
@@ -85,7 +86,7 @@ _INDEX_FILENAME = "lmcache_gds_index.json"
 _INDEX_VERSION = 1
 _CUFILE_ALIGNMENT = 4096
 # cuFile submissions to accumulate before recording a completion event and
-# draining finished ones (see ``GdsL1Backend._record_submission``).
+# draining finished ones (see ``GdsSlabAllocator._record_submission``).
 _SUBMISSION_CHECKPOINT_EVERY = 64
 _TORCH_DTYPE_TO_STR = {
     torch.half: "F16",
@@ -175,7 +176,7 @@ def get_fstype(path: str) -> str:
 class SlabAddressManager:
     """First-fit free-list allocator over a fixed-size byte offset space.
 
-    Used by :class:`GdsL1Backend` to track which byte ranges of the
+    Used by :class:`GdsSlabAllocator` to track which byte ranges of the
     slab file are in use. Same data structure pattern as the
     ``TensorMemoryAllocator`` that backs CPU L1's pinned slab, but
     operating on file offsets instead of pointers.
@@ -326,7 +327,7 @@ class GdsMemoryObj(MemoryObj):
         self,
         key: ObjectKey,
         metadata: MemoryObjMetadata,
-        parent_allocator: "GdsScratchAllocator",
+        parent_allocator: "GdsSlabAllocator",
     ) -> None:
         super().__init__(metadata)
         self.key = key
@@ -433,310 +434,7 @@ class GdsMemoryObj(MemoryObj):
         return self._parent_allocator
 
 
-# --- GdsScratchAllocator -------------------------------------------
-
-
-class GdsScratchAllocator(MemoryAllocatorInterface):
-    """Tag class for ``gpu_ops`` dispatch + home of cuFile I/O helpers.
-
-    Holds one or more cuFile-registered ``tmp_gpu_buffer`` regions and
-    routes every I/O through the backend's single slab handle. The
-    actual ``cuFileReadAsync`` / ``cuFileWriteAsync`` call uses the
-    chunk's ``slab_offset`` as ``file_offset``, the slot's offset
-    inside its containing registered region as ``dev_offset``, and
-    that region's base pointer as ``buf_base``.
-
-    Multi-registration striping (path #2 from the design notes):
-    cuFile on ext4 caps a single ``cuFileBufRegister`` at the host's
-    nvidia-fs slab size (16 MiB on the reference host). To stage more
-    concurrent in-flight I/Os without P2P mode, ``register_gpu_buffer``
-    is called multiple times, each with a ≤16 MiB sub-view of the
-    overall ``tmp_gpu_buffer_``. Each registration claims its own
-    nvidia-fs slab, allowing N concurrent ``cuFileReadAsync`` /
-    ``cuFileWriteAsync`` submissions before the next stream sync.
-
-    Args:
-        backend: The owning :class:`GdsL1Backend`. The allocator
-            reaches back into it for the slab handle and the address
-            manager.
-    """
-
-    def __init__(self, backend: "GdsL1Backend") -> None:
-        self._backend = backend
-        # Parallel lists, one entry per registered region, sorted by
-        # ``_base_ptrs`` ascending for ``_resolve_buffer``'s binary search.
-        self._buffers: list[torch.Tensor] = []
-        self._base_ptrs: list[int] = []
-        self._nbytes: list[int] = []
-        # Base pointer of the first registered region, for log messages.
-        self._first_base_ptr: int = 0
-
-    @property
-    def registered_base_ptr(self) -> int:
-        """Base pointer of the first registered slot (legacy accessor).
-
-        Multi-registration consumers should use the ``buf_base``
-        carried into :meth:`cufile_read_into` / :meth:`cufile_write_from`
-        via the gpu_buffer's residency, not this scalar.
-        """
-        return self._first_base_ptr
-
-    @property
-    def registered_nbytes(self) -> int:
-        """Total bytes across all registered regions."""
-        return sum(self._nbytes)
-
-    @property
-    def num_registered_buffers(self) -> int:
-        """How many distinct cuFile registrations the allocator holds."""
-        return len(self._buffers)
-
-    @property
-    def has_registered_buffer(self) -> bool:
-        """``True`` once at least one ``register_gpu_buffer`` succeeded."""
-        return len(self._buffers) > 0
-
-    # --- Buffer registration ----------------------------------------
-
-    def register_gpu_buffer(self, buffer: torch.Tensor) -> None:
-        """Register ``buffer`` with cuFile and the backend's CUDA stream.
-
-        Can be called multiple times; each call adds one more
-        registered region. nvidia-fs caps each call at 16 MiB, but
-        multiple registrations stripe across the slab pool's 16 MiB
-        tier and unlock N-way cuFile concurrency.
-
-        Args:
-            buffer: Must be contiguous, on CUDA, 4 KiB-aligned in size,
-                and no larger than 16 MiB (single nvidia-fs slab).
-
-        Raises:
-            ValueError: If ``buffer`` violates the contiguity, device,
-                alignment, or size constraints.
-            RuntimeError: If ``buffer``'s pointer range overlaps an
-                already-registered region. Overlapping registrations
-                would make ``_resolve_buffer`` ambiguous.
-        """
-        if not buffer.is_cuda:
-            raise ValueError("register_gpu_buffer: buffer must be on CUDA")
-        if not buffer.is_contiguous():
-            raise ValueError("register_gpu_buffer: buffer must be contiguous")
-        nbytes = buffer.numel() * buffer.element_size()
-        if nbytes % _CUFILE_ALIGNMENT != 0:
-            raise ValueError(
-                f"register_gpu_buffer: buffer size {nbytes} is not a multiple of "
-                f"{_CUFILE_ALIGNMENT} (cuFile requires 4 KiB alignment)."
-            )
-        if nbytes > 16 * 1024 * 1024:
-            raise ValueError(
-                f"register_gpu_buffer: a single cuFileBufRegister is capped at "
-                f"16 MiB on hosts with the standard nvidia-fs slab config; got "
-                f"{nbytes} bytes. Reduce lmcache_chunk_size or split into "
-                "multiple smaller registrations."
-            )
-        base = buffer.data_ptr()
-        for existing_base, existing_n in zip(
-            self._base_ptrs, self._nbytes, strict=True
-        ):
-            if base < existing_base + existing_n and existing_base < base + nbytes:
-                raise RuntimeError(
-                    f"register_gpu_buffer: new region [0x{base:x}, "
-                    f"0x{base + nbytes:x}) overlaps existing region "
-                    f"[0x{existing_base:x}, 0x{existing_base + existing_n:x})"
-                )
-        if self._backend.use_gds:
-            ca.register_buffer(buffer)
-            # Register the backend's CUDA stream on first buffer.
-            self._backend._ensure_stream_registered()  # noqa: SLF001
-            log_label = "cuFile"
-        else:
-            log_label = "POSIX fallback (no cuFile registration)"
-        # Insert keeping ``_base_ptrs`` sorted for ``_resolve_buffer``.
-        idx = bisect.bisect_left(self._base_ptrs, base)
-        self._buffers.insert(idx, buffer)
-        self._base_ptrs.insert(idx, base)
-        self._nbytes.insert(idx, nbytes)
-        if not self._first_base_ptr:
-            self._first_base_ptr = base
-        logger.info(
-            "GdsScratchAllocator: registered %d bytes at 0x%x via %s "
-            "(total registrations: %d)",
-            nbytes,
-            base,
-            log_label,
-            len(self._buffers),
-        )
-
-    def deregister_gpu_buffer(self) -> None:
-        """Deregister every previously-registered region + stream.
-
-        Idempotent: safe to call from ``GdsL1Backend.close`` even if
-        registration never happened.
-        """
-        if not self._buffers:
-            return
-        if self._backend.use_gds:
-            torch_dev.synchronize(device=self._buffers[0].device)
-            for buf in self._buffers:
-                try:
-                    ca.deregister_buffer(buf)
-                except Exception as e:
-                    logger.warning("deregister_gpu_buffer: %s", e)
-        # The stream is deregistered in backend.close(), not here.
-        self._buffers.clear()
-        self._base_ptrs.clear()
-        self._nbytes.clear()
-        self._first_base_ptr = 0
-
-    # --- cuFile I/O (dispatch target for gpu_ops) -------------------
-
-    def cufile_read_into(
-        self,
-        memory_obj: "GdsMemoryObj",
-        gpu_buffer: torch.Tensor,
-    ) -> None:
-        """Submit a ``cuFileReadAsync`` from the slab → registered slot.
-
-        No per-call sync: the read is enqueued on the current torch
-        CUDA stream and the subsequent kernel on the same stream
-        (``multi_layer_block_kv_transfer``) auto-waits via stream
-        ordering.
-
-        Args:
-            memory_obj: The :class:`GdsMemoryObj` to read.
-            gpu_buffer: A view into one of the registered staging
-                regions; the matching registration is resolved by
-                pointer comparison.
-
-        Raises:
-            RuntimeError: If no buffer has been registered.
-            ValueError: If ``gpu_buffer`` lies outside every registered
-                region or is smaller than the chunk.
-        """
-        base_ptr, dev_offset = self._resolve_buffer(gpu_buffer)
-        nbytes = memory_obj.get_size()
-        if nbytes > gpu_buffer.numel() * gpu_buffer.element_size():
-            raise ValueError(
-                f"cufile_read_into: chunk size {nbytes} exceeds gpu_buffer "
-                f"capacity {gpu_buffer.numel() * gpu_buffer.element_size()}"
-            )
-        self._backend._slab_read(  # noqa: SLF001
-            memory_obj.slab_offset, nbytes, dev_offset, base_ptr
-        )
-
-    def cufile_write_from(
-        self,
-        memory_obj: "GdsMemoryObj",
-        gpu_buffer: torch.Tensor,
-    ) -> None:
-        """Submit a ``cuFileWriteAsync`` from registered slot → slab.
-
-        Same stream-ordered semantics as :meth:`cufile_read_into`.
-        Registers the chunk in the backend's in-memory index after
-        the submit; persistence to the index file happens at backend
-        close (or on next periodic flush).
-
-        Args:
-            memory_obj: The :class:`GdsMemoryObj` to write.
-            gpu_buffer: A view into one of the registered staging
-                regions.
-        """
-        base_ptr, dev_offset = self._resolve_buffer(gpu_buffer)
-        nbytes = memory_obj.get_size()
-        if nbytes > gpu_buffer.numel() * gpu_buffer.element_size():
-            raise ValueError(
-                f"cufile_write_from: chunk size {nbytes} exceeds gpu_buffer "
-                f"capacity {gpu_buffer.numel() * gpu_buffer.element_size()}"
-            )
-        self._backend._slab_write(  # noqa: SLF001
-            memory_obj.slab_offset, nbytes, dev_offset, base_ptr
-        )
-        self._backend._record_entry(memory_obj)  # noqa: SLF001
-
-    # --- MemoryAllocatorInterface (mostly no-ops) -------------------
-
-    def allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[MemoryObj]:
-        raise NotImplementedError(
-            "GdsScratchAllocator.allocate: use "
-            "GdsL1Backend.create_memory_obj(key, layout_desc) instead"
-        )
-
-    def batched_allocate(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-        batch_size: int,
-        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-        allocator_type: Optional[str] = None,
-    ) -> Optional[list[MemoryObj]]:
-        raise NotImplementedError(
-            "GdsScratchAllocator.batched_allocate: use "
-            "GdsL1Backend.create_memory_obj(key, layout_desc) instead"
-        )
-
-    def free(
-        self,
-        memory_obj: MemoryObj,
-        allocator_type: Optional[str] = None,
-    ) -> None:
-        if isinstance(memory_obj, GdsMemoryObj):
-            self._backend.free_entry_from_index(memory_obj)
-
-    def batched_free(
-        self,
-        memory_objs: list[MemoryObj],
-        allocator_type: Optional[str] = None,
-        update_stats: bool = True,
-    ) -> None:
-        for mo in memory_objs:
-            self.free(mo)
-
-    def _resolve_buffer(self, gpu_buffer: torch.Tensor) -> tuple[int, int]:
-        """Find which registered region ``gpu_buffer`` belongs to.
-
-        Returns:
-            ``(base_ptr, dev_offset)`` where ``base_ptr`` is the
-            matching registration's base pointer (used as the
-            ``buf_base`` argument to ``cuFileReadAsync`` /
-            ``cuFileWriteAsync``) and ``dev_offset`` is
-            ``gpu_buffer.data_ptr() - base_ptr``.
-
-        Raises:
-            RuntimeError: If no buffer has been registered.
-            ValueError: If ``gpu_buffer`` does not lie entirely inside
-                any single registered region.
-        """
-        if not self._base_ptrs:
-            raise RuntimeError(
-                "GdsScratchAllocator: no GPU buffer has been registered yet"
-            )
-        ptr = gpu_buffer.data_ptr()
-        # Candidate region is the rightmost one whose base ≤ ptr.
-        idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
-        if idx < 0:
-            raise ValueError(
-                f"GdsScratchAllocator: gpu_buffer pointer 0x{ptr:x} is below "
-                f"the lowest registered base 0x{self._base_ptrs[0]:x}"
-            )
-        base = self._base_ptrs[idx]
-        nbytes = self._nbytes[idx]
-        offset = ptr - base
-        if offset < 0 or offset >= nbytes:
-            raise ValueError(
-                f"GdsScratchAllocator: gpu_buffer pointer 0x{ptr:x} is "
-                f"outside every registered region (closest candidate: "
-                f"[0x{base:x}, 0x{base + nbytes:x}))"
-            )
-        return base, offset
-
-
-# --- GdsL1Backend ---------------------------------------------------
+# --- GdsSlabAllocator ---------------------------------------------------
 
 
 class _IndexEntry:
@@ -761,7 +459,7 @@ class _IndexEntry:
         self.dtype = dtype
 
 
-class GdsL1Backend:
+class GdsSlabAllocator(MemoryAllocatorInterface):
     """Slab-file GDS L1 backend.
 
     Owns the slab file, the cuFile handle for it, the address
@@ -801,9 +499,11 @@ class GdsL1Backend:
         dst_device: str = "cuda",
     ) -> None:
         if not config.gds_path:
-            raise ValueError("GdsL1Backend requires gds_path to be set")
+            raise ValueError("GdsSlabAllocator requires gds_path to be set")
         if not dst_device.startswith("cuda"):
-            raise ValueError(f"GdsL1Backend requires cuda dst_device, got {dst_device}")
+            raise ValueError(
+                f"GdsSlabAllocator requires cuda dst_device, got {dst_device}"
+            )
         self.config = config
         self.dst_device = dst_device
 
@@ -817,7 +517,7 @@ class GdsL1Backend:
         self.gds_path: str = sharder.selected
         self.fstype: str = get_fstype(self.gds_path)
         logger.info(
-            "GdsL1Backend: fstype=%r path=%r (%d configured)",
+            "GdsSlabAllocator: fstype=%r path=%r (%d configured)",
             self.fstype,
             self.gds_path,
             len(self.gds_paths),
@@ -825,7 +525,9 @@ class GdsL1Backend:
 
         self.use_gds: bool = config.use_gds
         if self.fstype in ("tmpfs", "overlayfs") and config.use_gds:
-            logger.info("GdsL1Backend: auto-disabling cuFile on fstype=%r", self.fstype)
+            logger.info(
+                "GdsSlabAllocator: auto-disabling cuFile on fstype=%r", self.fstype
+            )
             self.use_gds = False
 
         self._slab_path = os.path.join(self.gds_path, _SLAB_FILENAME)
@@ -862,9 +564,14 @@ class GdsL1Backend:
         self._index: OrderedDict[ObjectKey, _IndexEntry] = OrderedDict()
         self._load_index()
 
-        self.scratch_allocator = GdsScratchAllocator(self)
+        # Parallel lists, one entry per cuFile-registered region, sorted
+        # by ``_base_ptrs`` ascending for ``_resolve_buffer``'s bisect.
+        self._buffers: list[torch.Tensor] = []
+        self._base_ptrs: list[int] = []
+        self._nbytes: list[int] = []
+        self._first_base_ptr: int = 0
         logger.info(
-            "GdsL1Backend: slab=%s size=%.1f GiB, %d resident entries",
+            "GdsSlabAllocator: slab=%s size=%.1f GiB, %d resident entries",
             self._slab_path,
             config.slab_size_gb,
             len(self._index),
@@ -893,7 +600,7 @@ class GdsL1Backend:
         nbytes = get_size_bytes(layout_desc.shapes, layout_desc.dtypes)
         if nbytes % _CUFILE_ALIGNMENT != 0:
             raise ValueError(
-                f"GdsL1Backend.create_memory_obj: payload size {nbytes} is not a "
+                f"GdsSlabAllocator.create_memory_obj: payload size {nbytes} is not a "
                 f"multiple of {_CUFILE_ALIGNMENT}, which cuFile/O_DIRECT requires. "
                 f"This should be unreachable since register_gpu_buffer already "
                 f"enforces 4 KiB alignment on the larger staging slot."
@@ -911,7 +618,7 @@ class GdsL1Backend:
         return GdsMemoryObj(
             key=key,
             metadata=meta,
-            parent_allocator=self.scratch_allocator,
+            parent_allocator=self,
         )
 
     def create_memory_obj_from_index(self, key: ObjectKey) -> Optional[GdsMemoryObj]:
@@ -941,7 +648,7 @@ class GdsL1Backend:
         # transfer length with a misaligned size.
         if entry.size % _CUFILE_ALIGNMENT != 0:
             raise ValueError(
-                f"GdsL1Backend.create_memory_obj_from_index: index entry size "
+                f"GdsSlabAllocator.create_memory_obj_from_index: index entry size "
                 f"{entry.size} is not a multiple of {_CUFILE_ALIGNMENT}. This "
                 f"should be unreachable -- _load_index rejects misaligned persisted "
                 f"sizes and create_memory_obj rejects misaligned new ones."
@@ -956,7 +663,7 @@ class GdsL1Backend:
         return GdsMemoryObj(
             key=key,
             metadata=meta,
-            parent_allocator=self.scratch_allocator,
+            parent_allocator=self,
         )
 
     def get_memory_usage(self) -> tuple[int, int]:
@@ -979,10 +686,8 @@ class GdsL1Backend:
 
     def close(self) -> None:
         """Sync stream, persist index, deregister cuFile state, close slab."""
-        if self.scratch_allocator._buffers:  # noqa: SLF001
-            torch_dev.synchronize(
-                device=self.scratch_allocator._buffers[0].device  # noqa: SLF001
-            )
+        if self._buffers:
+            torch_dev.synchronize(device=self._buffers[0].device)
         # The synchronize drained the stream; all submission ops have
         # executed, so drop the tracking lists.
         with self._submissions_lock:
@@ -990,20 +695,22 @@ class GdsL1Backend:
             self._inflight_submissions = []
             self._ops_since_checkpoint = 0
         self._persist_index()
-        self.scratch_allocator.deregister_gpu_buffer()
+        self.deregister_gpu_buffer()
         with self._stream_lock:
             if self._registered_stream_handle is not None and self.use_gds:
                 try:
                     ca.deregister_stream(self._registered_stream_handle)
                 except Exception as e:
-                    logger.warning("GdsL1Backend.close: deregister_stream: %s", e)
+                    logger.warning("GdsSlabAllocator.close: deregister_stream: %s", e)
                 self._registered_stream_handle = None
                 self._registered_stream = None
         if self._slab_handle is not None:
             try:
                 self._slab_handle.close()
             except Exception as e:
-                logger.warning("GdsL1Backend.close: slab handle close failed: %s", e)
+                logger.warning(
+                    "GdsSlabAllocator.close: slab handle close failed: %s", e
+                )
             self._slab_handle = None
         if self._posix_fd != -1:
             try:
@@ -1011,14 +718,14 @@ class GdsL1Backend:
             except OSError:
                 pass
             self._posix_fd = -1
-        logger.info("GdsL1Backend: closed")
+        logger.info("GdsSlabAllocator: closed")
 
     # --- Internal ---------------------------------------------------
 
     def _record_entry(self, memory_obj: GdsMemoryObj) -> None:
         """Insert ``memory_obj`` into the in-memory index.
 
-        Called by ``GdsScratchAllocator.cufile_write_from`` after the
+        Called by ``GdsSlabAllocator.cufile_write_from`` after the
         async write submit. Persistence to the on-disk index file is
         deferred to :meth:`close`.
 
@@ -1027,7 +734,7 @@ class GdsL1Backend:
         """
         if memory_obj.meta.dtype is None:
             raise RuntimeError(
-                f"GdsL1Backend._record_entry: memory_obj.meta.dtype is None for "
+                f"GdsSlabAllocator._record_entry: memory_obj.meta.dtype is None for "
                 f"key {memory_obj.key}"
             )
         entry = _IndexEntry(
@@ -1106,17 +813,17 @@ class GdsL1Backend:
                 base is ``buf_base``.
             buf_base: Base pointer of the cuFile-registered region the
                 read should land in. Picked by
-                ``GdsScratchAllocator._resolve_buffer`` so multi-
+                ``GdsSlabAllocator._resolve_buffer`` so multi-
                 registration striping ends up at the correct region.
         """
         if not self.use_gds:
             self._posix_slab_read(slab_offset, size, dev_offset, buf_base)
             return
         if self._slab_handle is None:
-            raise RuntimeError("GdsL1Backend._slab_read: slab handle not open")
+            raise RuntimeError("GdsSlabAllocator._slab_read: slab handle not open")
         if self._registered_stream_handle is None:
             raise RuntimeError(
-                "GdsL1Backend._slab_read: cuFile stream not registered; "
+                "GdsSlabAllocator._slab_read: cuFile stream not registered; "
                 "call register_gpu_buffer first"
             )
         sub = self._slab_handle.read_async(
@@ -1145,10 +852,10 @@ class GdsL1Backend:
             self._posix_slab_write(slab_offset, size, dev_offset, buf_base)
             return
         if self._slab_handle is None:
-            raise RuntimeError("GdsL1Backend._slab_write: slab handle not open")
+            raise RuntimeError("GdsSlabAllocator._slab_write: slab handle not open")
         if self._registered_stream_handle is None:
             raise RuntimeError(
-                "GdsL1Backend._slab_write: cuFile stream not registered; "
+                "GdsSlabAllocator._slab_write: cuFile stream not registered; "
                 "call register_gpu_buffer first"
             )
         sub = self._slab_handle.write_async(
@@ -1226,7 +933,8 @@ class GdsL1Backend:
         self._slab_handle.path = self._slab_path
         self._slab_handle.writable = True
         logger.info(
-            "GdsL1Backend: slab opened at %s (O_DIRECT=%s), cuFile handle registered",
+            "GdsSlabAllocator: slab opened at %s (O_DIRECT=%s), cuFile handle "
+            "registered",
             self._slab_path,
             use_direct_io,
         )
@@ -1241,7 +949,9 @@ class GdsL1Backend:
         finally:
             os.close(creator_fd)
         self._posix_fd = os.open(self._slab_path, os.O_RDWR)
-        logger.info("GdsL1Backend: slab opened at %s (POSIX fallback)", self._slab_path)
+        logger.info(
+            "GdsSlabAllocator: slab opened at %s (POSIX fallback)", self._slab_path
+        )
 
     def _posix_slab_read(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
@@ -1299,21 +1009,22 @@ class GdsL1Backend:
                 doc = json.loads(f.read())
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(
-                "GdsL1Backend: failed to read index %s: %s — starting empty",
+                "GdsSlabAllocator: failed to read index %s: %s — starting empty",
                 self._index_path,
                 e,
             )
             return
         if doc.get("version") != _INDEX_VERSION:
             logger.warning(
-                "GdsL1Backend: index version mismatch (got %r, want %d) — ignoring",
+                "GdsSlabAllocator: index version mismatch (got %r, want %d) — ignoring",
                 doc.get("version"),
                 _INDEX_VERSION,
             )
             return
         if doc.get("slab_size") != self._slab_size:
             logger.warning(
-                "GdsL1Backend: index slab_size mismatch (got %d, want %d) — ignoring",
+                "GdsSlabAllocator: index slab_size mismatch (got %d, want %d) "
+                "— ignoring",
                 doc.get("slab_size"),
                 self._slab_size,
             )
@@ -1332,7 +1043,7 @@ class GdsL1Backend:
                 continue
             if size % _CUFILE_ALIGNMENT != 0:
                 logger.warning(
-                    "GdsL1Backend._load_index: entry size %d is not a multiple "
+                    "GdsSlabAllocator._load_index: entry size %d is not a multiple "
                     "of %d — skipping",
                     size,
                     _CUFILE_ALIGNMENT,
@@ -1347,12 +1058,14 @@ class GdsL1Backend:
             try:
                 self._address_manager.mark_used(slab_offset, size)
             except RuntimeError as e:
-                logger.warning("GdsL1Backend._load_index: %s", e)
+                logger.warning("GdsSlabAllocator._load_index: %s", e)
                 continue
             self._index[key] = entry
             loaded += 1
         elapsed = time.perf_counter() - start
-        logger.info("GdsL1Backend: loaded %d index entries in %.2fs", loaded, elapsed)
+        logger.info(
+            "GdsSlabAllocator: loaded %d index entries in %.2fs", loaded, elapsed
+        )
 
     def _persist_index(self) -> None:
         """Write the current in-memory index to ``self._index_path``."""
@@ -1378,7 +1091,319 @@ class GdsL1Backend:
             os.rename(tmp, self._index_path)
         except OSError as e:
             logger.warning(
-                "GdsL1Backend._persist_index: failed to write %s: %s",
+                "GdsSlabAllocator._persist_index: failed to write %s: %s",
                 self._index_path,
                 e,
             )
+
+    @property
+    def registered_base_ptr(self) -> int:
+        """Base pointer of the first registered slot (legacy accessor).
+
+        Multi-registration consumers should use the ``buf_base``
+        carried into :meth:`cufile_read_into` / :meth:`cufile_write_from`
+        via the gpu_buffer's residency, not this scalar.
+        """
+        return self._first_base_ptr
+
+    @property
+    def registered_nbytes(self) -> int:
+        """Total bytes across all registered regions."""
+        return sum(self._nbytes)
+
+    @property
+    def num_registered_buffers(self) -> int:
+        """How many distinct cuFile registrations the allocator holds."""
+        return len(self._buffers)
+
+    @property
+    def has_registered_buffer(self) -> bool:
+        """``True`` once at least one ``register_gpu_buffer`` succeeded."""
+        return len(self._buffers) > 0
+
+    # --- Buffer registration ----------------------------------------
+
+    def register_gpu_buffer(self, buffer: torch.Tensor) -> None:
+        """Register ``buffer`` with cuFile and the backend's CUDA stream.
+
+        Can be called multiple times; each call adds one more
+        registered region. nvidia-fs caps each call at 16 MiB, but
+        multiple registrations stripe across the slab pool's 16 MiB
+        tier and unlock N-way cuFile concurrency.
+
+        Args:
+            buffer: Must be contiguous, on CUDA, 4 KiB-aligned in size,
+                and no larger than 16 MiB (single nvidia-fs slab).
+
+        Raises:
+            ValueError: If ``buffer`` violates the contiguity, device,
+                alignment, or size constraints.
+            RuntimeError: If ``buffer``'s pointer range overlaps an
+                already-registered region. Overlapping registrations
+                would make ``_resolve_buffer`` ambiguous.
+        """
+        if not buffer.is_cuda:
+            raise ValueError("register_gpu_buffer: buffer must be on CUDA")
+        if not buffer.is_contiguous():
+            raise ValueError("register_gpu_buffer: buffer must be contiguous")
+        nbytes = buffer.numel() * buffer.element_size()
+        if nbytes % _CUFILE_ALIGNMENT != 0:
+            raise ValueError(
+                f"register_gpu_buffer: buffer size {nbytes} is not a multiple of "
+                f"{_CUFILE_ALIGNMENT} (cuFile requires 4 KiB alignment)."
+            )
+        if nbytes > 16 * 1024 * 1024:
+            raise ValueError(
+                f"register_gpu_buffer: a single cuFileBufRegister is capped at "
+                f"16 MiB on hosts with the standard nvidia-fs slab config; got "
+                f"{nbytes} bytes. Reduce lmcache_chunk_size or split into "
+                "multiple smaller registrations."
+            )
+        base = buffer.data_ptr()
+        for existing_base, existing_n in zip(
+            self._base_ptrs, self._nbytes, strict=True
+        ):
+            if base < existing_base + existing_n and existing_base < base + nbytes:
+                raise RuntimeError(
+                    f"register_gpu_buffer: new region [0x{base:x}, "
+                    f"0x{base + nbytes:x}) overlaps existing region "
+                    f"[0x{existing_base:x}, 0x{existing_base + existing_n:x})"
+                )
+        if self.use_gds:
+            ca.register_buffer(buffer)
+            # Register the backend's CUDA stream on first buffer.
+            self._ensure_stream_registered()
+            log_label = "cuFile"
+        else:
+            log_label = "POSIX fallback (no cuFile registration)"
+        # Insert keeping ``_base_ptrs`` sorted for ``_resolve_buffer``.
+        idx = bisect.bisect_left(self._base_ptrs, base)
+        self._buffers.insert(idx, buffer)
+        self._base_ptrs.insert(idx, base)
+        self._nbytes.insert(idx, nbytes)
+        if not self._first_base_ptr:
+            self._first_base_ptr = base
+        logger.info(
+            "GdsSlabAllocator: registered %d bytes at 0x%x via %s "
+            "(total registrations: %d)",
+            nbytes,
+            base,
+            log_label,
+            len(self._buffers),
+        )
+
+    def deregister_gpu_buffer(self) -> None:
+        """Deregister every previously-registered region + stream.
+
+        Idempotent: safe to call from ``GdsSlabAllocator.close`` even if
+        registration never happened.
+        """
+        if not self._buffers:
+            return
+        if self.use_gds:
+            torch_dev.synchronize(device=self._buffers[0].device)
+            for buf in self._buffers:
+                try:
+                    ca.deregister_buffer(buf)
+                except Exception as e:
+                    logger.warning("deregister_gpu_buffer: %s", e)
+        # The stream is deregistered in backend.close(), not here.
+        self._buffers.clear()
+        self._base_ptrs.clear()
+        self._nbytes.clear()
+        self._first_base_ptr = 0
+
+    # --- cuFile I/O (dispatch target for gpu_ops) -------------------
+
+    def cufile_read_into(
+        self,
+        memory_obj: "GdsMemoryObj",
+        gpu_buffer: torch.Tensor,
+    ) -> None:
+        """Submit a ``cuFileReadAsync`` from the slab → registered slot.
+
+        No per-call sync: the read is enqueued on the current torch
+        CUDA stream and the subsequent kernel on the same stream
+        (``multi_layer_block_kv_transfer``) auto-waits via stream
+        ordering.
+
+        Args:
+            memory_obj: The :class:`GdsMemoryObj` to read.
+            gpu_buffer: A view into one of the registered staging
+                regions; the matching registration is resolved by
+                pointer comparison.
+
+        Raises:
+            RuntimeError: If no buffer has been registered.
+            ValueError: If ``gpu_buffer`` lies outside every registered
+                region or is smaller than the chunk.
+        """
+        base_ptr, dev_offset = self._resolve_buffer(gpu_buffer)
+        nbytes = memory_obj.get_size()
+        if nbytes > gpu_buffer.numel() * gpu_buffer.element_size():
+            raise ValueError(
+                f"cufile_read_into: chunk size {nbytes} exceeds gpu_buffer "
+                f"capacity {gpu_buffer.numel() * gpu_buffer.element_size()}"
+            )
+        self._slab_read(memory_obj.slab_offset, nbytes, dev_offset, base_ptr)
+
+    def cufile_write_from(
+        self,
+        memory_obj: "GdsMemoryObj",
+        gpu_buffer: torch.Tensor,
+    ) -> None:
+        """Submit a ``cuFileWriteAsync`` from registered slot → slab.
+
+        Same stream-ordered semantics as :meth:`cufile_read_into`.
+        Registers the chunk in the backend's in-memory index after
+        the submit; persistence to the index file happens at backend
+        close (or on next periodic flush).
+
+        Args:
+            memory_obj: The :class:`GdsMemoryObj` to write.
+            gpu_buffer: A view into one of the registered staging
+                regions.
+        """
+        base_ptr, dev_offset = self._resolve_buffer(gpu_buffer)
+        nbytes = memory_obj.get_size()
+        if nbytes > gpu_buffer.numel() * gpu_buffer.element_size():
+            raise ValueError(
+                f"cufile_write_from: chunk size {nbytes} exceeds gpu_buffer "
+                f"capacity {gpu_buffer.numel() * gpu_buffer.element_size()}"
+            )
+        self._slab_write(memory_obj.slab_offset, nbytes, dev_offset, base_ptr)
+        self._record_entry(memory_obj)
+
+    # --- MemoryAllocatorInterface (mostly no-ops) -------------------
+
+    def allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[MemoryObj]:
+        raise NotImplementedError(
+            "GdsSlabAllocator.allocate: use "
+            "GdsSlabAllocator.create_memory_obj(key, layout_desc) instead"
+        )
+
+    def batched_allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        batch_size: int,
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        allocator_type: Optional[str] = None,
+    ) -> Optional[list[MemoryObj]]:
+        raise NotImplementedError(
+            "GdsSlabAllocator.batched_allocate: use "
+            "GdsSlabAllocator.create_memory_obj(key, layout_desc) instead"
+        )
+
+    def free(
+        self,
+        memory_obj: MemoryObj,
+        allocator_type: Optional[str] = None,
+    ) -> None:
+        if isinstance(memory_obj, GdsMemoryObj):
+            self.free_entry_from_index(memory_obj)
+
+    def batched_free(
+        self,
+        memory_objs: list[MemoryObj],
+        allocator_type: Optional[str] = None,
+        update_stats: bool = True,
+    ) -> None:
+        for mo in memory_objs:
+            self.free(mo)
+
+    def _resolve_buffer(self, gpu_buffer: torch.Tensor) -> tuple[int, int]:
+        """Find which registered region ``gpu_buffer`` belongs to.
+
+        Returns:
+            ``(base_ptr, dev_offset)`` where ``base_ptr`` is the
+            matching registration's base pointer (used as the
+            ``buf_base`` argument to ``cuFileReadAsync`` /
+            ``cuFileWriteAsync``) and ``dev_offset`` is
+            ``gpu_buffer.data_ptr() - base_ptr``.
+
+        Raises:
+            RuntimeError: If no buffer has been registered.
+            ValueError: If ``gpu_buffer`` does not lie entirely inside
+                any single registered region.
+        """
+        if not self._base_ptrs:
+            raise RuntimeError(
+                "GdsSlabAllocator: no GPU buffer has been registered yet"
+            )
+        ptr = gpu_buffer.data_ptr()
+        # Candidate region is the rightmost one whose base ≤ ptr.
+        idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
+        if idx < 0:
+            raise ValueError(
+                f"GdsSlabAllocator: gpu_buffer pointer 0x{ptr:x} is below "
+                f"the lowest registered base 0x{self._base_ptrs[0]:x}"
+            )
+        base = self._base_ptrs[idx]
+        nbytes = self._nbytes[idx]
+        offset = ptr - base
+        if offset < 0 or offset >= nbytes:
+            raise ValueError(
+                f"GdsSlabAllocator: gpu_buffer pointer 0x{ptr:x} is "
+                f"outside every registered region (closest candidate: "
+                f"[0x{base:x}, 0x{base + nbytes:x}))"
+            )
+        return base, offset
+
+
+# --- GdsL1Backend (thin facade) -------------------------------------
+
+
+class GdsL1Backend:
+    """Thin L1-tier facade over :class:`GdsSlabAllocator`.
+
+    Mirrors :class:`L1MemoryManager` on the CPU tier: owns the allocator
+    and exposes the ``allocate`` / ``free`` interface ``L1Manager`` drives,
+    delegating all slab and index work down to the allocator.
+    """
+
+    def __init__(self, config: GdsL1Config, dst_device: str = "cuda") -> None:
+        self._allocator = GdsSlabAllocator(config, dst_device)
+
+    def allocate(
+        self, layout_desc: MemoryLayoutDesc, keys: list[ObjectKey]
+    ) -> tuple[L1Error, list[MemoryObj]]:
+        """Reserve one slab region per key.
+
+        All-or-nothing: on the first slab OOM, frees what was reserved and
+        returns ``(L1Error.OUT_OF_MEMORY, [])``.
+        """
+        allocated: list[MemoryObj] = []
+        for key in keys:
+            obj = self._allocator.create_memory_obj(key, layout_desc)
+            if obj is None:
+                self.free(allocated)
+                return L1Error.OUT_OF_MEMORY, []
+            allocated.append(obj)
+        return L1Error.SUCCESS, allocated
+
+    def free(self, mem_objs: list[MemoryObj]) -> L1Error:
+        """Return the slab regions of ``mem_objs`` (does not touch the index)."""
+        for mo in mem_objs:
+            if isinstance(mo, GdsMemoryObj):
+                self._allocator.free_entry(mo)
+        return L1Error.SUCCESS
+
+    @property
+    def scratch_allocator(self) -> "GdsSlabAllocator":
+        return self._allocator
+
+    def create_memory_obj_from_index(self, key: ObjectKey) -> Optional[MemoryObj]:
+        return self._allocator.create_memory_obj_from_index(key)
+
+    def get_memory_usage(self) -> tuple[int, int]:
+        return self._allocator.get_memory_usage()
+
+    def close(self) -> None:
+        self._allocator.close()

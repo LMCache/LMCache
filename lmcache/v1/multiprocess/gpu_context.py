@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.gds_l1 import GdsScratchAllocator
+from lmcache.v1.distributed.gds_l1 import GdsSlabAllocator
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
@@ -76,7 +76,7 @@ class GPUCacheContext:
         layout_hints: LayoutHints | None = None,
         group_views: Sequence[LMCacheGroupView] = (),
         engine_type: EngineType = EngineType.VLLM,
-        gds_scratch_allocator: GdsScratchAllocator | None = None,
+        gds_scratch_allocator: GdsSlabAllocator | None = None,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         self.gpu_kv_format_, self.kv_caches_ = normalize_kv_and_discover_format(

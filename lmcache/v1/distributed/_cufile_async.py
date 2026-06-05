@@ -23,7 +23,7 @@ Surface:
   byte count after the sync.
 
 This module is intentionally narrow: no thread pool, no future
-abstraction, no LRU. It's the layer where ``GdsScratchAllocator``
+abstraction, no LRU. It's the layer where ``GdsSlabAllocator``
 talks to libcufile when the operator opts into the fast path via
 ``GdsL1Config.use_async_ctypes=True``.
 """
