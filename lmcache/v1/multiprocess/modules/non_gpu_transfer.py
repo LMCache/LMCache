@@ -80,8 +80,6 @@ class NonGPUTransferModule:
         ] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
-        self._store_start_times: dict[tuple[int, IPCCacheEngineKey], float] = {}
-        self._retrieve_start_times: dict[tuple[int, IPCCacheEngineKey], float] = {}
 
     @property
     def context(self) -> MPCacheEngineContext:
@@ -156,8 +154,7 @@ class NonGPUTransferModule:
         """Release resources owned by this module."""
         self._non_gpu_contexts.clear()
         self._strategies.clear()
-        self._store_start_times.clear()
-        self._retrieve_start_times.clear()
+        self._ctx.session_manager.cleanup_expired()
 
     @staticmethod
     def _make_transfer_key(
@@ -257,13 +254,8 @@ class NonGPUTransferModule:
 
         self._strategies.pop(instance_id, None)
 
-        # Clean up any pending timing entries for this instance.
-        self._store_start_times = {
-            k: v for k, v in self._store_start_times.items() if k[0] != instance_id
-        }
-        self._retrieve_start_times = {
-            k: v for k, v in self._retrieve_start_times.items() if k[0] != instance_id
-        }
+        # Timing data lives in session.extras; reap expired sessions.
+        self._ctx.session_manager.cleanup_expired()
 
         with self._pending_shm_lock:
             stale_writes = []
@@ -324,7 +316,8 @@ class NonGPUTransferModule:
             context=entry.metadata,
             resolve_obj_keys=self._ctx.resolve_obj_keys,
         )
-        self._store_start_times[(instance_id, key)] = time.perf_counter()
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session.extras["store_start_time"] = time.perf_counter()
         return response
 
     @_lmcache_nvtx_annotate
@@ -358,7 +351,8 @@ class NonGPUTransferModule:
             raise ValueError(
                 f"transfer strategy not registered for instance ID {instance_id}"
             )
-        st = self._store_start_times.pop((instance_id, key), None)
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        st = session.extras.pop("store_start_time", None)
         result = strategy.commit_store(
             key=key,
             instance_id=instance_id,
@@ -404,7 +398,8 @@ class NonGPUTransferModule:
             instance_id=instance_id,
             resolve_obj_keys=self._ctx.resolve_obj_keys,
         )
-        self._retrieve_start_times[(instance_id, key)] = time.perf_counter()
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session.extras["retrieve_start_time"] = time.perf_counter()
         return response
 
     @_lmcache_nvtx_annotate
@@ -427,7 +422,8 @@ class NonGPUTransferModule:
             raise ValueError(
                 f"transfer strategy not registered for instance ID {instance_id}"
             )
-        st = self._retrieve_start_times.pop((instance_id, key), None)
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        st = session.extras.pop("retrieve_start_time", None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         if st is not None:
             num_tokens = len(self._ctx.resolve_obj_keys(key)) * self._ctx.chunk_size
