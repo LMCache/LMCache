@@ -19,6 +19,7 @@ Requires CUDA (c_ops must be importable). Automatically skipped on CPU-only CI.
 import enum
 import inspect
 import re
+import types
 
 # Third Party
 import pytest
@@ -73,7 +74,7 @@ def _get_enum_members(enum_cls):
     return {}
 
 
-def _public_descriptor_classes(module: object) -> dict[str, type]:
+def _public_descriptor_classes(module: types.ModuleType) -> dict[str, type]:
     """Return {name: cls} for public classes that are neither enums
     nor plain functions — e.g. pybind11 ``py::class_<>`` types like
     ``PageBufferShapeDesc``.
@@ -84,6 +85,7 @@ def _public_descriptor_classes(module: object) -> dict[str, type]:
         if not name.startswith("_")
         and not (issubclass(obj, enum.Enum) or hasattr(obj, "__members__"))
         and callable(obj)
+        and obj.__module__ == module.__name__
     }
 
 
