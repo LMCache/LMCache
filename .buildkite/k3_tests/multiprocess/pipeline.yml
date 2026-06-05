@@ -35,8 +35,7 @@ steps:
       # (LMCache+vLLM + baseline). It is public (no HF_TOKEN), forces TRITON_ATTN
       # (so ATTENTION_BACKEND=auto and a non-zero SCORE_TOLERANCE, since
       # TRITON_ATTN is not bit-exact under batch invariance), and its ~63GB of
-      # weights need a higher GPU_MEMORY_UTILIZATION than the 0.5 default. Longer
-      # timeout for the larger download + load.
+      # weights need a higher GPU_MEMORY_UTILIZATION than the 0.5 default.
       - label: ":compression: hma_lm_eval_gemma4"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
         timeout_in_minutes: 60
@@ -49,14 +48,10 @@ steps:
           # 31B weights are large; allow longer for download + load before the
           # readiness probe gives up (other models keep the 300s default).
           MAX_WAIT_SECONDS: "400"
-          # 31B has a ~10-20x larger per-token KV footprint than the smaller HMA
-          # models, so the full 200-sample gsm8k working set (~150GB) overflows
-          # the CPU pool and thrashes: run 1 evicts its own early chunks before
-          # run 2 re-reads them, leaving run 2 with zero LMCache hits (the
-          # non-vacuous guard then fails). Cap the sample count so the working
-          # set fits comfortably under the eviction watermark, and enlarge the
-          # pool. Both together keep run 2 served by LMCache. CPU_BUFFER_SIZE is
-          # bounded by node RAM (the 2-GPU pod sets no memory limit).
+          # LIMIT = number of gsm8k samples. 31B's large per-token KV makes the
+          # full 200-sample working set overflow the CPU pool and thrash, so run
+          # 2 misses LMCache; cap the samples and enlarge the pool to keep run 2
+          # cache-served. CPU_BUFFER_SIZE (GB) is bounded by node RAM.
           LIMIT: "100"
           CPU_BUFFER_SIZE: "200"
         agents: { queue: "k8s" }

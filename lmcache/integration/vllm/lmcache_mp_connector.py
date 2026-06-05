@@ -567,10 +567,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
         self.vllm_block_size = vllm_config.cache_config.block_size
-        # The scheduler side slices per-engine-group block IDs; the full
-        # list[LMCacheGroupView] is built worker-side in register_kv_caches
-        # where the tensors are available. Engine group ids are dense
-        # (0..N-1), so per-group state is indexed positionally.
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         vllm_groups = (
             getattr(kv_cache_config, "kv_cache_groups", ()) or ()
