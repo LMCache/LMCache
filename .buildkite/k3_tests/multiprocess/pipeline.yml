@@ -82,7 +82,7 @@ steps:
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts: *vol-mounts
                 volumes: *vols
-        artifact_paths: ["*.log"]
+        artifact_paths: ["*.log", "lm_eval_*_samples.jsonl"]
 
       - label: ":compression: fault_tolerance"
         command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
