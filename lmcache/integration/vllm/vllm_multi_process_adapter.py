@@ -241,21 +241,53 @@ class ParallelStrategy:
     """Number of LMCache servers backing this deployment
     (1 = single shared server, >1 = one server per node)."""
 
-    kv_world_size: int
-    """How many different pieces the KV cache is split into across the
-    whole deployment."""
+    @property
+    def kv_world_size(self) -> int:
+        """How many KV-cache pieces a single LMCache server is responsible for.
 
-    kv_worker_id: int
-    """Which piece of the KV cache the current worker has, in
-    ``[0, kv_world_size)``."""
+        For MLA models, TP ranks share the same KV cache, so the effective
+        KV world size excludes the TP dimension.
+        For multi-server deployments, each server only handles its local slice."""
+        if self.use_mla:
+            return self.global_world_size // self.tp_size
+        return self.global_world_size // self.n_servers
 
-    local_kv_world_size: int
-    """Same as ``kv_world_size`` but scoped to a single LMCache server;
-    consulted only when ``n_servers > 1``."""
+    @property
+    def kv_worker_id(self) -> int:
+        """This worker's KV-cache piece index within its LMCache server,
+        in ``[0, kv_world_size)``.
 
-    local_tp_size: int
-    """Same as ``tp_size`` but scoped to a single LMCache server;
-    consulted only when ``n_servers > 1``."""
+        For MLA models, TP ranks share the same KV cache, so the effective
+        KV worker id excludes the TP dimension.
+        For multi-server deployments, the id is local to the server's slice."""
+        if self.use_mla:
+            return self.global_rank // self.tp_size
+        return self.global_rank % (self.global_world_size // self.n_servers)
+
+    @property
+    def kv_tp_size(self) -> int:
+        """Tensor-parallel size as seen from a single LMCache server.
+
+        In multi-server deployments each server covers only its local TP slice."""
+        return self.tp_size // self.n_servers
+
+    @property
+    def is_kv_writer(self) -> bool:
+        """Whether this rank is responsible for storing KV to LMCache.
+
+        For non-MLA models, every rank writes its own KV shard.
+        For MLA models, only one rank per TP group (the first rank of each
+        pipeline-parallel group) writes, since TP ranks share the same KV.
+        In multi-server deployments, only the first rank on each node writes
+        to its local LMCache server."""
+        if not self.use_mla:
+            if self.n_servers <= 1:
+                return True
+            # Multi-server: only the first rank on each node writes.
+            ranks_per_node = self.global_world_size // self.n_servers
+            return self.global_rank % ranks_per_node == 0
+        # MLA: only the first rank of each TP group writes.
+        return self.global_rank % self.tp_size == 0
 
 
 def _normalize_adapter_init_args(
@@ -294,14 +326,10 @@ def _normalize_adapter_init_args(
     kv_worker_id = int(parallel_strategy)
     strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=kv_world_size,
-        kv_worker_id=kv_worker_id,
         global_world_size=kv_world_size,
         global_rank=kv_worker_id,
         tp_size=kv_world_size,
         pp_size=1,
-        local_kv_world_size=kv_world_size,
-        local_tp_size=kv_world_size,
         n_servers=1,
     )
     return int(legacy_block_size), strategy, mq_timeout
@@ -536,18 +564,13 @@ class LMCacheMPSchedulerAdapter:
 
     @property
     def world_size(self) -> int:
-        """How many pieces the KV cache is split into across the LMCache
-        server(s) this adapter talks to."""
-        if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
-            return self.parallel_strategy.local_kv_world_size
+        """How many KV-cache pieces a single LMCache server is responsible for."""
         return self.parallel_strategy.kv_world_size
 
     @property
     def tp_size(self) -> int:
         """Tensor-parallel size as seen from a single LMCache server."""
-        if self.parallel_strategy.n_servers > 1:
-            return self.parallel_strategy.local_tp_size
-        return self.parallel_strategy.tp_size
+        return self.parallel_strategy.kv_tp_size
 
     @property
     def is_healthy(self) -> bool:
@@ -1099,21 +1122,13 @@ class LMCacheMPWorkerAdapter:
 
     @property
     def world_size(self) -> int:
-        """How many pieces the KV cache is split into across the LMCache
-        server this worker talks to."""
-        if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
-            return self.parallel_strategy.local_kv_world_size
+        """How many KV-cache pieces a single LMCache server is responsible for."""
         return self.parallel_strategy.kv_world_size
 
     @property
     def worker_id(self) -> int:
-        """This worker's piece index, in ``[0, world_size)``.
-        Unique among workers backing the same LMCache server."""
-        if not self.parallel_strategy.use_mla and self.parallel_strategy.n_servers > 1:
-            return (
-                self.parallel_strategy.global_rank
-                % self.parallel_strategy.local_kv_world_size
-            )
+        """This worker's KV-cache piece index within its LMCache server,
+        in ``[0, world_size)``."""
         return self.parallel_strategy.kv_worker_id
 
     @property
@@ -1122,20 +1137,9 @@ class LMCacheMPWorkerAdapter:
         return self.parallel_strategy.use_mla
 
     @property
-    def is_first_rank_of_pp_group(self) -> bool:
-        """Whether this worker is the first rank of its pipeline-parallel
-        group. Use ``is_first_rank_of_node`` for per-node STORE gating."""
-        return self.parallel_strategy.global_rank % self.parallel_strategy.tp_size == 0
-
-    @property
-    def is_first_rank_of_node(self) -> bool:
-        """Whether this worker is the first rank on its node. Use
-        ``is_first_rank_of_pp_group`` outside multi-server deployments."""
-        n_servers = self.parallel_strategy.n_servers
-        if n_servers <= 1:
-            return self.is_first_rank_of_pp_group
-        ranks_per_node = self.parallel_strategy.global_world_size // n_servers
-        return self.parallel_strategy.global_rank % ranks_per_node == 0
+    def is_kv_writer(self) -> bool:
+        """Whether this worker is responsible for storing KV to LMCache."""
+        return self.parallel_strategy.is_kv_writer
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """

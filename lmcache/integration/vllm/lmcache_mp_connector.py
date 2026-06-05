@@ -94,30 +94,6 @@ def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     return block_ids[0]
 
 
-def extract_world_size_and_kv_rank(
-    world_size: int,
-    rank: int,
-    vllm_config: VllmConfig,
-) -> tuple[int, int]:
-    """
-    Convert the rank for the MLA.
-    """
-    use_mla = mla_enabled(vllm_config.model_config)
-    if not use_mla:
-        return world_size, rank
-    else:
-        # Tensor parallel does not change the KV caches for MLA models.
-        # So we need to "exclude" the effect of TP on rank and world size
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        # vLLM constructs TP groups first, and then construct other
-        # parallel groups on top of TP groups.
-        # for example, TP=4, PP=2,
-        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
-        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
-        # So we can "exclude" the effect of TP by rank // tp_size.
-        return world_size // tp_size, rank // tp_size
-
-
 def _build_parallel_strategy(
     server_urls: list[str],
     vllm_config: VllmConfig,
@@ -130,31 +106,17 @@ def _build_parallel_strategy(
     global_rank = vllm_config.parallel_config.rank
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    # Per-node (local) derivations: each node hosts one LMCache server.
     if global_tp_size % n_servers != 0:
         raise ValueError(
             f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
         )
-    local_world_size = global_world_size // n_servers
-    local_tp_size = global_tp_size // n_servers
 
-    # `extract_world_size_and_kv_rank` expects the GLOBAL world_size / rank
-    # and returns the kv-side world_size and kv_rank (excluding TP for MLA).
-    kv_world_size, kv_rank = extract_world_size_and_kv_rank(
-        global_world_size,
-        global_rank,
-        vllm_config,
-    )
     return ParallelStrategy(
         use_mla=mla_enabled(vllm_config.model_config),
-        kv_world_size=kv_world_size,
-        kv_worker_id=kv_rank,
         global_world_size=global_world_size,
         global_rank=global_rank,
         tp_size=global_tp_size,
         pp_size=vllm_config.parallel_config.pipeline_parallel_size,
-        local_kv_world_size=local_world_size,
-        local_tp_size=local_tp_size,
         n_servers=n_servers,
     )
 
@@ -710,14 +672,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        # In MLA scenario, KV cache is not sharded across TP ranks, so only
-        # one rank per node needs to STORE to the local LMCache server.
-        # For single-server deployments this degenerates to rank 0 only.
-        # is_first_rank_of_node handles both cases internally.
-        if (
-            self.worker_adapter.use_mla
-            and not self.worker_adapter.is_first_rank_of_node
-        ):
+        # Only the KV writer rank needs to STORE to the LMCache server.
+        # For non-MLA models, every rank writes its own KV shard.
+        # For MLA models, only the first rank of each TP group writes.
+        # In multi-server deployments, only the first rank on each node writes.
+        if not self.worker_adapter.is_kv_writer:
             return
 
         metadata = self._get_connector_metadata()

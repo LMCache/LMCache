@@ -59,14 +59,10 @@ def fake_adapter(monkeypatch):
 
     parallel_strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=1,
-        kv_worker_id=0,
         global_world_size=1,
         global_rank=0,
         tp_size=1,
         pp_size=1,
-        local_kv_world_size=1,
-        local_tp_size=1,
         n_servers=1,
     )
     adapter = LMCacheMPWorkerAdapter(
