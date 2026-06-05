@@ -333,24 +333,8 @@ class SlabAddressManager:
 
 
 class GdsMemoryObj(MemoryObj):
-    """Slab-anchored ``MemoryObj`` for the GDS L1 backend.
-
-    Carries ``(slab_offset, size)`` within the backend's single slab
-    file plus the standard ``MemoryObjMetadata``. ``.tensor`` is
-    always ``None``; ``.byte_array`` and ``.data_ptr`` raise. Under
-    the exclusive-L2 mode that GDS L1 enforces, neither field is read
-    on the GDS path — the data path is the ``gpu_ops`` dispatch + the
-    ``gpu_buffer`` parameter, not field access on the MemoryObj.
-
-    Args:
-        key: The ObjectKey this MemoryObj represents.
-        slab_offset: Byte offset into the slab file where this chunk's
-            payload starts.
-        size: Payload size in bytes.
-        metadata: Standard :class:`MemoryObjMetadata`.
-        parent_allocator: The :class:`GdsScratchAllocator` returned by
-            :meth:`parent` so ``gpu_ops``'s ``isinstance`` dispatch
-            picks the cuFile path.
+    """
+    Slab-anchored ``MemoryObj`` for the GDS L1 backend.
     """
 
     def __init__(
@@ -403,24 +387,6 @@ class GdsMemoryObj(MemoryObj):
     def get_physical_size(self) -> int:
         return self.meta.phy_size
 
-    def get_num_tokens(self) -> int:
-        with self._lock:
-            token_dim = self.meta.fmt.token_dim()
-            if token_dim < 0 or token_dim >= len(self.meta.shape):
-                return 0
-            return self.meta.shape[token_dim]
-
-    def pin(self) -> bool:
-        with self._lock:
-            self.meta.pin_count += 1
-            return True
-
-    def unpin(self) -> bool:
-        with self._lock:
-            if self.meta.pin_count > 0:
-                self.meta.pin_count -= 1
-            return True
-
     def ref_count_up(self) -> None:
         with self._lock:
             self.meta.ref_count += 1
@@ -440,29 +406,30 @@ class GdsMemoryObj(MemoryObj):
         with self._lock:
             return self.meta.ref_count
 
+    def get_num_tokens(self) -> int:
+        with self._lock:
+            token_dim = self.meta.fmt.token_dim()
+            if token_dim < 0 or token_dim >= len(self.meta.shape):
+                return 0
+            return self.meta.shape[token_dim]
+
+    def pin(self) -> bool:
+        with self._lock:
+            self.meta.pin_count += 1
+            return True
+
+    def unpin(self) -> bool:
+        with self._lock:
+            if self.meta.pin_count > 0:
+                self.meta.pin_count -= 1
+            return True
+
     @property
     def metadata(self) -> MemoryObjMetadata:
         return self.meta
 
     @property
-    def is_pinned(self) -> bool:
-        with self._lock:
-            return self.meta.pin_count > 0
-
-    @property
-    def can_evict(self) -> bool:
-        with self._lock:
-            return self.meta.pin_count == 0 and self.meta.ref_count == 0
-
-    @property
     def tensor(self) -> Optional[torch.Tensor]:
-        return None
-
-    @property
-    def raw_tensor(self) -> Optional[torch.Tensor]:
-        return None
-
-    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
         return None
 
     @property
@@ -480,6 +447,23 @@ class GdsMemoryObj(MemoryObj):
             "supported; GDS reads/writes use gpu_buffer.data_ptr() via the "
             "gpu_ops dispatch, never the MemoryObj's data_ptr."
         )
+
+    @property
+    def is_pinned(self) -> bool:
+        with self._lock:
+            return self.meta.pin_count > 0
+
+    @property
+    def can_evict(self) -> bool:
+        with self._lock:
+            return self.meta.pin_count == 0 and self.meta.ref_count == 0
+
+    @property
+    def raw_tensor(self) -> Optional[torch.Tensor]:
+        return None
+
+    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        return None
 
     def parent(self) -> Optional[MemoryAllocatorInterface]:
         return self._parent_allocator
