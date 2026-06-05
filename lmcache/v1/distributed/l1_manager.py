@@ -12,9 +12,13 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import L1ManagerConfig
+from lmcache.v1.distributed.config import GdsL1Config, L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.gds_l1 import GdsL1Backend, GdsMemoryObj
+from lmcache.v1.distributed.gds_l1 import (
+    GdsL1Backend,
+    GdsMemoryObj,
+    GdsScratchAllocator,
+)
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import MemoryObj
@@ -183,26 +187,20 @@ class L1Manager:
     def __init__(
         self,
         config: L1ManagerConfig,
-        gds_backend: GdsL1Backend | None = None,
+        gds_l1_config: GdsL1Config | None = None,
     ):
-        """Initialise the L1 manager.
-
-        Args:
-            config: L1 lock/TTL/memory configuration.
-            gds_backend: Optional GDS L1 backend. When provided,
-                ``reserve_read`` synthesises L1 entries from
-                ``gds_backend``'s hot index on miss (fill-on-miss),
-                ``get_memory_usage`` reports disk usage instead of
-                pinned-slab usage, and ``close`` shuts the backend
-                down too. When ``None`` (default), the CPU-pinned
-                path runs byte-for-byte unchanged.
-        """
         self._lock = threading.Lock()
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
         self._memory_manager = L1MemoryManager(config.memory_config)
-        self._gds_backend = gds_backend
+        self._gds_backend: GdsL1Backend | None = None
+        if gds_l1_config is not None:
+            self._gds_backend = GdsL1Backend(config=gds_l1_config)
+            logger.info(
+                "L1Manager: GDS L1 backend enabled (gds_path=%r)",
+                gds_l1_config.gds_path,
+            )
 
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
@@ -864,11 +862,7 @@ class L1Manager:
         """Get the current memory usage of L1 cache.
 
         Returns:
-            A tuple of (used_memory_bytes, total_memory_bytes). When a
-            GDS L1 backend is attached, this reports disk usage instead
-            of pinned-slab usage — the eviction controller already
-            consumes ``(used, total)`` agnostically, so swapping the
-            signal source is transparent to it.
+            A tuple of (used_memory_bytes, total_memory_bytes).
 
         Note:
             In the future, we many want to make a "callback" based mechanism
@@ -879,16 +873,14 @@ class L1Manager:
         return self._memory_manager.get_memory_usage()
 
     def get_l1_memory_desc(self):
-        """Return an L1MemoryDesc describing the underlying L1 memory buffer.
-
-        When a GDS L1 backend is attached, this still returns the
-        pinned-slab desc. NIXL co-tenancy with GDS L1 is an open
-        question (see gds_l1_backend.md §Open questions); until that
-        is resolved, callers that need a registered VRAM pointer for
-        external use should consult ``gds_backend.scratch_allocator``
-        directly rather than relying on this method.
-        """
+        """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
+
+    def get_gds_scratch_allocator(self) -> GdsScratchAllocator | None:
+        """Return the GDS scratch allocator, or None if GDS is not enabled."""
+        if self._gds_backend is None:
+            return None
+        return self._gds_backend.scratch_allocator
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""

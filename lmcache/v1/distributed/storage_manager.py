@@ -19,7 +19,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
-from lmcache.v1.distributed.gds_l1 import GdsL1Backend, GdsScratchAllocator
+from lmcache.v1.distributed.gds_l1 import GdsScratchAllocator
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
@@ -56,22 +56,11 @@ logger = init_logger(__name__)
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
-        # Optional GDS L1 backend, built before L1Manager (which takes
-        # it via an optional hook). CPU-pinned path is unchanged when
-        # ``gds_l1_config is None``.
-        self._gds_backend: GdsL1Backend | None = None
-        if config.gds_l1_config is not None:
-            self._gds_backend = GdsL1Backend(
-                config=config.gds_l1_config,
-            )
-            logger.info(
-                "StorageManager: GDS L1 backend enabled (gds_path=%r)",
-                config.gds_l1_config.gds_path,
-            )
-
+        # L1Manager owns the optional GDS L1 backend (built from
+        # gds_l1_config), parallel to its in-memory L1MemoryManager.
         self._l1_manager = L1Manager(
             config.l1_manager_config,
-            gds_backend=self._gds_backend,
+            gds_l1_config=config.gds_l1_config,
         )
         self._event_bus = get_event_bus()
 
@@ -751,17 +740,10 @@ class StorageManager:
         self._l1_manager.clear(force=force)
 
     def get_gds_scratch_allocator(self) -> GdsScratchAllocator | None:
-        """Return the GDS scratch allocator, if a GDS L1 backend is attached.
-
-        ``MPCacheEngine.register_kv_cache`` passes this to
-        ``GPUCacheContext`` so the context registers its
-        ``tmp_gpu_buffer_`` with cuFile at construction time. Returns
-        ``None`` for the CPU-pinned L1 path so callers can keep the
-        same code shape regardless of backend.
         """
-        if self._gds_backend is None:
-            return None
-        return self._gds_backend.scratch_allocator
+        Return the GDS scratch allocator.
+        """
+        return self._l1_manager.get_gds_scratch_allocator()
 
     def close(self):
         """
