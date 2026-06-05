@@ -27,9 +27,12 @@ store/retrieve address those views directly.
   IDs are indexed by that order.
 - Reuse one grouping primitive (`group_layers_by_identity`) on both the vLLM and
   server sides so group order matches.
-- **Not** in scope: sliding-window load-plan trimming; DeepSeek-V4
-  logical→physical block translation; HMA on the non-GPU transfer path (it
-  rejects multi-group); removing `layout_hints` (still used for tensor layout).
+- **Not** in scope: sliding-window load-plan trimming; DeepSeek-V4 slot
+  compression (`compress_ratio > 1`, packing several logical tokens per physical
+  slot — the per-group machinery exists but is validated separately); HMA on the
+  non-GPU transfer path (it rejects multi-group); removing `layout_hints` (still
+  used for tensor layout). Per-group block *sizes* and cross-layer KV sharing
+  *are* supported (see Store and retrieve).
 
 ## Types
 
@@ -62,7 +65,9 @@ KVLayerGroupInfo list   --STORE/RETRIEVE block_ids per view-->  transfer kernels
 `create_group_views_from_vllm` (the only place that reads vLLM `KVCacheConfig`):
 
 1. Inspect registered tensors for physical layout/dtype.
-2. Map each registered layer to its engine group index.
+2. Map each registered layer to its engine group index; layers absent from
+   every group's `layer_names` (cross-layer KV-sharing layers) are tagged
+   `EXCLUDED_ENGINE_GROUP` and dropped (see Cross-layer KV sharing).
 3. `group_layers_by_identity` splits layers by transfer identity
    `(kv_size, num_heads, head_size, block_size, engine_group_idx, dtype)` — the
    `engine_group_idx` term keeps identically-shaped layers from different engine
@@ -77,6 +82,35 @@ group-view order with `expand_block_ids_to_views(group_views, block_ids)` (each
 view reuses its source engine group's block IDs), so `STORE`/`RETRIEVE` receive
 `list[list[int]]` indexed by view order. The server loop is then trivial: for
 view `i`, use `gpu_block_ids[i]`.
+
+### Per-group block sizes
+
+Engine groups may use *different* `block_size`s. When a hybrid model's
+attention types have different per-token page sizes, vLLM unifies the physical
+page size by scaling the smaller-page group's `block_size` up (e.g.
+`google/gemma-4-E4B-it`: sliding-window groups `block_size=32`, full-attention
+groups `block_size=16`). The connector's block accounting (hit counts,
+`blocks_in_chunk`, the `start`/`end` range) stays in the *canonical* unit —
+`cache_config.block_size`, the GCD of all group block sizes — while each group's
+block IDs are in its own `block_size`. So the scheduler-side slice divides the
+canonical range by `k_g = group_block_size / canonical` per group
+(`_slice_block_ids`), and the server counts `blocks_per_chunk = chunk // bs` per
+group (`GPUCacheContext.blocks_for_tokens`). The server's per-group
+`compress_ratio` is derived from the *per-group* logical block size
+(`max(canonical, bs)`), so an uncompressed larger-block group gets
+`compress_ratio == 1` rather than being rejected.
+
+### Cross-layer KV sharing
+
+Some models (e.g. `google/gemma-4-E4B-it`) reuse one layer's KV cache for
+another (`kv_caches[layer] = kv_caches[target]`). vLLM lists only cache-*owning*
+layers in `kv_cache_groups`; a sharing layer is absent from every group's
+`layer_names`. Such a layer's KV physically lives in its target owner's blocks,
+so storing/retrieving the owner already covers it. Registration therefore tags
+unlisted layers with `EXCLUDED_ENGINE_GROUP` and `group_layers_by_identity`
+skips them — they never form their own view. (Placing them in a group would
+duplicate work and, when their block size differs from the group they default
+into, corrupt the per-group block-id counts.)
 
 **Store is all-or-nothing (fail-closed):** if the block IDs don't fully cover
 every chunk for every group (e.g. a caller bug), or a copy fails, the whole
