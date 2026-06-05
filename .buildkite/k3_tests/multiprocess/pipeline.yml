@@ -65,28 +65,24 @@ steps:
                 volumes: *vols
         artifact_paths: ["*.log"]
 
-      # HMA correctness check on google/gemma-4-31B-it. Its full-attention layers
-      # use a larger head_dim (512 vs 256), so vLLM gives the KV cache groups
-      # different block sizes -- exercising LMCache's per-group block-size path.
-      # Runs gsm8k (STORE), resets vLLM's local prefix cache (LMCache preserved),
-      # reruns (RETRIEVE), and asserts run1 == run2. Single GPU, no baseline.
-      # Public (no HF_TOKEN); forces TRITON_ATTN (so ATTENTION_BACKEND=auto);
-      # ~63GB weights need a higher GPU_MEMORY_UTILIZATION than the 0.5 default.
+      # HMA correctness check on google/gemma-4-31B-it (a hybrid model whose KV
+      # cache groups get different block sizes). Runs gsm8k, resets vLLM's prefix
+      # cache (LMCache preserved), reruns served by LMCache, and asserts the two
+      # runs' scores match. Single GPU, no baseline.
       - label: ":compression: hma_lm_eval_gemma4"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
         timeout_in_minutes: 60
         env:
           MODEL: "google/gemma-4-31B-it"
-          # Strict run1 == run2: enforce-eager is off (it breaks bit-exactness),
-          # so a correct retrieve reproduces the store score exactly.
+          # Require an exact score match between the two runs.
           SCORE_TOLERANCE: "0"
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.85"
-          # CUDA-graph capture (enforce-eager off) + 63GB load is slow; allow more
-          # than the 300s default before the readiness probe gives up.
+          # 31B load + CUDA-graph capture is slow; raise the readiness timeout
+          # above the 300s default.
           MAX_WAIT_SECONDS: "600"
-          # Cap gsm8k samples and enlarge the CPU pool so run 2 stays cache-served
-          # instead of thrashing (31B has a large per-token KV footprint).
+          # Cap samples and enlarge the CPU pool so the retrieve run stays
+          # cache-served (31B's per-token KV is large).
           LIMIT: "100"
           CPU_BUFFER_SIZE: "200"
         agents: { queue: "k8s" }
