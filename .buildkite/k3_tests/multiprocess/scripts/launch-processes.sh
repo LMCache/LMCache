@@ -52,21 +52,21 @@ if [ -n "$ATTENTION_BACKEND" ] && [ "$ATTENTION_BACKEND" != "auto" ]; then
 fi
 
 # Optionally run vLLM in eager mode (skip CUDA graph capture) for both servers.
-# Off by default: it changes the kernel path and can break the bit-exact run1 ==
-# run2 check in the determinism tests (lm_eval). Enable it (ENFORCE_EAGER=1) for
-# large models whose CUDA-graph capture would otherwise time out at launch.
+# Off by default: verified to break the bit-exact run1 == run2 check in the
+# determinism tests (lm_eval) -- eager changes the kernel path enough to diverge
+# across the cold/warm batch difference even under VLLM_BATCH_INVARIANT. Enable
+# (ENFORCE_EAGER=1) only for large models whose CUDA-graph capture would
+# otherwise time out at launch (those tests use a tolerance, not bit-exactness).
 ENFORCE_EAGER_ARG=""
 if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
     ENFORCE_EAGER_ARG="--enforce-eager"
 fi
 
-# Optionally pin max model length for both servers. Unset by default (vLLM uses
-# the model default); the auto-derived value depends on free KV memory and can
-# perturb the bit-exact determinism tests, so opt in per model (MAX_MODEL_LEN).
-MAX_MODEL_LEN_ARG=""
-if [ -n "${MAX_MODEL_LEN:-}" ]; then
-    MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
-fi
+# Pin max model length for both servers; defaults to "auto" (vLLM derives the
+# largest length that fits KV memory). Verified not to affect the bit-exact
+# determinism tests. Override via MAX_MODEL_LEN if a model needs a fixed length.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
+MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
 
 # Store PIDs in a file so cleanup.sh can find them
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"

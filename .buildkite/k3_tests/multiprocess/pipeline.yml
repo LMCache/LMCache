@@ -47,7 +47,6 @@ steps:
           # Skip CUDA-graph capture so the large model doesn't time out at launch
           # (safe here: this test uses a tolerance, not the bit-exact check).
           ENFORCE_EAGER: "1"
-          MAX_MODEL_LEN: "auto"
           # 31B weights are large; allow longer for download + load before the
           # readiness probe gives up (other models keep the 300s default).
           MAX_WAIT_SECONDS: "400"
