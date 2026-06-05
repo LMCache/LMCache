@@ -1013,6 +1013,55 @@ class GdsL1Backend:
         """
         return self._address_manager.used_bytes(), self._slab_size
 
+    def free_entry_from_index(self, memory_obj: GdsMemoryObj) -> None:
+        """Free the slab region and drop the index entry."""
+        with self._index_lock:
+            entry = self._index.pop(memory_obj.key, None)
+        if entry is not None:
+            self._address_manager.free(entry.slab_offset, entry.size)
+
+    def free_entry(self, memory_obj: GdsMemoryObj) -> None:
+        """Return a slab region without an idex."""
+        self._address_manager.free(memory_obj.slab_offset, memory_obj.size)
+
+    def close(self) -> None:
+        """Sync stream, persist index, deregister cuFile state, close slab."""
+        if self.scratch_allocator._buffers:  # noqa: SLF001
+            torch_dev.synchronize(
+                device=self.scratch_allocator._buffers[0].device  # noqa: SLF001
+            )
+        # The synchronize drained the stream; all submission ops have
+        # executed, so drop the tracking lists.
+        with self._submissions_lock:
+            self._uncommitted_submissions = []
+            self._inflight_submissions = []
+            self._ops_since_checkpoint = 0
+        self._persist_index()
+        self.scratch_allocator.deregister_gpu_buffer()
+        with self._stream_lock:
+            if self._registered_stream_handle is not None and self.use_gds:
+                try:
+                    ca.deregister_stream(self._registered_stream_handle)
+                except Exception as e:
+                    logger.warning("GdsL1Backend.close: deregister_stream: %s", e)
+                self._registered_stream_handle = None
+                self._registered_stream = None
+        if self._slab_handle is not None:
+            try:
+                self._slab_handle.close()
+            except Exception as e:
+                logger.warning("GdsL1Backend.close: slab handle close failed: %s", e)
+            self._slab_handle = None
+        if self._posix_fd != -1:
+            try:
+                os.close(self._posix_fd)
+            except OSError:
+                pass
+            self._posix_fd = -1
+        logger.info("GdsL1Backend: closed")
+
+    # --- Internal ---------------------------------------------------
+
     def _record_entry(self, memory_obj: GdsMemoryObj) -> None:
         """Insert ``memory_obj`` into the in-memory index.
 
@@ -1040,17 +1089,6 @@ class GdsL1Backend:
             if existing is not None:
                 self._address_manager.free(existing.slab_offset, existing.size)
             self._index[memory_obj.key] = entry
-
-    def free_entry_from_index(self, memory_obj: GdsMemoryObj) -> None:
-        """Free the slab region and drop the index entry."""
-        with self._index_lock:
-            entry = self._index.pop(memory_obj.key, None)
-        if entry is not None:
-            self._address_manager.free(entry.slab_offset, entry.size)
-
-    def free_entry(self, memory_obj: GdsMemoryObj) -> None:
-        """Return a slab region without an idex."""
-        self._address_manager.free(memory_obj.slab_offset, memory_obj.size)
 
     def _record_submission(self, sub: "ca.Submission") -> None:
         """Track one in-flight cuFile submission, draining completed ones.
@@ -1170,42 +1208,6 @@ class GdsL1Backend:
         )
         self._record_submission(sub)
 
-    def close(self) -> None:
-        """Sync stream, persist index, deregister cuFile state, close slab."""
-        if self.scratch_allocator._buffers:  # noqa: SLF001
-            torch_dev.synchronize(
-                device=self.scratch_allocator._buffers[0].device  # noqa: SLF001
-            )
-        # The synchronize drained the stream; all submission ops have
-        # executed, so drop the tracking lists.
-        with self._submissions_lock:
-            self._uncommitted_submissions = []
-            self._inflight_submissions = []
-            self._ops_since_checkpoint = 0
-        self._persist_index()
-        self.scratch_allocator.deregister_gpu_buffer()
-        with self._stream_lock:
-            if self._registered_stream_handle is not None and self.use_gds:
-                try:
-                    ca.deregister_stream(self._registered_stream_handle)
-                except Exception as e:
-                    logger.warning("GdsL1Backend.close: deregister_stream: %s", e)
-                self._registered_stream_handle = None
-                self._registered_stream = None
-        if self._slab_handle is not None:
-            try:
-                self._slab_handle.close()
-            except Exception as e:
-                logger.warning("GdsL1Backend.close: slab handle close failed: %s", e)
-            self._slab_handle = None
-        if self._posix_fd != -1:
-            try:
-                os.close(self._posix_fd)
-            except OSError:
-                pass
-            self._posix_fd = -1
-        logger.info("GdsL1Backend: closed")
-
     def _ensure_stream_registered(self) -> None:
         """Register the caller's current torch CUDA stream with cuFile.
 
@@ -1234,8 +1236,6 @@ class GdsL1Backend:
             ca.register_stream(raw_stream)
             self._registered_stream_handle = raw_stream
             self._registered_stream = current_stream
-
-    # --- Internal ---------------------------------------------------
 
     def _open_and_register_slab(self, use_direct_io: bool) -> None:
         """Create / open the slab file and register it with cuFile.
