@@ -339,13 +339,6 @@ def add_storage_manager_args(
         help="Open the slab file with O_DIRECT. Required for the GDS DMA "
         "fast path on ext4. Default True.",
     )
-    gds_l1_group.add_argument(
-        "--gds-l1-slab-size-gb",
-        type=float,
-        default=32.0,
-        help="Size of the GDS L1 slab file (preallocated at startup) in "
-        "GiB. Default 32.",
-    )
 
     # Adapter config
     add_l2_adapters_args(parser)
@@ -396,7 +389,7 @@ def parse_args_to_config(
             gds_path_sharding=args.gds_l1_path_sharding,
             use_gds=args.gds_l1_use_gds,
             use_direct_io=args.gds_l1_use_direct_io,
-            slab_size_gb=args.gds_l1_slab_size_gb,
+            slab_size_gb=args.l1_size_gb,
         )
 
     l1_manager_config = L1ManagerConfig(

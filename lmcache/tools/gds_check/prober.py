@@ -142,7 +142,7 @@ def verify_round_trip(
         if mo is None:
             raise RuntimeError(
                 f"GDS round-trip verify: slab too small to allocate {chunk_bytes} "
-                "bytes. Increase --gds-l1-slab-size-gb."
+                "bytes. Reduce --small-chunk-mib."
             )
         backend.cufile_write_from(mo, buf)
 
@@ -205,7 +205,7 @@ def benchmark(
             if mo is None:
                 raise RuntimeError(
                     f"GDS bench: slab exhausted after {i} of {num_chunks} chunks. "
-                    f"Increase --gds-l1-slab-size-gb or reduce the workload."
+                    f"Reduce this phase's --*-num-chunks or --*-chunk-mib."
                 )
             mem_objs.append(mo)
 
