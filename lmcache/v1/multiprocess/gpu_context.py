@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
-from lmcache.v1.distributed.gds_l1 import GdsSlabAllocator
+from lmcache.v1.distributed.gds_l1 import GdsCuFileIO
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
@@ -76,7 +76,7 @@ class GPUCacheContext:
         layout_hints: LayoutHints | None = None,
         group_views: Sequence[LMCacheGroupView] = (),
         engine_type: EngineType = EngineType.VLLM,
-        gds_scratch_allocator: GdsSlabAllocator | None = None,
+        gds_cufile_io: GdsCuFileIO | None = None,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         self.gpu_kv_format_, self.kv_caches_ = normalize_kv_and_discover_format(
@@ -168,15 +168,15 @@ class GPUCacheContext:
 
         # GDS L1: register each chunk-slot of tmp_gpu_buffer_ with cuFile as
         # its own region.
-        self.gds_scratch_allocator_ = gds_scratch_allocator
-        if gds_scratch_allocator is not None:
+        self.gds_cufile_io_ = gds_cufile_io
+        if gds_cufile_io is not None:
             with torch_dev.stream(self.cuda_stream_):
                 for slot in range(self.max_batch_size):
                     slot_view = self.tmp_gpu_buffer_[
                         slot * self.tmp_chunk_bytes_ : (slot + 1)
                         * self.tmp_chunk_bytes_
                     ]
-                    gds_scratch_allocator.register_gpu_buffer(slot_view)
+                    gds_cufile_io.register_gpu_buffer(slot_view)
 
         # Extra initialization
         self.cupy_stream_.launch_host_func(

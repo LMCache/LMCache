@@ -266,7 +266,7 @@ class GPUTransferModule:
             layout_hints=layout_hints or None,
             group_views=group_views,
             engine_type=engine_type,
-            gds_scratch_allocator=self._ctx.storage_manager.get_gds_scratch_allocator(),
+            gds_cufile_io=self._ctx.storage_manager.get_gds_cufile_io(),
         )
         self._gpu_contexts[instance_id] = GPUContextEntry(
             gpu_context=gpu_context,

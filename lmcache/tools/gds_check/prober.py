@@ -130,7 +130,7 @@ def verify_round_trip(
     """
     allocator = backend
     buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda:0")
-    allocator.register_gpu_buffer(buf)
+    allocator.cufile_io.register_gpu_buffer(buf)
     try:
         buf.fill_(pattern_val)
         torch_dev.synchronize()
@@ -160,7 +160,7 @@ def verify_round_trip(
                 "cuFile compat-mode / nvidia-fs setup issue."
             )
     finally:
-        allocator.deregister_gpu_buffer()
+        allocator.cufile_io.deregister_gpu_buffer()
 
 
 def benchmark(
@@ -192,7 +192,7 @@ def benchmark(
     tmp_buf = torch.empty(
         max_batch_size * chunk_bytes, dtype=torch.uint8, device="cuda:0"
     )
-    allocator.register_gpu_buffer(tmp_buf)
+    allocator.cufile_io.register_gpu_buffer(tmp_buf)
     try:
         pattern = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8, device="cuda:0")
 
@@ -231,7 +231,7 @@ def benchmark(
         torch_dev.synchronize()
         retrieve_secs = time.perf_counter() - t0
     finally:
-        allocator.deregister_gpu_buffer()
+        allocator.cufile_io.deregister_gpu_buffer()
 
     total_mib = (num_chunks * chunk_bytes) / (1024 * 1024)
     return (

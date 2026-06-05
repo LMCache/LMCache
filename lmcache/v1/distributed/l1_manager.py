@@ -15,9 +15,9 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config, L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.gds_l1 import (
+    GdsCuFileIO,
     GdsL1Backend,
     GdsMemoryObj,
-    GdsSlabAllocator,
 )
 from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
@@ -857,11 +857,11 @@ class L1Manager:
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
 
-    def get_gds_scratch_allocator(self) -> GdsSlabAllocator | None:
-        """Return the GDS scratch allocator, or None if GDS is not enabled."""
+    def get_gds_cufile_io(self) -> GdsCuFileIO | None:
+        """Return the GDS cuFile data-path engine, or None if GDS is disabled."""
         if self._gds_backend is None:
             return None
-        return self._gds_backend.scratch_allocator
+        return self._gds_backend.cufile_io
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""

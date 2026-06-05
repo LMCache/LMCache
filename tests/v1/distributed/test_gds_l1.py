@@ -315,7 +315,7 @@ class TestPosixRoundTrip:
         try:
             chunk_bytes = 8192
             buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda:0")
-            b.register_gpu_buffer(buf)
+            b.cufile_io.register_gpu_buffer(buf)
             try:
                 buf.fill_(0xAB)
                 torch.cuda.synchronize()
@@ -334,7 +334,7 @@ class TestPosixRoundTrip:
                 expected = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8)
                 assert torch.equal(buf.cpu(), expected)
             finally:
-                b.deregister_gpu_buffer()
+                b.cufile_io.deregister_gpu_buffer()
         finally:
             b.close()
 
