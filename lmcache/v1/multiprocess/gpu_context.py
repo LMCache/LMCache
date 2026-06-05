@@ -167,9 +167,7 @@ class GPUCacheContext:
         )
 
         # GDS L1: register each chunk-slot of tmp_gpu_buffer_ with cuFile as
-        # its own region (per-slot register: 16 MiB cuFileBufRegister cap).
-        # The allocator errors if a slot is not 4 KiB aligned or > 16 MiB.
-        # Deregistration happens at GdsL1Backend.close().
+        # its own region.
         self.gds_scratch_allocator_ = gds_scratch_allocator
         if gds_scratch_allocator is not None:
             with torch_dev.stream(self.cuda_stream_):

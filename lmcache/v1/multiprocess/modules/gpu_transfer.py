@@ -260,9 +260,6 @@ class GPUTransferModule:
             )
             return
 
-        # GDS L1: pass the scratch allocator so GPUCacheContext registers
-        # tmp_gpu_buffer_ with cuFile at construction; None on the CPU-pinned
-        # L1 path.
         gpu_context = GPUCacheContext(
             kv_caches,
             self._ctx.chunk_size,
