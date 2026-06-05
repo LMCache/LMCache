@@ -52,6 +52,43 @@ variables:
      - ``10``
      - Seconds between health-check sweeps. ``0`` disables eviction.
 
+Connecting MP servers
+---------------------
+
+An MP server (``lmcache server``) joins the coordinator when you point it at one
+with ``--coordinator-url``. It registers on startup, heartbeats while running,
+and deregisters on shutdown -- all on the server's own event loop. This is
+opt-in: with no URL set, the server runs exactly as before. Each flag falls back
+to a matching ``LMCACHE_COORDINATOR_*`` environment variable (handy for the
+Kubernetes downward API); an explicit flag wins over the env var.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 38 24 38
+
+   * - Flag (on the MP server)
+     - Env fallback
+     - Description
+   * - ``--coordinator-url``
+     - ``LMCACHE_COORDINATOR_URL``
+     - Coordinator base URL, e.g. ``http://coordinator:9300``. Enables
+       registration when set.
+   * - ``--coordinator-advertise-ip``
+     - ``LMCACHE_COORDINATOR_ADVERTISE_IP``
+     - IP the coordinator should reach this server at (defaults to the server's
+       outbound IP).
+   * - ``--coordinator-heartbeat-interval``
+     - ``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``
+     - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well
+       below the coordinator's ``INSTANCE_TIMEOUT``.
+
+The server registers under its telemetry identity (``--service-instance-id`` /
+OTel ``service.instance.id``); if that is unset, the coordinator assigns an id.
+
+Registration is best-effort: if the coordinator is unreachable, the MP server
+logs a warning, keeps retrying, and continues serving. A malformed
+heartbeat-interval value is rejected at startup.
+
 Inspecting the fleet
 --------------------
 
