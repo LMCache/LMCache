@@ -538,10 +538,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
-    - lmcache.mp.autostart: whether the scheduler should start a local
-      LMCache MP server.
-    - lmcache.mp.autostart.wait_timeout: timeout (seconds) for ZMQ server health.
-    - lmcache.mp.autostart.server_args: extra CLI args for the server process.
     """
 
     def __init__(
@@ -787,8 +783,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
     def shutdown(self):
         """
-        Shutdown the connector. This is called when the scheduler or worker
-        process is shutting down to ensure that all the async operations are
+        Shutdown the connector. This is called when the worker process
+        is shutting down to ensure that all the async operations are
         completed and the connector is cleaned up properly.
         """
         if hasattr(self, "worker_adapter"):

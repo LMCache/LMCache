@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import check_interprocess_event_support
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.utils import check_interprocess_event_support
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -130,7 +130,6 @@ def create_scheduler_adapter(
         vllm_config.parallel_config.pipeline_parallel_size,
     )
 
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPSchedulerAdapter(
         server_url=server_url,
         context=zmq_context,
@@ -139,7 +138,6 @@ def create_scheduler_adapter(
         parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
-        extra_config=extra_config,
     )
 
 
@@ -475,10 +473,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
-    - lmcache.mp.autostart: whether the scheduler should start a local
-      LMCache MP server.
-    - lmcache.mp.autostart.wait_timeout: timeout (seconds) for ZMQ server health.
-    - lmcache.mp.autostart.server_args: extra CLI args for the server process.
     - lmcache.mp.mp_transfer_mode: routing mode for the worker -> server
       transfer context. One of ``auto`` (default; CUDA -> handle, others
       -> data), ``handle`` (force IPC / SHM zero-copy), ``data`` (force
@@ -728,8 +722,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
     def shutdown(self):
         """
-        Shutdown the connector. This is called when the scheduler or worker
-        process is shutting down to ensure that all the async operations are
+        Shutdown the connector. This is called when the worker process
+        is shutting down to ensure that all the async operations are
         completed and the connector is cleaned up properly.
         """
         if hasattr(self, "worker_adapter"):
