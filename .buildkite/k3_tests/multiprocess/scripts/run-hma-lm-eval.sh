@@ -11,16 +11,15 @@
 #     Qwen3.5/Qwen3-Next, whose state caches LMCache cannot yet transfer).
 #   - Public, so no HF_TOKEN is required.
 #
-# Flow:
+# Flow (single GPU, no baseline server):
 #   1. Run lm_eval (gsm8k) against vLLM+LMCache       -> populates LMCache (STORE).
 #   2. Reset vLLM's *local* prefix cache (APC) only, leaving LMCache intact, via
 #      the dev-mode endpoint POST /reset_prefix_cache (reset_external defaults to
 #      false, so the LMCache-managed cache is preserved).
 #   3. Re-run lm_eval                                  -> vLLM APC misses, so the
 #      prefix KV is served by LMCache (RETRIEVE), exercising the HMA retrieve path.
-#   4. Assert the three gsm8k scores agree within SCORE_TOLERANCE (run 1 store ==
-#      run 2 retrieve == no-LMCache baseline); a broken retrieve corrupts the KV
-#      and the score diverges.
+#   4. Assert run 1 (store) and run 2 (retrieve) gsm8k scores agree within
+#      SCORE_TOLERANCE; a broken retrieve corrupts the KV and the score diverges.
 #   5. Assert LMCache actually served retrieves during run 2 (non-vacuous).
 #
 # The reset endpoint requires VLLM_SERVER_DEV_MODE=1 (set by launch-processes.sh).
@@ -34,17 +33,16 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 
 # Configuration
 VLLM_PORT="${VLLM_PORT:-8000}"
-VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 MODEL="${MODEL:-google/gemma-4-31B-it}"
 NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
 # 31B has a large per-token KV footprint; cap the sample count so the working
 # set fits the CPU pool (a too-large set thrashes and run 2 misses LMCache).
 LIMIT="${LIMIT:-100}"
-# Max allowed absolute difference in the gsm8k exact_match score across runs.
-# gemma-4 forces the Triton backend, which is not bit-exact under vLLM's
-# batch-invariant mode, so a correct retrieve can differ from a fresh compute by
-# a small margin; the default allows a small tolerance instead of an exact match.
-SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
+# Max allowed absolute difference in the gsm8k exact_match score between run 1
+# (store) and run 2 (retrieve). Defaults to 0 (strict equality): with
+# enforce-eager off the two runs are bit-exact, so a correct retrieve must
+# reproduce the store run's score exactly.
+SCORE_TOLERANCE="${SCORE_TOLERANCE:-0}"
 # Seconds to wait after run 1 so async LMCache stores drain before run 2.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 BUILD_ID="${BUILD_ID:-local_$$}"
@@ -55,19 +53,17 @@ LMCACHE_LOG="${LMCACHE_LOG:-/tmp/build_${BUILD_ID}_lmcache.log}"
 HMA_DIR="$RESULTS_DIR/hma_lm_eval"
 RUN1_DIR="$HMA_DIR/run1_store"
 RUN2_DIR="$HMA_DIR/run2_retrieve"
-BASELINE_DIR="$HMA_DIR/baseline"
 
 echo "=== HMA lm_eval correctness test ==="
 echo "Model: $MODEL"
 echo "vLLM (LMCache) port: $VLLM_PORT"
-echo "vLLM baseline port: $VLLM_BASELINE_PORT"
 echo "Concurrent requests: $NUM_CONCURRENT"
 echo "Limit: $LIMIT"
 echo "Score tolerance: $SCORE_TOLERANCE"
 echo "Results dir: $HMA_DIR"
 echo ""
 
-mkdir -p "$RUN1_DIR" "$RUN2_DIR" "$BASELINE_DIR"
+mkdir -p "$RUN1_DIR" "$RUN2_DIR"
 
 # Run one lm_eval gsm8k pass against a vLLM OpenAI-compatible server.
 #
@@ -164,23 +160,20 @@ run_lm_eval "$VLLM_PORT" "$RUN2_DIR" "run2 LMCache RETRIEVE"
 
 retrieves_after=$(count_retrieves)
 
-# ── 4. Baseline run: no LMCache, ground truth ──────────────
-run_lm_eval "$VLLM_BASELINE_PORT" "$BASELINE_DIR" "baseline no LMCache"
-
-# ── 5. Compare scores and verify LMCache was actually used ──
+# ── 4. Compare scores and verify LMCache was actually used ──
 echo "============================================"
 echo "=== Verifying HMA store/retrieve correctness ==="
 echo "============================================"
 echo "LMCache retrieves logged: before run2=${retrieves_before}, after run2=${retrieves_after}"
 
-python3 - "$RUN1_DIR" "$RUN2_DIR" "$BASELINE_DIR" \
+python3 - "$RUN1_DIR" "$RUN2_DIR" \
     "$SCORE_TOLERANCE" "$retrieves_before" "$retrieves_after" <<'PYEOF'
 import glob
 import json
 import os
 import sys
 
-run1_dir, run2_dir, baseline_dir, tol_s, before_s, after_s = sys.argv[1:7]
+run1_dir, run2_dir, tol_s, before_s, after_s = sys.argv[1:6]
 tol = float(tol_s)
 retrieves_before = int(before_s)
 retrieves_after = int(after_s)
@@ -223,11 +216,9 @@ def gsm8k_exact_match(results_dir: str) -> float:
 
 s1 = gsm8k_exact_match(run1_dir)
 s2 = gsm8k_exact_match(run2_dir)
-sb = gsm8k_exact_match(baseline_dir)
 
 print(f"  run1 (LMCache STORE)    gsm8k exact_match = {s1:.4f}")
 print(f"  run2 (LMCache RETRIEVE) gsm8k exact_match = {s2:.4f}")
-print(f"  baseline (no LMCache)   gsm8k exact_match = {sb:.4f}")
 print(f"  tolerance = {tol}")
 
 failures = []
@@ -236,12 +227,6 @@ if abs(s1 - s2) > tol:
     failures.append(
         f"LMCache store-vs-retrieve score drift: |{s1:.4f} - {s2:.4f}| = "
         f"{abs(s1 - s2):.4f} > {tol}"
-    )
-# run2 (retrieve) vs baseline (no LMCache): retrieve must match ground truth.
-if abs(s2 - sb) > tol:
-    failures.append(
-        f"Retrieve-vs-baseline score drift: |{s2:.4f} - {sb:.4f}| = "
-        f"{abs(s2 - sb):.4f} > {tol}"
     )
 # Non-vacuous: run 2 must have been served by LMCache retrieves, not recompute.
 if retrieves_after <= retrieves_before:
@@ -258,7 +243,7 @@ if failures:
     sys.exit(1)
 
 print(
-    f"\nPASS: store, retrieve, and baseline gsm8k scores match (tol={tol}); "
+    f"\nPASS: store and retrieve gsm8k scores match (tol={tol}); "
     f"LMCache served {retrieves_after - retrieves_before} retrieves during run 2."
 )
 PYEOF
