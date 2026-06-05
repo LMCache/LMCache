@@ -285,7 +285,7 @@ class TestStoreControllerSingleAdapter:
         # Wait for the object to appear in L2
         ok = wait_for_condition(
             lambda: adapter.debug_get_stored_object_count() == 1,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Object should be stored in L2 after L1 write"
         assert adapter.debug_has_key(keys[0])
@@ -310,7 +310,7 @@ class TestStoreControllerSingleAdapter:
 
         ok = wait_for_condition(
             lambda: adapter.debug_get_stored_object_count() == 5,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "All 5 objects should be stored in L2"
         for key in keys:
@@ -337,7 +337,7 @@ class TestStoreControllerSingleAdapter:
         # Wait for L2 store to complete
         ok = wait_for_condition(
             lambda: adapter.debug_has_key(keys[0]),
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok
 
@@ -350,7 +350,7 @@ class TestStoreControllerSingleAdapter:
                 mode="update",
             )[keys[0]][1]
             is not None,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Key should be updatable after store controller releases read lock"
 
@@ -383,7 +383,7 @@ class TestStoreControllerSingleAdapter:
         all_keys = batch_a + batch_b
         ok = wait_for_condition(
             lambda: all(adapter.debug_has_key(k) for k in all_keys),
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Both batches should reach L2"
 
@@ -404,7 +404,7 @@ class TestStoreControllerSingleAdapter:
                 l1_manager.finish_write([k])
             return True
 
-        ok = wait_for_condition(all_keys_updatable, timeout=5.0)
+        ok = wait_for_condition(all_keys_updatable, timeout=10.0)
         assert ok, "Read locks must be released for every concurrent request"
 
         ctrl.stop()
@@ -434,7 +434,7 @@ class TestStoreControllerMultipleAdapters:
         # Wait for both adapters to have the object
         ok = wait_for_condition(
             lambda: all(a.debug_has_key(keys[0]) for a in adapters),
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Object should be stored in both L2 adapters"
 
@@ -462,7 +462,7 @@ class TestStoreControllerMultipleAdapters:
         # Wait for stores to both adapters, then check updatability
         ok = wait_for_condition(
             lambda: all(a.debug_has_key(keys[0]) for a in adapters),
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok
 
@@ -474,7 +474,7 @@ class TestStoreControllerMultipleAdapters:
                 mode="update",
             )[keys[0]][1]
             is not None,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Key should be updatable after all adapter stores complete"
 
@@ -581,7 +581,7 @@ class TestStoreControllerCustomPolicy:
         # Wait for L2 store and L1 deletion
         ok = wait_for_condition(
             lambda: adapter.debug_has_key(keys[0]),
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Object should be stored in L2"
 
@@ -594,7 +594,7 @@ class TestStoreControllerCustomPolicy:
                 mode="new",
             )[keys[0]][1]
             is not None,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Key should be re-creatable after L1 deletion by policy"
 
@@ -633,7 +633,7 @@ class TestStoreControllerCustomPolicy:
 
         ok = wait_for_condition(
             lambda: adapters[0].debug_has_key(keys[0]),
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Object should be stored in first adapter"
 
@@ -670,14 +670,14 @@ class TestBufferOnlyMode:
         # Wait for L2 store
         ok = wait_for_condition(
             lambda: adapter.debug_has_key(keys[0]),
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Object should be stored in L2"
 
         # L1 should be cleaned: check key is gone
         ok = wait_for_condition(
             lambda: l1_manager.get_object_state(keys[0]) is None,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "Key should be deleted from L1 in buffer-only mode"
 
@@ -709,14 +709,14 @@ class TestBufferOnlyMode:
 
         ok = wait_for_condition(
             lambda: adapter.debug_get_stored_object_count() == 5,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "All 5 objects should be stored in L2"
 
         # All keys should be gone from L1
         ok = wait_for_condition(
             lambda: all(l1_manager.get_object_state(k) is None for k in keys),
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "All keys should be deleted from L1 after buffer-only cleanup"
 

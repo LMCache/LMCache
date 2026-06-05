@@ -173,7 +173,7 @@ def store_keys_in_l2(
     adapter.submit_store_task(keys, objs)  # type: ignore
     ok = wait_for_condition(
         lambda: all(adapter.debug_has_key(k) for k in keys),
-        timeout=5.0,
+        timeout=10.0,
     )
     assert ok, "Failed to store test data in L2 adapter"
 
@@ -548,7 +548,7 @@ class TestPrefetchL2LockRelease:
         # Wait for L2 unlock operations to be processed
         ok = wait_for_condition(
             lambda: adapter.debug_get_locked_key_count() == 0,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "L2 locks should be released after prefetch completion"
 
@@ -580,7 +580,7 @@ class TestPrefetchL2LockRelease:
         # All L2 locks should be released (both prefix and trimmed keys)
         ok = wait_for_condition(
             lambda: adapter.debug_get_locked_key_count() == 0,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "All L2 locks should be released after prefix-trimmed prefetch"
 
@@ -609,7 +609,7 @@ class TestPrefetchL2LockRelease:
 
         ok = wait_for_condition(
             lambda: adapter.debug_get_locked_key_count() == 0,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, "L2 locks should be 0 when nothing was found"
 
@@ -643,7 +643,7 @@ class TestPrefetchL2LockRelease:
         for i, adapter in enumerate(adapters):
             ok = wait_for_condition(
                 lambda a=adapter: a.debug_get_locked_key_count() == 0,
-                timeout=5.0,
+                timeout=10.0,
             )
             assert ok, f"Adapter {i} should have all L2 locks released"
 

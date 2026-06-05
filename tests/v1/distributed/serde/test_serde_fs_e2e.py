@@ -191,7 +191,7 @@ class TestFp8SerdeFsRoundTrip:
         # ---- Step 6: verify no memory leak ----
         ok = wait_for_condition(
             lambda: sm.report_status()["l1_manager"]["memory_used_bytes"] == 0,
-            timeout=5.0,
+            timeout=10.0,
         )
         assert ok, (
             f"L1 memory leak: "

@@ -175,6 +175,33 @@ def get_l1_object_count(sm: StorageManager) -> int:
     return sm.report_status()["l1_manager"]["total_object_count"]
 
 
+def clear_l1_and_wait_empty(sm: StorageManager, timeout: float = 10.0) -> bool:
+    """Clear unlocked L1 objects, retrying until L1 is empty or timeout.
+
+    ``StorageManager.clear(force=False)`` only drops objects whose locks are
+    released. After an L2 store the StoreController briefly holds read locks on
+    the just-flushed objects, so a single ``clear()`` can leave them behind.
+    This polls ``clear()`` until the object count reaches zero, which is robust
+    when the machine is under load (the previous fixed ``time.sleep(0.1)`` was
+    not -- it assumed the locks would release within 100ms).
+
+    Args:
+        sm: The storage manager whose L1 tier should be drained.
+        timeout: Maximum seconds to wait for L1 to become empty.
+
+    Returns:
+        True if L1 reached zero objects within the timeout, False otherwise.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        sm.clear()
+        if get_l1_object_count(sm) == 0:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 # =============================================================================
 # Tests: Full round-trip through serde
 # =============================================================================
@@ -196,10 +223,11 @@ class TestSerdeRoundTrip:
 
         write_and_wait_for_l2(sm, keys, layout)
 
-        # Brief sleep so StoreController releases read locks after L2 store
-        time.sleep(0.1)
-        sm.clear()
-        assert get_l1_object_count(sm) == 0
+        # Drain L1, retrying clear() until the StoreController releases its
+        # read locks after the L2 store.
+        assert clear_l1_and_wait_empty(sm), (
+            "L1 not empty after clear: StoreController read locks not released in time"
+        )
 
         # Prefetch from L2
         handle = sm.submit_prefetch_task(keys, layout)
@@ -222,8 +250,7 @@ class TestSerdeRoundTrip:
         keys = [make_object_key(i) for i in range(3)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(0.1)
-        sm.clear()
+        assert clear_l1_and_wait_empty(sm), "L1 not empty after clear"
 
         # Prefetch
         handle = sm.submit_prefetch_task(keys, layout)
@@ -237,7 +264,6 @@ class TestSerdeRoundTrip:
         # finish_read), so memory should be back to 0.
         ok = wait_for_condition(
             lambda: get_l1_memory_used(sm) == 0,
-            timeout=5.0,
         )
         assert ok, (
             f"L1 memory leak: {get_l1_memory_used(sm)} bytes still used "
@@ -263,8 +289,7 @@ class TestSerdeDisabled:
         keys = [make_object_key(i) for i in range(5)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(0.1)
-        sm.clear()
+        assert clear_l1_and_wait_empty(sm), "L1 not empty after clear"
 
         handle = sm.submit_prefetch_task(keys, layout)
         hits = wait_for_prefetch_status(sm, handle)
@@ -285,8 +310,7 @@ class TestSerdeDisabled:
         keys = [make_object_key(i) for i in range(3)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(0.1)
-        sm.clear()
+        assert clear_l1_and_wait_empty(sm), "L1 not empty after clear"
 
         handle = sm.submit_prefetch_task(keys, layout)
         hits = wait_for_prefetch_status(sm, handle)
@@ -295,7 +319,6 @@ class TestSerdeDisabled:
 
         ok = wait_for_condition(
             lambda: get_l1_memory_used(sm) == 0,
-            timeout=5.0,
         )
         assert ok, f"L1 memory leak: {get_l1_memory_used(sm)} bytes still used"
         sm.close()
@@ -318,8 +341,7 @@ class TestSerdePartialPrefix:
         # Write only keys 0, 1, 3, 4 (skip 2)
         keys_to_write = [make_object_key(i) for i in [0, 1, 3, 4]]
         write_and_wait_for_l2(sm, keys_to_write, layout)
-        time.sleep(0.1)
-        sm.clear()
+        assert clear_l1_and_wait_empty(sm), "L1 not empty after clear"
 
         # Request all 5 keys — prefix should be 2 (gap at index 2)
         all_keys = [make_object_key(i) for i in range(5)]
@@ -354,8 +376,9 @@ class TestSerdeMemoryStress:
         for cycle in range(5):
             keys = [make_object_key(cycle * 10 + i) for i in range(3)]
             write_and_wait_for_l2(sm, keys, layout)
-            time.sleep(0.1)
-            sm.clear()
+            assert clear_l1_and_wait_empty(sm), (
+                f"Cycle {cycle}: L1 not empty after clear"
+            )
 
             handle = sm.submit_prefetch_task(keys, layout)
             hits = wait_for_prefetch_status(sm, handle)
@@ -364,7 +387,6 @@ class TestSerdeMemoryStress:
 
             ok = wait_for_condition(
                 lambda: get_l1_memory_used(sm) == 0,
-                timeout=5.0,
             )
             assert ok, (
                 f"Cycle {cycle}: L1 memory leak — {get_l1_memory_used(sm)} bytes used"
@@ -397,7 +419,6 @@ class TestSerdeNoHits:
         # No objects in L1 → memory should be 0
         ok = wait_for_condition(
             lambda: get_l1_memory_used(sm) == 0,
-            timeout=5.0,
         )
         assert ok, (
             f"L1 memory leak after 0-hit prefetch: {get_l1_memory_used(sm)} bytes"
@@ -441,9 +462,9 @@ class TestSerdeBufferBounds:
         keys = [make_object_key(i) for i in range(num_keys)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(0.1)
-        sm.clear()
-        assert get_l1_object_count(sm) == 0
+        assert clear_l1_and_wait_empty(sm), (
+            "L1 not empty after clear: read locks not released in time"
+        )
 
         handle = sm.submit_prefetch_task(keys, layout)
         hits = wait_for_prefetch_status(sm, handle)
@@ -458,7 +479,6 @@ class TestSerdeBufferBounds:
         # Verify no memory leak (temp buffers fully cleaned up)
         ok = wait_for_condition(
             lambda: get_l1_memory_used(sm) == 0,
-            timeout=5.0,
         )
         assert ok, f"L1 memory leak: {get_l1_memory_used(sm)} bytes after full cycle"
         sm.close()

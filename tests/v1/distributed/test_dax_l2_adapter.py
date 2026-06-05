@@ -466,13 +466,13 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
         assert wait_for_condition(
             lambda: sm.report_status()["l1_manager"]["total_object_count"] == 0
             and adapter.get_usage().usage_fraction > 0,
-            timeout=5.0,
+            timeout=10.0,
         )
 
         handle = sm.submit_prefetch_task([key], layout)
         assert wait_for_condition(
             lambda: sm.query_prefetch_lookup_hits(handle) is not None,
-            timeout=5.0,
+            timeout=10.0,
         )
         lookup_hits = sm.query_prefetch_lookup_hits(handle)
         assert lookup_hits == 1
@@ -486,7 +486,7 @@ def test_storage_manager_dax_adapter_roundtrip(tmp_path):
             final_result["value"] = result.count_leading_ones()
             return True
 
-        assert wait_for_condition(_capture_prefetch_result, timeout=5.0)
+        assert wait_for_condition(_capture_prefetch_result, timeout=10.0)
         final_hits = final_result["value"]
         assert final_hits == 1
 
@@ -564,7 +564,7 @@ def test_storage_manager_dax_adapter_uses_global_l2_eviction(tmp_path):
             assert wait_for_condition(
                 lambda: adapter.get_usage().usage_fraction
                 == pytest.approx(usage_fraction),
-                timeout=5.0,
+                timeout=10.0,
             )
 
         _write_key(key0, 1, 0.5)

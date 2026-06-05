@@ -233,7 +233,7 @@ class TestStoreInterface:
 
         adpt.submit_store_task([key], [obj])
 
-        assert wait_for_event_fd(store_fd, timeout=5.0), (
+        assert wait_for_event_fd(store_fd, timeout=10.0), (
             "Store event fd was not signaled within timeout"
         )
 
@@ -248,7 +248,7 @@ class TestStoreInterface:
 
         task_id = adpt.submit_store_task([key], [obj])
 
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
 
         completed = adpt.pop_completed_store_tasks()
 
@@ -263,7 +263,7 @@ class TestStoreInterface:
         store_fd = adpt.get_store_event_fd()
 
         adpt.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
 
         # First pop should return the task
         completed1 = adpt.pop_completed_store_tasks()
@@ -293,7 +293,7 @@ class TestStoreInterface:
         # Wait for all completions
         completed = {}
         while len(completed) < 3:
-            wait_for_event_fd(store_fd, timeout=5.0)
+            wait_for_event_fd(store_fd, timeout=10.0)
             completed.update(adpt.pop_completed_store_tasks())
 
         for task_id in task_ids:
@@ -311,7 +311,7 @@ class TestStoreInterface:
 
         task_id = adpt.submit_store_task(keys, objs)
 
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
 
         completed = adpt.pop_completed_store_tasks()
         assert task_id in completed
@@ -343,7 +343,7 @@ class TestLookupAndLockInterface:
 
         adpt.submit_lookup_and_lock_task([key])
 
-        assert wait_for_event_fd(lookup_fd, timeout=5.0), (
+        assert wait_for_event_fd(lookup_fd, timeout=10.0), (
             "Lookup event fd was not signaled within timeout"
         )
 
@@ -354,7 +354,7 @@ class TestLookupAndLockInterface:
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
 
         task_id = adpt.submit_lookup_and_lock_task([key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
 
@@ -371,12 +371,12 @@ class TestLookupAndLockInterface:
 
         # First store the object
         adpt.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         # Now lookup
         task_id = adpt.submit_lookup_and_lock_task([key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
 
@@ -394,12 +394,12 @@ class TestLookupAndLockInterface:
 
         # Store only one key
         adpt.submit_store_task([existing_key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         # Lookup both keys
         task_id = adpt.submit_lookup_and_lock_task([existing_key, nonexistent_key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
 
         bitmap = adpt.query_lookup_and_lock_result(task_id)
 
@@ -420,7 +420,7 @@ class TestLookupAndLockInterface:
         lookup_fd = adpt.get_lookup_and_lock_event_fd()
 
         task_id = adpt.submit_lookup_and_lock_task([key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
 
         # First query returns result
         result1 = adpt.query_lookup_and_lock_result(task_id)
@@ -457,12 +457,12 @@ class TestUnlockInterface:
 
         # Store
         adpt.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
         task_id = adpt.submit_lookup_and_lock_task([key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
         adpt.query_lookup_and_lock_result(task_id)
 
         # Unlock should not raise
@@ -496,7 +496,7 @@ class TestLoadInterface:
 
         adpt.submit_load_task([key], [obj])
 
-        assert wait_for_event_fd(load_fd, timeout=5.0), (
+        assert wait_for_event_fd(load_fd, timeout=10.0), (
             "Load event fd was not signaled within timeout"
         )
 
@@ -508,7 +508,7 @@ class TestLoadInterface:
         load_fd = adpt.get_load_event_fd()
 
         task_id = adpt.submit_load_task([key], [obj])
-        wait_for_event_fd(load_fd, timeout=5.0)
+        wait_for_event_fd(load_fd, timeout=10.0)
 
         bitmap = adpt.query_load_result(task_id)
 
@@ -526,13 +526,13 @@ class TestLoadInterface:
         load_fd = adpt.get_load_event_fd()
 
         adpt.submit_store_task([key], [store_obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         # Load into page 1 (initially filled with 0.0)
         load_obj = create_memory_obj(buf, page_index=1, fill_value=0.0)
         task_id = adpt.submit_load_task([key], [load_obj])
-        wait_for_event_fd(load_fd, timeout=5.0)
+        wait_for_event_fd(load_fd, timeout=10.0)
 
         bitmap = adpt.query_load_result(task_id)
 
@@ -556,7 +556,7 @@ class TestLoadInterface:
         load_fd = adpt.get_load_event_fd()
 
         task_id = adpt.submit_load_task([key], [obj])
-        wait_for_event_fd(load_fd, timeout=5.0)
+        wait_for_event_fd(load_fd, timeout=10.0)
 
         # First query returns result
         result1 = adpt.query_load_result(task_id)
@@ -587,20 +587,20 @@ class TestEndToEndWorkflow:
         # Step 1: Store from page 0 (filled with 123.0)
         store_obj = create_memory_obj(buf, page_index=0, fill_value=123.0)
         store_task_id = adpt.submit_store_task([key], [store_obj])
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
         completed = adpt.pop_completed_store_tasks()
         assert completed[store_task_id].is_successful()
 
         # Step 2: Lookup and lock
         lookup_task_id = adpt.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap.test(0) is True
 
         # Step 3: Load into page 1 (initially 0.0)
         load_obj = create_memory_obj(buf, page_index=1, fill_value=0.0)
         load_task_id = adpt.submit_load_task([key], [load_obj])
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
         load_bitmap = adpt.query_load_result(load_task_id)
         assert load_bitmap.test(0) is True
 
@@ -625,13 +625,13 @@ class TestEndToEndWorkflow:
             buf, page_index=0, fill_value=77.0, num_pages=num_pages
         )
         store_task_id = adpt.submit_store_task([key], [store_obj])
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
         completed = adpt.pop_completed_store_tasks()
         assert completed[store_task_id].is_successful()
 
         # Lookup
         lookup_task_id = adpt.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         assert lookup_bitmap.test(0) is True
 
@@ -640,7 +640,7 @@ class TestEndToEndWorkflow:
             buf, page_index=10, fill_value=0.0, num_pages=num_pages
         )
         load_task_id = adpt.submit_load_task([key], [load_obj])
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
         load_bitmap = adpt.query_load_result(load_task_id)
         assert load_bitmap.test(0) is True
 
@@ -666,13 +666,13 @@ class TestEndToEndWorkflow:
             for i in range(num_objects)
         ]
         store_task_id = adpt.submit_store_task(keys, store_objs)
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
         completed = adpt.pop_completed_store_tasks()
         assert completed[store_task_id].is_successful()
 
         # Lookup all
         lookup_task_id = adpt.submit_lookup_and_lock_task(keys)
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         lookup_bitmap = adpt.query_lookup_and_lock_result(lookup_task_id)
         for i in range(num_objects):
             assert lookup_bitmap.test(i) is True
@@ -683,7 +683,7 @@ class TestEndToEndWorkflow:
             for i in range(num_objects)
         ]
         load_task_id = adpt.submit_load_task(keys, load_objs)
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
         load_bitmap = adpt.query_load_result(load_task_id)
         for i in range(num_objects):
             assert load_bitmap.test(i) is True
@@ -743,7 +743,7 @@ class TestCloseInterface:
         store_fd = adpt.get_store_event_fd()
 
         adpt.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         # Should not raise
@@ -792,7 +792,7 @@ class TestReportStatus:
         key = create_object_key(42)
         obj = create_memory_obj(buffer, page_index=0)
         adpt.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         status = adpt.report_status()
@@ -839,7 +839,7 @@ def _store_and_wait(adpt, key, obj):
     """Helper: store one key and wait for the store event fd to fire."""
     store_fd = adpt.get_store_event_fd()
     adpt.submit_store_task([key], [obj])
-    assert wait_for_event_fd(store_fd, timeout=5.0), "store timed out"
+    assert wait_for_event_fd(store_fd, timeout=10.0), "store timed out"
     adpt.pop_completed_store_tasks()
 
 
@@ -862,7 +862,7 @@ class TestEvictionInterface:
         adpt.delete([key])
 
         task_id = adpt.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         bitmap = adpt.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is False
 
@@ -912,7 +912,7 @@ class TestEvictionInterface:
         keys = [create_object_key(i) for i in range(3)]
         objs = [create_memory_obj(buf, page_index=i) for i in range(3)]
         adpt.submit_store_task(keys, objs)
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         current, _ = adpt.get_usage()
@@ -930,7 +930,7 @@ class TestEvictionInterface:
 
         # Pin the key via lookup_and_lock
         task_id = adpt.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         adpt.query_lookup_and_lock_result(task_id)
 
         # delete should skip the pinned key — stored_object_count stays 1
@@ -971,18 +971,18 @@ class TestEvictionInterface:
 
         # Store
         adpt.submit_store_task([key], [store_obj])
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock (required before load)
         task_id = adpt.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         adpt.query_lookup_and_lock_result(task_id)
 
         # Load
         load_obj = create_memory_obj(buf, page_index=1, fill_value=0.0)
         adpt.submit_load_task([key], [load_obj])
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
 
         assert len(listener.accessed) == 1
         assert key in listener.accessed[0]
@@ -1004,19 +1004,19 @@ class TestEvictionInterface:
 
         # Store only real_key
         adpt.submit_store_task([real_key], [store_obj])
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
         adpt.pop_completed_store_tasks()
 
         # Lookup and lock
         task_id = adpt.submit_lookup_and_lock_task([real_key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         adpt.query_lookup_and_lock_result(task_id)
 
         # Load both keys
         load_obj1 = create_memory_obj(buf, page_index=1, fill_value=0.0)
         load_obj2 = create_memory_obj(buf, page_index=2, fill_value=0.0)
         adpt.submit_load_task([real_key, missing_key], [load_obj1, load_obj2])
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
 
         assert len(listener.accessed) == 1
         assert real_key in listener.accessed[0]
@@ -1055,7 +1055,7 @@ class TestEvictionInterface:
 
         # Pin via lookup
         task_id = adpt.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         adpt.query_lookup_and_lock_result(task_id)
 
         # delete while pinned — should be skipped

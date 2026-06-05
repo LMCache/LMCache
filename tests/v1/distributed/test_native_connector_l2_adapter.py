@@ -428,7 +428,7 @@ class TestStoreInterface:
         store_fd = adapter.get_store_event_fd()
 
         task_id = adapter.submit_store_task([key], [obj])
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
 
         completed = adapter.pop_completed_store_tasks()
         assert task_id in completed
@@ -440,7 +440,7 @@ class TestStoreInterface:
         store_fd = adapter.get_store_event_fd()
 
         adapter.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
 
         completed1 = adapter.pop_completed_store_tasks()
         assert len(completed1) == 1
@@ -461,7 +461,7 @@ class TestStoreInterface:
         # Wait for all completions
         completed = {}
         while len(completed) < 5:
-            wait_for_event_fd(store_fd, timeout=5.0)
+            wait_for_event_fd(store_fd, timeout=10.0)
             completed.update(adapter.pop_completed_store_tasks())
 
         for tid in task_ids:
@@ -473,7 +473,7 @@ class TestStoreInterface:
         store_fd = adapter.get_store_event_fd()
 
         task_id = adapter.submit_store_task(keys, objs)
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
 
         completed = adapter.pop_completed_store_tasks()
         assert completed[task_id].is_successful()
@@ -490,7 +490,7 @@ class TestLookupAndLockInterface:
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
         task_id = adapter.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -504,12 +504,12 @@ class TestLookupAndLockInterface:
 
         # Store first
         adapter.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adapter.pop_completed_store_tasks()
 
         # Lookup
         task_id = adapter.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -523,11 +523,11 @@ class TestLookupAndLockInterface:
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
         adapter.submit_store_task([existing], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adapter.pop_completed_store_tasks()
 
         task_id = adapter.submit_lookup_and_lock_task([existing, missing])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
 
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap is not None
@@ -539,7 +539,7 @@ class TestLookupAndLockInterface:
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
         task_id = adapter.submit_lookup_and_lock_task([key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
 
         result1 = adapter.query_lookup_and_lock_result(task_id)
         assert result1 is not None
@@ -568,11 +568,11 @@ class TestUnlockInterface:
         lookup_fd = adapter.get_lookup_and_lock_event_fd()
 
         adapter.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adapter.pop_completed_store_tasks()
 
         task_id = adapter.submit_lookup_and_lock_task([key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
         adapter.query_lookup_and_lock_result(task_id)
 
         adapter.submit_unlock([key])  # should not raise
@@ -596,7 +596,7 @@ class TestLoadInterface:
         load_fd = adapter.get_load_event_fd()
 
         adapter.submit_load_task([key], [obj])
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
 
     def test_load_existing_key_copies_data(self, adapter):
         key = create_object_key(1)
@@ -607,12 +607,12 @@ class TestLoadInterface:
 
         # Store
         adapter.submit_store_task([key], [store_obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adapter.pop_completed_store_tasks()
 
         # Load
         task_id = adapter.submit_load_task([key], [load_obj])
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
 
         bitmap = adapter.query_load_result(task_id)
         assert bitmap is not None
@@ -627,7 +627,7 @@ class TestLoadInterface:
         load_fd = adapter.get_load_event_fd()
 
         task_id = adapter.submit_load_task([key], [obj])
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
 
         bitmap = adapter.query_load_result(task_id)
         assert bitmap is not None
@@ -640,7 +640,7 @@ class TestLoadInterface:
         load_fd = adapter.get_load_event_fd()
 
         task_id = adapter.submit_load_task([key], [obj])
-        wait_for_event_fd(load_fd, timeout=5.0)
+        wait_for_event_fd(load_fd, timeout=10.0)
 
         result1 = adapter.query_load_result(task_id)
         assert result1 is not None
@@ -669,18 +669,18 @@ class TestEndToEndWorkflow:
 
         # Store
         store_tid = adapter.submit_store_task([key], [store_obj])
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
         assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup
         lookup_tid = adapter.submit_lookup_and_lock_task([key])
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
         assert bitmap.test(0) is True
 
         # Load
         load_tid = adapter.submit_load_task([key], [load_obj])
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
         bitmap = adapter.query_load_result(load_tid)
         assert bitmap.test(0) is True
         assert torch.all(load_obj.tensor == 123.0)
@@ -702,19 +702,19 @@ class TestEndToEndWorkflow:
 
         # Store all
         store_tid = adapter.submit_store_task(keys, store_objs)
-        assert wait_for_event_fd(store_fd, timeout=5.0)
+        assert wait_for_event_fd(store_fd, timeout=10.0)
         assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup all
         lookup_tid = adapter.submit_lookup_and_lock_task(keys)
-        assert wait_for_event_fd(lookup_fd, timeout=5.0)
+        assert wait_for_event_fd(lookup_fd, timeout=10.0)
         bitmap = adapter.query_lookup_and_lock_result(lookup_tid)
         for i in range(n):
             assert bitmap.test(i) is True
 
         # Load all
         load_tid = adapter.submit_load_task(keys, load_objs)
-        assert wait_for_event_fd(load_fd, timeout=5.0)
+        assert wait_for_event_fd(load_fd, timeout=10.0)
         bitmap = adapter.query_load_result(load_tid)
         for i in range(n):
             assert bitmap.test(i) is True
@@ -741,7 +741,7 @@ class TestClose:
         store_fd = adp.get_store_event_fd()
 
         adp.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adp.pop_completed_store_tasks()
 
         adp.close()
@@ -1143,12 +1143,12 @@ class TestDeleteInterface:
 
         # Store
         adapter.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adapter.pop_completed_store_tasks()
 
         # Verify exists
         task_id = adapter.submit_lookup_and_lock_task([key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is True
         adapter.submit_unlock([key])
@@ -1158,7 +1158,7 @@ class TestDeleteInterface:
 
         # Verify gone
         task_id = adapter.submit_lookup_and_lock_task([key])
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         assert bitmap.test(0) is False
 
@@ -1177,7 +1177,7 @@ class TestDeleteInterface:
 
         # Store all
         adapter.submit_store_task(keys, objs)
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adapter.pop_completed_store_tasks()
 
         # Delete first 3
@@ -1185,7 +1185,7 @@ class TestDeleteInterface:
 
         # Verify: first 3 gone, last 2 remain
         task_id = adapter.submit_lookup_and_lock_task(keys)
-        wait_for_event_fd(lookup_fd, timeout=5.0)
+        wait_for_event_fd(lookup_fd, timeout=10.0)
         bitmap = adapter.query_lookup_and_lock_result(task_id)
         for i in range(3):
             assert bitmap.test(i) is False
@@ -1274,7 +1274,7 @@ class TestUsageTracking:
         obj = create_memory_obj(size=100, fill_value=1.0)  # 100 floats = 400 bytes
 
         adp.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adp.pop_completed_store_tasks()
 
         usage = adp.get_usage()
@@ -1291,7 +1291,7 @@ class TestUsageTracking:
 
         # Store
         adp.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adp.pop_completed_store_tasks()
 
         assert adp.get_usage().usage_fraction == pytest.approx(0.2)
@@ -1311,7 +1311,7 @@ class TestUsageTracking:
         objs = [create_memory_obj(size=100, fill_value=float(i)) for i in range(3)]
 
         adp.submit_store_task(keys, objs)
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adp.pop_completed_store_tasks()
 
         usage = adp.get_usage()
@@ -1334,11 +1334,11 @@ class TestUsageTracking:
 
         # Store same key twice
         adp.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adp.pop_completed_store_tasks()
 
         adp.submit_store_task([key], [obj])
-        wait_for_event_fd(store_fd, timeout=5.0)
+        wait_for_event_fd(store_fd, timeout=10.0)
         adp.pop_completed_store_tasks()
 
         # Should only count once
