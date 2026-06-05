@@ -185,9 +185,9 @@ class TestGdsL1BackendIndex:
         yield b
         b.close()
 
-    def test_lookup_empty(self, backend):
+    def test_missing_keys_not_in_index(self, backend):
         keys = [_object_key(seed=i) for i in range(3)]
-        assert backend.lookup(keys) == [False, False, False]
+        assert all(backend.create_memory_obj_from_index(k) is None for k in keys)
 
     def test_create_and_record(self, backend):
         key = _object_key(seed=42)
@@ -196,27 +196,27 @@ class TestGdsL1BackendIndex:
         )
         assert mo is not None
         assert mo.size == 4096
-        # Not in the index until record_entry.
-        assert backend.lookup([key]) == [False]
-        backend.record_entry(mo)
-        assert backend.lookup([key]) == [True]
-        assert backend.get_hot_cache_size() == 1
+        # Not in the index until _record_entry.
+        assert backend.create_memory_obj_from_index(key) is None
+        backend._record_entry(mo)
+        assert backend.create_memory_obj_from_index(key) is not None
+        assert len(backend._index) == 1
 
     def test_free_drops_index_entry(self, backend):
         key = _object_key(seed=7)
         mo = backend.create_memory_obj(
             key=key, layout_desc=_layout(torch.Size([4096]), torch.uint8)
         )
-        backend.record_entry(mo)
+        backend._record_entry(mo)
         backend.free_entry_from_index(mo)
-        assert backend.lookup([key]) == [False]
+        assert backend.create_memory_obj_from_index(key) is None
 
     def test_create_memory_obj_from_index(self, backend):
         key = _object_key(seed=8)
         mo = backend.create_memory_obj(
             key=key, layout_desc=_layout(torch.Size([4096]), torch.uint8)
         )
-        backend.record_entry(mo)
+        backend._record_entry(mo)
         resurrected = backend.create_memory_obj_from_index(key)
         assert resurrected is not None
         assert resurrected.slab_offset == mo.slab_offset
@@ -250,7 +250,7 @@ class TestGdsL1BackendIndex:
             key=_object_key(seed=99),
             layout_desc=_layout(torch.Size([4096]), torch.uint8),
         )
-        backend.record_entry(mo)
+        backend._record_entry(mo)
         used2, total2 = backend.get_memory_usage()
         assert used2 == 4096
         assert total2 == total
@@ -271,7 +271,7 @@ class TestGdsL1BackendPersistence:
                 layout_desc=_layout(torch.Size([8192]), torch.uint8),
                 fmt=MemoryFormat.KV_2LTD,
             )
-            b1.record_entry(mo)
+            b1._record_entry(mo)
             slab_offset = mo.slab_offset
         finally:
             b1.close()
@@ -279,7 +279,6 @@ class TestGdsL1BackendPersistence:
         # Reopen over the same path.
         b2 = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
         try:
-            assert b2.lookup([key]) == [True]
             resurrected = b2.create_memory_obj_from_index(key)
             assert resurrected is not None
             assert resurrected.slab_offset == slab_offset
@@ -295,7 +294,7 @@ class TestGdsL1BackendPersistence:
             f.write("not a json document")
         b = GdsL1Backend(_make_config(gds_root), dst_device="cuda:0")
         try:
-            assert b.get_hot_cache_size() == 0
+            assert len(b._index) == 0
         finally:
             b.close()
 

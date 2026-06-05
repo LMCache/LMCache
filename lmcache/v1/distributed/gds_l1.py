@@ -599,7 +599,7 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
         if self._backend.use_gds:
             ca.register_buffer(buffer)
             # Register the backend's CUDA stream on first buffer.
-            self._backend.ensure_stream_registered()
+            self._backend._ensure_stream_registered()  # noqa: SLF001
             log_label = "cuFile"
         else:
             log_label = "POSIX fallback (no cuFile registration)"
@@ -672,7 +672,9 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                 f"cufile_read_into: chunk size {nbytes} exceeds gpu_buffer "
                 f"capacity {gpu_buffer.numel() * gpu_buffer.element_size()}"
             )
-        self._backend.slab_read(memory_obj.slab_offset, nbytes, dev_offset, base_ptr)
+        self._backend._slab_read(  # noqa: SLF001
+            memory_obj.slab_offset, nbytes, dev_offset, base_ptr
+        )
 
     def cufile_write_from(
         self,
@@ -698,8 +700,10 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                 f"cufile_write_from: chunk size {nbytes} exceeds gpu_buffer "
                 f"capacity {gpu_buffer.numel() * gpu_buffer.element_size()}"
             )
-        self._backend.slab_write(memory_obj.slab_offset, nbytes, dev_offset, base_ptr)
-        self._backend.record_entry(memory_obj)
+        self._backend._slab_write(  # noqa: SLF001
+            memory_obj.slab_offset, nbytes, dev_offset, base_ptr
+        )
+        self._backend._record_entry(memory_obj)  # noqa: SLF001
 
     # --- MemoryAllocatorInterface (mostly no-ops) -------------------
 
@@ -830,12 +834,11 @@ class GdsL1Backend:
        - Loads ``<gds_path>/lmcache_gds_index.json`` if present and
          replays the recorded entries into the address manager.
     2. Steady state:
-       - ``lookup`` checks the index.
        - ``create_memory_obj`` ``allocate``s a slab region and
          returns a :class:`GdsMemoryObj`.
-       - ``slab_read`` / ``slab_write`` submit one ``cuFileReadAsync``
+       - ``_slab_read`` / ``_slab_write`` submit one ``cuFileReadAsync``
          / ``WriteAsync`` per call, no sync.
-       - ``record_entry`` / ``free_entry_from_index`` keep the index in sync.
+       - ``_record_entry`` / ``free_entry_from_index`` keep the index in sync.
     3. ``close``: stream-syncs, writes the index file, deregisters
        the cuFile handle, closes the slab fd.
 
@@ -889,7 +892,7 @@ class GdsL1Backend:
         self._posix_fd: int = -1
         self._cudart: Optional[ctypes.CDLL] = None
         # The torch CUDA stream the async ops run on, registered once via
-        # ``ensure_stream_registered`` and held for the backend's lifetime.
+        # ``_ensure_stream_registered`` and held for the backend's lifetime.
         # Kept in two forms: ``_registered_stream`` is the torch ``Stream``
         # object (for recording events); ``_registered_stream_handle`` is the
         # raw ``CUstream`` int (for cuFile's C API).
@@ -924,11 +927,6 @@ class GdsL1Backend:
         )
 
     # --- Public API -------------------------------------------------
-
-    def lookup(self, keys: list[ObjectKey]) -> list[bool]:
-        """Return whether each key is in the slab's index."""
-        with self._index_lock:
-            return [k in self._index for k in keys]
 
     def create_memory_obj(
         self,
@@ -1015,7 +1013,7 @@ class GdsL1Backend:
         """
         return self._address_manager.used_bytes(), self._slab_size
 
-    def record_entry(self, memory_obj: GdsMemoryObj) -> None:
+    def _record_entry(self, memory_obj: GdsMemoryObj) -> None:
         """Insert ``memory_obj`` into the in-memory index.
 
         Called by ``GdsScratchAllocator.cufile_write_from`` after the
@@ -1027,7 +1025,7 @@ class GdsL1Backend:
         """
         if memory_obj.meta.dtype is None:
             raise RuntimeError(
-                f"GdsL1Backend.record_entry: memory_obj.meta.dtype is None for "
+                f"GdsL1Backend._record_entry: memory_obj.meta.dtype is None for "
                 f"key {memory_obj.key}"
             )
         entry = _IndexEntry(
@@ -1102,7 +1100,7 @@ class GdsL1Backend:
             if not event.query()
         ]
 
-    def slab_read(
+    def _slab_read(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
     ) -> None:
         """Submit one ``cuFileReadAsync`` against the slab handle.
@@ -1125,10 +1123,10 @@ class GdsL1Backend:
             self._posix_slab_read(slab_offset, size, dev_offset, buf_base)
             return
         if self._slab_handle is None:
-            raise RuntimeError("GdsL1Backend.slab_read: slab handle not open")
+            raise RuntimeError("GdsL1Backend._slab_read: slab handle not open")
         if self._registered_stream_handle is None:
             raise RuntimeError(
-                "GdsL1Backend.slab_read: cuFile stream not registered; "
+                "GdsL1Backend._slab_read: cuFile stream not registered; "
                 "call register_gpu_buffer first"
             )
         sub = self._slab_handle.read_async(
@@ -1140,7 +1138,7 @@ class GdsL1Backend:
         )
         self._record_submission(sub)
 
-    def slab_write(
+    def _slab_write(
         self, slab_offset: int, size: int, dev_offset: int, buf_base: int
     ) -> None:
         """Submit one ``cuFileWriteAsync`` against the slab handle.
@@ -1157,10 +1155,10 @@ class GdsL1Backend:
             self._posix_slab_write(slab_offset, size, dev_offset, buf_base)
             return
         if self._slab_handle is None:
-            raise RuntimeError("GdsL1Backend.slab_write: slab handle not open")
+            raise RuntimeError("GdsL1Backend._slab_write: slab handle not open")
         if self._registered_stream_handle is None:
             raise RuntimeError(
-                "GdsL1Backend.slab_write: cuFile stream not registered; "
+                "GdsL1Backend._slab_write: cuFile stream not registered; "
                 "call register_gpu_buffer first"
             )
         sub = self._slab_handle.write_async(
@@ -1208,7 +1206,7 @@ class GdsL1Backend:
             self._posix_fd = -1
         logger.info("GdsL1Backend: closed")
 
-    def ensure_stream_registered(self) -> None:
+    def _ensure_stream_registered(self) -> None:
         """Register the caller's current torch CUDA stream with cuFile.
 
         Idempotent: the first call records the stream that
@@ -1236,11 +1234,6 @@ class GdsL1Backend:
             ca.register_stream(raw_stream)
             self._registered_stream_handle = raw_stream
             self._registered_stream = current_stream
-
-    def get_hot_cache_size(self) -> int:
-        """Number of resident keys. Used by tests + ``gds-check``."""
-        with self._index_lock:
-            return len(self._index)
 
     # --- Internal ---------------------------------------------------
 
