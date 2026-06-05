@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import os
 import sys
 
@@ -448,6 +448,7 @@ if __name__ == "__main__":
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     # NO_GPU_EXT skips GPU-vendor deps (cupy / nixl).
     if not NO_GPU_EXT:
+        core_file: Optional[str]
         if BUILD_WITH_HIP:
             core_file = "rocm_core.txt"
         elif BUILD_WITH_SYCL:

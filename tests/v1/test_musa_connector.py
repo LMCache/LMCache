@@ -3,20 +3,21 @@
 
 # Standard
 from types import SimpleNamespace
+from typing import cast
 
 # Third Party
 import pytest
 import torch
 
 # First Party
-import lmcache.c_ops as lmc_ops
 from lmcache.v1.gpu_connector.musa_connectors import VLLMPagedMemMUSAConnectorV2
-from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj, PinMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from tests.v1.utils import (
     check_paged_kv_cache_equal,
     generate_kv_cache_paged_list_tensors,
 )
+import lmcache.c_ops as lmc_ops
 
 
 def _skip_if_no_musa() -> None:
@@ -170,9 +171,12 @@ def test_musa_connector_to_gpu_skips_vllm_cached_prefix(
         dtype=torch.float32,
     ).reshape(2, num_layers, end - start, hidden_dim)
     memory_tensor = memory_tensor.to(torch.bfloat16)
-    memory_obj = SimpleNamespace(
-        tensor=memory_tensor,
-        metadata=SimpleNamespace(fmt=MemoryFormat.KV_2LTD),
+    memory_obj = cast(
+        MemoryObj,
+        SimpleNamespace(
+            tensor=memory_tensor,
+            metadata=SimpleNamespace(fmt=MemoryFormat.KV_2LTD),
+        ),
     )
     slot_mapping = torch.tensor(
         [-1, -1, -1, -1, -1, -1, 6, 7],
@@ -239,15 +243,18 @@ def test_musa_connector_rejects_unsupported_kv_layout(
             dtype=torch.bfloat16,
         )
     ]
-    memory_obj = SimpleNamespace(
-        tensor=torch.zeros(
-            2,
-            num_layers,
-            block_size,
-            hidden_dim,
-            dtype=torch.bfloat16,
+    memory_obj = cast(
+        MemoryObj,
+        SimpleNamespace(
+            tensor=torch.zeros(
+                2,
+                num_layers,
+                block_size,
+                hidden_dim,
+                dtype=torch.bfloat16,
+            ),
+            metadata=SimpleNamespace(fmt=MemoryFormat.KV_2LTD),
         ),
-        metadata=SimpleNamespace(fmt=MemoryFormat.KV_2LTD),
     )
 
     with pytest.raises(ValueError, match="VLLMPagedMemMUSAConnectorV2 supports"):

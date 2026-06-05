@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union, cast
 
 # Third Party
 import torch
@@ -219,9 +219,11 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
 
     def batched_to_gpu(
         self,
-        memory_objs: List[MemoryObj],
-        starts: List[int],
-        ends: List[int],
+        memory_objs: Union[
+            List[List[MemoryObj]], List[MemoryObj], List[int], None
+        ] = None,
+        starts: Optional[List[int]] = None,
+        ends: Optional[List[int]] = None,
         **kwargs: Any,
     ) -> None:
         """Store multiple memory objects into MUSA paged KV caches.
@@ -232,7 +234,13 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             ends: End offsets for each memory object.
             **kwargs: Arguments forwarded to :meth:`to_gpu`.
         """
-        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+        if memory_objs is None or starts is None or ends is None:
+            raise ValueError("memory_objs, starts, and ends should be provided.")
+
+        typed_memory_objs = cast(List[MemoryObj], memory_objs)
+        for memory_obj, start, end in zip(
+            typed_memory_objs, starts, ends, strict=False
+        ):
             self.to_gpu(memory_obj, start, end, **kwargs)
 
     def get_shape(self, num_tokens: int) -> torch.Size:
