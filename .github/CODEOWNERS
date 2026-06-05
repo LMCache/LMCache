@@ -51,7 +51,7 @@
 
 # Integration
 /lmcache/integration/vllm/             @sammshen @maobaolong @YaoJiayi @deng451e @hlin99
-/lmcache/integration/sglang/           @OasisGit @DongDongJu @sammshen
+/lmcache/integration/sglang/           @OasisGit @DongDongJu @sammshen @Shaoting-Feng
 /lmcache/integration/tensorrt_llm/     @sammshen
 
 # Non-CUDA equivalents

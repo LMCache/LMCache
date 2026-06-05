@@ -75,7 +75,7 @@ def wait_for_prefetch_status(
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
         if result is not None:
-            return result
+            return result.count_leading_ones()
         time.sleep(poll_interval)
     return None
 

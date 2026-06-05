@@ -8,6 +8,8 @@ Configuration for the multiprocess (ZMQ) server and HTTP frontend.
 from dataclasses import dataclass, field
 import argparse
 import json
+import math
+import os
 
 
 @dataclass
@@ -39,13 +41,25 @@ class MPServerConfig:
 
     engine_type: str = "default"
     """Cache engine backend type
-    ('default' for MPCacheEngine, 'blend' for BlendEngineV2).
+    ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
+
+    supported_transfer_mode: str = "auto"
+    """Transfer mode: 'gpu' for GPU-based IPC transfer (STORE/RETRIEVE),
+    'non_gpu' for non-GPU-based transfer (PREPARE/COMMIT), or 'auto' to
+    enable both."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
     )
     """Runtime plugin configuration (locations + extra config)."""
+
+    shm_name: str | None = None
+    """SHM segment name for non-GPU KV transfer.
+    None: auto-allocate (default). "": force pickle. Other: use that name."""
+
+    script_allowed_imports: list[str] = field(default_factory=list)
+    """Modules that /run_script endpoint is allowed to import."""
 
 
 @dataclass
@@ -77,6 +91,31 @@ class HTTPFrontendConfig:
 
 
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
+
+
+@dataclass
+class CoordinatorConfig:
+    """Configuration for joining an MP coordinator (registrant side).
+
+    Consumed by the HTTP server's lifespan to start the registration task.
+    When :attr:`url` is empty, the server registers with no coordinator and
+    runs exactly as before.
+    """
+
+    url: str = ""
+    """Coordinator base URL, e.g. ``http://coordinator:9300``. Empty disables
+    registration."""
+
+    advertise_ip: str = ""
+    """IP the coordinator should reach this server at. Empty defers to the
+    server's outbound IP (resolved by the registrar)."""
+
+    heartbeat_interval: float = 5.0
+    """Seconds between heartbeats. Must be strictly positive and kept well below
+    the coordinator's ``INSTANCE_TIMEOUT``."""
+
+
+DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
 
 
 def add_mp_server_args(
@@ -145,10 +184,20 @@ def add_mp_server_args(
         "--engine-type",
         type=str,
         default="default",
-        choices=["default", "blend"],
-        help="Cache engine backend type. 'default' uses MPCacheEngine, "
-        "'blend' uses BlendEngineV2 for cross-request KV reuse. "
-        "Default is 'default'.",
+        choices=["default", "blend", "blend_legacy"],
+        help="Cache engine backend type. 'default' uses standard prefix caching; "
+        "'blend' selects CacheBlend V3 (the current implementation); "
+        "'blend_legacy' selects the original CacheBlend. Default is 'default'.",
+    )
+    mp_group.add_argument(
+        "--supported-transfer-mode",
+        type=str,
+        default="auto",
+        choices=["gpu", "non_gpu", "auto"],
+        help="Supported transfer mode: 'gpu' for GPU-based IPC transfer "
+        "(STORE/RETRIEVE), 'non_gpu' for non-GPU-based transfer "
+        "(PREPARE/COMMIT), or 'auto' to enable both transfer paths. "
+        "Default is 'auto'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",
@@ -166,6 +215,23 @@ def add_mp_server_args(
         "plugins via LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG. "
         'Example: \'{"plugin.frontend.heartbeat_url": '
         '"http://localhost:5000/heartbeat"}\'',
+    )
+    mp_group.add_argument(
+        "--shm-name",
+        type=str,
+        default=None,
+        help="SHM segment name for non-GPU KV transfer. "
+        "Default (not specified): auto-allocate. "
+        'Set to "" to force pickle path (disable SHM). '
+        "Set to a name to use that specific SHM segment.",
+    )
+    mp_group.add_argument(
+        "--script-allowed-imports",
+        type=str,
+        nargs="*",
+        default=[],
+        help="Python modules that the /run_script endpoint is allowed to "
+        "import. Example: --script-allowed-imports numpy pandas",
     )
     return parser
 
@@ -198,10 +264,13 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),
             extra_config=plugin_extra,
         ),
+        shm_name=args.shm_name,
+        script_allowed_imports=args.script_allowed_imports or [],
     )
 
 
@@ -250,4 +319,102 @@ def parse_args_to_http_frontend_config(
     return HTTPFrontendConfig(
         http_host=args.http_host,
         http_port=args.http_port,
+    )
+
+
+def add_coordinator_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    """Add MP coordinator registration arguments to an existing parser.
+
+    Each flag falls back to its ``LMCACHE_COORDINATOR_*`` environment variable
+    so the server can be configured either way (the env var is convenient for
+    the Kubernetes downward API); an explicit flag wins over the env var.
+
+    Args:
+        parser: The argument parser to add arguments to.
+
+    Returns:
+        The same parser with coordinator arguments added.
+    """
+    group = parser.add_argument_group(
+        "Coordinator", "Configuration for joining an MP coordinator"
+    )
+    group.add_argument(
+        "--coordinator-url",
+        type=str,
+        default=None,
+        help="Coordinator base URL (e.g. http://coordinator:9300). When set, "
+        "this server registers, heartbeats, and deregisters on shutdown. "
+        "Defaults to LMCACHE_COORDINATOR_URL; unset disables registration.",
+    )
+    group.add_argument(
+        "--coordinator-advertise-ip",
+        type=str,
+        default=None,
+        help="IP the coordinator should reach this server at. Defaults to "
+        "LMCACHE_COORDINATOR_ADVERTISE_IP, then the server's outbound IP.",
+    )
+    group.add_argument(
+        "--coordinator-heartbeat-interval",
+        type=float,
+        default=None,
+        help="Seconds between heartbeats (must be > 0). Defaults to "
+        "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL, then 5.0.",
+    )
+    return parser
+
+
+def parse_args_to_coordinator_config(
+    args: argparse.Namespace,
+) -> CoordinatorConfig:
+    """Convert parsed command line arguments to a CoordinatorConfig.
+
+    A flag value takes precedence over its environment variable. The heartbeat
+    interval is validated here so a malformed value fails fast at startup
+    (runtime best-effort only covers coordinator *reachability*, not config).
+
+    Args:
+        args: Parsed arguments from the argument parser.
+
+    Returns:
+        The configuration object.
+
+    Raises:
+        ValueError: If the heartbeat interval is not a positive number.
+    """
+    url = (
+        args.coordinator_url
+        if args.coordinator_url is not None
+        else os.getenv("LMCACHE_COORDINATOR_URL", "")
+    )
+    advertise_ip = (
+        args.coordinator_advertise_ip
+        if args.coordinator_advertise_ip is not None
+        else os.getenv("LMCACHE_COORDINATOR_ADVERTISE_IP", "")
+    )
+    if args.coordinator_heartbeat_interval is not None:
+        heartbeat_interval = args.coordinator_heartbeat_interval
+    else:
+        raw = os.getenv("LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL")
+        if raw:
+            try:
+                heartbeat_interval = float(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL is not a number: %r" % raw
+                ) from exc
+        else:
+            heartbeat_interval = 5.0
+    if not math.isfinite(heartbeat_interval) or heartbeat_interval <= 0:
+        # Reject inf/nan too: inf would register once then sleep forever
+        # (never heartbeat), and nan has undefined sleep behavior.
+        raise ValueError(
+            "coordinator heartbeat interval must be a finite number > 0, "
+            "got %s" % heartbeat_interval
+        )
+    return CoordinatorConfig(
+        url=url,
+        advertise_ip=advertise_ip,
+        heartbeat_interval=heartbeat_interval,
     )

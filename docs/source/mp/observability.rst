@@ -151,14 +151,15 @@ L1 Metrics
      - Type
      - Description
    * - ``lmcache_mp.l1_read``
-     - Counter
-     - Number of chunks read from L1.
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks read from L1, grouped by tenant.
    * - ``lmcache_mp.l1_write``
-     - Counter
-     - Number of chunks written to L1.
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks written to L1, grouped by tenant.
    * - ``lmcache_mp.l1_evicted``
-     - Counter
-     - Number of chunks evicted by the EvictionController.
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks evicted by the EvictionController, grouped by
+       tenant.
    * - ``lmcache_mp.l1_eviction_loop_ticks``
      - Counter
      - L1 eviction-loop iterations (every cycle, regardless of whether
@@ -248,20 +249,21 @@ L2 Metrics
      - Counter
      - Number of L2 store requests submitted.
    * - ``lmcache_mp.l2_store_submitted_objects``
-     - Counter
-     - Number of chunks submitted for L2 store.
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks submitted for L2 store, grouped by tenant.
    * - ``lmcache_mp.l2_store_completed``
      - Counter (attr: ``l2_name``)
      - Number of L2 store requests completed, labeled by adapter type.
    * - ``lmcache_mp.l2_store_completed_objects``
-     - Counter
-     - Number of chunks successfully stored to L2.
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks successfully stored to L2, grouped by tenant.
    * - ``lmcache_mp.l2_prefetch_lookup``
      - Counter
      - Number of L2 prefetch lookup requests.
    * - ``lmcache_mp.l2_prefetch_lookup_objects``
-     - Counter
-     - Number of chunks submitted for L2 prefetch lookup.
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks submitted for L2 prefetch lookup, grouped by
+       tenant.
    * - ``lmcache_mp.l2_prefetch_hit``
      - Counter
      - Number of prefix chunks found in L2 lookup.
@@ -269,14 +271,17 @@ L2 Metrics
      - Counter
      - Number of L2 prefetch load requests submitted.
    * - ``lmcache_mp.l2_prefetch_load_submitted_objects``
-     - Counter
-     - Number of chunks submitted for L2 load.
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks submitted for L2 load, grouped by tenant.
    * - ``lmcache_mp.l2_prefetch_load_completed``
-     - Counter
-     - Number of chunks successfully loaded from L2.
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks successfully loaded from L2, grouped by tenant.
    * - ``lmcache_mp.l2_load_completed``
      - Counter (attr: ``l2_name``)
      - Number of per-adapter L2 load requests completed, labeled by adapter type.
+   * - ``lmcache_mp.l2_evicted_objects``
+     - Counter (attr: ``cache_salt``)
+     - Number of chunks evicted from L2, grouped by tenant.
 
 The ``l2_name``-labeled counters (``l2_store_completed`` and
 ``l2_load_completed``) exist so dashboards can compute per-backend IOPS on
@@ -540,6 +545,18 @@ Adapters with no in-flight work emit no datapoint for that scrape.
        the callback never raises during a scrape. Compare against the
        eviction watermark (default ``0.8``) to read whether the
        eviction loop is below or above its trigger threshold.
+   * - ``lmcache_mp.l2_usage_bytes``
+     - ObservableGauge (attr: ``l2_name``)
+     - Bytes currently held in each L2 adapter, sampled at scrape time
+       from ``adapter.get_usage()``.  One observation per configured
+       adapter, tagged by ``l2_name`` (the adapter type, e.g. ``"fs"``,
+       ``"nixl_store"``, ``"mooncake_store"``).  Parallel to
+       ``l1_memory_usage_bytes`` for the L2 tier — use it to see how
+       much each L2 backend currently holds.  Adapters whose
+       ``get_usage()`` raises are skipped silently rather than poisoning
+       the observation, so a missing datapoint for one ``l2_name`` can
+       mean either "not configured" or "adapter errored on this
+       scrape" — cross-check with the L2 store/load counters.
    * - ``lmcache_mp.num_inflight_l2_stores``
      - ObservableGauge (attrs: ``l2_name``, ``adapter_index``)
      - L2 store tasks currently executing, per adapter.  Sustained

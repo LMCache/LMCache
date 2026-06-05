@@ -8,7 +8,7 @@ on:
       max_entries:
         description: "Maximum entries to translate in this run"
         required: false
-        default: "10"
+        default: "50"
 
 concurrency:
     group: update-chinese-docs
@@ -43,10 +43,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements/docs.txt
 
+      - name: Reuse translations from open PR
+        run: |
+          if git fetch origin automation/update-chinese-docs 2>/dev/null; then
+            git checkout FETCH_HEAD -- docs/source/locale/zh_CN/LC_MESSAGES/ || true
+          fi
+
       - name: Update gettext catalogs
         run: |
           sphinx-build -b gettext docs/source docs/build/gettext
           sphinx-intl update -p docs/build/gettext -l zh_CN -d docs/source/locale -j 1
+
+      - name: Delete translations for renamed or removed docs
+        run: |
+          find docs/source/locale/zh_CN/LC_MESSAGES -name '*.po' | while read -r po; do
+            rel="${po#docs/source/locale/zh_CN/LC_MESSAGES/}"
+            if [ ! -f "docs/build/gettext/${rel%.po}.pot" ]; then
+              echo "deleting $po (no matching source doc)"
+              git rm -fq --ignore-unmatch "$po"
+            fi
+          done
 
       - name: Translate missing Chinese entries
         env:
@@ -70,7 +86,7 @@ jobs:
           delete-branch: true
           signoff: true
           add-paths: |
-            docs/source/locale/zh_CN/LC_MESSAGES/**/*.po
+            docs/source/locale/zh_CN/LC_MESSAGES
           commit-message: "Update Chinese documentation translations"
           title: "Update Chinese documentation translations"
           body: |

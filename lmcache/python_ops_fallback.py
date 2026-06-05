@@ -5,11 +5,14 @@
 #
 # Standard
 from concurrent.futures import ThreadPoolExecutor
-from enum import Enum, IntEnum
+from enum import IntEnum
 from multiprocessing import shared_memory
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 import ctypes
 import ctypes.util
+import os
+import threading
+import warnings
 
 # Third Party
 from numba import njit
@@ -241,8 +244,14 @@ def _copy_bytes_with_tensor(dst: int, src: int, num_bytes: int) -> None:
     dst_tensor.copy_(src_tensor)
 
 
-class TransferDirection(Enum):
-    """Specifies the direction of a memory transfer."""
+class TransferDirection(IntEnum):
+    """Specifies the direction of a memory transfer.
+
+    Inherits from IntEnum so that members compare equal to plain ints
+    and to native pybind11 enum members with the same integer value.
+    Several call sites (and the fallback ops themselves) use
+    ``int(direction)`` to compare across backend / fallback boundaries.
+    """
 
     H2D = 0
     D2H = 1
@@ -278,6 +287,9 @@ class GPUKVFormat(IntEnum):
     # used by: TRT-LLM cross-layer (HND layout)
     NB_NL_TWO_NH_BS_HS = 8
 
+    # used by: SGLang MHA via the MP daemon path
+    TWO_X_NL_X_NB_BS_NH_HS = 9
+
 
 class PageBufferShapeDesc:
     """Python stand-in for the C++ ``PageBufferShapeDesc`` struct.
@@ -306,6 +318,7 @@ class PageBufferShapeDesc:
         "hs",
         "element_size",
         "block_stride_elems",
+        "dtype",
     )
 
     def __init__(self) -> None:
@@ -319,6 +332,59 @@ class PageBufferShapeDesc:
         # 0 means "unset — fall back to tight stride"; any downstream
         # consumer that needs exact addressing must check this.
         self.block_stride_elems: int = 0
+        self.dtype: torch.dtype | None = None
+
+
+def set_shape_desc_dtype(shape_desc: Any, dtype: torch.dtype) -> None:
+    """Best-effort ``shape_desc.dtype = dtype``.
+
+    The pure-Python ``PageBufferShapeDesc`` exposes a ``dtype`` slot so
+    the CPU fallback kernel can disambiguate float16 vs bfloat16 (both
+    have ``element_size == 2``). The pybind C++ struct in
+    ``csrc/pybind.cpp`` has no such field; assignment raises
+    ``AttributeError`` and is silently swallowed here so call sites
+    don't need to branch on the active backend.
+
+    Args:
+        shape_desc: A ``PageBufferShapeDesc`` instance (either the
+            pure-Python fallback or the C++ pybind struct).
+        dtype: The torch dtype to assign.
+    """
+    try:
+        shape_desc.dtype = dtype
+    except AttributeError:
+        pass
+
+
+# Cuda path goes through func cudaHostAlloc, which is
+# already page aligned by CUDA spec. This fallback shim mirrors that
+# guarantee so consumers that require page-aligned host buffers, in
+# particular the Rust raw-block backend when O_DIRECT is enabled, which
+# requires page-aligned buffer pointer
+try:
+    _PAGE_SIZE = os.sysconf("SC_PAGESIZE")
+except (AttributeError, ValueError, OSError):
+    _PAGE_SIZE = 4096
+
+
+def _alloc_page_aligned_pinned_view(size: int) -> Tuple[torch.Tensor, int]:
+    """
+    Allocate a pinned CPU buffer whose first usable byte is page-aligned,
+    and return a torch view of ``size`` bytes plus its base pointer.
+
+    Internally over-allocates one extra page on a backing tensor, then
+    slices the aligned region out. The slice shares storage with the
+    backing tensor, so keeping the slice alive keeps the underlying
+    memory alive (no need to track the backing tensor separately).
+    """
+    backing = torch.empty(size + _PAGE_SIZE, dtype=torch.uint8, pin_memory=False)
+    # First-touch initialization on the entire backing region
+    backing.fill_(0)
+    base = backing.data_ptr()
+    # Distance from `base` to the next page boundary (0..PAGE_SIZE-1).
+    offset = (-base) % _PAGE_SIZE
+    aligned_view = backing[offset : offset + size]
+    return aligned_view, aligned_view.data_ptr()
 
 
 def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
@@ -326,20 +392,12 @@ def alloc_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
     On XPU, uses pin_memory=True (SYCL USM host allocation) for fast transfers.
     Note: NUMA node selection is not supported on non-CUDA."""
 
-    # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
-
-    # First-touch initialization (forces physical allocation)
-    tensor.fill_(0)
-
-    # Get a pointer to the start of the tensor object as this is what is
-    # returned by the CUDA equivalent function
-    ptr = tensor.data_ptr()
-
-    # Store the tensor so it can be accessed outide this function scope
-    _tensor_registry[ptr] = tensor
-
-    return ptr
+    view, aligned_ptr = _alloc_page_aligned_pinned_view(size)
+    # view shares storage with its over-allocated backing tensor;
+    # holding the view in the registry transitively keeps the underlying
+    # memory alive.
+    _tensor_registry[aligned_ptr] = view
+    return aligned_ptr
 
 
 def free_pinned_numa_ptr(ptr: int, size: int | None = None) -> None:
@@ -354,20 +412,9 @@ def alloc_pinned_ptr(size: int, device_id: int = 0) -> int:
     to it. On XPU, uses pin_memory=True (SYCL USM host allocation) for
     fast DMA transfers. On other non-CUDA platforms, pinning is not supported."""
 
-    # Create a 1D uint8 CPU tensor, as uint8 == 1 byte
-    tensor = torch.empty(size, dtype=torch.uint8, pin_memory=False)
-
-    # First-touch initialization (forces physical allocation)
-    tensor.fill_(0)
-
-    # Get a pointer to the start of the tensor object as this is what is
-    # returned by the CUDA equivalent function
-    ptr = tensor.data_ptr()
-
-    # Store the tensor so it can be accessed outide this function scope
-    _tensor_registry[ptr] = tensor
-
-    return ptr
+    view, aligned_ptr = _alloc_page_aligned_pinned_view(size)
+    _tensor_registry[aligned_ptr] = view
+    return aligned_ptr
 
 
 def free_pinned_ptr(ptr: int) -> None:
@@ -438,6 +485,42 @@ def free_shm_pinned_ptr(ptr: int, size: int = 0, shm_name: str = "") -> None:
         shm.unlink()
 
 
+# Hugepage variants: non-CUDA platforms do not support hugepages, so these
+# fall back to the same regular pinned allocation.
+
+
+def alloc_hugepage_pinned_ptr(size: int, device_id: int = 0) -> int:
+    """Non-CUDA fallback for alloc_hugepage_pinned_ptr (no hugepage support)."""
+    warnings.warn(
+        "Hugepages requested but not available on non-CUDA platforms; "
+        "falling back to regular allocation.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return alloc_pinned_ptr(size, device_id)
+
+
+def free_hugepage_pinned_ptr(ptr: int, size: int = 0) -> None:
+    """Non-CUDA fallback for free_hugepage_pinned_ptr (no hugepage support)."""
+    free_pinned_ptr(ptr)
+
+
+def alloc_hugepage_pinned_numa_ptr(size: int, numa_id: int = 0) -> int:
+    """Non-CUDA fallback for alloc_hugepage_pinned_numa_ptr (no hugepage support)."""
+    warnings.warn(
+        "Hugepages requested but not available on non-CUDA platforms; "
+        "falling back to regular allocation.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return alloc_pinned_numa_ptr(size, numa_id)
+
+
+def free_hugepage_pinned_numa_ptr(ptr: int, size: int = 0) -> None:
+    """Non-CUDA fallback for free_hugepage_pinned_numa_ptr (no hugepage support)."""
+    free_pinned_numa_ptr(ptr, size)
+
+
 def alloc_numa_ptr(size: int, numa_id: int = 0) -> int:
     """Non-CUDA equivalent of allocating numa memory and returning pointer
     to it. Note: Numa memory is not supported on non-CUDA."""
@@ -472,9 +555,9 @@ def multi_layer_kv_transfer(
 
     # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
     # NL_X_NB_TWO_NH_BS_HS) as next step.
-    if gpu_kv_format in (
-        GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
-        GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
+    if int(gpu_kv_format) in (
+        int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS),
+        int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS),
     ):
         raise NotImplementedError(
             "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
@@ -502,11 +585,11 @@ def multi_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     # 2. Determine architecture variant and tensor dimensions.
-    is_mla = gpu_kv_format in (
-        GPUKVFormat.NL_X_NB_BS_HS,
-        GPUKVFormat.NL_X_NBBS_ONE_HS,
+    is_mla = int(gpu_kv_format) in (
+        int(GPUKVFormat.NL_X_NB_BS_HS),
+        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
     )
-    is_flash_infer = gpu_kv_format == GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
+    is_flash_infer = int(gpu_kv_format) == int(GPUKVFormat.NL_X_NB_TWO_BS_NH_HS)
 
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
@@ -544,7 +627,7 @@ def multi_layer_kv_transfer(
         if is_mla:
             # Paged layout : [page_buffer_size, hidden_size]
             # key_value layout: [1, num_layers, num_tokens, hidden_size]
-            if direction == TransferDirection.H2D:
+            if int(direction) == int(TransferDirection.H2D):
                 lmc_valid = key_value[0, layer_id, valid_mask_kv, :]
                 paged_tensor.index_copy_(
                     0, valid_slots, lmc_valid.to(paged_tensor.device)
@@ -557,7 +640,7 @@ def multi_layer_kv_transfer(
         elif is_flash_infer:
             # Paged layout : [num_blocks, 2, block_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]
-            if direction == TransferDirection.H2D:
+            if int(direction) == int(TransferDirection.H2D):
                 lmc_valid = key_value[:, layer_id, valid_mask_kv, :]
                 src_data = lmc_valid.transpose(0, 1).to(paged_memory_device)
                 # src_data: [num_valid, 2, hidden_size]
@@ -571,7 +654,7 @@ def multi_layer_kv_transfer(
         else:
             # Paged layout : [2, page_buffer_size, hidden_size]
             # key_value layout: [2, num_layers, num_tokens, hidden_size]
-            if direction == TransferDirection.H2D:
+            if int(direction) == int(TransferDirection.H2D):
                 lmc_valid = key_value[:, layer_id, valid_mask_kv, :]
                 paged_tensor.index_copy_(
                     1, valid_slots, lmc_valid.to(paged_memory_device)
@@ -613,9 +696,9 @@ def multi_layer_kv_transfer_unilateral(
         H2D = LMCache  -> PagedBuffer
         D2H = PagedBuffer -> LMCache
     """
-    is_mla = gpu_kv_format in (
-        GPUKVFormat.NL_X_NB_BS_HS,
-        GPUKVFormat.NL_X_NBBS_ONE_HS,
+    is_mla = int(gpu_kv_format) in (
+        int(GPUKVFormat.NL_X_NB_BS_HS),
+        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
     )
 
     # MLA case collapses back to multi_layer_kv_transfer
@@ -631,7 +714,6 @@ def multi_layer_kv_transfer_unilateral(
             gpu_kv_format,
             0,  # block_size unused for MLA formats
         )
-
     # ── Non-MLA path: unilateral (separate K/V buffers per layer) ──
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
@@ -656,7 +738,7 @@ def multi_layer_kv_transfer_unilateral(
                     ptr, layer_shape, key_value.dtype, paged_memory_device
                 )
 
-            if direction == TransferDirection.H2D:
+            if int(direction) == int(TransferDirection.H2D):
                 lmc_valid = key_value[kv_idx, layer_id, valid_mask_kv, :]
                 paged_tensor.index_copy_(
                     0, valid_slots, lmc_valid.to(paged_memory_device)
@@ -709,9 +791,9 @@ def single_layer_kv_transfer(
     valid_token_indices = torch.nonzero(valid_mask_kv, as_tuple=True)[0]
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
-    is_mla = gpu_kv_format in (
-        GPUKVFormat.NL_X_NB_BS_HS,
-        GPUKVFormat.NL_X_NBBS_ONE_HS,
+    is_mla = int(gpu_kv_format) in (
+        int(GPUKVFormat.NL_X_NB_BS_HS),
+        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
     )
 
     if is_mla:
@@ -722,7 +804,7 @@ def single_layer_kv_transfer(
         block_indices = valid_slots // block_size
         block_offsets = valid_slots % block_size
 
-        if direction == TransferDirection.D2H:
+        if int(direction) == int(TransferDirection.D2H):
             # vLLM -> LMCache
             lmc_key_value_cache[valid_token_indices] = vllm_key_value_cache[
                 block_indices, block_offsets
@@ -736,7 +818,7 @@ def single_layer_kv_transfer(
     else:
         # ── Non-MLA format ──
         # Determine vLLM layout and block_size
-        is_two_major = gpu_kv_format == GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+        is_two_major = int(gpu_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS)
         # flash attn:
         #   [2, num_blocks, block_size, num_heads, head_size]
         #   -> dim2 = block_size
@@ -750,7 +832,7 @@ def single_layer_kv_transfer(
         block_offsets = valid_slots % block_size
 
         for kv in range(2):
-            if direction == TransferDirection.D2H:
+            if int(direction) == int(TransferDirection.D2H):
                 if is_two_major:
                     gathered = vllm_key_value_cache[kv, block_indices, block_offsets]
                 else:
@@ -832,7 +914,7 @@ def single_layer_kv_transfer_sgl(
         lmc_v = lmc_key_value_cache[1, :, :]
 
     # 4. Perform the transfer
-    if direction == TransferDirection.H2D:
+    if int(direction) == int(TransferDirection.H2D):
         # --- Direction: LMCache to SGLang (Paged Buffer) ---
         # Reshape LMC flat tensors to match SGL [num_heads, head_size]
         src_k_reshaped = (
@@ -1003,7 +1085,7 @@ def lmcache_memcpy_async(
         raise ValueError("host_buffer_alignments must be power of two")
 
     # 2. Validate direction
-    if direction not in (TransferDirection.H2D, TransferDirection.D2H):
+    if int(direction) not in (int(TransferDirection.H2D), int(TransferDirection.D2H)):
         raise ValueError(f"Unsupported direction: {direction}")
 
     # 3. Tensor-backed mode.
@@ -1465,3 +1547,88 @@ def get_gpu_pci_bus_id(device_id: int = 0) -> str | None:
         pass
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Completion recorder fallback (no CUDA stream ordering; enqueue immediately)
+# ---------------------------------------------------------------------------
+
+_completion_lock = threading.Lock()
+_completion_buffer: list[tuple[str, bytes]] = []
+
+
+def record_completion_on_stream(
+    cuda_stream_ptr: int, kind: str, payload: bytes
+) -> None:
+    """Fallback: immediately enqueue the completion without stream ordering.
+
+    Args:
+        cuda_stream_ptr: Ignored on non-CUDA path.
+        kind: Dispatch key identifying the handler (e.g. "finish_write").
+        payload: Opaque msgpack-encoded bytes forwarded to the handler.
+    """
+    with _completion_lock:
+        _completion_buffer.append((kind, payload))
+
+
+def drain_recorded_completions() -> list[tuple[str, bytes]]:
+    """Fallback: atomically drain and return all pending completions.
+
+    Returns:
+        List of (kind, payload) pairs recorded since the last drain.
+    """
+    with _completion_lock:
+        items = list(_completion_buffer)
+        _completion_buffer.clear()
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Event recorder fallback (no CUDA stream ordering; timestamp immediately)
+# ---------------------------------------------------------------------------
+
+_event_lock = threading.Lock()
+_event_buffer: list[tuple[str, str, float, dict[str, str], dict[str, int]]] = []
+
+
+def record_event_on_stream(
+    cuda_stream_ptr: int,
+    event_type_name: str,
+    session_id: str,
+    str_metadata: dict[str, str],
+    int_metadata: dict[str, int],
+) -> None:
+    """Fallback: immediately record the event without CUDA stream ordering.
+
+    The wall-clock timestamp is captured at call time (no host-callback).
+
+    Args:
+        cuda_stream_ptr: Ignored on non-CUDA path.
+        event_type_name: Event type identifier (e.g. "mp.store.start").
+        session_id: Session identifier for the event.
+        str_metadata: String-valued metadata dict.
+        int_metadata: Integer-valued metadata dict.
+    """
+    # Standard
+    import time
+
+    ts = time.time()
+    with _event_lock:
+        _event_buffer.append(
+            (event_type_name, session_id, ts, dict(str_metadata), dict(int_metadata))
+        )
+
+
+def drain_recorded_events() -> list[
+    tuple[str, str, float, dict[str, str], dict[str, int]]
+]:
+    """Fallback: atomically drain and return all pending events.
+
+    Returns:
+        List of (event_type_name, session_id, timestamp, str_metadata,
+        int_metadata) tuples recorded since the last drain.
+    """
+    with _event_lock:
+        items = list(_event_buffer)
+        _event_buffer.clear()
+    return items

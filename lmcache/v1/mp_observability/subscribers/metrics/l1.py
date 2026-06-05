@@ -11,6 +11,10 @@ from opentelemetry import metrics
 # First Party
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
+from lmcache.v1.mp_observability.subscribers.metrics.utils import (
+    emit_salt_counts,
+    group_by_salt,
+)
 
 
 class L1MetricsSubscriber(EventSubscriber):
@@ -49,10 +53,10 @@ class L1MetricsSubscriber(EventSubscriber):
         }
 
     def _on_read_finished(self, event: Event) -> None:
-        self._read_counter.add(len(event.metadata["keys"]))
+        emit_salt_counts(self._read_counter, group_by_salt(event.metadata["keys"]))
 
     def _on_write_finished(self, event: Event) -> None:
-        self._write_counter.add(len(event.metadata["keys"]))
+        emit_salt_counts(self._write_counter, group_by_salt(event.metadata["keys"]))
 
     def _on_evicted(self, event: Event) -> None:
-        self._evicted_counter.add(len(event.metadata["keys"]))
+        emit_salt_counts(self._evicted_counter, group_by_salt(event.metadata["keys"]))
