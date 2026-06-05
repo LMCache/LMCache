@@ -1313,10 +1313,8 @@ loaded data can be compared against the original store pattern.
 Profiling / flame charts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Because ``lmcache bench l2`` drives the adapter through its real
-submit/wait path in a single process, it can profile **itself** and
-render a flame graph of the measured phases -- one command, one
-terminal, no externally attached profiler. Pass ``--profile-enabled``:
+When ``--profile-enabled`` is passed, the benchmark profiles the L2
+adapter's performance and renders a flame graph of the measured phases:
 
 .. code-block:: bash
 
@@ -1327,14 +1325,13 @@ terminal, no externally attached profiler. Pass ``--profile-enabled``:
    #   [Profile] wrote /tmp/lmcache_bench_flames/FSL2Adapter.oncpu.svg
 
 The recorder samples every thread of the process (including native
-worker threads), so there is nothing adapter-specific to target. Two
-modes are available via ``--profile-mode``:
+worker threads). Two modes are available via ``--profile-mode``:
 
 * **on-cpu** (default) -- ``perf record``; where CPU cycles go
   (serialization, copies, hashing).
 * **off-cpu** -- ``offcputime-bpfcc`` (bcc); time spent blocked
   (waiting on I/O, locks, eventfds). Often the more informative view
-  for I/O-bound adapters such as ``fs``, ``s3`` or ``valkey``.
+  for I/O-bound adapters such as ``fs`` and ``s3``.
 
 Recording covers only the measured store/lookup/load work, so make the
 run long enough to collect samples (a few seconds is plenty -- use a
