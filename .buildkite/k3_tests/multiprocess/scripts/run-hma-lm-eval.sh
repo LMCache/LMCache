@@ -38,10 +38,8 @@ NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
 # 31B has a large per-token KV footprint; cap the sample count so the working
 # set fits the CPU pool (a too-large set thrashes and run 2 misses LMCache).
 LIMIT="${LIMIT:-100}"
-# Max allowed absolute difference in the gsm8k exact_match score between run 1
-# (store) and run 2 (retrieve). Defaults to 0 (strict equality): with
-# enforce-eager off the two runs are bit-exact, so a correct retrieve must
-# reproduce the store run's score exactly.
+# Max abs difference allowed between run 1 (store) and run 2 (retrieve) gsm8k
+# scores. Default 0 (strict): with enforce-eager off the two runs are bit-exact.
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0}"
 # Seconds to wait after run 1 so async LMCache stores drain before run 2.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"

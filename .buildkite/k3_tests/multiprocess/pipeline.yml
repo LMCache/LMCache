@@ -65,35 +65,28 @@ steps:
                 volumes: *vols
         artifact_paths: ["*.log"]
 
-      # HMA (hybrid memory allocator) correctness check on google/gemma-4-31B-it.
-      # It interleaves sliding + full attention whose full layers use a larger
-      # head_dim (512 vs 256), so vLLM gives its KV cache groups different block
-      # sizes -- exercising LMCache's per-group block-size handling. Runs gsm8k,
-      # resets vLLM's local prefix cache (LMCache preserved), reruns, and asserts
-      # run 1 (store) and run 2 (retrieve) scores match exactly. Single GPU: the
-      # correctness check is run1 == run2 (no separate no-LMCache baseline). It is
-      # public (no HF_TOKEN), forces TRITON_ATTN (so ATTENTION_BACKEND=auto), and
-      # its ~63GB of weights need a higher GPU_MEMORY_UTILIZATION than the 0.5
-      # default.
+      # HMA correctness check on google/gemma-4-31B-it. Its full-attention layers
+      # use a larger head_dim (512 vs 256), so vLLM gives the KV cache groups
+      # different block sizes -- exercising LMCache's per-group block-size path.
+      # Runs gsm8k (STORE), resets vLLM's local prefix cache (LMCache preserved),
+      # reruns (RETRIEVE), and asserts run1 == run2. Single GPU, no baseline.
+      # Public (no HF_TOKEN); forces TRITON_ATTN (so ATTENTION_BACKEND=auto);
+      # ~63GB weights need a higher GPU_MEMORY_UTILIZATION than the 0.5 default.
       - label: ":compression: hma_lm_eval_gemma4"
         command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
         timeout_in_minutes: 60
         env:
           MODEL: "google/gemma-4-31B-it"
-          # Bit-exact run1 == run2. enforce-eager stays off (it breaks the
-          # bit-exact check -- see launch-processes.sh and the lm_eval bisect),
-          # and max-model-len defaults to auto.
+          # Strict run1 == run2: enforce-eager is off (it breaks bit-exactness),
+          # so a correct retrieve reproduces the store score exactly.
           SCORE_TOLERANCE: "0"
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.85"
-          # 31B weights are large and CUDA-graph capture (enforce-eager off) adds
-          # startup time; allow longer before the readiness probe gives up (other
-          # models keep the 300s default).
+          # CUDA-graph capture (enforce-eager off) + 63GB load is slow; allow more
+          # than the 300s default before the readiness probe gives up.
           MAX_WAIT_SECONDS: "600"
-          # LIMIT = number of gsm8k samples. 31B's large per-token KV makes the
-          # full 200-sample working set overflow the CPU pool and thrash, so run
-          # 2 misses LMCache; cap the samples and enlarge the pool to keep run 2
-          # cache-served. CPU_BUFFER_SIZE (GB) is bounded by node RAM.
+          # Cap gsm8k samples and enlarge the CPU pool so run 2 stays cache-served
+          # instead of thrashing (31B has a large per-token KV footprint).
           LIMIT: "100"
           CPU_BUFFER_SIZE: "200"
         agents: { queue: "k8s" }
