@@ -78,6 +78,12 @@ class RequestType(enum.Enum):
     CB_LOOKUP_PRE_COMPUTED_V2 = enum.auto()
     CB_RETRIEVE_PRE_COMPUTED_V2 = enum.auto()
 
+    # Blend V3 — paged-aware CB.
+    CB_REGISTER_ROPE_V3 = enum.auto()
+    CB_UNREGISTER_ROPE_V3 = enum.auto()
+    CB_RETRIEVE_PRE_COMPUTED_V3 = enum.auto()
+    CB_UNIFIED_LOOKUP = enum.auto()
+
 
 @dataclass
 class ProtocolDefinition:

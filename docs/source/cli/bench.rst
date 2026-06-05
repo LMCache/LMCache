@@ -672,8 +672,9 @@ the HTTP API.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ + HTTP) and a GPU. It also requires the full ``lmcache`` install
-(not the lightweight ``lmcache-cli`` package).
+server (ZMQ + HTTP). GPU mode additionally requires a CUDA-capable device.
+It also requires the full ``lmcache`` install (not the lightweight
+``lmcache-cli`` package).
 
 
 What it does
@@ -740,10 +741,18 @@ Options
      - ``http://localhost:8080``
      - HTTP base URL of the server's checksum API. Used to
        verify per-chunk checksums end-to-end.
-   * - ``--mode {gpu}``
+   * - ``--mode {gpu,cpu}``
      - ``gpu``
-     - Run mode. Only ``gpu`` is supported today; CPU mode is a
-       planned follow-up.
+     - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
+       (handle path). ``cpu`` allocates POSIX-SHM-backed tensors and
+       uses the data-transfer path (gather/scatter via slot descriptors).
+   * - ``--transfer-mode {auto,handle,data}``
+     - ``auto``
+     - Transport routing for STORE/RETRIEVE. ``handle`` forces the
+       single-shot path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``).
+       ``data`` forces the two-phase gather/scatter path
+       (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` + ``PREPARE``/``COMMIT``).
+       ``auto`` maps gpu→handle and cpu→data.
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
@@ -812,7 +821,7 @@ Example output
 
 .. code-block:: text
 
-   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu) ...
+   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu, transfer=auto) ...
    Server chunk_size = 256
    Resolved KV shape spec: (2,1024,16,8,128):float16:32
    [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
@@ -841,6 +850,11 @@ Exit codes
    * - ``1``
      - Fatal error (for example, CUDA unavailable in ``--mode gpu``,
        server unreachable, or a checksum mismatch).
+
+.. note::
+
+   ``--transfer-mode handle`` on CPU mode is not yet implemented and
+   will be added in a future release.
 
 
 .. _lmcache-bench-l2:
