@@ -154,7 +154,6 @@ class NonGPUTransferModule:
         """Release resources owned by this module."""
         self._non_gpu_contexts.clear()
         self._strategies.clear()
-        self._ctx.session_manager.cleanup_expired()
 
     @staticmethod
     def _make_transfer_key(
@@ -253,9 +252,6 @@ class NonGPUTransferModule:
             return
 
         self._strategies.pop(instance_id, None)
-
-        # Timing data lives in session.extras; reap expired sessions.
-        self._ctx.session_manager.cleanup_expired()
 
         with self._pending_shm_lock:
             stale_writes = []
