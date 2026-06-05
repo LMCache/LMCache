@@ -270,21 +270,18 @@ class GPUCacheContext:
         return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
 
     def blocks_for_tokens(self, num_logical_tokens: int, group_idx: int) -> int:
-        """Number of this group's physical blocks spanning ``num_logical_tokens``.
+        """Number of group ``group_idx`` blocks that span ``num_logical_tokens``.
 
-        Block IDs are counted in each group's own ``block_size``
-        (``shape_desc.bs``), which can differ across KV cache groups: e.g.
-        ``google/gemma-4-E4B-it`` uses block_size=32 for its sliding-window
-        groups and 16 for its full-attention groups, and vLLM hands the connector
-        block IDs in each group's own block_size. For compressed groups
-        (DeepSeek V4) ``compress_ratio`` first reduces the physical slot count.
+        Each group counts blocks in its own ``block_size`` (``shape_desc.bs``),
+        which can differ across groups. For compressed groups, ``compress_ratio``
+        logical tokens share one physical slot, so it is divided out first.
 
         Args:
-            num_logical_tokens: Number of inference-engine logical tokens.
+            num_logical_tokens: Number of logical (engine-side) tokens.
             group_idx: Index of the KV layer group.
 
         Returns:
-            The number of this group's physical blocks spanning those tokens.
+            The number of this group's blocks spanning those tokens.
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
         physical_slots = num_logical_tokens // group.compress_ratio

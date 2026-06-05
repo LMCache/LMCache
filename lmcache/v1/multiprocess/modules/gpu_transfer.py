@@ -345,12 +345,9 @@ class GPUTransferModule:
         gpu_context = entry.gpu_context
         model_name = entry.model_name
 
-        # Block IDs are counted in each KV cache group's own block_size, which
-        # can differ across groups: google/gemma-4-E4B-it gives its sliding-
-        # window groups block_size=32 and its full-attention groups
-        # block_size=16, and vLLM hands the connector block IDs in each group's
-        # own block_size. So blocks-per-chunk is per group (and folds in
-        # compress_ratio for compressed groups like DeepSeek V4).
+        # NOTE: different engine groups may have different block sizes, so
+        # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
+        # group ``i``.
         blocks_per_chunk = [
             gpu_context.blocks_for_tokens(self._ctx.chunk_size, group_idx)
             for group_idx in range(gpu_context.kv_layer_groups_manager.num_groups)
@@ -634,10 +631,6 @@ class GPUTransferModule:
                         gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
                     )
                 for group_idx, group in enumerate(groups):
-                    # Each group counts block IDs in its own block_size (e.g.
-                    # google/gemma-4-E4B-it: sliding-window groups block_size=32,
-                    # full-attention groups block_size=16), so blocks-per-chunk
-                    # and the skip count are per group.
                     bpc = gpu_context.blocks_for_tokens(self._ctx.chunk_size, group_idx)
                     chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
                         start_chunk_id * bpc : end_chunk_id * bpc

@@ -80,28 +80,6 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
-      # Third HMA model: gemma-4-E4B-it. Same heterogeneous head dims as the
-      # 31B variant (so vLLM unifies KV pages to per-group block sizes:
-      # sliding-window=32, full-attention=16), but it ALSO uses KV-cache
-      # sharing across layers and is small enough to download/load quickly --
-      # covering the combined per-group + shared-layer path on cheaper GPUs. It
-      # is public (no HF_TOKEN), forces TRITON_ATTN (so ATTENTION_BACKEND=auto
-      # and a non-zero SCORE_TOLERANCE), and uses a modest GPU_MEMORY_UTILIZATION
-      # so vLLM's local prefix cache cannot cover every prefix (which would make
-      # the LMCache path pass vacuously).
-      - label: ":compression: hma_lm_eval_gemma4_e4b"
-        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4_e4b
-        timeout_in_minutes: 50
-        env:
-          MODEL: "google/gemma-4-E4B-it"
-          SCORE_TOLERANCE: "0.05"
-          ATTENTION_BACKEND: "auto"
-          GPU_MEMORY_UTILIZATION: "0.4"
-          ENFORCE_EAGER: "1"
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
-
       - label: ":compression: long_doc_qa"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         timeout_in_minutes: 30

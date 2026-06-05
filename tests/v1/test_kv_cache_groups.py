@@ -95,8 +95,8 @@ def test_slice_block_ids_uniform_block_sizes():
         allocated,
         group_block_sizes=[16, 16],
         canonical_block_size=16,
-        start=0,
-        end=16,
+        start_block_idx=0,
+        end_block_idx=16,
     )
     assert sliced == [list(range(16)), list(range(100, 116))]
 
@@ -112,8 +112,8 @@ def test_slice_block_ids_heterogeneous_block_sizes():
         allocated,
         group_block_sizes=[16, 32],
         canonical_block_size=16,
-        start=0,
-        end=16,
+        start_block_idx=0,
+        end_block_idx=16,
     )
     assert sliced == [list(range(16)), list(range(8))]
 
@@ -125,8 +125,8 @@ def test_slice_block_ids_nonzero_start_offset():
         allocated,
         group_block_sizes=[16, 32],
         canonical_block_size=16,
-        start=16,
-        end=32,
+        start_block_idx=16,
+        end_block_idx=32,
     )
     assert sliced == [list(range(16, 32)), list(range(8, 16))]
 
@@ -138,8 +138,8 @@ def test_slice_block_ids_missing_group_yields_empty():
         allocated,
         group_block_sizes=[16, 16],
         canonical_block_size=16,
-        start=0,
-        end=16,
+        start_block_idx=0,
+        end_block_idx=16,
     )
     assert sliced == [list(range(16)), []]
 
@@ -153,8 +153,8 @@ def test_slice_block_ids_misaligned_range_raises():
             allocated,
             group_block_sizes=[16, 48],
             canonical_block_size=16,
-            start=0,
-            end=8,
+            start_block_idx=0,
+            end_block_idx=8,
         )
     except ValueError as exc:
         assert "does not align" in str(exc)

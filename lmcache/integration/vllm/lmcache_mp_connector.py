@@ -330,12 +330,9 @@ class LMCacheMPRequestMetadata:
                 blocks in a LMCache data chunk
             vllm_block_size: the canonical (GCD) block size used in vLLM
                 accounting (= ``cache_config.block_size``)
-            group_block_sizes: per-engine-group vLLM block size, in engine
-                order; the op's block IDs carry one inner list per group. A
-                group's own block size may be a larger multiple of
-                ``vllm_block_size`` (hybrid models), so its block count is
-                normalized to the canonical unit before being compared across
-                groups.
+            group_block_sizes: per-engine-group vLLM block size. A group's own
+                block size may be a larger multiple of ``vllm_block_size``
+                (hybrid models).
         """
         num_engine_groups = len(group_block_sizes)
         # Store the blocks that has block hashes
@@ -435,10 +432,9 @@ class LMCacheMPRequestMetadata:
                 blocks in a LMCache data chunk
             vllm_block_size: the canonical (GCD) block size used in vLLM
                 accounting (= ``cache_config.block_size``)
-            group_block_sizes: per-engine-group vLLM block size, in engine
-                order; the op's block IDs carry one inner list per group. A
-                group's own block size may be a larger multiple of
-                ``vllm_block_size`` (hybrid models).
+            group_block_sizes: per-engine-group vLLM block size. A group's own
+                block size may be a larger multiple of ``vllm_block_size``
+                (hybrid models).
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -581,21 +577,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if kv_cache_config is not None
             else ()
         )
-        # Per-engine-group vLLM block size, in engine order. Hybrid models can
-        # give each group its own block size (e.g. google/gemma-4-E4B-it:
-        # sliding-window groups block_size=32, full-attention groups
-        # block_size=16) while ``vllm_block_size`` stays at the GCD (16). Block
-        # IDs are sliced per group with these sizes; the number of engine
-        # groups is ``len(self._group_block_sizes)``. Falls back to the global
-        # block size when the engine exposes no per-group specs.
+        # NOTE: Hybrid models can give each group its own block size that is
+        # different from ``vllm_block_size`` (e.g. gemma-4: sliding-window
+        # groups 32, full-attention groups 16, vllm_block_size 16).
         self._group_block_sizes: list[int] = [
             group.kv_cache_spec.block_size for group in vllm_groups
         ] or [self.vllm_block_size]
-        # Per-group slicing maps a canonical block index to a per-group index by
-        # dividing by ``block_size // vllm_block_size``, which assumes each
-        # group's block size is a positive multiple of the canonical
-        # ``vllm_block_size``. Validate once here (introduced by PR #3521) so
-        # the per-call slice path can rely on it.
+        # Validate that the block size for each group can be divided by
+        # ``self.vllm_block_size`` (per-group slicing relies on it).
         for engine_group_idx, block_size in enumerate(self._group_block_sizes):
             if block_size <= 0 or block_size % self.vllm_block_size != 0:
                 raise ValueError(
