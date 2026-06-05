@@ -374,6 +374,24 @@ class CBMatchResult:
     hash: bytes
 
 
+@dataclass
+class CBUnifiedLookupResult:
+    """Result of ``CB_UNIFIED_LOOKUP``: prefix lookup + non-prefix fingerprint
+    match, reconciled in one RPC.
+
+    Attributes:
+        prefix_coverage_tokens: Contiguous prefix-cache coverage (L1+L2) in
+            tokens — what the standard LOOKUP would report.
+        non_prefix_segments: Block-aligned matches outside the prefix coverage
+            (cur_st order), each carrying ``(old_st, old_ed, cur_st, cur_ed,
+            hash)``. Already sparse-prefetched, so the retrieve set equals the
+            prefetched set.
+    """
+
+    prefix_coverage_tokens: int
+    non_prefix_segments: list[CBMatchResult]
+
+
 _CUSTOMERIZED_SERIALIZERS = {
     CudaIPCWrapper: CustomizedSerdeConfig(
         serializer=CudaIPCWrapper.Serialize,

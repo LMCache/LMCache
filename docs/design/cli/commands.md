@@ -13,6 +13,7 @@ LMCache functionality.
 ```
 lmcache
 ├── server                          # Launch LMCache server (ZMQ + HTTP)
+├── coordinator                     # Launch the mp coordinator (HTTP)
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
 ├── query    {kvcache,engine}       # Single-shot query with metrics
@@ -52,6 +53,25 @@ lmcache server \
 Server args are composed from existing helpers: `add_mp_server_args()`,
 `add_storage_manager_args()`, `add_prometheus_args()`, `add_telemetry_args()`,
 `add_http_frontend_args()`.
+
+### `lmcache coordinator`
+
+Replaces `python3 -m lmcache.v1.mp_coordinator`. Runs the mp coordinator's
+FastAPI/HTTP app in the foreground (Ctrl-C to stop). The coordinator tracks mp
+server instances in a registry and evicts those whose heartbeats lapse.
+
+```bash
+lmcache coordinator \
+    --host 0.0.0.0 --port 9300 \
+    --instance-timeout 30 \
+    --health-check-interval 10
+```
+
+Config resolves from `MPCoordinatorConfig.from_env()` (the
+`LMCACHE_MP_COORDINATOR_*` environment variables); any CLI flag that is supplied
+overrides the corresponding field. Each flag defaults to unset so env-only
+deployments keep working. See
+[../v1/mp_coordinator/README.md](../v1/mp_coordinator/README.md).
 
 ### `lmcache describe`
 
@@ -289,6 +309,7 @@ lmcache/cli/
 │   ├── base.py          # BaseCommand ABC
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
+│   ├── coordinator.py   # lmcache coordinator
 │   ├── describe.py      # lmcache describe {kvcache,engine}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
 │   ├── query.py         # lmcache query {kvcache,engine}

@@ -183,16 +183,30 @@ def _build_modules(
 
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
-    if mp_config.engine_type == "blend":
+    if mp_config.engine_type == "blend_legacy":
         if mp_config.supported_transfer_mode == "non_gpu":
             raise ValueError(
-                "Blend engine requires supported_transfer_mode to be 'gpu' or 'auto', "
-                f"got '{mp_config.supported_transfer_mode}'"
+                "Legacy blend engine requires supported_transfer_mode to be "
+                f"'gpu' or 'auto', got '{mp_config.supported_transfer_mode}'"
             )
         # First Party
         from lmcache.v1.multiprocess.modules.blend import BlendModule
 
         modules.append(BlendModule(ctx))
+
+    # "blend" selects CacheBlend V3 (the current implementation).
+    if mp_config.engine_type == "blend":
+        if mp_config.supported_transfer_mode == "non_gpu":
+            raise ValueError(
+                "blend (V3) engine requires supported_transfer_mode 'gpu' or "
+                f"'auto', got '{mp_config.supported_transfer_mode}'"
+            )
+        # First Party
+        from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
+
+        gpu_transfer = next(m for m in modules if isinstance(m, GPUTransferModule))
+        lookup_module = next(m for m in modules if isinstance(m, LookupModule))
+        modules.append(BlendV3Module(ctx, gpu_transfer, lookup_module))
 
     return modules
 
