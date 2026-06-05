@@ -93,6 +93,31 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     head_dim: int
     inference_engine_logical_block_size: int
+    per_layer_inference_engine_logical_block_size: list[int]
+    """Per-registered-layer inference-engine logical block size (logical
+    tokens per engine block), indexed by registration order. Under a hybrid
+    KV cache manager the engine's groups have *different* logical block sizes
+    (e.g. DeepSeek-V4: 256 for the full-attention MLA group, 64/4/8 for the
+    SWA / compressor-state groups), while the single scalar
+    ``inference_engine_logical_block_size`` collapses to their GCD on the
+    worker. The server uses this per-layer list to derive each LMCache
+    group's ``compress_ratio`` / ``physical_chunk_size`` (and thus its
+    per-chunk block count) correctly per group instead of from one global
+    value. All layers in one LMCache group share a value (the group is keyed
+    by engine group id). Omit this key (or pass it empty) for engines without
+    per-group logical block sizes; the server then falls back to the scalar
+    ``inference_engine_logical_block_size`` for every group (legacy behavior,
+    e.g. DeepSeek-V3.2 / non-hybrid)."""
+    per_layer_sliding_window: list[int]
+    """Per-registered-layer sliding-window size in logical tokens, indexed
+    by registration order. ``0`` (or omission of this key) means full
+    attention. A positive value enables the SWA-suffix-only optimization
+    for that layer's group: store/retrieve only the trailing
+    ``ceil(sliding_window / inference_engine_logical_block_size)`` blocks
+    of every chunk, since earlier blocks fall outside the attention window
+    and are never read. All layers within one LMCache group share a window
+    (the group is keyed by engine group id, and vLLM places SWA and
+    full-attention layers in separate engine groups)."""
 
 
 def attempt_permute_to_contiguous_view(

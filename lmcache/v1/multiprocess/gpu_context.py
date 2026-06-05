@@ -132,10 +132,14 @@ class GPUCacheContext:
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            # ``get_kv_buffer_shape`` takes *logical* tokens; for
-            # compressed groups it folds ``compress_ratio`` logical
-            # tokens into one physical slot internally.
-            shape = self.get_kv_buffer_shape(lmcache_logical_chunk_size, group_idx)
+            # ``get_storage_kv_buffer_shape`` takes the *stored* logical tokens
+            # for this group (SWA-suffix-aware: a sliding-window group stores
+            # only the trailing window of each chunk, not the full chunk). For
+            # compressed groups it folds ``compress_ratio`` logical tokens into
+            # one physical slot internally. Sizing the slot from the same
+            # truncated per-group count is what keeps the buffer, the MemoryObj
+            # layout, and the kernel chunk-size arg in agreement.
+            shape = self.get_storage_kv_buffer_shape(group_idx)
             byte_size = shape.numel() * group.dtype.itemsize
             self.tmp_chunk_group_offsets_.append(
                 self.tmp_chunk_group_offsets_[-1] + byte_size
@@ -320,16 +324,17 @@ class GPUCacheContext:
     def get_tmp_chunk_gpu_buffer(self, group_idx: int = 0) -> torch.Tensor:
         """
         Returns a view of the temporary GPU buffer for the given group,
-        sized for a single chunk. The chunk holds
-        ``lmcache_logical_chunk_size`` logical tokens which, for a
-        compressed group, correspond to ``group.physical_chunk_size``
-        physical slots.
+        sized for a single chunk's *stored* payload. For a full-attention
+        group this is ``lmcache_logical_chunk_size`` logical tokens (=
+        ``group.physical_chunk_size`` physical slots); for an SWA-suffix
+        group it is only the trailing-window portion
+        (``group.storage_tokens_per_chunk`` logical tokens).
 
         Args:
             group_idx: Index of the KV layer group (default 0).
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        shape = self.get_kv_buffer_shape(self.lmcache_logical_chunk_size, group_idx)
+        shape = self.get_storage_kv_buffer_shape(group_idx)
         start = self.tmp_chunk_group_offsets_[group_idx]
         end = self.tmp_chunk_group_offsets_[group_idx + 1]
         return self.tmp_gpu_buffer_[start:end].view(group.dtype).view(shape)
@@ -340,7 +345,8 @@ class GPUCacheContext:
         """
         Returns a list of ``batch_size`` non-overlapping views into the
         pre-allocated temporary GPU buffer for the given group, each
-        sized for ``lmcache_logical_chunk_size`` tokens.
+        sized for one chunk's *stored* payload (SWA-suffix-aware; see
+        :meth:`get_tmp_chunk_gpu_buffer`).
 
         Args:
             batch_size: Number of concurrent requests (must be <= max_batch_size).
@@ -351,7 +357,7 @@ class GPUCacheContext:
                 f"batch_size {batch_size} exceeds max_batch_size {self.max_batch_size}"
             )
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        shape = self.get_kv_buffer_shape(self.lmcache_logical_chunk_size, group_idx)
+        shape = self.get_storage_kv_buffer_shape(group_idx)
         g_start = self.tmp_chunk_group_offsets_[group_idx]
         g_end = self.tmp_chunk_group_offsets_[group_idx + 1]
         chunk = self.tmp_chunk_bytes_
@@ -423,6 +429,22 @@ class GPUCacheContext:
         return torch.Size(
             (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
+
+    def get_storage_kv_buffer_shape(self, group_idx: int = 0) -> torch.Size:
+        """Returns the KV buffer shape for one chunk's *stored* payload.
+
+        SWA-suffix-aware: a sliding-window group stores only the trailing
+        window of each chunk (``group.storage_tokens_per_chunk`` logical
+        tokens), a full-attention group stores the whole chunk
+        (``lmcache_logical_chunk_size`` logical tokens). This is the single
+        shape that the staging buffer slot, the per-group buffer views, and the
+        ``MemoryObj`` layout (via ``get_layout_desc``) must all share, so a
+        mismatch cannot arise between them.
+        """
+        tokens = self.kv_layer_groups_manager_.kv_layer_groups[
+            group_idx
+        ].storage_tokens_per_chunk
+        return self.get_kv_buffer_shape(tokens, group_idx)
 
     def cache_size_per_token(self) -> int:
         """

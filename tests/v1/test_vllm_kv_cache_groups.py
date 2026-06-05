@@ -8,6 +8,8 @@ import torch
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
     create_group_views_from_vllm,
+    per_layer_inference_engine_logical_block_size_from_vllm,
+    per_layer_sliding_window_from_vllm,
 )
 from lmcache.v1.multiprocess.group_view import (
     expand_block_ids_to_views,
@@ -19,7 +21,6 @@ from lmcache.v1.multiprocess.group_view import (
 @dataclass
 class MockKVCacheGroup:
     layer_names: list[str]
-
 
 @dataclass
 class MockKVCacheConfig:
@@ -79,3 +80,88 @@ def test_conversion_splits_by_lmcache_layer_identity():
         [20],
         [10],
     ]
+
+
+# ----------------------------------------------------------------------------
+# per_layer_* hint derivation (logical block size + sliding window)
+# ----------------------------------------------------------------------------
+
+
+@dataclass
+class MockSpec:
+    """A vLLM ``KVCacheGroupSpec.kv_cache_spec`` stand-in."""
+
+    block_size: int = 0
+    sliding_window: int | None = None
+
+
+@dataclass
+class MockUniformSpec:
+    """A ``UniformTypeKVCacheSpecs`` stand-in: block size/window on inner specs."""
+
+    kv_cache_specs: dict
+
+
+@dataclass
+class MockGroupWithSpec:
+    layer_names: list[str]
+    kv_cache_spec: object
+
+
+@dataclass
+class MockConfigWithSpecs:
+    kv_cache_groups: list
+
+
+def test_per_layer_logical_block_size_maps_per_group():
+    """Each layer gets its engine group's block_size, in registration order."""
+    config = MockConfigWithSpecs(
+        kv_cache_groups=[
+            MockGroupWithSpec(["layer.0", "layer.2"], MockSpec(block_size=256)),
+            MockGroupWithSpec(["layer.1", "layer.3"], MockSpec(block_size=64)),
+        ]
+    )
+    caches = {f"layer.{i}": None for i in range(4)}
+    result = per_layer_inference_engine_logical_block_size_from_vllm(config, caches)
+    # registration order is layer.0,1,2,3 -> [256, 64, 256, 64]
+    assert result == [256, 64, 256, 64]
+
+
+def test_per_layer_logical_block_size_uniform_inner_spec_fallback():
+    """Block size read from inner specs for a UniformTypeKVCacheSpecs wrapper."""
+    uniform = MockUniformSpec(kv_cache_specs={"layer.0": MockSpec(block_size=4)})
+    config = MockConfigWithSpecs(
+        kv_cache_groups=[MockGroupWithSpec(["layer.0", "layer.1"], uniform)]
+    )
+    caches = {"layer.0": None, "layer.1": None}
+    result = per_layer_inference_engine_logical_block_size_from_vllm(config, caches)
+    assert result == [4, 4]
+
+
+def test_per_layer_logical_block_size_none_without_groups():
+    """No engine groups -> None (server falls back to the scalar)."""
+    assert per_layer_inference_engine_logical_block_size_from_vllm(None, {}) is None
+
+
+def test_per_layer_sliding_window_maps_per_group():
+    config = MockConfigWithSpecs(
+        kv_cache_groups=[
+            MockGroupWithSpec(["layer.0"], MockSpec(block_size=256, sliding_window=0)),
+            MockGroupWithSpec(
+                ["layer.1"], MockSpec(block_size=64, sliding_window=128)
+            ),
+        ]
+    )
+    caches = {"layer.0": None, "layer.1": None}
+    result = per_layer_sliding_window_from_vllm(config, caches)
+    assert result == [0, 128]
+
+
+def test_per_layer_sliding_window_none_when_all_full_attention():
+    """All groups full attention -> None (server keeps legacy full-chunk path)."""
+    config = MockConfigWithSpecs(
+        kv_cache_groups=[
+            MockGroupWithSpec(["layer.0"], MockSpec(block_size=256, sliding_window=0)),
+        ]
+    )
+    assert per_layer_sliding_window_from_vllm(config, {"layer.0": None}) is None

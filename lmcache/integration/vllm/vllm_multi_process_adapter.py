@@ -854,6 +854,7 @@ class LMCacheMPWorkerAdapter:
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.group_views: list[LMCacheGroupView] = []
+        self.per_layer_sliding_window: list[int] | None = None
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -968,6 +969,8 @@ class LMCacheMPWorkerAdapter:
         self,
         kv_caches: dict[str, torch.Tensor],
         group_views: Sequence[LMCacheGroupView] = (),
+        per_layer_sliding_window: list[int] | None = None,
+        per_layer_inference_engine_logical_block_size: list[int] | None = None,
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -976,6 +979,16 @@ class LMCacheMPWorkerAdapter:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
             group_views: LMCache-owned engine KV cache group metadata.
+            per_layer_sliding_window: Per-registered-layer sliding-window
+                size in logical tokens (``0`` = full attention), or ``None``
+                when no group is sliding-window. Forwarded to the server in
+                ``layout_hints`` to drive the SWA-suffix-only optimization.
+            per_layer_inference_engine_logical_block_size: Per-registered-layer
+                logical block size (logical tokens per engine block), or
+                ``None`` for engines without per-group logical block sizes.
+                Forwarded to the server in ``layout_hints`` so it derives each
+                group's compress_ratio / physical_chunk_size per group instead
+                of from the single (GCD-collapsed) scalar.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -984,6 +997,10 @@ class LMCacheMPWorkerAdapter:
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
         self.group_views = list(group_views)
+        self.per_layer_sliding_window = per_layer_sliding_window
+        self.per_layer_inference_engine_logical_block_size = (
+            per_layer_inference_engine_logical_block_size
+        )
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
@@ -1010,6 +1027,16 @@ class LMCacheMPWorkerAdapter:
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
         )
+        per_layer_sliding_window = getattr(self, "per_layer_sliding_window", None)
+        if per_layer_sliding_window is not None:
+            layout_hints["per_layer_sliding_window"] = per_layer_sliding_window
+        per_layer_logical_block_size = getattr(
+            self, "per_layer_inference_engine_logical_block_size", None
+        )
+        if per_layer_logical_block_size is not None:
+            layout_hints["per_layer_inference_engine_logical_block_size"] = (
+                per_layer_logical_block_size
+            )
         try:
             self.transfer_ctx.register(
                 self.instance_id,

@@ -176,6 +176,284 @@ class TestKVLayerGroupsManager:
         assert sd1.hs == 64
 
 
+class TestPerGroupCompressionMetadata:
+    """Per-group compress_ratio / physical_chunk_size derivation.
+
+    Exercises the hybrid-KV-cache-manager case where the engine's groups have
+    *different* logical block sizes, carried per layer via
+    ``LayoutHints["per_layer_inference_engine_logical_block_size"]``.
+    """
+
+    def _v4_like_tensors(self) -> list[torch.Tensor]:
+        """Two engine groups with different physical block sizes.
+
+        - layers 0,1: physical bs=64 (V4 SWA-like: logical 64 -> ratio 1)
+        - layer  2:   physical bs=4  (V4 state-like: logical 4 -> ratio 1)
+
+        The shapes also differ in ``hs`` so each engine group becomes its own
+        identity even before the engine-group split.
+        """
+        return [
+            torch.randn(1, 32, 64, 1, 128, dtype=torch.float16),  # bs=64
+            torch.randn(1, 32, 64, 1, 128, dtype=torch.float16),  # bs=64
+            torch.randn(1, 32, 4, 1, 512, dtype=torch.float16),  # bs=4
+        ]
+
+    def test_per_group_logical_block_size_drives_ratio(self):
+        """Each group's compress_ratio uses its own logical block size."""
+        tensors = self._v4_like_tensors()
+        # logical block sizes: groups [0,1] = 64, group [2] = 4
+        layout_hints: LayoutHints = {
+            "inference_engine_logical_block_size": 4,  # GCD scalar (wrong per group)
+            "per_layer_inference_engine_logical_block_size": [64, 64, 4],
+        }
+        manager = KVLayerGroupsManager(
+            tensors,
+            gpu_kv_format=_nhd_format(),
+            num_blocks=32,
+            layout_hints=layout_hints,
+            group_views=[
+                LMCacheGroupView(0, (0, 1)),
+                LMCacheGroupView(1, (2,)),
+            ],
+            lmcache_logical_chunk_size=1024,
+        )
+        by_engine = {g.engine_group_idx: g for g in manager.kv_layer_groups}
+        swa = by_engine[0]
+        state = by_engine[1]
+        # SWA group: physical bs 64, logical 64 -> ratio 1, full chunk 1024 slots
+        assert swa.compress_ratio == 1
+        assert swa.logical_block_size == 64
+        assert swa.physical_chunk_size == 1024
+        assert swa.blocks_per_chunk == 16  # 1024 / 64
+        # State group: physical bs 4, logical 4 -> ratio 1, 256 blocks/chunk
+        assert state.compress_ratio == 1
+        assert state.logical_block_size == 4
+        assert state.physical_chunk_size == 1024
+        assert state.blocks_per_chunk == 256  # 1024 / 4
+
+    def test_compressed_group_ratio_gt_one(self):
+        """logical block size larger than physical bs -> compress_ratio > 1."""
+        tensors = [torch.randn(1, 32, 64, 1, 128, dtype=torch.float16)]
+        layout_hints: LayoutHints = {
+            "per_layer_inference_engine_logical_block_size": [256],
+        }
+        manager = KVLayerGroupsManager(
+            tensors,
+            gpu_kv_format=_nhd_format(),
+            num_blocks=32,
+            layout_hints=layout_hints,
+            lmcache_logical_chunk_size=1024,
+        )
+        g = manager.kv_layer_groups[0]
+        assert g.compress_ratio == 4  # 256 / 64
+        assert g.logical_block_size == 256
+        assert g.physical_chunk_size == 256  # 1024 / 4
+        assert g.blocks_per_chunk == 4  # 256 / 64
+
+    def test_scalar_fallback_when_no_per_layer_hint(self):
+        """Absent per-layer hint -> scalar inference_engine_logical_block_size."""
+        tensors = [torch.randn(1, 32, 64, 1, 128, dtype=torch.float16)]
+        layout_hints: LayoutHints = {
+            "inference_engine_logical_block_size": 256,
+        }
+        manager = KVLayerGroupsManager(
+            tensors,
+            gpu_kv_format=_nhd_format(),
+            num_blocks=32,
+            layout_hints=layout_hints,
+            lmcache_logical_chunk_size=1024,
+        )
+        g = manager.kv_layer_groups[0]
+        assert g.compress_ratio == 4  # 256 / 64 (from the scalar)
+
+    def test_zero_per_layer_entry_falls_back_to_scalar(self):
+        """A 0 entry in the per-layer list defers to the scalar for that group."""
+        tensors = [torch.randn(1, 32, 64, 1, 128, dtype=torch.float16)]
+        layout_hints: LayoutHints = {
+            "inference_engine_logical_block_size": 256,
+            "per_layer_inference_engine_logical_block_size": [0],
+        }
+        manager = KVLayerGroupsManager(
+            tensors,
+            gpu_kv_format=_nhd_format(),
+            num_blocks=32,
+            layout_hints=layout_hints,
+            lmcache_logical_chunk_size=1024,
+        )
+        g = manager.kv_layer_groups[0]
+        assert g.compress_ratio == 4  # falls back to scalar 256
+
+    def test_no_hint_at_all_treats_as_uncompressed(self):
+        """No layout hints -> compress_ratio 1 (physical == logical)."""
+        tensors = [torch.randn(1, 32, 64, 1, 128, dtype=torch.float16)]
+        manager = KVLayerGroupsManager(
+            tensors,
+            gpu_kv_format=_nhd_format(),
+            num_blocks=32,
+            layout_hints=None,
+            lmcache_logical_chunk_size=1024,
+        )
+        g = manager.kv_layer_groups[0]
+        assert g.compress_ratio == 1
+        assert g.logical_block_size == 64
+        assert g.blocks_per_chunk == 16
+
+
+class TestNumSuffixBlocksPerChunk:
+    """``num_suffix_blocks_per_chunk`` / SWA-suffix helper math."""
+
+    def _group(
+        self,
+        *,
+        bs: int,
+        compress_ratio: int,
+        physical_chunk_size: int,
+        sliding_window: int,
+    ) -> KVLayerGroupInfo:
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        sd = lmc_ops.PageBufferShapeDesc()
+        sd.kv_size = 1
+        sd.nl = 1
+        sd.nb = 32
+        sd.bs = bs
+        sd.nh = 1
+        sd.hs = 128
+        sd.element_size = 2
+        return KVLayerGroupInfo(
+            layer_indices=[0],
+            shape_desc=sd,
+            dtype=torch.float16,
+            compress_ratio=compress_ratio,
+            physical_chunk_size=physical_chunk_size,
+            sliding_window=sliding_window,
+        )
+
+    def test_full_attention_returns_none(self):
+        g = self._group(
+            bs=64, compress_ratio=4, physical_chunk_size=256, sliding_window=0
+        )
+        assert g.num_suffix_blocks_per_chunk is None
+
+    def test_swa_ceil(self):
+        # logical bs = 64*1 = 64, window 128 -> ceil(128/64) = 2
+        g = self._group(
+            bs=64, compress_ratio=1, physical_chunk_size=1024, sliding_window=128
+        )
+        assert g.logical_block_size == 64
+        assert g.blocks_per_chunk == 16
+        assert g.num_suffix_blocks_per_chunk == 2
+
+    def test_swa_ceil_rounds_up(self):
+        # logical bs 4, window 8 -> ceil(8/4) = 2
+        g = self._group(
+            bs=4, compress_ratio=1, physical_chunk_size=1024, sliding_window=8
+        )
+        assert g.blocks_per_chunk == 256
+        assert g.num_suffix_blocks_per_chunk == 2
+
+    def test_window_larger_than_chunk_capped(self):
+        # logical bs 64, window 4096 -> ceil = 64, but capped at blocks_per_chunk 16
+        g = self._group(
+            bs=64, compress_ratio=1, physical_chunk_size=1024, sliding_window=4096
+        )
+        assert g.num_suffix_blocks_per_chunk == 16
+
+
+class TestStoragePerChunkHelpers:
+    """SWA-suffix storage helpers that the transfer loops + buffers share."""
+
+    def _group(
+        self,
+        *,
+        bs: int,
+        compress_ratio: int,
+        physical_chunk_size: int,
+        sliding_window: int,
+    ) -> KVLayerGroupInfo:
+        # First Party
+        import lmcache.c_ops as lmc_ops
+
+        sd = lmc_ops.PageBufferShapeDesc()
+        sd.kv_size = 1
+        sd.nl = 1
+        sd.nb = 32
+        sd.bs = bs
+        sd.nh = 1
+        sd.hs = 128
+        sd.element_size = 2
+        return KVLayerGroupInfo(
+            layer_indices=[0],
+            shape_desc=sd,
+            dtype=torch.float16,
+            compress_ratio=compress_ratio,
+            physical_chunk_size=physical_chunk_size,
+            sliding_window=sliding_window,
+        )
+
+    def test_full_attention_stores_whole_chunk(self):
+        # MLA full-attn: physical bs 64, logical 256, chunk 256 slots, 4 blk/chunk
+        g = self._group(
+            bs=64, compress_ratio=4, physical_chunk_size=256, sliding_window=0
+        )
+        assert g.storage_blocks_per_chunk == g.blocks_per_chunk == 4
+        assert g.storage_slots_per_chunk == g.physical_chunk_size == 256
+        assert g.storage_tokens_per_chunk == 1024  # 4 blocks * logical 256
+        assert g.chunk_suffix_offset_blocks == 0
+
+    def test_swa_stores_only_trailing_window(self):
+        # SWA: physical bs 64, logical 64, window 128, chunk 1024 slots, 16 blk/chunk
+        g = self._group(
+            bs=64, compress_ratio=1, physical_chunk_size=1024, sliding_window=128
+        )
+        assert g.blocks_per_chunk == 16
+        assert g.storage_blocks_per_chunk == 2  # ceil(128/64)
+        assert g.storage_slots_per_chunk == 2 * 64  # 128 physical slots
+        assert g.storage_tokens_per_chunk == 2 * 64  # logical_bs == bs here
+        assert g.chunk_suffix_offset_blocks == 14  # 16 - 2
+
+    def test_state_group_large_shrink(self):
+        # C4A state: physical bs 4, logical 4, window 8, 256 blk/chunk
+        g = self._group(
+            bs=4, compress_ratio=1, physical_chunk_size=1024, sliding_window=8
+        )
+        assert g.blocks_per_chunk == 256
+        assert g.storage_blocks_per_chunk == 2  # ceil(8/4)
+        assert g.storage_slots_per_chunk == 8
+        assert g.chunk_suffix_offset_blocks == 254  # 256 - 2
+
+    def test_kernel_chunk_size_invariant(self):
+        """storage_slots_per_chunk must equal storage_blocks_per_chunk * bs.
+
+        The kernel asserts num_blocks_per_object * bs == lmcache_chunk_size; we
+        pass storage_blocks_per_chunk block IDs and storage_slots_per_chunk as
+        lmcache_chunk_size, so this identity is what keeps it valid.
+        """
+        for g in [
+            self._group(bs=64, compress_ratio=4, physical_chunk_size=256,
+                        sliding_window=0),
+            self._group(bs=64, compress_ratio=1, physical_chunk_size=1024,
+                        sliding_window=128),
+            self._group(bs=4, compress_ratio=1, physical_chunk_size=1024,
+                        sliding_window=8),
+            self._group(bs=8, compress_ratio=1, physical_chunk_size=1024,
+                        sliding_window=128),
+        ]:
+            assert (
+                g.storage_slots_per_chunk
+                == g.storage_blocks_per_chunk * g.shape_desc.bs
+            )
+
+
+def _nhd_format():
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
+    return lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+
 class TestParseKvcacheShapeSpec:
     """Test cases for parse_kvcache_shape_spec function."""
 

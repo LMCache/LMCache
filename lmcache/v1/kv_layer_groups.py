@@ -158,6 +158,16 @@ class KVLayerGroupInfo:
     is known."""
     engine_group_idx: int = 0
     """Engine group index (paged-block address space). 0 for non-hybrid."""
+    sliding_window: int = 0
+    """Sliding-window size in logical tokens for this group, or ``0`` for
+    full attention. When positive, the SWA-suffix-only optimization applies:
+    only the trailing ``ceil(sliding_window / logical_block_size)`` blocks of
+    every chunk are stored and retrieved, because earlier blocks fall outside
+    the attention window and are never read back. Derived from
+    ``per_layer_sliding_window`` carried in ``layout_hints`` at
+    :class:`KVLayerGroupsManager` construction time; all layers in the group
+    share one window because the group is keyed by engine group id and vLLM
+    places SWA and full-attention layers in distinct engine groups."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -175,13 +185,105 @@ class KVLayerGroupInfo:
             f"dtype={self.dtype}, "
             f"compress_ratio={self.compress_ratio}, "
             f"physical_chunk_size={self.physical_chunk_size}, "
-            f"engine_group_idx={self.engine_group_idx})"
+            f"engine_group_idx={self.engine_group_idx}, "
+            f"sliding_window={self.sliding_window})"
         )
 
     @property
     def num_layers(self) -> int:
         """Number of layers in this group."""
         return len(self.layer_indices)
+
+    @property
+    def logical_block_size(self) -> int:
+        """Inference-engine logical block size for this group.
+
+        ``shape_desc.bs * compress_ratio`` — the number of *logical* (engine)
+        tokens that one inference-engine block addresses for this group. Equal
+        to the physical slot count when ``compress_ratio == 1``; larger for
+        compressed groups (each physical slot packs ``compress_ratio`` logical
+        tokens). This is the grain at which the engine hands out this group's
+        block IDs, so it drives how many block IDs make up one LMCache chunk.
+        """
+        return self.shape_desc.bs * self.compress_ratio
+
+    @property
+    def blocks_per_chunk(self) -> int:
+        """Number of inference-engine blocks in one LMCache chunk for this group.
+
+        ``physical_chunk_size // shape_desc.bs`` — equivalently
+        ``lmcache_logical_chunk_size // logical_block_size``. This is the number
+        of block IDs the store/retrieve loops consume per chunk for this group.
+        Under the hybrid KV cache manager it differs across groups (e.g. V4
+        chunk_size=1024: 4 for the logical-256 MLA group, 16 for the logical-64
+        SWA groups, 256 for the logical-4 state groups).
+        """
+        return self.physical_chunk_size // self.shape_desc.bs
+
+    @property
+    def num_suffix_blocks_per_chunk(self) -> int | None:
+        """Trailing blocks per chunk to keep under SWA-suffix-only, or
+        ``None`` for full attention (store/retrieve the whole chunk).
+
+        ``ceil(sliding_window / logical_block_size)`` — the minimum number
+        of trailing inference-engine blocks that can cover a window of
+        ``sliding_window`` logical tokens. Capped at
+        :attr:`blocks_per_chunk` so a window larger than one chunk degrades
+        gracefully to the full chunk.
+        """
+        if self.sliding_window <= 0:
+            return None
+        suffix = (
+            self.sliding_window + self.logical_block_size - 1
+        ) // self.logical_block_size
+        return min(suffix, self.blocks_per_chunk)
+
+    @property
+    def storage_blocks_per_chunk(self) -> int:
+        """Engine blocks actually transferred per chunk (SWA-suffix-aware).
+
+        For a sliding-window group this is :attr:`num_suffix_blocks_per_chunk`
+        (only the trailing window of each chunk is stored/retrieved); for a
+        full-attention group it is the full :attr:`blocks_per_chunk`. This is
+        the single source of truth for how many block IDs are sliced per chunk
+        and — together with ``shape_desc.bs`` — for sizing the staging buffer,
+        the ``MemoryObj`` layout, and the kernel's ``lmcache_chunk_size`` arg,
+        which must all agree (see the SWA-suffix shape landmine)."""
+        suffix = self.num_suffix_blocks_per_chunk
+        return suffix if suffix is not None else self.blocks_per_chunk
+
+    @property
+    def storage_slots_per_chunk(self) -> int:
+        """Physical slots transferred per chunk for this group.
+
+        ``storage_blocks_per_chunk * shape_desc.bs`` — the value the
+        block-level transfer kernel must be told as its ``lmcache_chunk_size``
+        (the kernel checks ``num_blocks_per_object * bs == lmcache_chunk_size``).
+        Equals :attr:`physical_chunk_size` for full-attention groups; smaller
+        for SWA-suffix groups."""
+        return self.storage_blocks_per_chunk * self.shape_desc.bs
+
+    @property
+    def storage_tokens_per_chunk(self) -> int:
+        """Logical tokens transferred per chunk for this group.
+
+        ``storage_blocks_per_chunk * logical_block_size``. Used to size the
+        per-group staging buffer view and the ``MemoryObj`` layout (which are
+        expressed in logical tokens and fold ``compress_ratio`` logical tokens
+        per physical slot). Equals ``lmcache_logical_chunk_size`` for
+        full-attention groups; smaller for SWA-suffix groups."""
+        return self.storage_blocks_per_chunk * self.logical_block_size
+
+    @property
+    def chunk_suffix_offset_blocks(self) -> int:
+        """Leading engine blocks dropped per chunk under SWA-suffix.
+
+        ``blocks_per_chunk - storage_blocks_per_chunk`` — the number of leading
+        blocks of each chunk that are *not* transferred (they fall outside the
+        attention window). ``0`` for full-attention groups. The store/retrieve
+        loops slice each chunk starting at this offset to keep only the trailing
+        window."""
+        return self.blocks_per_chunk - self.storage_blocks_per_chunk
 
     @property
     def hidden_dim_size(self) -> int:
@@ -278,6 +380,25 @@ class KVLayerGroupsManager:
             if layout_hints
             else None
         )
+        # Per-registered-layer sliding-window sizes (logical tokens), or
+        # ``None`` when the engine reports no SWA metadata. Each group reads
+        # its window from its first layer's entry below; layers in one group
+        # always share a window (the group is keyed by engine group id).
+        per_layer_sliding_window: "Sequence[int] | None" = (
+            layout_hints.get("per_layer_sliding_window") if layout_hints else None
+        )
+        # Per-registered-layer inference-engine logical block size, or ``None``
+        # when the engine reports no per-group sizes. Under the hybrid KV cache
+        # manager the engine's groups have different logical block sizes (e.g.
+        # V4: 256 for full attention, 64/4/8 for SWA / state groups) while the
+        # scalar ``inference_engine_logical_block_size`` collapses to their GCD.
+        # Each group reads its size from its first layer's entry below; a
+        # ``0`` entry (or no list) falls back to the scalar for that group.
+        per_layer_logical_block_size: "Sequence[int] | None" = (
+            layout_hints.get("per_layer_inference_engine_logical_block_size")
+            if layout_hints
+            else None
+        )
         self.kv_layer_groups: list[KVLayerGroupInfo] = []
 
         num_layers = get_num_layers(kv_caches, gpu_kv_format)
@@ -312,11 +433,30 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
+            # Resolve this group's inference-engine logical block size. Prefer
+            # the per-layer hint (correct per group under HMA); fall back to
+            # the single scalar when the per-layer entry is absent or 0 (legacy
+            # / non-hybrid engines). All layers in a group share one value.
+            group_ie_logical_block_size = self.inference_engine_logical_block_size_
+            if per_layer_logical_block_size is not None:
+                first_layer_logical_bs = int(per_layer_logical_block_size[indices[0]])
+                if first_layer_logical_bs > 0:
+                    group_ie_logical_block_size = first_layer_logical_bs
+
             compress_ratio, physical_chunk_size = self._derive_compression_metadata(
                 group_idx=group_idx,
                 bs=bs,
-                ie_logical_block_size=self.inference_engine_logical_block_size_,
+                ie_logical_block_size=group_ie_logical_block_size,
                 lmcache_logical_chunk_size=lmcache_logical_chunk_size,
+            )
+
+            # All layers in a group share one window (group keyed by engine
+            # group id; vLLM separates SWA from full-attention layers). Read
+            # it from the first layer; ``0`` (or no hint) means full attention.
+            sliding_window = (
+                int(per_layer_sliding_window[indices[0]])
+                if per_layer_sliding_window is not None
+                else 0
             )
 
             self.kv_layer_groups.append(
@@ -327,6 +467,7 @@ class KVLayerGroupsManager:
                     compress_ratio=compress_ratio,
                     physical_chunk_size=physical_chunk_size,
                     engine_group_idx=engine_group_idx,
+                    sliding_window=sliding_window,
                 )
             )
 

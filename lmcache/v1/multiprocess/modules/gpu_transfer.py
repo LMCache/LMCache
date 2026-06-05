@@ -47,21 +47,25 @@ import lmcache.c_ops as lmc_ops
 logger = init_logger(__name__)
 
 
-def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
-    """Get the memory layout description for a given GPU context and number of tokens.
+def get_layout_desc(gpu_context: GPUCacheContext) -> MemoryLayoutDesc:
+    """Get the memory layout description for a given GPU context.
 
-    Supports multiple KV layer groups with different shapes and dtypes.
+    Supports multiple KV layer groups with different shapes and dtypes. Each
+    group's shape is its *stored* payload shape (SWA-suffix-aware): a
+    sliding-window group's ``MemoryObj`` holds only the trailing window of each
+    chunk, a full-attention group holds the whole chunk. Both the staging
+    buffer and the kernel chunk-size arg derive from the same per-group stored
+    count, so the buffer, the layout, and the kernel cannot disagree.
 
     Args:
         gpu_context: The GPU cache context containing the KV cache information.
-        num_tokens: The number of tokens to determine the layout for.
 
     Returns:
         MemoryLayoutDesc: The memory layout description containing shapes and dtypes.
     """
     num_groups = gpu_context.kv_layer_groups_manager.num_groups
     shapes = [
-        gpu_context.get_kv_buffer_shape(num_tokens, group_idx)
+        gpu_context.get_storage_kv_buffer_shape(group_idx)
         for group_idx in range(num_groups)
     ]
     dtypes = [
@@ -273,7 +277,7 @@ class GPUTransferModule:
             world_size=world_size,
         )
 
-        layout_desc = get_layout_desc(gpu_context, self._ctx.chunk_size)
+        layout_desc = get_layout_desc(gpu_context)
         self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
 
         logger.info(
@@ -345,16 +349,14 @@ class GPUTransferModule:
         gpu_context = entry.gpu_context
         model_name = entry.model_name
 
-        # ``blocks_per_chunk`` is counted in inference-engine-side
-        # blocks (each block addresses
-        # ``inference_engine_logical_block_size`` *logical* tokens).
-        # For compressed groups the per-group physical slot count
-        # differs, but the block-id indexing is shared with the engine
-        # and therefore uses the engine logical block size here.
-        blocks_per_chunk = (
-            self._ctx.chunk_size
-            // gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
+        # ``blocks_per_chunk`` is counted in inference-engine-side blocks (each
+        # block addresses one engine logical block). Under the hybrid KV cache
+        # manager each LMCache group has its own logical block size, so the
+        # per-chunk block count differs per group — read it per group
+        # (``group.blocks_per_chunk`` = ``physical_chunk_size // shape_desc.bs``).
+        groups = gpu_context.kv_layer_groups_manager.kv_layer_groups
+        num_groups = len(groups)
+        blocks_per_chunk_per_group = [group.blocks_per_chunk for group in groups]
 
         with (
             torch_dev.device(gpu_context.device),
@@ -372,18 +374,22 @@ class GPUTransferModule:
             # drive the transfer kernel to read out-of-bounds GPU memory, so skip
             # the whole store and commit nothing rather than caching a partial or
             # garbage entry. A later request can store it once the block IDs are
-            # complete.
-            required_blocks = len(obj_keys) * blocks_per_chunk
+            # complete. Each group has its own per-chunk block count under HMA.
+            num_chunks_requested = len(obj_keys)
             if any(
-                group_block_ids.shape[0] < required_blocks
-                for group_block_ids in block_ids_per_group_gpu
+                group_block_ids.shape[0]
+                < num_chunks_requested * blocks_per_chunk_per_group[group_idx]
+                for group_idx, group_block_ids in enumerate(block_ids_per_group_gpu)
             ):
                 logger.warning(
-                    "STORE block ID underflow for request_id=%s: need %d block "
+                    "STORE block ID underflow for request_id=%s: need %s block "
                     "IDs per group for %d chunks; skipping the store.",
                     key.request_id,
-                    required_blocks,
-                    len(obj_keys),
+                    [
+                        num_chunks_requested * bpc
+                        for bpc in blocks_per_chunk_per_group
+                    ],
+                    num_chunks_requested,
                 )
                 event.record()
                 return event.ipc_handle(), False
@@ -426,7 +432,7 @@ class GPUTransferModule:
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             store_succeeded = False
             try:
-                layout_desc = get_layout_desc(gpu_context, self._ctx.chunk_size)
+                layout_desc = get_layout_desc(gpu_context)
                 reserved_dict = self._ctx.storage_manager.reserve_write(
                     obj_keys, layout_desc, "new"
                 )
@@ -435,7 +441,6 @@ class GPUTransferModule:
                 # skipped (not in reserved_dict), making block_ids
                 # non-contiguous. Batching would require torch.cat to
                 # reassemble block_ids, negating the benefit.
-                num_groups = gpu_context.kv_layer_groups_manager.num_groups
                 for idx, obj_key in enumerate(obj_keys):
                     if obj_key in reserved_dict:
                         memory_obj = reserved_dict[obj_key]
@@ -443,19 +448,28 @@ class GPUTransferModule:
                         continue
 
                     # Copy from GPU paged buffer to tmp buffer, then to CPU — per
-                    # group. Each group uses its own block-id list (HMA).
+                    # group. Each group uses its own block-id list (HMA), its own
+                    # per-chunk block count, and (for SWA groups) stores only the
+                    # trailing window of each chunk.
                     for group_idx in range(num_groups):
+                        group = groups[group_idx]
+                        bpc = blocks_per_chunk_per_group[group_idx]
+                        # SWA-suffix: keep only the trailing
+                        # ``storage_blocks_per_chunk`` blocks of this chunk;
+                        # ``chunk_suffix_offset_blocks`` is 0 for full-attention
+                        # groups (store the whole chunk).
+                        chunk_start = idx * bpc + group.chunk_suffix_offset_blocks
                         chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
-                            idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                            chunk_start : chunk_start + group.storage_blocks_per_chunk
                         ]
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
                         group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                        # Kernel contract: ``group_lmcache_chunk_size`` here is the
-                        # number of *physical* slots per chunk for this group
-                        # (= logical chunk_size // compress_ratio).
-                        group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
-                            group_idx
-                        )
+                        # Kernel contract: ``group_lmcache_chunk_size`` is the
+                        # number of *physical* slots actually transferred for
+                        # this group's chunk (SWA-suffix-aware), so the kernel's
+                        # ``num_blocks_per_object * bs == lmcache_chunk_size``
+                        # check holds.
+                        group_lmcache_chunk_size = group.storage_slots_per_chunk
                         lmc_ops.multi_layer_block_kv_transfer(
                             group_kv_pointers,
                             [tmp_buffer.data_ptr()],
@@ -581,18 +595,18 @@ class GPUTransferModule:
             ),
         )
 
-        # ``skip_*_in_chunk`` is expressed in engine-block units
-        # (logical tokens), which is what the kernel's
-        # ``skip_blocks_in_chunk`` argument expects regardless
-        # of per-group compression.
-        ie_logical_block_size = (
-            gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
-        blocks_per_chunk = self._ctx.chunk_size // ie_logical_block_size
+        # Under the hybrid KV cache manager each LMCache group has its own
+        # logical block size, so the per-chunk block count and the
+        # skip-block count differ per group. ``skip_first_n_tokens`` is in
+        # logical tokens (engine grain); convert it to a per-group block count
+        # inside the loop using that group's logical block size.
+        groups = gpu_context.kv_layer_groups_manager.kv_layer_groups
+        blocks_per_chunk_per_group = [
+            group.blocks_per_chunk for group in groups
+        ]
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             _BATCH_SIZE = gpu_context.max_batch_size
-            groups = gpu_context.kv_layer_groups_manager.kv_layer_groups
             for batch_idx, memory_obj_batch in enumerate(
                 batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
             ):
@@ -612,17 +626,6 @@ class GPUTransferModule:
                         self._ctx.chunk_size * batch_len - 1,
                     ),
                 )
-                if skip_tokens_in_chunk % ie_logical_block_size != 0:
-                    logger.error(
-                        "skip_first_n_tokens (%d) is not aligned to "
-                        "inference_engine_logical_block_size (%d), "
-                        "rounding down from %d tokens to %d blocks",
-                        skip_first_n_tokens,
-                        ie_logical_block_size,
-                        skip_tokens_in_chunk,
-                        skip_tokens_in_chunk // ie_logical_block_size,
-                    )
-                skip_blocks_in_chunk = skip_tokens_in_chunk // ie_logical_block_size
 
                 start_chunk_id = batch_idx * _BATCH_SIZE
                 end_chunk_id = start_chunk_id + batch_len
@@ -634,11 +637,30 @@ class GPUTransferModule:
                         gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
                     )
                 for group_idx, group in enumerate(groups):
-                    chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
+                    blocks_per_chunk = blocks_per_chunk_per_group[group_idx]
+                    group_logical_bs = group.logical_block_size
+                    # ``skip_blocks_in_chunk`` is in this group's engine blocks.
+                    if skip_tokens_in_chunk % group_logical_bs != 0:
+                        logger.error(
+                            "skip_first_n_tokens (%d) is not aligned to group %d "
+                            "logical block size (%d); rounding down %d tokens to "
+                            "%d blocks",
+                            skip_first_n_tokens,
+                            group_idx,
+                            group_logical_bs,
+                            skip_tokens_in_chunk,
+                            skip_tokens_in_chunk // group_logical_bs,
+                        )
+                    skip_blocks_in_chunk = skip_tokens_in_chunk // group_logical_bs
+                    # The connector sends full-grain block IDs (all
+                    # ``blocks_per_chunk`` per chunk); validate that, then keep
+                    # only the trailing window of each chunk for SWA-suffix
+                    # groups below (offset is 0 for full attention).
+                    full_slice = block_ids_per_group_gpu[group_idx][
                         start_chunk_id * blocks_per_chunk : end_chunk_id
                         * blocks_per_chunk
                     ]
-                    if chunk_block_ids_gpu.shape[0] != batch_len * blocks_per_chunk:
+                    if full_slice.shape[0] != batch_len * blocks_per_chunk:
                         # Fail closed: a short block-id slice would make the
                         # transfer kernel write out-of-bounds GPU memory.
                         raise ValueError(
@@ -647,15 +669,40 @@ class GPUTransferModule:
                             f"engine_group_idx={group.engine_group_idx} "
                             f"batch={batch_idx} "
                             f"expected={batch_len * blocks_per_chunk} "
-                            f"got={chunk_block_ids_gpu.shape[0]}"
+                            f"got={full_slice.shape[0]}"
                         )
+                    # SWA-suffix: keep only the trailing window of each chunk;
+                    # ``chunk_suffix_offset_blocks`` is 0 for full-attention
+                    # groups (retrieve the whole chunk).
+                    suffix_offset = group.chunk_suffix_offset_blocks
+                    if suffix_offset:
+                        # Gather the trailing window of each chunk: reshape to
+                        # (chunks, full_bpc), drop the leading ``suffix_offset``
+                        # blocks, flatten back to chunk-major order. ``reshape``
+                        # after the column slice yields a contiguous int64 tensor
+                        # (required by the kernel).
+                        chunk_block_ids_gpu = (
+                            full_slice.view(batch_len, blocks_per_chunk)[
+                                :, suffix_offset:
+                            ]
+                            .reshape(-1)
+                            .contiguous()
+                        )
+                        # The leading blocks we dropped already absorb the APC
+                        # skip; only any remaining skip applies to stored blocks.
+                        skip_blocks_in_chunk = max(
+                            0, skip_blocks_in_chunk - suffix_offset
+                        )
+                    else:
+                        chunk_block_ids_gpu = full_slice
                     tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
                         batch_len, group_idx
                     )
                     group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                    group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
-                        group_idx
-                    )
+                    # Physical slots actually transferred per chunk for this
+                    # group (SWA-suffix-aware); satisfies the kernel's
+                    # ``num_blocks_per_object * bs == lmcache_chunk_size`` check.
+                    group_lmcache_chunk_size = group.storage_slots_per_chunk
 
                     lmc_ops.multi_layer_block_kv_transfer(
                         group_kv_pointers,
