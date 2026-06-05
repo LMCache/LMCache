@@ -53,8 +53,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
     _IMPORT_ERROR,
     DTYPE_MAP,
-    _allocate_cpu_kv_cache,
-    _allocate_gpu_kv_cache,
+    _allocate_kv_cache,
     _get_chunk_size,
     _process_request,
     _require_full_install,
@@ -304,7 +303,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         )
         # Paged KV demands identical ``NB`` / ``BS`` across all groups
         # (block_id -> slot maths is shared), but ``kv_size`` / ``NH`` /
-        # ``HS`` / ``dtype`` may vary per group. ``_allocate_gpu_kv_cache(
+        # ``HS`` / ``dtype`` may vary per group. ``_allocate_kv_cache(
         # groups=...)`` honours each group's own shape; ``_process_request``
         # only needs a single ``block_size`` / ``total_blocks``.
         first = layer_groups[0]
@@ -399,7 +398,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             # First Party
             from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
 
-            allocated = _allocate_gpu_kv_cache(groups=layer_groups)
+            allocated = _allocate_kv_cache(groups=layer_groups, use_gpu=True)
             print(
                 "Allocated %d GPU tensors on %s" % (len(allocated), allocated[0].device)
             )
@@ -412,7 +411,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                     "supported in this PR (TODO: separate PR)."
                 )
                 sys.exit(1)
-            cpu_tensors = _allocate_cpu_kv_cache(groups=layer_groups)
+            cpu_tensors = _allocate_kv_cache(groups=layer_groups, use_gpu=False)
             print("Allocated %d CPU tensors" % len(cpu_tensors))
             kv_wrappers = []
             client_kv_tensors = cpu_tensors

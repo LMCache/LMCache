@@ -197,7 +197,7 @@ def _alloc_tensor(
     return torch.randint(iinfo.min, iinfo.max + 1, shape, dtype=dtype, **kwargs)
 
 
-def _allocate_gpu_kv_cache(
+def _allocate_kv_cache(
     num_layers: int = 32,
     num_heads: int = 8,
     head_size: int = 128,
@@ -207,8 +207,9 @@ def _allocate_gpu_kv_cache(
     device: "str | torch.device | None" = None,
     kv_size: int = 2,
     groups: "list[KVLayerGroupInfo] | None" = None,
+    use_gpu: bool = True,
 ) -> "list[torch.Tensor]":
-    """Allocate paged GPU KV cache tensors.
+    """Allocate paged KV cache tensors for either GPU or CPU mode.
 
     Each layer is a tensor of shape
     ``(kv_size, num_blocks, block_size, num_heads, head_size)``
@@ -222,17 +223,28 @@ def _allocate_gpu_kv_cache(
     (for heterogeneous multi-group specs). In that mode the flat
     ``num_heads`` / ``head_size`` / ``dtype`` / ``kv_size`` kwargs
     are ignored, and ``num_layers`` is derived from the groups.
+
+    GPU mode wraps real CUDA tensors; CPU mode (``use_gpu=False``,
+    used by ``--transfer-mode data``) allocates plain CPU tensors --
+    the server owns the SHM pool and the bench only needs these
+    tensors for client-side checksum self-check. The handle-mode
+    CPU path (true zero-copy SHM IPC with the server) will need
+    :class:`CpuShmTensorWrapper` and is left for a separate PR --
+    see ``TODO(baoloongmao)`` markers below.
     """
     # ``torch.float16`` cannot be used as a default value because the
     # module must load on ``lmcache-cli`` (no torch) installs.
     if dtype is None:
         dtype = torch.float16
     torch.random.manual_seed(42)
-    dev = (
-        torch.device(device)
-        if device
-        else torch.device(torch_device_type, torch_dev.current_device())
-    )
+    if use_gpu:
+        dev: torch.device | None = (
+            torch.device(device)
+            if device
+            else torch.device(torch_device_type, torch_dev.current_device())
+        )
+    else:
+        dev = None
 
     if groups:
         tensors: list[torch.Tensor] = []
@@ -244,31 +256,6 @@ def _allocate_gpu_kv_cache(
 
     shape = (kv_size, num_blocks, block_size, num_heads, head_size)
     return [_alloc_tensor(shape, dtype, dev) for _ in range(num_layers)]
-
-
-def _allocate_cpu_kv_cache(
-    groups: "list[KVLayerGroupInfo]",
-) -> "list[torch.Tensor]":
-    """Allocate paged CPU KV cache tensors for ``--transfer-mode data``.
-
-    Data mode does *not* require client-side cross-process sharing: the
-    server owns the SHM pool, and the bench only uses these tensors to
-    capture pre-STORE ground truth and to host the post-RETRIEVE
-    scatter target for the client-side checksum self-check. Plain CPU
-    tensors are sufficient and avoid pulling in any custom POSIX-SHM
-    primitives.
-
-    The handle-mode CPU path (true zero-copy SHM IPC with the server)
-    will need :class:`CpuShmTensorWrapper` and is intentionally left
-    out -- see ``TODO(baoloongmao)`` markers below.
-    """
-    torch.random.manual_seed(42)
-    tensors: list[torch.Tensor] = []
-    for g in groups:
-        sd = g.shape_desc
-        g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
-        tensors.extend(_alloc_tensor(g_shape, g.dtype) for _ in range(sd.nl))
-    return tensors
 
 
 def _send_register_kv_cache(
@@ -563,7 +550,7 @@ def _send_store(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
-    chunk_size: int = 0,
+    chunk_size: int = 256,
     server_pool: "memoryview | None" = None,
 ) -> str:
     """Store KV cache blocks. Returns status string.
