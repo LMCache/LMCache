@@ -447,20 +447,29 @@ class LocalDiskBackend(StorageBackendInterface):
 
         logger.debug(f"lookup_id: {lookup_id}; Prefetching {len(keys)} keys from disk.")
         for key in keys:
-            self.disk_lock.acquire()
-            assert key in self.dict, f"Key {key} not found in disk cache after pinning"
+            # Hold disk_lock only for shared disk metadata.
+            with self.disk_lock:
+                assert key in self.dict, (
+                    f"Key {key} not found in disk cache after pinning"
+                )
 
-            path = self.dict[key].path
-            dtype = self.dict[key].dtype
-            shape = self.dict[key].shape
-            fmt = self.dict[key].fmt
+                disk_meta = self.dict[key]
+                path = disk_meta.path
+                dtype = disk_meta.dtype
+                shape = disk_meta.shape
+                fmt = disk_meta.fmt
 
-            assert dtype is not None
-            assert shape is not None
+                assert dtype is not None
+                assert shape is not None
+
+                # Pin before releasing the lock to prevent eviction during staging.
+                disk_meta.pin()
 
             # busy_loop=False prevents spinning on the event loop thread;
             # if staging memory is exhausted the caller will get a logged
             # error rather than a silent deadlock.
+            #
+            # Allocate outside disk_lock to avoid blocking metadata access.
             memory_obj = self.local_cpu_backend.allocate(
                 shape,
                 dtype,
@@ -469,6 +478,12 @@ class LocalDiskBackend(StorageBackendInterface):
             )
 
             if memory_obj is None:
+                # Allocation failed; undo the disk pin taken above.
+                with self.disk_lock:
+                    # Check for stale metadata.
+                    if key in self.dict:
+                        self.dict[key].unpin()
+
                 logger.error(
                     "Memory allocation failed during async disk load for key %s. "
                     "CPU staging pool may be exhausted (unpin() not called after "
@@ -477,13 +492,21 @@ class LocalDiskBackend(StorageBackendInterface):
                 )
                 return mem_objs
 
-            self.dict[key].pin()
+            with self.disk_lock:
+                # Check for stale metadata.
+                if key in self.dict:
+                    # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
+                    # Update cache recency
+                    self.cache_policy.update_on_hit(key, self.dict)
+                else:
+                    logger.warning(
+                        "Key %s disappeared from disk cache after pinning. "
+                        "Skipping async disk load.",
+                        key,
+                    )
+                    memory_obj.ref_count_down()
+                    continue
 
-            # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
-            # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
-
-            self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
             memory_obj.pin()
             mem_objs.append(memory_obj)

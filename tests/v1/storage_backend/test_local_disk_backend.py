@@ -466,3 +466,59 @@ class TestGetBlockingCachePolicyUpdate:
         assert result is None
         mock_update.assert_not_called()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestBatchedGetNonBlockingAllocationFailure:
+    """Regression tests for disk_lock cleanup in disk prefetch path."""
+
+    def _inject_key(
+        self,
+        backend: LocalDiskBackend,
+        key: CacheEngineKey,
+        shape: torch.Size,
+        dtype: torch.dtype,
+    ) -> None:
+        """Insert a fake disk-cache metadata entry without writing a file."""
+        meta = DiskCacheMetadata(
+            path="/nonexistent/path.pt",
+            size=0,
+            shape=shape,
+            dtype=dtype,
+            cached_positions=None,
+            fmt=MemoryFormat.KV_2LTD,
+            pin_count=0,
+        )
+        with backend.disk_lock:
+            backend.dict[key] = meta
+            backend.cache_policy.update_on_put(key)
+
+    @pytest.mark.asyncio
+    async def test_batched_get_releases_disk_lock_on_cpu_alloc_failure(
+        self,
+        local_disk_backend: LocalDiskBackend,
+    ) -> None:
+        """batched_get_non_blocking must not leak disk_lock when CPU alloc fails."""
+        key = create_test_key(201)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        self._inject_key(local_disk_backend, key, shape, torch.bfloat16)
+
+        with patch.object(
+            local_disk_backend.local_cpu_backend,
+            "allocate",
+            return_value=None,
+        ):
+            result = await local_disk_backend.batched_get_non_blocking(
+                lookup_id="req-lock-leak",
+                keys=[key],
+            )
+
+        assert result == []
+
+        acquired = local_disk_backend.disk_lock.acquire(timeout=0.1)
+        try:
+            assert acquired, "disk_lock was leaked when CPU staging allocation failed"
+        finally:
+            if acquired:
+                local_disk_backend.disk_lock.release()
+
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
