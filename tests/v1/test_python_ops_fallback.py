@@ -1824,6 +1824,12 @@ def scenario_multi_layer_block_kv_transfer(
     # are reconstructed internally via _tensor_from_ptr).
     use_tensor_list = device not in ("cpu", "cuda")
 
+    def _alloc_chunks(shape: tuple[int, ...], count: int) -> list[torch.Tensor]:
+        chunks = [torch.zeros(shape, dtype=dtype) for _ in range(count)]
+        if device in ("cuda"):
+            chunks = [chunk.pin_memory() for chunk in chunks]
+        return chunks
+
     # --- NHD per-layer ---
     torch.manual_seed(123)
     num_layers, num_blocks, block_size = 2, 8, 4
@@ -1849,10 +1855,7 @@ def scenario_multi_layer_block_kv_transfer(
     shape_desc.kv_size = 2
     gpu_kv_format = ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
     num_chunks = num_blocks // blocks_per_chunk
-    d2h_chunks = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks = _alloc_chunks((2, num_layers, chunk_tokens, hidden_dim), num_chunks)
     block_ids = list(range(num_blocks))
 
     ops.multi_layer_block_kv_transfer(
@@ -1905,10 +1908,9 @@ def scenario_multi_layer_block_kv_transfer(
         for _ in range(num_layers)
     ]
     gpu_kv_format_fi_nhd = ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
-    d2h_chunks_fi_nhd = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_fi_nhd = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_layers_fi_nhd
         if use_tensor_list
@@ -1965,10 +1967,9 @@ def scenario_multi_layer_block_kv_transfer(
         for _ in range(num_layers)
     ]
     gpu_kv_format_hnd = ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS
-    d2h_chunks_hnd = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_hnd = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_layers_hnd
         if use_tensor_list
@@ -2021,10 +2022,9 @@ def scenario_multi_layer_block_kv_transfer(
         for _ in range(num_layers)
     ]
     gpu_kv_format_fi_hnd = ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS
-    d2h_chunks_fi_hnd = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_fi_hnd = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_layers_fi_hnd
         if use_tensor_list
@@ -2088,10 +2088,7 @@ def scenario_multi_layer_block_kv_transfer(
     shape_desc_mla.element_size = dtype.itemsize
     shape_desc_mla.kv_size = 1
     gpu_kv_format_mla = ops.GPUKVFormat.NL_X_NB_BS_HS
-    d2h_chunks_mla = [
-        torch.zeros(num_layers, chunk_tokens, mla_hidden, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_mla = _alloc_chunks((num_layers, chunk_tokens, mla_hidden), num_chunks)
     ops.multi_layer_block_kv_transfer(
         paged_layers_mla
         if use_tensor_list
@@ -2142,10 +2139,9 @@ def scenario_multi_layer_block_kv_transfer(
         for _ in range(num_layers)
     ]
     gpu_kv_format_sglang_mla = ops.GPUKVFormat.NL_X_NBBS_ONE_HS
-    d2h_chunks_sglang_mla = [
-        torch.zeros(num_layers, chunk_tokens, mla_hidden, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_sglang_mla = _alloc_chunks(
+        (num_layers, chunk_tokens, mla_hidden), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_layers_sglang_mla
         if use_tensor_list
@@ -2207,10 +2203,9 @@ def scenario_multi_layer_block_kv_transfer(
         dtype=dtype,
     ).to(device)
     gpu_kv_format_cross_nhd = ops.GPUKVFormat.NB_NL_TWO_BS_NH_HS
-    d2h_chunks_cross_nhd = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_cross_nhd = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_cross_nhd
         if use_tensor_list
@@ -2263,10 +2258,9 @@ def scenario_multi_layer_block_kv_transfer(
         dtype=dtype,
     ).to(device)
     gpu_kv_format_cross_hnd = ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS
-    d2h_chunks_cross_hnd = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_cross_hnd = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_cross_hnd
         if use_tensor_list
@@ -2321,10 +2315,9 @@ def scenario_multi_layer_block_kv_transfer(
         ],
     ]
     gpu_kv_format_sglang_nbbs = ops.GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS
-    d2h_chunks_sglang_nbbs = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_sglang_nbbs = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_sglang_nbbs
         if use_tensor_list
@@ -2394,10 +2387,9 @@ def scenario_multi_layer_block_kv_transfer(
         ],
     ]
     gpu_kv_format_sglang_nb = ops.GPUKVFormat.TWO_X_NL_X_NB_BS_NH_HS
-    d2h_chunks_sglang_nb = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_sglang_nb = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_sglang_nb
         if use_tensor_list
@@ -2463,10 +2455,9 @@ def scenario_multi_layer_block_kv_transfer(
     # With skip=2, effective blocks start at index 2.
     # Object 0 occupies flat indices [0, blocks_per_chunk), skipping first 2.
     # Object 1 occupies flat indices [blocks_per_chunk, 2*blocks_per_chunk).
-    d2h_chunks_skip = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_skip = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_layers_skip
         if use_tensor_list
@@ -2533,10 +2524,9 @@ def scenario_multi_layer_block_kv_transfer(
     ]
     generator = torch.Generator(device="cpu").manual_seed(616)
     permuted_block_ids = torch.randperm(num_blocks, generator=generator).tolist()
-    d2h_chunks_permuted = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks)
-    ]
+    d2h_chunks_permuted = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks
+    )
     ops.multi_layer_block_kv_transfer(
         paged_layers_permuted
         if use_tensor_list
@@ -2602,10 +2592,9 @@ def scenario_multi_layer_block_kv_transfer(
     shape_desc_mc.element_size = dtype.itemsize
     shape_desc_mc.kv_size = 2
     num_chunks_mc = num_blocks_mc // blocks_per_chunk  # 3 chunks
-    d2h_chunks_mc = [
-        torch.zeros(2, num_layers, chunk_tokens, hidden_dim, dtype=dtype)
-        for _ in range(num_chunks_mc)
-    ]
+    d2h_chunks_mc = _alloc_chunks(
+        (2, num_layers, chunk_tokens, hidden_dim), num_chunks_mc
+    )
     block_ids_mc = list(range(num_blocks_mc))
     ops.multi_layer_block_kv_transfer(
         paged_layers_mc
