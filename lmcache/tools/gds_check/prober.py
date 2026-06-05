@@ -94,7 +94,7 @@ def probe_host(gds_path: str, chunk_bytes: int) -> HostInfo:
         A :class:`HostInfo` snapshot.
     """
     # First Party
-    from lmcache.v1.distributed.gds_l1 import get_fstype
+    from lmcache.v1.storage_backend.gds_backend import get_fstype
 
     os.makedirs(gds_path, exist_ok=True)
     fstype = get_fstype(gds_path)
@@ -128,9 +128,8 @@ def verify_round_trip(
         RuntimeError: If the bytes read back do not match what was
             written, or if the slab is too small for ``chunk_bytes``.
     """
-    allocator = backend
     buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda:0")
-    allocator.cufile_io.register_gpu_buffer(buf)
+    backend.cufile_io.register_gpu_buffer(buf)
     try:
         buf.fill_(pattern_val)
         torch_dev.synchronize()
@@ -145,11 +144,11 @@ def verify_round_trip(
                 f"GDS round-trip verify: slab too small to allocate {chunk_bytes} "
                 "bytes. Increase --gds-l1-slab-size-gb."
             )
-        allocator.cufile_write_from(mo, buf)
+        backend.cufile_write_from(mo, buf)
 
         buf.zero_()
         torch_dev.synchronize()
-        allocator.cufile_read_into(mo, buf)
+        backend.cufile_read_into(mo, buf)
         torch_dev.synchronize()
 
         expected = torch.full((chunk_bytes,), pattern_val, dtype=torch.uint8)
@@ -160,7 +159,7 @@ def verify_round_trip(
                 "cuFile compat-mode / nvidia-fs setup issue."
             )
     finally:
-        allocator.cufile_io.deregister_gpu_buffer()
+        backend.cufile_io.deregister_gpu_buffer()
 
 
 def benchmark(
@@ -187,12 +186,10 @@ def benchmark(
     Returns:
         ``(store_result, retrieve_result)``.
     """
-    allocator = backend
-
     tmp_buf = torch.empty(
         max_batch_size * chunk_bytes, dtype=torch.uint8, device="cuda:0"
     )
-    allocator.cufile_io.register_gpu_buffer(tmp_buf)
+    backend.cufile_io.register_gpu_buffer(tmp_buf)
     try:
         pattern = torch.full((chunk_bytes,), 0xAB, dtype=torch.uint8, device="cuda:0")
 
@@ -217,7 +214,7 @@ def benchmark(
         for i, mo in enumerate(mem_objs):
             slot = slot_views[i % max_batch_size]
             slot.copy_(pattern, non_blocking=False)
-            allocator.cufile_write_from(mo, slot)
+            backend.cufile_write_from(mo, slot)
         torch_dev.synchronize()
         store_secs = time.perf_counter() - t0
 
@@ -227,11 +224,11 @@ def benchmark(
         t0 = time.perf_counter()
         for i, mo in enumerate(mem_objs):
             slot = slot_views[i % max_batch_size]
-            allocator.cufile_read_into(mo, slot)
+            backend.cufile_read_into(mo, slot)
         torch_dev.synchronize()
         retrieve_secs = time.perf_counter() - t0
     finally:
-        allocator.cufile_io.deregister_gpu_buffer()
+        backend.cufile_io.deregister_gpu_buffer()
 
     total_mib = (num_chunks * chunk_bytes) / (1024 * 1024)
     return (
@@ -266,7 +263,7 @@ def run_gds_check(
       throughput once per-call overhead is amortized.
 
     The verify phase uses the small chunk size (faster) and is the
-    same byte-for-byte round-trip check as before.
+    byte-for-byte round-trip check in :func:`verify_round_trip`.
 
     Args:
         gds_path: Directory to use as the slab root. Wiped fresh.
@@ -336,7 +333,7 @@ def run_gds_check(
             for k in list(backend._index.keys()):  # noqa: SLF001
                 mo = backend.create_memory_obj_from_index(k)
                 if mo is not None:
-                    backend.free_entry_from_index(mo)
+                    backend.free(mo)
 
         if not skip_bench:
             _run_bench_phase(
@@ -350,7 +347,7 @@ def run_gds_check(
             for k in list(backend._index.keys()):  # noqa: SLF001
                 mo = backend.create_memory_obj_from_index(k)
                 if mo is not None:
-                    backend.free_entry_from_index(mo)
+                    backend.free(mo)
             _run_bench_phase(
                 backend,
                 label="large chunks (bandwidth-dominated)",

@@ -65,6 +65,10 @@ class L1ManagerConfig:
     memory_config: L1MemoryManagerConfig
     """ The memory manager configuration for L1 cache. """
 
+    gds_l1_config: "GdsL1Config | None" = None
+    """ Optional GDS L1 backend. When set, the GDS slab is the L1 medium
+    (mutually exclusive with the CPU pinned slab in ``memory_config``). """
+
     write_ttl_seconds: int = field(default=600)
     """ Time to live for each object's write lock. Default is 600s (10 minutes). """
 
@@ -148,9 +152,6 @@ class StorageManagerConfig:
 
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
-
-    gds_l1_config: GdsL1Config | None = None
-    """Optional GDS L1 backend. """
 
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
@@ -388,8 +389,19 @@ def parse_args_to_config(
         align_bytes=args.l1_align_bytes,
     )
 
+    gds_l1_config: GdsL1Config | None = None
+    if getattr(args, "gds_l1_path", None):
+        gds_l1_config = GdsL1Config(
+            gds_path=args.gds_l1_path,
+            gds_path_sharding=args.gds_l1_path_sharding,
+            use_gds=args.gds_l1_use_gds,
+            use_direct_io=args.gds_l1_use_direct_io,
+            slab_size_gb=args.gds_l1_slab_size_gb,
+        )
+
     l1_manager_config = L1ManagerConfig(
         memory_config=memory_config,
+        gds_l1_config=gds_l1_config,
         write_ttl_seconds=args.l1_write_ttl_seconds,
         read_ttl_seconds=args.l1_read_ttl_seconds,
     )
@@ -402,16 +414,6 @@ def parse_args_to_config(
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
-    gds_l1_config: GdsL1Config | None = None
-    if getattr(args, "gds_l1_path", None):
-        gds_l1_config = GdsL1Config(
-            gds_path=args.gds_l1_path,
-            gds_path_sharding=args.gds_l1_path_sharding,
-            use_gds=args.gds_l1_use_gds,
-            use_direct_io=args.gds_l1_use_direct_io,
-            slab_size_gb=args.gds_l1_slab_size_gb,
-        )
-
     return StorageManagerConfig(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
@@ -419,7 +421,6 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
-        gds_l1_config=gds_l1_config,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
 

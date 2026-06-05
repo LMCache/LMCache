@@ -1964,7 +1964,11 @@ class TestL1ManagerGdsTeardown:
     def test_free_objects_drops_gds_entry(
         self, basic_l1_config, gds_l1_config, basic_layout
     ):
-        manager = L1Manager(basic_l1_config, gds_l1_config=gds_l1_config)
+        l1_config = L1ManagerConfig(
+            memory_config=basic_l1_config.memory_config,
+            gds_l1_config=gds_l1_config,
+        )
+        manager = L1Manager(l1_config)
         try:
             # White-box: create + record a GDS object as a completed write would.
             allocator = manager._gds_backend._allocator
@@ -1980,5 +1984,8 @@ class TestL1ManagerGdsTeardown:
 
             assert allocator.create_memory_obj_from_index(key) is None
             assert allocator.get_memory_usage()[0] == 0
+
+            # Health check routes to the GDS slab when CPU L1 is disabled.
+            assert manager.memcheck() is True
         finally:
             manager.close()

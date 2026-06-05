@@ -5,8 +5,10 @@ Focus is on the parts that do not require a real cuFile driver:
 
 - :class:`SlabAddressManager` — allocator semantics, coalescing,
   OOM, ``mark_used`` overlap rejection.
-- :class:`GdsL1Backend` — lookup / create_memory_obj / free_entry_from_index,
-  ``get_memory_usage``, index persistence + reload.
+- :class:`GdsSlabAllocator` — create_memory_obj / create_memory_obj_from_index
+  / free, ``get_memory_usage``, index persistence + reload.
+- :class:`GdsL1Backend` — the thin facade's ``allocate`` / ``free``
+  contract (all-or-nothing reservation).
 - :class:`GdsMemoryObj` — disk-anchored surface (``tensor`` is None,
   ``byte_array`` / ``data_ptr`` raise).
 
@@ -127,6 +129,23 @@ class TestSlabAddressManager:
         with pytest.raises(RuntimeError):
             sm.mark_used(0, 4096)
 
+    def test_memcheck_consistent_across_alloc_free(self):
+        sm = SlabAddressManager(total_size=64 * 1024)
+        assert sm.memcheck()
+        a = sm.allocate(8192)
+        b = sm.allocate(4096)
+        assert sm.memcheck()
+        sm.free(a, 8192)
+        sm.free(b, 4096)
+        assert sm.memcheck()
+
+    def test_memcheck_detects_inconsistency(self):
+        sm = SlabAddressManager(total_size=64 * 1024)
+        sm.allocate(8192)
+        # Corrupt the used counter so it no longer agrees with the free list.
+        sm._used += 4096
+        assert not sm.memcheck()
+
 
 # --- GdsMemoryObj surface --------------------------------------------
 
@@ -171,8 +190,8 @@ class TestGdsMemoryObjSurface:
 
 
 class TestGdsSlabAllocatorIndex:
-    """``lookup`` / ``create_memory_obj`` / ``record_entry`` /
-    ``free_entry_from_index``."""
+    """``create_memory_obj`` / ``create_memory_obj_from_index`` /
+    ``_record_entry`` / ``free``."""
 
     @pytest.fixture
     def backend(self, gds_root):
@@ -203,7 +222,7 @@ class TestGdsSlabAllocatorIndex:
             key=key, layout_desc=_layout(torch.Size([4096]), torch.uint8)
         )
         backend._record_entry(mo)
-        backend.free_entry_from_index(mo)
+        backend.free(mo)
         assert backend.create_memory_obj_from_index(key) is None
 
     def test_create_memory_obj_from_index(self, backend):

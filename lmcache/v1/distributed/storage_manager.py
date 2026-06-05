@@ -56,10 +56,7 @@ logger = init_logger(__name__)
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
-        self._l1_manager = L1Manager(
-            config.l1_manager_config,
-            gds_l1_config=config.gds_l1_config,
-        )
+        self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
 
         # L1 eviction controller

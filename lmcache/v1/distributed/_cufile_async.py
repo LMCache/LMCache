@@ -23,9 +23,11 @@ Surface:
   byte count after the sync.
 
 This module is intentionally narrow: no thread pool, no future
-abstraction, no LRU. It's the layer where ``GdsSlabAllocator``
-talks to libcufile when the operator opts into the fast path via
-``GdsL1Config.use_async_ctypes=True``.
+abstraction, no LRU. It is the layer :class:`GdsCuFileIO`
+(``lmcache.v1.distributed.gds_l1``) uses to talk to libcufile on the
+GDS DMA fast path (``GdsL1Config.use_gds=True``); with
+``use_gds=False`` the backend falls back to POSIX ``pread``/``pwrite``
++ ``cudaMemcpy`` and this module is unused.
 """
 
 # Standard

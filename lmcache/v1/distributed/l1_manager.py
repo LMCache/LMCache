@@ -12,7 +12,7 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import TTLLock
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
-from lmcache.v1.distributed.config import GdsL1Config, L1ManagerConfig
+from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.gds_l1 import (
     GdsCuFileIO,
@@ -184,23 +184,22 @@ class L1Manager:
     _gauge_registered: bool = False
     _gauge_target: "L1Manager | None" = None
 
-    def __init__(
-        self,
-        config: L1ManagerConfig,
-        gds_l1_config: GdsL1Config | None = None,
-    ):
+    def __init__(self, config: L1ManagerConfig):
         self._lock = threading.Lock()
 
         self._objects: dict[ObjectKey, L1ObjectState] = {}
 
-        self._memory_manager = L1MemoryManager(config.memory_config)
+        # For now, there is only one instance of GDS and CPU L1
         self._gds_backend: GdsL1Backend | None = None
-        if gds_l1_config is not None:
-            self._gds_backend = GdsL1Backend(config=gds_l1_config)
+        self._memory_manager: L1MemoryManager | None = None
+        if config.gds_l1_config is not None:
+            self._gds_backend = GdsL1Backend(config=config.gds_l1_config)
             logger.info(
-                "L1Manager: GDS L1 backend enabled (gds_path=%r)",
-                gds_l1_config.gds_path,
+                "L1Manager: GDS L1 backend enabled (gds_path=%r); CPU L1 disabled",
+                config.gds_l1_config.gds_path,
             )
+        else:
+            self._memory_manager = L1MemoryManager(config.memory_config)
 
         self._write_ttl_seconds = config.write_ttl_seconds
         self._read_ttl_seconds = config.read_ttl_seconds
@@ -501,10 +500,12 @@ class L1Manager:
             err, allocated_objs = self._gds_backend.allocate(
                 layout_desc, [key for key, _ in need_to_allocate]
             )
-        else:
+        elif self._memory_manager is not None:
             err, allocated_objs = self._memory_manager.allocate(
                 layout_desc, len(need_to_allocate)
             )
+        else:
+            err = L1Error.OUT_OF_MEMORY
 
         if err != L1Error.SUCCESS:
             for key, _ in need_to_allocate:
@@ -512,7 +513,7 @@ class L1Manager:
 
             # Free the memory if partial allocation succeeded
             if allocated_objs:
-                self._memory_manager.free(allocated_objs)
+                self._free_objects(allocated_objs)
 
         else:
             for (key, is_temp), mem_obj in zip(
@@ -793,17 +794,10 @@ class L1Manager:
         )
 
     def _free_objects(self, mem_objs: list[MemoryObj]) -> None:
-        """Free removed objects, routing each to its owning tier.
-
-        GDS-resident objects drop their slab region and index entry via the
-        GDS backend; CPU-pinned objects go back to the L1 memory manager.
-        Used by the removal paths (finish_read / delete / clear / eviction).
-        Not for shutdown: ``close`` keeps GDS entries durable.
+        """
+        Free removed objects
         """
         if not mem_objs:
-            return
-        if self._gds_backend is None:
-            self._memory_manager.free(mem_objs)
             return
         gds_objs: list[MemoryObj] = [
             mo for mo in mem_objs if isinstance(mo, GdsMemoryObj)
@@ -811,9 +805,9 @@ class L1Manager:
         cpu_objs: list[MemoryObj] = [
             mo for mo in mem_objs if not isinstance(mo, GdsMemoryObj)
         ]
-        if gds_objs:
-            self._gds_backend.free_resident(gds_objs)
-        if cpu_objs:
+        if gds_objs and self._gds_backend is not None:
+            self._gds_backend.free_from_index(gds_objs)
+        if cpu_objs and self._memory_manager is not None:
             self._memory_manager.free(cpu_objs)
 
     def _try_gds_fill_on_miss_locked(self, key: ObjectKey) -> L1ObjectState | None:
@@ -877,10 +871,15 @@ class L1Manager:
         """
         if self._gds_backend is not None:
             return self._gds_backend.get_memory_usage()
-        return self._memory_manager.get_memory_usage()
+        elif self._memory_manager is not None:
+            return self._memory_manager.get_memory_usage()
+        else:
+            raise RuntimeError("L1Manager has no memory backend configured")
 
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
+        if self._memory_manager is None:
+            return None
         return self._memory_manager.get_l1_memory_desc()
 
     def get_gds_cufile_io(self) -> GdsCuFileIO | None:
@@ -891,20 +890,25 @@ class L1Manager:
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
+        # Clear all objects
         with self._lock:
-            # Only CPU-pinned objects belong to _memory_manager. GDS objects
-            # are owned by the slab and torn down by _gds_backend.close() below.
-            cpu_objs = [
-                entry.memory_obj
-                for entry in self._objects.values()
-                if not isinstance(entry.memory_obj, GdsMemoryObj)
-            ]
-            self._memory_manager.free(cpu_objs)
+            # GDS is a durable cache and close() is shutdown, not removal
+            if self._memory_manager is not None:
+                cpu_objs = [
+                    entry.memory_obj
+                    for entry in self._objects.values()
+                    if not isinstance(entry.memory_obj, GdsMemoryObj)
+                ]
+                self._memory_manager.free(cpu_objs)
             self._objects.clear()
 
-        self._memory_manager.close()
-        if self._gds_backend is not None:
+        # Close the backends
+        if self._memory_manager is not None:
+            self._memory_manager.close()
+        elif self._gds_backend is not None:
             self._gds_backend.close()
+        else:
+            raise RuntimeError("L1Manager has no memory backend configured")
 
     # Status reporting
     @l1_mgr_synchronized
@@ -920,9 +924,16 @@ class L1Manager:
                 read_locked += 1
             if entry.is_temporary:
                 temporary += 1
-        used, total = self._memory_manager.get_memory_usage()
+        if self._gds_backend is not None:
+            used, total = self._gds_backend.get_memory_usage()
+            is_healthy = self._gds_backend.memcheck()
+        elif self._memory_manager is not None:
+            used, total = self._memory_manager.get_memory_usage()
+            is_healthy = self._memory_manager.memcheck()
+        else:
+            raise RuntimeError("L1Manager has no memory backend configured")
         return {
-            "is_healthy": self._memory_manager.memcheck(),
+            "is_healthy": is_healthy,
             "total_object_count": len(self._objects),
             "write_locked_count": write_locked,
             "read_locked_count": read_locked,
@@ -950,7 +961,12 @@ class L1Manager:
     @l1_mgr_synchronized
     def memcheck(self) -> bool:
         """Perform memory check for L1 cache."""
-        mem_check_result = self._memory_manager.memcheck()
+        if self._memory_manager is not None:
+            mem_check_result = self._memory_manager.memcheck()
+        elif self._gds_backend is not None:
+            mem_check_result = self._gds_backend.memcheck()
+        else:
+            mem_check_result = True
 
         # Log the locked objects for debugging
         num_write_locked = 0
