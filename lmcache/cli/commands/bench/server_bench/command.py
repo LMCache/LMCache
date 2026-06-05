@@ -266,7 +266,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
 
     # Resolve transfer mode. ``auto`` reproduces the historical
     # behaviour: gpu -> handle path, cpu -> data path.
-    transfer_mode = getattr(args, "transfer_mode", "auto")
+    transfer_mode = args.transfer_mode
     if transfer_mode == "auto":
         use_handle = use_gpu
     elif transfer_mode == "handle":
@@ -417,14 +417,14 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             client_kv_tensors = cpu_tensors
 
         # Register KV cache before any store/retrieve.
-        register_result = _send_register_kv_cache(
+        register_ok, register_response = _send_register_kv_cache(
             client,
             layout_hints=layout_hints,
             kv_caches=kv_wrappers if use_handle else None,
             use_gpu=use_gpu,
             use_handle=use_handle,
         )
-        print("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
+        print("REGISTER_KV_CACHE: %s" % ("OK" if register_ok else "FAIL"))
         print()
 
         # In data mode the server reply carries the SHM pool name
@@ -435,9 +435,9 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         # and unregister from the worker's resource tracker so the
         # segment is not unlinked when the bench exits -- the server
         # owns its lifetime.
-        if not use_handle and hasattr(register_result, "shm_name"):
-            shm_name = getattr(register_result, "shm_name", "")
-            pool_size = getattr(register_result, "pool_size", 0)
+        if not use_handle and register_ok and register_response is not None:
+            shm_name = register_response.shm_name
+            pool_size = register_response.pool_size
             if shm_name and pool_size > 0:
                 server_shm = shared_memory.SharedMemory(
                     name=shm_name.lstrip("/"), create=False

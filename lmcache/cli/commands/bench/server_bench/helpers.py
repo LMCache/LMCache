@@ -267,7 +267,7 @@ def _send_register_kv_cache(
     kv_caches: list[CudaIPCWrapper] | None = None,
     use_gpu: bool = True,
     use_handle: bool | None = None,
-) -> "bool | RegisterNonGpuContextResponse":
+) -> "tuple[bool, RegisterNonGpuContextResponse | None]":
     """Register a KV cache context with the MP server.
 
     Dispatches to the correct protocol based on ``use_handle``:
@@ -276,6 +276,12 @@ def _send_register_kv_cache(
       list (GPU only in this PR).
     * Data mode: ``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` with a
       ``RegisterNonGpuContextPayload`` derived from ``layout_hints``.
+
+    Returns ``(success, response)`` where ``response`` is the
+    data-mode SHM pool descriptor (``None`` in handle mode or on
+    failure). Using an explicit success flag avoids relying on the
+    truthiness of a dataclass response, which is always truthy even
+    when the server returned an empty pool descriptor.
 
     ``use_handle`` defaults to ``use_gpu`` for backwards compatibility:
     GPU always goes through the handle path, CPU defaults to data.
@@ -305,7 +311,7 @@ def _send_register_kv_cache(
             [],
         ]
         result = _call(client, RequestType.REGISTER_KV_CACHE, payloads)
-        return result is not _TIMEOUT
+        return (result is not _TIMEOUT, None)
 
     # Data mode: use the non-GPU context registration protocol.
     # layout_hints carries num_layers, num_heads, head_size, block_size,
@@ -333,12 +339,14 @@ def _send_register_kv_cache(
         use_mla=False,
     )
     result = _call(client, RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT, [payload])
-    if result is _TIMEOUT:
-        return False
+    if result is _TIMEOUT or result is None:
+        return (False, None)
     # The data-mode register reply carries the server's SHM pool name
     # and size; the bench keeps it so STORE/RETRIEVE can mmap the same
-    # pool and exchange tensor data via slot descriptors.
-    return result
+    # pool and exchange tensor data via slot descriptors. A non-empty
+    # ``shm_name`` is the authoritative success signal here.
+    success = bool(getattr(result, "shm_name", ""))
+    return (success, result)
 
 
 def _send_lookup(
