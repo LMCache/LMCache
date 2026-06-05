@@ -276,5 +276,35 @@ class TestFormatKvcacheShapeSpec:
             format_kvcache_shape_spec([])
 
 
+class TestDeriveCompressionMetadata:
+    """``(compress_ratio, physical_chunk_size)`` derivation: ``1`` when there is
+    no engine block size, else ``ie_logical_block_size // bs`` (e.g. DeepSeek V4
+    compression where ``bs < logical``), with divisibility enforced.
+    """
+
+    def _derive(self, bs: int, logical: "int | None", chunk: int = 256):
+        return KVLayerGroupsManager._derive_compression_metadata(
+            group_idx=0,
+            bs=bs,
+            ie_logical_block_size=logical,
+            lmcache_logical_chunk_size=chunk,
+        )
+
+    def test_one_to_one(self):
+        assert self._derive(bs=16, logical=16) == (1, 256)
+
+    def test_no_block_size_info(self):
+        assert self._derive(bs=16, logical=None) == (1, 256)
+
+    def test_compression_bs_lt_logical(self):
+        # bs=8 packs 2 logical tokens per physical slot (DeepSeek V4 style).
+        assert self._derive(bs=8, logical=16) == (2, 128)
+
+    def test_not_divisible_raises(self):
+        # Divisibility is enforced loudly (e.g. bs=6 does not divide 16).
+        with pytest.raises(ValueError, match="must be a multiple of"):
+            self._derive(bs=6, logical=16)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

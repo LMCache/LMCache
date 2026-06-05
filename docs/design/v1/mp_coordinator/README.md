@@ -135,12 +135,17 @@ liveness.
 ## Running
 
 ```
-python -m lmcache.v1.mp_coordinator
+lmcache coordinator [--host HOST] [--port PORT] \
+    [--instance-timeout SECS] [--health-check-interval SECS]
 ```
+
+(or, equivalently, `python -m lmcache.v1.mp_coordinator`).
 
 Configured via `LMCACHE_MP_COORDINATOR_*` environment variables — see
 `MPCoordinatorConfig` in `config.py` (`HOST`, `PORT`, `INSTANCE_TIMEOUT`,
-`HEALTH_CHECK_INTERVAL`).
+`HEALTH_CHECK_INTERVAL`). The `lmcache coordinator` CLI flags override the
+matching env-derived field; unset flags fall back to the env vars and then the
+config defaults.
 
 An mp server joins via the `registrar.py` helpers — no dedicated client object,
 mirroring how the coordinator just calls mp endpoints. The mp server's FastAPI

@@ -345,16 +345,13 @@ class GPUTransferModule:
         gpu_context = entry.gpu_context
         model_name = entry.model_name
 
-        # ``blocks_per_chunk`` is counted in inference-engine-side
-        # blocks (each block addresses
-        # ``inference_engine_logical_block_size`` *logical* tokens).
-        # For compressed groups the per-group physical slot count
-        # differs, but the block-id indexing is shared with the engine
-        # and therefore uses the engine logical block size here.
-        blocks_per_chunk = (
-            self._ctx.chunk_size
-            // gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
+        # NOTE: different engine groups may have different block sizes, so
+        # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
+        # group ``i``.
+        blocks_per_chunk = [
+            gpu_context.blocks_for_tokens(self._ctx.chunk_size, group_idx)
+            for group_idx in range(gpu_context.kv_layer_groups_manager.num_groups)
+        ]
 
         with (
             torch_dev.device(gpu_context.device),
@@ -373,17 +370,19 @@ class GPUTransferModule:
             # the whole store and commit nothing rather than caching a partial or
             # garbage entry. A later request can store it once the block IDs are
             # complete.
-            required_blocks = len(obj_keys) * blocks_per_chunk
             if any(
-                group_block_ids.shape[0] < required_blocks
-                for group_block_ids in block_ids_per_group_gpu
+                group_block_ids.shape[0] < len(obj_keys) * bpc
+                for group_block_ids, bpc in zip(
+                    block_ids_per_group_gpu, blocks_per_chunk, strict=True
+                )
             ):
                 logger.warning(
-                    "STORE block ID underflow for request_id=%s: need %d block "
-                    "IDs per group for %d chunks; skipping the store.",
+                    "STORE block ID underflow for request_id=%s: each group needs "
+                    "len(obj_keys) * blocks_per_chunk block IDs for %d chunks "
+                    "(per-group blocks_per_chunk=%s); skipping the store.",
                     key.request_id,
-                    required_blocks,
                     len(obj_keys),
+                    blocks_per_chunk,
                 )
                 event.record()
                 return event.ipc_handle(), False
@@ -445,8 +444,9 @@ class GPUTransferModule:
                     # Copy from GPU paged buffer to tmp buffer, then to CPU — per
                     # group. Each group uses its own block-id list (HMA).
                     for group_idx in range(num_groups):
+                        bpc = blocks_per_chunk[group_idx]
                         chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
-                            idx * blocks_per_chunk : (idx + 1) * blocks_per_chunk
+                            idx * bpc : (idx + 1) * bpc
                         ]
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
                         group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
@@ -588,7 +588,6 @@ class GPUTransferModule:
         ie_logical_block_size = (
             gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
         )
-        blocks_per_chunk = self._ctx.chunk_size // ie_logical_block_size
 
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             _BATCH_SIZE = gpu_context.max_batch_size
@@ -622,8 +621,6 @@ class GPUTransferModule:
                         skip_tokens_in_chunk,
                         skip_tokens_in_chunk // ie_logical_block_size,
                     )
-                skip_blocks_in_chunk = skip_tokens_in_chunk // ie_logical_block_size
-
                 start_chunk_id = batch_idx * _BATCH_SIZE
                 end_chunk_id = start_chunk_id + batch_len
                 # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
@@ -634,11 +631,11 @@ class GPUTransferModule:
                         gpu_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
                     )
                 for group_idx, group in enumerate(groups):
+                    bpc = gpu_context.blocks_for_tokens(self._ctx.chunk_size, group_idx)
                     chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
-                        start_chunk_id * blocks_per_chunk : end_chunk_id
-                        * blocks_per_chunk
+                        start_chunk_id * bpc : end_chunk_id * bpc
                     ]
-                    if chunk_block_ids_gpu.shape[0] != batch_len * blocks_per_chunk:
+                    if chunk_block_ids_gpu.shape[0] != batch_len * bpc:
                         # Fail closed: a short block-id slice would make the
                         # transfer kernel write out-of-bounds GPU memory.
                         raise ValueError(
@@ -646,9 +643,12 @@ class GPUTransferModule:
                             f"group_idx={group_idx} "
                             f"engine_group_idx={group.engine_group_idx} "
                             f"batch={batch_idx} "
-                            f"expected={batch_len * blocks_per_chunk} "
+                            f"expected={batch_len * bpc} "
                             f"got={chunk_block_ids_gpu.shape[0]}"
                         )
+                    group_skip_blocks = gpu_context.blocks_for_tokens(
+                        skip_tokens_in_chunk, group_idx
+                    )
                     tmp_buffers = gpu_context.get_tmp_chunk_gpu_buffer_batched(
                         batch_len, group_idx
                     )
@@ -666,7 +666,7 @@ class GPUTransferModule:
                         gpu_context.get_shape_desc(group_idx),
                         group_lmcache_chunk_size,
                         gpu_context.gpu_kv_format_,
-                        skip_blocks_in_chunk,
+                        group_skip_blocks,
                     )
 
         with (
