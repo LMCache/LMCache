@@ -6,6 +6,7 @@ import argparse
 import shutil
 import sys
 import time
+import uuid
 
 # Third Party
 import zmq
@@ -235,6 +236,13 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine).
         If return_engine is False: None (blocks until interrupted).
     """
+    # Generate this server's identity once at startup. It keys the coordinator
+    # membership and, unless observability set its service.instance.id
+    # explicitly, also tags OTel metrics/traces.
+    mp_config.instance_id = str(uuid.uuid4())
+    if obs_config.service_instance_id is None:
+        obs_config.service_instance_id = mp_config.instance_id
+
     event_bus = init_observability(
         obs_config, start_prometheus_http_server=start_prometheus_http_server
     )

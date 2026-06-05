@@ -61,6 +61,11 @@ class MPServerConfig:
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
 
+    instance_id: str = ""
+    """Internal identity of this MP server, used as the coordinator
+    membership key. Not operator-settable: ``run_cache_server`` generates a
+    random UUID at startup."""
+
 
 @dataclass
 class RuntimePluginConfig:

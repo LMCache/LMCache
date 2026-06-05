@@ -79,9 +79,12 @@ class ObservabilityConfig:
     One MP server has exactly one instance id.
 
     ``None`` (the default, also the state when the CLI flag is not
-    passed) falls back to a random UUID v4 at ``init_observability``
-    time.  An explicit empty string is preserved verbatim so operators
-    who want the attribute to report ``""`` can ask for it."""
+    passed) means "not set explicitly": on the full MP server
+    ``run_cache_server`` fills it from the generated
+    ``MPServerConfig.instance_id`` so OTel and coordinator membership match;
+    standalone callers (e.g. the trace CLI driver) fall back to a random
+    UUID v4 at ``init_observability`` time. An explicit value (including an
+    empty string) is preserved verbatim."""
 
 
 DEFAULT_OBSERVABILITY_CONFIG = ObservabilityConfig(enabled=False)
