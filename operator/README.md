@@ -149,7 +149,8 @@ image ENTRYPOINT — a `sh -c` wrapper is skipped). Editable samples:
 The webhook mutates **Pods**, not the Deployment, so verify on a pod
 (`kubectl get pod -l app=vllm-cacheblend -o yaml | grep -E "cb-plugin|cacheblend-injected|skip-reason"`).
 If nothing was injected, check the pod's `lmcache.ai/cacheblend-skip-reason`
-annotation (`command-override`, `kv-transfer-config-present`, or `engine-not-found`).
+annotation (`command-override`, `kv-transfer-config-present`, `engine-not-found`,
+`payload-image-unset`, or `target-container-not-found`).
 
 ## Development
 

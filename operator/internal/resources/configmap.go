@@ -19,6 +19,7 @@ package resources
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -77,9 +78,7 @@ func buildConnectionConfigMapCore(
 		"lmcache.mp.host": fmt.Sprintf("tcp://%s", svcHost),
 		"lmcache.mp.port": fmt.Sprintf("%d", port),
 	}
-	for k, v := range extraConfig {
-		extra[k] = v
-	}
+	maps.Copy(extra, extraConfig)
 
 	config := map[string]any{
 		"kv_connector":              connectorName,

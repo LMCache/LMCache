@@ -273,7 +273,7 @@ var _ = Describe("PodInjector", func() {
 			Expect(pullSecretNames(out)).To(ContainElement("cb-payload-pull"))
 
 			By("M6: idempotency annotation stamped")
-			Expect(out.Annotations[AnnotationInjected]).To(Equal("true"))
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
 			Expect(out.Annotations).NotTo(HaveKey(AnnotationSkipReason))
 		})
 	})
@@ -354,7 +354,7 @@ var _ = Describe("PodInjector", func() {
 			engine := newTestEngine(nil)
 			injector := newPodInjector(engine, true)
 			pod := vllmPod(func(p *corev1.Pod) {
-				p.Annotations[AnnotationInjected] = "true"
+				p.Annotations[AnnotationInjected] = valueTrue
 			})
 
 			resp := injector.Handle(ctx, makeRequest(pod))
@@ -429,7 +429,7 @@ var _ = Describe("PodInjector", func() {
 
 			By("the skip reason is stamped but the rest of the injection still applies")
 			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonKVTransferConfigPresent))
-			Expect(out.Annotations[AnnotationInjected]).To(Equal("true"))
+			Expect(out.Annotations[AnnotationInjected]).To(Equal(valueTrue))
 			Expect(out.Spec.HostIPC).To(BeTrue())
 			Expect(argsHasFlagValue(c.Args, cbFlagBlockSize, cbValBlockSize)).To(BeTrue())
 		})
@@ -498,6 +498,25 @@ var _ = Describe("PodInjector", func() {
 			sidecar := findContainer(out, "sidecar")
 			Expect(sidecar.Args).To(Equal([]string{"sleep"}))
 		})
+
+		It("skips + stamps target-container-not-found for an unknown container name", func() {
+			engine := newTestEngine(nil)
+			injector := newPodInjector(engine, true)
+			pod := vllmPod(func(p *corev1.Pod) {
+				p.Annotations[AnnotationContainer] = "does-not-exist"
+			})
+
+			resp := injector.Handle(ctx, makeRequest(pod))
+			out := applyResponse(pod, resp)
+
+			Expect(out.Annotations[AnnotationSkipReason]).To(Equal(SkipReasonTargetContainerNotFound))
+			Expect(out.Annotations).NotTo(HaveKey(AnnotationInjected))
+			Expect(out.Spec.HostIPC).To(BeFalse())
+			Expect(out.Spec.InitContainers).To(BeEmpty())
+			By("the original vLLM container is left untouched")
+			vllm := findContainer(out, "vllm")
+			Expect(envValue(vllm, pythonPathEnvName)).To(BeEmpty())
+		})
 	})
 
 	Describe("cudagraph modes", func() {
@@ -531,12 +550,12 @@ func argsHasFlagValue(args []string, flag, value string) bool {
 // single-token form), or "" if the flag is absent.
 func argsFlagValue(args []string, flag string) string {
 	eqPrefix := flag + "="
-	for i := 0; i < len(args); i++ {
+	for i := range len(args) {
 		if args[i] == flag && i+1 < len(args) {
 			return args[i+1]
 		}
-		if strings.HasPrefix(args[i], eqPrefix) {
-			return strings.TrimPrefix(args[i], eqPrefix)
+		if after, ok := strings.CutPrefix(args[i], eqPrefix); ok {
+			return after
 		}
 	}
 	return ""

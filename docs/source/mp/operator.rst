@@ -713,8 +713,12 @@ The webhook mutates **Pods**, not the Deployment, so inspect a pod:
 
 If nothing was injected, check the pod's ``lmcache.ai/cacheblend-skip-reason``
 annotation: ``command-override`` (a ``sh -c`` wrapper was used),
-``kv-transfer-config-present`` (you set your own), or ``engine-not-found`` (the
-``<name>-connection`` ConfigMap is missing).  With ``failurePolicy: Ignore`` a
+``kv-transfer-config-present`` (you set your own), ``engine-not-found`` (the
+``<name>-connection`` ConfigMap is missing), ``payload-image-unset`` (the
+engine's ``injection.payloadImage`` has no repository), or
+``target-container-not-found`` (the requested ``targetContainer`` /
+``cacheblend-container`` annotation names a container the pod does not have).
+With ``failurePolicy: Ignore`` a
 webhook/cert problem also leaves the pod un-mutated silently -- confirm the
 operator pod is ``Running`` and the ``MutatingWebhookConfiguration`` exists.
 

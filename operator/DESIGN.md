@@ -444,7 +444,10 @@ webhook then applies:
 The webhook **skips** (stamping `lmcache.ai/cacheblend-skip-reason`) when: the
 target container overrides `command` (a `sh -c` wrapper — appended args wouldn't
 reach `vllm serve`); the user already supplies `--kv-transfer-config` (not
-clobbered); or the named engine's connection ConfigMap doesn't exist. It does
+clobbered); the named engine's connection ConfigMap doesn't exist; the engine's
+`injection.payloadImage` resolves to an empty reference (`payload-image-unset`);
+or the requested `targetContainer`/`cacheblend-container` annotation names a
+container that does not exist on the pod (`target-container-not-found`). It does
 **not** gate on engine readiness — like `LMCacheEngine`, the connector connects
 when the engine comes up. Args are emitted in two-token form
 (`--attention-backend CUSTOM`); the replace-not-duplicate dedup still recognizes a

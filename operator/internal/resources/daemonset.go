@@ -27,6 +27,23 @@ import (
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
 
+const (
+	// nvidiaRuntimeClass is the RuntimeClass name registered by the NVIDIA GPU
+	// Operator; engine pods request it when gpuVendor is nvidia.
+	nvidiaRuntimeClass = "nvidia"
+
+	// lmcacheServerBinary is the entrypoint binary for the LMCache server inside
+	// the engine image.
+	lmcacheServerBinary = "/opt/venv/bin/lmcache"
+
+	// serverSubcommand is the `lmcache server` subcommand that starts the engine.
+	serverSubcommand = "server"
+
+	// serverPortName is the name of the engine's serving port on the container
+	// and the node-local Service.
+	serverPortName = "server"
+)
+
 // BuildDaemonSet constructs a DaemonSet for the given LMCacheEngine.
 func BuildDaemonSet(engine *lmcachev1alpha1.LMCacheEngine) *appsv1.DaemonSet {
 	return buildDaemonSetCore(engine.Name, engine.Namespace, &engine.Spec, BuildContainerArgs(&engine.Spec), "lmcache/vllm-openai")
@@ -60,7 +77,7 @@ func buildDaemonSetCore(
 	gpuVendor := derefString(spec.GPUVendor, lmcachev1alpha1.GPUVendorNvidia)
 	var runtimeClassName *string
 	if gpuVendor == lmcachev1alpha1.GPUVendorNvidia {
-		rc := "nvidia"
+		rc := nvidiaRuntimeClass
 		runtimeClassName = &rc
 	}
 	privileged := true
@@ -147,8 +164,8 @@ func buildDaemonSetCore(
 	// (LMCACHE_RESP_USERNAME / LMCACHE_RESP_PASSWORD) injected above,
 	// so no shell wrapper is needed.
 	containerCommand := []string{
-		"/opt/venv/bin/lmcache",
-		"server",
+		lmcacheServerBinary,
+		serverSubcommand,
 	}
 
 	// Probes
@@ -183,7 +200,7 @@ func buildDaemonSetCore(
 	httpPort := getHTTPPort(spec)
 	containerPorts := []corev1.ContainerPort{
 		{
-			Name:          "server",
+			Name:          serverPortName,
 			ContainerPort: serverPort,
 			Protocol:      corev1.ProtocolTCP,
 		},

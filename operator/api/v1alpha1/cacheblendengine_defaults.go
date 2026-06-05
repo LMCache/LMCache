@@ -24,7 +24,7 @@ func (e *CacheBlendEngine) SetDefaults() {
 
 	// Default logLevel to INFO if unset (belt-and-suspenders with kubebuilder default).
 	if spec.LogLevel == nil {
-		info := "INFO"
+		info := defaultLogLevel
 		spec.LogLevel = &info
 	}
 
@@ -35,7 +35,7 @@ func (e *CacheBlendEngine) SetDefaults() {
 
 	if spec.NodeSelector == nil && *spec.GPUVendor == GPUVendorNvidia {
 		spec.NodeSelector = map[string]string{
-			"nvidia.com/gpu.present": "true",
+			"nvidia.com/gpu.present": labelValueTrue,
 		}
 	}
 

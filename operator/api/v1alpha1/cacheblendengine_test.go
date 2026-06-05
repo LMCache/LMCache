@@ -27,7 +27,7 @@ import (
 func TestCBSetDefaults_LogLevelNil(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
 	e.SetDefaults()
-	if e.Spec.LogLevel == nil || *e.Spec.LogLevel != "INFO" {
+	if e.Spec.LogLevel == nil || *e.Spec.LogLevel != defaultLogLevel {
 		t.Fatalf("expected LogLevel=INFO, got %v", e.Spec.LogLevel)
 	}
 }
@@ -49,7 +49,7 @@ func TestCBSetDefaults_NodeSelectorDefaultGPU(t *testing.T) {
 	if e.Spec.NodeSelector == nil {
 		t.Fatal("expected default NodeSelector, got nil")
 	}
-	if e.Spec.NodeSelector["nvidia.com/gpu.present"] != "true" {
+	if e.Spec.NodeSelector["nvidia.com/gpu.present"] != labelValueTrue {
 		t.Fatalf("expected nvidia.com/gpu.present=true, got %v", e.Spec.NodeSelector)
 	}
 }
@@ -188,8 +188,18 @@ func TestCBSetDefaults_InjectionPreserved(t *testing.T) {
 
 // --- ValidateSpec tests ---
 
+// validCBInjection returns the minimal injection block ValidateSpec requires
+// (injection.payloadImage.repository). Tests that exercise other fields include
+// it so the injection requirement does not perturb their expected error counts.
+func validCBInjection() *InjectionSpec {
+	return &InjectionSpec{PayloadImage: &ImageSpec{Repository: ptr("myreg/cacheblend-plugin")}}
+}
+
 func TestCBValidateSpec_ValidMinimal(t *testing.T) {
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
+	}}
 	errs := e.ValidateSpec()
 	if len(errs) != 0 {
 		t.Fatalf("expected no errors, got %v", errs)
@@ -197,7 +207,10 @@ func TestCBValidateSpec_ValidMinimal(t *testing.T) {
 }
 
 func TestCBValidateSpec_ValidDefaulted(t *testing.T) {
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
+	}}
 	e.SetDefaults()
 	errs := e.ValidateSpec()
 	if len(errs) != 0 {
@@ -205,8 +218,39 @@ func TestCBValidateSpec_ValidDefaulted(t *testing.T) {
 	}
 }
 
+func TestCBValidateSpec_InjectionRequired(t *testing.T) {
+	// A spec with no injection block is invalid: the webhook has no payload
+	// image to inject.
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: 10}}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.injection" {
+		t.Fatalf("expected field spec.injection, got %s", errs[0].Field)
+	}
+}
+
+func TestCBValidateSpec_InjectionPayloadRepositoryRequired(t *testing.T) {
+	// injection present but payloadImage.repository empty is invalid.
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: &InjectionSpec{PayloadImage: &ImageSpec{Repository: ptr("")}},
+	}}
+	errs := e.ValidateSpec()
+	if len(errs) != 1 {
+		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
+	}
+	if errs[0].Field != "spec.injection.payloadImage.repository" {
+		t.Fatalf("expected field spec.injection.payloadImage.repository, got %s", errs[0].Field)
+	}
+}
+
 func TestCBValidateSpec_SizeGBZero(t *testing.T) {
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: 0}}}
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: 0},
+		Injection: validCBInjection(),
+	}}
 	errs := e.ValidateSpec()
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 error, got %d: %v", len(errs), errs)
@@ -217,7 +261,10 @@ func TestCBValidateSpec_SizeGBZero(t *testing.T) {
 }
 
 func TestCBValidateSpec_SizeGBNegative(t *testing.T) {
-	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{L1: L1BackendSpec{SizeGB: -1}}}
+	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
+		L1:        L1BackendSpec{SizeGB: -1},
+		Injection: validCBInjection(),
+	}}
 	errs := e.ValidateSpec()
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 error, got %d", len(errs))
@@ -226,8 +273,9 @@ func TestCBValidateSpec_SizeGBNegative(t *testing.T) {
 
 func TestCBValidateSpec_EvictionPolicyInvalid(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1:       L1BackendSpec{SizeGB: 10},
-		Eviction: &EvictionSpec{Policy: ptr("FIFO")},
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
+		Eviction:  &EvictionSpec{Policy: ptr("FIFO")},
 	}}
 	errs := e.ValidateSpec()
 	if len(errs) != 1 {
@@ -237,8 +285,9 @@ func TestCBValidateSpec_EvictionPolicyInvalid(t *testing.T) {
 
 func TestCBValidateSpec_EvictionPolicyLRU(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1:       L1BackendSpec{SizeGB: 10},
-		Eviction: &EvictionSpec{Policy: ptr("LRU")},
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
+		Eviction:  &EvictionSpec{Policy: ptr("LRU")},
 	}}
 	errs := e.ValidateSpec()
 	if len(errs) != 0 {
@@ -262,8 +311,9 @@ func TestCBValidateSpec_TriggerWatermarkBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-				L1:       L1BackendSpec{SizeGB: 10},
-				Eviction: &EvictionSpec{TriggerWatermark: ptr(tt.value)},
+				L1:        L1BackendSpec{SizeGB: 10},
+				Injection: validCBInjection(),
+				Eviction:  &EvictionSpec{TriggerWatermark: ptr(tt.value)},
 			}}
 			errs := e.ValidateSpec()
 			if tt.wantErr && len(errs) == 0 {
@@ -291,8 +341,9 @@ func TestCBValidateSpec_EvictionRatioBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-				L1:       L1BackendSpec{SizeGB: 10},
-				Eviction: &EvictionSpec{EvictionRatio: ptr(tt.value)},
+				L1:        L1BackendSpec{SizeGB: 10},
+				Injection: validCBInjection(),
+				Eviction:  &EvictionSpec{EvictionRatio: ptr(tt.value)},
 			}}
 			errs := e.ValidateSpec()
 			if tt.wantErr && len(errs) == 0 {
@@ -319,8 +370,9 @@ func TestCBValidateSpec_ServerPort(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-				L1:     L1BackendSpec{SizeGB: 10},
-				Server: &ServerSpec{Port: ptr(tt.port), ChunkSize: ptr(CacheBlendChunkSize)},
+				L1:        L1BackendSpec{SizeGB: 10},
+				Injection: validCBInjection(),
+				Server:    &ServerSpec{Port: ptr(tt.port), ChunkSize: ptr(CacheBlendChunkSize)},
 			}}
 			errs := e.ValidateSpec()
 			if tt.wantErr && len(errs) == 0 {
@@ -347,8 +399,9 @@ func TestCBValidateSpec_ChunkSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-				L1:     L1BackendSpec{SizeGB: 10},
-				Server: &ServerSpec{ChunkSize: ptr(tt.value)},
+				L1:        L1BackendSpec{SizeGB: 10},
+				Injection: validCBInjection(),
+				Server:    &ServerSpec{ChunkSize: ptr(tt.value)},
 			}}
 			errs := e.ValidateSpec()
 			if tt.wantErr && len(errs) == 0 {
@@ -374,8 +427,9 @@ func TestCBValidateSpec_CheckLayerBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-				L1:    L1BackendSpec{SizeGB: 10},
-				Blend: &BlendSpec{CheckLayer: ptr(tt.value)},
+				L1:        L1BackendSpec{SizeGB: 10},
+				Injection: validCBInjection(),
+				Blend:     &BlendSpec{CheckLayer: ptr(tt.value)},
 			}}
 			errs := e.ValidateSpec()
 			if tt.wantErr && len(errs) == 0 {
@@ -404,8 +458,9 @@ func TestCBValidateSpec_RecompRatioBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-				L1:    L1BackendSpec{SizeGB: 10},
-				Blend: &BlendSpec{RecompRatio: ptr(tt.value)},
+				L1:        L1BackendSpec{SizeGB: 10},
+				Injection: validCBInjection(),
+				Blend:     &BlendSpec{RecompRatio: ptr(tt.value)},
 			}}
 			errs := e.ValidateSpec()
 			if tt.wantErr && len(errs) == 0 {
@@ -420,8 +475,9 @@ func TestCBValidateSpec_RecompRatioBounds(t *testing.T) {
 
 func TestCBValidateSpec_MultipleErrors(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1:     L1BackendSpec{SizeGB: 0},
-		Server: &ServerSpec{Port: ptr(int32(80)), ChunkSize: ptr(int32(128))},
+		L1:        L1BackendSpec{SizeGB: 0},
+		Injection: validCBInjection(),
+		Server:    &ServerSpec{Port: ptr(int32(80)), ChunkSize: ptr(int32(128))},
 		Eviction: &EvictionSpec{
 			Policy:           ptr("FIFO"),
 			TriggerWatermark: ptr(0.0),
@@ -440,7 +496,8 @@ func TestCBValidateSpec_MultipleErrors(t *testing.T) {
 
 func TestCBValidateSpec_L2RESPValid(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1: L1BackendSpec{SizeGB: 10},
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
 		L2Backend: &L2BackendSpec{
 			RESP: &RESPL2AdapterSpec{
 				Host: "redis.default.svc",
@@ -456,7 +513,8 @@ func TestCBValidateSpec_L2RESPValid(t *testing.T) {
 
 func TestCBValidateSpec_L2RESPEmptyHost(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1: L1BackendSpec{SizeGB: 10},
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
 		L2Backend: &L2BackendSpec{
 			RESP: &RESPL2AdapterSpec{
 				Host: "",
@@ -476,6 +534,7 @@ func TestCBValidateSpec_L2RESPEmptyHost(t *testing.T) {
 func TestCBValidateSpec_L2NoneSet(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
 		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
 		L2Backend: &L2BackendSpec{},
 	}}
 	errs := e.ValidateSpec()
@@ -486,7 +545,8 @@ func TestCBValidateSpec_L2NoneSet(t *testing.T) {
 
 func TestCBValidateSpec_L2BothSet(t *testing.T) {
 	e := &CacheBlendEngine{Spec: CacheBlendEngineSpec{
-		L1: L1BackendSpec{SizeGB: 10},
+		L1:        L1BackendSpec{SizeGB: 10},
+		Injection: validCBInjection(),
 		L2Backend: &L2BackendSpec{
 			RESP: &RESPL2AdapterSpec{Host: "redis", Port: 6379},
 			Raw:  &RawL2AdapterSpec{Type: "mock"},

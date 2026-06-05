@@ -238,7 +238,7 @@ func BuildCBArgs(existingArgs []string, kvTransferConfigJSON, cudagraph string) 
 // otherwise the two-token pair is appended. Returns a new slice.
 func applyArg(args []string, flag, value string) []string {
 	eqPrefix := flag + "="
-	for i := 0; i < len(args); i++ {
+	for i := range len(args) {
 		if args[i] == flag {
 			// Two-token form: overwrite the following value token if present,
 			// else append the value after the flag.

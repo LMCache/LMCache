@@ -51,7 +51,7 @@ func buildLookupServiceCore(name, namespace string, spec *lmcachev1alpha1.LMCach
 			InternalTrafficPolicy: &localPolicy,
 			Ports: []corev1.ServicePort{
 				{
-					Name:     "server",
+					Name:     serverPortName,
 					Port:     serverPort,
 					Protocol: corev1.ProtocolTCP,
 				},

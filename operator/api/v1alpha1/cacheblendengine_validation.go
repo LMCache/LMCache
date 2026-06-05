@@ -27,35 +27,13 @@ import (
 func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 	var errs field.ErrorList
 	spec := &e.Spec
-	l1Path := field.NewPath("spec", "l1")
 
 	// l1.sizeGB must be > 0
 	if spec.L1.SizeGB <= 0 {
-		errs = append(errs, field.Invalid(l1Path.Child("sizeGB"), spec.L1.SizeGB, "must be greater than 0"))
+		errs = append(errs, field.Invalid(field.NewPath("spec", "l1", "sizeGB"), spec.L1.SizeGB, "must be greater than 0"))
 	}
 
-	// Eviction validation
-	if spec.Eviction != nil {
-		evPath := field.NewPath("spec", "eviction")
-
-		if spec.Eviction.Policy != nil && *spec.Eviction.Policy != "LRU" {
-			errs = append(errs, field.NotSupported(evPath.Child("policy"), *spec.Eviction.Policy, []string{"LRU"}))
-		}
-
-		if spec.Eviction.TriggerWatermark != nil {
-			tw := *spec.Eviction.TriggerWatermark
-			if tw <= 0.0 || tw > 1.0 {
-				errs = append(errs, field.Invalid(evPath.Child("triggerWatermark"), tw, "must be in (0.0, 1.0]"))
-			}
-		}
-
-		if spec.Eviction.EvictionRatio != nil {
-			er := *spec.Eviction.EvictionRatio
-			if er <= 0.0 || er > 1.0 {
-				errs = append(errs, field.Invalid(evPath.Child("evictionRatio"), er, "must be in (0.0, 1.0]"))
-			}
-		}
-	}
+	errs = append(errs, validateEvictionSpec(spec.Eviction)...)
 
 	// Server validation
 	if spec.Server != nil {
@@ -91,48 +69,23 @@ func (e *CacheBlendEngine) ValidateSpec() field.ErrorList {
 		}
 	}
 
-	// L2 backend validation
-	if spec.L2Backend != nil {
-		l2Path := field.NewPath("spec", "l2Backend")
-		b := spec.L2Backend
-
-		setCount := 0
-		if b.RESP != nil {
-			setCount++
-		}
-		if b.Raw != nil {
-			setCount++
-		}
-		// For now we only support one kind at each LMCache server. LMCache
-		// MP mode is designed to support multiple ones at the same time
-		// but tests and performance validation is needed before we ship
-		// it into operator.
-		if setCount == 0 {
-			errs = append(errs, field.Required(l2Path, "exactly one of resp or raw must be set"))
-		} else if setCount > 1 {
-			errs = append(errs, field.Invalid(l2Path, "", "exactly one of resp or raw must be set, got multiple"))
-		}
-
-		if b.RESP != nil {
-			respPath := l2Path.Child("resp")
-			if b.RESP.Host == "" {
-				errs = append(errs, field.Required(respPath.Child("host"), "must be a non-empty string"))
-			}
-			if b.RESP.Port < 1 || b.RESP.Port > 65535 {
-				errs = append(errs, field.Invalid(respPath.Child("port"), b.RESP.Port, "must be in [1, 65535]"))
-			}
-			if b.RESP.AuthSecretRef != nil && b.RESP.AuthSecretRef.Name == "" {
-				errs = append(errs, field.Required(respPath.Child("authSecretRef", "name"), "must be non-empty"))
-			}
-		}
-
-		if b.Raw != nil {
-			rawPath := l2Path.Child("raw")
-			if b.Raw.Type == "" {
-				errs = append(errs, field.Required(rawPath.Child("type"), "must be a non-empty string"))
-			}
-		}
+	// Injection validation. injection.payloadImage.repository is functionally
+	// required: the mutating webhook needs it to inject a valid init container.
+	// Without it the webhook would produce a Pod with an empty init-container
+	// image, which the API server rejects at Pod creation. Enforce it here so
+	// the misconfiguration is caught at `kubectl apply` time instead.
+	injPath := field.NewPath("spec", "injection")
+	if spec.Injection == nil {
+		errs = append(errs, field.Required(injPath, "must be specified for CacheBlend injection"))
+	} else if spec.Injection.PayloadImage == nil {
+		errs = append(errs, field.Required(injPath.Child("payloadImage"),
+			"must be specified for CacheBlend injection"))
+	} else if spec.Injection.PayloadImage.Repository == nil || *spec.Injection.PayloadImage.Repository == "" {
+		errs = append(errs, field.Required(injPath.Child("payloadImage", "repository"),
+			"must be a non-empty string"))
 	}
+
+	errs = append(errs, validateL2BackendSpec(spec.L2Backend)...)
 
 	return errs
 }

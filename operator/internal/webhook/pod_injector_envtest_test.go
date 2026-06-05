@@ -51,7 +51,7 @@ var _ = Describe("PodInjector webhook (envtest)", Ordered, func() {
 			if p.Labels == nil {
 				p.Labels = map[string]string{}
 			}
-			p.Labels["lmcache.ai/cacheblend-inject"] = "true"
+			p.Labels["lmcache.ai/cacheblend-inject"] = valueTrue
 		})
 		Expect(k8sClient.Create(envtestCtx, pod)).To(Succeed())
 
@@ -60,7 +60,7 @@ var _ = Describe("PodInjector webhook (envtest)", Ordered, func() {
 			types.NamespacedName{Name: "vllm-injected", Namespace: testNamespace}, got)).To(Succeed())
 
 		By("the idempotency annotation is stamped")
-		Expect(got.Annotations).To(HaveKeyWithValue(AnnotationInjected, "true"))
+		Expect(got.Annotations).To(HaveKeyWithValue(AnnotationInjected, valueTrue))
 
 		By("M0: hostIPC is set on the pod")
 		Expect(got.Spec.HostIPC).To(BeTrue())

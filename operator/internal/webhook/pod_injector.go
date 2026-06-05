@@ -56,6 +56,10 @@ const (
 	AnnotationSkipReason = "lmcache.ai/cacheblend-skip-reason"
 )
 
+// valueTrue is the boolean-true string stamped on AnnotationInjected and used as
+// the opt-in value of the lmcache.ai/cacheblend-inject label.
+const valueTrue = "true"
+
 // Skip-reason values stamped on AnnotationSkipReason (design §8).
 const (
 	// SkipReasonEngineNotFound is stamped when the named engine's connection
@@ -69,6 +73,18 @@ const (
 	// SkipReasonKVTransferConfigPresent is stamped when the user already supplies
 	// --kv-transfer-config; the webhook does not clobber their structured JSON.
 	SkipReasonKVTransferConfigPresent = "kv-transfer-config-present"
+
+	// SkipReasonPayloadImageUnset is stamped when the engine's
+	// injection.payloadImage resolves to an empty reference (no repository). The
+	// webhook skips rather than inject an init container with an empty image,
+	// which the API server would reject. CRD validation normally prevents this.
+	SkipReasonPayloadImageUnset = "payload-image-unset"
+
+	// SkipReasonTargetContainerNotFound is stamped when the requested target
+	// container (injection.targetContainer or the cacheblend-container
+	// annotation) names a container that does not exist on the pod, so there is
+	// nothing to inject into.
+	SkipReasonTargetContainerNotFound = "target-container-not-found"
 )
 
 // kvTransferConfigDataKey is the key within the <engine>-connection ConfigMap's
@@ -76,7 +92,7 @@ const (
 // the key written by resources.buildConnectionConfigMapCore.
 const kvTransferConfigDataKey = "kv-transfer-config.json"
 
-//+kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod.lmcache.ai,admissionReviewVersions=v1,reinvocationPolicy=Never
+// +kubebuilder:webhook:path=/mutate--v1-pod,mutating=true,failurePolicy=ignore,sideEffects=None,groups="",resources=pods,verbs=create,versions=v1,name=mpod.lmcache.ai,admissionReviewVersions=v1,reinvocationPolicy=Never
 
 // PodInjector is the mutating admission handler that injects the
 // lmcache-cacheblend vLLM plugin into opted-in pods (design §7). It is gated by
@@ -110,7 +126,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 
 	// (1) Idempotency short-circuit: a pod already carrying the injected guard is
 	// allowed unchanged on re-admission.
-	if pod.Annotations[AnnotationInjected] == "true" {
+	if pod.Annotations[AnnotationInjected] == valueTrue {
 		return admission.Allowed("already injected")
 	}
 
@@ -155,12 +171,17 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	}
 	kvTransferConfigJSON := connCM.Data[kvTransferConfigDataKey]
 
-	// (6) Resolve the target container (annotation or first).
+	// (6) Resolve the target container (annotation or first). A requested
+	// container name that does not exist (or a pod with no containers) is a
+	// misconfiguration: skip + stamp rather than silently allowing it through.
 	containerIdx, ok := resolveTargetContainer(pod, engine.Spec.Injection.TargetContainer,
 		pod.Annotations[AnnotationContainer])
 	if !ok {
-		// No container to inject into; nothing actionable, allow unchanged.
-		return admission.Allowed("no target container")
+		log.Info("Skipped CacheBlend injection: target container not found",
+			"engine", engineName,
+			"annotationContainer", pod.Annotations[AnnotationContainer],
+			"specTargetContainer", deref(engine.Spec.Injection.TargetContainer))
+		return p.skip(req, pod, SkipReasonTargetContainerNotFound)
 	}
 	target := &pod.Spec.Containers[containerIdx]
 
@@ -188,7 +209,14 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	pod.Spec.Volumes = appendVolumeIfAbsent(pod.Spec.Volumes, BuildCBPluginVolume())
 
 	// M2: payload init container (payloadImage is an ImageSpec: repo/tag/policy).
+	// Fail open if the image resolves to empty (no repository) rather than inject
+	// an init container with an empty image, which the API server would reject.
 	payloadRef, payloadPullPolicy := resolvePayloadImage(engine.Spec.Injection.PayloadImage)
+	if payloadRef == "" {
+		log.Info("Skipped CacheBlend injection: payload image repository is unset",
+			"engine", engineName)
+		return p.skip(req, pod, SkipReasonPayloadImageUnset)
+	}
 	pod.Spec.InitContainers = appendInitContainerIfAbsent(pod.Spec.InitContainers,
 		BuildCBInitContainer(payloadRef, payloadPullPolicy))
 
@@ -218,7 +246,7 @@ func (p *PodInjector) Handle(ctx context.Context, req admission.Request) admissi
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
-	pod.Annotations[AnnotationInjected] = "true"
+	pod.Annotations[AnnotationInjected] = valueTrue
 	if userHasKVTransferConfig {
 		pod.Annotations[AnnotationSkipReason] = SkipReasonKVTransferConfigPresent
 	}
@@ -295,7 +323,7 @@ func resolveInjectedPullSecrets(
 		return specSecrets
 	}
 	out := make([]corev1.LocalObjectReference, 0)
-	for _, part := range strings.Split(csv, ",") {
+	for part := range strings.SplitSeq(csv, ",") {
 		name := strings.TrimSpace(part)
 		if name == "" {
 			continue

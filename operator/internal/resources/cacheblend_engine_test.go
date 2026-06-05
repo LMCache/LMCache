@@ -116,7 +116,7 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 		t.Fatal("expected HostIPC=true")
 	}
 	// runtimeClassName=nvidia for the default (nvidia) vendor.
-	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != "nvidia" {
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != nvidiaRuntimeClass {
 		t.Fatalf("expected RuntimeClassName=nvidia, got %v", podSpec.RuntimeClassName)
 	}
 
@@ -131,15 +131,15 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	}
 
 	// NVIDIA env exposes all GPUs without a device-plugin claim.
-	if !hasEnv(c.Env, "NVIDIA_VISIBLE_DEVICES", "all") {
+	if !hasEnvAll(c.Env, "NVIDIA_VISIBLE_DEVICES") {
 		t.Fatal("missing NVIDIA_VISIBLE_DEVICES=all")
 	}
-	if !hasEnv(c.Env, "NVIDIA_DRIVER_CAPABILITIES", "all") {
+	if !hasEnvAll(c.Env, "NVIDIA_DRIVER_CAPABILITIES") {
 		t.Fatal("missing NVIDIA_DRIVER_CAPABILITIES=all")
 	}
 
 	// Command is the same lmcache server binary as LMCacheEngine.
-	if len(c.Command) < 2 || c.Command[0] != "/opt/venv/bin/lmcache" || c.Command[1] != "server" {
+	if len(c.Command) < 2 || c.Command[0] != lmcacheServerBinary || c.Command[1] != serverSubcommand {
 		t.Fatalf("expected lmcache server command, got %v", c.Command)
 	}
 

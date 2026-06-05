@@ -35,6 +35,10 @@ import (
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
 )
 
+// cbeResourceName is the name of the CacheBlendEngine fixture reconciled by the
+// controller tests; the owner-reference helper checks against it.
+const cbeResourceName = "test-cbe"
+
 // argsContainFlagValue reports whether the ["--flag", "value", ...] slice
 // contains the given two-token flag/value pair.
 func argsContainFlagValue(args []string, flag, value string) bool {
@@ -46,11 +50,11 @@ func argsContainFlagValue(args []string, flag, value string) bool {
 	return false
 }
 
-// ownedBy reports whether owners contains a controller reference to the named
-// CacheBlendEngine.
-func ownedBy(owners []metav1.OwnerReference, name string) bool {
+// ownedBy reports whether owners contains a controller reference to the
+// CacheBlendEngine test fixture (cbeResourceName).
+func ownedBy(owners []metav1.OwnerReference) bool {
 	for _, o := range owners {
-		if o.Kind == "CacheBlendEngine" && o.Name == name && o.Controller != nil && *o.Controller {
+		if o.Kind == "CacheBlendEngine" && o.Name == cbeResourceName && o.Controller != nil && *o.Controller {
 			return true
 		}
 	}
@@ -59,7 +63,7 @@ func ownedBy(owners []metav1.OwnerReference, name string) bool {
 
 var _ = Describe("CacheBlendEngine Controller", func() {
 	Context("When reconciling a resource", func() {
-		const resourceName = "test-cbe"
+		const resourceName = cbeResourceName
 
 		ctx := context.Background()
 
@@ -73,6 +77,9 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			engine := &lmcachev1alpha1.CacheBlendEngine{}
 			err := k8sClient.Get(ctx, typeNamespacedName, engine)
 			if err != nil && errors.IsNotFound(err) {
+				// injection.payloadImage.repository is required by ValidateSpec
+				// (the webhook needs it to inject a valid init container).
+				payloadRepo := "lmcache/cacheblend-plugin"
 				resource := &lmcachev1alpha1.CacheBlendEngine{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
@@ -80,6 +87,9 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 					},
 					Spec: lmcachev1alpha1.CacheBlendEngineSpec{
 						L1: lmcachev1alpha1.L1BackendSpec{SizeGB: 10},
+						Injection: &lmcachev1alpha1.InjectionSpec{
+							PayloadImage: &lmcachev1alpha1.ImageSpec{Repository: &payloadRepo},
+						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -118,7 +128,7 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			By("Verifying the blend_v3 DaemonSet")
 			ds := &appsv1.DaemonSet{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, ds)).To(Succeed())
-			Expect(ownedBy(ds.OwnerReferences, resourceName)).To(BeTrue())
+			Expect(ownedBy(ds.OwnerReferences)).To(BeTrue())
 
 			podSpec := ds.Spec.Template.Spec
 			Expect(podSpec.HostIPC).To(BeTrue())
@@ -135,20 +145,20 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			By("Verifying the lookup Service is node-local (named after the engine)")
 			lookupSvc := &corev1.Service{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, lookupSvc)).To(Succeed())
-			Expect(ownedBy(lookupSvc.OwnerReferences, resourceName)).To(BeTrue())
+			Expect(ownedBy(lookupSvc.OwnerReferences)).To(BeTrue())
 			Expect(lookupSvc.Spec.InternalTrafficPolicy).NotTo(BeNil())
 			Expect(*lookupSvc.Spec.InternalTrafficPolicy).To(Equal(corev1.ServiceInternalTrafficPolicyLocal))
 
 			By("Verifying the headless metrics Service")
 			metricsSvc := &corev1.Service{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-metrics", Namespace: "default"}, metricsSvc)).To(Succeed())
-			Expect(ownedBy(metricsSvc.OwnerReferences, resourceName)).To(BeTrue())
+			Expect(ownedBy(metricsSvc.OwnerReferences)).To(BeTrue())
 			Expect(metricsSvc.Spec.ClusterIP).To(Equal(corev1.ClusterIPNone))
 
 			By("Verifying the connection ConfigMap carries CBKVConnector JSON")
 			cm := &corev1.ConfigMap{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName + "-connection", Namespace: "default"}, cm)).To(Succeed())
-			Expect(ownedBy(cm.OwnerReferences, resourceName)).To(BeTrue())
+			Expect(ownedBy(cm.OwnerReferences)).To(BeTrue())
 			jsonStr, ok := cm.Data["kv-transfer-config.json"]
 			Expect(ok).To(BeTrue())
 			Expect(strings.Contains(jsonStr, "CBKVConnector")).To(BeTrue())
