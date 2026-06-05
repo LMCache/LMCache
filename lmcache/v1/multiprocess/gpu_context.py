@@ -11,7 +11,6 @@ This module provides GPU-side KV cache management functionality, including:
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 import array
-import os
 
 # Third Party
 import torch
@@ -126,10 +125,7 @@ class GPUCacheContext:
         # This lets callers copy an entire chunk to/from a MemoryObj with a
         # single memcpy, without needing to know the per-group layout.
         # max_batch_size is the max number of chunks processed concurrently.
-        # Default 4; override via LMCACHE_GPU_CONTEXT_MAX_BATCH_SIZE.
-        self.max_batch_size = int(
-            os.environ.get("LMCACHE_GPU_CONTEXT_MAX_BATCH_SIZE", "4")
-        )
+        self.max_batch_size = 4
         # Byte size of one chunk entry (= one chunk across all groups).
         # tmp_chunk_group_offsets_[g] is the byte offset of group g within
         # a single chunk; tmp_chunk_group_offsets_[num_groups] ==
