@@ -189,13 +189,24 @@ API. Exercises the full RPC path
 (``REGISTER_KV_CACHE → GET_CHUNK_SIZE → LOOKUP → QUERY_PREFETCH_STATUS →
 RETRIEVE → STORE → END_SESSION``).
 
+Supports two run modes via ``--mode``:
+
+- **``gpu``** (default) -- allocates real CUDA tensors and uses CUDA IPC
+  (handle transfer path).
+- **``cpu``** -- allocates POSIX-SHM-backed tensors; the server maps the same
+  physical pages for zero-copy STORE/RETRIEVE (data transfer path).
+
+The transfer path can be overridden explicitly with ``--transfer-mode
+{auto,handle,data}``. ``auto`` keeps the historical mapping: gpu→handle,
+cpu→data. Note: ``--transfer-mode handle`` on CPU is not yet implemented.
+
 ```bash
 $ lmcache bench server \
     --rpc-url tcp://localhost:5555 \
     --url http://localhost:8080 \
     --start 0 --end 2
 
-Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu) ...
+Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu, transfer=auto) ...
 Server chunk_size = 256
 Resolved KV shape spec: (2,1024,16,8,128):float16:32
 [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
