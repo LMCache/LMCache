@@ -31,26 +31,32 @@ GDS DMA fast path (``GdsL1Config.use_gds=True``); with
 """
 
 # Standard
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 import ctypes
 import os
 
 # Third Party
-from cufile.bindings import (
-    CUfileError,
-    cuFileDriverClose,
-    cuFileDriverOpen,
-    cuFileHandleDeregister,
-    cuFileHandleRegister,
-    libcufile,
-)
 import torch
+
+if TYPE_CHECKING:
+    # Third Party
+    from cufile.bindings import CUfileError
+
+# ``cufile.bindings`` dlopens ``libcufile.so`` at import time, which is absent
+# on CPU-only / macOS hosts. Importing this module (transitively pulled in by
+# the CLI command discovery via ``storage_manager``) must not trigger that, so
+# every cufile symbol is imported lazily inside the function that uses it and
+# the dlopen happens only when GDS is actually exercised. This mirrors the
+# lazy ``import cufile`` in the legacy ``GdsBackend``.
 
 # --- Declare ctypes signatures for the async symbols (see cufile.h) --
 
 
 def _declare_signatures() -> None:
     """Set argtypes/restype on libcufile symbols. Idempotent."""
+    # Third Party
+    from cufile.bindings import CUfileError, libcufile
+
     if getattr(libcufile.cuFileReadAsync, "argtypes", None):
         return
     libcufile.cuFileReadAsync.argtypes = [
@@ -82,18 +88,19 @@ def _declare_signatures() -> None:
     libcufile.cuFileStreamDeregister.restype = CUfileError
 
 
-_declare_signatures()
-
-
 _driver_opened = False
 
 
 def _ensure_driver_open() -> None:
-    """Idempotently call ``cuFileDriverOpen``."""
+    """Idempotently open the cuFile driver and declare async signatures."""
     global _driver_opened
     if _driver_opened:
         return
+    # Third Party
+    from cufile.bindings import cuFileDriverOpen
+
     cuFileDriverOpen()
+    _declare_signatures()
     _driver_opened = True
 
 
@@ -102,13 +109,16 @@ def close_driver() -> None:
     global _driver_opened
     if not _driver_opened:
         return
+    # Third Party
+    from cufile.bindings import cuFileDriverClose
+
     try:
         cuFileDriverClose()
     finally:
         _driver_opened = False
 
 
-def _check(err: CUfileError, op: str) -> None:
+def _check(err: "CUfileError", op: str) -> None:
     """Convert a non-zero ``CUfileError_t`` into a Python exception."""
     if err.err != 0:
         raise RuntimeError(
@@ -134,6 +144,9 @@ def register_buffer(buf: torch.Tensor) -> None:
     if not buf.is_cuda:
         raise ValueError("register_buffer: tensor must be on CUDA")
     _ensure_driver_open()
+    # Third Party
+    from cufile.bindings import libcufile
+
     nbytes = buf.numel() * buf.element_size()
     _check(
         libcufile.cuFileBufRegister(
@@ -147,6 +160,9 @@ def register_buffer(buf: torch.Tensor) -> None:
 
 def deregister_buffer(buf: torch.Tensor) -> None:
     """Reverse of :func:`register_buffer`."""
+    # Third Party
+    from cufile.bindings import libcufile
+
     _check(
         libcufile.cuFileBufDeregister(ctypes.c_void_p(buf.data_ptr())),
         "cuFileBufDeregister",
@@ -159,6 +175,9 @@ def register_stream(raw_stream: int) -> None:
     ``raw_stream`` is the integer ``CUstream`` handle — get it via
     ``torch_dev.current_stream().cuda_stream``.
     """
+    # Third Party
+    from cufile.bindings import libcufile
+
     _check(
         libcufile.cuFileStreamRegister(ctypes.c_void_p(raw_stream), 0),
         "cuFileStreamRegister",
@@ -167,6 +186,9 @@ def register_stream(raw_stream: int) -> None:
 
 def deregister_stream(raw_stream: int) -> None:
     """Reverse of :func:`register_stream`."""
+    # Third Party
+    from cufile.bindings import libcufile
+
     _check(
         libcufile.cuFileStreamDeregister(ctypes.c_void_p(raw_stream)),
         "cuFileStreamDeregister",
@@ -222,6 +244,9 @@ class AsyncHandle:
         mode: int = 0o644,
     ) -> None:
         _ensure_driver_open()
+        # Third Party
+        from cufile.bindings import cuFileHandleRegister
+
         flags = os.O_DIRECT
         if writable:
             flags |= os.O_CREAT | os.O_RDWR
@@ -256,6 +281,9 @@ class AsyncHandle:
         ``buf.data_ptr()``). ``buf_offset`` is the byte offset within
         that registration that the data should land at.
         """
+        # Third Party
+        from cufile.bindings import libcufile
+
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
         _check(
             libcufile.cuFileReadAsync(
@@ -280,6 +308,9 @@ class AsyncHandle:
         raw_stream: int,
     ) -> Submission:
         """Enqueue a ``cuFileWriteAsync`` on the stream."""
+        # Third Party
+        from cufile.bindings import libcufile
+
         sub = Submission(size=size, file_offset=file_offset, buf_offset=buf_offset)
         _check(
             libcufile.cuFileWriteAsync(
@@ -299,6 +330,9 @@ class AsyncHandle:
         """Deregister the cuFile handle and close the fd."""
         if self._fd < 0:
             return
+        # Third Party
+        from cufile.bindings import cuFileHandleDeregister
+
         try:
             cuFileHandleDeregister(self._handle)
         finally:
