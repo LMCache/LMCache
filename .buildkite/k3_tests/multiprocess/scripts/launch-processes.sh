@@ -42,9 +42,9 @@ elif [ "$GPU_MEMORY_GB" -gt 90 ]; then
 fi
 
 # Attention backend for both vLLM servers. Defaults to FLASH_ATTN (what the
-# batch-invariant gemma-3 lm_eval needs). Models with heterogeneous head
-# dimensions (e.g. gemma-4) must NOT pin FLASH_ATTN -- set ATTENTION_BACKEND=auto
-# so vLLM selects the backend itself (gemma-4 auto-forces TRITON_ATTN).
+# batch-invariant lm_eval needs). Models with heterogeneous head dimensions
+# (e.g. gemma-4) must NOT pin FLASH_ATTN -- set ATTENTION_BACKEND=auto so vLLM
+# selects the backend itself (gemma-4 auto-forces TRITON_ATTN).
 ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASH_ATTN}"
 ATTENTION_BACKEND_ARG=""
 if [ -n "$ATTENTION_BACKEND" ] && [ "$ATTENTION_BACKEND" != "auto" ]; then
