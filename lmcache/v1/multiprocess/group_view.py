@@ -118,7 +118,9 @@ def expand_block_ids_to_views(
     # Normalize both shapes to a concrete list[list[int]] so downstream
     # indexing is unambiguous for both runtime and mypy.
     if not engine_side_block_ids or isinstance(engine_side_block_ids[0], int):
-        per_group: Sequence[Sequence[int]] = [cast("Sequence[int]", engine_side_block_ids)]
+        per_group: Sequence[Sequence[int]] = [
+            cast("Sequence[int]", engine_side_block_ids)
+        ]
     else:
         per_group = cast("Sequence[Sequence[int]]", engine_side_block_ids)
     return [
