@@ -230,7 +230,7 @@ uv pip install -r requirements/common.txt
 echo "✅ Installed requirements/common.txt"
 
 echo "Installing vLLM CPU build"
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index --torch-backend cpu
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/71df063c494c111ab60f6a33c54aafe7b9ae1d02/cpu --index-strategy first-index --torch-backend cpu
 echo "✅ vLLM CPU install completed"
 
 echo "Installing LMCache in editable mode with NO_GPU_EXT=1"
