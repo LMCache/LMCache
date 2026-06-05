@@ -93,10 +93,9 @@ def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None
 
 
 @dataclass
-class GPUContextEntry:
+class ContextEntry:
     """Registered cache context metadata for a single worker instance.
 
-    The ``gpu_context`` field name is kept for backwards compatibility.
     The actual concrete type is whatever :func:`create_cache_context`
     returned -- currently always a :class:`GPUCacheContext`.
 
@@ -124,7 +123,7 @@ class GPUTransferModule:
 
     def __init__(self, ctx: MPCacheEngineContext) -> None:
         self._ctx = ctx
-        self._gpu_contexts: dict[int, GPUContextEntry] = {}
+        self._gpu_contexts: dict[int, ContextEntry] = {}
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -147,7 +146,7 @@ class GPUTransferModule:
         return self._ctx
 
     @property
-    def gpu_contexts(self) -> dict[int, GPUContextEntry]:
+    def gpu_contexts(self) -> dict[int, ContextEntry]:
         """Per-instance GPU context registry."""
         return self._gpu_contexts
 
@@ -272,7 +271,7 @@ class GPUTransferModule:
             group_views=group_views,
             engine_type=engine_type,
         )
-        self._gpu_contexts[instance_id] = GPUContextEntry(
+        self._gpu_contexts[instance_id] = ContextEntry(
             gpu_context=gpu_context,
             model_name=model_name,
             world_size=world_size,
