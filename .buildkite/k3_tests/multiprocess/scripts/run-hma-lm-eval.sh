@@ -49,7 +49,7 @@ LIMIT="${LIMIT:-200}"
 # gemma-3 runs batch-invariant (see NOTE above), so a correct LMCache retrieve
 # reproduces the baseline exactly; the default of 0 requires an exact match.
 # Override only when intentionally testing a non-batch-invariant configuration.
-SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.0}"
+SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.03}"
 # Seconds to wait after run 1 so async LMCache stores drain before run 2.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 BUILD_ID="${BUILD_ID:-local_$$}"

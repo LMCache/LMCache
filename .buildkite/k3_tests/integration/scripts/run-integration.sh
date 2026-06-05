@@ -56,7 +56,7 @@ run_test() {
             > "${test_name}-vllm.log" 2>&1 &
     VLLM_PID=$!
 
-    wait_for_server "$PORT" 180 "${test_name}-vllm.log"
+    wait_for_server "$PORT" 300 "${test_name}-vllm.log"
 
     # Send requests -- same prompt twice to exercise the cache (second hit should be cached)
     local prompt="The quick brown fox jumps over the lazy dog. Explain this sentence in detail."

@@ -44,6 +44,7 @@ lmcache/v1/mp_coordinator/
   config.py         # MPCoordinatorConfig (LMCACHE_MP_COORDINATOR_*)
   registry.py       # InstanceRegistry + MPInstance (pure membership)
   schemas.py        # Pydantic request/response models (shared wire contract)
+  registrar.py      # mp-server-side register/heartbeat/deregister helpers
   http_apis/
     instances_api.py  # the /instances REST resource
     health_api.py     # /healthz
@@ -141,10 +142,17 @@ Configured via `LMCACHE_MP_COORDINATOR_*` environment variables — see
 `MPCoordinatorConfig` in `config.py` (`HOST`, `PORT`, `INSTANCE_TIMEOUT`,
 `HEALTH_CHECK_INTERVAL`).
 
-An mp server joins by calling the REST API from its own process: `POST
-/instances` on startup, `PUT /instances/{id}/heartbeat` on a timer, `DELETE
-/instances/{id}` on shutdown. The natural home is an async registrar in the mp
-server's existing FastAPI lifespan (reusing its event loop + an
-`httpx.AsyncClient`), advertising its own HTTP address (`ip` + `http_port`, e.g.
-the pod IP via the k8s downward API) so the coordinator can push commands back.
-That mp-side integration is deferred and not included here.
+An mp server joins via the `registrar.py` helpers — no dedicated client object,
+mirroring how the coordinator just calls mp endpoints. The mp server's FastAPI
+lifespan creates a generic `httpx.AsyncClient` and launches `keep_registered()`
+as a task: it `POST`s `/instances`, `PUT`s `/instances/{id}/heartbeat` on a
+timer, and `DELETE`s on cancellation — on the mp server's own event loop, using
+the shared `schemas` models. It is wired into
+`lmcache/v1/multiprocess/http_server.py`'s lifespan and configured by a
+`CoordinatorConfig` (`lmcache/v1/multiprocess/config.py`), built from
+`--coordinator-*` flags that fall back to `LMCACHE_COORDINATOR_*` env vars. It is
+**opt-in**: with no coordinator URL, the mp server is unaffected. It is
+best-effort — failures are logged and retried (a down coordinator never blocks
+the server), while a malformed config is rejected at startup. The server
+advertises its own HTTP address (`ip` + `http_port`, e.g. the pod IP via the k8s
+downward API) so the coordinator can reach it.
