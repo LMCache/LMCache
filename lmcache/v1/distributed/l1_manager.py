@@ -879,8 +879,14 @@ class L1Manager:
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
         with self._lock:
-            all_memory_objs = [entry.memory_obj for entry in self._objects.values()]
-            self._memory_manager.free(all_memory_objs)
+            # Only CPU-pinned objects belong to _memory_manager. GDS objects
+            # are owned by the slab and torn down by _gds_backend.close() below.
+            cpu_objs = [
+                entry.memory_obj
+                for entry in self._objects.values()
+                if not isinstance(entry.memory_obj, GdsMemoryObj)
+            ]
+            self._memory_manager.free(cpu_objs)
             self._objects.clear()
 
         self._memory_manager.close()

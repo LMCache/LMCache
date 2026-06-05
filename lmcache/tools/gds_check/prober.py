@@ -38,7 +38,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.gds_l1 import GdsL1Backend
-from lmcache.v1.memory_management import MemoryFormat
 
 logger = init_logger(__name__)
 
@@ -140,7 +139,6 @@ def verify_round_trip(
         mo = backend.create_memory_obj(
             key=key,
             layout_desc=_layout_for(chunk_bytes),
-            fmt=MemoryFormat.KV_2LTD,
         )
         if mo is None:
             raise RuntimeError(
@@ -206,9 +204,7 @@ def benchmark(
         mem_objs = []
         for i in range(num_chunks):
             key = _object_key(seed=i)
-            mo = backend.create_memory_obj(
-                key=key, layout_desc=layout, fmt=MemoryFormat.KV_2LTD
-            )
+            mo = backend.create_memory_obj(key=key, layout_desc=layout)
             if mo is None:
                 raise RuntimeError(
                     f"GDS bench: slab exhausted after {i} of {num_chunks} chunks. "

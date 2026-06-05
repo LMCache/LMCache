@@ -33,7 +33,6 @@ from lmcache.v1.distributed.gds_l1 import (
     GdsL1Backend,
     SlabAddressManager,
 )
-from lmcache.v1.memory_management import MemoryFormat
 
 # --- Fixtures --------------------------------------------------------
 
@@ -94,12 +93,6 @@ class TestSlabAddressManager:
         assert off == 0
         assert sm.used_bytes() == 4096
         assert sm.free_bytes() == 64 * 1024 - 4096
-
-    def test_allocate_aligns_up(self):
-        sm = SlabAddressManager(total_size=64 * 1024)
-        # 100 bytes rounds up to 4 KiB.
-        sm.allocate(100)
-        assert sm.used_bytes() == 4096
 
     def test_allocate_returns_none_on_oom(self):
         sm = SlabAddressManager(total_size=4096)
@@ -195,7 +188,7 @@ class TestGdsL1BackendIndex:
             key=key, layout_desc=_layout(torch.Size([4096]), torch.uint8)
         )
         assert mo is not None
-        assert mo.size == 4096
+        assert mo.get_size() == 4096
         # Not in the index until _record_entry.
         assert backend.create_memory_obj_from_index(key) is None
         backend._record_entry(mo)
@@ -220,7 +213,7 @@ class TestGdsL1BackendIndex:
         resurrected = backend.create_memory_obj_from_index(key)
         assert resurrected is not None
         assert resurrected.slab_offset == mo.slab_offset
-        assert resurrected.size == mo.size
+        assert resurrected.get_size() == mo.get_size()
 
     def test_oom_returns_none(self, gds_root):
         # Slab sized to fit exactly one 4 KiB chunk.
@@ -269,7 +262,6 @@ class TestGdsL1BackendPersistence:
             mo = b1.create_memory_obj(
                 key=key,
                 layout_desc=_layout(torch.Size([8192]), torch.uint8),
-                fmt=MemoryFormat.KV_2LTD,
             )
             b1._record_entry(mo)
             slab_offset = mo.slab_offset
@@ -282,7 +274,7 @@ class TestGdsL1BackendPersistence:
             resurrected = b2.create_memory_obj_from_index(key)
             assert resurrected is not None
             assert resurrected.slab_offset == slab_offset
-            assert resurrected.size == 8192
+            assert resurrected.get_size() == 8192
             used, _ = b2.get_memory_usage()
             assert used == 8192
         finally:

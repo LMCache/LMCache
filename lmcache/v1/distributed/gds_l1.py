@@ -62,6 +62,7 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.v1.distributed import _cufile_async as ca
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
@@ -168,14 +169,6 @@ def get_fstype(path: str) -> str:
     return best_fstype
 
 
-def _compute_layout_bytes(layout_desc: MemoryLayoutDesc) -> int:
-    """Total byte size of a ``MemoryLayoutDesc`` (sum across groups)."""
-    total = 0
-    for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=True):
-        total += shape.numel() * dtype.itemsize
-    return total
-
-
 # --- Slab address manager -------------------------------------------
 
 
@@ -187,31 +180,25 @@ class SlabAddressManager:
     ``TensorMemoryAllocator`` that backs CPU L1's pinned slab, but
     operating on file offsets instead of pointers.
 
+    Sizes and offsets are tracked verbatim; callers are responsible for
+    passing 4 KiB-aligned sizes (the cuFile/O_DIRECT requirement is
+    enforced upstream at the object-creation and index-load boundaries).
+
     Args:
         total_size: Total addressable space in bytes.
-        align: Allocation alignment; every ``allocate`` and ``free``
-            rounds up to this multiple. Default 4 KiB to match
-            cuFile's alignment requirement on ext4.
 
     Raises:
-        ValueError: If ``total_size`` <= 0 or ``align`` is not a
-            positive power of two.
+        ValueError: If ``total_size`` <= 0.
 
     Thread-safe: all public methods take an internal lock.
     """
 
-    def __init__(self, total_size: int, align: int = _CUFILE_ALIGNMENT) -> None:
+    def __init__(self, total_size: int) -> None:
         if total_size <= 0:
             raise ValueError(
                 f"SlabAddressManager: total_size must be > 0, got {total_size}"
             )
-        if align <= 0 or (align & (align - 1)) != 0:
-            raise ValueError(
-                "SlabAddressManager: align must be a positive power of two, "
-                f"got {align}"
-            )
         self._total = total_size
-        self._align = align
         self._lock = threading.Lock()
         # Sorted (offset, size) free regions; starts covering the whole slab.
         self._free: list[tuple[int, int]] = [(0, total_size)]
@@ -237,7 +224,8 @@ class SlabAddressManager:
         First-fit: scans the free list for the first region big enough.
 
         Args:
-            size: Number of bytes to reserve. Rounded up to ``align``.
+            size: Number of bytes to reserve (caller must pass a
+                4 KiB-aligned size).
 
         Returns:
             Byte offset of the allocation, or ``None`` if no region
@@ -250,7 +238,6 @@ class SlabAddressManager:
             raise ValueError(
                 f"SlabAddressManager.allocate: size must be > 0, got {size}"
             )
-        size = _round_up(size, self._align)
         with self._lock:
             for i, (off, free_size) in enumerate(self._free):
                 if free_size >= size:
@@ -269,11 +256,10 @@ class SlabAddressManager:
 
         Args:
             offset: Start of the region returned by :meth:`allocate`.
-            size: Size of the region (will be rounded up to ``align``).
+            size: Size of the region (must match the allocated size).
         """
         if size <= 0:
             return
-        size = _round_up(size, self._align)
         with self._lock:
             self._used = max(0, self._used - size)
             offsets = [o for o, _ in self._free]
@@ -307,7 +293,6 @@ class SlabAddressManager:
         """
         if size <= 0:
             return
-        size = _round_up(size, self._align)
         with self._lock:
             for i, (off, free_size) in enumerate(self._free):
                 if off <= offset and offset + size <= off + free_size:
@@ -340,89 +325,70 @@ class GdsMemoryObj(MemoryObj):
     def __init__(
         self,
         key: ObjectKey,
-        slab_offset: int,
-        size: int,
         metadata: MemoryObjMetadata,
         parent_allocator: "GdsScratchAllocator",
     ) -> None:
         super().__init__(metadata)
         self.key = key
-        self.slab_offset = slab_offset
-        self.size = size
         self._parent_allocator = parent_allocator
-        self._lock = threading.Lock()
-        self._valid = True
+
+    @property
+    def slab_offset(self) -> int:
+        """Byte offset of this chunk within the slab file (== meta.address)."""
+        return self.meta.address
 
     def invalidate(self) -> None:
-        self._valid = False
+        raise NotImplementedError("GdsMemoryObj.invalidate: not used on the MP path")
 
     def is_valid(self) -> bool:
-        return self._valid
+        raise NotImplementedError("GdsMemoryObj.is_valid: not used on the MP path")
 
     def get_size(self) -> int:
-        return self.size
-
-    def get_shape(self) -> torch.Size:
-        return self.meta.shape
-
-    def get_dtype(self) -> Optional[torch.dtype]:
-        return self.meta.dtype
-
-    def get_shapes(self) -> list[torch.Size]:
-        if self.meta.shapes is not None:
-            return self.meta.shapes
-        return [self.meta.shape]
-
-    def get_dtypes(self) -> list[torch.dtype]:
-        if self.meta.dtypes is not None:
-            return self.meta.dtypes
-        if self.meta.dtype is None:
-            raise RuntimeError("GdsMemoryObj.meta.dtype is None")
-        return [self.meta.dtype]
-
-    def get_memory_format(self) -> MemoryFormat:
-        with self._lock:
-            return self.meta.fmt
-
-    def get_physical_size(self) -> int:
         return self.meta.phy_size
 
+    def get_shape(self) -> torch.Size:
+        raise NotImplementedError("GdsMemoryObj.get_shape: not used on the MP path")
+
+    def get_dtype(self) -> Optional[torch.dtype]:
+        raise NotImplementedError("GdsMemoryObj.get_dtype: not used on the MP path")
+
+    def get_shapes(self) -> list[torch.Size]:
+        raise NotImplementedError("GdsMemoryObj.get_shapes: not used on the MP path")
+
+    def get_dtypes(self) -> list[torch.dtype]:
+        raise NotImplementedError("GdsMemoryObj.get_dtypes: not used on the MP path")
+
+    def get_memory_format(self) -> MemoryFormat:
+        raise NotImplementedError(
+            "GdsMemoryObj.get_memory_format: not used on the MP path"
+        )
+
+    def get_physical_size(self) -> int:
+        raise NotImplementedError(
+            "GdsMemoryObj.get_physical_size: not used on the MP path"
+        )
+
     def ref_count_up(self) -> None:
-        with self._lock:
-            self.meta.ref_count += 1
+        raise NotImplementedError("GdsMemoryObj.ref_count_up: not used on the MP path")
 
     def ref_count_down(self) -> None:
-        with self._lock:
-            self.meta.ref_count -= 1
-            if self.meta.ref_count < 0:
-                logger.warning(
-                    "GdsMemoryObj for key %s: ref_count went negative (%d), clamping",
-                    self.key,
-                    self.meta.ref_count,
-                )
-                self.meta.ref_count = 0
+        raise NotImplementedError(
+            "GdsMemoryObj.ref_count_down: not used on the MP path"
+        )
 
     def get_ref_count(self) -> int:
-        with self._lock:
-            return self.meta.ref_count
+        raise NotImplementedError("GdsMemoryObj.get_ref_count: not used on the MP path")
 
     def get_num_tokens(self) -> int:
-        with self._lock:
-            token_dim = self.meta.fmt.token_dim()
-            if token_dim < 0 or token_dim >= len(self.meta.shape):
-                return 0
-            return self.meta.shape[token_dim]
+        raise NotImplementedError(
+            "GdsMemoryObj.get_num_tokens: not used on the MP path"
+        )
 
     def pin(self) -> bool:
-        with self._lock:
-            self.meta.pin_count += 1
-            return True
+        raise NotImplementedError("GdsMemoryObj.pin: not used on the MP path")
 
     def unpin(self) -> bool:
-        with self._lock:
-            if self.meta.pin_count > 0:
-                self.meta.pin_count -= 1
-            return True
+        raise NotImplementedError("GdsMemoryObj.unpin: not used on the MP path")
 
     @property
     def metadata(self) -> MemoryObjMetadata:
@@ -450,13 +416,11 @@ class GdsMemoryObj(MemoryObj):
 
     @property
     def is_pinned(self) -> bool:
-        with self._lock:
-            return self.meta.pin_count > 0
+        raise NotImplementedError("GdsMemoryObj.is_pinned: not used on the MP path")
 
     @property
     def can_evict(self) -> bool:
-        with self._lock:
-            return self.meta.pin_count == 0 and self.meta.ref_count == 0
+        raise NotImplementedError("GdsMemoryObj.can_evict: not used on the MP path")
 
     @property
     def raw_tensor(self) -> Optional[torch.Tensor]:
@@ -650,7 +614,7 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                 region or is smaller than the chunk.
         """
         base_ptr, dev_offset = self._resolve_buffer(gpu_buffer)
-        nbytes = memory_obj.size
+        nbytes = memory_obj.get_size()
         if nbytes > gpu_buffer.numel() * gpu_buffer.element_size():
             raise ValueError(
                 f"cufile_read_into: chunk size {nbytes} exceeds gpu_buffer "
@@ -678,7 +642,7 @@ class GdsScratchAllocator(MemoryAllocatorInterface):
                 regions.
         """
         base_ptr, dev_offset = self._resolve_buffer(gpu_buffer)
-        nbytes = memory_obj.size
+        nbytes = memory_obj.get_size()
         if nbytes > gpu_buffer.numel() * gpu_buffer.element_size():
             raise ValueError(
                 f"cufile_write_from: chunk size {nbytes} exceeds gpu_buffer "
@@ -782,7 +746,7 @@ class _IndexEntry:
     so it serialises cheaply to JSON.
     """
 
-    __slots__ = ("slab_offset", "size", "shape", "dtype", "fmt")
+    __slots__ = ("slab_offset", "size", "shape", "dtype")
 
     def __init__(
         self,
@@ -790,13 +754,11 @@ class _IndexEntry:
         size: int,
         shape: torch.Size,
         dtype: torch.dtype,
-        fmt: MemoryFormat,
     ) -> None:
         self.slab_offset = slab_offset
         self.size = size
         self.shape = shape
         self.dtype = dtype
-        self.fmt = fmt
 
 
 class GdsL1Backend:
@@ -895,9 +857,7 @@ class GdsL1Backend:
         else:
             self._open_slab_posix()
 
-        self._address_manager = SlabAddressManager(
-            total_size=self._slab_size, align=_CUFILE_ALIGNMENT
-        )
+        self._address_manager = SlabAddressManager(total_size=self._slab_size)
         self._index_lock = threading.Lock()
         self._index: OrderedDict[ObjectKey, _IndexEntry] = OrderedDict()
         self._load_index()
@@ -916,14 +876,12 @@ class GdsL1Backend:
         self,
         key: ObjectKey,
         layout_desc: MemoryLayoutDesc,
-        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     ) -> Optional[GdsMemoryObj]:
         """Reserve a slab region for ``key`` and return a fresh MemoryObj.
 
         Args:
             key: The ObjectKey being inserted.
             layout_desc: Layout descriptor for the chunk's payload.
-            fmt: The chunk's memory format.
 
         Returns:
             A :class:`GdsMemoryObj` pointing at a freshly-reserved
@@ -932,7 +890,14 @@ class GdsL1Backend:
         """
         shape = layout_desc.shapes[0]
         dtype = layout_desc.dtypes[0]
-        nbytes = _compute_layout_bytes(layout_desc)
+        nbytes = get_size_bytes(layout_desc.shapes, layout_desc.dtypes)
+        if nbytes % _CUFILE_ALIGNMENT != 0:
+            raise ValueError(
+                f"GdsL1Backend.create_memory_obj: payload size {nbytes} is not a "
+                f"multiple of {_CUFILE_ALIGNMENT}, which cuFile/O_DIRECT requires. "
+                f"This should be unreachable since register_gpu_buffer already "
+                f"enforces 4 KiB alignment on the larger staging slot."
+            )
         slab_offset = self._address_manager.allocate(nbytes)
         if slab_offset is None:
             return None
@@ -940,17 +905,11 @@ class GdsL1Backend:
             shape=shape,
             dtype=dtype,
             address=slab_offset,
-            phy_size=_round_up(nbytes, _CUFILE_ALIGNMENT),
+            phy_size=nbytes,
             ref_count=0,
-            pin_count=0,
-            fmt=fmt,
-            shapes=list(layout_desc.shapes),
-            dtypes=list(layout_desc.dtypes),
         )
         return GdsMemoryObj(
             key=key,
-            slab_offset=slab_offset,
-            size=nbytes,
             metadata=meta,
             parent_allocator=self.scratch_allocator,
         )
@@ -973,19 +932,29 @@ class GdsL1Backend:
             entry = self._index.get(key)
         if entry is None:
             return None
+        # Also unreachable in practice: entries only enter ``self._index``
+        # via ``_record_entry`` (sizes already accepted by
+        # ``create_memory_obj`` above) or via ``_load_index``, which skips
+        # any persisted entry whose size is not 4 KiB-aligned. This guard
+        # is the in-memory analogue of that index-load check, so a
+        # corrupt-but-aligned-looking entry can't reach the cuFile
+        # transfer length with a misaligned size.
+        if entry.size % _CUFILE_ALIGNMENT != 0:
+            raise ValueError(
+                f"GdsL1Backend.create_memory_obj_from_index: index entry size "
+                f"{entry.size} is not a multiple of {_CUFILE_ALIGNMENT}. This "
+                f"should be unreachable -- _load_index rejects misaligned persisted "
+                f"sizes and create_memory_obj rejects misaligned new ones."
+            )
         meta = MemoryObjMetadata(
             shape=entry.shape,
             dtype=entry.dtype,
             address=entry.slab_offset,
-            phy_size=_round_up(entry.size, _CUFILE_ALIGNMENT),
+            phy_size=entry.size,
             ref_count=0,
-            pin_count=0,
-            fmt=entry.fmt,
         )
         return GdsMemoryObj(
             key=key,
-            slab_offset=entry.slab_offset,
-            size=entry.size,
             metadata=meta,
             parent_allocator=self.scratch_allocator,
         )
@@ -1006,7 +975,7 @@ class GdsL1Backend:
 
     def free_entry(self, memory_obj: GdsMemoryObj) -> None:
         """Return a slab region without an idex."""
-        self._address_manager.free(memory_obj.slab_offset, memory_obj.size)
+        self._address_manager.free(memory_obj.slab_offset, memory_obj.get_size())
 
     def close(self) -> None:
         """Sync stream, persist index, deregister cuFile state, close slab."""
@@ -1063,10 +1032,9 @@ class GdsL1Backend:
             )
         entry = _IndexEntry(
             slab_offset=memory_obj.slab_offset,
-            size=memory_obj.size,
+            size=memory_obj.get_size(),
             shape=memory_obj.meta.shape,
             dtype=memory_obj.meta.dtype,
-            fmt=memory_obj.meta.fmt,
         )
         with self._index_lock:
             existing = self._index.get(memory_obj.key)
@@ -1358,17 +1326,23 @@ class GdsL1Backend:
             try:
                 shape = torch.Size(raw["shape"])
                 dtype = _STR_TO_TORCH_DTYPE[raw["dtype"]]
-                fmt = MemoryFormat(raw["fmt"])
                 slab_offset = int(raw["offset"])
                 size = int(raw["size"])
             except (KeyError, ValueError):
+                continue
+            if size % _CUFILE_ALIGNMENT != 0:
+                logger.warning(
+                    "GdsL1Backend._load_index: entry size %d is not a multiple "
+                    "of %d — skipping",
+                    size,
+                    _CUFILE_ALIGNMENT,
+                )
                 continue
             entry = _IndexEntry(
                 slab_offset=slab_offset,
                 size=size,
                 shape=shape,
                 dtype=dtype,
-                fmt=fmt,
             )
             try:
                 self._address_manager.mark_used(slab_offset, size)
@@ -1389,7 +1363,6 @@ class GdsL1Backend:
                     "size": e.size,
                     "shape": list(e.shape),
                     "dtype": _TORCH_DTYPE_TO_STR.get(e.dtype, "F16"),
-                    "fmt": e.fmt.value,
                 }
                 for k, e in self._index.items()
             }
