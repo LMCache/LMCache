@@ -32,6 +32,7 @@ and is identical on Linux.
 from __future__ import annotations
 
 # Standard
+import atexit
 import ctypes
 import mmap as _mmap
 import os
@@ -80,7 +81,10 @@ def _open_and_mmap(name: str, nbytes: int, *, create: bool) -> tuple[_mmap.mmap,
         if create:
             os.ftruncate(fd, nbytes)
         mm = _mmap.mmap(fd, nbytes, access=_mmap.ACCESS_WRITE)
+        addr = _addr_of_mmap(mm)
     except BaseException:
+        if mm is not None:
+            mm.close()
         if create:
             try:
                 _posixshmem.shm_unlink(_slashed(name))
@@ -89,7 +93,6 @@ def _open_and_mmap(name: str, nbytes: int, *, create: bool) -> tuple[_mmap.mmap,
         raise
     finally:
         os.close(fd)
-    addr = _addr_of_mmap(mm)
     return mm, addr
 
 
@@ -114,6 +117,16 @@ def shm_create_readwrite(name: str, nbytes: int) -> int:
     mmap`` sequence: collisions raise ``OSError`` (``FileExistsError``
     is a subclass), and a failure mid-way fully tears down what was
     allocated.
+
+    Args:
+        name: The name of the shared-memory segment.
+        nbytes: The size of the segment in bytes.
+
+    Returns:
+        The virtual address of the mapped segment.
+
+    Raises:
+        OSError: If the segment already exists or creation fails.
     """
     sm_name = _strip_leading_slash(name)
     mm, addr = _open_and_mmap(sm_name, nbytes, create=True)
@@ -128,6 +141,16 @@ def shm_map_readwrite(name: str, nbytes: int) -> int:
 
     ``nbytes`` must match the segment's actual size; ``mmap`` will
     raise on a mismatch.
+
+    Args:
+        name: The name of the shared-memory segment.
+        nbytes: The size of the segment in bytes.
+
+    Returns:
+        The virtual address of the mapped segment.
+
+    Raises:
+        OSError: If the segment cannot be opened or mapped.
     """
     sm_name = _strip_leading_slash(name)
     mm, addr = _open_and_mmap(sm_name, nbytes, create=False)
@@ -141,6 +164,11 @@ def shm_munmap(addr: int, nbytes: int) -> None:
 
     The underlying mmap is closed exactly once; subsequent calls with
     the same address are no-ops.
+
+    Args:
+        addr: The virtual address of the mapped segment.
+        nbytes: Kept for API compatibility; not used internally since
+            ``mmap.close()`` does not require the size.
     """
     if not addr:
         return
@@ -163,6 +191,9 @@ def shm_unlink(name: str) -> None:
 
     Idempotent: a missing segment is treated as a successful
     no-op so callers can blindly call this on shutdown.
+
+    Args:
+        name: The name of the shared-memory segment to unlink.
     """
     sm_name = _strip_leading_slash(name)
     with _REGISTRY_LOCK:
@@ -177,6 +208,20 @@ def shm_unlink(name: str) -> None:
         pass
 
 
+def _atexit_cleanup() -> None:
+    """Unlink any SHM segments still owned by this process at exit."""
+    with _REGISTRY_LOCK:
+        names = list(_OWNED_NAMES)
+    for n in names:
+        try:
+            _posixshmem.shm_unlink(_slashed(n))
+        except OSError:
+            pass
+
+
+atexit.register(_atexit_cleanup)
+
+
 def shm_open_pool_as_mmap(name: str, nbytes: int) -> _mmap.mmap:
     """Open an existing segment as an independent ``mmap.mmap`` object.
 
@@ -184,6 +229,16 @@ def shm_open_pool_as_mmap(name: str, nbytes: int) -> _mmap.mmap:
     segment via ``torch.frombuffer(mmap_obj, ...)`` rather than a raw
     address. The returned mmap is independent of any registry entry,
     so the caller takes ownership and is responsible for closing it.
+
+    Args:
+        name: The name of the shared-memory segment.
+        nbytes: The size of the segment in bytes.
+
+    Returns:
+        An independent ``mmap.mmap`` object backed by the segment.
+
+    Raises:
+        OSError: If the segment cannot be opened or mapped.
     """
     sm_name = _strip_leading_slash(name)
     fd = _posixshmem.shm_open(_slashed(sm_name), os.O_RDWR, mode=0o600)

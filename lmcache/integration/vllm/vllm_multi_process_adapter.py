@@ -165,7 +165,7 @@ def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
     are silently skipped.
     """
     # First Party
-    from lmcache.v1.platform.cpu.shm import shm_unlink
+    from lmcache.v1.multiprocess.posix_shm import shm_unlink
 
     for w in wrappers:
         name = getattr(w, "shm_name", None)

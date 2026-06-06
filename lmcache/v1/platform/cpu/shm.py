@@ -181,7 +181,25 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     segment is released (``munmap`` + ``shm_unlink``) automatically
     when the migrated tensor is garbage-collected.
     """
+    # Validate and normalise the tensor *before* touching the registry
+    # or mutating storage, so a bad input never leaves things half-done.
+    # First Party
+    from lmcache.v1.gpu_connector.utils import (
+        attempt_permute_to_contiguous_view,
+    )
+
+    tensor = attempt_permute_to_contiguous_view(tensor)
+    if tensor.device.type != "cpu":
+        raise ValueError(
+            "migrate_to_shm_and_wrap requires a CPU tensor, got %s" % tensor.device
+        )
+    if not tensor.is_contiguous():
+        raise ValueError("migrate_to_shm_and_wrap requires a contiguous tensor")
+
     tid = id(tensor)
+
+    # Fast path: check the registry under the lock, return early if the
+    # tensor has already been migrated.
     with _CPU_SHM_LOCK:
         cached = _CPU_SHM_NAMES.get(tid)
         if cached is not None:
@@ -192,43 +210,46 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
             # reused; drop it and fall through to allocate fresh.
         _CPU_SHM_NAMES.pop(tid, None)
 
-        nbytes = tensor.numel() * tensor.element_size()
-        if nbytes == 0:
-            # No SHM segment for empty tensors: ``mmap`` with length 0
-            # is undefined / EINVAL on POSIX. ``to_tensor`` rebuilds an
-            # empty view directly when ``shm_name`` is empty.
-            return CpuShmTensorWrapper(tensor, "")
-        shm_name = "%s%d_%d" % (
-            CpuShmTensorWrapper.SHM_NAME_PREFIX,
-            os.getpid(),
-            next(_CPU_SHM_COUNTER),
-        )
-        addr = shm_create_readwrite(shm_name, nbytes)
-        try:
-            buf_type = ctypes.c_uint8 * nbytes
-            buf = buf_type.from_address(addr)
-            shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
-            tensor.set_(
-                shm_storage,
-                tensor.storage_offset(),
-                tensor.shape,
-                tensor.stride(),
-            )
-        except Exception:
-            # Make sure the SHM resources don't leak if migration fails
-            # part-way (e.g. ``set_`` rejects an unusual stride).
-            shm_munmap(addr, nbytes)
-            shm_unlink(shm_name)
-            raise
+    nbytes = tensor.numel() * tensor.element_size()
+    if nbytes == 0:
+        # No SHM segment for empty tensors: ``mmap`` with length 0
+        # is undefined / EINVAL on POSIX. ``to_tensor`` rebuilds an
+        # empty view directly when ``shm_name`` is empty.
+        return CpuShmTensorWrapper(tensor, "")
 
+    shm_name = "%s%d_%d" % (
+        CpuShmTensorWrapper.SHM_NAME_PREFIX,
+        os.getpid(),
+        next(_CPU_SHM_COUNTER),
+    )
+    # Perform the heavy work (syscall + tensor mutation) outside the lock
+    # to keep the critical section small.
+    addr = shm_create_readwrite(shm_name, nbytes)
+    try:
+        buf_type = ctypes.c_uint8 * nbytes
+        buf = buf_type.from_address(addr)
+        shm_storage = torch.frombuffer(buf, dtype=torch.uint8).untyped_storage()
+        tensor.set_(
+            shm_storage,
+            tensor.storage_offset(),
+            tensor.shape,
+            tensor.stride(),
+        )
+    except Exception:
+        # Make sure the SHM resources don't leak if migration fails
+        # part-way (e.g. ``set_`` rejects an unusual stride).
+        shm_munmap(addr, nbytes)
+        shm_unlink(shm_name)
+        raise
+
+    with _CPU_SHM_LOCK:
         _CPU_SHM_NAMES[tid] = (weakref.ref(tensor), shm_name)
-        weakref.finalize(tensor, _cleanup_shm_segment, tid, shm_name, addr, nbytes)
-        logger.info(
-            "Migrated CPU KV cache tensor (nbytes=%d) to SHM %s",
-            nbytes,
-            shm_name,
-        )
-
+    weakref.finalize(tensor, _cleanup_shm_segment, tid, shm_name, addr, nbytes)
+    logger.info(
+        "Migrated CPU KV cache tensor (nbytes=%d) to SHM %s",
+        nbytes,
+        shm_name,
+    )
     return CpuShmTensorWrapper(tensor, shm_name)
 
 

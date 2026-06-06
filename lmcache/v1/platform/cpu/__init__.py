@@ -8,11 +8,17 @@ pick the right wrapper based on ``tensor.device.type`` without any
 if/elif chain.
 """
 
+# Standard
+from typing import Any
+
+# Third Party
+import torch
+
 # First Party
 from lmcache.v1.platform._registry import register_kv_wrapper
 
 
-def _kv_wrapper_factory(tensor):
+def _kv_wrapper_factory(tensor: torch.Tensor) -> Any:
     """Indirect-dispatch wrapper.
 
     Defers loading :mod:`lmcache.v1.platform.cpu.shm` (which pulls in
