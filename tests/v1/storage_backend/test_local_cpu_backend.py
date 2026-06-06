@@ -726,3 +726,135 @@ class TestLocalCPUBackendAllocatorAlignment:
             assert kwargs.get("align_bytes") == 4096
         finally:
             backend.memory_allocator.close()
+            
+#L1 past-path & LFU Eviction Regression Tests
+class DummyMemoryObj:
+    def __init__(self):
+        self.is_pinned = False
+        self.can_evict = True
+    def ref_count_up(self): pass
+    def ref_count_down(self): pass
+    def pin(self): self.is_pinned = True
+    def unpin(self): self.is_pinned = False
+
+
+def test_l1_fast_path_promotion_and_lfu_eviction():
+    # 1. Setup minimal dependencies using mocks
+    from unittest.mock import MagicMock
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+    from lmcache.utils import CacheEngineKey
+
+    config = MagicMock(spec=LMCacheEngineConfig)
+    config.local_cpu = True
+    config.cache_policy = "LRU"
+    config.use_layerwise = False
+    config.enable_blending = False
+    config.lmcache_instance_id = "test_instance"
+    config.max_local_cpu_size = 1.0
+    config.local_cpu_use_hugepages = False
+    config.enable_p2p = False
+    config.enable_lazy_memory_allocator = False
+    config.extra_config = {}
+
+    mock_allocator = MagicMock()
+    backend = LocalCPUBackend(config=config, metadata=None, memory_allocator=mock_allocator)
+    
+    # Force low capacity thresholds for explicit state tracking
+    backend.l1_max_size = 2
+    backend.hot_threshold = 3
+
+    key_a = CacheEngineKey("chunk_A", 0, 0)
+    key_b = CacheEngineKey("chunk_B", 0, 0)
+    key_c = CacheEngineKey("chunk_C", 0, 0)
+
+    obj_a, obj_b, obj_c = DummyMemoryObj(), DummyMemoryObj(), DummyMemoryObj()
+
+    # 2. Test standard insertion
+    backend.submit_put_task(key_a, obj_a)
+    backend.submit_put_task(key_b, obj_b)
+    backend.submit_put_task(key_c, obj_c)
+
+    # 3. Test dynamic promotion limits
+    backend.get_blocking(key_a)
+    backend.get_blocking(key_a)
+    assert key_a not in backend.l1_fast_path_registry  # Hit count 2 < threshold 3
+
+    backend.get_blocking(key_a)
+    assert key_a in backend.l1_fast_path_registry      # Hit count 3 >= threshold 3 -> Promoted!
+
+    # Promote Key B
+    for _ in range(3): 
+        backend.get_blocking(key_b)
+    assert len(backend.l1_fast_path_registry) == 2
+
+    # 4. Test LFU Eviction Policy inside L1 registry
+    # Give Key A one extra hit so total counts are: Key A = 4 hits, Key B = 3 hits
+    backend.get_blocking(key_a)
+
+    # Promote Key C (crosses threshold 3). L1 is full, should evict Key B (lowest frequency: 3)
+    for _ in range(3): 
+        backend.get_blocking(key_c)
+
+    assert key_c in backend.l1_fast_path_registry
+    assert key_a in backend.l1_fast_path_registry
+    assert key_b not in backend.l1_fast_path_registry  # Safely dropped via LFU eviction loop
+
+
+def test_lock_bypass_on_fast_path():
+    from unittest.mock import MagicMock
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+    from lmcache.utils import CacheEngineKey
+
+    config = MagicMock(spec=LMCacheEngineConfig)
+    config.local_cpu = True
+    config.cache_policy = "LRU"
+    config.lmcache_instance_id = "test_instance"
+    config.extra_config = {}
+
+    backend = LocalCPUBackend(config=config, metadata=None, memory_allocator=MagicMock())
+    key = CacheEngineKey("chunk_fast", 0, 0)
+    mem_obj = DummyMemoryObj()
+
+    # Manually seed L1 registry map
+    backend.l1_fast_path_registry[key] = mem_obj
+
+    # Force acquire lock to simulate heavy contention/blocked background threads
+    backend.cpu_lock.acquire()
+    try:
+        # contains should immediately return True without hanging on the lock acquisition
+        assert backend.contains(key, pin=False) is True
+    finally:
+        backend.cpu_lock.release()
+
+
+def test_stale_pointer_cleanup_on_remove():
+    from unittest.mock import MagicMock
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+    from lmcache.utils import CacheEngineKey
+
+    config = MagicMock(spec=LMCacheEngineConfig)
+    config.local_cpu = True
+    config.cache_policy = "LRU"
+    config.lmcache_instance_id = "test_instance"
+    config.extra_config = {}
+
+    backend = LocalCPUBackend(config=config, metadata=None, memory_allocator=MagicMock())
+    key = CacheEngineKey("chunk_remove", 0, 0)
+    mem_obj = DummyMemoryObj()
+
+    backend.submit_put_task(key, mem_obj)
+    for _ in range(3): 
+        backend.get_blocking(key)  # Force promotion into L1
+
+    assert key in backend.l1_fast_path_registry
+
+    # Execute backend remove
+    backend.remove(key, force=True)
+
+    # Validate that fast-path lookups are entirely cleared out to prevent stale pointer tracking
+    assert key not in backend.hot_cache
+    assert key not in backend.l1_fast_path_registry
+    assert key not in backend.access_frequencies            

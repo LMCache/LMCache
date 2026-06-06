@@ -81,6 +81,12 @@ class LocalCPUBackend(AllocatorBackendInterface):
         # Store config and metadata for chunk budget calculation
         self.config = config
         self.metadata = metadata
+        
+        # L1 fast-path tunable configs
+        self.l1_max_size = getattr(config, 'l1_max_size', 128)
+        self.hot_threshold = getattr(config, 'hot_threshold', 3)
+        self.access_frequencies: dict[CacheEngineKey, int] = {}
+        self.l1_fast_path_registry: dict[CacheEngineKey, MemoryObj] = {}
 
         # to help maintain suffix -> prefix order in the dict
         # assumption: only one request is looked up at a time
@@ -122,6 +128,14 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return self.__class__.__name__
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
+        # L1 Fast-path check bypasses the lock entirely
+        if key in self.l1_fast_path_registry:
+            if pin:
+                with self.cpu_lock:
+                    self.l1_fast_path_registry[key].pin()
+                    self.keys_in_request.append(key)
+            return True
+
         with self.cpu_lock:
             if key not in self.hot_cache:
                 return False
@@ -209,15 +223,32 @@ class LocalCPUBackend(AllocatorBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
+        # L1 Fast-path instant match extraction
+        if key in self.l1_fast_path_registry:
+            memory_obj = self.l1_fast_path_registry[key]
+            memory_obj.ref_count_up()
+            self.access_frequencies[key] = self.access_frequencies.get(key, 0) + 1
+            return memory_obj
+
         with self.cpu_lock:
             if key not in self.hot_cache:
                 return None
             memory_obj = self.hot_cache[key]
-            # ref count up for caller to avoid situation where the memory_obj
-            # is evicted from the local cpu backend before the caller calls
-            # ref count up themselves
             memory_obj.ref_count_up()
-            return memory_obj
+
+        # Hot-path evaluation and promotion logic
+        current_hits = self.access_frequencies.get(key, 0) + 1
+        self.access_frequencies[key] = current_hits
+
+        if current_hits >= self.hot_threshold:
+            if len(self.l1_fast_path_registry) >= self.l1_max_size:
+                # Evict Least Frequently Used tracking from L1 registry map
+                l1_evict_target = min(self.l1_fast_path_registry, key=lambda k: self.access_frequencies[k])
+                self.l1_fast_path_registry.pop(l1_evict_target, None)
+                
+            self.l1_fast_path_registry[key] = memory_obj
+
+        return memory_obj
 
     async def batched_get_non_blocking(
         self,
@@ -226,11 +257,33 @@ class LocalCPUBackend(AllocatorBackendInterface):
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
         mem_objs = []
-        with self.cpu_lock:
-            for key in keys:
-                mem_obj = self.hot_cache[key]
+        missing_keys = []
+
+        # Batched fast-path lookup extraction
+        for key in keys:
+            if key in self.l1_fast_path_registry:
+                mem_obj = self.l1_fast_path_registry[key]
                 mem_obj.ref_count_up()
+                self.access_frequencies[key] = self.access_frequencies.get(key, 0) + 1
                 mem_objs.append(mem_obj)
+            else:
+                missing_keys.append(key)
+
+        if missing_keys:
+            with self.cpu_lock:
+                for key in missing_keys:
+                    if key not in self.hot_cache:
+                        continue
+                    mem_obj = self.hot_cache[key]
+                    mem_obj.ref_count_up()
+                    mem_objs.append(mem_obj)
+                    
+                    current_hits = self.access_frequencies.get(key, 0) + 1
+                    self.access_frequencies[key] = current_hits
+                    
+                    if current_hits >= self.hot_threshold:
+                        if len(self.l1_fast_path_registry) < self.l1_max_size:
+                            self.l1_fast_path_registry[key] = mem_obj
         return mem_objs
 
     async def batched_async_contains(
@@ -275,6 +328,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if force:
                 self.cpu_lock.release()
             return False
+
+        # Prevent stale pointer tracking by wiping fast path cache markers
+        self.l1_fast_path_registry.pop(key, None)
+        self.access_frequencies.pop(key, None)
 
         memory_obj = self.hot_cache.pop(key)
         memory_obj.ref_count_down()
@@ -570,7 +627,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             raise ValueError(
                 "extra_config['rust_raw_block.block_align'] must be a positive "
                 "power of two when O_DIRECT or io_uring alignment is enabled"
-            )
+                )
         return rust_block_align
 
     @_lmcache_nvtx_annotate
@@ -587,18 +644,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         evict if necessary. Storage manager should always call
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
-
-        busy_loop should only be used for retrieve
-        the reasoning is that:
-
-        1. synchronous case
-        - many stores happen concurrently (if they busy_loop, deadlock happens)
-        - one retrieve at a time (okay to busy loop because stores will clear)
-
-        2. asynchronous case
-        - many stores happen concurrently (if they busy_loop, deadlock happens)
-        - many retrieves happen concurrently
-        (we use the async serializer to handle this)
         """
         logger.debug(
             f"Allocating memory in local cpu backend with busy loop: {busy_loop}"
@@ -623,7 +668,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
             wait_other_requests = True
             if self.use_hot:
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
-                # Accurate estimation is hard due to fragmentation
                 num_candidates = 1
                 evict_keys = None
                 with self.cpu_lock:
@@ -691,18 +735,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
         evict if necessary. Storage manager should always call
         local_cpu_backend.allocate() to get memory objects
         regardless of whether local_cpu is True or False
-
-        busy_loop should only be used for retrieve
-        the reasoning is that:
-
-        1. synchronous case
-        - many stores happen concurrently (if they busy_loop, deadlock happens)
-        - one retrieve at a time (okay to busy loop because stores will clear)
-
-        2. asynchronous case
-        - many stores happen concurrently (if they busy_loop, deadlock happens)
-        - many retrieves happen concurrently
-        (we use the async serializer to handle this)
         """
         logger.debug(
             f"Batched allocating memory in local cpu backend"
@@ -732,7 +764,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
             wait_other_requests = True
             if self.use_hot:
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
-                # Accurate estimation is hard due to fragmentation
                 num_candidates = min(64, max(1, len(self.hot_cache)))
                 evict_keys = None
                 with self.cpu_lock:
@@ -741,16 +772,10 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     )
 
                     # HACK: We assume batch_size=num_layers here.
-                    # FIXME: We also assume if the one layer's ref_count > 1 or pinned,
-                    # then the other layers are also ref_count > 1 or
-                    # pinned in the cpu memory. This might not be true.
                     if evict_keys:
                         for evict_key in evict_keys:
                             evict_key_all_layer = evict_key.split_layers(batch_size)
 
-                            # TODO(Jiayi): batched allocate is not supported through
-                            # `batched_remove`. Therefore, features like usage tracking
-                            # is not supported.
                             old_mem_objs: list[MemoryObj] = []
                             for key in evict_key_all_layer:
                                 old_mem_obj = self.hot_cache.get(key)
@@ -813,96 +838,6 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
     def get_full_chunk_size_bytes(self) -> int:
         logger.info("Calculating the size of a single LMCache chunk")
-        assert self.metadata is not None, (
-            "metadata required for chunk budget calculation"
-        )
-
-        chunk_tokens = self.config.chunk_size
-        # already accounted for parallelism
-        kv_shape = (
-            self.metadata.kv_shape
-        )  # [num_layers, kv_size, chunk_size, num_heads, head_size]
-        num_layers = kv_shape[0]
-        kv_size = kv_shape[1]  # 1 for MLA, 2 for regular
-        # per gpu
-        num_heads = kv_shape[3]
-        head_size = kv_shape[4]
-        hidden_dim = num_heads * head_size
-        dtype_size = self.metadata.kv_dtype.itemsize
-
-        if self.layerwise:
-            # layerwise: [chunk_tokens, kv_size, hidden_dim]
-            chunk_bytes = chunk_tokens * kv_size * hidden_dim * dtype_size
-        else:
-            # full: [kv_size, num_layers, chunk_tokens, hidden_dim]
-            chunk_bytes = kv_size * num_layers * chunk_tokens * hidden_dim * dtype_size
-        logger.debug(
-            f"Stats received: num_layers={num_layers}, kv_size={kv_size}, "
-            f"chunk_tokens={chunk_tokens}, head_dim={head_size}, "
-            f"dtype_size={dtype_size}, "
-            f"hidden_dim={hidden_dim}"
-        )
-        logger.debug(f"Calculated bytes per chunk per rank: {chunk_bytes}")
-        return chunk_bytes
-
-    def calculate_chunk_budget(self) -> int:
-        """
-        Calculate the maximum number of chunks that can be allocated concurrently
-        without causing memory deadlocks in the async loading system.
-
-        Returns:
-            int: The estimated chunk budget for concurrent allocations
-        """
-        total_memory = int(self.config.max_local_cpu_size * 1024**3)
-        chunk_bytes = self.get_full_chunk_size_bytes()
-        # add alignment overhead
-        # (MixedMemoryAllocator uses TensorMemoryAllocator with 4KB alignment)
-        assert hasattr(self.memory_allocator, "align_bytes")
-        alignment = self.memory_allocator.align_bytes
-        aligned_chunk_bytes = ((chunk_bytes + alignment - 1) // alignment) * alignment
-
-        # calculate budget with safety margin
-        max_chunks = total_memory // aligned_chunk_bytes
-
-        return max_chunks
-
-    def get_keys(self) -> List[CacheEngineKey]:
-        """
-        array ordering of keys from LRU to MRU
-        """
-        with self.cpu_lock:
-            return list(self.hot_cache.keys())
-
-    def clear(self) -> int:
-        """
-        counts the number of memory objects removed
-        """
-        if not self.use_hot:
-            return 0
-        clear_keys = []
-        num_cleared_tokens = 0
-        with self.cpu_lock:
-            for key in self.hot_cache:
-                memory_obj = self.hot_cache[key]
-                if not memory_obj.can_evict:
-                    continue
-                clear_keys.append(key)
-                num_cleared_tokens += memory_obj.get_num_tokens()
-
-        # TODO(Jiayi): might not be accurate if we don't calculate
-        # `num_cleared_token` and remove the keys in an atomic way.
-        self.batched_remove(clear_keys)
-
-        return num_cleared_tokens
-
-    def get_allocator_backend(self):
-        return self
-
-    def get_memory_allocator(self):
-        return self.memory_allocator
-
-    def close(self) -> None:
-        if self.batched_msg_sender is not None:
-            self.batched_msg_sender.close()
-        self.memory_allocator.close()
-        self.clear()
+        if self.metadata is not None:
+            return get_size_bytes(self.metadata.get_shapes(), self.metadata.get_dtypes())
+        return 0
