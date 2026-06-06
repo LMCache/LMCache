@@ -83,10 +83,9 @@ class _CBUnifiedJob:
 
 
 class BlendTokenRangeMatcherV3(BlendTokenRangeMatcher):
-    """V3 matcher: full-hash collision rejection + block-aligned probe stride.
+    """V3 matcher: full-hash collision rejection + configurable probe stride.
 
-    Probes every ``probe_stride`` positions; lossless because retrieve drops
-    non-block-aligned ``cur_st`` anyway.
+    register_rope sets ``probe_stride`` to 1 for token-level matching.
     """
 
     def __init__(self, chunk_size: int = 256, probe_stride: int = 16):
@@ -162,7 +161,7 @@ class BlendTokenRangeMatcherV3(BlendTokenRangeMatcher):
     ) -> list[CBMatchResult]:
         """Probe rolling-hash array every ``probe_stride`` positions; skips
         bucket-only collisions and evicted entries. One result per unique
-        match; ``cur_st`` is the first block-aligned hit."""
+        match; ``cur_st`` is the first hit position."""
         if len(token_ids) < self.chunk_size:
             return []
 
@@ -429,20 +428,9 @@ class BlendV3Module:
         self._cb_gpu_contexts[instance_id] = gpu_context
         self._cb_gpu_context_meta[instance_id] = (entry.model_name, entry.world_size)
 
-        # Probe stride = ie block size; must divide chunk_size.
-        ie_logical_block_size = (
-            gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
-        if self._ctx.chunk_size % ie_logical_block_size == 0:
-            self._token_range_matcher._probe_stride = ie_logical_block_size
-        else:
-            logger.warning(
-                "CB matcher probe stride unchanged (%d): chunk_size %d is not "
-                "a multiple of inference_engine_logical_block_size %d.",
-                self._token_range_matcher._probe_stride,
-                self._ctx.chunk_size,
-                ie_logical_block_size,
-            )
+        # Probe every token so non-block-aligned matches are found; the
+        # per-token slot scatter writes them.
+        self._token_range_matcher._probe_stride = 1
 
         logger.info(
             "Registered CB rope state for instance %d "
@@ -667,11 +655,9 @@ class BlendV3Module:
         # enter the sparse prefetch, so they cannot leak a read lock.
         if not job.sparse_started:
             prefix_tokens = job.prefix_chunks * chunk_size
-            job.non_prefix = [
-                r
-                for r in job.matches
-                if r.cur_st >= prefix_tokens and r.cur_st % chunk_size == 0
-            ]
+            # Any offset is fine: the per-token slot scatter writes
+            # non-block-aligned matches.
+            job.non_prefix = [r for r in job.matches if r.cur_st >= prefix_tokens]
             if job.non_prefix:
                 layout_desc = self._resolve_cb_layout_desc(
                     key.model_name, key.world_size
@@ -937,7 +923,6 @@ class BlendV3Module:
                 f"chunk_size {chunk_size} must be a multiple of "
                 f"inference_engine_logical_block_size {ie_logical_block_size}"
             )
-        blocks_per_chunk = chunk_size // ie_logical_block_size
         num_groups = gpu_context.kv_layer_groups_manager.num_groups
 
         with (
@@ -982,30 +967,20 @@ class BlendV3Module:
                     if memory_objs is None:
                         return event_ipc_handle, False
 
-                    # Drop malformed matches up front.
+                    # Per-token scatter handles any cur_st; just bound the
+                    # matched range to the allocated slots.
                     pairs: list[tuple[CBMatchResult, Any]] = []
+                    num_slots = int(all_block_ids_gpu.numel()) * ie_logical_block_size
                     for r, memory_obj in zip(
                         cb_match_result, memory_objs, strict=False
                     ):
-                        if r.cur_st % ie_logical_block_size != 0:
+                        if r.cur_ed > num_slots:
                             logger.warning(
-                                "Dropping CB match cur_st=%d: not aligned to "
-                                "ie_logical_block_size=%d.",
+                                "Dropping CB match cur_st=%d cur_ed=%d: exceeds "
+                                "%d slots. Request %s.",
                                 r.cur_st,
-                                ie_logical_block_size,
-                            )
-                            continue
-                        cbs = r.cur_st // ie_logical_block_size
-                        if cbs + blocks_per_chunk > int(all_block_ids_gpu.numel()):
-                            logger.warning(
-                                "Dropping CB match cur_st=%d old_st=%d: needs "
-                                "blocks [%d:%d) but gpu_block_ids has %d. "
-                                "Request %s.",
-                                r.cur_st,
-                                r.old_st,
-                                cbs,
-                                cbs + blocks_per_chunk,
-                                int(all_block_ids_gpu.numel()),
+                                r.cur_ed,
+                                num_slots,
                                 key.request_id,
                             )
                             continue
@@ -1025,7 +1000,6 @@ class BlendV3Module:
                         for batch_start in range(0, len(run), max_batch):
                             batch = run[batch_start : batch_start + max_batch]
                             batch_len = len(batch)
-                            first_cur_st = batch[0][0].cur_st
 
                             # (a) H2D fill into per-chunk tmp slots.
                             for slot_idx, (_, memory_obj) in enumerate(batch):
@@ -1044,14 +1018,24 @@ class BlendV3Module:
                                 gpu_context, rope_state, batch_len, slots_to_rope
                             )
 
-                            # (c) One batched scatter per group.
-                            chunk_block_start = first_cur_st // ie_logical_block_size
-                            chunk_block_end = (
-                                chunk_block_start + batch_len * blocks_per_chunk
+                            # (c) Per-token slot scatter: partial vLLM blocks
+                            # shared with recomputed tokens stay disjoint.
+                            bs = ie_logical_block_size
+                            pos = torch.cat(
+                                [
+                                    torch.arange(
+                                        r.cur_st,
+                                        r.cur_ed,
+                                        device=gpu_context.device,
+                                        dtype=torch.long,
+                                    )
+                                    for (r, _) in batch
+                                ]
                             )
-                            chunk_block_ids_gpu = all_block_ids_gpu[
-                                chunk_block_start:chunk_block_end
-                            ]
+                            slot_mapping = all_block_ids_gpu[pos // bs] * bs + (
+                                pos % bs
+                            )
+                            page_buffer_size = gpu_context.num_blocks * bs
                             for group_idx in range(num_groups):
                                 tmp_buffers = (
                                     gpu_context.get_tmp_chunk_gpu_buffer_batched(
@@ -1059,23 +1043,17 @@ class BlendV3Module:
                                         group_idx=group_idx,
                                     )
                                 )
-                                group_kv_pointers = gpu_context.get_group_kv_pointers(
-                                    group_idx
-                                )
-                                group_lmcache_chunk_size = (
-                                    gpu_context.get_physical_chunk_size(group_idx)
-                                )
-
-                                lmc_ops.multi_layer_block_kv_transfer(
-                                    group_kv_pointers,
-                                    [tb.data_ptr() for tb in tmp_buffers],
-                                    chunk_block_ids_gpu,
+                                key_value = torch.cat(tmp_buffers, dim=2)
+                                lmc_ops.multi_layer_kv_transfer(
+                                    key_value,
+                                    gpu_context.get_group_kv_pointers(group_idx),
+                                    slot_mapping,
                                     gpu_context.device,
+                                    page_buffer_size,
                                     lmc_ops.TransferDirection.H2D,
-                                    gpu_context.get_shape_desc(group_idx),
-                                    group_lmcache_chunk_size,
                                     gpu_context.gpu_kv_format_,
-                                    0,  # skip_blocks_in_chunk
+                                    block_size=bs,
+                                    head_size=rope_state.head_size,
                                 )
             except Exception:
                 logger.exception("Error during retrieving prefetched results")
