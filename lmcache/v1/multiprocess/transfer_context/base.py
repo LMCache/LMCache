@@ -282,6 +282,7 @@ def gather_paged_kv_to_cpu(
     is_hnd = gpu_kv_format in (
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS,
     )
 
     block_size = get_block_size(normalized, gpu_kv_format)
@@ -326,6 +327,10 @@ def gather_paged_kv_to_cpu(
                     if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
                         k_t = layer[0]
                         v_t = layer[1]
+                    elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS:
+                        # [NB, NH, BS, 2, HS] — K/V fused at dim 3
+                        k_t = layer[:, :, :, 0]
+                        v_t = layer[:, :, :, 1]
                     else:
                         k_t = layer[:, 0]
                         v_t = layer[:, 1]
@@ -419,6 +424,7 @@ def scatter_cpu_to_paged_kv(
     is_hnd = gpu_kv_format in (
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS,
     )
 
     # After normalization the structure is always a list of per-layer
@@ -462,6 +468,10 @@ def scatter_cpu_to_paged_kv(
                 if gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
                     k_t = layer[0]
                     v_t = layer[1]
+                elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS:
+                    # [NB, NH, BS, 2, HS] — K/V fused at dim 3
+                    k_t = layer[:, :, :, 0]
+                    v_t = layer[:, :, :, 1]
                 else:
                     k_t = layer[:, 0]
                     v_t = layer[:, 1]

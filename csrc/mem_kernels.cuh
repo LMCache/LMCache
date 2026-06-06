@@ -99,6 +99,15 @@ enum class GPUKVFormat : int {
   - SGLang MHA via the MP daemon path
   physical shape per layer: [num_blocks, block_size, num_heads, head_size]
   */
+
+  NL_X_NB_NH_BS_TWO_HS = 10,
+  /*
+  used by:
+  - vLLM non-MLA CPU attention (blocks-first, K/V fused per vLLM #44393)
+  physical shape per layer: [num_blocks, num_heads, block_size, 2, head_size]
+  (recovered by splitting the fused trailing [block_size, 2 * head_size]).
+  CPU-only; never reaches the CUDA transfer kernels.
+  */
 };
 
 void multi_layer_kv_transfer(
