@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # HMA (hybrid memory allocator) correctness test using a real hybrid model.
 #
-# google/gemma-3-4b-it interleaves local (sliding-window) and global (full-
-# attention) layers, so vLLM keeps its hybrid KV cache manager ON for it
-# (LMCacheMPConnector subclasses SupportsHMA, so vLLM does not auto-disable the
-# hybrid manager). vLLM therefore exposes multiple KV cache groups and the
-# connector exercises the multi-engine-group HMA store/retrieve path. gemma-3
-# uses standard paged attention for both layer families (so it is supported by
-# LMCache's transfer kernels, unlike Mamba/linear-attention hybrids such as
-# Qwen3.5/Qwen3-Next, whose state caches LMCache cannot yet transfer). gemma-3 is
-# gated, so CI must provide HF_TOKEN.
+# Why google/gemma-4-31B-it:
+#   - Hybrid (sliding-window + full-attention), so vLLM keeps its hybrid KV
+#     cache manager on and exposes multiple KV cache groups.
+#   - Its full layers have a larger head_dim, so the groups get different block
+#     sizes -- this exercises the per-group HMA store/retrieve path.
+#   - Standard paged attention for both layer families, so LMCache's transfer
+#     kernels support it (unlike Mamba/linear-attention hybrids like
+#     Qwen3.5/Qwen3-Next, whose state caches LMCache cannot yet transfer).
+#   - Public, so no HF_TOKEN is required.
 #
 # Flow:
 #   1. Run lm_eval (gsm8k) against vLLM+LMCache       -> populates LMCache (STORE).
@@ -18,19 +18,12 @@
 #      false, so the LMCache-managed cache is preserved).
 #   3. Re-run lm_eval                                  -> vLLM APC misses, so the
 #      prefix KV is served by LMCache (RETRIEVE), exercising the HMA retrieve path.
-#   4. Assert the two runs' gsm8k scores are identical (LMCache retrieve returns
-#      the KV bit-exactly) and that run 2 is identical to the no-LMCache baseline.
+#   4. Assert the three gsm8k scores agree within SCORE_TOLERANCE (run 1 store ==
+#      run 2 retrieve == no-LMCache baseline); a broken retrieve corrupts the KV
+#      and the score diverges.
 #   5. Assert LMCache actually served retrieves during run 2 (non-vacuous).
 #
 # The reset endpoint requires VLLM_SERVER_DEV_MODE=1 (set by launch-processes.sh).
-#
-# NOTE on determinism: gemma-3 runs under vLLM's batch-invariant mode
-# (VLLM_BATCH_INVARIANT=1, the launch-processes.sh default), so generation is
-# bit-deterministic and independent of batch composition. A correct LMCache
-# retrieve returns the KV verbatim, so all three runs must produce the *same*
-# gsm8k score; the comparison therefore requires an exact match (SCORE_TOLERANCE
-# defaults to 0). A broken HMA retrieve (corrupt KV) changes the generated tokens
-# and the score diverges.
 set -e
 set -o pipefail
 
@@ -42,14 +35,16 @@ source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 # Configuration
 VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
-MODEL="${MODEL:-google/gemma-3-4b-it}"
+MODEL="${MODEL:-google/gemma-4-31B-it}"
 NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
-LIMIT="${LIMIT:-200}"
-# Max allowed absolute difference in the gsm8k exact_match score between runs.
-# gemma-3 runs batch-invariant (see NOTE above), so a correct LMCache retrieve
-# reproduces the baseline exactly; the default of 0 requires an exact match.
-# Override only when intentionally testing a non-batch-invariant configuration.
-SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.03}"
+# 31B has a large per-token KV footprint; cap the sample count so the working
+# set fits the CPU pool (a too-large set thrashes and run 2 misses LMCache).
+LIMIT="${LIMIT:-100}"
+# Max allowed absolute difference in the gsm8k exact_match score across runs.
+# gemma-4 forces the Triton backend, which is not bit-exact under vLLM's
+# batch-invariant mode, so a correct retrieve can differ from a fresh compute by
+# a small margin; the default allows a small tolerance instead of an exact match.
+SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
 # Seconds to wait after run 1 so async LMCache stores drain before run 2.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
 BUILD_ID="${BUILD_ID:-local_$$}"

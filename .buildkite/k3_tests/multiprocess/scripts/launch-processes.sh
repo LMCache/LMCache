@@ -31,10 +31,42 @@ GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounit
 GPU_MEMORY_GB=$((GPU_MEMORY_MB / 1024))
 echo "Detected GPU memory: ${GPU_MEMORY_GB}GB (${GPU_MEMORY_MB}MB)"
 
-if [ "$GPU_MEMORY_GB" -gt 90 ]; then
+if [ -n "${GPU_MEMORY_UTILIZATION:-}" ]; then
+    # Explicit override (e.g. large models like gemma-4-31B whose ~63GB of
+    # weights alone exceed the default 0.5 fraction and would fail to load).
+    echo "Using configured --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}"
+    GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization ${GPU_MEMORY_UTILIZATION}"
+elif [ "$GPU_MEMORY_GB" -gt 90 ]; then
     echo "GPU memory > 90GB, adding --gpu-memory-utilization 0.5"
     GPU_MEMORY_UTIL_ARG="--gpu-memory-utilization 0.5"
 fi
+
+# Attention backend for both vLLM servers. Defaults to FLASH_ATTN (what the
+# batch-invariant lm_eval needs). Models with heterogeneous head dimensions
+# (e.g. gemma-4) must NOT pin FLASH_ATTN -- set ATTENTION_BACKEND=auto so vLLM
+# selects the backend itself (gemma-4 auto-forces TRITON_ATTN).
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASH_ATTN}"
+ATTENTION_BACKEND_ARG=""
+if [ -n "$ATTENTION_BACKEND" ] && [ "$ATTENTION_BACKEND" != "auto" ]; then
+    ATTENTION_BACKEND_ARG="--attention-backend $ATTENTION_BACKEND"
+fi
+
+# Optionally run vLLM in eager mode (skip CUDA graph capture) for both servers.
+# Off by default: verified to break the bit-exact run1 == run2 check in the
+# determinism tests (lm_eval) -- eager changes the kernel path enough to diverge
+# across the cold/warm batch difference even under VLLM_BATCH_INVARIANT. Enable
+# (ENFORCE_EAGER=1) only for large models whose CUDA-graph capture would
+# otherwise time out at launch (those tests use a tolerance, not bit-exactness).
+ENFORCE_EAGER_ARG=""
+if [ "${ENFORCE_EAGER:-0}" = "1" ] || [ "${ENFORCE_EAGER:-0}" = "true" ]; then
+    ENFORCE_EAGER_ARG="--enforce-eager"
+fi
+
+# Pin max model length for both servers; defaults to "auto" (vLLM derives the
+# largest length that fits KV memory). Verified not to affect the bit-exact
+# determinism tests. Override via MAX_MODEL_LEN if a model needs a fixed length.
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
+MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
 
 # Store PIDs in a file so cleanup.sh can find them
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
@@ -77,9 +109,11 @@ VLLM_BATCH_INVARIANT=1 \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
-    --attention-backend FLASH_ATTN \
+    $ATTENTION_BACKEND_ARG \
     --port "$vllm_port" \
     --no-async-scheduling \
+    $MAX_MODEL_LEN_ARG \
+    $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
@@ -100,9 +134,11 @@ if [[ "${LAUNCH_BASELINE:-true}" == "true" ]]; then
     VLLM_BATCH_INVARIANT=1 \
     PYTHONHASHSEED=0 \
     vllm serve "$MODEL" \
-        --attention-backend FLASH_ATTN \
+        $ATTENTION_BACKEND_ARG \
         --port "$vllm_baseline_port" \
         --no-async-scheduling \
+        $MAX_MODEL_LEN_ARG \
+        $ENFORCE_EAGER_ARG \
         $GPU_MEMORY_UTIL_ARG \
         > "/tmp/build_${BUILD_ID}_vllm_baseline.log" 2>&1 &
 

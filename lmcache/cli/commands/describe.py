@@ -172,7 +172,7 @@ class KVCacheDescriber:
 
     def add_models(self) -> None:
         """Per-model KV cache layout sections."""
-        gpu_meta = self.data.get("gpu_context_meta", {})
+        gpu_meta = self.data.get("cache_context_meta", {})
         if not gpu_meta:
             # CB-only deployments populate cb_gpu_context_meta instead.
             gpu_meta = self.data.get("cb_gpu_context_meta", {})
