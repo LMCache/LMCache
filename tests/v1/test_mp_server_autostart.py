@@ -185,6 +185,11 @@ def test_config_rejects_remote_host_when_enabled() -> None:
             "must be a boolean",
         ),
         (
+            {"lmcache.mp.autostart": 1},
+            5555,
+            "must be a boolean",
+        ),
+        (
             {
                 "lmcache.mp.autostart": True,
                 "lmcache.mp.autostart.server_args": ["invalid"],

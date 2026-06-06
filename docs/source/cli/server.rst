@@ -63,6 +63,16 @@ Commonly used flags include:
      - Fraction of L1 cleared per eviction cycle.
    * - ``--max-workers N``
      - Number of server worker processes.
+   * - ``--coordinator-url URL``
+     - Register with an MP coordinator at this base URL (e.g.
+       ``http://coordinator:9300``). Opt-in; enables fleet registration. See
+       :doc:`/mp/coordinator`.
+   * - ``--coordinator-advertise-ip IP``
+     - IP the coordinator should reach this server at (defaults to the
+       outbound IP).
+   * - ``--coordinator-heartbeat-interval SECONDS``
+     - Seconds between heartbeats (``> 0``, default ``5``). Keep well below the
+       coordinator's instance timeout.
    * - ``--trace-level {storage}``
      - Enable storage-level trace recording (see :doc:`trace`).
    * - ``--trace-output PATH``

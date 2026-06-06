@@ -17,6 +17,20 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 
+try:
+    # Import at module load time to follow the repo import convention. Some
+    # config-only tests import this launcher without installing torch; keep that
+    # import path available and fail only when MQ health probing is actually used.
+    # First Party
+    from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+except ModuleNotFoundError as exc:
+    if exc.name != "torch":
+        raise
+    MessageQueueClient = None
+    RequestType = None
+    get_response_class = None
+
 logger = init_logger(__name__)
 
 _AUTOSTART_KEY = "lmcache.mp.autostart"
@@ -54,20 +68,14 @@ def _create_message_queue_client(
     server_url: str,
     zmq_context: zmq.Context,
 ) -> _MessageQueueClient:
-    # Keep the multiprocess stack deferred so config-only tests can import
-    # this launcher without requiring the full torch/vLLM runtime.
-    # First Party
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
-
+    if MessageQueueClient is None:
+        raise RuntimeError("MessageQueueClient requires torch to be installed")
     return MessageQueueClient(server_url, zmq_context)
 
 
 def _submit_ping(client: _MessageQueueClient) -> _MessagingFuture:
-    # Keep the multiprocess stack deferred so config-only tests can import
-    # this launcher without requiring the full torch/vLLM runtime.
-    # First Party
-    from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
-
+    if RequestType is None or get_response_class is None:
+        raise RuntimeError("MP health probing requires torch to be installed")
     return client.submit_request(
         RequestType.PING,
         [],
@@ -125,8 +133,9 @@ def maybe_autostart_mp_server(
         zmq_context: ZMQ context used for health probing.
 
     Returns:
-        The launcher tracking the server process, or ``None`` when no process
-        was started by this connector.
+        A launcher for the enabled auto-start configuration, or ``None`` when
+        auto-start is disabled. The launcher owns a process only when it had to
+        start one.
 
     Raises:
         ValueError: If an auto-start configuration value is invalid.
@@ -160,8 +169,9 @@ def maybe_autostart_mp_server_from_url(
         zmq_context: ZMQ context used for health probing.
 
     Returns:
-        The launcher tracking the server process, or ``None`` when no process
-        was started.
+        A launcher for the enabled auto-start configuration, or ``None`` when
+        auto-start is disabled. The launcher owns a process only when it had to
+        start one.
 
     Raises:
         ValueError: If an auto-start configuration value or server URL is
@@ -205,8 +215,6 @@ def _parse_bool(value: object | None) -> bool:
         return False
     if isinstance(value, bool):
         return value
-    if isinstance(value, int):
-        return bool(value)
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"1", "true", "yes", "y", "on"}:
