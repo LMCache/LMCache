@@ -116,7 +116,7 @@ class MPCacheEngine:
         """Used by ``/kvcache/check``; unwraps :class:`GPUContextEntry`."""
         for module in self._modules:
             if isinstance(module, GPUTransferModule):
-                return {i: e.gpu_context for i, e in module.gpu_contexts.items()}
+                return {i: e.cache_context for i, e in module.cache_contexts.items()}
         return None
 
     def clear(self) -> None:

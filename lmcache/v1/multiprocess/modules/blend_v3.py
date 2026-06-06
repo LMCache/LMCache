@@ -386,16 +386,16 @@ class BlendV3Module:
         head_size: int,
         is_neox_style: bool,
     ) -> None:
-        """Bolt rope state onto an already-registered ``gpu_contexts`` entry;
+        """Bolt rope state onto an already-registered ``cache_contexts`` entry;
         idempotent. ``REGISTER_KV_CACHE`` must precede this."""
-        gpu_contexts = self._gpu_transfer.gpu_contexts
-        if instance_id not in gpu_contexts:
+        cache_contexts = self._gpu_transfer.cache_contexts
+        if instance_id not in cache_contexts:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
             )
-        entry = gpu_contexts[instance_id]
-        gpu_context = entry.gpu_context
+        entry = cache_contexts[instance_id]
+        gpu_context = entry.cache_context
 
         cos_sin_cache = cos_sin_cache_ipc.to_tensor()
         # YaRN/longrope bake an mscale m into the rope cache (cos²+sin²=m²≠1).
@@ -461,7 +461,7 @@ class BlendV3Module:
         self._cb_rope_state.pop(instance_id, None)
         self._cb_gpu_contexts.pop(instance_id, None)
         self._cb_gpu_context_meta.pop(instance_id, None)
-        if instance_id not in self._gpu_transfer.gpu_contexts:
+        if instance_id not in self._gpu_transfer.cache_contexts:
             logger.warning(
                 "cb_unregister_rope: instance %d not registered", instance_id
             )
@@ -768,8 +768,8 @@ class BlendV3Module:
             job = (tokens_in_range, chunk_hashes, start_chunk_idx, key.start)
             with self._pending_fp_lock:
                 self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
-            entry = self._gpu_transfer.gpu_contexts.get(instance_id)
-            gpu_ctx = entry.gpu_context if entry is not None else None
+            entry = self._gpu_transfer.cache_contexts.get(instance_id)
+            gpu_ctx = entry.cache_context if entry is not None else None
             if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
                 gpu_ctx.cupy_stream.launch_host_func(
                     self._fingerprint_queue.put_nowait, job
@@ -871,8 +871,8 @@ class BlendV3Module:
         """Scatter EVERY matched chunk into paged KV (prefix-hit + shifted);
         K-only re-RoPE on the shifted subset. Drops misaligned matches;
         MLA layouts unsupported."""
-        gpu_contexts = self._gpu_transfer.gpu_contexts
-        if instance_id not in gpu_contexts:
+        cache_contexts = self._gpu_transfer.cache_contexts
+        if instance_id not in cache_contexts:
             raise ValueError(
                 f"Instance {instance_id} not registered for paged KV cache"
             )
@@ -881,7 +881,7 @@ class BlendV3Module:
                 f"Instance {instance_id} has no CB rope state; "
                 "send CB_REGISTER_ROPE_V3 before CB_RETRIEVE_PRE_COMPUTED_V3."
             )
-        gpu_context = gpu_contexts[instance_id].gpu_context
+        gpu_context = cache_contexts[instance_id].cache_context
         rope_state = self._cb_rope_state[instance_id]
         chunk_size = self._ctx.chunk_size
 
