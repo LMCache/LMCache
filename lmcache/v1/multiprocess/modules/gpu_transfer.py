@@ -48,20 +48,18 @@ logger = init_logger(__name__)
 
 
 def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
-    """Get the memory layout description for a given GPU context and number of tokens.
-
-    Supports multiple KV layer groups with different shapes and dtypes.
+    """Get the memory layout description for a GPU context.
 
     Args:
-        gpu_context: The GPU cache context containing the KV cache information.
-        num_tokens: The number of tokens to determine the layout for.
+        gpu_context: The GPU cache context.
+        num_tokens: Unused; kept for call-site compatibility.
 
     Returns:
-        MemoryLayoutDesc: The memory layout description containing shapes and dtypes.
+        MemoryLayoutDesc with per-group storage shapes and dtypes.
     """
     num_groups = gpu_context.kv_layer_groups_manager.num_groups
     shapes = [
-        gpu_context.get_kv_buffer_shape(num_tokens, group_idx)
+        gpu_context.get_storage_kv_buffer_shape(group_idx)
         for group_idx in range(num_groups)
     ]
     dtypes = [
@@ -198,7 +196,6 @@ class GPUTransferModule:
                         ctx.kv_layer_groups_manager.inference_engine_logical_block_size
                     ),
                     "group_physical_block_sizes": ctx.group_physical_block_sizes,
-                    "group_compress_ratios": ctx.group_compress_ratios,
                     "hidden_dim_sizes": str(ctx.hidden_dim_sizes),
                     "dtype": str(ctx.dtype),
                     "is_mla": ctx.is_mla,
@@ -345,12 +342,8 @@ class GPUTransferModule:
         gpu_context = entry.gpu_context
         model_name = entry.model_name
 
-        # ``blocks_per_chunk`` is counted in inference-engine-side
-        # blocks (each block addresses
-        # ``inference_engine_logical_block_size`` *logical* tokens).
-        # For compressed groups the per-group physical slot count
-        # differs, but the block-id indexing is shared with the engine
-        # and therefore uses the engine logical block size here.
+        # blocks_per_chunk: engine-side blocks per LMCache chunk, used to
+        # index into the per-group block ID list.
         blocks_per_chunk = (
             self._ctx.chunk_size
             // gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
@@ -450,12 +443,7 @@ class GPUTransferModule:
                         ]
                         tmp_buffer = gpu_context.get_tmp_chunk_gpu_buffer(group_idx)
                         group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                        # Kernel contract: ``group_lmcache_chunk_size`` here is the
-                        # number of *physical* slots per chunk for this group
-                        # (= logical chunk_size // compress_ratio).
-                        group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
-                            group_idx
-                        )
+                        group = gpu_context.kv_layer_groups_manager.kv_layer_groups[group_idx]
                         lmc_ops.multi_layer_block_kv_transfer(
                             group_kv_pointers,
                             [tmp_buffer.data_ptr()],
@@ -463,7 +451,7 @@ class GPUTransferModule:
                             gpu_context.device,
                             lmc_ops.TransferDirection.D2H,
                             gpu_context.get_shape_desc(group_idx),
-                            group_lmcache_chunk_size,
+                            group.storage_slots_per_chunk,
                             gpu_context.gpu_kv_format_,
                             0,
                         )
@@ -653,9 +641,7 @@ class GPUTransferModule:
                         batch_len, group_idx
                     )
                     group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
-                    group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
-                        group_idx
-                    )
+                    group = gpu_context.kv_layer_groups_manager.kv_layer_groups[group_idx]
 
                     lmc_ops.multi_layer_block_kv_transfer(
                         group_kv_pointers,
@@ -664,7 +650,7 @@ class GPUTransferModule:
                         gpu_context.device,
                         lmc_ops.TransferDirection.H2D,
                         gpu_context.get_shape_desc(group_idx),
-                        group_lmcache_chunk_size,
+                        group.storage_slots_per_chunk,
                         gpu_context.gpu_kv_format_,
                         skip_blocks_in_chunk,
                     )

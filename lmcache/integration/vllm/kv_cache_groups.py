@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 # Standard
+import math
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,85 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+
+
+def spec_int_attr(spec: Any, attr: str) -> int:
+    """Read an integer attribute from a vLLM KV cache spec.
+
+    For ``UniformTypeKVCacheSpec``, the attribute lives on the inner ``kv_type``
+    spec; for all others it lives directly on *spec*.
+
+    Args:
+        spec: A vLLM ``KVCacheSpec`` (or ``None``).
+        attr: Attribute name to read.
+
+    Returns:
+        Integer value, or ``0`` when *spec* is ``None`` or the attribute is absent.
+    """
+    if spec is None:
+        return 0
+    inner = getattr(spec, "kv_type", None)
+    src = inner if inner is not None else spec
+    return int(getattr(src, attr, 0) or 0)
+
+
+def storage_blocks_per_chunk(
+    sliding_window: int,
+    logical_block_size: int,
+    chunk_tokens: int,
+) -> int:
+    """Blocks per LMCache chunk for a KV group.
+
+    Full-attention groups (``sliding_window == 0``) return the full chunk block
+    count. SWA groups return only the trailing blocks that fall inside the
+    window, capped at the full count.
+
+    Args:
+        sliding_window: Sliding-window size in tokens (0 = full attention).
+        logical_block_size: Inference-engine-side logical block size in tokens.
+        chunk_tokens: LMCache logical chunk size in tokens.
+
+    Returns:
+        Number of blocks per chunk to store/retrieve for this group.
+    """
+    full_bpc = chunk_tokens // logical_block_size
+    if sliding_window == 0:
+        return full_bpc
+    suffix_bpc = math.ceil(sliding_window / logical_block_size)
+    return min(suffix_bpc, full_bpc)
+
+
+def engine_group_sbpc_from_vllm(
+    kv_cache_config: Any,
+    chunk_tokens: int,
+) -> "dict[int, int]":
+    """Compute per-engine-group ``storage_blocks_per_chunk`` from vLLM config.
+
+    Reads ``block_size`` and ``sliding_window`` from each engine group's
+    ``kv_cache_spec`` and delegates to :func:`storage_blocks_per_chunk`.
+
+    Args:
+        kv_cache_config: vLLM ``KVCacheConfig`` (or ``None``).
+        chunk_tokens: LMCache logical chunk size in tokens. ``0`` or missing
+            config yields an empty mapping.
+
+    Returns:
+        Mapping from engine group id to blocks-per-chunk for that group.
+        Empty dict when *kv_cache_config* has no groups or *chunk_tokens* is 0.
+    """
+    if not chunk_tokens or kv_cache_config is None:
+        return {}
+    vllm_groups = getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+    result: dict[int, int] = {}
+    for engine_group_id, group in enumerate(vllm_groups):
+        spec = getattr(group, "kv_cache_spec", None)
+        logical_bs = spec_int_attr(spec, "block_size")
+        sliding_win = spec_int_attr(spec, "sliding_window")
+        if logical_bs > 0:
+            result[engine_group_id] = storage_blocks_per_chunk(
+                sliding_win, logical_bs, chunk_tokens
+            )
+    return result
 
 
 def create_group_views_from_vllm(
@@ -30,6 +110,11 @@ def create_group_views_from_vllm(
     splits the layers by physical transfer identity using the real tensors (via
     the shared :func:`lmcache.v1.kv_layer_groups.group_layers_by_identity`).
     vLLM-specific field access is intentionally confined to this function.
+
+    For per-group geometry hints (e.g. ``storage_blocks_per_chunk``) use
+    :func:`engine_group_sbpc_from_vllm` and embed the result in
+    :class:`~lmcache.v1.gpu_connector.utils.LayoutHints` under
+    ``per_engine_group_storage_blocks_per_chunk`` before passing to the server.
 
     Args:
         kv_cache_config: vLLM ``KVCacheConfig`` describing the engine KV cache

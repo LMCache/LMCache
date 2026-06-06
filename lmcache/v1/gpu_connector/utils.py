@@ -86,6 +86,13 @@ class LayoutHints(TypedDict, total=False):
             KV layer groups compress multiple logical tokens into a
             single physical slot
             (``shape_desc.bs < inference_engine_logical_block_size``).
+        per_engine_group_storage_blocks_per_chunk: Per-engine-group
+            physical block count to transfer per LMCache chunk, keyed
+            by engine group id (0-based). When present, the server
+            uses the value directly instead of deriving it from the
+            logical chunk size and block size. Groups absent from the
+            mapping fall back to the default
+            (``lmcache_logical_chunk_size // shape_desc.bs``).
     """
 
     kv_layout: Literal["NHD", "HND"]
@@ -93,6 +100,7 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     head_dim: int
     inference_engine_logical_block_size: int
+    per_engine_group_storage_blocks_per_chunk: dict[int, int]
 
 
 def attempt_permute_to_contiguous_view(

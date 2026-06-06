@@ -140,24 +140,12 @@ class KVLayerGroupInfo:
     """Torch dtype of the KV cache tensors for this group. Used for
     kernel template instantiation; see class docstring for why we keep
     this alongside ``shape_desc.element_size``."""
-    compress_ratio: int = 1
-    """Logical-tokens-per-physical-slot for this group. ``1`` for
-    non-compressed groups (one logical token per physical slot);
-    greater than ``1`` for compressed groups where each physical slot
-    packs ``compress_ratio`` logical tokens (e.g. DeepSeek V4
-    compressor / indexer caches). Derived from
-    ``inference_engine_logical_block_size`` carried in ``layout_hints``
-    at :class:`KVLayerGroupsManager` construction time."""
-    physical_chunk_size: int = 0
-    """Number of *physical* slots in one LMCache chunk for this group
-    (= ``lmcache_logical_chunk_size // compress_ratio``). This is what
-    the block-level transfer kernel must be told, not the logical
-    ``lmcache_logical_chunk_size`` which counts vLLM tokens. ``0``
-    means the field has not been populated yet; ``GPUCacheContext``
-    fills it in after construction once ``lmcache_logical_chunk_size``
-    is known."""
     engine_group_idx: int = 0
     """Engine group index (paged-block address space). 0 for non-hybrid."""
+    storage_blocks_per_chunk: int = 0
+    """Blocks per chunk to transfer for this group (from
+    ``per_layer_storage_blocks_per_chunk`` layout hint).
+    ``storage_slots_per_chunk = storage_blocks_per_chunk * shape_desc.bs``."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -173,15 +161,19 @@ class KVLayerGroupInfo:
             f"element_size={sd.element_size}, "
             f"block_stride_elems={sd.block_stride_elems}), "
             f"dtype={self.dtype}, "
-            f"compress_ratio={self.compress_ratio}, "
-            f"physical_chunk_size={self.physical_chunk_size}, "
-            f"engine_group_idx={self.engine_group_idx})"
+            f"engine_group_idx={self.engine_group_idx}, "
+            f"storage_blocks_per_chunk={self.storage_blocks_per_chunk})"
         )
 
     @property
     def num_layers(self) -> int:
         """Number of layers in this group."""
         return len(self.layer_indices)
+
+    @property
+    def storage_slots_per_chunk(self) -> int:
+        """Physical slots transferred per chunk: ``storage_blocks_per_chunk * shape_desc.bs``."""
+        return self.storage_blocks_per_chunk * self.shape_desc.bs
 
     @property
     def hidden_dim_size(self) -> int:
@@ -239,23 +231,14 @@ class KVLayerGroupsManager:
                 ``shape_desc.nb``. Each group's ``shape_desc.bs`` is
                 discovered per-layer via :func:`get_block_size`, so
                 compressed and non-compressed groups can coexist.
-            layout_hints: Engine-provided hints. The manager only reads
-                ``inference_engine_logical_block_size`` (logical tokens
-                per inference-engine block) from it to derive each
-                group's ``compress_ratio`` and ``physical_chunk_size``.
-                ``None`` means every group is treated as non-compressed
-                (``compress_ratio == 1``).
-            group_views: LMCache-owned engine KV cache group
-                metadata. When present, it is used to keep layers from
-                different engine block-ID spaces in separate LMCache
-                transfer groups.
-            lmcache_logical_chunk_size: Logical tokens per LMCache chunk
-                (one logical token = one inference-engine token).
-                Together with ``compress_ratio`` it determines each
-                group's ``physical_chunk_size =
-                lmcache_logical_chunk_size // compress_ratio``, the
-                number of *physical* slots per chunk fed to the
-                block-level transfer kernel.
+            layout_hints: Engine-provided hints. Reads
+                ``per_layer_storage_blocks_per_chunk`` to set each group's
+                transfer block count. ``None`` defaults every group to the
+                full chunk.
+            group_views: LMCache-owned engine KV cache group metadata.
+                Keeps layers from different block-ID spaces in separate groups.
+            lmcache_logical_chunk_size: Logical tokens per LMCache chunk.
+                Used as fallback when no per-layer hint is provided.
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -287,6 +270,15 @@ class KVLayerGroupsManager:
 
         per_layer_engine_group_idx = get_engine_group_indices(group_views, num_layers)
 
+        # Build an engine_group_idx -> storage_blocks_per_chunk map from
+        # layout_hints. Non-zero values were set by the connector; zero (or
+        # absent) means "use default" (full chunk).
+        hint_sbpc: dict[int, int] = (
+            layout_hints.get("per_engine_group_storage_blocks_per_chunk") or {}
+            if layout_hints
+            else {}
+        )
+
         groups_by_identity = group_layers_by_identity(
             kv_caches, gpu_kv_format, num_layers, per_layer_engine_group_idx
         )
@@ -312,21 +304,18 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
-            compress_ratio, physical_chunk_size = self._derive_compression_metadata(
-                group_idx=group_idx,
-                bs=bs,
-                ie_logical_block_size=self.inference_engine_logical_block_size_,
-                lmcache_logical_chunk_size=lmcache_logical_chunk_size,
-            )
+            # storage_bpc: prefer hint keyed by engine group; fall back to full chunk.
+            full_bpc = lmcache_logical_chunk_size // bs
+            hinted = hint_sbpc.get(engine_group_idx, 0)
+            storage_bpc = min(hinted, full_bpc) if hinted > 0 else full_bpc
 
             self.kv_layer_groups.append(
                 KVLayerGroupInfo(
                     layer_indices=indices,
                     shape_desc=shape_desc,
                     dtype=dt,
-                    compress_ratio=compress_ratio,
-                    physical_chunk_size=physical_chunk_size,
                     engine_group_idx=engine_group_idx,
+                    storage_blocks_per_chunk=storage_bpc,
                 )
             )
 
@@ -336,53 +325,6 @@ class KVLayerGroupsManager:
         )
 
         logger.info("KV layer groups: %s", self.kv_layer_groups)
-
-    @staticmethod
-    def _derive_compression_metadata(
-        group_idx: int,
-        bs: int,
-        ie_logical_block_size: "int | None",
-        lmcache_logical_chunk_size: int,
-    ) -> tuple[int, int]:
-        """Resolve ``(compress_ratio, physical_chunk_size)`` for one group.
-
-        ``compress_ratio`` falls back to ``1`` when
-        ``ie_logical_block_size`` is absent (no compression info
-        available); otherwise it equals
-        ``ie_logical_block_size // bs`` and the divisibility invariants
-        are enforced loudly. ``physical_chunk_size`` is then
-        ``lmcache_logical_chunk_size // compress_ratio``, the per-chunk
-        physical slot count fed to the block-level transfer kernel.
-        """
-        if ie_logical_block_size is None:
-            compress_ratio = 1
-        else:
-            if ie_logical_block_size % bs != 0:
-                raise ValueError(
-                    f"inference engine logical block size "
-                    f"{ie_logical_block_size} must be a multiple of "
-                    f"group {group_idx} physical slot count {bs}"
-                )
-            compress_ratio = ie_logical_block_size // bs
-        if lmcache_logical_chunk_size % compress_ratio != 0:
-            raise ValueError(
-                f"lmcache_logical_chunk_size {lmcache_logical_chunk_size} "
-                f"must be a multiple of compress_ratio {compress_ratio} "
-                f"(group {group_idx})"
-            )
-        physical_chunk_size = lmcache_logical_chunk_size // compress_ratio
-        if compress_ratio != 1:
-            logger.info(
-                "group %d: compressed "
-                "(inference_engine_logical_block_size=%d -> "
-                "slots=%d, compress_ratio=%d, physical_chunk_size=%d)",
-                group_idx,
-                ie_logical_block_size,
-                bs,
-                compress_ratio,
-                physical_chunk_size,
-            )
-        return compress_ratio, physical_chunk_size
 
     @property
     def num_groups(self) -> int:
@@ -418,25 +360,6 @@ class KVLayerGroupsManager:
             IndexError: If *group_idx* is out of range.
         """
         return self.kv_layer_groups[group_idx].shape_desc
-
-    def get_physical_chunk_size(self, group_idx: int) -> int:
-        """Return the per-chunk *physical* slot count for *group_idx*.
-
-        Equivalent to
-        ``self.kv_layer_groups[group_idx].physical_chunk_size``.
-        For non-compressed groups this equals
-        ``lmcache_logical_chunk_size``; for compressed groups it equals
-        ``lmcache_logical_chunk_size // compress_ratio`` and is what the
-        block-level transfer kernel must be told (the logical chunk size
-        in *vLLM tokens* is not what the kernel addresses).
-
-        Args:
-            group_idx: 0-based group index.
-
-        Raises:
-            IndexError: If *group_idx* is out of range.
-        """
-        return self.kv_layer_groups[group_idx].physical_chunk_size
 
 
 # ------------------------------------------------------------------ #
