@@ -734,29 +734,45 @@ class HFBucketL2Adapter(L2AdapterInterface):
                 if not local_path.exists():
                     continue
 
-                data = local_path.read_bytes()
                 dst = memoryview(objects[index].byte_array).cast("B")
-                if len(data) != len(dst):
+                file_size = local_path.stat().st_size
+                if file_size != len(dst):
                     logger.error(
                         "Downloaded object %s has %d bytes, expected %d bytes; "
                         "rejecting load",
                         object_paths[index],
-                        len(data),
+                        file_size,
                         len(dst),
                     )
                     with self._lock:
                         self._set_cached_object_size_locked(
                             object_paths[index],
-                            len(data),
+                            file_size,
                         )
                     continue
 
-                dst[:] = data
+                with local_path.open("rb") as f:
+                    bytes_read = f.readinto(dst)
+                if bytes_read != len(dst):
+                    logger.error(
+                        "Downloaded object %s read %d bytes, expected %d bytes; "
+                        "rejecting load",
+                        object_paths[index],
+                        bytes_read,
+                        len(dst),
+                    )
+                    with self._lock:
+                        self._set_cached_object_size_locked(
+                            object_paths[index],
+                            bytes_read,
+                        )
+                    continue
+
                 bitmap.set(index)
                 with self._lock:
                     self._set_cached_object_size_locked(
                         object_paths[index],
-                        len(data),
+                        file_size,
                     )
 
             return bitmap
