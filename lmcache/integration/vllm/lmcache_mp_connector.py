@@ -94,22 +94,6 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
-    if block_ids is None:
-        return []
-    assert isinstance(block_ids, tuple), (
-        f"Expected block_ids to be a tuple of lists, but got {type(block_ids)}"
-    )
-
-    if len(block_ids) > 1:
-        raise RuntimeError(
-            "LMCacheMPConnector only works without hybrid kv cache manager. "
-            "Please pass --disable-hybrid-kv-cache-manager when starting vllm"
-        )
-
-    return block_ids[0]
-
-
 def _build_parallel_strategy(
     server_urls: list[str],
     vllm_config: VllmConfig,
@@ -118,20 +102,20 @@ def _build_parallel_strategy(
     view across every worker process (ranks 0 .. world_size - 1).
     """
     n_servers = len(server_urls)
-    global_world_size = vllm_config.parallel_config.world_size
-    global_rank = vllm_config.parallel_config.rank
-    global_tp_size = vllm_config.parallel_config.tensor_parallel_size
+    vllm_world_size = vllm_config.parallel_config.world_size
+    vllm_worker_id = vllm_config.parallel_config.rank
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-    if global_tp_size % n_servers != 0:
+    if tp_size % n_servers != 0:
         raise ValueError(
-            f"tp_size ({global_tp_size}) must be divisible by n_servers ({n_servers})"
+            f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
         )
 
     return ParallelStrategy(
         use_mla=mla_enabled(vllm_config.model_config),
-        global_world_size=global_world_size,
-        global_rank=global_rank,
-        tp_size=global_tp_size,
+        vllm_world_size=vllm_world_size,
+        vllm_worker_id=vllm_worker_id,
+        tp_size=tp_size,
         pp_size=vllm_config.parallel_config.pipeline_parallel_size,
         n_servers=n_servers,
     )
@@ -165,8 +149,8 @@ def create_worker_adapter(
     # Global ranks are assigned to nodes in contiguous blocks:
     #   node 0 → ranks [0, ranks_per_node),
     #   node 1 → [ranks_per_node, 2 * ranks_per_node), ...
-    ranks_per_node = parallel_strategy.global_world_size // parallel_strategy.n_servers
-    local_server_url = server_urls[parallel_strategy.global_rank // ranks_per_node]
+    ranks_per_node = parallel_strategy.vllm_world_size // parallel_strategy.n_servers
+    local_server_url = server_urls[parallel_strategy.vllm_worker_id // ranks_per_node]
 
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPWorkerAdapter(
