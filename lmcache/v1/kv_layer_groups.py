@@ -432,6 +432,11 @@ class KVLayerGroupsManager:
         return len(self._kernel_groups)
 
     @property
+    def object_groups(self) -> list[ObjectGroupInfo]:
+        """List of :class:`ObjectGroupInfo`, one per object group."""
+        return self._object_groups
+
+    @property
     def num_object_groups(self) -> int:
         """Number of :class:`ObjectGroupInfo` entries."""
         return len(self._object_groups)
