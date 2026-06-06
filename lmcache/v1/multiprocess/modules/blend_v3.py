@@ -83,15 +83,12 @@ class _CBUnifiedJob:
 
 
 class BlendTokenRangeMatcherV3(BlendTokenRangeMatcher):
-    """V3 matcher: full-hash collision rejection + configurable probe stride.
+    """V3 matcher: token-level probe (any offset) + full-hash collision
+    rejection."""
 
-    register_rope sets ``probe_stride`` to 1 for token-level matching.
-    """
-
-    def __init__(self, chunk_size: int = 256, probe_stride: int = 16):
+    def __init__(self, chunk_size: int = 256):
         super().__init__(chunk_size)
         self._chunk_poly_hash: list[int] = []
-        self._probe_stride: int = probe_stride
 
     def on_new_token_hashes(
         self,
@@ -159,74 +156,55 @@ class BlendTokenRangeMatcherV3(BlendTokenRangeMatcher):
         self,
         token_ids: list[int],
     ) -> list[CBMatchResult]:
-        """Probe rolling-hash array every ``probe_stride`` positions; skips
-        bucket-only collisions and evicted entries. One result per unique
-        match; ``cur_st`` is the first hit position."""
+        """Find every registered chunk reused in ``token_ids``. One result per
+        unique chunk; ``cur_st`` is its first query position. Verifies the full
+        poly hash to reject direct-address bucket collisions."""
         if len(token_ids) < self.chunk_size:
             return []
 
         arr = np.array(token_ids, dtype=np.uint64)
         rolling = rolling_hash_windows_numba(arr, self.chunk_size, self._BASE)
-        n_positions = int(rolling.shape[0])
 
         with self._lock:
             if not self._chunk_token_hash:
-                logger.info(
-                    "[match_probe] empty fingerprint table; n_tok=%d", len(token_ids)
-                )
                 return []
 
-            mask = int(self._mask)
-            stride = self._probe_stride
+            # Vectorized direct-address probe over all positions. The table is
+            # sparse (TABLE_SIZE >> registered chunks), so only true matches and
+            # a few bucket collisions reach the Python verify loop below.
+            cids_at_pos = self._table_id[rolling & self._mask]
+            hit_positions = np.nonzero(cids_at_pos >= 0)[0]
+
             seen_cids: set[int] = set()
             results: list[CBMatchResult] = []
-            n_probes = 0
-            n_table_hit = 0
-            n_collision = 0
-            n_evicted = 0
-            n_no_old_st = 0
-            for q_pos in range(0, n_positions, stride):
-                n_probes += 1
-                r = int(rolling[q_pos])
-                cid = int(self._table_id[r & mask])
-                if cid < 0 or cid in seen_cids:
+            for pos in hit_positions:
+                pos = int(pos)
+                cid = int(cids_at_pos[pos])
+                if cid in seen_cids:
                     continue
-                n_table_hit += 1
-                if r != self._chunk_poly_hash[cid]:
-                    n_collision += 1
-                    continue
+                if int(rolling[pos]) != self._chunk_poly_hash[cid]:
+                    continue  # bucket-only collision
                 th = self._chunk_token_hash[cid]
                 if th is None:
-                    n_evicted += 1
-                    continue
+                    continue  # evicted
                 old_st = self._token_hash_to_start.get(th)
                 if old_st is None:
-                    n_no_old_st += 1
                     continue
                 seen_cids.add(cid)
                 results.append(
                     CBMatchResult(
                         old_st=old_st,
                         old_ed=old_st + self.chunk_size,
-                        cur_st=q_pos,
-                        cur_ed=q_pos + self.chunk_size,
+                        cur_st=pos,
+                        cur_ed=pos + self.chunk_size,
                         hash=th,
                     )
                 )
             logger.info(
-                "[match_probe] n_tok=%d stride=%d n_probes=%d "
-                "table_hit=%d collisions=%d evicted=%d no_old_st=%d "
-                "→ matches=%d (sample old_st=%s cur_st=%s)",
+                "[match_probe] n_tok=%d table_hits=%d matches=%d",
                 len(token_ids),
-                stride,
-                n_probes,
-                n_table_hit,
-                n_collision,
-                n_evicted,
-                n_no_old_st,
+                len(hit_positions),
                 len(results),
-                [r.old_st for r in results[:3]],
-                [r.cur_st for r in results[:3]],
             )
             return results
 
@@ -428,20 +406,14 @@ class BlendV3Module:
         self._cb_gpu_contexts[instance_id] = gpu_context
         self._cb_gpu_context_meta[instance_id] = (entry.model_name, entry.world_size)
 
-        # Probe every token so non-block-aligned matches are found; the
-        # per-token slot scatter writes them.
-        self._token_range_matcher._probe_stride = 1
-
         logger.info(
             "Registered CB rope state for instance %d "
-            "(cos_sin_cache shape=%s dtype=%s, head_size=%d, is_neox=%s, "
-            "matcher_probe_stride=%d)",
+            "(cos_sin_cache shape=%s dtype=%s, head_size=%d, is_neox=%s)",
             instance_id,
             tuple(cos_sin_cache.shape),
             cos_sin_cache.dtype,
             head_size,
             is_neox_style,
-            self._token_range_matcher._probe_stride,
         )
 
     def cb_unregister_rope(self, instance_id: int) -> None:
