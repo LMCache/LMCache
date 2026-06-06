@@ -77,15 +77,8 @@ class LayoutHints(TypedDict, total=False):
             depth-1 → depth-2 un-flatten + 3-D → 4-D reshape.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
         inference_engine_logical_block_size: Inference-engine-side block
-            size (logical tokens per engine block; for vLLM this is
-            ``cache_config.block_size``). Carried inside
-            ``LayoutHints`` (instead of as a standalone
-            ``REGISTER_KV_CACHE`` argument) so that engines without a
-            logical block-size concept can simply omit it. The server
-            uses it to derive per-group compression ratios when some
-            KV layer groups compress multiple logical tokens into a
-            single physical slot
-            (``shape_desc.bs < inference_engine_logical_block_size``).
+            size (logical tokens per engine block). Carried inside
+            ``LayoutHints`` so engines without this concept can omit it.
     """
 
     kv_layout: Literal["NHD", "HND"]
@@ -93,6 +86,10 @@ class LayoutHints(TypedDict, total=False):
     tokens_per_block: int
     head_dim: int
     inference_engine_logical_block_size: int
+    per_layer_storage_blocks_per_chunk: list[int]
+    """Per-registered-layer blocks-per-chunk the connector actually sends:
+    full chunk for full-attention groups, trailing-window count for SWA groups.
+    Used by the server for buffer sizing, kernel chunk-size, and underflow check."""
 
 
 def attempt_permute_to_contiguous_view(

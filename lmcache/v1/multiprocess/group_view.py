@@ -118,6 +118,24 @@ def expand_block_ids_to_views(
     ]
 
 
+def expand_per_group_values_to_views(
+    groups: Sequence[LMCacheGroupView],
+    engine_side_values: Sequence[int],
+    default: int = 0,
+) -> list[int]:
+    """Re-index a per-engine-group int list to one value per LMCache group.
+
+    Symmetric with :func:`expand_block_ids_to_views`. Each LMCache group
+    takes the value of its source engine group; missing entries use *default*.
+    """
+    return [
+        engine_side_values[engine_group_id]
+        if engine_group_id < len(engine_side_values)
+        else default
+        for engine_group_id in _engine_group_id_per_view(groups)
+    ]
+
+
 def get_engine_group_indices(
     groups: Sequence[LMCacheGroupView],
     num_registered_layers: int,

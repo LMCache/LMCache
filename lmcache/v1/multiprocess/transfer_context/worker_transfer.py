@@ -131,23 +131,13 @@ class TransferContext(ABC):
         block_ids: list[list[int]],
         event: IPCEvent,
         blocks_in_chunk: int,
-        skip_first_n_tokens: int = 0,
+        skip_blocks_per_group: list[int] | None = None,
     ) -> MessagingFuture:
         """Submit a retrieve request and return a completion future.
 
         Args:
-            request_id: External request identifier.
-            key: LMCache key object for the retrieve range.
-            instance_id: Worker process instance identifier.
-            kv_caches: Worker KV cache tensors keyed by layer name.
-            block_ids: vLLM block IDs to retrieve into, indexed by LMCache KV
-                group id.
-            event: Synchronization event object.
-            blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
-            skip_first_n_tokens: Number of initial tokens to skip when writing.
-
-        Returns:
-            A future compatible with adapter-side ``query()``/``result()`` flow.
+            skip_blocks_per_group: Per-group leading blocks to skip (APC guard,
+                stored-block units). ``None`` / empty -> no skip.
 
         Raises:
             RuntimeError: If register() was not called first.
@@ -228,7 +218,7 @@ class HandleTransferContext(TransferContext):
         block_ids: list[list[int]],
         event: IPCEvent,
         _blocks_in_chunk: int,
-        skip_first_n_tokens: int = 0,
+        skip_blocks_per_group: list[int] | None = None,
     ) -> MessagingFuture:
         if self._mq_client is None or self._send_request is None:
             raise RuntimeError(
@@ -238,7 +228,13 @@ class HandleTransferContext(TransferContext):
         return self._send_request(
             self._mq_client,
             RequestType.RETRIEVE,
-            [key, instance_id, block_ids, event.ipc_handle(), skip_first_n_tokens],
+            [
+                key,
+                instance_id,
+                block_ids,
+                event.ipc_handle(),
+                list(skip_blocks_per_group or []),
+            ],
         ).to_cuda_future()
 
     def close(self) -> None:
@@ -391,7 +387,7 @@ class DataTransferContext(TransferContext):
         block_ids: list[list[int]],
         _event: IPCEvent,
         blocks_in_chunk: int,
-        skip_first_n_tokens: int = 0,
+        skip_blocks_per_group: list[int] | None = None,
     ) -> MessagingFuture:
         if self._non_gpu_context is None:
             raise RuntimeError(
@@ -402,13 +398,18 @@ class DataTransferContext(TransferContext):
         src_buffers = self._non_gpu_context.prepare_retrieve(key, instance_id)
         ok = src_buffers is not None
         if src_buffers is not None:
+            # Single-group non-GPU path: convert group-0 block skip to tokens.
+            skip_blocks = (
+                skip_blocks_per_group[0] if skip_blocks_per_group else 0
+            )
+            block_size = self._non_gpu_context.metadata.block_size
             try:
                 scatter_cpu_to_paged_kv(
                     kv_caches,
                     _single_group_block_ids(block_ids),
                     src_buffers,
                     blocks_in_chunk,
-                    skip_first_n_tokens=skip_first_n_tokens,
+                    skip_first_n_tokens=skip_blocks * block_size,
                     layout_hints=self._layout_hints,
                     gpu_kv_format=self._gpu_kv_format,
                 )

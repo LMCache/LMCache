@@ -215,13 +215,16 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
         block_ids=[[0]],
         start=0,
         end=4,
-        skip_first_n_tokens=1,
+        skip_blocks_per_group=[1],
     )
 
     adapter.submit_retrieve_request("req-1", op, event=MagicMock())
 
     assert transfer_ctx.submit_retrieve.called
-    assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
+    # Single (no group_views) -> skip expands to one value per LMCache group.
+    assert transfer_ctx.submit_retrieve.call_args.kwargs == {
+        "skip_blocks_per_group": [1]
+    }
     assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
 

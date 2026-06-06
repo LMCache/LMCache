@@ -135,17 +135,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             handler_type=HandlerType.BLOCKING,
         ),
         # Retrieve KV cache blocks
-        # Payload:
-        #   - key: KeyType - Cache key to retrieve
-        #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - gpu_block_ids: list[list[int]] - GPU block IDs to store
-        #     retrieved data, indexed by LMCache KV group index.
-        #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
-        #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
-        #     start of the retrieve range (to avoid overwriting APC-shared blocks)
+        # Payload: key, instance_id, gpu_block_ids, event_ipc_handle,
+        #   skip_blocks_per_group: list[int] - per-group leading blocks to skip
+        #   (APC overlap guard, stored-block units).
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes, int],
+            payload_classes=[KeyType, int, list[list[int]], bytes, list[int]],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),

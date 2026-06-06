@@ -132,10 +132,7 @@ class GPUCacheContext:
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            # ``get_kv_buffer_shape`` takes *logical* tokens; for
-            # compressed groups it folds ``compress_ratio`` logical
-            # tokens into one physical slot internally.
-            shape = self.get_kv_buffer_shape(lmcache_logical_chunk_size, group_idx)
+            shape = self.get_storage_kv_buffer_shape(group_idx)
             byte_size = shape.numel() * group.dtype.itemsize
             self.tmp_chunk_group_offsets_.append(
                 self.tmp_chunk_group_offsets_[-1] + byte_size
@@ -205,25 +202,9 @@ class GPUCacheContext:
 
     @property
     def group_physical_block_sizes(self) -> list[int]:
-        """Per-group physical slot count (``shape_desc.bs``) in group
-        order. For non-compressed groups this equals
-        ``inference_engine_logical_block_size``; for compressed groups
-        it equals
-        ``inference_engine_logical_block_size // compress_ratio``.
-        """
+        """Per-group physical slot count (``shape_desc.bs``) in group order."""
         return [
             group.shape_desc.bs
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
-        ]
-
-    @property
-    def group_compress_ratios(self) -> list[int]:
-        """Per-group compression ratio
-        (= ``inference_engine_logical_block_size // shape_desc.bs``)
-        in group order. ``1`` for non-compressed groups.
-        """
-        return [
-            group.compress_ratio
             for group in self.kv_layer_groups_manager_.kv_layer_groups
         ]
 
@@ -259,15 +240,6 @@ class GPUCacheContext:
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given KV layer group."""
         return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
-
-    def get_physical_chunk_size(self, group_idx: int) -> int:
-        """Returns the per-chunk physical slot count for the given group.
-
-        Equal to ``lmcache_logical_chunk_size // compress_ratio``; for
-        non-compressed groups this is just ``lmcache_logical_chunk_size``.
-        This is the value the block-level transfer kernel must be told.
-        """
-        return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
 
     @property
     def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
@@ -320,16 +292,16 @@ class GPUCacheContext:
     def get_tmp_chunk_gpu_buffer(self, group_idx: int = 0) -> torch.Tensor:
         """
         Returns a view of the temporary GPU buffer for the given group,
-        sized for a single chunk. The chunk holds
-        ``lmcache_logical_chunk_size`` logical tokens which, for a
-        compressed group, correspond to ``group.physical_chunk_size``
-        physical slots.
+        sized for a single chunk's *stored* payload
+        (``group.storage_slots_per_chunk`` physical slots). For a full-attention
+        group this is the whole chunk; for a sliding-window group it is only the
+        trailing-window portion the connector sends.
 
         Args:
             group_idx: Index of the KV layer group (default 0).
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        shape = self.get_kv_buffer_shape(self.lmcache_logical_chunk_size, group_idx)
+        shape = self.get_storage_kv_buffer_shape(group_idx)
         start = self.tmp_chunk_group_offsets_[group_idx]
         end = self.tmp_chunk_group_offsets_[group_idx + 1]
         return self.tmp_gpu_buffer_[start:end].view(group.dtype).view(shape)
@@ -340,7 +312,8 @@ class GPUCacheContext:
         """
         Returns a list of ``batch_size`` non-overlapping views into the
         pre-allocated temporary GPU buffer for the given group, each
-        sized for ``lmcache_logical_chunk_size`` tokens.
+        sized for one chunk's *stored* payload (SWA-suffix-aware; see
+        :meth:`get_tmp_chunk_gpu_buffer`).
 
         Args:
             batch_size: Number of concurrent requests (must be <= max_batch_size).
@@ -351,7 +324,7 @@ class GPUCacheContext:
                 f"batch_size {batch_size} exceeds max_batch_size {self.max_batch_size}"
             )
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        shape = self.get_kv_buffer_shape(self.lmcache_logical_chunk_size, group_idx)
+        shape = self.get_storage_kv_buffer_shape(group_idx)
         g_start = self.tmp_chunk_group_offsets_[group_idx]
         g_end = self.tmp_chunk_group_offsets_[group_idx + 1]
         chunk = self.tmp_chunk_bytes_
@@ -393,61 +366,44 @@ class GPUCacheContext:
         ]
 
     def get_kv_buffer_shape(
-        self, logical_num_tokens: int, group_idx: int = 0
+        self, num_slots: int, group_idx: int = 0
     ) -> torch.Size:
-        """
-        Returns the shape of the KV buffer for the given number of
-        *logical* tokens.
-
-        For a compressed group (``compress_ratio > 1``) every
-        ``compress_ratio`` logical tokens are packed into a single
-        physical slot, so the returned shape's token dimension is
-        ``num_tokens // compress_ratio``. Callers therefore always
-        pass logical-token counts and never need to know per-group
-        compression ratios.
+        """Returns the KV buffer shape for the given number of physical slots.
 
         Args:
-            logical_num_tokens: Number of *logical* tokens. Must be a multiple
-                of the group's ``compress_ratio``.
+            num_slots: Number of physical KV slots.
             group_idx: Index of the KV layer group (default 0).
         """
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        compress_ratio = group.compress_ratio
-        if logical_num_tokens % compress_ratio != 0:
-            raise ValueError(
-                f"logical_num_tokens ({logical_num_tokens}) is not a multiple of "
-                f"compress_ratio ({compress_ratio}) for group {group_idx}"
-            )
-        num_slots = logical_num_tokens // compress_ratio
         sd = group.shape_desc
         return torch.Size(
             (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
 
-    def cache_size_per_token(self) -> int:
-        """
-        Returns the cache size per *logical* token (in bytes), summed
-        across all groups. For a compressed group, one physical slot
-        stores ``compress_ratio`` logical tokens, so the per-logical-token
-        contribution is ``physical_slot_bytes // compress_ratio``.
+    def get_storage_kv_buffer_shape(self, group_idx: int = 0) -> torch.Size:
+        """KV buffer shape for one chunk's stored payload (``storage_slots_per_chunk`` slots)."""
+        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        sd = group.shape_desc
+        return torch.Size(
+            (
+                sd.kv_size,
+                group.num_layers,
+                group.storage_slots_per_chunk,
+                group.hidden_dim_size,
+            )
+        )
 
-        Reporting-only metric (surfaced via the ``/api/status`` HTTP
-        endpoint and the ``lmcache describe`` CLI); sub-byte truncation
-        from integer division is acceptable.
+    def cache_size_per_token(self) -> int:
+        """Cache bytes per token, summed across all groups.
+
+        Reporting-only metric (``/api/status``, ``lmcache describe``).
         """
         total = 0
         for group_idx, group in enumerate(
             self.kv_layer_groups_manager_.kv_layer_groups
         ):
-            # ``get_kv_buffer_shape`` now takes *logical* tokens, so
-            # query ``compress_ratio`` logical tokens (= 1 physical
-            # slot) and then divide the resulting bytes back by
-            # ``compress_ratio`` to recover the per-logical-token
-            # contribution. Equivalent to the old
-            # ``physical_slot_bytes // compress_ratio`` formulation.
-            numels = self.get_kv_buffer_shape(group.compress_ratio, group_idx).numel()
-            slot_bytes = numels * group.dtype.itemsize
-            total += slot_bytes // group.compress_ratio
+            slot_bytes = self.get_kv_buffer_shape(1, group_idx).numel() * group.dtype.itemsize
+            total += slot_bytes
         return total
 
 

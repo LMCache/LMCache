@@ -98,3 +98,75 @@ def create_group_views_from_vllm(
             per_layer_group_idx,
         )
     ]
+
+
+def spec_int_attr(spec: Any, attr: str) -> int:
+    """Read an integer ``attr`` off a vLLM KVCacheGroupSpec spec.
+
+    Falls back to the first inner spec for ``UniformTypeKVCacheSpecs`` wrappers.
+    Returns ``0`` when the attribute is absent or ``None``.
+    """
+    value = getattr(spec, attr, None)
+    if value is None:
+        inner_specs = getattr(spec, "kv_cache_specs", None)
+        if inner_specs:
+            first_inner = next(iter(inner_specs.values()))
+            value = getattr(first_inner, attr, None)
+    return int(value or 0)
+
+
+def storage_blocks_per_chunk(
+    sliding_window: int,
+    logical_block_size: int,
+    chunk_tokens: int,
+) -> int:
+    """Blocks per chunk a group actually stores/retrieves (SWA-suffix-aware).
+
+    Returns the full chunk for full-attention groups (``sliding_window <= 0``),
+    or ``ceil(sliding_window / logical_block_size)`` capped at the full chunk
+    for sliding-window groups. Shared by the connector's scheduler-side trim
+    and its worker-side register hint so the two cannot drift.
+    """
+    full_bpc = chunk_tokens // logical_block_size
+    if sliding_window <= 0:
+        return full_bpc
+    suffix = (sliding_window + logical_block_size - 1) // logical_block_size
+    return min(suffix, full_bpc)
+
+
+def per_layer_storage_blocks_per_chunk_from_vllm(
+    kv_cache_config: Any,
+    kv_caches: Mapping[str, Any],
+    chunk_tokens: int,
+) -> list[int] | None:
+    """Per-registered-layer stored-blocks-per-chunk derived from vLLM metadata.
+
+    Combines each group's ``block_size`` and ``sliding_window`` via
+    :func:`storage_blocks_per_chunk` and maps the result onto every layer in
+    that group. Returns ``None`` when no group reports a positive block size.
+    """
+    vllm_groups = (
+        getattr(kv_cache_config, "kv_cache_groups", ()) or ()
+        if kv_cache_config is not None
+        else ()
+    )
+    if not vllm_groups:
+        return None
+
+    layer_to_idx = {name: idx for idx, name in enumerate(kv_caches.keys())}
+    per_layer = [0] * len(layer_to_idx)
+    any_block_size = False
+    for group in vllm_groups:
+        spec = getattr(group, "kv_cache_spec", None)
+        logical_bs = spec_int_attr(spec, "block_size")
+        if logical_bs <= 0:
+            continue
+        any_block_size = True
+        window = spec_int_attr(spec, "sliding_window")
+        bpc = storage_blocks_per_chunk(window, logical_bs, chunk_tokens)
+        for name in group.layer_names:
+            idx = layer_to_idx.get(name)
+            if idx is not None:
+                per_layer[idx] = bpc
+
+    return per_layer if any_block_size else None

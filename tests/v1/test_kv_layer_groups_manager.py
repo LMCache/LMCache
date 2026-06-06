@@ -176,6 +176,113 @@ class TestKVLayerGroupsManager:
         assert sd1.hs == 64
 
 
+class TestKVLayerGroupInfoFields:
+    """KVLayerGroupInfo has exactly the expected fields and no compression artifacts."""
+
+    def _make_manager(self, *, bs, hint=None, chunk=1024):
+        tensors = [torch.randn(1, 32, bs, 1, 128, dtype=torch.float16)]
+        layout_hints: LayoutHints = {}
+        if hint is not None:
+            layout_hints["per_layer_storage_blocks_per_chunk"] = hint
+        return KVLayerGroupsManager(
+            tensors,
+            gpu_kv_format=_nhd_format(),
+            num_blocks=32,
+            layout_hints=layout_hints or None,
+            lmcache_logical_chunk_size=chunk,
+        )
+
+    def test_no_compress_ratio_field(self):
+        """compress_ratio and physical_chunk_size no longer exist on KVLayerGroupInfo."""
+        g = self._make_manager(bs=64).kv_layer_groups[0]
+        assert not hasattr(g, "compress_ratio")
+        assert not hasattr(g, "physical_chunk_size")
+        assert not hasattr(g, "logical_block_size")
+        assert not hasattr(g, "full_blocks_per_chunk")
+
+    def test_storage_blocks_per_chunk_defaults_to_full(self):
+        """No hint -> storage_blocks_per_chunk = chunk_size // bs."""
+        g = self._make_manager(bs=64).kv_layer_groups[0]
+        assert g.storage_blocks_per_chunk == 1024 // 64  # 16
+
+    def test_storage_blocks_per_chunk_from_hint(self):
+        g = self._make_manager(bs=64, hint=[2]).kv_layer_groups[0]
+        assert g.storage_blocks_per_chunk == 2
+
+    def test_storage_slots_per_chunk(self):
+        g = self._make_manager(bs=64, hint=[2]).kv_layer_groups[0]
+        assert g.storage_slots_per_chunk == 2 * 64
+
+
+class TestStorageBlocksPerChunkHint:
+    """``storage_blocks_per_chunk`` populated from the per-layer hint.
+
+    This is the single per-group block count the server uses on the transfer
+    path; the connector pre-trims SWA groups so the server stays window-blind.
+    """
+
+    def _manager(self, *, bs, hint=None, chunk=1024):
+        tensors = [torch.randn(1, 32, bs, 1, 128, dtype=torch.float16)]
+        layout_hints: LayoutHints = {}
+        if hint is not None:
+            layout_hints["per_layer_storage_blocks_per_chunk"] = hint
+        return KVLayerGroupsManager(
+            tensors,
+            gpu_kv_format=_nhd_format(),
+            num_blocks=32,
+            layout_hints=layout_hints or None,
+            lmcache_logical_chunk_size=chunk,
+        )
+
+    def test_hint_sets_storage_blocks(self):
+        # bs=64, full chunk = 1024/64 = 16; hint trims to 2 (SWA suffix).
+        g = self._manager(bs=64, hint=[2]).kv_layer_groups[0]
+        assert g.storage_blocks_per_chunk == 2
+        assert g.storage_slots_per_chunk == 2 * 64  # bpc * bs
+
+    def test_absent_hint_defaults_to_full_chunk(self):
+        g = self._manager(bs=64, hint=None).kv_layer_groups[0]
+        assert g.storage_blocks_per_chunk == 16  # 1024 // 64
+
+    def test_zero_hint_defaults_to_full_chunk(self):
+        g = self._manager(bs=64, hint=[0]).kv_layer_groups[0]
+        assert g.storage_blocks_per_chunk == 16
+
+    def test_hint_capped_at_full_chunk(self):
+        # A hint larger than the full chunk is clamped (defensive).
+        g = self._manager(bs=64, hint=[999]).kv_layer_groups[0]
+        assert g.storage_blocks_per_chunk == 16
+
+    def test_state_group_large_shrink(self):
+        # bs=4, full chunk = 1024/4 = 256; hint trims to 2.
+        g = self._manager(bs=4, hint=[2]).kv_layer_groups[0]
+        assert g.storage_blocks_per_chunk == 2
+        assert g.storage_slots_per_chunk == 8  # 2 * 4
+
+    def test_kernel_chunk_size_invariant(self):
+        """storage_slots_per_chunk must equal storage_blocks_per_chunk * bs.
+
+        The kernel asserts num_blocks_per_object * bs == lmcache_chunk_size; we
+        pass storage_blocks_per_chunk block IDs and storage_slots_per_chunk as
+        lmcache_chunk_size, so this identity is what keeps it valid.
+        """
+        for bs, hint in [
+            (64, [4]),
+            (64, [2]),
+            (4, [2]),
+            (8, [2]),
+        ]:
+            g = self._manager(bs=bs, hint=hint).kv_layer_groups[0]
+            assert g.storage_slots_per_chunk == g.storage_blocks_per_chunk * g.shape_desc.bs
+
+
+def _nhd_format():
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
+    return lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+
+
 class TestParseKvcacheShapeSpec:
     """Test cases for parse_kvcache_shape_spec function."""
 

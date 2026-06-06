@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, NoReturn, Protocol
 import enum
 import os
@@ -25,6 +25,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.group_view import (
     LMCacheGroupView,
     expand_block_ids_to_views,
+    expand_per_group_values_to_views,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -417,9 +418,9 @@ class LoadStoreOp:
     end: int = 0
     """End token index"""
 
-    skip_first_n_tokens: int = 0
-    """Number of tokens to skip writing at the beginning of the retrieve
-    range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
+    skip_blocks_per_group: list[int] = field(default_factory=list)
+    """Per-engine-group leading blocks to skip on retrieve (stored-block units,
+    parallel to ``block_ids``). Empty for store ops / no APC overlap."""
 
     @property
     def flat_block_ids(self) -> list[int]:
@@ -854,6 +855,7 @@ class LMCacheMPWorkerAdapter:
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.group_views: list[LMCacheGroupView] = []
+        self.per_layer_storage_blocks_per_chunk: list[int] | None = None
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -968,26 +970,36 @@ class LMCacheMPWorkerAdapter:
         self,
         kv_caches: dict[str, torch.Tensor],
         group_views: Sequence[LMCacheGroupView] = (),
+        per_layer_storage_blocks_per_chunk: list[int] | None = None,
     ) -> None:
-        """
-        Register the kv caches with LMCache server.
+        """Register the KV caches with the LMCache server.
 
         Args:
-            kv_caches: A dict of kv caches to register. The keys are the
-                layer names and the values are the corresponding tensors.
+            kv_caches: Layer-name → tensor mapping.
             group_views: LMCache-owned engine KV cache group metadata.
+            per_layer_storage_blocks_per_chunk: Per-layer block count the
+                connector sends per chunk (trimmed for SWA groups). Forwarded
+                to the server as ``layout_hints``. ``None`` for non-hybrid.
 
         Raises:
-            ConnectionError: if the server does not respond within
-                mq_timeout.
+            ConnectionError: if the server does not respond within mq_timeout.
         """
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
         self.group_views = list(group_views)
+        self.per_layer_storage_blocks_per_chunk = per_layer_storage_blocks_per_chunk
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
         return expand_block_ids_to_views(self.group_views, op.block_ids)
+
+    def _skip_blocks_per_group(self, op: LoadStoreOp) -> list[int]:
+        """Re-index the op's per-engine-group retrieve skip to LMCache-group
+        order (parallel to ``_block_ids_per_group``). Empty skip (store ops /
+        no APC overlap) expands to all-zero."""
+        return expand_per_group_values_to_views(
+            self.group_views, op.skip_blocks_per_group
+        )
 
     def _send_register_kv_caches_request(
         self, kv_caches: dict[str, torch.Tensor]
@@ -1010,6 +1022,13 @@ class LMCacheMPWorkerAdapter:
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
         )
+        per_layer_storage_blocks_per_chunk = getattr(
+            self, "per_layer_storage_blocks_per_chunk", None
+        )
+        if per_layer_storage_blocks_per_chunk is not None:
+            layout_hints["per_layer_storage_blocks_per_chunk"] = (
+                per_layer_storage_blocks_per_chunk
+            )
         try:
             self.transfer_ctx.register(
                 self.instance_id,
@@ -1174,7 +1193,7 @@ class LMCacheMPWorkerAdapter:
             self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
-            skip_first_n_tokens=op.skip_first_n_tokens,
+            skip_blocks_per_group=self._skip_blocks_per_group(op),
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
         self.retrieve_events[request_id] = event

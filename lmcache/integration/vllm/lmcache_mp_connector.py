@@ -38,6 +38,9 @@ import zmq
 from lmcache import torch_dev
 from lmcache.integration.vllm.kv_cache_groups import (
     create_group_views_from_vllm,
+    per_layer_storage_blocks_per_chunk_from_vllm,
+    spec_int_attr,
+    storage_blocks_per_chunk,
 )
 from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
@@ -314,34 +317,90 @@ class LMCacheMPRequestMetadata:
     cache_salt: str = ""
 
     @staticmethod
+    def _group_ratio(
+        engine_group_idx: int,
+        logical_block_sizes: "list[int]",
+        vllm_block_size: int,
+    ) -> int:
+        """GCD-grain blocks per one own-grain block for this group.
+
+        ``logical_block_size_g // vllm_block_size`` (vllm_block_size is the
+        GCD under HMA). Used to convert between GCD-grain bookkeeping and
+        per-group block-ID grain. Returns 1 for non-hybrid / V3.2.
+        """
+        if engine_group_idx < len(logical_block_sizes):
+            logical_bs = logical_block_sizes[engine_group_idx]
+            if logical_bs and vllm_block_size:
+                return max(1, logical_bs // vllm_block_size)
+        return 1
+
+    @staticmethod
+    def _group_geometry(
+        engine_group_idx: int,
+        logical_block_sizes: "list[int]",
+        sliding_windows: "list[int]",
+        vllm_block_size: int,
+        blocks_in_chunk: int,
+    ) -> "tuple[int, int, int]":
+        """Return ``(ratio, full_bpc, suffix_bpc)`` for a group.
+
+        ``ratio`` is the GCD-to-own-grain factor; ``full_bpc`` is the full
+        chunk block count in own grain; ``suffix_bpc`` is the trimmed count
+        after applying the SWA window (equals ``full_bpc`` for full attention).
+        """
+        ratio = LMCacheMPRequestMetadata._group_ratio(
+            engine_group_idx, logical_block_sizes, vllm_block_size
+        )
+        full_bpc = blocks_in_chunk // ratio
+        logical_bs = ratio * vllm_block_size
+        window = (
+            sliding_windows[engine_group_idx]
+            if engine_group_idx < len(sliding_windows)
+            else 0
+        )
+        suffix_bpc = storage_blocks_per_chunk(
+            window, logical_bs, blocks_in_chunk * vllm_block_size
+        )
+        return ratio, full_bpc, suffix_bpc
+
+    @staticmethod
     def _slice_block_ids(
         tracker: LMCacheMPRequestTracker,
         num_engine_groups: int,
         start: int,
         end: int,
+        logical_block_sizes: "list[int]",
+        sliding_windows: "list[int]",
+        vllm_block_size: int,
+        blocks_in_chunk: int,
     ) -> list[list[int]]:
-        """Slice every engine group's block IDs for the block range.
+        """Slice every engine group's block IDs for ``[start, end)`` (GCD grain),
+        trimming each chunk to its trailing SWA-suffix window.
 
-        Args:
-            tracker: Request tracker holding the per-engine-group block IDs.
-            num_engine_groups: Number of engine KV cache groups; the result
-                has one inner list per group, in engine-group order.
-            start: Start **block** index (inclusive), not a token index.
-            end: End **block** index (exclusive), not a token index.
-
-        Returns:
-            One ``list[int]`` of block IDs per engine group, each sliced to
-            ``[start, end)``.
-
-        Notes:
-            Minimal HMA support assumes all groups share vLLM's scheduler
-            block size. DeepSeek-V4's per-group logical/physical block-size
-            mapping is intentionally left for a follow-up.
+        Returns one ``list[int]`` per engine group, in engine-group order.
         """
-        return [
-            tracker.allocated_block_ids.get(engine_group_idx, [])[start:end]
-            for engine_group_idx in range(num_engine_groups)
-        ]
+        num_chunks = (end - start) // blocks_in_chunk if blocks_in_chunk else 0
+        sliced: list[list[int]] = []
+        for engine_group_idx in range(num_engine_groups):
+            ratio, full_bpc, suffix_bpc = LMCacheMPRequestMetadata._group_geometry(
+                engine_group_idx,
+                logical_block_sizes,
+                sliding_windows,
+                vllm_block_size,
+                blocks_in_chunk,
+            )
+            group_block_ids = tracker.allocated_block_ids.get(engine_group_idx, [])
+            own = group_block_ids[start // ratio : end // ratio]
+            if suffix_bpc < full_bpc and num_chunks > 0:
+                # Keep only the trailing ``suffix_bpc`` blocks of each chunk.
+                trimmed: list[int] = []
+                for c in range(num_chunks):
+                    base = c * full_bpc
+                    trimmed.extend(own[base + full_bpc - suffix_bpc : base + full_bpc])
+                sliced.append(trimmed)
+            else:
+                sliced.append(own)
+        return sliced
 
     @staticmethod
     def GetStoreMetadata(
@@ -349,16 +408,24 @@ class LMCacheMPRequestMetadata:
         blocks_in_chunk: int,
         vllm_block_size: int,
         num_engine_groups: int,
+        logical_block_sizes: "list[int]",
+        sliding_windows: "list[int]",
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            blocks_in_chunk: the number of blocks in a LMCache data chunk
-            vllm_block_size: the block size used in vLLM
+            blocks_in_chunk: the number of GCD-grain blocks in a LMCache chunk.
+            vllm_block_size: ``cache_config.block_size`` (GCD under hybrid).
             num_engine_groups: number of engine KV cache groups; the op's
                 block IDs carry one inner list per group, in engine order.
+            logical_block_sizes: per-engine-group logical (scheduler) block
+                size, used to reconcile per-group allocation counts (own grain)
+                against the GCD-grain bookkeeping. Scheduler-side only.
+            sliding_windows: per-engine-group sliding window in logical tokens
+                (``0`` = full attention), used to trim each chunk's block IDs to
+                its trailing window before sending. Scheduler-side only.
         """
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
@@ -386,9 +453,18 @@ class LMCacheMPRequestMetadata:
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
         allocated_lengths = tracker.num_allocated_blocks()
+        # Each group's allocation is counted at the group's own logical grain;
+        # scale every group up to GCD grain (multiply by ratio_g) before taking
+        # the cross-group min, so groups with different logical block sizes are
+        # compared on the same axis. (Pre-fix this took the raw min, which a
+        # coarse-grained group like V4 full-attn bs=256 dominated, wedging the
+        # store gate to 0 chunks.)
         allocated_blocks = (
             min(
                 allocated_lengths.get(engine_group_idx, 0)
+                * LMCacheMPRequestMetadata._group_ratio(
+                    engine_group_idx, logical_block_sizes, vllm_block_size
+                )
                 for engine_group_idx in range(num_engine_groups)
             )
             if num_engine_groups > 0
@@ -406,7 +482,9 @@ class LMCacheMPRequestMetadata:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
             block_ids = LMCacheMPRequestMetadata._slice_block_ids(
-                tracker, num_engine_groups, start, end
+                tracker, num_engine_groups, start, end,
+                logical_block_sizes, sliding_windows,
+                vllm_block_size, blocks_in_chunk,
             )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
@@ -437,16 +515,25 @@ class LMCacheMPRequestMetadata:
         blocks_in_chunk: int,
         vllm_block_size: int,
         num_engine_groups: int,
+        logical_block_sizes: "list[int]",
+        sliding_windows: "list[int]",
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            blocks_in_chunk: the number of blocks in a LMCache data chunk
-            vllm_block_size: the block size used in vLLM
+            blocks_in_chunk: the number of GCD-grain blocks in a LMCache chunk.
+            vllm_block_size: ``cache_config.block_size`` (GCD under hybrid).
             num_engine_groups: number of engine KV cache groups; the op's
                 block IDs carry one inner list per group, in engine order.
+            logical_block_sizes: per-engine-group logical (scheduler) block
+                size, used to slice each group's block IDs at its own grain.
+                Scheduler-side only.
+            sliding_windows: per-engine-group sliding window in logical tokens
+                (``0`` = full attention), used to trim each chunk to its trailing
+                window and to convert the APC skip to per-group stored-block
+                units. Scheduler-side only.
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -468,26 +555,41 @@ class LMCacheMPRequestMetadata:
         )
         if end > start:
             block_ids = LMCacheMPRequestMetadata._slice_block_ids(
-                tracker, num_engine_groups, start, end
+                tracker, num_engine_groups, start, end,
+                logical_block_sizes, sliding_windows,
+                vllm_block_size, blocks_in_chunk,
             )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
 
-            # Compute how many tokens at the start of the retrieve range
-            # overlap with APC-shared blocks. The server must skip writing
-            # to these positions to avoid a cross-stream data race: the
-            # retrieve writes on the LMCache CUDA stream while concurrent
-            # requests may read these APC-shared blocks on the vLLM stream.
             apc_overlap_blocks = tracker.num_vllm_hit_blocks - start
-            skip_first_n_tokens = apc_overlap_blocks * vllm_block_size
+            apc_overlap_tokens = apc_overlap_blocks * vllm_block_size
+
+            # Per-group skip in stored-block units: token overlap -> own-grain
+            # blocks, minus the leading blocks already dropped by SWA trimming.
+            skip_blocks_per_group: list[int] = []
+            for engine_group_idx in range(num_engine_groups):
+                ratio, full_bpc, suffix_bpc = (
+                    LMCacheMPRequestMetadata._group_geometry(
+                        engine_group_idx,
+                        logical_block_sizes,
+                        sliding_windows,
+                        vllm_block_size,
+                        blocks_in_chunk,
+                    )
+                )
+                logical_bs = ratio * vllm_block_size
+                skip_blocks_full = apc_overlap_tokens // logical_bs
+                suffix_offset = full_bpc - suffix_bpc
+                skip_blocks_per_group.append(max(0, skip_blocks_full - suffix_offset))
 
             op = LoadStoreOp(
                 token_ids=token_ids,
                 block_ids=block_ids,
                 start=start_token_idx,
                 end=end_token_idx,
-                skip_first_n_tokens=skip_first_n_tokens,
+                skip_blocks_per_group=skip_blocks_per_group,
             )
 
             ret = LMCacheMPRequestMetadata(
@@ -588,6 +690,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self._num_engine_groups = len(vllm_groups) or 1
 
+        # Per-engine-group logical block size and sliding window, scheduler-side
+        # only (never sent to server). Empty for non-hybrid / V3.2 -> ratio 1.
+        self._engine_group_logical_block_sizes: list[int] = [
+            spec_int_attr(getattr(group, "kv_cache_spec", None), "block_size")
+            for group in vllm_groups
+        ]
+        self._engine_group_sliding_windows: list[int] = [
+            spec_int_attr(getattr(group, "kv_cache_spec", None), "sliding_window")
+            for group in vllm_groups
+        ]
+
     @property
     def role(self) -> KVConnectorRole:
         return self._role
@@ -624,7 +737,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             kv_caches,
             layout_hints=vllm_layout_hints(),
         )
-        self.worker_adapter.register_kv_caches(kv_caches, group_views=group_views)
+        chunk_tokens = (
+            self.worker_adapter.blocks_in_chunk
+            * self.worker_adapter.vllm_logical_block_size
+        )
+        per_layer_storage_blocks_per_chunk = (
+            per_layer_storage_blocks_per_chunk_from_vllm(
+                kv_cache_config, kv_caches, chunk_tokens
+            )
+        )
+        self.worker_adapter.register_kv_caches(
+            kv_caches,
+            group_views=group_views,
+            per_layer_storage_blocks_per_chunk=per_layer_storage_blocks_per_chunk,
+        )
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -1120,6 +1246,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 blocks_per_chunk,
                 vllm_block_size=self.vllm_block_size,
                 num_engine_groups=self._num_engine_groups,
+                logical_block_sizes=self._engine_group_logical_block_sizes,
+                sliding_windows=self._engine_group_sliding_windows,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -1143,6 +1271,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 blocks_per_chunk,
                 self.vllm_block_size,
                 self._num_engine_groups,
+                self._engine_group_logical_block_sizes,
+                self._engine_group_sliding_windows,
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -1173,6 +1303,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 blocks_per_chunk,
                 self.vllm_block_size,
                 self._num_engine_groups,
+                self._engine_group_logical_block_sizes,
+                self._engine_group_sliding_windows,
             )
 
             if r_meta is not None:

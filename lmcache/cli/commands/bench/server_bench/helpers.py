@@ -362,7 +362,7 @@ def _send_retrieve(
         _INSTANCE_ID,
         [block_ids] * num_group_views,
         _make_event_handle(),
-        0,  # skip_first_n_tokens
+        [],  # skip_blocks_per_group
     ]
     result = _call(client, RequestType.RETRIEVE, payloads)
     if result is _TIMEOUT:
