@@ -3,15 +3,12 @@
 Unit tests for S3FIFO eviction policy.
 
 These tests verify the basic functionality of the S3FIFOEvictionPolicy:
-
 1. Key tracking (create, delete)
 2. Safe handling of duplicate/nonexistent keys
 3. Eviction actions behavior with different ratios
-4. Eviction candidates API correctness
-5. Eviction destination logic
-6. Key eligibility filtering support
+4. Eviction destination logic
+5. Key eligibility filtering support
 """
-
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
@@ -35,7 +32,8 @@ def make_key(chunk_hash: int, model: str = "model", kv_rank: int = 0) -> ObjectK
 
 def test_empty_policy_has_no_keys():
     policy = S3FIFOEvictionPolicy()
-    assert policy.get_num_tracked_keys() == 0
+    # empty policy should return an empty list of actions
+    assert policy.get_eviction_actions(1.0) == []
 
 
 def test_create_keys_increases_count():
@@ -43,7 +41,10 @@ def test_create_keys_increases_count():
 
     policy.on_keys_created([make_key(1), make_key(2), make_key(3)])
 
-    assert policy.get_num_tracked_keys() == 3
+    # If we evict with ratio 1.0, we expect all 3 keys to be returned
+    actions = policy.get_eviction_actions(1.0)
+    assert len(actions) == 1
+    assert len(actions[0].keys) == 3
 
 
 def test_delete_keys_decreases_count():
@@ -52,7 +53,9 @@ def test_delete_keys_decreases_count():
     policy.on_keys_created([make_key(1), make_key(2), make_key(3)])
     policy.on_keys_removed([make_key(2)])
 
-    assert policy.get_num_tracked_keys() == 2
+    actions = policy.get_eviction_actions(1.0)
+    assert len(actions) == 1
+    assert len(actions[0].keys) == 2
 
 
 def test_delete_nonexistent_key_is_safe():
@@ -60,7 +63,7 @@ def test_delete_nonexistent_key_is_safe():
 
     policy.on_keys_removed([make_key(999)])
 
-    assert policy.get_num_tracked_keys() == 0
+    assert policy.get_eviction_actions(1.0) == []
 
 
 def test_duplicate_key_does_not_duplicate_count():
@@ -70,7 +73,9 @@ def test_duplicate_key_does_not_duplicate_count():
     policy.on_keys_created([key])
     policy.on_keys_created([key])
 
-    assert policy.get_num_tracked_keys() == 1
+    actions = policy.get_eviction_actions(1.0)
+    assert len(actions) == 1
+    assert len(actions[0].keys) == 1
 
 
 # =============================================================================
@@ -115,30 +120,6 @@ def test_ratio_clamped_behavior():
 
     assert policy.get_eviction_actions(-1.0) == []
     assert len(policy.get_eviction_actions(2.0)[0].keys) == 10
-
-
-# =============================================================================
-# Eviction Candidates
-# =============================================================================
-
-def test_get_eviction_candidates_respects_count():
-    policy = S3FIFOEvictionPolicy()
-
-    policy.on_keys_created([make_key(i) for i in range(10)])
-
-    candidates = policy.get_eviction_candidates(3)
-
-    assert len(candidates) == 3
-
-
-def test_get_eviction_candidates_does_not_crash_with_large_count():
-    policy = S3FIFOEvictionPolicy()
-
-    policy.on_keys_created([make_key(1), make_key(2)])
-
-    candidates = policy.get_eviction_candidates(100)
-
-    assert len(candidates) == 2
 
 
 # =============================================================================
