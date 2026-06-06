@@ -14,15 +14,15 @@ import pytest
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.posix_shm import shm_unlink
 from lmcache.v1.platform.cpu.shm import (
     CpuShmTensorWrapper,
     migrate_to_shm_and_wrap,
     shm_create_readwrite,
-    shm_unlink,
 )
 
 
-def test_shm_create_unlink_roundtrip(tmp_path):
+def test_shm_create_unlink_roundtrip():
     """``shm_create_readwrite`` succeeds and ``shm_unlink`` cleans up."""
     name = "/lmcache_test_%d" % os.getpid()
     addr = shm_create_readwrite(name, 4096)
@@ -174,7 +174,7 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
     from lmcache.integration.vllm import vllm_multi_process_adapter as adapter
     from lmcache.v1.platform.cpu.shm import shm_map_readwrite
 
-    real_wrap = adapter._wrap_one_kv_cache
+    real_wrap = adapter.wrap_one_kv_cache
     state = {"n": 0, "first_name": None}
 
     def flaky_wrap(tensor):
@@ -185,7 +185,7 @@ def test_wrap_kv_caches_unlinks_partial_batch_on_failure(monkeypatch):
         state["first_name"] = w.shm_name
         return w
 
-    monkeypatch.setattr(adapter, "_wrap_one_kv_cache", flaky_wrap)
+    monkeypatch.setattr(adapter, "wrap_one_kv_cache", flaky_wrap)
 
     t1 = torch.zeros((2, 2), dtype=torch.float32)
     t2 = torch.zeros((2, 2), dtype=torch.float32)

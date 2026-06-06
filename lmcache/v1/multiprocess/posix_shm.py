@@ -99,12 +99,14 @@ def _open_and_mmap(name: str, nbytes: int, *, create: bool) -> tuple[_mmap.mmap,
 def _addr_of_mmap(mm: _mmap.mmap) -> int:
     """Return the base address of an ``mmap`` without leaking a buffer view.
 
-    A ctypes buffer view is created just long enough to read the
-    address, then dropped before this function returns; once it is
+    A single-byte ctypes view is created just long enough to read the
+    base address, then dropped before this function returns; once it is
     out of scope the mmap has no exported pointers, so a later
-    ``mm.close()`` can complete cleanly.
+    ``mm.close()`` can complete cleanly.  A 1-byte view is sufficient
+    -- ``ctypes.addressof`` returns the start of the buffer regardless
+    of its declared length.
     """
-    view = (ctypes.c_uint8 * len(mm)).from_buffer(mm)
+    view = (ctypes.c_uint8 * 1).from_buffer(mm)
     addr = ctypes.addressof(view)
     del view
     return addr
@@ -159,7 +161,7 @@ def shm_map_readwrite(name: str, nbytes: int) -> int:
     return addr
 
 
-def shm_munmap(addr: int, nbytes: int) -> None:
+def shm_munmap(addr: int, nbytes: int = 0) -> None:
     """Best-effort release of a previously mapped segment by address.
 
     The underlying mmap is closed exactly once; subsequent calls with
@@ -167,8 +169,8 @@ def shm_munmap(addr: int, nbytes: int) -> None:
 
     Args:
         addr: The virtual address of the mapped segment.
-        nbytes: Kept for API compatibility; not used internally since
-            ``mmap.close()`` does not require the size.
+        nbytes: Unused; kept for API compatibility so callers that
+            already pass the size do not need to be updated.
     """
     if not addr:
         return
@@ -209,9 +211,17 @@ def shm_unlink(name: str) -> None:
 
 
 def _atexit_cleanup() -> None:
-    """Unlink any SHM segments still owned by this process at exit."""
+    """Unlink and munmap any SHM segments still owned by this process."""
     with _REGISTRY_LOCK:
         names = list(_OWNED_NAMES)
+        mmaps = list(_ADDR_TO_MMAP.values())
+        _ADDR_TO_MMAP.clear()
+        _OWNED_NAMES.clear()
+    for mm in mmaps:
+        try:
+            mm.close()
+        except (BufferError, OSError):
+            pass
     for n in names:
         try:
             _posixshmem.shm_unlink(_slashed(n))

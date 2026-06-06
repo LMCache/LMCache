@@ -75,12 +75,6 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
     SHM_NAME_PREFIX = "/lmcache_kv_"
 
     def __init__(self, tensor: torch.Tensor, shm_name: str) -> None:
-        # First Party
-        from lmcache.v1.gpu_connector.utils import (
-            attempt_permute_to_contiguous_view,
-        )
-
-        tensor = attempt_permute_to_contiguous_view(tensor)
         if tensor.device.type != "cpu":
             raise ValueError(
                 "CpuShmTensorWrapper requires a CPU tensor, got %s" % tensor.device
@@ -181,13 +175,11 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     segment is released (``munmap`` + ``shm_unlink``) automatically
     when the migrated tensor is garbage-collected.
     """
+    # First Party
+    from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
+
     # Validate and normalise the tensor *before* touching the registry
     # or mutating storage, so a bad input never leaves things half-done.
-    # First Party
-    from lmcache.v1.gpu_connector.utils import (
-        attempt_permute_to_contiguous_view,
-    )
-
     tensor = attempt_permute_to_contiguous_view(tensor)
     if tensor.device.type != "cpu":
         raise ValueError(
