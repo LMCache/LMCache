@@ -37,17 +37,21 @@ double-buffering) so it leaves the critical path -- left as future work.
 """
 
 # Standard
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
 import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    from lmcache.integration.vllm.vllm_v1_adapter import (
+        LMCacheConnectorMetadata,
+        LMCacheConnectorV1Impl,
+    )
 
 logger = init_logger(__name__)
 
@@ -55,7 +59,7 @@ _blk_size: "int | None" = None
 _shape_logged = False
 
 
-def _dcp_group():
+def _dcp_group() -> "tuple[Any, int, int]":
     # Third Party
     from vllm.distributed.parallel_state import get_dcp_group
 
@@ -88,13 +92,17 @@ def _flat(layer_cache: torch.Tensor) -> torch.Tensor:
     return layer_cache.view(-1, layer_cache.shape[-1])
 
 
-def _extract_shard(kvcaches, rslots: torch.Tensor) -> torch.Tensor:
+def _extract_shard(
+    kvcaches: "list[torch.Tensor]", rslots: torch.Tensor
+) -> torch.Tensor:
     # This rank's latent KV for `rslots` -> [1, L, nl, D] (KV_MLA_FMT, kv_size=1).
     parts = [_flat(c).index_select(0, rslots) for c in kvcaches]  # each [nl, D]
     return torch.stack(parts, dim=0).unsqueeze(0)  # [1, L, nl, D]
 
 
-def _scatter_shard(kvcaches, rslots: torch.Tensor, shard: torch.Tensor) -> None:
+def _scatter_shard(
+    kvcaches: "list[torch.Tensor]", rslots: torch.Tensor, shard: torch.Tensor
+) -> None:
     # Write [1, L, nl, D] back into the paged kvcaches at rslots.
     for layer, cache in enumerate(kvcaches):
         _flat(cache).index_copy_(0, rslots, shard[0, layer].to(cache.dtype))
@@ -125,7 +133,13 @@ def _deinterleave(
     )
 
 
-def _dcp_store(impl, token_ids, store_mask, kvcaches, slot_mapping) -> int:
+def _dcp_store(
+    impl: "LMCacheConnectorV1Impl",
+    token_ids: torch.Tensor,
+    store_mask: torch.Tensor,
+    kvcaches: "list[torch.Tensor]",
+    slot_mapping: torch.Tensor,
+) -> int:
     global _shape_logged
     engine = impl.lmcache_engine
     group, world, _ = _dcp_group()
@@ -173,7 +187,14 @@ def _dcp_store(impl, token_ids, store_mask, kvcaches, slot_mapping) -> int:
     return n_chunks
 
 
-def _dcp_load(impl, token_ids, token_mask, kvcaches, slot_mapping, n_load) -> int:
+def _dcp_load(
+    impl: "LMCacheConnectorV1Impl",
+    token_ids: torch.Tensor,
+    token_mask: "Optional[torch.Tensor]",
+    kvcaches: "list[torch.Tensor]",
+    slot_mapping: torch.Tensor,
+    n_load: int,
+) -> int:
     engine = impl.lmcache_engine
     group, world, rank = _dcp_group()
     # The CPU cache lives only on the global first rank, but ALL TP ranks need the
@@ -219,7 +240,16 @@ def _dcp_load(impl, token_ids, token_mask, kvcaches, slot_mapping, n_load) -> in
 
 
 def dcp_gather_enabled(impl: "LMCacheConnectorV1Impl") -> bool:
-    """Whether this connector should use the DCP gather/scatter offload path."""
+    """Whether this connector should use the DCP gather/scatter offload path.
+
+    Args:
+        impl: the LMCache v1 connector worker-side implementation.
+
+    Returns:
+        True when decode-context-parallel is active (``cp_world > 1``) and the
+        connector is a non-layerwise producer/both role, so the DCP path applies.
+        False otherwise (the caller then runs the normal non-DCP path).
+    """
     try:
         _, world, _ = _dcp_group()
     except Exception:
@@ -227,15 +257,28 @@ def dcp_gather_enabled(impl: "LMCacheConnectorV1Impl") -> bool:
     return world > 1 and not impl.use_layerwise and impl.kv_role != "kv_consumer"
 
 
-def maybe_dcp_save(impl: "LMCacheConnectorV1Impl", connector_metadata) -> bool:
-    """If DCP is active, gather+store every request's KV and return True; else
-    return False so the caller runs the normal (non-DCP) save."""
+def maybe_dcp_save(
+    impl: "LMCacheConnectorV1Impl",
+    connector_metadata: "LMCacheConnectorMetadata",
+) -> bool:
+    """Gather and store every request's KV across the DCP group, if DCP is active.
+
+    Args:
+        impl: the LMCache v1 connector worker-side implementation.
+        connector_metadata: the per-step connector metadata holding the requests
+            to save (token ids, slot mapping and save spec per request).
+
+    Returns:
+        True if the DCP path handled the save (the caller must then skip the
+        normal save). False if DCP is inactive, so the caller runs the normal
+        non-DCP save.
+    """
     if not dcp_gather_enabled(impl):
         return False
     kvcaches = list(impl.kv_caches.values())
     assert len(kvcaches) > 0
     dev = kvcaches[0].device
-    chunk = impl._lmcache_chunk_size
+    chunk = impl.config.chunk_size
     total = 0
     for request in connector_metadata.requests:
         impl.lmcache_engine.lookup_unpin(request.req_id)
@@ -260,22 +303,34 @@ def maybe_dcp_save(impl: "LMCacheConnectorV1Impl", connector_metadata) -> bool:
     return True
 
 
-def maybe_dcp_load(impl: "LMCacheConnectorV1Impl", connector_metadata) -> bool:
-    """If DCP is active, load+scatter every request's KV and return True; else
-    return False so the caller runs the normal (non-DCP) load."""
+def maybe_dcp_load(
+    impl: "LMCacheConnectorV1Impl",
+    connector_metadata: "LMCacheConnectorMetadata",
+) -> bool:
+    """Load and scatter every request's KV across the DCP group, if DCP is active.
+
+    Args:
+        impl: the LMCache v1 connector worker-side implementation.
+        connector_metadata: the per-step connector metadata holding the requests
+            to load (token ids, slot mapping and load spec per request).
+
+    Returns:
+        True if the DCP path handled the load (the caller must then skip the
+        normal load). False if DCP is inactive, so the caller runs the normal
+        non-DCP load.
+    """
     if not dcp_gather_enabled(impl):
         return False
     kvcaches = list(impl.kv_caches.values())
     dev = kvcaches[0].device
-    chunk = impl._lmcache_chunk_size
+    chunk = impl.config.chunk_size
+    stats_monitor = LMCStatsMonitor.GetOrCreate()
     total = 0
     for request in connector_metadata.requests:
         load_spec = request.load_spec
         if load_spec is not None:
-            impl._stats_monitor.update_interval_vllm_hit_tokens(
-                load_spec.vllm_cached_tokens
-            )
-            impl._stats_monitor.update_interval_prompt_tokens(len(request.token_ids))
+            stats_monitor.update_interval_vllm_hit_tokens(load_spec.vllm_cached_tokens)
+            stats_monitor.update_interval_prompt_tokens(len(request.token_ids))
         if load_spec is None or not load_spec.can_load:
             continue
         token_ids = request.token_ids
