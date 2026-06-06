@@ -14,6 +14,13 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
+from lmcache.v1.periodic_thread import (
+    PeriodicThread,
+    PeriodicThreadRegistry,
+    ThreadLevel,
+    ThreadRunSummary,
+    create_periodic_thread,
+)
 
 logger = init_logger(__name__)
 
@@ -121,12 +128,23 @@ class SessionManager:
     """Thread-safe manager for per-request sessions."""
 
     DEFAULT_SESSION_TTL = 600  # 10 minutes
+    DEFAULT_CLEANUP_INTERVAL = 60.0
 
-    def __init__(self, hasher: TokenHasher, ttl: float = DEFAULT_SESSION_TTL):
+    def __init__(
+        self,
+        hasher: TokenHasher,
+        ttl: float = DEFAULT_SESSION_TTL,
+        cleanup_interval: float | None = DEFAULT_CLEANUP_INTERVAL,
+    ) -> None:
         self._hasher = hasher
         self._ttl = ttl
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
+        self._cleanup_interval = cleanup_interval
+        self._cleanup_thread: PeriodicThread | None = None
+        if cleanup_interval is not None and cleanup_interval > 0:
+            self._cleanup_thread = self._create_cleanup_thread(cleanup_interval)
+            self._cleanup_thread.start()
 
     def get_or_create(self, request_id: str) -> Session:
         """Get existing session or create a new one.
@@ -189,3 +207,28 @@ class SessionManager:
         """
         with self._lock:
             return len(self._sessions)
+
+    def close(self) -> None:
+        """Stop the background cleanup thread and unregister it."""
+        if self._cleanup_thread is None:
+            return
+
+        PeriodicThreadRegistry.get_instance().unregister(self._cleanup_thread.name)
+        self._cleanup_thread.stop()
+        self._cleanup_thread = None
+
+    def _create_cleanup_thread(self, cleanup_interval: float) -> PeriodicThread:
+        def execute_cleanup() -> ThreadRunSummary:
+            removed = self.cleanup_expired()
+            return ThreadRunSummary(
+                success=True,
+                message=f"Removed {removed} expired sessions",
+                extra_info={"removed_sessions": str(removed)},
+            )
+
+        return create_periodic_thread(
+            name=f"SessionManager-cleanup-thread-{id(self):x}",
+            interval=cleanup_interval,
+            execute_fn=execute_cleanup,
+            level=ThreadLevel.MEDIUM,
+        )
