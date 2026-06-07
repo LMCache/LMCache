@@ -286,10 +286,10 @@ class ParallelStrategy:
     """Whether to use the MLA."""
 
     vllm_world_size: int
-    """vLLM-side world size."""
+    """Number of workers under one vLLM scheduler."""
 
     vllm_worker_id: int
-    """vLLM-side rank of the sub-process."""
+    """This worker's rank within its scheduler group."""
 
     tp_size: int
     """The tensor parallel size."""
