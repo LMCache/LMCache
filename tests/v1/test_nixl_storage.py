@@ -138,24 +138,31 @@ def run(config: LMCacheEngineConfig, shape, dtype):
         assert nixl_backend is not None
         assert nixl_backend.memory_allocator is not None
 
+        # Allocate via the chunk shape that LMCacheMetadata derives from
+        # kv_shape (LocalCPUBackend / NIXL share the same paged pool sized
+        # by metadata.get_shapes()); passing the raw 5D kv_shape would
+        # produce a same-byte-count but differently-indexed tensor.
+        alloc_shape = metadata.get_shapes()[0]
         for key in keys:
             assert not nixl_backend.contains(key, False)
             assert not nixl_backend.exists_in_put_tasks(key)
 
-            obj = nixl_backend.memory_allocator.allocate(torch.Size(shape), dtype)
+            obj = nixl_backend.memory_allocator.allocate(alloc_shape, dtype)
             assert obj is not None
             assert obj.tensor is not None
             objs.append(obj)
 
-        # small tensor changes for data validation
-        objs[0].tensor[100, 200] = 1e-3
-        objs[0].tensor[200, 100] = 1e-4
+        # small tensor changes for data validation (chunk shape is 4D:
+        # [kv_size, num_layers, num_tokens, num_heads * head_size] =
+        # [2, 4, 256, 1024] for kv_shape (4, 2, 256, 8, 128))
+        objs[0].tensor[0, 0, 100, 200] = 1e-3
+        objs[0].tensor[1, 0, 200, 100] = 1e-4
 
-        objs[1].tensor[300, 400] = 1e-2
-        objs[1].tensor[400, 300] = 1e-5
+        objs[1].tensor[0, 1, 150, 400] = 1e-2
+        objs[1].tensor[1, 1, 100, 300] = 1e-5
 
-        objs[2].tensor[300, 400] = 3e-2
-        objs[2].tensor[400, 300] = 4e-5
+        objs[2].tensor[0, 2, 50, 200] = 3e-2
+        objs[2].tensor[1, 3, 200, 100] = 4e-5
 
         # Insert first 2 keys
         first_keys = keys[0:2]
@@ -267,9 +274,12 @@ def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cuda"
+    # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
+    # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
+    config.nixl_buffer_size = 1024**3
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = True
     config.extra_config["nixl_path"] = nixl_tmp_path
@@ -287,7 +297,7 @@ def test_nixl_gds_mt_cpu_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS_MT"
@@ -308,9 +318,12 @@ def test_nixl_gds_cuda_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cuda"
+    # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
+    # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
+    config.nixl_buffer_size = 1024**3
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = True
     config.extra_config["nixl_path"] = nixl_tmp_path
@@ -328,7 +341,7 @@ def test_nixl_gds_cpu_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS"
@@ -352,7 +365,7 @@ def test_nixl_endpoint_list_empty_raises():
         worker_id=0,
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
-        kv_shape=[2048, 2048],
+        kv_shape=(4, 2, 256, 8, 128),
     )
 
     with pytest.raises(ValueError, match="nixl_endpoint_list is set but empty"):
@@ -374,7 +387,7 @@ def test_nixl_endpoint_list_malformed_url_raises():
         worker_id=0,
         local_worker_id=0,
         kv_dtype=torch.bfloat16,
-        kv_shape=[2048, 2048],
+        kv_shape=(4, 2, 256, 8, 128),
     )
 
     with pytest.raises(ValueError, match="is not a valid URL"):
@@ -387,7 +400,7 @@ def test_nixl_posix_backend(nixl_tmp_path):
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = torch.Size([2048, 2048])
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
