@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -275,7 +276,7 @@ class HFBucketL2Adapter(L2AdapterInterface):
         self._load_efd = create_event_notifier()
 
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
 
@@ -337,7 +338,7 @@ class HFBucketL2Adapter(L2AdapterInterface):
         with self._lock:
             task_id = self._get_next_task_id_locked()
             if self._closed:
-                self._completed_store_tasks[task_id] = False
+                self._completed_store_tasks[task_id] = L2StoreResult(False, 0)
                 closed = True
             else:
                 closed = False
@@ -352,7 +353,7 @@ class HFBucketL2Adapter(L2AdapterInterface):
         )
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
@@ -539,8 +540,12 @@ class HFBucketL2Adapter(L2AdapterInterface):
             stored_sizes = []
             success = False
 
+        bytes_transferred = sum(stored_sizes)
         with self._lock:
-            self._completed_store_tasks[task_id] = success
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success,
+                bytes_transferred,
+            )
 
         if stored_keys:
             self._notify_keys_stored(stored_keys, stored_sizes)
@@ -632,11 +637,11 @@ class HFBucketL2Adapter(L2AdapterInterface):
             # write part of the batch and then fail. Fetch fresh backend
             # metadata, update accounting for objects that really landed, and
             # still report the submitted store task as failed.
-            stored_keys, stored_sizes = self._reconcile_failed_store(indexed)
+            reconciled_keys, reconciled_sizes = self._reconcile_failed_store(indexed)
             raise _PartialStoreFailure(
                 "HFBucket batch upload failed after partial reconciliation",
-                stored_keys,
-                stored_sizes,
+                reconciled_keys,
+                reconciled_sizes,
             ) from exc
 
         stored_keys: list[ObjectKey] = []

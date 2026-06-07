@@ -2,6 +2,7 @@
 """Unit tests for the HFBucket MP L2 adapter."""
 
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 import select
@@ -24,6 +25,7 @@ from lmcache.v1.distributed.l2_adapters.hfbucket_l2_adapter import (
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
+    MemoryObj,
     MemoryObjMetadata,
     TensorMemoryObj,
 )
@@ -31,7 +33,6 @@ from lmcache.v1.platform import consume_fd
 from lmcache.v1.storage_backend.connector.hfbucket_connector import (
     parse_hfbucket_handle,
 )
-
 
 _TEST_BUCKET_HANDLE = "hf://buckets/test-org/test-bucket/prod"
 _TEST_BUCKET_LOCATION = parse_hfbucket_handle(_TEST_BUCKET_HANDLE)
@@ -64,8 +65,8 @@ class _FakeBucketClient:
     def get_paths_info(
         self,
         bucket_id: str,
-        paths: list[str],
-    ) -> list[_FakePathInfo]:
+        paths: Sequence[str],
+    ) -> list[object]:
         del bucket_id
         with self._lock:
             return [
@@ -74,7 +75,7 @@ class _FakeBucketClient:
                 if path in self.storage
             ]
 
-    def list_tree(self, bucket_id: str, prefix: str) -> list[_FakePathInfo]:
+    def list_tree(self, bucket_id: str, prefix: str) -> list[object]:
         del bucket_id
         with self._lock:
             return [
@@ -86,7 +87,7 @@ class _FakeBucketClient:
     def upload_files(
         self,
         bucket_id: str,
-        add: list[tuple[bytes, str]],
+        add: Sequence[tuple[bytes, str]],
     ) -> None:
         del bucket_id
         with self._lock:
@@ -101,13 +102,12 @@ class _FakeBucketClient:
     def download_files(
         self,
         bucket_id: str,
-        files: list[tuple[str, str]],
+        files: Sequence[tuple[str, str]],
     ) -> None:
         del bucket_id
         with self._lock:
             items = [
-                (remote, local, self.storage.get(remote))
-                for remote, local in files
+                (remote, local, self.storage.get(remote)) for remote, local in files
             ]
 
         for _remote, local, data in items:
@@ -118,7 +118,7 @@ class _FakeBucketClient:
     def delete_files(
         self,
         bucket_id: str,
-        delete: list[str],
+        delete: Sequence[str],
     ) -> None:
         del bucket_id
         with self._lock:
@@ -139,7 +139,7 @@ def create_object_key(chunk_id: int, model_name: str = "test/model") -> ObjectKe
     )
 
 
-def create_memory_obj(size: int = 16, fill_value: float = 1.0) -> TensorMemoryObj:
+def create_memory_obj(size: int = 16, fill_value: float = 1.0) -> MemoryObj:
     raw_data = torch.empty(size, dtype=torch.float32)
     raw_data.fill_(fill_value)
     metadata = MemoryObjMetadata(
@@ -231,9 +231,7 @@ class TestObjectKeySerialization:
         assert _object_key_to_string(base_key) != _object_key_to_string(salted)
 
     def test_bucket_path_uses_prefix_and_encoding(self) -> None:
-        cfg = HFBucketL2AdapterConfig(
-            bucket_handle=_TEST_BUCKET_HANDLE
-        )
+        cfg = HFBucketL2AdapterConfig(bucket_handle=_TEST_BUCKET_HANDLE)
         key = create_object_key(1)
         path = _object_key_to_bucket_path(key, cfg.bucket_location)
         assert path.startswith("prod/")
@@ -256,7 +254,7 @@ class TestStoreLookupLoad:
 
         tid = adapter.submit_store_task([key], [obj])
         assert wait_for_event_fd(adapter.get_store_event_fd())
-        assert adapter.pop_completed_store_tasks() == {tid: True}
+        assert adapter.pop_completed_store_tasks()[tid].is_successful()
 
         tid = adapter.submit_lookup_and_lock_task([key])
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
@@ -331,7 +329,7 @@ class TestStoreLookupLoad:
 
         tid = adapter.submit_store_task(keys, objs)
         assert wait_for_event_fd(adapter.get_store_event_fd())
-        assert adapter.pop_completed_store_tasks() == {tid: False}
+        assert not adapter.pop_completed_store_tasks()[tid].is_successful()
 
         assert fake_client.contains(bucket_path_for_key(keys[0]))
         assert not fake_client.contains(bucket_path_for_key(keys[1]))
@@ -509,7 +507,7 @@ class TestConfig:
         assert cfg.num_workers == 8
         assert cfg.max_capacity_gb == 2.5
 
-    #strict boolean parsing
+    # strict boolean parsing
     def test_from_dict_rejects_string_boolean(self) -> None:
         with pytest.raises(ValueError, match="create_bucket_if_missing"):
             HFBucketL2AdapterConfig.from_dict(
