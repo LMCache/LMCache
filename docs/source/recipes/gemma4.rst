@@ -7,6 +7,7 @@ Validated models
 ----------------
 
 - `google/gemma-4-31B-it <https://huggingface.co/google/gemma-4-31B-it>`_
+- `google/gemma-4-E4B-it <https://huggingface.co/google/gemma-4-E4B-it>`_
 
 .. tab-set::
    :sync-group: engine
@@ -34,6 +35,16 @@ Validated models
 
          vllm serve google/gemma-4-31B-it \
              --tensor-parallel-size 2 \
+             --kv-transfer-config \
+             '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+      |
+
+      The smaller ``google/gemma-4-E4B-it`` runs on a single GPU:
+
+      .. code-block:: bash
+
+         vllm serve google/gemma-4-E4B-it \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
@@ -75,4 +86,16 @@ Compression support
 Caveats
 -------
 
-None known.
+- **Hybrid KV cache with heterogeneous block sizes.** Gemma 4 interleaves
+  sliding-window and full-attention layers whose head dimensions differ
+  (sliding 256, full 512), so vLLM unifies the physical page size by giving the
+  two attention types different ``block_size``\ s (e.g. ``google/gemma-4-E4B-it``:
+  sliding 32, full 16). LMCache stores and retrieves each KV cache group in its
+  own block size; no extra flags are required.
+- **Cross-layer KV sharing.** ``google/gemma-4-E4B-it`` reuses some layers' KV
+  caches across layers. LMCache stores the cache-owning layers only; the sharing
+  layers' KV lives in the same blocks and is restored automatically.
+- **Determinism.** Gemma 4 runs on the Triton attention backend, which is not
+  bit-exact under vLLM's batch-invariant mode, so a retrieved result may differ
+  from a freshly computed one by a small numerical margin rather than being
+  byte-identical.
