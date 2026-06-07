@@ -58,7 +58,7 @@ def hipify_wrapper() -> None:
     # Third Party
     from torch.utils.hipify.hipify_python import hipify
 
-    print("Hipifying sources ")
+    print("Hipifying sources")
 
     # Get absolute path for all source files.
     extra_files = [
@@ -221,7 +221,6 @@ def cuda_extension() -> tuple[list, dict]:
     from torch.utils import cpp_extension  # Import here
 
     print("Building CUDA extensions")
-    global ENABLE_CXX11_ABI
     if ENABLE_CXX11_ABI:
         flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=1"
     else:
