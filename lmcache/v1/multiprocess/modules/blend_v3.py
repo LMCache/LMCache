@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend V3: paged-aware CacheBlend as an :class:`EngineModule`.
+"""Blend V3: paged-aware CacheBlend as an EngineModule.
 
-Plugs into the unified :class:`MPCacheEngine`; standard ``REGISTER_KV_CACHE``
-+ ``CB_REGISTER_ROPE_V3`` for setup; STORE wrapper registers fingerprints;
+Plugs into the unified MPCacheEngine; standard REGISTER_KV_CACHE +
+CB_REGISTER_ROPE_V3 for setup; STORE wrapper registers fingerprints;
 retrieve scatters into the request's paged blocks.
 """
 
@@ -39,7 +39,6 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.modules.blend import BlendTokenRangeMatcher
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -65,7 +64,7 @@ class _CBRopeState:
 
 @dataclass
 class _CBUnifiedJob:
-    """Per-request poll state for non-blocking ``cb_unified_lookup``.
+    """Per-request poll state for non-blocking cb_unified_lookup.
 
     Stashed across polls because the underlying status/found polls are
     consume-once.
@@ -82,12 +81,34 @@ class _CBUnifiedJob:
     found_uidx: set[int] | None = None  # stashed when the sparse poll completes
 
 
-class BlendTokenRangeMatcherV3(BlendTokenRangeMatcher):
+class BlendTokenRangeMatcherV3:
     """V3 matcher: token-level probe (any offset) + full-hash collision
-    rejection."""
+    rejection. Self-contained (does not inherit a base matcher)."""
+
+    _TABLE_BITS: int = 20  # 2^20 ~ 1 M entries
+    _TABLE_SIZE: int = 1 << _TABLE_BITS
+    _BASE: np.uint64 = np.uint64(0x9E3779B97F4A7C15)  # Fibonacci-hashing const
 
     def __init__(self, chunk_size: int = 256):
-        super().__init__(chunk_size)
+        """Initialize the V3 matcher.
+
+        Args:
+            chunk_size (int): Tokens per non-overlapping fingerprint chunk.
+        """
+        self.chunk_size = chunk_size
+        # poly_chunk_hash -> compact_chunk_id; -1 = empty
+        self._table_id = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
+        self._mask = np.uint64(self._TABLE_SIZE - 1)
+        # compact_chunk_id -> caller token_hash (full bytes); None once evicted
+        self._chunk_token_hash: list[bytes | None] = []
+        # token_hash -> start position in its registered sequence
+        self._token_hash_to_start: dict[bytes, int] = {}
+        # compact_chunk_id -> table slot (reverse lookup for eviction)
+        self._compact_id_to_slot = np.full(self._TABLE_SIZE, -1, dtype=np.int64)
+        # token_hash -> compact_chunk_id (for eviction lookup)
+        self._token_hash_to_compact_id: dict[bytes, int] = {}
+        self._lock = threading.Lock()
+        # V3 addition: compact_chunk_id -> full poly hash, for collision reject.
         self._chunk_poly_hash: list[int] = []
 
     def on_new_token_hashes(
@@ -97,9 +118,23 @@ class BlendTokenRangeMatcherV3(BlendTokenRangeMatcher):
         start_chunk_idx: int = 0,
         position_offset: int = 0,
     ) -> None:
-        """Index non-overlapping chunks; ``start_chunk_idx=1`` skips pos-0
-        (handled by the standard prefix lookup); ``position_offset`` is
-        added to recorded positions for tail-slices."""
+        """Index a stored sequence's non-overlapping chunks into the matcher.
+
+        Records each new chunk's poly hash + start position so a later
+        match_sub_sequence can find it. Thread-safe (holds the matcher lock).
+
+        Args:
+            token_ids (list[int]): The stored sequence's token IDs.
+            token_hashes (list[bytes]): Per-chunk content hashes (one per
+                chunk), used as the dedup/eviction key.
+            start_chunk_idx (int): First chunk to index; 1 skips chunk 0 (the
+                standard prefix lookup owns it).
+            position_offset (int): Added to each recorded start position (for
+                indexing a tail-slice of a larger sequence).
+
+        Returns:
+            None.
+        """
         arr = np.array(token_ids, dtype=np.uint64)
         chunk_hashes = chunk_hash_windows_numba(arr, self.chunk_size, self._BASE)
         n = int(chunk_hashes.shape[0])
@@ -156,9 +191,20 @@ class BlendTokenRangeMatcherV3(BlendTokenRangeMatcher):
         self,
         token_ids: list[int],
     ) -> list[CBMatchResult]:
-        """Find every registered chunk reused in ``token_ids``. One result per
-        unique chunk; ``cur_st`` is its first query position. Verifies the full
-        poly hash to reject direct-address bucket collisions."""
+        """Find every registered chunk reused anywhere in a query sequence.
+
+        Vectorized direct-address probe over all token positions, then a small
+        verify loop over the surviving hits (a full poly-hash check rejects
+        bucket collisions; evicted/unknown chunks are skipped). Thread-safe.
+
+        Args:
+            token_ids (list[int]): The query sequence's token IDs.
+
+        Returns:
+            list[CBMatchResult]: One result per unique reused chunk (cur_st
+            = its first query position, old_st = its stored position).
+            Empty if the query is shorter than one chunk or nothing matched.
+        """
         if len(token_ids) < self.chunk_size:
             return []
 
@@ -363,8 +409,8 @@ class BlendV3Module:
         head_size: int,
         is_neox_style: bool,
     ) -> None:
-        """Bolt rope state onto an already-registered ``cache_contexts`` entry;
-        idempotent. ``REGISTER_KV_CACHE`` must precede this."""
+        """Bolt rope state onto an already-registered cache_contexts entry;
+        idempotent. REGISTER_KV_CACHE must precede this."""
         cache_contexts = self._gpu_transfer.cache_contexts
         if instance_id not in cache_contexts:
             raise ValueError(
@@ -454,7 +500,7 @@ class BlendV3Module:
     def _match_fingerprints(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
         """Drain pending registrations, fingerprint-match sub-sequences, then
         leftmost-greedy dedup over overlapping ranges. Returns matches sorted
-        by ``cur_st`` (empty if none)."""
+        by cur_st (empty if none)."""
         self._drain_fingerprints_sync()
         matches = self._token_range_matcher.match_sub_sequence(list(key.token_ids))
         if not matches:
@@ -487,8 +533,8 @@ class BlendV3Module:
         layout_desc: "MemoryLayoutDesc",
         matches: list[CBMatchResult],
     ) -> "tuple[PrefetchHandle, dict[bytes, list], list[int]]":
-        """Coalesce all ``matches`` into one sparse prefetch and submit it
-        (non-blocking). The caller polls ``query_prefetch_status(handle)`` then
+        """Coalesce all matches into one sparse prefetch and submit it
+        (non-blocking). The caller polls query_prefetch_status(handle) then
         calls :meth:`_sparse_classify` with the found set."""
         world_size = key.world_size
         per_hash_obj_keys: dict[bytes, list] = {}
@@ -585,7 +631,7 @@ class BlendV3Module:
         """Non-blocking single-RPC CB lookup (submit-once, poll-on-recall).
 
         First call submits the prefix lookup + fingerprint match; later calls
-        poll both legs, returning ``None`` until the prefix and the sparse
+        poll both legs, returning None until the prefix and the sparse
         complement are both resident in L1 (so a worker thread never blocks on
         the L2->L1 loads). The prefix job's L1 read locks persist for the
         retrieve.
@@ -744,7 +790,7 @@ class BlendV3Module:
         return result
 
     def _drain_fingerprint_queue(self) -> None:
-        """Best-effort background drainer for ``_fingerprint_queue``."""
+        """Best-effort background drainer for _fingerprint_queue."""
         while not self._fingerprint_stop.is_set():
             try:
                 job = self._fingerprint_queue.get(timeout=0.1)
@@ -774,7 +820,7 @@ class BlendV3Module:
         slots_to_rope: list[tuple[int, int, int]],
     ) -> None:
         """Re-RoPE tmp-pool slots in-place (K-only, per group); list of
-        ``(slot_idx, old_st, cur_st)``."""
+        (slot_idx, old_st, cur_st)."""
         if not slots_to_rope:
             return
         num_groups = gpu_context.kv_layer_groups_manager.num_groups
@@ -849,7 +895,14 @@ class BlendV3Module:
         with self._lookup_obj_keys_lock:
             cached = self._lookup_obj_keys_cache.pop(key.request_id, None)
         if cached is not None and all(r.hash in cached for r in cb_match_result):
-            all_obj_keys = [k for r in cb_match_result for k in cached[r.hash]]
+            # The lookup cached all-ranks obj keys (world_size per hash). This
+            # retrieve is per-worker, so select THIS rank's key -> M objects, not
+            # M*world_size (else the zip below silently truncates and mispairs
+            # ranks at TP>1). Mirrors the non-cached path's per-worker resolve.
+            if key.worker_id is not None and key.world_size > 1:
+                all_obj_keys = [cached[r.hash][key.worker_id] for r in cb_match_result]
+            else:
+                all_obj_keys = [k for r in cb_match_result for k in cached[r.hash]]
         else:
             all_obj_keys = ipc_key_to_object_keys(
                 key, [r.hash for r in cb_match_result]
@@ -943,9 +996,7 @@ class BlendV3Module:
                     # matched range to the allocated slots.
                     pairs: list[tuple[CBMatchResult, Any]] = []
                     num_slots = int(all_block_ids_gpu.numel()) * ie_logical_block_size
-                    for r, memory_obj in zip(
-                        cb_match_result, memory_objs, strict=False
-                    ):
+                    for r, memory_obj in zip(cb_match_result, memory_objs, strict=True):
                         if r.cur_ed > num_slots:
                             logger.warning(
                                 "Dropping CB match cur_st=%d cur_ed=%d: exceeds "
