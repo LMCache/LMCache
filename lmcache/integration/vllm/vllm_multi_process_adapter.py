@@ -708,17 +708,14 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         ).no_worker_id_version()
 
-        futures: dict[str, MessagingFuture[Any]] = {}
-        for url in self._server_urls:
-            try:
-                futures[url] = send_lmcache_request(
-                    self.mq_clients[url],
-                    RequestType.LOOKUP,
-                    [key, self.tp_size],
-                )
-            except Exception as e:
-                logger.error("LOOKUP submit to %s failed: %s", url, e, exc_info=True)
-                self._health_events[url].clear()
+        futures: dict[str, MessagingFuture[Any]] = {
+            url: send_lmcache_request(
+                self.mq_clients[url],
+                RequestType.LOOKUP,
+                [key, self.tp_size],
+            )
+            for url in self._server_urls
+        }
 
         results: list[tuple[str, bool]] = []
         for url, fut in futures.items():
@@ -736,10 +733,6 @@ class LMCacheMPSchedulerAdapter:
             except Exception as e:
                 logger.error("LOOKUP to %s failed: %s", url, e, exc_info=True)
                 self._health_events[url].clear()
-                results.append((url, False))
-
-        for url in self._server_urls:
-            if url not in futures:
                 results.append((url, False))
 
         # Only track as pending when every server accepted the job.
@@ -791,22 +784,14 @@ class LMCacheMPSchedulerAdapter:
         per_server = self._per_server_hits.setdefault(request_id, {})
         unresolved_urls = [u for u in self._server_urls if u not in per_server]
 
-        futures: dict[str, MessagingFuture[Any]] = {}
-        for url in unresolved_urls:
-            try:
-                futures[url] = send_lmcache_request(
-                    self.mq_clients[url],
-                    RequestType.QUERY_PREFETCH_STATUS,
-                    [request_id],
-                )
-            except Exception as e:
-                logger.error(
-                    "QUERY_PREFETCH_STATUS submit to %s failed: %s",
-                    url,
-                    e,
-                    exc_info=True,
-                )
-                self._health_events[url].clear()
+        futures: dict[str, MessagingFuture[Any]] = {
+            url: send_lmcache_request(
+                self.mq_clients[url],
+                RequestType.QUERY_PREFETCH_STATUS,
+                [request_id],
+            )
+            for url in unresolved_urls
+        }
 
         for url, fut in futures.items():
             try:

@@ -93,27 +93,29 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 
+# Helper functions
 def build_parallel_strategy_from_vllm_config(
     vllm_config: VllmConfig,
     n_servers: int,
 ) -> ParallelStrategy:
-    """Construct a :class:`ParallelStrategy` snapshot from ``vllm_config``.
+    """Build a ParallelStrategy from a vLLM config.
 
-    ``vllm_config.parallel_config.world_size`` and ``.rank`` are vLLM's
-    GLOBAL view across every worker process (ranks 0 .. world_size - 1).
+    Centralises the (vllm_config -> KV parallel geometry) mapping.
+
+    Args:
+        vllm_config: The vLLM configuration object.
+        n_servers: Number of LMCache servers backing this deployment.
+
+    Returns:
+        The constructed ParallelStrategy.
     """
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
-    if tp_size % n_servers != 0:
-        raise ValueError(
-            f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
-        )
-
+    pc = vllm_config.parallel_config
     return ParallelStrategy(
         use_mla=mla_enabled(vllm_config.model_config),
-        vllm_world_size=vllm_config.parallel_config.world_size,
-        vllm_worker_id=vllm_config.parallel_config.rank,
-        tp_size=tp_size,
-        pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+        vllm_world_size=pc.world_size,
+        vllm_worker_id=pc.rank,
+        tp_size=pc.tensor_parallel_size,
+        pp_size=pc.pipeline_parallel_size,
         n_servers=n_servers,
     )
 
@@ -534,6 +536,12 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             f"world_size ({vllm_config.parallel_config.world_size}) must be "
             f"divisible by n_servers ({n_servers})"
         )
+
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        if tp_size % n_servers != 0:
+            raise ValueError(
+                f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
+            )
 
         # Multi-server is currently TP-only. DP/PP support requires a custom
         # rank-to-group mapping API and will land in a follow-up PR.
