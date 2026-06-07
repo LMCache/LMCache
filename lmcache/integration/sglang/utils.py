@@ -22,11 +22,11 @@ def lmcache_get_config() -> LMCacheEngineConfig:
     """
     logger.info(f"LMCACHE_CONFIG_FILE: {os.getenv('LMCACHE_CONFIG_FILE')}")
     if "LMCACHE_CONFIG_FILE" not in os.environ:
-        logger.warn(
+        logger.warning(
             "No LMCache configuration file is set. Trying to read"
             " configurations from the environment variables."
         )
-        logger.warn(
+        logger.warning(
             "You can set the configuration file through "
             "the environment variable: LMCACHE_CONFIG_FILE"
         )
