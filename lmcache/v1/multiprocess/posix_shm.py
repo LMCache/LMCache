@@ -34,12 +34,15 @@ from __future__ import annotations
 # Standard
 import atexit
 import ctypes
+import logging
 import mmap as _mmap
 import os
 import threading
 
 # Third Party
 import _posixshmem  # type: ignore[import-not-found]
+
+logger = logging.getLogger(__name__)
 
 
 def _strip_leading_slash(name: str) -> str:
@@ -89,7 +92,11 @@ def _open_and_mmap(name: str, nbytes: int, *, create: bool) -> tuple[_mmap.mmap,
             try:
                 _posixshmem.shm_unlink(_slashed(name))
             except OSError:
-                pass
+                logger.warning(
+                    "shm_unlink failed during cleanup of %s",
+                    name,
+                    exc_info=True,
+                )
         raise
     finally:
         os.close(fd)
@@ -180,12 +187,16 @@ def shm_munmap(addr: int, nbytes: int = 0) -> None:
         return
     try:
         mm.close()
-    except (BufferError, ValueError):
+    except (BufferError, ValueError) as exc:
         # ``BufferError`` means callers still hold an exported view
         # (e.g. a torch tensor backed by this mmap); they will release
         # the mapping themselves on GC. ``ValueError`` means already
         # closed -- treat both as best-effort no-ops.
-        pass
+        logger.warning(
+            "shm_munmap: mmap.close() skipped for addr=%#x: %s",
+            addr,
+            exc,
+        )
 
 
 def shm_unlink(name: str) -> None:
@@ -203,11 +214,15 @@ def shm_unlink(name: str) -> None:
     try:
         _posixshmem.shm_unlink(_slashed(sm_name))
     except FileNotFoundError:
-        pass
+        logger.debug("shm_unlink: segment %s already removed", sm_name)
     except OSError:
         # Mirrors the historical "best effort" contract -- e.g.
         # double-unlink on shutdown should never raise.
-        pass
+        logger.warning(
+            "shm_unlink: failed to unlink %s",
+            sm_name,
+            exc_info=True,
+        )
 
 
 def _atexit_cleanup() -> None:
@@ -220,13 +235,13 @@ def _atexit_cleanup() -> None:
     for mm in mmaps:
         try:
             mm.close()
-        except (BufferError, OSError):
-            pass
+        except (BufferError, OSError) as exc:
+            logger.warning("atexit: mmap.close() failed: %s", exc)
     for n in names:
         try:
             _posixshmem.shm_unlink(_slashed(n))
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("atexit: shm_unlink(%s) failed: %s", n, exc)
 
 
 atexit.register(_atexit_cleanup)
