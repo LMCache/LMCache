@@ -93,19 +93,16 @@ if TYPE_CHECKING:
 logger = lmcache_init_logger(__name__)
 
 
-# Helper functions
-def _build_parallel_strategy(
-    server_urls: list[str],
+def build_parallel_strategy_from_vllm_config(
     vllm_config: VllmConfig,
+    n_servers: int,
 ) -> ParallelStrategy:
-    """`vllm_config.parallel_config.world_size` and `.rank` are vLLM's GLOBAL
-    view across every worker process (ranks 0 .. world_size - 1).
-    """
-    n_servers = len(server_urls)
-    vllm_world_size = vllm_config.parallel_config.world_size
-    vllm_worker_id = vllm_config.parallel_config.rank
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    """Construct a :class:`ParallelStrategy` snapshot from ``vllm_config``.
 
+    ``vllm_config.parallel_config.world_size`` and ``.rank`` are vLLM's
+    GLOBAL view across every worker process (ranks 0 .. world_size - 1).
+    """
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
     if tp_size % n_servers != 0:
         raise ValueError(
             f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
@@ -113,53 +110,11 @@ def _build_parallel_strategy(
 
     return ParallelStrategy(
         use_mla=mla_enabled(vllm_config.model_config),
-        vllm_world_size=vllm_world_size,
-        vllm_worker_id=vllm_worker_id,
+        vllm_world_size=vllm_config.parallel_config.world_size,
+        vllm_worker_id=vllm_config.parallel_config.rank,
         tp_size=tp_size,
         pp_size=vllm_config.parallel_config.pipeline_parallel_size,
         n_servers=n_servers,
-    )
-
-
-def create_scheduler_adapter(
-    server_urls: list[str],
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
-) -> LMCacheMPSchedulerAdapter:
-    parallel_strategy = _build_parallel_strategy(server_urls, vllm_config)
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return LMCacheMPSchedulerAdapter(
-        server_urls=server_urls,
-        context=zmq_context,
-        model_name=vllm_config.model_config.model,
-        vllm_block_size=vllm_config.cache_config.block_size,
-        parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
-    )
-
-
-def create_worker_adapter(
-    server_urls: list[str],
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
-) -> LMCacheMPWorkerAdapter:
-    parallel_strategy = _build_parallel_strategy(server_urls, vllm_config)
-
-    # Node routing: a worker connects only to its local LMCache server.
-    # Global ranks are assigned to nodes in contiguous blocks:
-    #   node 0 → ranks [0, ranks_per_node),
-    #   node 1 → [ranks_per_node, 2 * ranks_per_node), ...
-    ranks_per_node = parallel_strategy.vllm_world_size // parallel_strategy.n_servers
-    local_server_url = server_urls[parallel_strategy.vllm_worker_id // ranks_per_node]
-
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return LMCacheMPWorkerAdapter(
-        server_url=local_server_url,
-        context=zmq_context,
-        model_name=vllm_config.model_config.model,
-        vllm_block_size=vllm_config.cache_config.block_size,
-        parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
     )
 
 
@@ -599,18 +554,37 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         zmq_context = zmq.Context.instance()
 
+        parallel_strategy = build_parallel_strategy_from_vllm_config(
+            vllm_config, n_servers
+        )
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+
         if self.role == KVConnectorRole.SCHEDULER:
-            self.scheduler_adapter = create_scheduler_adapter(
-                server_urls,
-                zmq_context,
-                vllm_config,
+            self.scheduler_adapter = LMCacheMPSchedulerAdapter(
+                server_urls=server_urls,
+                context=zmq_context,
+                model_name=vllm_config.model_config.model,
+                vllm_block_size=vllm_config.cache_config.block_size,
+                parallel_strategy=parallel_strategy,
+                extra_config=extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
-            self.worker_adapter = create_worker_adapter(
-                server_urls,
-                zmq_context,
-                vllm_config,
+            # Node routing: a worker connects only to its local LMCache server.
+            # Global ranks are assigned to nodes in contiguous blocks:
+            #   node 0 → ranks [0, ranks_per_node),
+            #   node 1 → [ranks_per_node, 2 * ranks_per_node), ...
+            ranks_per_node = parallel_strategy.vllm_world_size // n_servers
+            local_server_url = server_urls[
+                parallel_strategy.vllm_worker_id // ranks_per_node
+            ]
+            self.worker_adapter = LMCacheMPWorkerAdapter(
+                server_url=local_server_url,
+                context=zmq_context,
+                model_name=vllm_config.model_config.model,
+                vllm_block_size=vllm_config.cache_config.block_size,
+                parallel_strategy=parallel_strategy,
+                extra_config=extra_config,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
