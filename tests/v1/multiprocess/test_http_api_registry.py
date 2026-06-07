@@ -11,6 +11,7 @@ Covers:
 """
 
 # Standard
+import importlib
 import sys
 
 # Third Party
@@ -62,6 +63,39 @@ class TestDiscoverApiRouters:
                     del sys.modules[key]
 
         assert len(routers) == 2
+
+    def test_invalidates_import_caches_for_dynamic_modules(self, tmp_path, monkeypatch):
+        """Dynamically-created API modules are importable during discovery."""
+        (tmp_path / "late_api.py").write_text(
+            "from fastapi import APIRouter\nrouter = APIRouter()\n"
+        )
+        (tmp_path / "__init__.py").write_text("")
+
+        sys.path.insert(0, str(tmp_path.parent))
+        pkg_name = tmp_path.name
+        real_import_module = importlib.import_module
+        invalidated = False
+
+        def fake_invalidate_caches():
+            nonlocal invalidated
+            invalidated = True
+
+        def guarded_import_module(name, package=None):
+            if name == f"{pkg_name}.late_api" and not invalidated:
+                raise ModuleNotFoundError(name)
+            return real_import_module(name, package)
+
+        monkeypatch.setattr(importlib, "invalidate_caches", fake_invalidate_caches)
+        monkeypatch.setattr(importlib, "import_module", guarded_import_module)
+        try:
+            routers = discover_api_routers(tmp_path, pkg_name)
+        finally:
+            sys.path.pop(0)
+            for key in list(sys.modules):
+                if key.startswith(pkg_name):
+                    del sys.modules[key]
+
+        assert len(routers) == 1
 
     def test_skips_non_api_modules(self, tmp_path):
         """Modules without the ``_api`` suffix are ignored."""
