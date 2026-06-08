@@ -45,7 +45,8 @@ LOOKUP (blend server, cb_unified_lookup)
         ── POST /blend/match ──▶ coordinator.match():
                                    roll hash over tokens, probe every probe_stride
         ◀── matches: [(object_key, old_st, cur_st)] ──
-  → global_segments → sparse prefetch from shared L2 → retrieve + re-RoPE
+  → non-prefix set (drop prefix-covered, leftmost-greedy overlap dedup)
+  → one sparse prefetch from shared L2 → retrieve + re-RoPE
 ```
 
 The coordinator owns `chunk_size` (`blend_chunk_size`, fleet config, must equal

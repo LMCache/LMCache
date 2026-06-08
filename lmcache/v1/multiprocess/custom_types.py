@@ -375,30 +375,6 @@ class CBMatchResult:
 
 
 @dataclass
-class CBGlobalSegment:
-    """One reusable chunk located in the fleet-wide coordinator directory.
-
-    Chunk-granular, parallel to ``CBMatchResult`` but pointing at a shared-L2
-    storage key instead of a local hash. Identifies the chunk's KV in the shared
-    L2 and the positions needed to re-RoPE it.
-
-    Attributes:
-        object_key: Hex of the chunk's storage key (``ObjectKey`` chunk hash);
-            expanded to per-rank object keys at retrieve.
-        old_st: Start token position in the stored sequence (re-RoPE source).
-        old_ed: End token position in the stored sequence.
-        cur_st: Start token position in the request (re-RoPE target).
-        cur_ed: End token position in the request.
-    """
-
-    object_key: str
-    old_st: int
-    old_ed: int
-    cur_st: int
-    cur_ed: int
-
-
-@dataclass
 class CBUnifiedLookupResult:
     """Resolved payload of ``CB_UNIFIED_LOOKUP``: prefix lookup + non-prefix
     fingerprint match, reconciled in one RPC. The RPC returns ``None`` (not this)
@@ -419,7 +395,6 @@ class CBUnifiedLookupResult:
 
     prefix_coverage_tokens: int
     non_prefix_segments: list[CBMatchResult]
-    global_segments: list[CBGlobalSegment] = field(default_factory=list)
 
 
 _CUSTOMERIZED_SERIALIZERS = {

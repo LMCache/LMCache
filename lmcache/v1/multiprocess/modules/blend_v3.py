@@ -39,7 +39,6 @@ from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
 from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
-    CBGlobalSegment,
     CBMatchResult,
     CBUnifiedLookupResult,
     CudaIPCWrapper,
@@ -48,7 +47,6 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -871,42 +869,17 @@ class BlendV3Module:
                     )
                 )
 
-        # --- Local legs ready: classify the complement once (side effects). ---
-        if job.found_result is None:
-            if job.handle is not None:
-                found = self._sparse_classify(
-                    key,
-                    job.non_prefix or [],
-                    job.found_uidx or set(),
-                    job.per_hash_obj_keys or {},
-                    job.expanded_uidx or [],
-                )
-            else:
-                found = []
-            job.found_result = found
-            num_tokens = job.num_tokens
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_LOOKUP_END,
-                    session_id=rid,
-                    metadata={
-                        "num_tokens": num_tokens,
-                        "fingerprint_hits": len(found),
-                        "prefix_hits": job.prefix_chunks,
-                        "storage_hits": len(found),
-                        "stale_chunks": len(job.non_prefix or []) - len(found),
-                        "no_gpu_context": False,
-                        "hit_tokens": _unique_token_coverage(found),
-                        "requested_tokens": (num_tokens // chunk_size) * chunk_size,
-                    },
-                )
+        # --- BOTH legs ready: classify the complement + finalize. ---
+        if job.handle is not None:
+            found = self._sparse_classify(
+                key,
+                job.non_prefix or [],
+                job.found_uidx or set(),
+                job.per_hash_obj_keys or {},
+                job.expanded_uidx or [],
             )
-        found = job.found_result
-
-        # --- Global leg: poll the coordinator (bounded defer), best-effort. ---
-        global_segments = self._poll_coordinator_match(job, rid)
-        if global_segments is None:
-            return None  # coordinator still in flight, within the defer budget
+        else:
+            found = []
 
         prefix_tokens = job.prefix_chunks * chunk_size
         num_tokens = job.num_tokens
@@ -938,7 +911,6 @@ class BlendV3Module:
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
-            global_segments=global_segments,
         )
 
     def store(
@@ -1130,6 +1102,12 @@ class BlendV3Module:
         """
         chunk_size = self._ctx.chunk_size
         return [
+            CBMatchResult(
+                old_st=m.old_st,
+                old_ed=m.old_st + chunk_size,
+                cur_st=m.cur_st,
+                cur_ed=m.cur_st + chunk_size,
+                hash=bytes.fromhex(m.object_key),
             )
             for m in matches
         ]
