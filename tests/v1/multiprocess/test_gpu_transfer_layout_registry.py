@@ -81,6 +81,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     def fake_layout_desc(
         gpu_context: _FakeGPUContext,
         num_tokens: int,
+        object_group_id: int = 0,
     ) -> MemoryLayoutDesc:
         """Return the shared layout descriptor used by both registrations."""
         return layout_desc
