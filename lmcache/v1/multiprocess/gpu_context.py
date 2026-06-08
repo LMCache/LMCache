@@ -148,13 +148,16 @@ class GPUCacheContext:
             device=self.device_,
         )
 
-        # Register the staging buffer with the GDS cuFile context
-        get_gds_context().register_gpu_buffer(
-            self.tmp_gpu_buffer_, self.tmp_chunk_bytes_
-        )
-
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
+
+        # Register the staging buffer with the GDS cuFile context on the
+        # context's CUDA stream.
+        with torch_dev.stream(self.cuda_stream_):
+            get_gds_context().register_gpu_buffer(
+                self.tmp_gpu_buffer_, self.tmp_chunk_bytes_
+            )
+
         # Third Party
         import cupy
 
