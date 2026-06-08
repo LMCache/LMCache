@@ -301,8 +301,8 @@ class LMCBaseModel(nn.Module, ABC):
                     ffn_end = torch.cuda.Event(enable_timing=True)
                     ffn_start.record(stream)
                 skip_ffn = bool(getattr(self.blender, "skip_ffn", False))
-                if skip_ffn and bool(getattr(self.blender, "skip_ffn_only_costream", True)):
-                    skip_ffn = getattr(self.blender, "blend_mode", "") in ("costream",)
+                if skip_ffn and bool(getattr(self.blender, "skip_ffn_only_codecsight", True)):
+                    skip_ffn = getattr(self.blender, "blend_mode", "") in ("codecsight",)
                 if skip_ffn:
                     hidden_states = torch.zeros_like(hidden_states)
                 else:

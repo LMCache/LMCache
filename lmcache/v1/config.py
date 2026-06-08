@@ -186,7 +186,7 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "default": None,
         "env_converter": _to_int_list,
     },
-    "is_costream": {
+    "is_codecsight": {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,

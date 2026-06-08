@@ -627,7 +627,7 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                 # scoped cross-stream waits instead (the load_stream feeds
                 # rope on `stream`; both directions covered for the 2-buffer
                 # ping-pong). Validate output byte-identical when enabling.
-                if os.environ.get("VLLM_COSTREAM_ASYNC_OVERLAP", "0") == "1":
+                if os.environ.get("VLLM_CODECSIGHT_ASYNC_OVERLAP", "0") == "1":
                     stream.wait_stream(self.load_stream)
                     self.load_stream.wait_stream(stream)
                 else:

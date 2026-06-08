@@ -49,7 +49,7 @@ class LMCBlender:
         # TODO(Jiayi): support "skipping blending if hit too short"
         blend_mode = getattr(config, "blend_mode", "") or ""
         if not blend_mode:
-            blend_mode = "costream" if config.is_costream else "topk"
+            blend_mode = "codecsight" if config.is_codecsight else "topk"
         if blend_mode not in BLEND_MODES:
             logger.warning(
                 "Unknown blend_mode '%s', falling back to 'direct_reuse'. "
@@ -77,7 +77,7 @@ class LMCBlender:
             vlcache_recompute_ratio=self.vlcache_recompute_ratio,
         )
         self.skip_ffn = False
-        self.skip_ffn_only_costream = True
+        self.skip_ffn_only_codecsight = True
         # When True, blend_mode direct_reuse only runs layerwise GPU retrieve
         # (same KV load as enable_blending=False) and skips the redundant
         # layerwise_model.compute_layer pass that recomputes attention/FFN.
@@ -85,8 +85,8 @@ class LMCBlender:
         self._single_zero_idx: dict[torch.device, torch.Tensor] = {}
         if config.extra_config is not None:
             self.skip_ffn = bool(config.extra_config.get("skip_ffn", False))
-            self.skip_ffn_only_costream = bool(
-                config.extra_config.get("skip_ffn_only_costream", True)
+            self.skip_ffn_only_codecsight = bool(
+                config.extra_config.get("skip_ffn_only_codecsight", True)
             )
             if "direct_reuse_retrieve_only" in config.extra_config:
                 self.direct_reuse_retrieve_only = bool(
@@ -94,8 +94,8 @@ class LMCBlender:
                 )
         if self.skip_ffn:
             logger.warning(
-                "FFN skip is enabled (only_costream=%s). This may reduce output quality.",
-                self.skip_ffn_only_costream,
+                "FFN skip is enabled (only_codecsight=%s). This may reduce output quality.",
+                self.skip_ffn_only_codecsight,
             )
 
         # This will be set during the blending process
@@ -283,7 +283,7 @@ class LMCBlender:
         return positions.to(device=device, dtype=torch.int64)
 
     # ------------------------------------------------------------------
-    # Helpers shared by costream / vlcache selection paths
+    # Helpers shared by codecsight / vlcache selection paths
     # ------------------------------------------------------------------
 
     def _compute_hit_indices(self, effective_len: int, device: torch.device):
@@ -302,7 +302,7 @@ class LMCBlender:
         hit_mask[valid_gap] = False
         return torch.where(hit_mask)[0]
 
-    def _costream_select(
+    def _codecsight_select(
         self,
         hit_indices: torch.Tensor,
         effective_len: int,
@@ -570,7 +570,7 @@ class LMCBlender:
     ):
         """Dispatch to the appropriate blend strategy based on ``blend_mode``.
 
-        Supported modes: direct_reuse, topk, costream, vlcache.
+        Supported modes: direct_reuse, topk, codecsight, vlcache.
         """
         logger.debug("Blender is processing KV for layer %d", layer_id)
         try:
@@ -666,7 +666,7 @@ class LMCBlender:
             return q, k, v, residual, attn_output, attn_metadata
 
         # ==============================================================
-        # costream / vlcache: index-based selective recomputation
+        # codecsight / vlcache: index-based selective recomputation
         # ==============================================================
         _MIN_BLEND_TOKENS = 128
         first_layer = self.metadata.imp_indices is None
@@ -682,8 +682,8 @@ class LMCBlender:
                 q, _ = rotary(self.metadata.positions, q, k)
                 return q, old_k, old_v, residual, attn_output, attn_metadata
             hit_indices = self._compute_hit_indices(effective_len, q.device)
-            if self.blend_mode == "costream":
-                selected = self._costream_select(
+            if self.blend_mode == "codecsight":
+                selected = self._codecsight_select(
                     hit_indices, effective_len, q.device,
                 )
             else:

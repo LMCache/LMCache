@@ -684,23 +684,23 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
-        # Deferred costream blenders (pipelining A): stepped per-layer from
+        # Deferred codecsight blenders (pipelining A): stepped per-layer from
         # wait_for_layer_load so the per-layer KV load overlaps prefill.
         self.layerwise_blenders: list[
             Generator[None, None, None]
         ] = []
-        self._costream_pipeline = (
-            os.environ.get("VLLM_COSTREAM_PIPELINE", "0") == "1"
+        self._codecsight_pipeline = (
+            os.environ.get("VLLM_CODECSIGHT_PIPELINE", "0") == "1"
         )
         # Async overlap prototype: run the deferred blender on a side CUDA
         # stream one layer ahead so blend(L+1)'s recompute overlaps prefill(L).
         # Implies the deferred-blender path. Requires the gpu_connector's
         # per-layer global sync to be scoped (gated on the same env var).
         self._async_overlap = (
-            os.environ.get("VLLM_COSTREAM_ASYNC_OVERLAP", "0") == "1"
+            os.environ.get("VLLM_CODECSIGHT_ASYNC_OVERLAP", "0") == "1"
         )
         if self._async_overlap:
-            self._costream_pipeline = True
+            self._codecsight_pipeline = True
         self._blend_stream = None  # lazily created (needs CUDA device)
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
@@ -1315,7 +1315,7 @@ class LMCacheConnectorV1Impl:
                         deferred_blender = self.blender.blend(
                             tokens[:lmcache_cached_tokens],
                             token_mask[:lmcache_cached_tokens],
-                            defer=self._costream_pipeline,
+                            defer=self._codecsight_pipeline,
                             kvcaches=kvcaches,
                             slot_mapping=slot_mapping[:lmcache_cached_tokens],
                             tokens_per_frame=request.tokens_per_frame,
@@ -1480,7 +1480,7 @@ class LMCacheConnectorV1Impl:
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
 
-        # Pipelining A / async overlap: step deferred costream blenders one
+        # Pipelining A / async overlap: step deferred codecsight blenders one
         # layer at a time. blend_layer yields None each step (no token mask).
         if self._async_overlap and self.layerwise_blenders:
             # The blender is one layer ahead (2x prime). At this hook for

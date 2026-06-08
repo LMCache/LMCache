@@ -6,7 +6,7 @@ from typing import List, Optional, Sequence, Any
 # Third Party
 import torch
 
-BLEND_MODES = ("direct_reuse", "topk", "costream", "vlcache")
+BLEND_MODES = ("direct_reuse", "topk", "codecsight", "vlcache")
 
 @dataclass
 class LMCBlendCommonMetadata:
@@ -17,7 +17,7 @@ class LMCBlendCommonMetadata:
     check_layers: List[int]
     recomp_ratios: Optional[List[float]] = None
     thresholds: Optional[List[float]] = None
-    blend_mode: str = "costream"
+    blend_mode: str = "codecsight"
     GOP: int = 8
     vlcache_recompute_ratio: float = 0.05
 
