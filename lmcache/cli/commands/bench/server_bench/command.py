@@ -33,6 +33,8 @@ Usage examples::
 from __future__ import annotations
 
 # Standard
+from multiprocessing import shared_memory
+from multiprocessing.resource_tracker import unregister
 from typing import TYPE_CHECKING
 import argparse
 import itertools
@@ -51,7 +53,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
     _IMPORT_ERROR,
     DTYPE_MAP,
-    _allocate_gpu_kv_cache,
+    _allocate_kv_cache,
     _get_chunk_size,
     _process_request,
     _require_full_install,
@@ -127,12 +129,29 @@ def register_server_parser(
         default="tcp://localhost:5555",
         help=("ZMQ endpoint of the MP server (default: tcp://localhost:5555)"),
     )
-    # TODO(maobaolong): add "cpu" choice once CPU mode is implemented.
     parser.add_argument(
         "--mode",
-        choices=["gpu"],
+        choices=["cpu", "gpu"],
         default="gpu",
-        help="Run mode (default: gpu)",
+        help=(
+            "Run mode (default: gpu). In cpu mode the bench drives "
+            "the data-transfer path: the server allocates a SHM pool "
+            "and the client gathers/scatters chunks via slot "
+            "descriptors. CPU handle mode is not yet supported."
+        ),
+    )
+    parser.add_argument(
+        "--transfer-mode",
+        choices=["auto", "handle", "data"],
+        default="auto",
+        help=(
+            "Transport routing for STORE/RETRIEVE (default: auto). "
+            "`handle` forces the GPU-style single-shot path "
+            "(REGISTER_KV_CACHE + STORE/RETRIEVE). "
+            "`data` forces the worker-side gather/scatter path "
+            "(REGISTER_KV_CACHE_NON_GPU_CONTEXT + PREPARE/COMMIT). "
+            "`auto` keeps the historical mapping: gpu->handle, cpu->data."
+        ),
     )
     parser.add_argument(
         "--num-tokens",
@@ -240,17 +259,31 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
     )
     from lmcache.v1.multiprocess.mq import MessageQueueClient
 
-    if not torch_dev.is_available():
+    use_gpu = args.mode == "gpu"
+    if use_gpu and not torch_dev.is_available():
         print("ERROR: --mode gpu requires CUDA")
         sys.exit(1)
 
+    # Resolve transfer mode. ``auto`` reproduces the historical
+    # behaviour: gpu -> handle path, cpu -> data path.
+    transfer_mode = args.transfer_mode
+    if transfer_mode == "auto":
+        use_handle = use_gpu
+    elif transfer_mode == "handle":
+        use_handle = True
+    else:
+        use_handle = False
+
     url = args.rpc_url
     print(
-        "Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, args.mode),
+        "Connecting to LMCache MP Server at %s (mode=%s, transfer=%s) ..."
+        % (url, args.mode, transfer_mode),
     )
 
     ctx = zmq.Context()
     client = MessageQueueClient(url, ctx)
+    server_shm: "shared_memory.SharedMemory | None" = None
+    server_pool: "memoryview | None" = None
 
     try:
         # Query chunk size from server
@@ -270,7 +303,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         )
         # Paged KV demands identical ``NB`` / ``BS`` across all groups
         # (block_id -> slot maths is shared), but ``kv_size`` / ``NH`` /
-        # ``HS`` / ``dtype`` may vary per group. ``_allocate_gpu_kv_cache(
+        # ``HS`` / ``dtype`` may vary per group. ``_allocate_kv_cache(
         # groups=...)`` honours each group's own shape; ``_process_request``
         # only needs a single ``block_size`` / ``total_blocks``.
         first = layer_groups[0]
@@ -356,23 +389,64 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             )
         )
 
-        # Allocate GPU tensors — one tensor per layer, shaped according
-        # to that layer's group in the spec (so heterogeneous ``nh`` /
-        # ``hs`` / ``dtype`` / ``kv_size`` are honoured).
-        gpu_tensors = _allocate_gpu_kv_cache(groups=layer_groups)
-        print(
-            "Allocated %d GPU tensors on %s"
-            % (len(gpu_tensors), gpu_tensors[0].device),
-        )
+        # Allocate KV tensors. GPU mode wraps real CUDA tensors
+        # via CUDA IPC; CPU mode (data transfer mode) allocates
+        # plain CPU tensors used for client-side checksum self-check.
+        # TODO(baoloongmao): CPU handle mode (zero-copy SHM IPC with
+        # the server) will be implemented in a separate PR.
+        if use_gpu:
+            # First Party
+            from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
 
-        # Register KV cache before any store/retrieve
-        ok = _send_register_kv_cache(
+            allocated = _allocate_kv_cache(groups=layer_groups, use_gpu=True)
+            print(
+                "Allocated %d GPU tensors on %s" % (len(allocated), allocated[0].device)
+            )
+            kv_wrappers: list = [CudaIPCWrapper(t) for t in allocated]
+            client_kv_tensors = allocated
+        else:
+            if use_handle:
+                print(
+                    "ERROR: --mode cpu --transfer-mode handle is not yet "
+                    "supported in this PR (TODO: separate PR)."
+                )
+                sys.exit(1)
+            cpu_tensors = _allocate_kv_cache(groups=layer_groups, use_gpu=False)
+            print("Allocated %d CPU tensors" % len(cpu_tensors))
+            kv_wrappers = []
+            client_kv_tensors = cpu_tensors
+
+        # Register KV cache before any store/retrieve.
+        register_ok, register_response = _send_register_kv_cache(
             client,
             layout_hints=layout_hints,
-            gpu_tensors=gpu_tensors,
+            kv_caches=kv_wrappers if use_handle else None,
+            use_gpu=use_gpu,
+            use_handle=use_handle,
         )
-        print("REGISTER_KV_CACHE: %s" % ("OK" if ok else "FAIL"))
+        print("REGISTER_KV_CACHE: %s" % ("OK" if register_ok else "FAIL"))
         print()
+
+        # In data mode the server reply carries the SHM pool name
+        # and size; the bench attaches to the same pool so
+        # STORE/RETRIEVE can exchange tensor data via slot
+        # descriptors. We open via :class:`SharedMemory` (matching
+        # the server-side allocator in ``transfer_context/shm.py``)
+        # and unregister from the worker's resource tracker so the
+        # segment is not unlinked when the bench exits -- the server
+        # owns its lifetime.
+        if not use_handle and register_ok and register_response is not None:
+            shm_name = register_response.shm_name
+            pool_size = register_response.pool_size
+            if shm_name and pool_size > 0:
+                server_shm = shared_memory.SharedMemory(
+                    name=shm_name.lstrip("/"), create=False
+                )
+                try:
+                    unregister("/%s" % server_shm.name, "shared_memory")
+                except KeyError:
+                    pass
+                server_pool = server_shm.buf
 
         if args.end is not None:
             seq_iter: itertools.count | range = range(args.start, args.end)
@@ -380,6 +454,11 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             seq_iter = itertools.count(args.start)
 
         http_base = args.url.rstrip("/")
+
+        # In data mode the server has no paged kv_tensors view to
+        # hash, so we self-check on the client. Handle mode keeps
+        # the legacy server-side /kvcache/check path.
+        client_tensors = None if use_handle else client_kv_tensors
 
         for seq_no in seq_iter:
             print("=== Request seq=%d ===" % seq_no)
@@ -395,6 +474,10 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                 block_size=block_size,
                 total_blocks=num_blocks,
                 num_group_views=num_group_views,
+                use_gpu=use_gpu,
+                use_handle=use_handle,
+                client_tensors=client_tensors,
+                server_pool=server_pool,
             )
 
             time.sleep(args.interval)
@@ -410,6 +493,10 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
                 block_size=block_size,
                 total_blocks=num_blocks,
                 num_group_views=num_group_views,
+                use_gpu=use_gpu,
+                use_handle=use_handle,
+                client_tensors=client_tensors,
+                server_pool=server_pool,
             )
 
             # Compare checksums
@@ -440,6 +527,21 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
+        # Release the bench-side view of the server SHM pool first
+        # (data mode only; server_shm stays None otherwise). The
+        # ``memoryview`` returned by ``SharedMemory.buf`` must be
+        # released before ``SharedMemory.close``, otherwise CPython
+        # raises ``BufferError`` on shutdown.
+        if server_pool is not None:
+            try:
+                server_pool.release()
+            except (BufferError, ValueError):
+                pass
+        if server_shm is not None:
+            try:
+                server_shm.close()
+            except (BufferError, ValueError):
+                pass
         client.close()
         ctx.term()
     print("Done.")

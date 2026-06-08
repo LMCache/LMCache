@@ -182,6 +182,9 @@ class StorageManagerConfig:
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
 
+    periodic_notifier_interval_ms: int = 5
+    """ Interval (ms) for the periodic event notifier heartbeat. """
+
 
 def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
     memory_config = config.l1_manager_config.memory_config
@@ -356,6 +359,12 @@ def add_storage_manager_args(
         default=8,
         help="Maximum number of concurrent prefetch requests. Default is 8.",
     )
+    policy_group.add_argument(
+        "--periodic-notifier-interval-ms",
+        type=int,
+        default=5,
+        help="Interval in ms for the periodic event notifier heartbeat. Default is 5.",
+    )
 
     # Adapter config
     add_l2_adapters_args(parser)
@@ -421,6 +430,7 @@ def parse_args_to_config(
         store_policy=args.l2_store_policy,
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
+        periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
     normalize_storage_manager_config(config)
     return config

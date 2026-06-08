@@ -13,6 +13,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.python_ops_fallback import set_shape_desc_dtype
 import lmcache.c_ops as lmc_ops
 
 if TYPE_CHECKING:
@@ -50,6 +51,12 @@ DTYPE_MAP: dict[str, torch.dtype] = {
 LayerGroupIdentity = tuple[int, int, int, int, int, torch.dtype]
 
 
+# Sentinel ``per_layer_engine_group_idx`` value: a KV tensor tagged with it is
+# excluded from every LMCache group (used for cross-layer KV-sharing layers; see
+# ``create_group_views_from_vllm``).
+EXCLUDED_ENGINE_GROUP = -1
+
+
 def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
     gpu_kv_format: "lmc_ops.GPUKVFormat",
@@ -71,6 +78,9 @@ def group_layers_by_identity(
             block group id. When ``None`` every layer is treated as block group
             0 (non-hybrid); when present, layers from different engine block
             groups never share an identity even if their tensor shapes match.
+            Layers whose value is ``EXCLUDED_ENGINE_GROUP`` are left out of all
+            groups (e.g. cross-layer KV-sharing layers whose KV lives in their
+            target owner's blocks).
 
     Returns:
         A list of ``(identity, layer_indices)`` pairs sorted by each group's
@@ -90,15 +100,19 @@ def group_layers_by_identity(
     kv_size = 1 if mla else 2
     groups_dict: dict[LayerGroupIdentity, list[int]] = defaultdict(list)
     for idx in range(num_layers):
-        nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
-        hs = get_head_size(kv_caches, gpu_kv_format, idx)
-        dt = get_dtype(kv_caches, gpu_kv_format, idx)
-        bs = get_block_size(kv_caches, gpu_kv_format, idx)
         engine_group_idx = (
             per_layer_engine_group_idx[idx]
             if per_layer_engine_group_idx is not None
             else 0
         )
+        # Skip layers explicitly excluded from grouping (e.g. cross-layer
+        # KV-sharing layers, whose KV lives in their target owner's blocks).
+        if engine_group_idx == EXCLUDED_ENGINE_GROUP:
+            continue
+        nh = 1 if mla else get_num_heads(kv_caches, gpu_kv_format, idx)
+        hs = get_head_size(kv_caches, gpu_kv_format, idx)
+        dt = get_dtype(kv_caches, gpu_kv_format, idx)
+        bs = get_block_size(kv_caches, gpu_kv_format, idx)
         groups_dict[(kv_size, nh, hs, bs, engine_group_idx, dt)].append(idx)
     return sorted(groups_dict.items(), key=lambda kv: kv[1][0])
 
@@ -312,10 +326,18 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
+            # Per-group logical block size: a group's own block_size can exceed
+            # the global GCD hint (e.g. gemma-4 sliding=32, hint=16).
+            # ``max(hint, bs)`` gives compress_ratio=1 for uncompressed groups
+            # and the engine block size for compressed ones (bs < hint, DeepSeek).
+            global_logical = self.inference_engine_logical_block_size_
+            group_logical_block_size = (
+                max(global_logical, bs) if global_logical is not None else None
+            )
             compress_ratio, physical_chunk_size = self._derive_compression_metadata(
                 group_idx=group_idx,
                 bs=bs,
-                ie_logical_block_size=self.inference_engine_logical_block_size_,
+                ie_logical_block_size=group_logical_block_size,
                 lmcache_logical_chunk_size=lmcache_logical_chunk_size,
             )
 
@@ -548,6 +570,7 @@ def parse_kvcache_shape_spec(
         shape_desc.nh = nh
         shape_desc.hs = hs
         shape_desc.element_size = dtype.itemsize
+        set_shape_desc_dtype(shape_desc, dtype)
 
         indices = list(range(layer_offset, layer_offset + layer_count))
         groups.append(

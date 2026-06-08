@@ -8,7 +8,7 @@
 #   2. Snapshot lmcache_mp_l1_write_chunks_total via /metrics.
 #   3. Kill the LMCache server, relaunch on the same port.
 #   4. Wait for the new server to be ready and for the worker to
-#      re-register (poll /status until gpu_context_meta is non-empty).
+#      re-register (poll /status until cache_context_meta is non-empty).
 #   5. Run the same bench round again.
 #   6. Snapshot the metric again.
 #   7. Assert run2 > 0 and run2 >= 0.8 * run1.
@@ -142,7 +142,7 @@ wait_for_lmcache_http() {
 }
 
 wait_for_worker_reregister() {
-    # Poll /status until gpu_context_meta has at least one entry,
+    # Poll /status until cache_context_meta has at least one entry,
     # which proves the vLLM worker re-registered with the new server.
     local deadline=$(( $(date +%s) + RECOVER_TIMEOUT ))
     while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -152,13 +152,13 @@ import json, urllib.request
 try:
     body = urllib.request.urlopen("http://localhost:${LMCACHE_HTTP_PORT}/status", timeout=5).read()
     data = json.loads(body)
-    print(len(data.get("gpu_context_meta", {})))
+    print(len(data.get("cache_context_meta", {})))
 except Exception:
     print(0)
 EOF
 )
         if [ "$count" -gt 0 ]; then
-            echo "Worker re-registered (gpu_context_meta entries: $count)"
+            echo "Worker re-registered (cache_context_meta entries: $count)"
             return 0
         fi
         sleep 2
