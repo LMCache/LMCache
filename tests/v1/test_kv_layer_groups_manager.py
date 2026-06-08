@@ -9,8 +9,13 @@ import torch
 # First Party
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
+    EXCLUDED_ENGINE_GROUP,
+    KernelGroupIdentity,
+    KernelGroupInfo,
     KVLayerGroupInfo,
     KVLayerGroupsManager,
+    LayerGroupIdentity,
+    ObjectGroupInfo,
     format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
@@ -304,6 +309,107 @@ class TestDeriveCompressionMetadata:
         # Divisibility is enforced loudly (e.g. bs=6 does not divide 16).
         with pytest.raises(ValueError, match="must be a multiple of"):
             self._derive(bs=6, logical=16)
+
+
+class TestKernelGroupIdentity:
+    """The grouping key is a named tuple; ``LayerGroupIdentity`` is its alias."""
+
+    def test_fields_and_alias(self):
+        ident = KernelGroupIdentity(
+            kv_size=2,
+            num_heads=8,
+            head_size=64,
+            block_size=16,
+            engine_group_idx=0,
+            dtype=torch.float16,
+        )
+        assert ident.kv_size == 2
+        assert ident.num_heads == 8
+        assert ident.head_size == 64
+        assert ident.block_size == 16
+        assert ident.engine_group_idx == 0
+        assert ident.dtype == torch.float16
+        assert LayerGroupIdentity is KernelGroupIdentity
+
+    def test_hashable_as_dict_key(self):
+        ident = KernelGroupIdentity(2, 8, 64, 16, 0, torch.float16)
+        assert {ident: "x"}[ident] == "x"
+
+    def test_excluded_engine_group_sentinel(self):
+        assert EXCLUDED_ENGINE_GROUP == -1
+
+
+class TestKernelAndObjectGroups:
+    """Kernel-group accessors, deprecated aliases, and the (currently single)
+    object-group layout."""
+
+    def test_kernel_groups_match_deprecated_alias(self):
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
+        ]
+        manager = _build_manager(tensors, num_blocks=32)
+        # The deprecated alias must still return the live list, not a bound
+        # method (regression guard for the @property/@deprecate ordering).
+        assert isinstance(manager.kv_layer_groups, list)
+        assert manager.kernel_groups is manager.kv_layer_groups
+        assert manager.num_kernel_groups == manager.num_groups
+        assert manager.num_kernel_groups == len(manager.kernel_groups)
+        assert all(isinstance(g, KernelGroupInfo) for g in manager.kernel_groups)
+
+    def test_single_object_group_covers_all_kernel_groups(self):
+        # Two distinct kernel groups (different num_heads) still share one
+        # object group under the current single-object-group assumption.
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
+        ]
+        manager = _build_manager(tensors, num_blocks=32)
+        assert manager.num_kernel_groups == 2
+        assert manager.num_object_groups == 1
+        obj = manager.object_groups[0]
+        assert isinstance(obj, ObjectGroupInfo)
+        assert obj.kernel_group_indices == list(range(manager.num_kernel_groups))
+
+    def test_empty_manager_has_no_groups(self):
+        # Empty registration returns early in __init__; both group lists must
+        # still be initialized (regression guard for missing _object_groups).
+        manager = _build_manager([], num_blocks=32)
+        assert manager.kernel_groups == []
+        assert manager.num_kernel_groups == 0
+        assert manager.object_groups == []
+        assert manager.num_object_groups == 0
+
+    def test_excluded_layer_left_out_of_all_groups(self):
+        # Layer 2 is referenced by no group view, so it is excluded entirely.
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            group_views=[LMCacheGroupView(0, (0, 1))],
+        )
+        grouped = sorted(
+            idx for group in manager.kernel_groups for idx in group.layer_indices
+        )
+        assert grouped == [0, 1]
+
+    def test_calculate_num_blocks_uncompressed(self):
+        # bs=16, compress_ratio=1 -> 256 tokens span 16 blocks.
+        tensors = [torch.randn(2, 32, 16, 8, 64, dtype=torch.float16) for _ in range(2)]
+        manager = _build_manager(tensors, num_blocks=32)
+        assert manager.calculate_num_blocks(0, 256) == 16
+
+    def test_calculate_num_blocks_compressed(self):
+        # bs=8, ie_logical_block_size=16 -> compress_ratio=2;
+        # 256 logical tokens -> 128 physical slots -> 128 // 8 = 16 blocks.
+        tensors = [torch.randn(2, 32, 8, 8, 64, dtype=torch.float16) for _ in range(2)]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            layout_hints={"inference_engine_logical_block_size": 16},
+        )
+        assert manager.calculate_num_blocks(0, 256) == 16
 
 
 if __name__ == "__main__":
