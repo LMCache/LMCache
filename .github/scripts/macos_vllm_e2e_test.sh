@@ -106,11 +106,11 @@ echo ""
 echo "=== Phase 1: Install vLLM CPU build ==="
 
 echo "==> Installing numpy<2 for scipy/vLLM compatibility"
-pip install "numpy<2"
+uv pip install "numpy<2"
 echo "    numpy<2 installed"
 
 echo "==> Installing vLLM CPU build"
-pip install vllm \
+uv pip install vllm \
     --extra-index-url \
     https://wheels.vllm.ai/71df063c494c111ab60f6a33c54aafe7b9ae1d02/cpu \
     --index-strategy first-index \
