@@ -62,6 +62,9 @@ def test_accessors():
     assert U.get_page_buffer_size(norm, fmt) == NB * BS
     assert U.get_tokens_per_layer(norm, fmt) == NB * BS
     assert U.get_elements_per_layer(norm, fmt) == NB * NH * BS * HS * 2
+    # get_dtype is on the register_kv_caches -> group_layers_by_identity path,
+    # so it must recognize this format too.
+    assert U.get_dtype(norm, fmt) == _raw_cpu_caches()[0].dtype
     assert U.is_hnd(fmt) is True
     assert not U.is_mla(fmt)
 

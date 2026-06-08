@@ -1143,6 +1143,7 @@ def get_dtype(
         lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS,
         lmc_ops.GPUKVFormat.NL_X_NBBS_ONE_HS,
+        lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS,
     ):
         return kv_caches[layer_idx].dtype
     elif gpu_kv_format in (
