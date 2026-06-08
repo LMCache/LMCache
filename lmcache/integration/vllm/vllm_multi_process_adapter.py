@@ -149,7 +149,7 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     wrappers: KVCache = []
     try:
         for tensor in kv_caches.values():
-            wrappers.append(_wrap_one_kv_cache(tensor))
+            wrappers.append(wrap_one_kv_cache(tensor))
     except BaseException:
         _release_partial_kv_wrappers(wrappers)
         raise
@@ -165,7 +165,7 @@ def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
     are silently skipped.
     """
     # First Party
-    from lmcache.v1.platform.cpu.shm import shm_unlink
+    from lmcache.v1.multiprocess.posix_shm import shm_unlink
 
     for w in wrappers:
         name = getattr(w, "shm_name", None)
@@ -177,7 +177,7 @@ def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
             logger.debug("shm_unlink failed during rollback", exc_info=True)
 
 
-def _wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
+def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
     """Dispatch by ``tensor.device.type`` via the platform registry.
 
     Concrete factories self-register at import time (CUDA in
@@ -475,7 +475,19 @@ class LoadStoreOp:
 
     @property
     def flat_block_ids(self) -> list[int]:
-        """Return all block IDs flattened for group-blind error paths."""
+        """Return all block IDs flattened for group-blind error paths.
+
+        Handles both the normal ``list[list[int]]`` format and the
+        IPC-flattened ``list[int]`` format that vLLM v0.19.0 produces when
+        ``SchedulerOutput`` serializes single-element nested lists across
+        process boundaries (e.g. ``[[20, 21]]`` → ``[20, 21]``).
+        Returns an empty list when ``block_ids`` is empty.
+        """
+        if not self.block_ids:
+            return []
+        # Defend against IPC serialization flattening [[20, 21, …]] → [20, 21, …]
+        if isinstance(self.block_ids[0], int):
+            return list(self.block_ids)
         return [
             block_id
             for group_block_ids in self.block_ids

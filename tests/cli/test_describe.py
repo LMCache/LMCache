@@ -29,7 +29,7 @@ SAMPLE_STATUS = {
     "chunk_size": 256,
     "hash_algorithm": "sha256",
     "registered_gpu_ids": [0],
-    "gpu_context_meta": {
+    "cache_context_meta": {
         "0": {
             "model_name": "llama",
             "world_size": 1,
