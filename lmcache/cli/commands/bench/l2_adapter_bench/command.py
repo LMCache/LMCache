@@ -125,9 +125,8 @@ def register_l2_parser(
             "never stored. Default: 0.0."
         ),
     )
-    # Round-trip verification is OFF by default (cheaper memory
-    # footprint: see make_memory_objects' share_buffer layout).
-    # Use --no-skip-verify to enable verification.
+    # Round-trip verification is OFF by default. Use --no-skip-verify
+    # to compare store and load buffers after the measured rounds.
     parser.add_argument(
         "--skip-verify",
         action=argparse.BooleanOptionalAction,
@@ -238,10 +237,15 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     # Use the first adapter config for benchmarking
     adapter_cfg = l2_cfg.adapters[0]
 
-    # Backing L1 memory buffer for adapters that need an L1 desc.
-    # Sized for one in-flight wave of store + load buffers.
+    # Backing L1 memory buffer for adapters that need an L1 desc. The buffer
+    # is eagerly reserved for one in-flight store wave and one in-flight load
+    # wave; store/load MemoryObj views are created lazily below.
+    l1_slot_size = ((data_size + l1_align_bytes - 1) // l1_align_bytes) * (
+        l1_align_bytes
+    )
+    l1_direction_bytes = keys_per_round * l1_slot_size
     l1_buffer = make_aligned_l1_buffer(
-        2 * keys_per_round * data_size,
+        2 * l1_direction_bytes,
         align_bytes=l1_align_bytes,
     )
     l1_memory_desc = create_l1_memory_desc(
@@ -282,20 +286,29 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             for i in range(in_flight)
         ]
 
-    def _build_round_objs() -> list[list]:
+    def _build_round_objs(start_offset: int) -> list[list]:
         """Allocate per-submit object batches for one round.
 
-        Every key in every batch gets its OWN ``data_size`` tensor,
+        Every key in every batch gets its OWN L1-backed tensor view,
         pre-filled with a distinguishing byte pattern. This keeps
         ``verify_round_trip`` meaningful (it can detect cross-key
         corruption after a store -> load cycle) and keeps the
         memory layout consistent regardless of whether verify is
         actually run.
 
-        Per-round (per direction) memory:
-        ``in_flight * num_keys * data_size`` bytes.
+        Per direction, the returned views cover:
+        ``in_flight * num_keys * l1_slot_size`` bytes.
         """
-        return [make_memory_objects(num_keys, data_size) for _ in range(in_flight)]
+        return [
+            make_memory_objects(
+                num_keys,
+                data_size,
+                l1_buffer,
+                start_offset + i * num_keys * l1_slot_size,
+                align_bytes=l1_align_bytes,
+            )
+            for i in range(in_flight)
+        ]
 
     # Lookup hit/miss split per round.
     per_round_hit = int(keys_per_round * max_hit_rate)
@@ -327,29 +340,28 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Per-direction object batches for store / load.
     #
-    # Allocation strategy:
-    # * Lazy: only allocate when the corresponding direction is
-    #   actually exercised. With ``--only store`` we never touch
-    #   load buffers (and vice versa), saving
-    #   ``in_flight * num_keys * data_size`` bytes of host memory.
-    # * Cross-round reuse: once allocated, the same batches are
-    #   fed into every round; only the keys change per round. The
-    #   L2 adapter does not care about object identity across
-    #   rounds, and re-allocating these buffers each round would
-    #   just be wasted work.
+    # Object-view construction strategy:
+    # * Direction-lazy: only create MemoryObj wrappers/views when the
+    #   corresponding operation runs. The backing L1 buffer was already
+    #   reserved above, so this saves wrapper construction and buffer
+    #   initialization work, not the reserved L1 capacity.
+    # * Cross-round reuse: once created, the same batches are fed into every
+    #   round; only the keys change per round. The L2 adapter does not care
+    #   about object identity across rounds, and rebuilding the views each
+    #   round would just be wasted work.
     store_obj_batches: list[list] | None = None
     load_obj_batches: list[list] | None = None
 
     def _store_objs(_r: int) -> list[list]:
         nonlocal store_obj_batches
         if store_obj_batches is None:
-            store_obj_batches = _build_round_objs()
+            store_obj_batches = _build_round_objs(0)
         return store_obj_batches
 
     def _load_objs(_r: int) -> list[list]:
         nonlocal load_obj_batches
         if load_obj_batches is None:
-            load_obj_batches = _build_round_objs()
+            load_obj_batches = _build_round_objs(l1_direction_bytes)
         return load_obj_batches
 
     results: list = []
@@ -424,7 +436,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             # the last measured round, and load buffers now hold what
             # the adapter returned. Compare against the byte pattern
             # written by store (i & 0xFF, where i is position within
-            # the batch — see make_memory_objects).
+            # the batch; see make_memory_objects).
             log(
                 "[Verify] Checking store -> load data integrity for last "
                 "measured round..."

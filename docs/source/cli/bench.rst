@@ -1165,10 +1165,9 @@ round against the byte pattern that ``store`` wrote (see
    [Verify] Checking store -> load data integrity for last measured round...
    [Verify] OK
 
-Verification is **off** by default because the stricter byte pattern
-also forces every key to allocate its own ``data_size`` buffer
-(otherwise the runner is free to reuse a single shared buffer across
-keys to keep the memory footprint small).
+Verification is **off** by default so the benchmark can focus on L2
+adapter throughput unless byte-for-byte store/load validation is
+explicitly requested.
 
 
 Exit codes
