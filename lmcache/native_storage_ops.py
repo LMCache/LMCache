@@ -164,22 +164,53 @@ class Bitmap:
 
     # -- single-bit ops -----------------------------------------------------
     def set(self, index: int) -> None:
+        """Set the bit at the specified index to 1.
+
+        Out-of-range indices are silently ignored.
+
+        Args:
+            index: The bit position to set.
+        """
         if 0 <= index < self._size:
             byte_idx = self._byte_index(index)
             bit_offset = self._bit_offset(index)
             self._data[byte_idx] |= 1 << bit_offset
 
     def batched_set(self, indices: Sequence[int]) -> None:
+        """Set multiple bits at once.
+
+        Out-of-range indices are silently ignored.
+
+        Args:
+            indices: Sequence of bit positions to set.
+        """
         for i in indices:
             self.set(i)
 
     def clear(self, index: int) -> None:
+        """Clear the bit at the specified index (set to 0).
+
+        Out-of-range indices are silently ignored.
+
+        Args:
+            index: The bit position to clear.
+        """
         if 0 <= index < self._size:
             byte_idx = self._byte_index(index)
             bit_offset = self._bit_offset(index)
             self._data[byte_idx] &= ~(1 << bit_offset)
 
     def test(self, index: int) -> bool:
+        """Return True if the bit at the specified index is set.
+
+        Returns False for out-of-range indices.
+
+        Args:
+            index: The bit position to test.
+
+        Returns:
+            True if the bit is set, False otherwise.
+        """
         if 0 <= index < self._size:
             byte_idx = self._byte_index(index)
             bit_offset = self._bit_offset(index)
@@ -188,6 +219,11 @@ class Bitmap:
 
     # -- aggregates ---------------------------------------------------------
     def popcount(self) -> int:
+        """Return the number of set bits (population count).
+
+        Returns:
+            The count of bits that are set to 1.
+        """
         if not self._data:
             return 0
         count = 0
@@ -202,6 +238,12 @@ class Bitmap:
         return count
 
     def count_leading_zeros(self) -> int:
+        """Return the number of consecutive zero bits starting from index 0.
+
+        Returns:
+            The count of leading zero bits. Returns 0 if bit 0 is set,
+            and ``size`` if all bits are zero.
+        """
         if self._size == 0:
             return 0
         count = 0
@@ -225,6 +267,12 @@ class Bitmap:
         return count
 
     def count_leading_ones(self) -> int:
+        """Return the number of consecutive one bits starting from index 0.
+
+        Returns:
+            The count of leading one bits. Returns 0 if bit 0 is clear,
+            and ``size`` if all bits are set.
+        """
         inverted = ~self
         return inverted.count_leading_zeros()
 
@@ -259,6 +307,11 @@ class Bitmap:
 
     # -- introspection ------------------------------------------------------
     def get_indices_list(self) -> list[int]:
+        """Return a sorted list of indices of all set bits.
+
+        Returns:
+            A list of bit positions (in ascending order) that are set to 1.
+        """
         indices: list[int] = []
         for i in range(len(self._data)):
             byte = self._data[i]
@@ -274,9 +327,23 @@ class Bitmap:
         return indices
 
     def get_indices_set(self) -> Set[int]:
+        """Return a set of indices of all set bits.
+
+        Returns:
+            A set of bit positions that are set to 1.
+        """
         return set(self.get_indices_list())
 
     def gather(self, items: Sequence[Any]) -> list[Any]:
+        """Collect items at positions where the corresponding bit is set.
+
+        Args:
+            items: A sequence to index into. Items beyond ``len(items)`` are
+                silently skipped.
+
+        Returns:
+            A list of elements from ``items`` at the set bit positions.
+        """
         return [items[i] for i in self.get_indices_list() if i < len(items)]
 
     def __repr__(self) -> str:
@@ -306,6 +373,14 @@ class ParallelPatternMatcher:
         self._pattern: list[int] = list(pattern)
 
     def match(self, data: list[int]) -> list[int]:
+        """Find all starting positions where the pattern occurs in data.
+
+        Args:
+            data: The integer sequence to search in.
+
+        Returns:
+            A sorted list of starting positions where the pattern is found.
+        """
         pat = self._pattern
         m = len(pat)
         if m == 0 or len(data) < m:
@@ -432,7 +507,12 @@ class PeriodicEventNotifier:
             # avoids the lost-wakeup race where shutdown() fires while we're
             # between releasing the lock above and re-acquiring it here.
             with self._cv:
-                self._cv.wait_for(lambda: self._stop, timeout=interval)
+                current_interval = self._interval_s
+
+                def _should_wake(ci: float = current_interval) -> bool:
+                    return self._stop or not self._fds or self._interval_s != ci
+
+                self._cv.wait_for(_should_wake, timeout=interval)
                 if self._stop:
                     break
 
@@ -469,6 +549,20 @@ class RangePatternMatcher:
         self._end: list[int] = list(end_pattern)
 
     def match(self, data: list[int]) -> list[tuple[int, int]]:
+        """Find all (start, end) ranges delimited by the start/end patterns.
+
+        Produces minimal non-overlapping ranges: for each start-pattern
+        occurrence, the first subsequent end-pattern occurrence is matched.
+
+        Args:
+            data: The integer sequence to search in.
+
+        Returns:
+            A list of ``(start_pos, end_pos)`` tuples where ``start_pos`` is
+            the index of the first element of the start pattern and
+            ``end_pos`` is the index one past the last element of the end
+            pattern.
+        """
         ranges: list[tuple[int, int]] = []
         start_len = len(self._start)
         end_len = len(self._end)
