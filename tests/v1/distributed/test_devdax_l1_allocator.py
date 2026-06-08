@@ -16,11 +16,14 @@ import torch
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
+    EvictionConfig,
     L1ManagerConfig,
     L1MemoryManagerConfig,
+    StorageManagerConfig,
     parse_args,
 )
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import DevDaxMemoryAllocator
@@ -46,6 +49,26 @@ def _key(seed: int = 0) -> ObjectKey:
 
 def _layout(num_bytes: int = 4096) -> MemoryLayoutDesc:
     return MemoryLayoutDesc(shapes=[torch.Size([num_bytes])], dtypes=[torch.uint8])
+
+
+class _FakeMooncakeL2Config:
+    def __init__(self, setup_config: dict[str, str]):
+        self.setup_config = setup_config
+
+
+def _hybrid_storage_config(path: str, adapter_config) -> StorageManagerConfig:
+    return StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=1024 * 1024,
+                use_lazy=False,
+                devdax_path=path,
+                devdax_size_in_bytes=1024 * 1024,
+            )
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        l2_adapter_config=L2AdaptersConfig(adapters=[adapter_config]),
+    )
 
 
 def test_devdax_config_disables_lazy_and_shm(tmp_path):
@@ -78,6 +101,41 @@ def test_devdax_overflow_config_disables_lazy_and_shm(tmp_path):
     assert cfg.devdax_size_in_bytes == 2 * 1024 * 1024
     assert cfg.use_lazy is False
     assert cfg.shm_name == ""
+
+
+@pytest.mark.parametrize(
+    ("adapter_name", "adapter_config"),
+    [
+        ("nixl_store", object()),
+        ("nixl_store_dynamic", object()),
+        ("mooncake_store", _FakeMooncakeL2Config({"protocol": "rdma"})),
+    ],
+)
+def test_devdax_overflow_rejects_single_region_l2_adapters(
+    tmp_path, monkeypatch, adapter_name, adapter_config
+):
+    path = _make_mmap_file(tmp_path)
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.config.get_type_name_for_config",
+        lambda _: adapter_name,
+    )
+
+    with pytest.raises(ValueError, match=adapter_name):
+        _hybrid_storage_config(path, adapter_config)
+
+
+def test_devdax_overflow_allows_mooncake_without_rdma(tmp_path, monkeypatch):
+    path = _make_mmap_file(tmp_path)
+    monkeypatch.setattr(
+        "lmcache.v1.distributed.config.get_type_name_for_config",
+        lambda _: "mooncake_store",
+    )
+
+    config = _hybrid_storage_config(
+        path, _FakeMooncakeL2Config({"protocol": "tcp"})
+    )
+
+    assert config.l1_manager_config.memory_config.devdax_size_in_bytes == 1024 * 1024
 
 
 def test_devdax_allocator_uses_mmap_backing_file(tmp_path):

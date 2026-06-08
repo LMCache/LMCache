@@ -16,10 +16,29 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     add_l2_adapters_args,
+    get_type_name_for_config,
     parse_args_to_l2_adapters_config,
 )
 
 logger = init_logger(__name__)
+
+
+_HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
+    "nixl_store",
+    "nixl_store_dynamic",
+}
+
+
+def _requires_single_l1_memory_region(adapter_config) -> str | None:
+    type_name = get_type_name_for_config(adapter_config)
+    if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
+        return type_name
+    if (
+        type_name == "mooncake_store"
+        and getattr(adapter_config, "setup_config", {}).get("protocol") == "rdma"
+    ):
+        return type_name
+    return None
 
 
 @dataclass
@@ -131,6 +150,24 @@ class StorageManagerConfig:
 
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
+
+    def __post_init__(self):
+        memory_config = self.l1_manager_config.memory_config
+        if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
+            return
+
+        incompatible_adapters = [
+            adapter_name
+            for adapter_config in self.l2_adapter_config.adapters
+            if (adapter_name := _requires_single_l1_memory_region(adapter_config))
+            is not None
+        ]
+        if incompatible_adapters:
+            raise ValueError(
+                "Hybrid DRAM + Device-DAX L1 cannot be used with L2 adapters "
+                "that register a single L1 memory region: "
+                f"{', '.join(incompatible_adapters)}"
+            )
 
 
 def add_storage_manager_args(
