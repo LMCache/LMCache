@@ -117,6 +117,7 @@ class _TempGPUBuffer:
     ) -> None:
         self._kv_groups_manager = kv_layer_groups_manager
         self._lmcache_chunk_size = lmcache_logical_chunk_size
+        self._max_batch_size = max_batch_size
 
         self._temp_buffer = torch.empty(
             self._get_size_for_single_batch() * max_batch_size,
@@ -172,6 +173,11 @@ class _TempGPUBuffer:
             self._shape_cache_kernel_group[kernel_group_idx] = (shape, dtype)
 
     # Public APIs
+    @property
+    def max_batch_size(self) -> int:
+        """Maximum number of chunks (batch slots) the buffer holds."""
+        return self._max_batch_size
+
     def get_temp_kernel_group_buffer(
         self, batch_idx: int, kernel_group_idx: int
     ) -> torch.Tensor:
@@ -547,6 +553,11 @@ class GPUCacheContext:
         return self._temp_buffer.get_temp_kernel_group_buffer(
             batch_idx, kernel_group_idx
         )
+
+    @property
+    def max_batch_size(self) -> int:
+        """Maximum number of chunks processed concurrently in one batch."""
+        return self._temp_buffer.max_batch_size
 
     def get_temp_object_group_buffer(
         self, batch_idx: int, object_group_idx: int
