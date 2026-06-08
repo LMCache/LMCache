@@ -538,6 +538,9 @@ def stub_native_storage_ops() -> Any:
     module = type(sys)("lmcache.native_storage_ops")
     module.TTLLock = type("TTLLock", (), {})  # type: ignore[attr-defined]
     module.Bitmap = type("Bitmap", (), {})  # type: ignore[attr-defined]
+    module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]
+        "PeriodicEventNotifier", (), {}
+    )
     with patch.dict(
         sys.modules,
         {
