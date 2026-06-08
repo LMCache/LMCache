@@ -14,6 +14,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
@@ -354,7 +355,7 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
         scatter_cpu_to_paged_kv,
     )
 
-    source = builder_fn()
+    source = {k: v.to(torch_device_type) for k, v in builder_fn().items()}
     (
         block_size,
         num_layers,
@@ -402,7 +403,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
     )
     import lmcache.c_ops as lmc_ops
 
-    source = hnd_builder(2, 8, 4, 2, 8)
+    source = {k: v.to(torch_device_type) for k, v in hnd_builder(2, 8, 4, 2, 8).items()}
     layout_hints: LayoutHints = {"kv_layout": "HND"}
     (
         block_size,
@@ -501,7 +502,7 @@ def test_scatter_respects_skip_first_n_tokens(
         scatter_cpu_to_paged_kv,
     )
 
-    source = builder_fn()
+    source = {k: v.to(torch_device_type) for k, v in builder_fn().items()}
     destination = {
         name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
     }
@@ -887,13 +888,17 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
 
     # 3 chunks (6 blocks, 2 blocks per chunk), but we only want chunks 0 and 2
-    source = _make_kv_caches(num_layers=2, num_blocks=6, block_size=4)
+    source = {
+        k: v.to(torch_device_type)
+        for k, v in _make_kv_caches(num_layers=2, num_blocks=6, block_size=4).items()
+    }
     blocks_per_chunk = 2
     # Pre-allocate output buffers for chunks 0 and 2 only (2 tensors, not 3).
     # Shape: [2, num_layers, chunk_tokens, hidden_dim] where
     # chunk_tokens = blocks_per_chunk * block_size = 2 * 4 = 8.
     out0 = torch.zeros(2, 2, 8, 16)
     out2 = torch.zeros(2, 2, 8, 16)
+
     out_buffers = [out0, out2]
 
     # With chunk_indices=[0, 2], gather only chunks at positions 0 and 2
@@ -905,7 +910,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
         out=out_buffers,
         chunk_indices=[0, 2],
     )
-
+    torch_dev.synchronize()
     # Result should be the same list as out_buffers (in-place fill)
     assert result is out_buffers
 
@@ -913,6 +918,8 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     # out_buffers[1] should contain chunk 2 (blocks 4,5) data
     # Verify by independently gathering all chunks and comparing
     all_chunks = gather_paged_kv_to_cpu(source, [0, 1, 2, 3, 4, 5], blocks_per_chunk)
+    torch_dev.synchronize()
+
     assert torch.allclose(out_buffers[0], all_chunks[0])
     assert torch.allclose(out_buffers[1], all_chunks[2])
 
