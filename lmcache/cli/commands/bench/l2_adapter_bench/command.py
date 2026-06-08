@@ -168,12 +168,10 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         args: Parsed CLI arguments from the ``bench l2`` subparser.
     """
     # Lazy imports: keep CLI loadable without torch / native deps.
-    # Third Party
-    import torch
-
     # First Party
     from lmcache.cli.commands.bench.l2_adapter_bench.data import (
         create_l1_memory_desc,
+        make_aligned_l1_buffer,
         make_memory_objects,
         make_object_keys,
         verify_round_trip,
@@ -191,6 +189,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     kb = 1024
     mb = 1024 * 1024
     data_size = args.data_size_kb * kb
+    l1_align_bytes = 4096
     in_flight = args.in_flight
     num_keys = args.num_keys
     rounds = args.rounds
@@ -241,8 +240,14 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Backing L1 memory buffer for adapters that need an L1 desc.
     # Sized for one in-flight wave of store + load buffers.
-    l1_buffer = torch.empty(2 * keys_per_round * data_size, dtype=torch.uint8)
-    l1_memory_desc = create_l1_memory_desc(l1_buffer)
+    l1_buffer = make_aligned_l1_buffer(
+        2 * keys_per_round * data_size,
+        align_bytes=l1_align_bytes,
+    )
+    l1_memory_desc = create_l1_memory_desc(
+        l1_buffer,
+        align_bytes=l1_align_bytes,
+    )
 
     log("\n[Init] Creating adapter...")
     try:
