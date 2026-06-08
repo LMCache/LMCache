@@ -7,7 +7,7 @@ import torch
 
 # First Party
 from lmcache.integration.vllm.kv_cache_groups import (
-    create_group_views_from_vllm,
+    create_engine_group_infos_from_vllm,
 )
 from lmcache.v1.multiprocess.group_view import (
     expand_block_ids_to_views,
@@ -32,7 +32,7 @@ def _same_shape_caches(names: list[str]) -> dict[str, torch.Tensor]:
 
 def test_conversion_defaults_to_single_group_without_config():
     """No vLLM KV cache groups -> all layers fall into a single engine group."""
-    spec = create_group_views_from_vllm(
+    spec = create_engine_group_infos_from_vllm(
         None, _same_shape_caches(["layer.0", "layer.1"])
     )
 
@@ -43,7 +43,7 @@ def test_conversion_defaults_to_single_group_without_config():
 
 def test_conversion_preserves_engine_group_layers():
     """Two engine groups with identical tensor shape stay separate by group."""
-    spec = create_group_views_from_vllm(
+    spec = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0", "layer.2"]),
@@ -62,7 +62,7 @@ def test_conversion_splits_by_lmcache_layer_identity():
     caches = _same_shape_caches(["layer.0", "layer.1", "layer.2", "layer.3"])
     # layer.4 has a different head count -> distinct transfer identity.
     caches["layer.4"] = torch.randn(2, 32, 16, 16, 64, dtype=torch.float16)
-    spec = create_group_views_from_vllm(
+    spec = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(["layer.0", "layer.2", "layer.4"]),

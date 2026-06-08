@@ -72,7 +72,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         kv_caches: object,
         lmcache_logical_chunk_size: int,
         layout_hints: object = None,
-        group_views: object = (),
+        engine_group_infos: object = (),
         engine_type: object = None,
     ) -> _FakeGPUContext:
         """Return a fake cache context without touching CUDA or wrappers."""

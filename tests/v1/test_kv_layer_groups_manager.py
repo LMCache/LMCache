@@ -19,7 +19,7 @@ from lmcache.v1.kv_layer_groups import (
     format_kvcache_shape_spec,
     parse_kvcache_shape_spec,
 )
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="PageBufferShapeDesc requires CUDA build"
@@ -31,7 +31,7 @@ def _build_manager(
     *,
     num_blocks: int,
     layout_hints: LayoutHints | None = None,
-    group_views: Sequence[LMCacheGroupView] = (),
+    engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
 
@@ -48,7 +48,7 @@ def _build_manager(
         gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
         layout_hints=layout_hints,
-        group_views=group_views,
+        engine_group_infos=engine_group_infos,
     )
 
 
@@ -95,9 +95,9 @@ class TestKVLayerGroupsManager:
         manager = _build_manager(
             tensors,
             num_blocks=32,
-            group_views=[
-                LMCacheGroupView(0, (0, 2)),
-                LMCacheGroupView(1, (1, 3)),
+            engine_group_infos=[
+                EngineGroupInfo(0, (0, 2)),
+                EngineGroupInfo(1, (1, 3)),
             ],
         )
 
@@ -108,7 +108,7 @@ class TestKVLayerGroupsManager:
         assert groups_by_engine_group_idx[0].layer_indices == [0, 2]
         assert groups_by_engine_group_idx[1].layer_indices == [1, 3]
 
-    def test_build_rejects_bad_group_views(self):
+    def test_build_rejects_bad_engine_group_infos(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(2)
         ]
@@ -116,7 +116,7 @@ class TestKVLayerGroupsManager:
             _build_manager(
                 tensors,
                 num_blocks=32,
-                group_views=[LMCacheGroupView(0, (2,))],
+                engine_group_infos=[EngineGroupInfo(0, (2,))],
             )
 
     def test_build_different_shapes(self):
@@ -380,14 +380,14 @@ class TestKernelAndObjectGroups:
         assert manager.num_object_groups == 0
 
     def test_excluded_layer_left_out_of_all_groups(self):
-        # Layer 2 is referenced by no group view, so it is excluded entirely.
+        # Layer 2 is referenced by no engine group info, so it is excluded entirely.
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(3)
         ]
         manager = _build_manager(
             tensors,
             num_blocks=32,
-            group_views=[LMCacheGroupView(0, (0, 1))],
+            engine_group_infos=[EngineGroupInfo(0, (0, 1))],
         )
         grouped = sorted(
             idx for group in manager.kernel_groups for idx in group.layer_indices
