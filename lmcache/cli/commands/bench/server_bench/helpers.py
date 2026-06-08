@@ -554,7 +554,7 @@ def _send_store(
     key: IPCCacheEngineKey,
     block_offset: int = 0,
     block_size: int = 16,
-    num_group_views: int = 1,
+    num_engine_group_infos: int = 1,
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
@@ -582,7 +582,7 @@ def _send_store(
         payloads = [
             key,
             _INSTANCE_ID,
-            [block_ids] * num_group_views,
+            [block_ids] * num_engine_group_infos,
             _make_event_handle(use_gpu),
         ]
         result = _call(client, RequestType.STORE, payloads)
@@ -627,7 +627,7 @@ def _send_retrieve(
     hit_chunks: int,
     block_offset: int = 0,
     block_size: int = 16,
-    num_group_views: int = 1,
+    num_engine_group_infos: int = 1,
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
@@ -654,7 +654,7 @@ def _send_retrieve(
         payloads = [
             key,
             _INSTANCE_ID,
-            [block_ids] * num_group_views,
+            [block_ids] * num_engine_group_infos,
             _make_event_handle(use_gpu),
             0,  # skip_first_n_tokens
         ]
@@ -784,7 +784,7 @@ def _process_request(
     http_base: str = "",
     block_size: int = 16,
     total_blocks: int = 1024,
-    num_group_views: int = 1,
+    num_engine_group_infos: int = 1,
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
@@ -901,7 +901,7 @@ def _process_request(
             hit_chunks,
             block_offset=block_offset,
             block_size=block_size,
-            num_group_views=num_group_views,
+            num_engine_group_infos=num_engine_group_infos,
             use_gpu=use_gpu,
             use_handle=use_handle,
             client_tensors=client_tensors,
@@ -938,7 +938,7 @@ def _process_request(
             store_key,
             block_offset=store_block_off,
             block_size=block_size,
-            num_group_views=num_group_views,
+            num_engine_group_infos=num_engine_group_infos,
             use_gpu=use_gpu,
             use_handle=use_handle,
             client_tensors=client_tensors,

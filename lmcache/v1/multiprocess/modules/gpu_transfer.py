@@ -36,7 +36,7 @@ from lmcache.v1.multiprocess.engine_module import (
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -231,7 +231,7 @@ class GPUTransferModule:
         world_size: int,
         engine_type: EngineType,
         layout_hints: LayoutHints,
-        group_views: list[LMCacheGroupView],
+        engine_group_infos: list[EngineGroupInfo],
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -245,7 +245,7 @@ class GPUTransferModule:
                 Forwarded to GPUCacheContext for format detection.
             layout_hints: See LayoutHints.  Forwarded to
                 GPUCacheContext for GPU KV format detection.
-            group_views: Engine-neutral KV cache group metadata
+            engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
         """
         if instance_id in self._cache_contexts:
@@ -260,7 +260,7 @@ class GPUTransferModule:
             kv_caches,
             self._ctx.chunk_size,
             layout_hints=layout_hints or None,
-            group_views=group_views,
+            engine_group_infos=engine_group_infos,
             engine_type=engine_type,
         )
         self._cache_contexts[instance_id] = ContextEntry(

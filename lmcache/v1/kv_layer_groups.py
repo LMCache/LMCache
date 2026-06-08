@@ -20,7 +20,7 @@ import lmcache.c_ops as lmc_ops
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.utils import DiscoverableKVCache, LayoutHints
-    from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 logger = init_logger(__name__)
 
@@ -63,7 +63,7 @@ LayerGroupIdentity = KernelGroupIdentity  # Alias for compatibility
 
 # Sentinel ``per_layer_engine_group_idx`` value: a KV tensor tagged with it is
 # excluded from every LMCache group (used for cross-layer KV-sharing layers; see
-# ``create_group_views_from_vllm``).
+# ``create_engine_group_infos_from_vllm``).
 EXCLUDED_ENGINE_GROUP = -1
 
 
@@ -271,7 +271,7 @@ class KVLayerGroupsManager:
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_blocks: int,
         layout_hints: "LayoutHints | None" = None,
-        group_views: "Sequence[LMCacheGroupView]" = (),
+        engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_logical_chunk_size: int = 256,
     ) -> None:
         """Partition layers into groups keyed by
@@ -301,7 +301,7 @@ class KVLayerGroupsManager:
                 group's ``compress_ratio`` and ``physical_chunk_size``.
                 ``None`` means every group is treated as non-compressed
                 (``compress_ratio == 1``).
-            group_views: LMCache-owned engine KV cache group
+            engine_group_infos: LMCache-owned engine KV cache group
                 metadata. When present, it is used to keep layers from
                 different engine block-ID spaces in separate LMCache
                 transfer groups.
@@ -342,7 +342,9 @@ class KVLayerGroupsManager:
             logger.debug("No KV caches available, skipping KV layer groups building")
             return
 
-        per_layer_engine_group_idx = get_engine_group_indices(group_views, num_layers)
+        per_layer_engine_group_idx = get_engine_group_indices(
+            engine_group_infos, num_layers
+        )
 
         groups_by_identity = group_layers_by_identity(
             kv_caches, gpu_kv_format, num_layers, per_layer_engine_group_idx
@@ -410,7 +412,7 @@ class KVLayerGroupsManager:
         )
 
         # Detect the object groups
-        self._object_groups = self._detect_object_groups(group_views)
+        self._object_groups = self._detect_object_groups(engine_group_infos)
 
     @property
     def kernel_groups(self) -> list[KernelGroupInfo]:
@@ -516,18 +518,18 @@ class KVLayerGroupsManager:
 
     ### Helper methods
     def _detect_object_groups(
-        self, group_views: "Sequence[LMCacheGroupView]"
+        self, engine_group_infos: "Sequence[EngineGroupInfo]"
     ) -> list[ObjectGroupInfo]:
-        """Detect object groups based on the provided group views.
+        """Detect object groups based on the provided engine group infos.
 
         Args:
-            group_views: LMCache-owned engine KV cache group metadata.
+            engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Returns:
             A list of ObjectGroupInfo instances representing the detected object groups.
         """
         # TODO: add the real object group detection logic based on
-        # the attention type metadata in the group views once it's
+        # the attention type metadata in the engine group infos once it's
         # available.
         # Now, we are using a single object group, which means
         # all kernel groups' KV caches will be stored in the same memory object.
