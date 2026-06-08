@@ -187,6 +187,18 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-opt-125m-v1
 
+      # Separate cache for vLLM CPU wheel (large, keyed by commit hash).
+      # Must be declared before the install step so the cache is restored
+      # before pip runs.
+      - name: Cache vLLM pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: >-
+            vllm-cpu-macos-py3.12-71df063c
+          restore-keys: |
+            vllm-cpu-macos-py3.12-
+
       - name: Install lmcache (CPU-only, no vLLM)
         env:
           NO_GPU_EXT: "1"
@@ -198,6 +210,21 @@ jobs:
           python -m pip install -r requirements/common.txt
           python -m pip install -r requirements/cli.txt
           python -m pip install -e . --no-deps --no-build-isolation
+
+      - name: Install vLLM CPU build
+        run: |
+          pip install "numpy<2"
+          pip install vllm \
+            --extra-index-url \
+            https://wheels.vllm.ai/71df063c494c111ab60f6a33c54aafe7b9ae1d02/cpu
+
+      - name: Download facebook/opt-125m
+        run: |
+          python3 -c "
+          from huggingface_hub import snapshot_download
+          snapshot_download('facebook/opt-125m')
+          print('model ready')
+          "
 
       - name: Run macOS vLLM CPU e2e test
         env:

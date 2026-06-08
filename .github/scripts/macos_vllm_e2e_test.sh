@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # macOS vLLM CPU end-to-end smoke test for lmcache multiprocess server.
-# Installs vLLM CPU build, starts LMCache server + vLLM, and sends a
-# completion request to verify the full stack works on macOS.
+# Assumes vLLM CPU build and facebook/opt-125m are already installed/
+# downloaded by the CI workflow steps before this script is invoked.
 #
 # Key differences from the Linux CPU e2e validation:
 #   - No /dev/shm on macOS -> use pickle transport (LMCACHE_SHM_NAME="")
@@ -106,33 +106,16 @@ trap on_error ERR
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Phase 1: Install vLLM CPU build
+# Phase 1: Validate installs
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "=== Phase 1: Install vLLM CPU build ==="
-
-echo "==> Installing numpy<2 for scipy/vLLM compatibility"
-pip install "numpy<2"
-echo "    numpy<2 installed"
-
-echo "==> Installing vLLM CPU build"
-pip install vllm \
-    --extra-index-url \
-    https://wheels.vllm.ai/71df063c494c111ab60f6a33c54aafe7b9ae1d02/cpu
-echo "    vLLM CPU install completed"
+echo "=== Phase 1: Validate installs ==="
 
 echo "==> Validating imports"
 python3 -c "import lmcache; import vllm; print('imports OK')"
 python3 -c "import vllm; print('vllm:', vllm.__version__)"
 python3 -c "import lmcache; print('lmcache:', lmcache.__version__)"
-
-echo "==> Downloading facebook/opt-125m (cache-aware)"
-python3 -c "
-from huggingface_hub import snapshot_download
-snapshot_download('facebook/opt-125m')
-print('model ready')
-"
 
 echo "=== Phase 1 passed ==="
 
