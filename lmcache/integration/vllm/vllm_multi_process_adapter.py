@@ -149,7 +149,7 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     wrappers: KVCache = []
     try:
         for tensor in kv_caches.values():
-            wrappers.append(_wrap_one_kv_cache(tensor))
+            wrappers.append(wrap_one_kv_cache(tensor))
     except BaseException:
         _release_partial_kv_wrappers(wrappers)
         raise
@@ -165,7 +165,7 @@ def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
     are silently skipped.
     """
     # First Party
-    from lmcache.v1.platform.cpu.shm import shm_unlink
+    from lmcache.v1.multiprocess.posix_shm import shm_unlink
 
     for w in wrappers:
         name = getattr(w, "shm_name", None)
@@ -177,7 +177,7 @@ def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
             logger.debug("shm_unlink failed during rollback", exc_info=True)
 
 
-def _wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
+def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
     """Dispatch by ``tensor.device.type`` via the platform registry.
 
     Concrete factories self-register at import time (CUDA in
