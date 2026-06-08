@@ -823,17 +823,18 @@ class BlendV3Module:
         (slot_idx, old_st, cur_st)."""
         if not slots_to_rope:
             return
-        num_groups = gpu_context.kv_layer_groups_manager.num_groups
+        num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
         for group_idx in range(num_groups):
-            group = gpu_context.kv_layer_groups_manager.kv_layer_groups[group_idx]
+            group = gpu_context.kv_layer_groups_manager.kernel_groups[group_idx]
             if group.compress_ratio != 1:
                 raise RuntimeError(
                     f"CB v3: group {group_idx} has compress_ratio="
                     f"{group.compress_ratio}; compressed layouts unsupported."
                 )
-            all_slots = gpu_context.get_tmp_chunk_gpu_buffer_batched(
-                batch_size=batch_len, group_idx=group_idx
-            )
+            all_slots = [
+                gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)
+                for slot_idx in range(batch_len)
+            ]
             if all_slots[0].shape[0] != 2:
                 raise RuntimeError(
                     f"CB v3: group {group_idx} has kv_size={all_slots[0].shape[0]}; "
@@ -948,7 +949,7 @@ class BlendV3Module:
                 f"chunk_size {chunk_size} must be a multiple of "
                 f"inference_engine_logical_block_size {ie_logical_block_size}"
             )
-        num_groups = gpu_context.kv_layer_groups_manager.num_groups
+        num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
 
         with (
             torch_dev.device(gpu_context.device),
@@ -1026,8 +1027,9 @@ class BlendV3Module:
 
                             # (a) H2D fill into per-chunk tmp slots.
                             for slot_idx, (_, memory_obj) in enumerate(batch):
-                                flat_slot = gpu_context.get_tmp_gpu_buffer_flat(
-                                    chunk_idx=slot_idx
+                                # Single object group => object_group_idx=0.
+                                flat_slot = gpu_context.get_temp_object_group_buffer(
+                                    slot_idx, 0
                                 )
                                 lmcache_memcpy_async_h2d(memory_obj, flat_slot)
 
@@ -1060,16 +1062,16 @@ class BlendV3Module:
                             )
                             page_buffer_size = gpu_context.num_blocks * bs
                             for group_idx in range(num_groups):
-                                tmp_buffers = (
-                                    gpu_context.get_tmp_chunk_gpu_buffer_batched(
-                                        batch_size=batch_len,
-                                        group_idx=group_idx,
+                                tmp_buffers = [
+                                    gpu_context.get_temp_kernel_group_buffer(
+                                        slot_idx, group_idx
                                     )
-                                )
+                                    for slot_idx in range(batch_len)
+                                ]
                                 key_value = torch.cat(tmp_buffers, dim=2)
                                 lmc_ops.multi_layer_kv_transfer(
                                     key_value,
-                                    gpu_context.get_group_kv_pointers(group_idx),
+                                    gpu_context.get_kernel_group_kv_pointers(group_idx),
                                     slot_mapping,
                                     gpu_context.device,
                                     page_buffer_size,
