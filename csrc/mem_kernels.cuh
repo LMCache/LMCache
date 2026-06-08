@@ -103,10 +103,11 @@ enum class GPUKVFormat : int {
   NL_X_NB_NH_BS_TWO_HS = 10,
   /*
   used by:
-  - vLLM non-MLA CPU attention (blocks-first, K/V fused per vLLM #44393)
+  - vLLM non-MLA blocks-first attention with K/V fused into the trailing dim
   physical shape per layer: [num_blocks, num_heads, block_size, 2, head_size]
   (recovered by splitting the fused trailing [block_size, 2 * head_size]).
-  CPU-only; never reaches the CUDA transfer kernels.
+  Currently only reached via the host gather/scatter path, not the CUDA
+  transfer kernels.
   */
 };
 

@@ -342,7 +342,7 @@ def get_attention_backend(gpu_kv_format: "lmc_ops.GPUKVFormat") -> str:
         ),
         lmc_ops.GPUKVFormat.NB_NL_TWO_NH_BS_HS: "TRT-LLM cross-layer (HND layout)",
         lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS: (
-            "vLLM non-MLA CPU attention (blocks-first, fused K/V)"
+            "vLLM non-MLA blocks-first, fused K/V"
         ),
     }
     return _ATTENTION_BACKENDS.get(gpu_kv_format, f"Unknown ({gpu_kv_format})")
@@ -626,14 +626,14 @@ def normalize_kv_and_discover_format(
                     else:
                         detected_format = lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS
             elif tensor_dim == 4:
-                # vLLM CPU attention (post vLLM #44393): blocks-first with
-                # K/V fused into the trailing dim -> [NB, NH, BS, 2*head_size].
+                # vLLM non-MLA blocks-first attention: K/V fused into the
+                # trailing dim -> [NB, NH, BS, 2*head_size].
                 # Split the fused axis so downstream sees the canonical 5D
                 # [NB, NH, BS, 2, HS].
                 last_dim = probe.shape[3]
                 if last_dim % 2 != 0:
                     raise ValueError(
-                        "vLLM CPU KV cache trailing dim "
+                        "blocks-first fused KV cache trailing dim "
                         f"{last_dim} is not 2 * head_size"
                     )
                 kv_caches = [

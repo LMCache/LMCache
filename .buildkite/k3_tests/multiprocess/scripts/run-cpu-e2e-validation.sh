@@ -231,8 +231,8 @@ echo "✅ Installed requirements/common.txt"
 
 echo "Installing vLLM CPU build"
 # Un-pinned from 71df063c (LMCache #3538) now that LMCache handles the
-# blocks-first fused CPU KV layout from vLLM #44393. Running against nightly
-# means a passing CPU e2e proves the new GPUKVFormat path works.
+# blocks-first fused KV layout. Running against nightly means a passing CPU
+# e2e proves the new GPUKVFormat path works.
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index --torch-backend cpu
 echo "✅ vLLM CPU install completed"
 

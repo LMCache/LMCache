@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""vLLM CPU blocks-first, fused-K/V KV layout (GPUKVFormat.NL_X_NB_NH_BS_TWO_HS).
+"""Blocks-first, fused-K/V KV layout (GPUKVFormat.NL_X_NB_NH_BS_TWO_HS).
 
-vLLM #44393 ([Attention][CPU] Standardize kv layout to blocks first, part of
-RFC #42082) changed the CPU attention backend KV cache from the 5D K/V-major
-``[2, NB, NH, BS, HS]`` to the 4D blocks-first ``[NB, NH, BS, 2 * HS]`` with K/V
-fused into the trailing dim. Discovery splits the fused axis into the canonical
-5D ``[NB, NH, BS, 2, HS]`` and classifies it as ``NL_X_NB_NH_BS_TWO_HS``.
+A non-MLA blocks-first attention backend registers its KV cache as the 4D
+``[NB, NH, BS, 2 * HS]`` with K/V fused into the trailing dim (as opposed to
+the 5D K/V-major ``[2, NB, NH, BS, HS]``). Discovery splits the fused axis into
+the canonical 5D ``[NB, NH, BS, 2, HS]`` and classifies it as
+``NL_X_NB_NH_BS_TWO_HS``.
 
 These tests pin discovery, the format-aware accessors, and the multiprocess
-CPU gather/scatter round-trip for that layout.
+gather/scatter round-trip for that layout.
 """
 
 # Third Party
@@ -28,15 +28,15 @@ NB, NH, BS, HS, NL = 16, 4, 128, 64, 3
 HINTS = {"kv_layout": "HND"}
 
 
-def _raw_cpu_caches() -> list[torch.Tensor]:
-    """Per-layer vLLM CPU tensors as registered: [NB, NH, BS, 2 * HS]."""
+def _raw_blocks_first_caches() -> list[torch.Tensor]:
+    """Per-layer blocks-first tensors as registered: [NB, NH, BS, 2 * HS]."""
     torch.manual_seed(0)
     return [torch.randn(NB, NH, BS, 2 * HS) for _ in range(NL)]
 
 
 def test_discovery_splits_fused_axis():
     fmt, norm = U.normalize_kv_and_discover_format(
-        _raw_cpu_caches(), EngineType.VLLM, HINTS
+        _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )
     assert fmt == lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS
     # 4D [NB, NH, BS, 2*HS] -> canonical 5D [NB, NH, BS, 2, HS]
@@ -51,7 +51,7 @@ def test_discovery_rejects_odd_trailing_dim():
 
 def test_accessors():
     fmt, norm = U.normalize_kv_and_discover_format(
-        _raw_cpu_caches(), EngineType.VLLM, HINTS
+        _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )
     assert U.get_num_layers(norm, fmt) == NL
     assert U.get_num_blocks(norm, fmt) == NB
@@ -64,7 +64,7 @@ def test_accessors():
     assert U.get_elements_per_layer(norm, fmt) == NB * NH * BS * HS * 2
     # get_dtype is on the register_kv_caches -> group_layers_by_identity path,
     # so it must recognize this format too.
-    assert U.get_dtype(norm, fmt) == _raw_cpu_caches()[0].dtype
+    assert U.get_dtype(norm, fmt) == _raw_blocks_first_caches()[0].dtype
     assert U.is_hnd(fmt) is True
     assert not U.is_mla(fmt)
 
@@ -72,7 +72,7 @@ def test_accessors():
 def test_mp_gather_scatter_roundtrip():
     blocks_per_chunk = 2
     block_ids = [0, 3, 5, 6]  # 2 chunks
-    raw = _raw_cpu_caches()
+    raw = _raw_blocks_first_caches()
     src = {f"layer_{i}": t for i, t in enumerate(raw)}
     ref = {k: v.clone() for k, v in src.items()}
     idx = torch.tensor(block_ids)
