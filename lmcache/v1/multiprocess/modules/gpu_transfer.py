@@ -201,23 +201,7 @@ class GPUTransferModule:
             gpu_context_meta[str(instance_id)] = {
                 "model_name": entry.model_name,
                 "world_size": entry.world_size,
-                "kv_cache_layout": {
-                    "num_layers": ctx.num_layers,
-                    "inference_engine_logical_block_size": (
-                        ctx.kv_layer_groups_manager.inference_engine_logical_block_size
-                    ),
-                    "group_physical_block_sizes": ctx.group_physical_block_sizes,
-                    "group_compress_ratios": ctx.group_compress_ratios,
-                    "hidden_dim_sizes": str(ctx.hidden_dim_sizes),
-                    "dtype": str(ctx.dtype),
-                    "is_mla": ctx.is_mla,
-                    "num_blocks": ctx.num_blocks,
-                    "gpu_kv_format": ctx.gpu_kv_format_name,
-                    "gpu_kv_shape": ctx.gpu_kv_shape,
-                    "gpu_kv_concrete_shape": ctx.concrete_gpu_kv_shape,
-                    "attention_backend": ctx.attention_backend,
-                    "cache_size_per_token": ctx.cache_size_per_token(),
-                },
+                "kv_cache_layout": ctx.report_status(),
             }
 
         return {

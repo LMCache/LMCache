@@ -430,31 +430,6 @@ class GPUCacheContext:
         return self.cupy_stream_
 
     @property
-    @lmcache_deprecate("will be refactored soon")
-    def group_physical_block_sizes(self) -> list[int]:
-        """Per-group physical slot count (``shape_desc.bs``) in group
-        order.
-
-        Only used in metadata printing.
-        """
-        return [
-            group.shape_desc.bs
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
-        ]
-
-    @property
-    @lmcache_deprecate("will be refactored soon")
-    def group_compress_ratios(self) -> list[int]:
-        """Per-group compression ratio
-
-        Only used in metadata printing
-        """
-        return [
-            group.compress_ratio
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
-        ]
-
-    @property
     def num_layers(self) -> int:
         """
         Returns the number of layers in the model
@@ -487,30 +462,6 @@ class GPUCacheContext:
     def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
         """Returns the KV layer groups manager."""
         return self.kv_layer_groups_manager_
-
-    @property
-    @lmcache_deprecate("will be refactored soon")
-    def gpu_kv_format_name(self) -> str:
-        """Returns the GPU KV format enum name (e.g. ``'NL_X_TWO_NB_BS_NH_HS'``)."""
-        return self.gpu_kv_format_.name
-
-    @property
-    @lmcache_deprecate("will be refactored soon")
-    def gpu_kv_shape(self) -> str:
-        """Returns a human-readable shape description of the GPU KV cache layout."""
-        return get_gpu_kv_shape_description(self.gpu_kv_format_)
-
-    @property
-    @lmcache_deprecate("will be refactored soon")
-    def attention_backend(self) -> str:
-        """Returns the attention backend name."""
-        return get_attention_backend(self.gpu_kv_format_)
-
-    @property
-    @lmcache_deprecate("will be refactored soon")
-    def concrete_gpu_kv_shape(self) -> str:
-        """Returns the GPU KV shape with actual numeric values substituted."""
-        return get_concrete_gpu_kv_shape(self.kv_caches_, self.gpu_kv_format_)
 
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given KV layer group."""
@@ -684,6 +635,64 @@ class GPUCacheContext:
         from integer division is acceptable.
         """
         return self._temp_buffer.get_cache_size_per_token()
+
+    def report_status(self) -> dict:
+        """Return this context's KV cache layout metadata for ``/status``.
+
+        Builds the ``kv_cache_layout`` sub-dict surfaced by the ``/status``
+        HTTP endpoint (see ``GPUTransferModule.report_status``) and consumed by
+        the ``lmcache`` CLI (``lmcache describe kvcache`` and
+        ``lmcache bench engine``). It describes only the KV cache geometry; the
+        owning module wraps it with ``model_name``/``world_size``, which this
+        context does not track.
+
+        Returns:
+            A dict with one entry per documented layout field:
+
+            - ``num_layers`` (int)
+            - ``inference_engine_logical_block_size`` (int)
+            - ``group_physical_block_sizes`` (list[int]): per-group
+              ``shape_desc.bs``
+            - ``group_compress_ratios`` (list[int]): per-group compress ratio
+            - ``hidden_dim_sizes`` (str): stringified per-group hidden-dim list
+            - ``dtype`` (str): stringified torch dtype
+            - ``is_mla`` (bool)
+            - ``num_blocks`` (int)
+            - ``gpu_kv_format`` (str): GPU KV format enum name
+            - ``gpu_kv_shape`` (str): symbolic shape description
+            - ``gpu_kv_concrete_shape`` (str): shape with numeric values
+            - ``attention_backend`` (str)
+            - ``cache_size_per_token`` (int): bytes per logical token
+        """
+        # TODO(compat): the key names and value *formatting* below are a
+        # contract with the `/status` endpoint and the `lmcache` CLI
+        # (`lmcache/cli/commands/describe.py`, `bench/engine_bench/config.py`).
+        # Renaming a key breaks `lmcache describe kvcache`; dropping
+        # `cache_size_per_token` breaks `lmcache bench engine`. `hidden_dim_sizes`
+        # and `dtype` are stringified only for back-compat with those consumers
+        # and should become a real list / structured value once the CLI is
+        # updated to parse them.
+        manager = self.kv_layer_groups_manager
+        kernel_groups = manager.kernel_groups
+        return {
+            "num_layers": self.num_layers,
+            "inference_engine_logical_block_size": (
+                manager.inference_engine_logical_block_size
+            ),
+            "group_physical_block_sizes": [g.shape_desc.bs for g in kernel_groups],
+            "group_compress_ratios": [g.compress_ratio for g in kernel_groups],
+            "hidden_dim_sizes": str([g.hidden_dim_size for g in kernel_groups]),
+            "dtype": str(self.dtype),
+            "is_mla": self.is_mla,
+            "num_blocks": self.num_blocks,
+            "gpu_kv_format": self.gpu_kv_format_.name,
+            "gpu_kv_shape": get_gpu_kv_shape_description(self.gpu_kv_format_),
+            "gpu_kv_concrete_shape": get_concrete_gpu_kv_shape(
+                self.kv_caches_, self.gpu_kv_format_
+            ),
+            "attention_backend": get_attention_backend(self.gpu_kv_format_),
+            "cache_size_per_token": self.cache_size_per_token(),
+        }
 
 
 class PlainGPUCacheContext:
