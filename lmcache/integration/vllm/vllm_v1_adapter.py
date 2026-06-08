@@ -1359,8 +1359,11 @@ class LMCacheConnectorV1Impl:
 
         req_id = request.request_id
 
-        # lookup_client is always initialized for scheduler role
-        assert self.lookup_client is not None
+        # Degraded mode (LMCache init failed): no lookup client is available, so
+        # report no external hits and let vLLM recompute instead of asserting and
+        # crashing EngineCore during scheduling.
+        if self.lookup_client is None:
+            return 0
 
         if (
             num_external_hit_tokens := self.lookup_client.lookup_cache(lookup_id=req_id)
@@ -1470,9 +1473,13 @@ class LMCacheConnectorV1Impl:
         if the CacheManager this allocated blocks for us.
         """
 
+        # Degraded mode (LMCache init failed): there is no lookup client to clear
+        # and no load spec was recorded, so nothing to do.
+        if self.lookup_client is None:
+            return
+
         # Clear local status in lookup client when a new request is
         # successfully scheduled.
-        assert self.lookup_client is not None
         self.lookup_client.clear_lookup_status(request.request_id)
 
         kv_transfer_params = (
@@ -1548,6 +1555,11 @@ class LMCacheConnectorV1Impl:
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
+
+        # Degraded mode (LMCache init failed): no lookup client means no load specs
+        # were ever recorded, so return empty metadata for the worker-side hooks.
+        if self.lookup_client is None:
+            return LMCacheConnectorMetadata()
 
         force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
@@ -1785,6 +1797,11 @@ class LMCacheConnectorV1Impl:
             self, "_layerwise_save_storers"
         ):
             self._layerwise_save_storers.pop(request.request_id, None)
+
+        # Degraded mode (LMCache init failed): no engine/lookup client to notify
+        # and nothing to stream back, so report no transfer params.
+        if self.lmcache_engine is None or self.lookup_client is None:
+            return False, None
 
         # Cleanup if request was aborted
         if request.status == RequestStatus.FINISHED_ABORTED:
