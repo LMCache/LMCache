@@ -41,6 +41,37 @@ def _requires_single_l1_memory_region(adapter_config) -> str | None:
     return None
 
 
+def _infer_l1_devdax_overflow_from_dax_adapter(
+    memory_config: "L1MemoryManagerConfig",
+    l2_adapter_config: L2AdaptersConfig,
+) -> None:
+    if not memory_config.devdax_path or memory_config.devdax_size_in_bytes:
+        return
+
+    l1_devdax_path = memory_config.devdax_path
+    remaining_adapters = []
+    matched_dax_adapters = []
+    for adapter_config in l2_adapter_config.adapters:
+        if (
+            get_type_name_for_config(adapter_config) == "dax"
+            and getattr(adapter_config, "device_path", None) == l1_devdax_path
+        ):
+            matched_dax_adapters.append(adapter_config)
+        else:
+            remaining_adapters.append(adapter_config)
+
+    if not matched_dax_adapters:
+        return
+    if len(matched_dax_adapters) > 1:
+        raise ValueError(
+            "Only one DAX adapter can match l1-devdax-path for hybrid L1"
+        )
+
+    dax_adapter = matched_dax_adapters[0]
+    memory_config.devdax_size_in_bytes = int(dax_adapter.max_dax_size_gb * (1 << 30))
+    l2_adapter_config.adapters = remaining_adapters
+
+
 @dataclass
 class L1MemoryManagerConfig:
     """
@@ -151,23 +182,27 @@ class StorageManagerConfig:
     prefetch_max_in_flight: int = 8
     """ Maximum number of concurrent prefetch requests. """
 
-    def __post_init__(self):
-        memory_config = self.l1_manager_config.memory_config
-        if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
-            return
 
-        incompatible_adapters = [
-            adapter_name
-            for adapter_config in self.l2_adapter_config.adapters
-            if (adapter_name := _requires_single_l1_memory_region(adapter_config))
-            is not None
-        ]
-        if incompatible_adapters:
-            raise ValueError(
-                "Hybrid DRAM + Device-DAX L1 cannot be used with L2 adapters "
-                "that register a single L1 memory region: "
-                f"{', '.join(incompatible_adapters)}"
-            )
+def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
+    memory_config = config.l1_manager_config.memory_config
+    _infer_l1_devdax_overflow_from_dax_adapter(
+        memory_config, config.l2_adapter_config
+    )
+    if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
+        return
+
+    incompatible_adapters = [
+        adapter_name
+        for adapter_config in config.l2_adapter_config.adapters
+        if (adapter_name := _requires_single_l1_memory_region(adapter_config))
+        is not None
+    ]
+    if incompatible_adapters:
+        raise ValueError(
+            "Hybrid DRAM + Device-DAX L1 cannot be used with L2 adapters "
+            "that register a single L1 memory region: "
+            f"{', '.join(incompatible_adapters)}"
+        )
 
 
 def add_storage_manager_args(
@@ -231,18 +266,8 @@ def add_storage_manager_args(
             "Optional /dev/dax device or mmap-able file to use as the L1 "
             "backing arena. When set, L1 lazy allocation and SHM transfer "
             "advertising are disabled because the L1 bytes live in the DAX map. "
-            "Use --l1-devdax-overflow-size-gb to keep DRAM as primary L1 and "
-            "use this path as L1 overflow."
-        ),
-    )
-    memory_group.add_argument(
-        "--l1-devdax-overflow-size-gb",
-        type=float,
-        default=0,
-        help=(
-            "Optional Device-DAX overflow size in GB for hybrid L1. When set "
-            "with --l1-devdax-path, --l1-size-gb is the DRAM L1 size and "
-            "allocations spill to Device-DAX after DRAM is full."
+            "If a DAX L2 adapter with the same device_path is registered, "
+            "that adapter's max_dax_size_gb is used as L1 overflow size."
         ),
     )
     # L1 Manager Config (TTL settings)
@@ -373,7 +398,6 @@ def parse_args_to_config(
         init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
         align_bytes=args.l1_align_bytes,
         devdax_path=args.l1_devdax_path,
-        devdax_size_in_bytes=int(args.l1_devdax_overflow_size_gb * (1 << 30)),
     )
 
     l1_manager_config = L1ManagerConfig(
@@ -390,7 +414,7 @@ def parse_args_to_config(
 
     l2_adapter_config = parse_args_to_l2_adapters_config(args)
 
-    return StorageManagerConfig(
+    config = StorageManagerConfig(
         l1_manager_config=l1_manager_config,
         eviction_config=eviction_config,
         l2_adapter_config=l2_adapter_config,
@@ -398,6 +422,8 @@ def parse_args_to_config(
         prefetch_policy=args.l2_prefetch_policy,
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
     )
+    normalize_storage_manager_config(config)
+    return config
 
 
 def parse_args(args: list[str] | None = None) -> StorageManagerConfig:

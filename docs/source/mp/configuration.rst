@@ -176,7 +176,9 @@ Source: ``lmcache/v1/distributed/config.py``
      - *(not set)*
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
        backing arena.  When set, lazy allocation and SHM transfer advertising
-       are disabled because the L1 bytes live in the DAX mapping.
+       are disabled because the L1 bytes live in the DAX mapping.  If a DAX
+       L2 adapter with the same ``device_path`` is registered, that adapter's
+       ``max_dax_size_gb`` is used as the L1 Device-DAX overflow size.
 
 L1 Manager TTLs
 ----------------

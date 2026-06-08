@@ -16,7 +16,10 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
 )
-from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.config import (
+    StorageManagerConfig,
+    normalize_storage_manager_config,
+)
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
@@ -53,6 +56,7 @@ logger = init_logger(__name__)
 
 class StorageManager:
     def __init__(self, config: StorageManagerConfig):
+        normalize_storage_manager_config(config)
         self._l1_manager = L1Manager(config.l1_manager_config)
         self._event_bus = get_event_bus()
 

@@ -20,6 +20,7 @@ from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
+    normalize_storage_manager_config,
     parse_args,
 )
 from lmcache.v1.distributed.error import L1Error
@@ -57,7 +58,7 @@ class _FakeMooncakeL2Config:
 
 
 def _hybrid_storage_config(path: str, adapter_config) -> StorageManagerConfig:
-    return StorageManagerConfig(
+    config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=1024 * 1024,
@@ -69,6 +70,8 @@ def _hybrid_storage_config(path: str, adapter_config) -> StorageManagerConfig:
         eviction_config=EvictionConfig(eviction_policy="LRU"),
         l2_adapter_config=L2AdaptersConfig(adapters=[adapter_config]),
     )
+    normalize_storage_manager_config(config)
+    return config
 
 
 def test_devdax_config_disables_lazy_and_shm(tmp_path):
@@ -296,7 +299,7 @@ def test_cli_parses_l1_devdax_path(tmp_path):
     assert mem_cfg.shm_name == ""
 
 
-def test_cli_parses_l1_devdax_overflow_size(tmp_path):
+def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
     path = _make_mmap_file(tmp_path)
     config = parse_args(
         [
@@ -306,8 +309,12 @@ def test_cli_parses_l1_devdax_overflow_size(tmp_path):
             "LRU",
             "--l1-devdax-path",
             path,
-            "--l1-devdax-overflow-size-gb",
-            "2",
+            "--l2-adapter",
+            (
+                '{"type":"dax","device_path":"%s",'
+                '"max_dax_size_gb":2,"slot_bytes":4096}'
+            )
+            % path,
         ]
     )
 
@@ -317,6 +324,7 @@ def test_cli_parses_l1_devdax_overflow_size(tmp_path):
     assert mem_cfg.devdax_size_in_bytes == 2 << 30
     assert mem_cfg.use_lazy is False
     assert mem_cfg.shm_name == ""
+    assert config.l2_adapter_config.adapters == []
 
 
 def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):
