@@ -96,6 +96,18 @@ class FakeMessageQueueClient:
         self.closed = True
 
 
+class FakeRequestType:
+    """Minimal request type double for health checks."""
+
+    PING = "PING"
+
+
+def fake_get_response_class(request_type: object) -> type[bool]:
+    """Return the fake response class for PING requests."""
+    assert request_type == FakeRequestType.PING
+    return bool
+
+
 def test_config_defaults_to_disabled_without_validating_remote_host() -> None:
     config = MPServerAutostartConfig.from_extra_config(
         extra_config={
@@ -542,16 +554,9 @@ def test_launcher_early_exit_raises_connection_error(monkeypatch) -> None:
 def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
     FakeMessageQueueClient.instances = []
     FakeMessageQueueClient.future = FakeFuture(True)
-    monkeypatch.setattr(
-        launcher_mod,
-        "_create_message_queue_client",
-        FakeMessageQueueClient,
-    )
-    monkeypatch.setattr(
-        launcher_mod,
-        "_submit_ping",
-        lambda client: client.submit_request("PING", [], bool),
-    )
+    monkeypatch.setattr(launcher_mod, "MessageQueueClient", FakeMessageQueueClient)
+    monkeypatch.setattr(launcher_mod, "RequestType", FakeRequestType)
+    monkeypatch.setattr(launcher_mod, "get_response_class", fake_get_response_class)
     zmq_context = MagicMock()
 
     assert launcher_mod.is_mp_server_healthy(
@@ -571,16 +576,9 @@ def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
 def test_health_probe_returns_false_on_zmq_ping_timeout(monkeypatch) -> None:
     FakeMessageQueueClient.instances = []
     FakeMessageQueueClient.future = FakeFuture(error=TimeoutError())
-    monkeypatch.setattr(
-        launcher_mod,
-        "_create_message_queue_client",
-        FakeMessageQueueClient,
-    )
-    monkeypatch.setattr(
-        launcher_mod,
-        "_submit_ping",
-        lambda client: client.submit_request("PING", [], bool),
-    )
+    monkeypatch.setattr(launcher_mod, "MessageQueueClient", FakeMessageQueueClient)
+    monkeypatch.setattr(launcher_mod, "RequestType", FakeRequestType)
+    monkeypatch.setattr(launcher_mod, "get_response_class", fake_get_response_class)
 
     assert not launcher_mod.is_mp_server_healthy(
         "tcp://localhost:5555",
