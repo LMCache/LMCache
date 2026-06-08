@@ -122,6 +122,7 @@ platform = "linux"
 modules = ["lmcache", "tests", "benchmarks"]
 exclude = [
     'lmcache/integration/vllm/lmcache_mp_connector_.*\.py',
+    'lmcache/native_storage_ops\.py',
 ]
 
 disable_error_code = [
