@@ -87,7 +87,7 @@ if ! wait_for_server "$VLLM_PORT" 600 "$VLLM_LOG"; then
     exit 1
 fi
 
-echo "=== Verifying scheduler auto-started the MP server ==="
+echo "=== Verifying vLLM auto-started the MP server ==="
 if ! grep -q "Auto-starting LMCache MP server" "$VLLM_LOG"; then
     echo "FAIL: vLLM log does not show MP server auto-start"
     tail -200 "$VLLM_LOG" 2>/dev/null || true

@@ -476,9 +476,10 @@ All connector-level options are passed through
        connector to the server.
    * - ``lmcache.mp.autostart``
      - ``false``
-     - Whether the vLLM scheduler should start a local ``lmcache server``
-       process before connecting to it. Only ``localhost``, ``127.0.0.1``,
-       and ``::1`` are supported.
+     - Whether vLLM worker 0 should start a local ``lmcache server`` process
+       before workers connect to it. Other local workers wait for the server to
+       become reachable. Only ``localhost``, ``127.0.0.1``, and ``::1`` are
+       supported.
    * - ``lmcache.mp.autostart.wait_timeout``
      - ``90.0``
      - Timeout (seconds) to wait for the auto-started server to respond to
@@ -496,7 +497,7 @@ All connector-level options are passed through
        SHM zero-copy), or ``data`` (force worker-side gather/scatter copy).
        Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
 
-To let the vLLM scheduler start a local MP server automatically:
+To let vLLM worker 0 start a local MP server automatically:
 
 .. code-block:: bash
 
@@ -506,7 +507,9 @@ To let the vLLM scheduler start a local MP server automatically:
 
 The auto-started MP server is treated as a shared local service. vLLM shutdown
 does not terminate it, because other vLLM instances may still be connected.
-Stop the server process separately when it is no longer needed.
+Stop the server process separately when it is no longer needed. Auto-start is
+intended for single-node deployments; for multi-node TP/PP deployments, start
+the MP server separately and configure each vLLM instance to connect to it.
 
 Environment Variables
 ---------------------

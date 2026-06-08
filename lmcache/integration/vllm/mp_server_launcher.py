@@ -115,53 +115,54 @@ def is_mp_server_healthy(
                 logger.debug("Failed to close LMCache MP health client", exc_info=True)
 
 
-def maybe_autostart_mp_server(
+def _build_autostart_config_from_url(
     *,
     extra_config: object | None,
-    server_host: str,
-    server_port: int | str,
     server_url: str,
-    zmq_context: zmq.Context,
-) -> "MPServerLauncher | None":
-    """Start the LMCache MP server when configured.
+) -> "MPServerAutostartConfig":
+    """Build auto-start configuration from connector config and ZMQ URL.
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_host: LMCache MP server host from ``lmcache.mp.host``.
-        server_port: LMCache MP server port from ``lmcache.mp.port``.
         server_url: ZMQ URL used by the connector to reach the MP server.
-        zmq_context: ZMQ context used for health probing.
 
     Returns:
-        A launcher for the enabled auto-start configuration, or ``None`` when
-        auto-start is disabled. The launcher owns a process only when it had to
-        start one.
+        Parsed ``MPServerAutostartConfig``.
 
     Raises:
-        ValueError: If an auto-start configuration value is invalid.
-        ConnectionError: If auto-start is enabled and the server does not
-            become reachable before the configured timeout.
+        ValueError: If an auto-start configuration value or server URL is
+            invalid.
     """
-    config = MPServerAutostartConfig.from_extra_config(
+    if not _parse_bool(_get_extra_config_value(extra_config, _AUTOSTART_KEY)):
+        return MPServerAutostartConfig.from_extra_config(
+            extra_config=extra_config,
+            server_host="",
+            server_port=0,
+        )
+
+    server_host = _get_extra_config_value(extra_config, _HOST_KEY)
+    server_port = _get_extra_config_value(extra_config, _PORT_KEY)
+    if server_host is None or server_port is None:
+        parsed = urlparse(server_url if "://" in server_url else f"tcp://{server_url}")
+        if parsed.hostname is None or parsed.port is None:
+            raise ValueError(f"Invalid LMCache MP server URL: {server_url!r}")
+        server_host = parsed.hostname if server_host is None else server_host
+        server_port = parsed.port if server_port is None else server_port
+
+    return MPServerAutostartConfig.from_extra_config(
         extra_config=extra_config,
-        server_host=server_host,
+        server_host=str(server_host),
         server_port=server_port,
     )
-    if not config.enabled:
-        return None
-
-    launcher = MPServerLauncher(config)
-    launcher.start(server_url=server_url, zmq_context=zmq_context)
-    return launcher
 
 
-def maybe_autostart_mp_server_from_url(
+def maybe_start_mp_server_from_url(
     *,
     extra_config: object | None,
     server_url: str,
     zmq_context: zmq.Context,
 ) -> "MPServerLauncher | None":
-    """Start the LMCache MP server from a connector server URL when configured.
+    """Start the connector's local LMCache MP server when auto-start is enabled.
 
     Args:
         extra_config: vLLM ``kv_connector_extra_config`` mapping.
@@ -179,22 +180,48 @@ def maybe_autostart_mp_server_from_url(
         ConnectionError: If auto-start is enabled and the server does not
             become reachable before the configured timeout.
     """
-    if not _parse_bool(_get_extra_config_value(extra_config, _AUTOSTART_KEY)):
+    config = _build_autostart_config_from_url(
+        extra_config=extra_config,
+        server_url=server_url,
+    )
+    if not config.enabled:
         return None
 
-    server_host = _get_extra_config_value(extra_config, _HOST_KEY)
-    server_port = _get_extra_config_value(extra_config, _PORT_KEY)
-    if server_host is None or server_port is None:
-        parsed = urlparse(server_url if "://" in server_url else f"tcp://{server_url}")
-        if parsed.hostname is None or parsed.port is None:
-            raise ValueError(f"Invalid LMCache MP server URL: {server_url!r}")
-        server_host = parsed.hostname if server_host is None else server_host
-        server_port = parsed.port if server_port is None else server_port
+    launcher = MPServerLauncher(config)
+    launcher.start(server_url=server_url, zmq_context=zmq_context)
+    return launcher
 
-    return maybe_autostart_mp_server(
+
+def wait_for_mp_server_from_url(
+    *,
+    extra_config: object | None,
+    server_url: str,
+    zmq_context: zmq.Context,
+) -> None:
+    """Wait for the connector's local LMCache MP server when auto-start is enabled.
+
+    Args:
+        extra_config: vLLM ``kv_connector_extra_config`` mapping.
+        server_url: ZMQ URL used by the connector to reach the MP server.
+        zmq_context: ZMQ context used for health probing.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If an auto-start configuration value or server URL is
+            invalid.
+        ConnectionError: If auto-start is enabled and the server does not
+            become reachable before the configured timeout.
+    """
+    config = _build_autostart_config_from_url(
         extra_config=extra_config,
-        server_host=str(server_host),
-        server_port=server_port,
+        server_url=server_url,
+    )
+    if not config.enabled:
+        return
+
+    MPServerLauncher(config).wait_until_healthy(
         server_url=server_url,
         zmq_context=zmq_context,
     )
@@ -352,7 +379,11 @@ class MPServerAutostartConfig:
         )
 
     def command(self) -> list[str]:
-        """Return the command used to start the HTTP MP server."""
+        """Return the command used to start the HTTP MP server.
+
+        Returns:
+            Command arguments suitable for ``subprocess.Popen``.
+        """
         return [
             sys.executable,
             "-m",
@@ -384,6 +415,9 @@ class MPServerLauncher:
             server_url: ZMQ URL used by the connector to reach the MP server.
             zmq_context: ZMQ context used for health probing.
 
+        Returns:
+            None.
+
         Raises:
             ConnectionError: If the server process exits early or does not become
                 healthy before the configured timeout.
@@ -402,16 +436,51 @@ class MPServerLauncher:
         logger.info("Auto-starting LMCache MP server with command: %s", command)
         self._process = subprocess.Popen(command)
         try:
-            self._wait_until_healthy(server_url, zmq_context)
+            self._wait_until_healthy(
+                server_url,
+                zmq_context,
+                require_owned_process=True,
+            )
         except Exception:
             self.shutdown()
             raise
+
+    def wait_until_healthy(self, server_url: str, zmq_context: zmq.Context) -> None:
+        """Wait for the MP server to become reachable over ZMQ.
+
+        Args:
+            server_url: ZMQ URL used by the connector to reach the MP server.
+            zmq_context: ZMQ context used for health probing.
+
+        Returns:
+            None.
+
+        Raises:
+            ConnectionError: If the server does not become healthy before the
+                configured timeout.
+        """
+        if not self.config.enabled:
+            return
+
+        if is_mp_server_healthy(server_url, zmq_context):
+            logger.info("LMCache MP server is already healthy at %s", server_url)
+            return
+
+        logger.info("Waiting for LMCache MP server to become healthy at %s", server_url)
+        self._wait_until_healthy(
+            server_url,
+            zmq_context,
+            require_owned_process=False,
+        )
 
     def shutdown(self) -> None:
         """Terminate the auto-started MP server process.
 
         This is used for startup failure cleanup. Normal vLLM shutdown does not
         call it because other vLLM instances may share the same MP server.
+
+        Returns:
+            None.
         """
         if self._process is None:
             return
@@ -428,7 +497,13 @@ class MPServerLauncher:
             process.kill()
             process.wait(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
 
-    def _wait_until_healthy(self, server_url: str, zmq_context: zmq.Context) -> None:
+    def _wait_until_healthy(
+        self,
+        server_url: str,
+        zmq_context: zmq.Context,
+        *,
+        require_owned_process: bool,
+    ) -> None:
         deadline = time.monotonic() + self.config.wait_timeout
         while time.monotonic() < deadline:
             if is_mp_server_healthy(server_url, zmq_context):
@@ -438,21 +513,26 @@ class MPServerLauncher:
                 )
                 return
 
-            process = self._process
-            if process is None:
-                raise ConnectionError("Auto-started LMCache MP server is not active.")
-            return_code = process.poll()
-            if return_code is not None:
-                raise ConnectionError(
-                    "Auto-started LMCache MP server exited before becoming "
-                    f"healthy. returncode={return_code}, "
-                    f"server_url={server_url}, "
-                    f"command={self.config.command()}"
-                )
+            if require_owned_process:
+                process = self._process
+                if process is None:
+                    raise ConnectionError(
+                        "Auto-started LMCache MP server is not active."
+                    )
+                return_code = process.poll()
+                if return_code is not None:
+                    raise ConnectionError(
+                        "Auto-started LMCache MP server exited before becoming "
+                        f"healthy. returncode={return_code}, "
+                        f"server_url={server_url}, "
+                        f"command={self.config.command()}"
+                    )
             time.sleep(_POLL_INTERVAL_SECONDS)
 
-        raise ConnectionError(
-            "Auto-started LMCache MP server did not become healthy within "
-            f"{self.config.wait_timeout}s. server_url={server_url}, "
-            f"command={self.config.command()}"
+        message = (
+            "LMCache MP server did not become healthy within "
+            f"{self.config.wait_timeout}s. server_url={server_url}"
         )
+        if require_owned_process:
+            message += f", command={self.config.command()}"
+        raise ConnectionError(message)

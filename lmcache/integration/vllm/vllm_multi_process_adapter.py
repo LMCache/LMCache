@@ -15,7 +15,8 @@ import zmq
 # First Party
 from lmcache.integration.request_telemetry.factory import RequestTelemetryFactory
 from lmcache.integration.vllm.mp_server_launcher import (
-    maybe_autostart_mp_server_from_url,
+    maybe_start_mp_server_from_url,
+    wait_for_mp_server_from_url,
 )
 from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
@@ -532,16 +533,9 @@ class LMCacheMPSchedulerAdapter:
             mq_timeout,
         )
         if extra_config is not None:
-            self._mp_server_launcher = maybe_autostart_mp_server_from_url(
-                extra_config=extra_config,
-                server_url=server_url,
-                zmq_context=context,
-            )
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
-        else:
-            self._mp_server_launcher = None
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -904,11 +898,29 @@ class LMCacheMPWorkerAdapter:
             mq_timeout,
         )
         if extra_config is not None:
+            # ``kv_worker_id`` may be shared by multiple TP ranks under MLA; the
+            # actual vLLM worker rank is the unique local server owner.
+            if parallel_strategy.actual_worker_id == 0:
+                # Retain the Popen handle; normal adapter shutdown deliberately
+                # leaves the shared local server running.
+                self._mp_server_launcher = maybe_start_mp_server_from_url(
+                    extra_config=extra_config,
+                    server_url=server_url,
+                    zmq_context=context,
+                )
+            else:
+                wait_for_mp_server_from_url(
+                    extra_config=extra_config,
+                    server_url=server_url,
+                    zmq_context=context,
+                )
+                self._mp_server_launcher = None
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
             self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
         else:
+            self._mp_server_launcher = None
             self._mp_transfer_mode = ExtraConfigDefault.mp_transfer_mode.value
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout

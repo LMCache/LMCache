@@ -12,8 +12,8 @@ from lmcache.integration.vllm import mp_server_launcher as launcher_mod
 from lmcache.integration.vllm.mp_server_launcher import (
     MPServerAutostartConfig,
     MPServerLauncher,
-    maybe_autostart_mp_server,
-    maybe_autostart_mp_server_from_url,
+    maybe_start_mp_server_from_url,
+    wait_for_mp_server_from_url,
 )
 
 
@@ -238,13 +238,14 @@ def test_config_rejects_invalid_enabled_values(
         )
 
 
-def test_maybe_autostart_starts_when_enabled(monkeypatch) -> None:
+def test_maybe_start_mp_server_from_url_starts_when_enabled(monkeypatch) -> None:
     instances = []
 
     class FakeLauncher:
         def __init__(self, config: MPServerAutostartConfig) -> None:
             self.config = config
             self.started = False
+            self.waited = False
             self.server_url = None
             self.zmq_context = None
             instances.append(self)
@@ -254,26 +255,66 @@ def test_maybe_autostart_starts_when_enabled(monkeypatch) -> None:
             self.server_url = server_url
             self.zmq_context = zmq_context
 
+        def wait_until_healthy(self, server_url: str, zmq_context: object) -> None:
+            self.waited = True
+            self.server_url = server_url
+            self.zmq_context = zmq_context
+
     monkeypatch.setattr(launcher_mod, "MPServerLauncher", FakeLauncher)
     zmq_context = MagicMock()
 
-    launcher = maybe_autostart_mp_server(
+    launcher = maybe_start_mp_server_from_url(
         extra_config={"lmcache.mp.autostart": True},
-        server_host="tcp://localhost",
-        server_port=5555,
         server_url="tcp://localhost:5555",
         zmq_context=zmq_context,
     )
 
     assert launcher is instances[0]
+    assert instances[0].config.host == "localhost"
+    assert instances[0].config.port == 5555
     assert instances[0].started
+    assert not instances[0].waited
     assert instances[0].server_url == "tcp://localhost:5555"
     assert instances[0].zmq_context is zmq_context
     assert len(instances) == 1
 
 
-def test_maybe_autostart_from_url_ignores_invalid_url_when_disabled() -> None:
-    launcher = maybe_autostart_mp_server_from_url(
+def test_wait_for_mp_server_from_url_waits_when_enabled(monkeypatch) -> None:
+    instances = []
+
+    class FakeLauncher:
+        def __init__(self, config: MPServerAutostartConfig) -> None:
+            self.config = config
+            self.started = False
+            self.waited = False
+            instances.append(self)
+
+        def start(self, _server_url: str, _zmq_context: object) -> None:
+            self.started = True
+
+        def wait_until_healthy(self, server_url: str, zmq_context: object) -> None:
+            self.waited = True
+            self.server_url = server_url
+            self.zmq_context = zmq_context
+
+    monkeypatch.setattr(launcher_mod, "MPServerLauncher", FakeLauncher)
+
+    wait_for_mp_server_from_url(
+        extra_config={"lmcache.mp.autostart": True},
+        server_url="tcp://localhost:5555",
+        zmq_context=MagicMock(),
+    )
+
+    assert len(instances) == 1
+    assert instances[0].config.host == "localhost"
+    assert instances[0].config.port == 5555
+    assert not instances[0].started
+    assert instances[0].waited
+    assert instances[0].server_url == "tcp://localhost:5555"
+
+
+def test_maybe_start_mp_server_from_url_ignores_invalid_url_when_disabled() -> None:
+    launcher = maybe_start_mp_server_from_url(
         extra_config={"lmcache.mp.autostart": False},
         server_url="not a valid url",
         zmq_context=MagicMock(),
@@ -282,52 +323,67 @@ def test_maybe_autostart_from_url_ignores_invalid_url_when_disabled() -> None:
     assert launcher is None
 
 
-def test_maybe_autostart_from_url_parses_local_server_url(monkeypatch) -> None:
-    calls = []
-
-    def fake_maybe_autostart(**kwargs):
-        calls.append(kwargs)
-        return "launcher"
-
-    monkeypatch.setattr(
-        launcher_mod,
-        "maybe_autostart_mp_server",
-        fake_maybe_autostart,
+def test_wait_for_mp_server_from_url_ignores_invalid_url_when_disabled() -> None:
+    wait_for_mp_server_from_url(
+        extra_config={"lmcache.mp.autostart": False},
+        server_url="not a valid url",
+        zmq_context=MagicMock(),
     )
+
+
+def test_maybe_start_mp_server_from_url_parses_local_server_url(monkeypatch) -> None:
+    instances = []
+
+    class FakeLauncher:
+        def __init__(self, config: MPServerAutostartConfig) -> None:
+            self.config = config
+            instances.append(self)
+
+        def start(self, server_url: str, zmq_context: object) -> None:
+            self.server_url = server_url
+            self.zmq_context = zmq_context
+            return None
+
+        def wait_until_healthy(self, server_url: str, zmq_context: object) -> None:
+            self.server_url = server_url
+            self.zmq_context = zmq_context
+            return None
+
+    monkeypatch.setattr(launcher_mod, "MPServerLauncher", FakeLauncher)
     zmq_context = MagicMock()
 
-    launcher = maybe_autostart_mp_server_from_url(
+    launcher = maybe_start_mp_server_from_url(
         extra_config={"lmcache.mp.autostart": True},
         server_url="tcp://localhost:5555",
         zmq_context=zmq_context,
     )
 
-    assert launcher == "launcher"
-    assert calls == [
-        {
-            "extra_config": {"lmcache.mp.autostart": True},
-            "server_host": "localhost",
-            "server_port": 5555,
-            "server_url": "tcp://localhost:5555",
-            "zmq_context": zmq_context,
-        }
-    ]
+    assert launcher is instances[0]
+    assert instances[0].config.host == "localhost"
+    assert instances[0].config.port == 5555
 
 
-def test_maybe_autostart_from_url_prefers_configured_endpoint(
+def test_maybe_start_mp_server_from_url_prefers_configured_endpoint(
     monkeypatch,
 ) -> None:
-    calls = []
+    instances = []
 
-    def fake_maybe_autostart(**kwargs):
-        calls.append(kwargs)
-        return "launcher"
+    class FakeLauncher:
+        def __init__(self, config: MPServerAutostartConfig) -> None:
+            self.config = config
+            instances.append(self)
 
-    monkeypatch.setattr(
-        launcher_mod,
-        "maybe_autostart_mp_server",
-        fake_maybe_autostart,
-    )
+        def start(self, server_url: str, zmq_context: object) -> None:
+            self.server_url = server_url
+            self.zmq_context = zmq_context
+            return None
+
+        def wait_until_healthy(self, server_url: str, zmq_context: object) -> None:
+            self.server_url = server_url
+            self.zmq_context = zmq_context
+            return None
+
+    monkeypatch.setattr(launcher_mod, "MPServerLauncher", FakeLauncher)
     extra_config = {
         "lmcache.mp.autostart": True,
         "lmcache.mp.host": "::1",
@@ -335,27 +391,20 @@ def test_maybe_autostart_from_url_prefers_configured_endpoint(
     }
     zmq_context = MagicMock()
 
-    launcher = maybe_autostart_mp_server_from_url(
+    launcher = maybe_start_mp_server_from_url(
         extra_config=extra_config,
         server_url="tcp://::1:5555",
         zmq_context=zmq_context,
     )
 
-    assert launcher == "launcher"
-    assert calls == [
-        {
-            "extra_config": extra_config,
-            "server_host": "::1",
-            "server_port": 5555,
-            "server_url": "tcp://::1:5555",
-            "zmq_context": zmq_context,
-        }
-    ]
+    assert launcher is instances[0]
+    assert instances[0].config.host == "::1"
+    assert instances[0].config.port == 5555
 
 
-def test_maybe_autostart_from_url_rejects_missing_port_when_enabled() -> None:
+def test_maybe_start_mp_server_from_url_rejects_missing_port_when_enabled() -> None:
     with pytest.raises(ValueError, match="Invalid LMCache MP server URL"):
-        maybe_autostart_mp_server_from_url(
+        maybe_start_mp_server_from_url(
             extra_config={"lmcache.mp.autostart": True},
             server_url="tcp://localhost",
             zmq_context=MagicMock(),
