@@ -51,7 +51,7 @@ def _directory(request: Request) -> GlobalBlendMatcher:
 
 
 @router.post("/blend/fingerprints")
-async def publish_fingerprints(
+def publish_fingerprints(
     body: BlendFingerprintRequest, request: Request
 ) -> BlendFingerprintResponse:
     """Register published chunk fingerprints (idempotent).
@@ -74,9 +74,7 @@ async def publish_fingerprints(
 
 
 @router.delete("/blend/fingerprints")
-async def evict_fingerprints(
-    body: BlendEvictRequest, request: Request
-) -> BlendEvictResponse:
+def evict_fingerprints(body: BlendEvictRequest, request: Request) -> BlendEvictResponse:
     """Evict fingerprints by storage key (idempotent).
 
     Returns:
@@ -88,9 +86,7 @@ async def evict_fingerprints(
 
 
 @router.post("/blend/match")
-async def match_fingerprints(
-    body: BlendMatchRequest, request: Request
-) -> BlendMatchResponse:
+def match_fingerprints(body: BlendMatchRequest, request: Request) -> BlendMatchResponse:
     """Match a request's rolling-hash array against the directory.
 
     Returns:

@@ -36,9 +36,9 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
+from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
-    CBGlobalSegment,
     CBMatchResult,
     CBUnifiedLookupResult,
     CudaIPCWrapper,
@@ -47,7 +47,6 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -91,6 +90,7 @@ class _CBUnifiedJob:
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
     found_result: list[CBMatchResult] | None = None  # local classify, computed once
     coord_submitted: bool = False  # coordinator match query was issued
+    coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
 
 
 class BlendTokenRangeMatcherV3:
@@ -419,6 +419,10 @@ class BlendV3Module:
 
     def close(self) -> None:
         self._fingerprint_stop.set()
+        if self._coordinator is not None:
+            # Joins the client's daemon thread and closes its httpx.Client;
+            # otherwise the coordinator leg leaks both on server shutdown.
+            self._coordinator.close()
         self._cb_rope_state.clear()
 
     # ------------------------------------------------------------------
@@ -760,6 +764,8 @@ class BlendV3Module:
             )
             job = _CBUnifiedJob(matches=matches, num_tokens=len(key.token_ids))
             job.coord_submitted = self._submit_coordinator_match(key)
+            if job.coord_submitted and self._coordinator is not None:
+                job.coord_deadline = time.monotonic() + self._coordinator.match_budget_s
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
@@ -1036,29 +1042,36 @@ class BlendV3Module:
 
     def _poll_coordinator_match(
         self, job: "_CBUnifiedJob", rid: str
-    ) -> "list[CBGlobalSegment] | None":
+    ) -> "list[CBMatchResult] | None":
         """Poll the coordinator match result, deferring until it resolves.
 
         Mirrors the prefix/sparse legs: ``return None`` to defer while pending.
-        The result is guaranteed to resolve (matches, or ``[]`` on failure)
-        within the client's HTTP ``request_timeout``, which is the single
-        wall-clock budget bounding how long the lookup waits on this optional
-        leg before proceeding local-only.
+        A per-lookup wall-clock deadline (``job.coord_deadline``) bounds the
+        total wait: the daemon services match queries serially, so queue backlog
+        can keep a query ``PENDING`` well past one HTTP round-trip. Once the
+        deadline passes, the leg is abandoned and the lookup proceeds local-only
+        (the daemon's later fill, if any, is dropped via ``take_match``).
 
         Args:
             job: The per-request poll state.
             rid: Request id.
 
         Returns:
-            The global segments (possibly empty) once resolved, or ``None`` to
-            defer (still in flight).
+            The global segments (possibly empty) once resolved or timed out, or
+            ``None`` to defer (still in flight and within the deadline).
         """
         coordinator = self._coordinator
         if coordinator is None or not job.coord_submitted:
             return []
         poll = coordinator.poll_match(rid)
         if poll is PENDING:
-            return None  # defer; bounded by the client's request_timeout
+            if time.monotonic() < job.coord_deadline:
+                return None  # defer; bounded by job.coord_deadline
+            coordinator.take_match(rid)
+            logger.warning(
+                "CB coordinator match deadline exceeded for %s; local-only", rid
+            )
+            return []
         coordinator.take_match(rid)
         if isinstance(poll, list):
             return self._build_global_segments(poll)
@@ -1066,23 +1079,29 @@ class BlendV3Module:
 
     def _build_global_segments(
         self, matches: "list[RemoteMatch]"
-    ) -> list[CBGlobalSegment]:
-        """Convert coordinator matches into chunk-granular global segments.
+    ) -> list[CBMatchResult]:
+        """Convert coordinator matches into chunk-granular retrievable segments.
+
+        Each coordinator ``object_key`` is the hex of the chunk's content hash
+        (the same ``th`` a local ``CBMatchResult.hash`` holds), so the matches
+        are returned as ``CBMatchResult`` directly: the retrieve path then
+        expands ``hash`` to per-rank shared-L2 object keys via
+        ``ipc_key_to_object_keys``, identical to local matches.
 
         Args:
             matches: Matched chunks returned by the coordinator client.
 
         Returns:
-            One :class:`CBGlobalSegment` per matched chunk (request order).
+            One :class:`CBMatchResult` per matched chunk (request order).
         """
         chunk_size = self._ctx.chunk_size
         return [
-            CBGlobalSegment(
-                object_key=m.object_key,
+            CBMatchResult(
                 old_st=m.old_st,
                 old_ed=m.old_st + chunk_size,
                 cur_st=m.cur_st,
                 cur_ed=m.cur_st + chunk_size,
+                hash=bytes.fromhex(m.object_key),
             )
             for m in matches
         ]

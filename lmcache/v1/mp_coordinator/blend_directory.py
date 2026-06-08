@@ -148,31 +148,36 @@ class GlobalBlendMatcher:
             Number of chunk fingerprints newly inserted (excludes idempotent
             skips).
         """
+        # Hash every range outside the lock; keep only well-formed ranges.
+        prepared: list[tuple[str, np.ndarray, list[str], int]] = []
+        for rng in ranges:
+            arr = np.array(rng.tokens, dtype=np.uint64)
+            polys = chunk_hash_windows_numba(arr, self._chunk_size, POLY_BASE)
+            n_chunks = int(polys.shape[0])
+            if n_chunks != len(rng.object_keys):
+                logger.error(
+                    "blend register: %d chunks from %d tokens (chunk_size=%d) "
+                    "but %d object_keys for scope %s; skipping range "
+                    "(publisher/chunk_size mismatch)",
+                    n_chunks,
+                    len(rng.tokens),
+                    self._chunk_size,
+                    len(rng.object_keys),
+                    rng.model_scope,
+                )
+                continue
+            prepared.append((rng.model_scope, polys, rng.object_keys, rng.old_st_base))
+
         inserted = 0
         with self._lock:
-            for rng in ranges:
-                arr = np.array(rng.tokens, dtype=np.uint64)
-                polys = chunk_hash_windows_numba(arr, self._chunk_size, POLY_BASE)
-                n_chunks = int(polys.shape[0])
-                if n_chunks != len(rng.object_keys):
-                    logger.error(
-                        "blend register: %d chunks from %d tokens (chunk_size=%d) "
-                        "but %d object_keys for scope %s; skipping range "
-                        "(publisher/chunk_size mismatch)",
-                        n_chunks,
-                        len(rng.tokens),
-                        self._chunk_size,
-                        len(rng.object_keys),
-                        rng.model_scope,
-                    )
-                    continue
-                for i in range(n_chunks):
-                    key = (rng.model_scope, int(polys[i]))
+            for model_scope, polys, object_keys, old_st_base in prepared:
+                for i in range(len(object_keys)):
+                    key = (model_scope, int(polys[i]))
                     if key in self._index:
                         continue
-                    object_key = rng.object_keys[i]
+                    object_key = object_keys[i]
                     self._index[key] = _ChunkLoc(
-                        object_key, rng.old_st_base + i * self._chunk_size
+                        object_key, old_st_base + i * self._chunk_size
                     )
                     self._by_key.setdefault(object_key, []).append(key)
                     inserted += 1

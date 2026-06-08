@@ -79,6 +79,7 @@ class BlendCoordinatorClient:
         *,
         request_fn: _RequestFn | None = None,
         request_timeout: float = 2.0,
+        match_budget_s: float = 2.0,
     ) -> None:
         """Create the client and start its daemon.
 
@@ -89,7 +90,12 @@ class BlendCoordinatorClient:
                 json_dict`` used instead of the built-in HTTP client (for
                 testing). Must raise on transport failure.
             request_timeout: Per-request HTTP timeout in seconds.
+            match_budget_s: Per-lookup wall-clock budget the blend module uses to
+                bound the optional global leg. Unlike ``request_timeout`` (one
+                round-trip), this bounds total time including queue wait behind
+                other match queries, since the daemon services them serially.
         """
+        self.match_budget_s = match_budget_s
         self._client = None
         if request_fn is None:
             # Third Party
@@ -191,10 +197,12 @@ class BlendCoordinatorClient:
 
         Reads ``LMCACHE_COORDINATOR_URL`` (required to enable) and
         ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (default 0.05s). This timeout is the
-        single wall-clock budget on the optional global leg: the lookup polls
-        until the match resolves (matches, or ``[]`` if the HTTP call times out),
-        so it bounds how long the critical path waits before proceeding
-        local-only. Keep it small.
+        wall-clock budget on the optional global leg: the blend module polls
+        until the match resolves (matches, or ``[]`` on failure) but gives up
+        once the budget elapses, so it bounds how long the critical path waits
+        -- including time queued behind other match queries -- before proceeding
+        local-only. It is used both as the per-request HTTP timeout and as the
+        module's per-lookup deadline. Keep it small.
 
         Returns:
             A started client, or ``None`` when no coordinator URL is configured
@@ -205,7 +213,7 @@ class BlendCoordinatorClient:
             return None
         timeout = float(os.getenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "0.05"))
         logger.info("Blend coordinator client enabled -> %s", url)
-        return cls(url, request_timeout=timeout)
+        return cls(url, request_timeout=timeout, match_budget_s=timeout)
 
     # -- daemon ------------------------------------------------------------
 

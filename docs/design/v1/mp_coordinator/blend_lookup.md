@@ -140,17 +140,22 @@ every publish/query path is skipped (behavior unchanged).
 The coordinator leg is additive around the existing prefix + sparse legs:
 
 1. First call: submit the local fingerprint match (unchanged) **and** the
-   coordinator match (request tokens).
+   coordinator match (request tokens). A per-lookup wall-clock deadline is armed
+   (`match_budget_s`, from `LMCACHE_COORDINATOR_BLEND_TIMEOUT`).
 2. Local legs complete once (classify side effects run once).
-3. Poll the coordinator (defer until resolved, bounded by the HTTP
-   `request_timeout`); when ready, flatten matches into
-   `global_segments` on `CBUnifiedLookupResult`.
+3. Poll the coordinator: defer while pending, but give up at the deadline and
+   proceed local-only. The deadline (not just the per-request HTTP timeout)
+   bounds total wait, since the coordinator daemon services match queries
+   serially and a query can sit queued behind others. When ready, the matches
+   become `global_segments` on `CBUnifiedLookupResult`.
 
-`CBUnifiedLookupResult.global_segments` is chunk-granular
-(`object_key, old_st, old_ed, cur_st, cur_ed`), parallel to the local
-`non_prefix_segments` but pointing at shared-L2 storage keys. The partial-KV
-transfer / retrieve path consumes it (and reconciles any overlap with the local
-segments — not merged here).
+`CBUnifiedLookupResult.global_segments` is `list[CBMatchResult]`, the same shape
+as the local `non_prefix_segments`: each `hash` is the chunk's content hash
+(the coordinator's `object_key` hex), which `ipc_key_to_object_keys` expands to
+per-rank shared-L2 keys at retrieve. The consumer merges these into the single
+`cb_match_result` list it sends to `CB_RETRIEVE_PRE_COMPUTED_V3` (reconciling any
+overlap with the local segments — not merged here), so the existing retrieve /
+re-RoPE path fetches and scatters them with no protocol change.
 
 ## Eviction & staleness
 
