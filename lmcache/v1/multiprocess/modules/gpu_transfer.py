@@ -76,9 +76,8 @@ def get_layout_desc(
         gpu_context.get_kernel_group_shape_dtype(num_tokens, kernel_group_idx)
         for kernel_group_idx in object_group.kernel_group_indices
     ]
-    shapes = [shape for shape, _ in shapes_and_dtypes]
-    dtypes = [dtype for _, dtype in shapes_and_dtypes]
-    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
+    shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
+    return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
 
 
 def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None]:
@@ -271,7 +270,7 @@ class GPUTransferModule:
         )
 
         layout_desc = get_layout_desc(
-            gpu_context, self._ctx.chunk_size, object_group_id=0
+            cache_context, self._ctx.chunk_size, object_group_id=0
         )
         self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
 
@@ -345,13 +344,13 @@ class GPUTransferModule:
         model_name = entry.model_name
 
         # TODO(refactor): only single-object-group transfers are wired up so far.
-        assert gpu_context.kv_layer_groups_manager.num_object_groups == 1
+        assert cache_context.kv_layer_groups_manager.num_object_groups == 1
 
         # NOTE: different engine groups may have different block sizes, so
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
         # group ``i``.
         blocks_per_chunk = [
-            cache_context.blocks_for_tokens(self._ctx.chunk_size, group_idx)
+            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
             for group_idx in range(cache_context.kv_layer_groups_manager.num_groups)
         ]
 
@@ -428,7 +427,7 @@ class GPUTransferModule:
             store_succeeded = False
             try:
                 layout_desc = get_layout_desc(
-                    gpu_context, self._ctx.chunk_size, object_group_id=0
+                    cache_context, self._ctx.chunk_size, object_group_id=0
                 )
                 reserved_dict = self._ctx.storage_manager.reserve_write(
                     obj_keys, layout_desc, "new"
@@ -453,10 +452,10 @@ class GPUTransferModule:
                             idx * bpc : (idx + 1) * bpc
                         ]
                         # Store is not batched, so we always use batch_idx=0.
-                        tmp_buffer = gpu_context.get_temp_kernel_group_buffer(
+                        tmp_buffer = cache_context.get_temp_kernel_group_buffer(
                             0, group_idx
                         )
-                        group_kv_pointers = gpu_context.get_kernel_group_kv_pointers(
+                        group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                             group_idx
                         )
                         # Kernel contract: ``group_lmcache_chunk_size`` here is the
@@ -479,7 +478,7 @@ class GPUTransferModule:
                     # Store is not batched, so we always use batch_idx=0 (single
                     # slot). Single object group => object_group_idx=0.
                     lmcache_memcpy_async_d2h(
-                        gpu_context.get_temp_object_group_buffer(0, 0), memory_obj
+                        cache_context.get_temp_object_group_buffer(0, 0), memory_obj
                     )
                 store_succeeded = True
             except Exception:
@@ -568,7 +567,7 @@ class GPUTransferModule:
         model_name = entry.model_name
 
         # TODO(refactor): only single-object-group transfers are wired up so far.
-        assert gpu_context.kv_layer_groups_manager.num_object_groups == 1
+        assert cache_context.kv_layer_groups_manager.num_object_groups == 1
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
@@ -642,10 +641,10 @@ class GPUTransferModule:
                     # Single object group => object_group_idx=0.
                     lmcache_memcpy_async_h2d(
                         memory_obj,
-                        gpu_context.get_temp_object_group_buffer(chunk_idx, 0),
+                        cache_context.get_temp_object_group_buffer(chunk_idx, 0),
                     )
                 for group_idx, group in enumerate(groups):
-                    bpc = cache_context.blocks_for_tokens(
+                    bpc = cache_context.calculate_num_blocks(
                         self._ctx.chunk_size, group_idx
                     )
                     chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
@@ -662,17 +661,17 @@ class GPUTransferModule:
                             f"expected={batch_len * bpc} "
                             f"got={chunk_block_ids_gpu.shape[0]}"
                         )
-                    group_skip_blocks = cache_context.blocks_for_tokens(
+                    group_skip_blocks = cache_context.calculate_num_blocks(
                         skip_tokens_in_chunk, group_idx
                     )
                     tmp_buffers = [
-                        gpu_context.get_temp_kernel_group_buffer(i, group_idx)
+                        cache_context.get_temp_kernel_group_buffer(i, group_idx)
                         for i in range(batch_len)
                     ]
-                    group_kv_pointers = gpu_context.get_kernel_group_kv_pointers(
+                    group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                         group_idx
                     )
-                    group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
+                    group_lmcache_chunk_size = cache_context.get_physical_chunk_size(
                         group_idx
                     )
 
