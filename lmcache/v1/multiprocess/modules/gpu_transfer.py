@@ -47,27 +47,36 @@ import lmcache.c_ops as lmc_ops
 logger = init_logger(__name__)
 
 
-def get_layout_desc(gpu_context: GPUCacheContext, num_tokens: int) -> MemoryLayoutDesc:
-    """Get the memory layout description for a given GPU context and number of tokens.
+def get_layout_desc(
+    gpu_context: GPUCacheContext,
+    num_tokens: int,
+    object_group_id: int = 0,
+) -> MemoryLayoutDesc:
+    """Get the memory layout description for a specific object group.
 
-    Supports multiple KV layer groups with different shapes and dtypes.
+    The returned layout describes the single memory object that backs
+    ``object_group_id``: one (shape, dtype) entry per kernel group in that
+    object group, in the kernel groups' declared layout order. Kernel groups
+    may have different shapes and dtypes.
 
     Args:
         gpu_context: The GPU cache context containing the KV cache information.
         num_tokens: The number of tokens to determine the layout for.
+        object_group_id: Index of the object group whose layout to build.
+            Defaults to 0; under the current single-object-group assumption this
+            covers every kernel group.
 
     Returns:
-        MemoryLayoutDesc: The memory layout description containing shapes and dtypes.
+        MemoryLayoutDesc: The memory layout description containing shapes and
+        dtypes, one entry per kernel group in the object group.
     """
-    num_groups = gpu_context.kv_layer_groups_manager.num_groups
-    shapes = [
-        gpu_context.get_kv_buffer_shape(num_tokens, group_idx)
-        for group_idx in range(num_groups)
+    object_group = gpu_context.kv_layer_groups_manager.object_groups[object_group_id]
+    shapes_and_dtypes = [
+        gpu_context.get_kernel_group_shape_dtype(num_tokens, kernel_group_idx)
+        for kernel_group_idx in object_group.kernel_group_indices
     ]
-    dtypes = [
-        gpu_context.kv_layer_groups_manager.kv_layer_groups[group_idx].dtype
-        for group_idx in range(num_groups)
-    ]
+    shapes = [shape for shape, _ in shapes_and_dtypes]
+    dtypes = [dtype for _, dtype in shapes_and_dtypes]
     return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
 
 
@@ -273,7 +282,9 @@ class GPUTransferModule:
             world_size=world_size,
         )
 
-        layout_desc = get_layout_desc(gpu_context, self._ctx.chunk_size)
+        layout_desc = get_layout_desc(
+            gpu_context, self._ctx.chunk_size, object_group_id=0
+        )
         self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
 
         logger.info(
@@ -428,7 +439,9 @@ class GPUTransferModule:
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             store_succeeded = False
             try:
-                layout_desc = get_layout_desc(gpu_context, self._ctx.chunk_size)
+                layout_desc = get_layout_desc(
+                    gpu_context, self._ctx.chunk_size, object_group_id=0
+                )
                 reserved_dict = self._ctx.storage_manager.reserve_write(
                     obj_keys, layout_desc, "new"
                 )
@@ -455,7 +468,9 @@ class GPUTransferModule:
                         tmp_buffer = gpu_context.get_temp_kernel_group_buffer(
                             0, group_idx
                         )
-                        group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                        group_kv_pointers = gpu_context.get_kernel_group_kv_pointers(
+                            group_idx
+                        )
                         # Kernel contract: ``group_lmcache_chunk_size`` here is the
                         # number of *physical* slots per chunk for this group
                         # (= logical chunk_size // compress_ratio).
@@ -664,7 +679,9 @@ class GPUTransferModule:
                         gpu_context.get_temp_kernel_group_buffer(i, group_idx)
                         for i in range(batch_len)
                     ]
-                    group_kv_pointers = gpu_context.get_group_kv_pointers(group_idx)
+                    group_kv_pointers = gpu_context.get_kernel_group_kv_pointers(
+                        group_idx
+                    )
                     group_lmcache_chunk_size = gpu_context.get_physical_chunk_size(
                         group_idx
                     )
