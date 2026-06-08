@@ -179,6 +179,13 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             requirements/*.txt
+            .github/workflows/macos_compat.yml
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-opt-125m-v1
 
       - name: Install lmcache (CPU-only, no vLLM)
         env:
