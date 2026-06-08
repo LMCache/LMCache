@@ -1,13 +1,17 @@
 name: macOS Compat
 
-# Smoke test that verifies the lmcache multiprocess server can be
-# installed and launched on macOS (GPU backend skipped via NO_GPU_EXT=1;
-# common C++ extensions — native_storage_ops / lmcache_redis /
-# lmcache_fs — are still built so the cross-platform PipeNotifier
-# fallback in csrc/storage_backends/event_notifier.h is exercised),
-# and that both the HTTP endpoint and the `lmcache` CLI are usable.
-# This is a "best-effort basic compatibility" check — it does not
-# cover GPU / CUDA / vLLM code paths.
+# Two-job macOS compatibility suite:
+#
+# 1. macos-smoke  — fast sanity check: installs lmcache (NO_GPU_EXT=1,
+#    no vLLM), verifies common C++ extensions load, and confirms the
+#    LMCache HTTP server starts and answers /healthcheck.
+#
+# 2. macos-vllm-e2e  — full CPU e2e: installs vLLM CPU build on top of
+#    lmcache, starts LMCache server (pickle transport, macOS has no
+#    /dev/shm), starts vLLM with LMCacheMPConnector, and sends a
+#    completion request to verify the whole stack works end-to-end.
+#    Mirrors .buildkite/k3_tests/multiprocess/scripts/
+#    run-cpu-e2e-validation.sh but adapted for macOS.
 
 on:
   workflow_call:
@@ -66,6 +70,7 @@ jobs:
               - 'requirements/**.txt'
               - '.github/workflows/macos_compat.yml'
               - '.github/scripts/macos_smoke_test.sh'
+              - '.github/scripts/macos_vllm_e2e_test.sh'
               - '!operator/**'
 
   macos-smoke:
@@ -144,4 +149,69 @@ jobs:
         with:
           name: lmcache-server-log-${{ matrix.platform }}-py${{ matrix.python }}
           path: ${{ env.LMCACHE_LOG_FILE }}
+          if-no-files-found: ignore
+
+  macos-vllm-e2e:
+    needs: changes
+    if: needs.changes.outputs.lmcache == 'true'
+    name: "macOS vLLM CPU e2e: py3.12"
+    # macos-latest is Apple Silicon (arm64); vLLM CPU wheels support arm64.
+    runs-on: macos-latest
+    # vLLM CPU install + model download + server startup can be slow.
+    timeout-minutes: 60
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/*.txt
+
+      - name: Install lmcache (CPU-only, no vLLM)
+        env:
+          NO_GPU_EXT: "1"
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0.dev0"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/build.txt
+          python -m pip install torch
+          python -m pip install -r requirements/common.txt
+          python -m pip install -r requirements/cli.txt
+          python -m pip install -e . --no-deps --no-build-isolation
+
+      - name: Run macOS vLLM CPU e2e test
+        env:
+          LMCACHE_HTTP_PORT: "18080"
+          VLLM_PORT: "18000"
+          LMCACHE_LOG_FILE: "/tmp/macos_e2e_lmcache.log"
+          # macOS has no /dev/shm -> pickle transport
+          LMCACHE_SHM_NAME: ""
+          # GitHub macOS runners are slower; give vLLM more time to start.
+          VLLM_READY_TIMEOUT: "300"
+          LMCACHE_HEALTHCHECK_TIMEOUT: "60"
+        run: |
+          chmod +x .github/scripts/macos_vllm_e2e_test.sh
+          .github/scripts/macos_vllm_e2e_test.sh
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-vllm-e2e-logs
+          path: |
+            /tmp/macos_e2e_lmcache.log
+            /tmp/macos_e2e_vllm.log
           if-no-files-found: ignore
