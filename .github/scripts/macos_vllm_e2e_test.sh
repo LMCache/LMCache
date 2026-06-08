@@ -51,7 +51,7 @@ wait_for_endpoint() {
     local label="$4"
     local response
 
-    for _ in $(seq 1 "${timeout}"); do
+    for ((i=1; i<=timeout; i++)); do
         if response="$(curl -fsS "${url}" 2>/dev/null)"; then
             if [ -z "${expected}" ] || \
                echo "${response}" | grep -q "${expected}"; then
@@ -73,22 +73,29 @@ print_logs() {
 
 cleanup() {
     set +e
-    if [ -n "${VLLM_PID}" ] && kill -0 "${VLLM_PID}" 2>/dev/null; then
-        echo "==> Stopping vLLM (PID=${VLLM_PID})"
-        kill "${VLLM_PID}" 2>/dev/null || true
-        wait "${VLLM_PID}" 2>/dev/null || true
-    fi
-    if [ -n "${LMCACHE_PID}" ] && kill -0 "${LMCACHE_PID}" 2>/dev/null; then
-        echo "==> Stopping LMCache (PID=${LMCACHE_PID})"
-        kill "${LMCACHE_PID}" 2>/dev/null || true
-        wait "${LMCACHE_PID}" 2>/dev/null || true
-    fi
+    for pid in "${VLLM_PID}" "${LMCACHE_PID}"; do
+        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            echo "==> Stopping process PID=${pid} gracefully..."
+            kill "${pid}" 2>/dev/null || true
+            for ((i=1; i<=5; i++)); do
+                if ! kill -0 "${pid}" 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+            if kill -0 "${pid}" 2>/dev/null; then
+                echo "==> Force killing process PID=${pid}..."
+                kill -9 "${pid}" 2>/dev/null || true
+            fi
+            wait "${pid}" 2>/dev/null || true
+        fi
+    done
     set -e
 }
 
 on_error() {
     local exit_code=$?
-    trap - ERR
+    trap - ERR EXIT
     echo "!! macOS vLLM CPU e2e test FAILED (exit code: ${exit_code})"
     print_logs
     cleanup
