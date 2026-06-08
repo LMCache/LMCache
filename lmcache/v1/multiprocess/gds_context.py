@@ -256,11 +256,9 @@ class GDSContext:
         except Exception:
             os.close(fd)
             raise
-        self._slab_handle = ca.AsyncHandle.__new__(ca.AsyncHandle)
-        self._slab_handle._fd = fd  # noqa: SLF001
-        self._slab_handle._handle = handle  # noqa: SLF001
-        self._slab_handle.path = self._slab_path
-        self._slab_handle.writable = True
+        self._slab_handle = ca.AsyncHandle.from_fd(
+            fd, handle, self._slab_path, writable=True
+        )
         logger.info(
             "GDSContext: slab created at %s (%.1f GiB, O_DIRECT=%s), cuFile "
             "handle registered",

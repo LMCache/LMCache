@@ -29,7 +29,7 @@ the GDS DMA fast path.
 """
 
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 import ctypes
 import os
 
@@ -149,7 +149,7 @@ def register_buffer(buf: torch.Tensor) -> None:
     _check(
         libcufile.cuFileBufRegister(
             ctypes.c_void_p(buf.data_ptr()),
-            ctypes.c_ulong(nbytes),
+            ctypes.c_size_t(nbytes),
             ctypes.c_int(0),
         ),
         "cuFileBufRegister",
@@ -260,6 +260,28 @@ class AsyncHandle:
         except Exception:
             os.close(self._fd)
             raise
+
+    @classmethod
+    def from_fd(
+        cls,
+        fd: int,
+        handle: Any,
+        path: str,
+        writable: bool = False,
+    ) -> "AsyncHandle":
+        """Wrap an already-opened fd and registered cuFile handle.
+
+        For callers that open + register the file themselves (e.g. a slab that
+        must be created, truncated, and ``posix_fallocate``d before
+        ``cuFileHandleRegister``) and just need an ``AsyncHandle`` around the
+        result.
+        """
+        obj = cls.__new__(cls)
+        obj._fd = fd
+        obj._handle = handle
+        obj.path = path
+        obj.writable = writable
+        return obj
 
     @property
     def fd(self) -> int:
