@@ -14,13 +14,13 @@ import time
 import pytest
 
 # First Party
-from lmcache.v1.mp_coordinator.blend_directory import (
-    GlobalBlendMatcher,
-    StoreRange,
-)
 from lmcache.v1.mp_coordinator.blend_client import (
     PENDING,
     BlendCoordinatorClient,
+)
+from lmcache.v1.mp_coordinator.blend_directory import (
+    GlobalBlendMatcher,
+    StoreRange,
 )
 
 CHUNK = 3
