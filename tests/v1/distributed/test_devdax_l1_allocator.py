@@ -63,6 +63,23 @@ def test_devdax_config_disables_lazy_and_shm(tmp_path):
     assert cfg.shm_name == ""
 
 
+def test_devdax_overflow_config_disables_lazy_and_shm(tmp_path):
+    path = _make_mmap_file(tmp_path)
+
+    cfg = L1MemoryManagerConfig(
+        size_in_bytes=1024 * 1024,
+        use_lazy=True,
+        shm_name="lmcache_l1_pool_test",
+        devdax_path=path,
+        devdax_size_in_bytes=2 * 1024 * 1024,
+    )
+
+    assert cfg.devdax_path == path
+    assert cfg.devdax_size_in_bytes == 2 * 1024 * 1024
+    assert cfg.use_lazy is False
+    assert cfg.shm_name == ""
+
+
 def test_devdax_allocator_uses_mmap_backing_file(tmp_path):
     path = _make_mmap_file(tmp_path)
     allocator = DevDaxMemoryAllocator(
@@ -147,6 +164,40 @@ def test_l1_manager_round_trip_on_devdax_mapping(tmp_path):
         assert f.read(1) == bytes([0x23])
 
 
+def test_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
+    path = _make_mmap_file(tmp_path, size=8192)
+    manager = L1MemoryManager(
+        L1MemoryManagerConfig(
+            size_in_bytes=8192,
+            use_lazy=False,
+            align_bytes=4096,
+            devdax_path=path,
+            devdax_size_in_bytes=8192,
+        )
+    )
+
+    error, objs = manager.allocate(_layout(4096), count=3)
+
+    assert error == L1Error.SUCCESS
+    assert len(objs) == 3
+    assert objs[0].data_ptr == manager._allocator.buffer.data_ptr()
+    assert objs[1].data_ptr == manager._allocator.buffer.data_ptr() + 4096
+    assert objs[2].data_ptr == manager._allocator.devdax_allocator.buffer.data_ptr()
+    used, total = manager.get_memory_usage()
+    assert used == 3 * 4096
+    assert total == 4 * 4096
+
+    objs[2].raw_tensor.fill_(0x6D)
+    manager.free(objs)
+    used, total = manager.get_memory_usage()
+    assert used == 0
+    assert total == 4 * 4096
+    manager.close()
+
+    with open(path, "rb") as f:
+        assert f.read(4096) == bytes([0x6D]) * 4096
+
+
 def test_l1_memory_manager_reports_devdax_desc(tmp_path):
     path = _make_mmap_file(tmp_path)
     manager = L1MemoryManager(
@@ -183,6 +234,29 @@ def test_cli_parses_l1_devdax_path(tmp_path):
 
     mem_cfg = config.l1_manager_config.memory_config
     assert mem_cfg.devdax_path == path
+    assert mem_cfg.use_lazy is False
+    assert mem_cfg.shm_name == ""
+
+
+def test_cli_parses_l1_devdax_overflow_size(tmp_path):
+    path = _make_mmap_file(tmp_path)
+    config = parse_args(
+        [
+            "--l1-size-gb",
+            "1",
+            "--eviction-policy",
+            "LRU",
+            "--l1-devdax-path",
+            path,
+            "--l1-devdax-overflow-size-gb",
+            "2",
+        ]
+    )
+
+    mem_cfg = config.l1_manager_config.memory_config
+    assert mem_cfg.size_in_bytes == 1 << 30
+    assert mem_cfg.devdax_path == path
+    assert mem_cfg.devdax_size_in_bytes == 2 << 30
     assert mem_cfg.use_lazy is False
     assert mem_cfg.shm_name == ""
 

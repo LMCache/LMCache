@@ -51,7 +51,24 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
-    if config.devdax_path:
+    if config.devdax_path and config.devdax_size_in_bytes:
+        logger.debug(
+            "use mixed memory allocator with devdax overflow, "
+            "dram size is %d bytes, devdax path is %s, "
+            "devdax size is %d bytes, align bytes is %d bytes",
+            config.size_in_bytes,
+            config.devdax_path,
+            config.devdax_size_in_bytes,
+            config.align_bytes,
+        )
+        return MixedMemoryAllocator(
+            config.size_in_bytes,
+            align_bytes=config.align_bytes,
+            shm_name=config.shm_name,
+            devdax_path=config.devdax_path,
+            devdax_size=config.devdax_size_in_bytes,
+        )
+    elif config.devdax_path:
         logger.debug(
             "use devdax memory allocator, path is %s, total size is %d bytes, "
             "align bytes is %d bytes",
@@ -175,11 +192,7 @@ class L1MemoryManager:
         # HACK: now trying to read this from the address manager in a ad-hoc
         # manner
         def get_address_manager(allocator: MemoryAllocatorInterface):
-            if isinstance(allocator, MixedMemoryAllocator) and hasattr(
-                allocator.pin_allocator, "address_manager"
-            ):
-                return allocator.pin_allocator.address_manager
-            elif isinstance(allocator, DevDaxMemoryAllocator):
+            if isinstance(allocator, DevDaxMemoryAllocator):
                 return allocator.address_manager
             elif isinstance(allocator, LazyMemoryAllocator):
                 return allocator.get_address_manager()
@@ -187,6 +200,9 @@ class L1MemoryManager:
                 raise NotImplementedError(
                     "get_memory_usage is not implemented for this allocator type."
                 )
+
+        if isinstance(self._allocator, MixedMemoryAllocator):
+            return self._allocator.get_memory_usage()
 
         address_manager = get_address_manager(self._allocator)
         free_size = address_manager.get_free_size()

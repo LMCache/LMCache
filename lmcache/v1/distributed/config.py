@@ -46,11 +46,19 @@ class L1MemoryManagerConfig:
     devdax_path: str | None = None
     """ Optional Device-DAX path to use as the L1 backing arena. """
 
+    devdax_size_in_bytes: int = 0
+    """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
 
         if self.devdax_path is not None:
             self.devdax_path = self.devdax_path.strip()
+
+        if self.devdax_size_in_bytes < 0:
+            raise ValueError("devdax_size_in_bytes must be >= 0")
+        if self.devdax_size_in_bytes and not self.devdax_path:
+            raise ValueError("devdax_size_in_bytes requires devdax_path")
 
         if self.devdax_path:
             self.use_lazy = False
@@ -185,7 +193,19 @@ def add_storage_manager_args(
         help=(
             "Optional /dev/dax device or mmap-able file to use as the L1 "
             "backing arena. When set, L1 lazy allocation and SHM transfer "
-            "advertising are disabled because the L1 bytes live in the DAX map."
+            "advertising are disabled because the L1 bytes live in the DAX map. "
+            "Use --l1-devdax-overflow-size-gb to keep DRAM as primary L1 and "
+            "use this path as L1 overflow."
+        ),
+    )
+    memory_group.add_argument(
+        "--l1-devdax-overflow-size-gb",
+        type=float,
+        default=0,
+        help=(
+            "Optional Device-DAX overflow size in GB for hybrid L1. When set "
+            "with --l1-devdax-path, --l1-size-gb is the DRAM L1 size and "
+            "allocations spill to Device-DAX after DRAM is full."
         ),
     )
     # L1 Manager Config (TTL settings)
@@ -316,6 +336,7 @@ def parse_args_to_config(
         init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
         align_bytes=args.l1_align_bytes,
         devdax_path=args.l1_devdax_path,
+        devdax_size_in_bytes=int(args.l1_devdax_overflow_size_gb * (1 << 30)),
     )
 
     l1_manager_config = L1ManagerConfig(
