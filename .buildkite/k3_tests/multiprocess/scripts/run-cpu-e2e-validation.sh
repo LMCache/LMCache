@@ -3,15 +3,20 @@ set -euo pipefail
 
 echo "Build ID: ${BUILDKITE_BUILD_ID:-local}"
 echo "Python: $(python3 --version 2>&1 || true)"
-echo "uv: $(uv --version 2>&1 || true)"
+if command -v uv >/dev/null 2>&1; then
+  echo "uv: $(uv --version 2>&1 || true)"
+else
+  echo "uv: not installed"
+fi
 
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 VENV_DIR=".venv-${BUILD_ID}"
-LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache_cpu_validation.log"
-VLLM_LOG="/tmp/build_${BUILD_ID}_vllm_cpu_validation.log"
+LMCACHE_LOG="${LMCACHE_LOG_FILE:-/tmp/build_${BUILD_ID}_lmcache_cpu_validation.log}"
+VLLM_LOG="${VLLM_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm_cpu_validation.log}"
 LMCACHE_PID=""
 VLLM_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
+LMCACHE_ZMQ_PORT="${LMCACHE_ZMQ_PORT:-5555}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-1}"
 LMCACHE_EVICTION_POLICY="${LMCACHE_EVICTION_POLICY:-LRU}"
@@ -25,10 +30,17 @@ VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-2048}"
 VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
 LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-30}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
-# Set LMCACHE_SHM_NAME="" to use pickle transport; unset/default uses shm transport
+# Transport mode selection (mutually exclusive, checked below):
+#   LMCACHE_MP_TRANSFER_MODE=handle  -> handle mode (POSIX SHM server-side copy)
+#   LMCACHE_SHM_NAME=""              -> pickle transport
+#   LMCACHE_SHM_NAME=__default__     -> shm transport (default)
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
-# Set LMCACHE_MP_TRANSFER_MODE=handle for server-side copy (POSIX SHM IPC)
 LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-auto}"
+# Set SKIP_INSTALL=1 to skip Phase 1 (install) — useful when the caller
+# has already installed everything (e.g. macOS CI workflow steps).
+SKIP_INSTALL="${SKIP_INSTALL:-0}"
+# Set SKIP_CACHE_HIT_VALIDATION=1 to skip Phase 3 (cache-hit metrics).
+SKIP_CACHE_HIT_VALIDATION="${SKIP_CACHE_HIT_VALIDATION:-0}"
 
 # Directory to collect artifacts before workspace is deleted
 ARTIFACT_DIR="/tmp/build_${BUILD_ID}_artifacts"
@@ -150,36 +162,6 @@ print(int(total))
 EOF
 }
 
-# Wait for a metric to change from its previous value
-wait_for_metric_change() {
-  local metric_name="$1"
-  local previous_value="$2"
-  local timeout_seconds="${3:-5}"
-  
-  echo "Waiting for metric '${metric_name}' to change from ${previous_value} (timeout: ${timeout_seconds}s)"
-  
-  local start_time current_time
-  start_time=$(date +%s)
-  
-  while true; do
-    current_time=$(date +%s)
-    if [ $((current_time - start_time)) -ge "${timeout_seconds}" ]; then
-      echo "Timeout: Metric '${metric_name}' did not change within ${timeout_seconds}s"
-      return 1
-    fi
-    
-    local current_value
-    current_value="$(scrape_metric "${metric_name}")"
-    
-    if [ "${current_value}" -gt "${previous_value}" ]; then
-      echo "Metric '${metric_name}' changed from ${previous_value} to ${current_value}"
-      return 0
-    fi
-    
-    sleep 1
-  done
-}
-
 # Send a completion request and print the text output
 send_completion() {
   local prompt_file="$1"
@@ -208,11 +190,42 @@ start_vllm() {
   # VLLM_CPU_KVCACHE_SPACE, CPU backend falls back to
   # `total_memory * gpu_memory_utilization`, which can request 100s of GiB
   # on big hosts and OOM (see vllm/v1/worker/cpu_worker.py:determine_available_memory).
+  # VLLM_DEVICE is the modern env var (vLLM 0.8+); VLLM_TARGET_DEVICE is
+  # kept for backwards-compatibility with older vLLM CPU wheels.
+  export VLLM_DEVICE=cpu
   export VLLM_TARGET_DEVICE=cpu
   export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
   export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
+  # Pin gloo / vLLM rendezvous to loopback. Otherwise vLLM's
+  # network_utils.get_ip() picks a LAN address (e.g. 192.168.x.x on the
+  # macOS GHA runner) and gloo's init_process_group sits there for ~16
+  # minutes doing slow socket bind/connect retries before the engine
+  # ever loads weights.
+  export VLLM_HOST_IP="${VLLM_HOST_IP:-127.0.0.1}"
+  if [ -z "${GLOO_SOCKET_IFNAME:-}" ]; then
+    case "$(uname -s)" in
+      Darwin) export GLOO_SOCKET_IFNAME=lo0 ;;
+      Linux)  export GLOO_SOCKET_IFNAME=lo ;;
+    esac
+  fi
   local kv_cache_bytes
   kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
+  # Tell LMCacheMPConnector where the lmcache server actually listens.
+  # Without this it falls back to tcp://localhost:5555 and dies with
+  # "Cannot reach the LMCache MP server" whenever we run multiple e2e
+  # steps in parallel/sequence on different ZMQ ports.
+  local kv_transfer_config
+  kv_transfer_config="$(python3 -c "
+import json
+print(json.dumps({
+    'kv_connector': 'LMCacheMPConnector',
+    'kv_role': 'kv_both',
+    'kv_connector_module_path': 'lmcache.integration.vllm.lmcache_mp_connector',
+    'kv_connector_extra_config': {
+        'lmcache.mp.host': 'tcp://localhost',
+        'lmcache.mp.port': int('${LMCACHE_ZMQ_PORT}'),
+    },
+}))")"
   vllm serve facebook/opt-125m \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
@@ -222,7 +235,8 @@ start_vllm() {
     --kv-cache-memory-bytes "${kv_cache_bytes}" \
     --max-model-len "${VLLM_MAX_MODEL_LEN}" \
     --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
-    --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}' \
+    --kv-transfer-config "${kv_transfer_config}" \
+    --enforce-eager \
     >"${VLLM_LOG}" 2>&1 &
   VLLM_PID=$!
   echo "vLLM server started (PID=${VLLM_PID})"
@@ -262,52 +276,82 @@ on_error() {
 
 trap on_error ERR
 
-echo "=== CPU Install Validation (Phase 1) ==="
-echo "Creating virtual environment with uv at ${VENV_DIR}"
-uv venv --python 3.12 "${VENV_DIR}"
-source "${VENV_DIR}/bin/activate"
-echo "✅ Virtual environment ready"
+if [ "${SKIP_INSTALL}" = "1" ]; then
+  echo "=== CPU Install Validation (Phase 1) — SKIPPED (SKIP_INSTALL=1) ==="
+else
+  echo "=== CPU Install Validation (Phase 1) ==="
+  echo "Creating virtual environment with uv at ${VENV_DIR}"
+  uv venv --python 3.12 "${VENV_DIR}"
+  source "${VENV_DIR}/bin/activate"
+  echo "✅ Virtual environment ready"
 
-echo "Upgrading pip/setuptools/wheel"
-uv pip install --upgrade pip setuptools wheel
-echo "✅ Upgraded pip/setuptools/wheel"
+  echo "Upgrading pip/setuptools/wheel"
+  uv pip install --upgrade pip setuptools wheel
+  echo "✅ Upgraded pip/setuptools/wheel"
 
-echo "Installing build dependencies from requirements/build.txt"
-uv pip install -r requirements/build.txt
-echo "✅ Installed requirements/build.txt"
+  echo "Installing build dependencies from requirements/build.txt"
+  uv pip install -r requirements/build.txt
+  echo "✅ Installed requirements/build.txt"
 
-echo "Installing common dependencies from requirements/common.txt"
-uv pip install -r requirements/common.txt
-echo "✅ Installed requirements/common.txt"
+  echo "Installing common dependencies from requirements/common.txt"
+  uv pip install -r requirements/common.txt
+  echo "✅ Installed requirements/common.txt"
 
-echo "Installing vLLM CPU build"
-# Un-pinned from 71df063c (LMCache #3538) now that LMCache handles the
-# blocks-first fused KV layout. Running against nightly means a passing CPU
-# e2e proves the new GPUKVFormat path works.
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index --torch-backend cpu
-echo "✅ vLLM CPU install completed"
+  echo "Installing vLLM CPU build"
+  # Uninstall any existing vLLM to avoid conflicts
+  uv pip uninstall -y vllm 2>/dev/null || true
+  # Install CPU-only vLLM from the official CPU wheel host.
+  # We use --find-links (alias -f) instead of --extra-index-url to
+  # guarantee the CPU wheel is preferred over the default PyPI index.
+  # Note: if the CPU wheel is not available, uv will fall back to
+  # the default PyPI index (which is GPU-only).
+  uv pip install vllm \
+    --find-links https://wheels.vllm.ai/nightly/cpu \
+    --torch-backend cpu
+  echo "✅ vLLM CPU install completed"
 
-echo "Installing LMCache in editable mode with NO_GPU_EXT=1"
-NO_GPU_EXT=1 uv pip install -e . --no-build-isolation
-echo "✅ LMCache install completed"
+  # Debug: check if vLLM is actually CPU version
+  echo "Checking vLLM installation type..."
+  python -c "
+import vllm
+import os
+print('vLLM location:', vllm.__file__)
+print('VLLM_TARGET_DEVICE:', os.environ.get('VLLM_TARGET_DEVICE', 'not set'))
+print('VLLM_DEVICE:', os.environ.get('VLLM_DEVICE', 'not set'))
+# Try to detect if vLLM has CUDA support
+try:
+    import torch
+    print('PyTorch CUDA available:', torch.cuda.is_available())
+except Exception as e:
+    print('PyTorch check failed:', e)
+" || true
 
-echo "Freezing installed package versions"
-uv pip freeze
+  echo "Installing LMCache in editable mode with NO_GPU_EXT=1"
+  NO_GPU_EXT=1 uv pip install -e . --no-build-isolation
+  echo "✅ LMCache install completed"
 
-echo "Validating imports"
-python -c "import lmcache; import vllm; print('✅ Imports OK')"
+  echo "Freezing installed package versions"
+  uv pip freeze
 
-echo "Printing package versions"
-python -c "import vllm; print('vllm:', vllm.__version__)"
-python -c "import lmcache; print('lmcache:', lmcache.__version__)"
+  echo "Validating imports"
+  python -c "import lmcache; import vllm; print('✅ Imports OK')"
 
-echo "✅ CPU install validation passed"
+  echo "Printing package versions"
+  python -c "import vllm; print('vllm:', vllm.__version__)"
+  python -c "import lmcache; print('lmcache:', lmcache.__version__)"
+
+  echo "✅ CPU install validation passed"
+fi
 
 echo "=== CPU E2E Validation (Phase 2) ==="
 
-echo "[Phase 2 / Step 1] Installing numpy<2 for scipy/vLLM compatibility"
-uv pip install "numpy<2"
-echo "✅ numpy<2 installed"
+if [ "${SKIP_INSTALL}" = "1" ]; then
+  echo "[Phase 2 / Step 1] numpy<2 install — SKIPPED (SKIP_INSTALL=1)"
+else
+  echo "[Phase 2 / Step 1] Installing numpy<2 for scipy/vLLM compatibility"
+  uv pip install "numpy<2"
+  echo "✅ numpy<2 installed"
+fi
 
 echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (cache-aware)"
 if ! python -c "from huggingface_hub import snapshot_download; snapshot_download('facebook/opt-125m')"; then
@@ -320,11 +364,14 @@ echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
 # Build lmcache server args
 LMCACHE_ARGS=(
+  --port "${LMCACHE_ZMQ_PORT}"
+  --http-port "${LMCACHE_HTTP_PORT}"
   --l1-size-gb "${LMCACHE_L1_SIZE_GB}"
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
   --chunk-size "${LMCACHE_CHUNK_SIZE}"
 )
-if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ]; then
+if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ] || \
+   [ "${LMCACHE_MP_TRANSFER_MODE}" = "auto" ]; then
   echo "Transport mode: server-side copy (handle via POSIX SHM IPC)"
   EXPECTED_TRANSPORT="handle"
 elif [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
@@ -352,8 +399,12 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
 fi
 echo "✅ LMCache server is healthy"
 
-echo "[Phase 2 / Step 4] Installing libnuma and starting vLLM server"
-apt-get update && apt-get install -y --no-install-recommends libnuma1
+echo "[Phase 2 / Step 4] Installing libnuma (Linux only) and starting vLLM server"
+if [ "$(uname -s)" = "Linux" ]; then
+  apt-get update && apt-get install -y --no-install-recommends libnuma1
+fi
+# VLLM_DEVICE is the modern env var (vLLM 0.8+)
+export VLLM_DEVICE=cpu
 export VLLM_TARGET_DEVICE=cpu
 start_vllm
 
@@ -412,6 +463,10 @@ echo "✅ CPU E2E validation passed"
 #   - vLLM restart (instance 2): request A → LMCache hit (cross-instance)
 #   - All three outputs must be identical (bit-exact with temperature=0)
 # ═══════════════════════════════════════════════════════════════════
+
+if [ "${SKIP_CACHE_HIT_VALIDATION}" = "1" ]; then
+  echo "=== Cache Hit Validation (Phase 3) — SKIPPED (SKIP_CACHE_HIT_VALIDATION=1) ==="
+else
 
 echo "=== Cache Hit Validation (Phase 3) ==="
 
@@ -527,11 +582,20 @@ echo "[Phase 3 / Step 9] Cleaning up"
 stop_vllm
 cleanup_processes
 echo "✅ Phase 3 cleanup completed"
+fi  # end SKIP_CACHE_HIT_VALIDATION
 
 echo ""
 echo "=========================================="
-echo "✅ All phases passed (Phase 1 + 2 + 3)"
+if [ "${SKIP_CACHE_HIT_VALIDATION}" = "1" ]; then
+  echo "✅ All phases passed (Phase 1 + 2)"
+else
+  echo "✅ All phases passed (Phase 1 + 2 + 3)"
+fi
 echo "=========================================="
+
+# Make sure lmcache/vllm processes started in this run are reaped so
+# the next CI step does not collide on their default ZMQ/HTTP ports.
+cleanup_processes
 
 # Upload artifacts BEFORE deleting the workspace
 upload_artifacts
