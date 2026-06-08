@@ -1040,15 +1040,11 @@ class GDSMemoryObject(MemoryObj):
 
     @property
     def is_pinned(self) -> bool:
-        raise NotImplementedError(
-            "GDSMemoryObject.is_pinned: not used on the GDS path"
-        )
+        raise NotImplementedError("GDSMemoryObject.is_pinned: not used on the GDS path")
 
     @property
     def can_evict(self) -> bool:
-        raise NotImplementedError(
-            "GDSMemoryObject.can_evict: not used on the GDS path"
-        )
+        raise NotImplementedError("GDSMemoryObject.can_evict: not used on the GDS path")
 
     @property
     def raw_tensor(self) -> Optional[torch.Tensor]:
