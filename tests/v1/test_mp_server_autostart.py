@@ -146,6 +146,32 @@ def test_config_parses_server_args() -> None:
 
 
 @pytest.mark.parametrize(
+    "server_args",
+    [
+        "--host 0.0.0.0",
+        "--host=0.0.0.0",
+        "--hos 0.0.0.0",
+        "--port 6000",
+        "--port=6000",
+        "--por=6000",
+        "--http-host 0.0.0.0",
+        "--http-host=0.0.0.0",
+        "--http-ho=0.0.0.0",
+    ],
+)
+def test_config_rejects_endpoint_server_args(server_args: str) -> None:
+    with pytest.raises(ValueError, match="cannot override"):
+        MPServerAutostartConfig.from_extra_config(
+            extra_config={
+                "lmcache.mp.autostart": True,
+                "lmcache.mp.autostart.server_args": server_args,
+            },
+            server_host="127.0.0.1",
+            server_port=5555,
+        )
+
+
+@pytest.mark.parametrize(
     ("server_host", "expected_host"),
     [
         ("::1", "::1"),
@@ -455,7 +481,14 @@ def test_launcher_starts_command_and_waits_until_healthy(monkeypatch) -> None:
         "-m",
         "lmcache.v1.multiprocess.http_server",
     ]
-    assert command[3:] == ["--host", "localhost", "--port", "5555"]
+    assert command[3:] == [
+        "--host",
+        "localhost",
+        "--port",
+        "5555",
+        "--http-host",
+        "localhost",
+    ]
 
 
 def test_launcher_timeout_terminates_process(monkeypatch) -> None:

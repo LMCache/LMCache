@@ -41,6 +41,7 @@ _WAIT_TIMEOUT_KEY = "lmcache.mp.autostart.wait_timeout"
 
 _DEFAULT_WAIT_TIMEOUT = 90.0
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_DISALLOWED_SERVER_ARGS = {"--host", "--port", "--http-host"}
 _PING_TIMEOUT_SECONDS = 1.0
 _POLL_INTERVAL_SECONDS = 0.5
 _SHUTDOWN_TIMEOUT_SECONDS = 10.0
@@ -275,7 +276,16 @@ def _parse_server_args(value: object | None) -> tuple[str, ...]:
         return ()
     if not isinstance(value, str):
         raise ValueError(f"{_SERVER_ARGS_KEY} must be a string, got {value!r}")
-    return tuple(shlex.split(value))
+    server_args = tuple(shlex.split(value))
+    for arg in server_args:
+        option = arg.split("=", 1)[0]
+        for disallowed_arg in _DISALLOWED_SERVER_ARGS:
+            if option == disallowed_arg or disallowed_arg.startswith(option):
+                raise ValueError(
+                    f"{_SERVER_ARGS_KEY} cannot override {disallowed_arg}; "
+                    "configure the MP endpoint with lmcache.mp.host/port"
+                )
+    return server_args
 
 
 def _parse_wait_timeout(value: object | None) -> float:
@@ -392,6 +402,8 @@ class MPServerAutostartConfig:
             self.host,
             "--port",
             str(self.port),
+            "--http-host",
+            self.host,
             *self.server_args,
         ]
 

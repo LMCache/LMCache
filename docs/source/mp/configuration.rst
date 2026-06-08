@@ -489,7 +489,10 @@ All connector-level options are passed through
      - Extra command-line arguments passed to the auto-started MP HTTP server
        process. Required server settings such as ``--l1-size-gb`` and
        ``--eviction-policy`` must be supplied here. For example, pass
-       ``--l1-size-gb 20 --eviction-policy LRU``.
+       ``--l1-size-gb 20 --eviction-policy LRU``. Endpoint flags such as
+       ``--host``, ``--port``, and ``--http-host`` are rejected because the
+       auto-started ZMQ and HTTP listeners are bound to the local connector
+       endpoint.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
