@@ -221,6 +221,30 @@ def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
     maybe_start.assert_not_called()
 
 
+def test_legacy_worker_adapter_does_not_autostart(monkeypatch) -> None:
+    """Legacy positional callers stay connect-only without actual worker rank."""
+    maybe_start = MagicMock(name="maybe_start_mp_server_from_url")
+    wait_for_server = MagicMock(name="wait_for_mp_server_from_url")
+
+    monkeypatch.setattr(adapter_mod, "maybe_start_mp_server_from_url", maybe_start)
+    monkeypatch.setattr(adapter_mod, "wait_for_mp_server_from_url", wait_for_server)
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", FakeMQClient)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+
+    LMCacheMPWorkerAdapter(
+        "tcp://localhost:5555",
+        MagicMock(name="zmq_context"),
+        "test-model",
+        1,
+        0,
+        16,
+        extra_config={"lmcache.mp.autostart": True},
+    )
+
+    maybe_start.assert_not_called()
+    wait_for_server.assert_not_called()
+
+
 def test_worker_adapter_does_not_shutdown_autostarted_server_on_init_failure(
     monkeypatch,
 ) -> None:

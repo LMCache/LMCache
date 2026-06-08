@@ -322,7 +322,7 @@ def _normalize_adapter_init_args(
     parallel_strategy: ParallelStrategy | int,
     legacy_block_size: int | None,
     mq_timeout: float,
-) -> tuple[int, ParallelStrategy, float]:
+) -> tuple[int, ParallelStrategy, float, bool]:
     """Normalize adapter constructor args from old and new vLLM connectors.
 
     Args:
@@ -336,13 +336,15 @@ def _normalize_adapter_init_args(
 
     Returns:
         A tuple of normalized ``(vllm_block_size, parallel_strategy,
-        mq_timeout)``.
+        mq_timeout, supports_autostart)``. ``supports_autostart`` is ``False``
+        for legacy positional callers because they do not provide the actual
+        vLLM worker rank needed for single-owner auto-start.
 
     Raises:
         TypeError: If the connector argument shape is not supported.
     """
     if isinstance(parallel_strategy, ParallelStrategy):
-        return vllm_block_size, parallel_strategy, mq_timeout
+        return vllm_block_size, parallel_strategy, mq_timeout, True
     if not isinstance(parallel_strategy, int) or legacy_block_size is None:
         raise TypeError(
             "parallel_strategy must be ParallelStrategy, or legacy "
@@ -360,7 +362,7 @@ def _normalize_adapter_init_args(
         tp_size=kv_world_size,
         pp_size=1,
     )
-    return int(legacy_block_size), strategy, mq_timeout
+    return int(legacy_block_size), strategy, mq_timeout, False
 
 
 class HeartbeatThread(PeriodicThread):
@@ -526,7 +528,12 @@ class LMCacheMPSchedulerAdapter:
                 ``lmcache.mp.`` (e.g., ``lmcache.mp.mq_timeout``). When
                 provided, it overrides ``mq_timeout`` / ``heartbeat_interval``.
         """
-        vllm_block_size, parallel_strategy, mq_timeout = _normalize_adapter_init_args(
+        (
+            vllm_block_size,
+            parallel_strategy,
+            mq_timeout,
+            _supports_autostart,
+        ) = _normalize_adapter_init_args(
             vllm_block_size,
             parallel_strategy,
             legacy_block_size,
@@ -891,16 +898,23 @@ class LMCacheMPWorkerAdapter:
         Raises:
             TypeError: If the connector argument shape is unsupported.
         """
-        vllm_block_size, parallel_strategy, mq_timeout = _normalize_adapter_init_args(
+        (
+            vllm_block_size,
+            parallel_strategy,
+            mq_timeout,
+            supports_autostart,
+        ) = _normalize_adapter_init_args(
             vllm_block_size,
             parallel_strategy,
             legacy_block_size,
             mq_timeout,
         )
+        self._mp_server_launcher = None
         if extra_config is not None:
-            # ``kv_worker_id`` may be shared by multiple TP ranks under MLA; the
-            # actual vLLM worker rank is the unique local server owner.
-            if parallel_strategy.actual_worker_id == 0:
+            # ``kv_worker_id`` may be shared by multiple TP ranks under MLA.
+            # Only connectors that pass the actual vLLM worker rank can elect a
+            # unique local server owner.
+            if supports_autostart and parallel_strategy.actual_worker_id == 0:
                 # Retain the Popen handle; normal adapter shutdown deliberately
                 # leaves the shared local server running.
                 self._mp_server_launcher = maybe_start_mp_server_from_url(
@@ -908,19 +922,17 @@ class LMCacheMPWorkerAdapter:
                     server_url=server_url,
                     zmq_context=context,
                 )
-            else:
+            elif supports_autostart:
                 wait_for_mp_server_from_url(
                     extra_config=extra_config,
                     server_url=server_url,
                     zmq_context=context,
                 )
-                self._mp_server_launcher = None
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
             self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
         else:
-            self._mp_server_launcher = None
             self._mp_transfer_mode = ExtraConfigDefault.mp_transfer_mode.value
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
