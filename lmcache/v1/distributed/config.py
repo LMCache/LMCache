@@ -61,9 +61,9 @@ class GdsL1Config:
     """Configuration for the GDS slab-file L1 tier.
 
     When present on :class:`L1ManagerConfig`, the L1 medium becomes an NVMe
-    slab file accessed via cuFile DMA instead of pinned DRAM. The slab capacity
-    is taken from ``L1MemoryManagerConfig.size_in_bytes`` (the ``--l1-size-gb``
-    flag), so this only carries the disk location and the DMA mode.
+    slab file accessed via cuFile DMA instead of pinned DRAM (mutually
+    exclusive with the pinned-DRAM tier in ``memory_config``). Carries the
+    slab location, capacity, and DMA mode.
     """
 
     file_location: str

@@ -42,10 +42,11 @@ class GDSL1MemoryManager:
         """Create the manager.
 
         Args:
-            config: The GDS tier config. ``size_in_bytes`` sizes the slab -- it
-                must equal the ``max_capacity`` the :class:`GDSContext`
-                preallocated -- and ``align_bytes`` sets the allocation
-                alignment (cuFile/O_DIRECT require 4 KiB). The CPU-tier
+            config: The GDS tier config. ``size_in_bytes`` sizes the slab
+                address space, and ``align_bytes`` sets the allocation alignment
+                (cuFile/O_DIRECT require 4 KiB). The same ``GdsL1Config`` drives
+                the :class:`GDSContext` that preallocates the slab file, so the
+                address space and the file match by construction. The CPU-tier
                 ``memory_config`` is not referenced on the GDS path.
         """
         self._address_manager = AddressManager(config.size_in_bytes, config.align_bytes)

@@ -50,8 +50,8 @@ class GDSContext:
     Constructed empty (the global singleton always exists); :meth:`initialize`
     does the heavy setup (create/clear the slab, register the cuFile handle)
     and flips :attr:`initialized`. Until then GDS L1 is off and only
-    :attr:`initialized` should be consulted -- ``register_gpu_buffer`` /
-    ``read_async`` / ``write_async`` raise on an uninitialized context.
+    :attr:`initialized` should be consulted: ``register_gpu_buffer`` is a no-op
+    on an uninitialized context, and ``read_async`` / ``write_async`` raise.
     """
 
     #: Whether :meth:`initialize` has completed (GDS L1 is active).
