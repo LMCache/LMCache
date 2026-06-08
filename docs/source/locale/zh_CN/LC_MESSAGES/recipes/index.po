@@ -34,7 +34,7 @@ msgstr "本节列出了经过 LMCache 端到端验证的模型架构，每个架
 msgid ""
 "Engine-side documentation (how to serve the model itself) lives with the "
 "serving engine. Recipe pages link out rather than duplicate."
-msgstr "引擎端文档（如何服务模型本身）与服务引擎一起存在。使用指南页面链接而不是重复。"
+msgstr "引擎端文档（如何服务模型本身）随服务引擎一起维护。使用指南页面提供外部链接，不重复已有内容。"
 
 #: ../../source/recipes/index.rst:14
 msgid "Recipe page contents"
