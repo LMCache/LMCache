@@ -38,6 +38,7 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.gds_context import get_gds_context
 from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 
 # Backend selection (c_ops when CUDA is available, otherwise a pure-Python
@@ -145,6 +146,11 @@ class GPUCacheContext:
             self.tmp_chunk_bytes_ * self.max_batch_size,
             dtype=torch.uint8,
             device=self.device_,
+        )
+
+        # Register the staging buffer with the GDS cuFile context
+        get_gds_context().register_gpu_buffer(
+            self.tmp_gpu_buffer_, self.tmp_chunk_bytes_
         )
 
         # GPU streams

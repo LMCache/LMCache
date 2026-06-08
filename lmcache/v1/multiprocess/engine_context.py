@@ -17,6 +17,7 @@ from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.gds_context import initialize_gds_context
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -141,6 +142,11 @@ class MPCacheEngineContext:
         hash_algorithm: str = "blake3",
     ) -> None:
         self._chunk_size = chunk_size
+
+        # Initialize the process-global GDS context.
+        # No-op when GDS L1 is disabled (config is None).
+        initialize_gds_context(storage_manager_config.l1_manager_config.gds_l1_config)
+
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
