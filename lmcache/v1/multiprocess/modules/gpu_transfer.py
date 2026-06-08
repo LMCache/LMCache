@@ -43,9 +43,73 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.cache_context import create_cache_context
+
+# Third Party
+import torch
+
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+
+# Cache for multi_layer_block_kv_transfer parameter format preference
+# True = accepts tensors directly, False = requires pointers (data_ptr())
+_lmc_ops_accepts_tensors: bool | None = None
+
+
+def _detect_lmc_ops_param_format() -> bool:
+    """
+    Detect if multi_layer_block_kv_transfer accepts tensors directly or requires pointers.
+
+    This check is done once at startup. The c ops version requires pointers (list[int]),
+    while a Python/binding version may accept tensors directly (list[torch.Tensor]).
+
+    Returns:
+        True if tensors are accepted directly, False if pointers required
+    """
+    global _lmc_ops_accepts_tensors
+
+    if _lmc_ops_accepts_tensors is not None:
+        return _lmc_ops_accepts_tensors
+
+    # For now, default to False (requires pointers/c ops behavior)
+    # This is the safer default for c ops
+    # TODO: Add a more robust detection mechanism if needed
+    _lmc_ops_accepts_tensors = False
+
+    logger.info(
+        "multi_layer_block_kv_transfer parameter format: %s",
+        "tensors" if _lmc_ops_accepts_tensors else "pointers (c ops)"
+    )
+    return _lmc_ops_accepts_tensors
+
+
+def _convert_lmc_objects_ptrs(lmc_objects_ptrs: list) -> list:
+    """
+    Convert lmc_objects_ptrs to the appropriate format for multi_layer_block_kv_transfer.
+
+    Uses cached detection result from startup to avoid per-call detection.
+
+    Args:
+        lmc_objects_ptrs: Either list[int](pointers) or list[torch.Tensor]
+
+    Returns:
+        list[int]: List of pointer addresses (if requires pointers)
+    """
+    if not lmc_objects_ptrs:
+        return lmc_objects_ptrs
+
+    # Use cached detection result
+    accepts_tensors = _detect_lmc_ops_param_format()
+
+    if not accepts_tensors:
+        # Need to extract pointers from tensors
+        first_elem = lmc_objects_ptrs[0]
+        if isinstance(first_elem, torch.Tensor):
+            return [t.data_ptr() for t in lmc_objects_ptrs]
+
+    # Otherwise, return as-is (already pointers or accepts tensors directly)
+    return lmc_objects_ptrs
 
 
 def get_layout_desc(
@@ -466,7 +530,7 @@ class GPUTransferModule:
                         )
                         lmc_ops.multi_layer_block_kv_transfer(
                             group_kv_pointers,
-                            [tmp_buffer.data_ptr()],
+                            _convert_lmc_objects_ptrs([tmp_buffer]),
                             chunk_block_ids_gpu,
                             cache_context.device,
                             lmc_ops.TransferDirection.D2H,
@@ -669,7 +733,7 @@ class GPUTransferModule:
 
                     lmc_ops.multi_layer_block_kv_transfer(
                         group_kv_pointers,
-                        [tb.data_ptr() for tb in tmp_buffers],
+                        _convert_lmc_objects_ptrs(tmp_buffers),
                         chunk_block_ids_gpu,
                         cache_context.device,
                         lmc_ops.TransferDirection.H2D,
