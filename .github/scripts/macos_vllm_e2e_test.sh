@@ -139,6 +139,7 @@ echo "    Transport mode: pickle (macOS has no /dev/shm)"
 echo "    LMCache log: ${LMCACHE_LOG}"
 
 lmcache server \
+    --http-port "${LMCACHE_HTTP_PORT}" \
     --l1-size-gb "${LMCACHE_L1_SIZE_GB}" \
     --eviction-policy "${LMCACHE_EVICTION_POLICY}" \
     --chunk-size "${LMCACHE_CHUNK_SIZE}" \
