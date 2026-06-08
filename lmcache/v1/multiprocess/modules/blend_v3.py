@@ -10,9 +10,16 @@ retrieve scatters into the request's paged blocks.
 from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import threading
 import time
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.mp_coordinator.blend_client import (
+        BlendCoordinatorClient,
+        RemoteMatch,
+    )
 
 # Third Party
 import numpy as np
@@ -31,6 +38,7 @@ from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
+    CBGlobalSegment,
     CBMatchResult,
     CBUnifiedLookupResult,
     CudaIPCWrapper,
@@ -39,6 +47,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
+from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -80,6 +89,8 @@ class _CBUnifiedJob:
     expanded_uidx: list[int] | None = None
     found_uidx: set[int] | None = None  # stashed when the sparse poll completes
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
+    found_result: list[CBMatchResult] | None = None  # local classify, computed once
+    coord_submitted: bool = False  # coordinator match query was issued
 
 
 class BlendTokenRangeMatcherV3:
@@ -312,6 +323,7 @@ class BlendV3Module:
         ctx: MPCacheEngineContext,
         gpu_transfer: GPUTransferModule,
         lookup_module: LookupModule,
+        coordinator: "BlendCoordinatorClient | None" = None,
     ):
         self._ctx = ctx
         self._gpu_transfer = gpu_transfer
@@ -319,6 +331,9 @@ class BlendV3Module:
         # (registers the prefix prefetch job + session state the retrieve
         # path depends on) inside the single unified RPC.
         self._lookup_module = lookup_module
+        # Optional bridge to the fleet-wide fingerprint directory. ``None`` =>
+        # purely local matching (publish/query paths skipped).
+        self._coordinator = coordinator
 
         self._token_range_matcher = BlendTokenRangeMatcherV3(ctx.chunk_size)
         self._event_bus = ctx.event_bus
@@ -744,6 +759,7 @@ class BlendV3Module:
                 )
             )
             job = _CBUnifiedJob(matches=matches, num_tokens=len(key.token_ids))
+            job.coord_submitted = self._submit_coordinator_match(key)
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
@@ -815,17 +831,42 @@ class BlendV3Module:
                     )
                 )
 
-        # --- BOTH legs ready: classify the complement + finalize. ---
-        if job.handle is not None:
-            found = self._sparse_classify(
-                key,
-                job.non_prefix or [],
-                job.found_uidx or set(),
-                job.per_hash_obj_keys or {},
-                job.expanded_uidx or [],
+        # --- Local legs ready: classify the complement once (side effects). ---
+        if job.found_result is None:
+            if job.handle is not None:
+                found = self._sparse_classify(
+                    key,
+                    job.non_prefix or [],
+                    job.found_uidx or set(),
+                    job.per_hash_obj_keys or {},
+                    job.expanded_uidx or [],
+                )
+            else:
+                found = []
+            job.found_result = found
+            num_tokens = job.num_tokens
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_LOOKUP_END,
+                    session_id=rid,
+                    metadata={
+                        "num_tokens": num_tokens,
+                        "fingerprint_hits": len(found),
+                        "prefix_hits": job.prefix_chunks,
+                        "storage_hits": len(found),
+                        "stale_chunks": len(job.non_prefix or []) - len(found),
+                        "no_gpu_context": False,
+                        "hit_tokens": _unique_token_coverage(found),
+                        "requested_tokens": (num_tokens // chunk_size) * chunk_size,
+                    },
+                )
             )
-        else:
-            found = []
+        found = job.found_result
+
+        # --- Global leg: poll the coordinator (bounded defer), best-effort. ---
+        global_segments = self._poll_coordinator_match(job, rid)
+        if global_segments is None:
+            return None  # coordinator still in flight, within the defer budget
 
         prefix_tokens = job.prefix_chunks * chunk_size
         num_tokens = job.num_tokens
@@ -857,6 +898,7 @@ class BlendV3Module:
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
+            global_segments=global_segments,
         )
 
     def store(
@@ -923,7 +965,127 @@ class BlendV3Module:
                 key.request_id,
             )
 
+        if self._coordinator is not None:
+            self._publish_fingerprints(key, chunk_hashes, tokens_in_range)
+
         return result
+
+    def _publish_fingerprints(
+        self,
+        key: IPCCacheEngineKey,
+        chunk_hashes: list[bytes],
+        tokens_in_range: list[int],
+    ) -> None:
+        """Publish this stored range's chunk fingerprints to the coordinator.
+
+        Best-effort and fire-and-forget (enqueue only): one wire
+        ``ChunkFingerprint`` per stored chunk -- its content poly-hash (the same
+        ``chunk_hash_windows_numba`` the match probes, with the fleet base), its
+        shared-L2 ``object_key`` (the chunk storage key ``th``), and its token
+        position. Never raises into the store path.
+
+        Args:
+            key: The store request key (model/scope/positions).
+            chunk_hashes: Per-chunk storage keys (``th``) for the range.
+            tokens_in_range: The stored tokens ``token_ids[start:end]``.
+        """
+        coordinator = self._coordinator
+        if coordinator is None or not chunk_hashes:
+            return
+        try:
+            model_scope = f"{key.model_name}@{key.cache_salt}"
+            store_range = {
+                "model_scope": model_scope,
+                "tokens": list(tokens_in_range),
+                "object_keys": [h.hex() for h in chunk_hashes],
+                "old_st_base": key.start,
+            }
+            coordinator.enqueue_register([store_range])
+        except Exception:
+            logger.warning(
+                "CB coordinator publish build failed for request %s "
+                "(does not affect store correctness)",
+                key.request_id,
+            )
+
+    def _submit_coordinator_match(self, key: IPCCacheEngineKey) -> bool:
+        """Issue a fleet directory match query for this request (best-effort).
+
+        Args:
+            key: The lookup request key.
+
+        Returns:
+            ``True`` if a query was submitted (so the finalize step should poll
+            for it), ``False`` when there is no coordinator or submission failed.
+        """
+        coordinator = self._coordinator
+        if coordinator is None:
+            return False
+        try:
+            tokens = list(key.token_ids)
+            if len(tokens) < self._ctx.chunk_size:
+                return False
+            model_scope = f"{key.model_name}@{key.cache_salt}"
+            coordinator.submit_match(key.request_id, model_scope, tokens)
+            return True
+        except Exception:
+            logger.warning(
+                "CB coordinator match submit failed for request %s", key.request_id
+            )
+            return False
+
+    def _poll_coordinator_match(
+        self, job: "_CBUnifiedJob", rid: str
+    ) -> "list[CBGlobalSegment] | None":
+        """Poll the coordinator match result, deferring until it resolves.
+
+        Mirrors the prefix/sparse legs: ``return None`` to defer while pending.
+        The result is guaranteed to resolve (matches, or ``[]`` on failure)
+        within the client's HTTP ``request_timeout``, which is the single
+        wall-clock budget bounding how long the lookup waits on this optional
+        leg before proceeding local-only.
+
+        Args:
+            job: The per-request poll state.
+            rid: Request id.
+
+        Returns:
+            The global segments (possibly empty) once resolved, or ``None`` to
+            defer (still in flight).
+        """
+        coordinator = self._coordinator
+        if coordinator is None or not job.coord_submitted:
+            return []
+        poll = coordinator.poll_match(rid)
+        if poll is PENDING:
+            return None  # defer; bounded by the client's request_timeout
+        coordinator.take_match(rid)
+        if isinstance(poll, list):
+            return self._build_global_segments(poll)
+        return []
+
+    def _build_global_segments(
+        self, matches: "list[RemoteMatch]"
+    ) -> list[CBGlobalSegment]:
+        """Convert coordinator matches into chunk-granular global segments.
+
+        Args:
+            matches: Matched chunks returned by the coordinator client.
+
+        Returns:
+            One :class:`CBGlobalSegment` per matched chunk (request order).
+        """
+        chunk_size = self._ctx.chunk_size
+        return [
+            CBGlobalSegment(
+                object_key=m.object_key,
+                old_st=m.old_st,
+                old_ed=m.old_st + chunk_size,
+                cur_st=m.cur_st,
+                cur_ed=m.cur_st + chunk_size,
+            )
+            for m in matches
+        ]
 
     def _drain_fingerprint_queue(self) -> None:
         """Best-effort background drainer for _fingerprint_queue."""
