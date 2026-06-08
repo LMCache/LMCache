@@ -605,23 +605,23 @@ class GPUCacheContext:
             (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
 
-    def blocks_for_tokens(self, num_logical_tokens: int, group_idx: int) -> int:
-        """Number of group ``group_idx`` blocks that span ``num_logical_tokens``.
-
-        Each group counts blocks in its own ``block_size`` (``shape_desc.bs``),
-        which can differ across groups. For compressed groups, ``compress_ratio``
-        logical tokens share one physical slot, so it is divided out first.
+    def calculate_num_blocks(self, num_tokens: int, kernel_group_idx: int) -> int:
+        """Calculate the number of blocks for a given number of tokens in a
+        specified kernel group.
 
         Args:
-            num_logical_tokens: Number of logical (engine-side) tokens.
-            group_idx: Index of the KV layer group.
+            kernel_group_idx: 0-based index of the kernel group.
+            num_tokens: The total number of tokens to be processed for the group.
 
         Returns:
-            The number of this group's blocks spanning those tokens.
+            The number of blocks.
+
+        Raises:
+            IndexError: If *kernel_group_idx* is out of range.
         """
-        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        physical_slots = num_logical_tokens // group.compress_ratio
-        return physical_slots // group.shape_desc.bs
+        return self.kv_layer_groups_manager.calculate_num_blocks(
+            kernel_group_idx, num_tokens
+        )
 
     def cache_size_per_token(self) -> int:
         """
