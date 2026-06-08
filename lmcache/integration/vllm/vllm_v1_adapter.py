@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
+import contextlib
 import os
 
 # Third Party
@@ -683,6 +684,24 @@ class LMCacheConnectorV1Impl:
         self.layerwise_retrievers: list[
             Generator[Optional[torch.Tensor], None, None]
         ] = []
+        # Deferred costream blenders (pipelining A): stepped per-layer from
+        # wait_for_layer_load so the per-layer KV load overlaps prefill.
+        self.layerwise_blenders: list[
+            Generator[None, None, None]
+        ] = []
+        self._costream_pipeline = (
+            os.environ.get("VLLM_COSTREAM_PIPELINE", "0") == "1"
+        )
+        # Async overlap prototype: run the deferred blender on a side CUDA
+        # stream one layer ahead so blend(L+1)'s recompute overlaps prefill(L).
+        # Implies the deferred-blender path. Requires the gpu_connector's
+        # per-layer global sync to be scoped (gated on the same env var).
+        self._async_overlap = (
+            os.environ.get("VLLM_COSTREAM_ASYNC_OVERLAP", "0") == "1"
+        )
+        if self._async_overlap:
+            self._costream_pipeline = True
+        self._blend_stream = None  # lazily created (needs CUDA device)
         self._stats_monitor = LMCStatsMonitor.GetOrCreate()
         if role == KVConnectorRole.SCHEDULER:
             self.lmcache_engine: Optional[LMCacheEngine] = None
@@ -1180,6 +1199,7 @@ class LMCacheConnectorV1Impl:
         self.lmcache_engine.post_init(kvcaches=kvcaches)
 
         self.layerwise_retrievers = []
+        self.layerwise_blenders = []
 
         for idx, request in enumerate(metadata.requests):
             if request.load_spec is None:
@@ -1282,19 +1302,34 @@ class LMCacheConnectorV1Impl:
                         lmcache_cached_tokens,
                     )
 
-                    self.blender.blend(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
-                        kvcaches=kvcaches,
-                        slot_mapping=slot_mapping[:lmcache_cached_tokens],
-                        tokens_per_frame=request.tokens_per_frame,
-                        mm_positions=request.mm_positions,
-                        image_grid_thw=request.image_grid_thw,
-                        page_stream=page_stream,
-                        sync=sync,
-                        inputs_embeds=inputs_embeds,
-                        deepstack_input_embeds=deepstack_input_embeds,
+                    if self._async_overlap and self._blend_stream is None:
+                        self._blend_stream = torch.cuda.Stream()
+                    # Async overlap: prime the deferred blender ON the side
+                    # stream so layer-0's blend runs there (one layer ahead).
+                    _blend_ctx = (
+                        torch.cuda.stream(self._blend_stream)
+                        if self._async_overlap
+                        else contextlib.nullcontext()
                     )
+                    with _blend_ctx:
+                        deferred_blender = self.blender.blend(
+                            tokens[:lmcache_cached_tokens],
+                            token_mask[:lmcache_cached_tokens],
+                            defer=self._costream_pipeline,
+                            kvcaches=kvcaches,
+                            slot_mapping=slot_mapping[:lmcache_cached_tokens],
+                            tokens_per_frame=request.tokens_per_frame,
+                            mm_positions=request.mm_positions,
+                            image_grid_thw=request.image_grid_thw,
+                            page_stream=page_stream,
+                            sync=sync,
+                            inputs_embeds=inputs_embeds,
+                            deepstack_input_embeds=deepstack_input_embeds,
+                        )
+                    if deferred_blender is not None:
+                        # Pipelining A: step per-layer in wait_for_layer_load
+                        # so the KV load overlaps prefill compute.
+                        self.layerwise_blenders.append(deferred_blender)
                 else:
                     layerwise_retriever = self.lmcache_engine.retrieve_layer(
                         tokens[:lmcache_cached_tokens],
@@ -1444,6 +1479,22 @@ class LMCacheConnectorV1Impl:
                 assert ret_token_mask is not None
                 num_retrieved_tokens = ret_token_mask.sum().item()
                 logger.debug(f"Retrieved {num_retrieved_tokens} tokens")
+
+        # Pipelining A / async overlap: step deferred costream blenders one
+        # layer at a time. blend_layer yields None each step (no token mask).
+        if self._async_overlap and self.layerwise_blenders:
+            # The blender is one layer ahead (2x prime). At this hook for
+            # prefill layer L, blend(L) was already issued on the side stream
+            # last call; make the current (prefill) stream wait for it, then
+            # issue blend(L+1) on the side stream so it overlaps prefill(L).
+            cur = torch.cuda.current_stream()
+            cur.wait_stream(self._blend_stream)
+            with torch.cuda.stream(self._blend_stream):
+                for layerwise_blender in self.layerwise_blenders:
+                    next(layerwise_blender)
+        else:
+            for layerwise_blender in self.layerwise_blenders:
+                next(layerwise_blender)
 
         return
 

@@ -1,8 +1,0 @@
-local_gpu: True
-max_local_gpu_size: 5
-enable_blending: True
-use_layerwise: True
-blend_special_str: "<<SEG>>"
-chunk_size: 16
-blend_check_layers: 1
-blend_recompute_ratios: 0.15

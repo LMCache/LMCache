@@ -2,6 +2,8 @@
 # Standard
 from typing import List, Optional, Tuple, Union
 import abc
+import logging
+import os
 
 # Third Party
 import torch
@@ -524,7 +526,10 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
         :param ends: The ending indices of the KV cache in the corresponding
             token sequence.
         """
-        timing = True
+        # Per-layer timing requires two extra full stream syncs per layer
+        # (load_stream + current stream) just to read elapsed_time for a
+        # debug log. Only pay that when DEBUG logging is actually enabled.
+        timing = logger.isEnabledFor(logging.DEBUG)
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
@@ -615,8 +620,18 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
                 logger.debug(f"Finished loading layer {layer_id - 2} into paged memory")
 
             if layer_id > 0 and layer_id <= self.num_layers:
-                # NOTE: wait until both compute and load streams are done
-                torch.cuda.synchronize()
+                # NOTE: wait until both compute and load streams are done.
+                # Default: global barrier (batch-path safe). Async-overlap
+                # prototype (#async): a global sync here would barrier the
+                # whole device and defeat blend<->prefill overlap, so use
+                # scoped cross-stream waits instead (the load_stream feeds
+                # rope on `stream`; both directions covered for the 2-buffer
+                # ping-pong). Validate output byte-identical when enabling.
+                if os.environ.get("VLLM_COSTREAM_ASYNC_OVERLAP", "0") == "1":
+                    stream.wait_stream(self.load_stream)
+                    self.load_stream.wait_stream(stream)
+                else:
+                    torch.cuda.synchronize()
 
                 # ping-pong the buffers
                 compute_gpu_buffer_obj, load_gpu_buffer_obj = (
@@ -685,10 +700,6 @@ class VLLMBufferLayerwiseGPUConnector(GPUConnectorInterface):
 
                         if self.cache_positions and layer_id == 0:
                             old_positions_full[s:e] = memory_obj.metadata.cached_positions
-                        # if self.cache_positions and layer_id == 0:
-                        #     old_positions_full[
-                        #         start - buf_offset : end - buf_offset
-                        #     ] = memory_obj.metadata.cached_positions
                     if timing:
                         load_end.record(self.load_stream)
                         load_events = (load_start, load_end)

@@ -308,7 +308,7 @@ class LMCBlender:
         effective_len: int,
         device: torch.device,
     ) -> torch.Tensor:
-        """CoStream I-frame selection using GOP / mm_positions."""
+        """CodecSight I-frame selection using GOP / mm_positions."""
         gop = self.gop
         tokens_per_frame = int(self.metadata.tokens_per_frame or 0)
         mm_positions: Optional[Sequence[Any]] = self.metadata.mm_positions
@@ -774,15 +774,23 @@ class LMCBlender:
         self,
         tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
+        defer: bool = False,
         **kwargs,
     ):
         """
         Perform blending for the given tokens.
+
+        If ``defer`` is True, prime the layerwise generator (filling the
+        internal load pipeline, mirroring retrieve_layer's 2x prime) and
+        RETURN it instead of draining it. The caller then steps it once per
+        decoder layer from ``wait_for_layer_load`` so the per-layer KV load
+        overlaps the previous layer's prefill compute. Returns None in the
+        eager path.
         """
 
         if isinstance(tokens, list):
             tokens = torch.tensor(tokens).cuda()
-        logger.info("enter blend")
+        logger.info("enter blend (defer=%s)", defer)
         tokens_per_frame = kwargs.get("tokens_per_frame")
         if tokens_per_frame is not None:
             self.metadata.tokens_per_frame = int(tokens_per_frame)
@@ -799,6 +807,15 @@ class LMCBlender:
 
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 
+        if defer:
+            # Prime twice to fill the 3-stage load pipeline (same count as the
+            # non-blend retrieve_layer deferral). The remaining num_layers
+            # steps are driven by wait_for_layer_load during the forward.
+            next(layerwise_blender)
+            next(layerwise_blender)
+            return layerwise_blender
+
         # +2 is for the handshake/closing process with the retriever at both the beginning and end.
         for _ in range(self.num_layers + 2):
             next(layerwise_blender)
+        return None
