@@ -17,6 +17,7 @@ corresponding ``lmcache.integration.<engine>`` package, not here.
 
 # Standard
 from collections.abc import Mapping, Sequence
+from typing import cast
 
 # Third Party
 import msgspec
@@ -94,7 +95,7 @@ def _engine_group_id_per_view(
 
 def expand_block_ids_to_views(
     groups: Sequence[LMCacheGroupView],
-    engine_side_block_ids: Sequence[Sequence[int]],
+    engine_side_block_ids: Sequence[Sequence[int]] | Sequence[int],
 ) -> list[list[int]]:
     """Re-index engine-side block IDs to one list per LMCache group.
 
@@ -112,8 +113,18 @@ def expand_block_ids_to_views(
         Block IDs re-indexed by LMCache group order: one inner list per LMCache
         group, copied from that group's source engine group.
     """
+    # Back-compat: older vLLM connectors emit a flat Sequence[int] for the
+    # single (non-hybrid) engine group instead of one inner list per group.
+    # Normalize both shapes to a concrete list[list[int]] so downstream
+    # indexing is unambiguous for both runtime and mypy.
+    if not engine_side_block_ids or isinstance(engine_side_block_ids[0], int):
+        per_group: Sequence[Sequence[int]] = [
+            cast("Sequence[int]", engine_side_block_ids)
+        ]
+    else:
+        per_group = cast("Sequence[Sequence[int]]", engine_side_block_ids)
     return [
-        list(engine_side_block_ids[engine_group_id])
+        list(per_group[engine_group_id])
         for engine_group_id in _engine_group_id_per_view(groups)
     ]
 
