@@ -2197,7 +2197,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self._unregistered = False
 
-        self.pin_allocator: MemoryAllocatorInterface
+        self.pin_allocator: TensorMemoryAllocator | PagedTensorMemoryAllocator
         if use_paging:
             assert "shapes" in kwargs, (
                 "shapes must be specified for paged memory allocator"
@@ -2220,7 +2220,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
         self.buffer_allocator = BufferAllocator("cpu")
-        self.devdax_allocator: MemoryAllocatorInterface | None = None
+        self.devdax_allocator: "DevDaxMemoryAllocator | None" = None
         devdax_path = kwargs.get("devdax_path", None)
         devdax_size = kwargs.get("devdax_size", 0)
         if devdax_path:
@@ -2245,6 +2245,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         shapes: Union[torch.Size, list[torch.Size]],
         dtypes: Union[torch.dtype, list[torch.dtype]],
     ) -> int:
+        assert isinstance(self.pin_allocator, TensorMemoryAllocator)
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
         unit_raw_size = get_size_bytes(shapes, dtypes)
         unit_aligned_size = self.pin_allocator.address_manager.compute_aligned_size(

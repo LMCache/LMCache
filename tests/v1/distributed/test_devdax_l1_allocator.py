@@ -10,6 +10,7 @@ manager wiring while keeping CI portable.
 import gc
 import os
 
+# Third Party
 import pytest
 import torch
 
@@ -24,8 +25,8 @@ from lmcache.v1.distributed.config import (
     parse_args,
 )
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import DevDaxMemoryAllocator
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
@@ -134,9 +135,7 @@ def test_devdax_overflow_allows_mooncake_without_rdma(tmp_path, monkeypatch):
         lambda _: "mooncake_store",
     )
 
-    config = _hybrid_storage_config(
-        path, _FakeMooncakeL2Config({"protocol": "tcp"})
-    )
+    config = _hybrid_storage_config(path, _FakeMooncakeL2Config({"protocol": "tcp"}))
 
     assert config.l1_manager_config.memory_config.devdax_size_in_bytes == 1024 * 1024
 
@@ -310,10 +309,7 @@ def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
             "--l1-devdax-path",
             path,
             "--l2-adapter",
-            (
-                '{"type":"dax","device_path":"%s",'
-                '"max_dax_size_gb":2,"slot_bytes":4096}'
-            )
+            ('{"type":"dax","device_path":"%s","max_dax_size_gb":2,"slot_bytes":4096}')
             % path,
         ]
     )

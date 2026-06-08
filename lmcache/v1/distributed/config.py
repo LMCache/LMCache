@@ -6,7 +6,7 @@ Configuration for distributed storage manager
 
 # Standard
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal, cast
 import argparse
 import os
 
@@ -63,12 +63,11 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
     if not matched_dax_adapters:
         return
     if len(matched_dax_adapters) > 1:
-        raise ValueError(
-            "Only one DAX adapter can match l1-devdax-path for hybrid L1"
-        )
+        raise ValueError("Only one DAX adapter can match l1-devdax-path for hybrid L1")
 
-    dax_adapter = matched_dax_adapters[0]
-    memory_config.devdax_size_in_bytes = int(dax_adapter.max_dax_size_gb * (1 << 30))
+    dax_adapter = cast(Any, matched_dax_adapters[0])
+    max_dax_size_gb = dax_adapter.max_dax_size_gb
+    memory_config.devdax_size_in_bytes = int(max_dax_size_gb * (1 << 30))
     l2_adapter_config.adapters = remaining_adapters
 
 
@@ -188,9 +187,7 @@ class StorageManagerConfig:
 
 def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
     memory_config = config.l1_manager_config.memory_config
-    _infer_l1_devdax_overflow_from_dax_adapter(
-        memory_config, config.l2_adapter_config
-    )
+    _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
         return
 
