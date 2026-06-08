@@ -57,14 +57,14 @@ class TestKVLayerGroupsManager:
 
     def test_build_empty(self):
         manager = _build_manager([], num_blocks=32)
-        assert manager.kv_layer_groups == []
+        assert manager.kernel_groups == []
 
     def test_build_single_layer(self):
         tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
         manager = _build_manager(tensors, num_blocks=32)
 
-        assert len(manager.kv_layer_groups) == 1
-        group = manager.kv_layer_groups[0]
+        assert len(manager.kernel_groups) == 1
+        group = manager.kernel_groups[0]
         assert isinstance(group, KVLayerGroupInfo)
         assert group.layer_indices == [0]
         assert group.shape_desc.kv_size == 2
@@ -81,8 +81,8 @@ class TestKVLayerGroupsManager:
         ]
         manager = _build_manager(tensors, num_blocks=32)
 
-        assert len(manager.kv_layer_groups) == 1
-        group = manager.kv_layer_groups[0]
+        assert len(manager.kernel_groups) == 1
+        group = manager.kernel_groups[0]
         assert group.layer_indices == [0, 1, 2]
         assert group.shape_desc.nl == 3
         assert group.shape_desc.nh == 8
@@ -101,9 +101,9 @@ class TestKVLayerGroupsManager:
             ],
         )
 
-        assert len(manager.kv_layer_groups) == 2
+        assert len(manager.kernel_groups) == 2
         groups_by_engine_group_idx = {
-            group.engine_group_idx: group for group in manager.kv_layer_groups
+            group.engine_group_idx: group for group in manager.kernel_groups
         }
         assert groups_by_engine_group_idx[0].layer_indices == [0, 2]
         assert groups_by_engine_group_idx[1].layer_indices == [1, 3]
@@ -126,8 +126,8 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
         manager = _build_manager(tensors, num_blocks=32)
-        assert len(manager.kv_layer_groups) == 2
-        group1, group2 = manager.kv_layer_groups
+        assert len(manager.kernel_groups) == 2
+        group1, group2 = manager.kernel_groups
         assert group1.layer_indices == [0, 2]
         assert group1.shape_desc.nh == 8
         assert group2.layer_indices == [1]
@@ -140,8 +140,8 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
         ]
         manager = _build_manager(tensors, num_blocks=32)
-        assert len(manager.kv_layer_groups) == 2
-        group1, group2 = manager.kv_layer_groups
+        assert len(manager.kernel_groups) == 2
+        group1, group2 = manager.kernel_groups
         assert group1.layer_indices == [0, 2]
         assert group1.dtype == torch.float16
         assert group2.layer_indices == [1]
@@ -156,9 +156,9 @@ class TestKVLayerGroupsManager:
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float32),  # nh=16, f32
         ]
         manager = _build_manager(tensors, num_blocks=32)
-        assert len(manager.kv_layer_groups) == 4
+        assert len(manager.kernel_groups) == 4
 
-        groups_by_key = {(g.shape_desc.nh, g.dtype): g for g in manager.kv_layer_groups}
+        groups_by_key = {(g.shape_desc.nh, g.dtype): g for g in manager.kernel_groups}
         assert groups_by_key[(8, torch.float16)].layer_indices == [0, 3]
         assert groups_by_key[(8, torch.float32)].layer_indices == [1]
         assert groups_by_key[(16, torch.float16)].layer_indices == [2]

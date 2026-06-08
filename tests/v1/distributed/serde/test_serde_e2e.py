@@ -197,7 +197,7 @@ class TestSerdeRoundTrip:
         write_and_wait_for_l2(sm, keys, layout)
 
         # Brief sleep so StoreController releases read locks after L2 store
-        time.sleep(0.1)
+        time.sleep(1)
         sm.clear()
         assert get_l1_object_count(sm) == 0
 
@@ -222,7 +222,7 @@ class TestSerdeRoundTrip:
         keys = [make_object_key(i) for i in range(3)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(0.1)
+        time.sleep(1)
         sm.clear()
 
         # Prefetch
@@ -263,7 +263,7 @@ class TestSerdeDisabled:
         keys = [make_object_key(i) for i in range(5)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(0.1)
+        time.sleep(1)
         sm.clear()
 
         handle = sm.submit_prefetch_task(keys, layout)
@@ -285,7 +285,7 @@ class TestSerdeDisabled:
         keys = [make_object_key(i) for i in range(3)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(0.1)
+        time.sleep(1)
         sm.clear()
 
         handle = sm.submit_prefetch_task(keys, layout)
@@ -318,7 +318,7 @@ class TestSerdePartialPrefix:
         # Write only keys 0, 1, 3, 4 (skip 2)
         keys_to_write = [make_object_key(i) for i in [0, 1, 3, 4]]
         write_and_wait_for_l2(sm, keys_to_write, layout)
-        time.sleep(0.1)
+        time.sleep(1)
         sm.clear()
 
         # Request all 5 keys — prefix should be 2 (gap at index 2)
@@ -354,7 +354,7 @@ class TestSerdeMemoryStress:
         for cycle in range(5):
             keys = [make_object_key(cycle * 10 + i) for i in range(3)]
             write_and_wait_for_l2(sm, keys, layout)
-            time.sleep(0.1)
+            time.sleep(1)
             sm.clear()
 
             handle = sm.submit_prefetch_task(keys, layout)
@@ -441,7 +441,7 @@ class TestSerdeBufferBounds:
         keys = [make_object_key(i) for i in range(num_keys)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(0.1)
+        time.sleep(1)
         sm.clear()
         assert get_l1_object_count(sm) == 0
 
