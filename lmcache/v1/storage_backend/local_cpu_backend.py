@@ -128,12 +128,16 @@ class LocalCPUBackend(AllocatorBackendInterface):
         return self.__class__.__name__
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
-        # L1 Fast-path check bypasses the lock entirely
-        if key in self.l1_fast_path_registry:
+        # L1 Fast-path check bypasses the lock entirely if not pinning
+        if not pin and key in self.l1_fast_path_registry:
+            return True
+
+        with self.cpu_lock:
+            if key not in self.hot_cache:
+                return False
             if pin:
-                with self.cpu_lock:
-                    self.l1_fast_path_registry[key].pin()
-                    self.keys_in_request.append(key)
+                self.hot_cache[key].pin()
+                self.keys_in_request.append(key)
             return True
 
         with self.cpu_lock:
