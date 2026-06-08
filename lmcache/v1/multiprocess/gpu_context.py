@@ -525,12 +525,6 @@ class GPUCacheContext:
         """
         return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
 
-    @lmcache_deprecate("please use get_kernel_group_kv_pointers instead")
-    def get_group_kv_pointers(self, group_idx: int) -> torch.Tensor:
-        """Returns the pre-computed GPU tensor of KV cache pointers for the
-        given group."""
-        return self.get_kernel_group_kv_pointers(group_idx)
-
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the
         given kernel group index.
