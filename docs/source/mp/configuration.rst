@@ -492,7 +492,9 @@ All connector-level options are passed through
        ``--l1-size-gb 20 --eviction-policy LRU``. Endpoint flags such as
        ``--host``, ``--port``, and ``--http-host`` are rejected because the
        auto-started ZMQ and HTTP listeners are bound to the local connector
-       endpoint.
+       endpoint. If multiple auto-started MP servers run on the same host, pass
+       distinct ``--http-port`` values here to avoid HTTP frontend port
+       conflicts.
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
