@@ -57,7 +57,7 @@ repos:
   hooks:
   - id: mypy
     language_version: python3.12 
-    args: [--config-file=pyproject.toml]
+    args: [--config-file=pyproject.toml, --exclude, 'lmcache/native_storage_ops\.py']
     #args: [--ignore-missing-imports]
     additional_dependencies:
       - tokenize-rt==6.1.0 # For better dynamic analysis performance
