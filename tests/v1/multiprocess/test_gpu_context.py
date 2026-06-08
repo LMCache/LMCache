@@ -1,13 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for GPUCacheContext.get_tmp_chunk_gpu_buffer,
-get_tmp_chunk_gpu_buffer_batched and get_tmp_gpu_buffer_flat — verifying
-contiguity, shape, non-overlapping guarantees, and multi-group layout.
+"""Unit tests for the temp-GPU-buffer machinery in
+``lmcache.v1.multiprocess.gpu_context``.
 
-These tests construct a minimal GPUCacheContext-like object that has
-just the fields the buffer methods need, avoiding the full KVCache /
-CudaIPCWrapper construction.
+Two layers are exercised:
+
+* ``_TempGPUBuffer`` -- the standalone buffer manager. It is built directly
+  from a real :class:`KVLayerGroupsManager` (its constructor is fully public),
+  so the layout invariants (per-kernel-group shape/dtype, per-object-group flat
+  views, non-overlap, write isolation, byte sizing) are tested in isolation.
+
+* ``GPUCacheContext`` -- the higher-level context that owns a ``_TempGPUBuffer``
+  and exposes the per-kernel-group / per-object-group buffer accessors plus
+  ``get_kernel_group_kv_pointers``, ``calculate_num_blocks``,
+  ``kv_layer_groups_manager`` and ``report_status``. It is built through its
+  real public constructor using a lightweight ``to_tensor`` test double in place
+  of ``CudaIPCWrapper`` (same-process CUDA IPC cannot reimport its own handle).
 """
+
+# Standard
+from collections.abc import Sequence
 
 # Third Party
 import pytest
@@ -18,402 +30,486 @@ pytestmark = pytest.mark.skipif(
 )
 
 # First Party
+from lmcache.v1.gpu_connector.utils import LayoutHints  # noqa: E402
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
-from lmcache.v1.multiprocess.gpu_context import GPUCacheContext  # noqa: E402
+from lmcache.v1.multiprocess.gpu_context import (  # noqa: E402
+    GPUCacheContext,
+    _TempGPUBuffer,
+)
 import lmcache.c_ops as lmc_ops  # noqa: E402
+
+_DEVICE = torch.device("cuda")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_context(
-    num_layers: int = 4,
-    num_heads: int = 8,
-    head_size: int = 128,
-    is_mla: bool = False,
-    chunk_size: int = 256,
-    dtype: torch.dtype = torch.bfloat16,
-) -> GPUCacheContext:
-    """Build a GPUCacheContext with a single KV layer group by directly
-    setting internal fields, bypassing the KVCache/IPC wrapper construction."""
-    ctx = object.__new__(GPUCacheContext)
-    ctx.is_mla_ = is_mla
-    ctx.num_layers_ = num_layers
-    ctx.max_batch_size = 4
+class _GroupSpec:
+    """Description of one homogeneous block of KV layers used to build the
+    synthetic ``[2, NB, BS, NH, HS]`` (non-MLA) tensors fed to the manager."""
 
-    # Build a real KVLayerGroupsManager from synthetic tensors shaped to
-    # match the grouping signature the tests care about.
-    if is_mla:
-        kv_caches = [
-            torch.empty(1, 1, head_size, dtype=dtype) for _ in range(num_layers)
-        ]
-        fmt = lmc_ops.GPUKVFormat.NL_X_NB_BS_HS
-    else:
-        kv_caches = [
-            torch.empty(2, 1, 1, num_heads, head_size, dtype=dtype)
-            for _ in range(num_layers)
-        ]
-        fmt = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
-    manager = KVLayerGroupsManager(
-        kv_caches, fmt, num_blocks=1, lmcache_logical_chunk_size=chunk_size
+    def __init__(
+        self,
+        num_layers: int,
+        num_heads: int = 8,
+        head_size: int = 64,
+        block_size: int = 16,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        self.num_layers = num_layers
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.block_size = block_size
+        self.dtype = dtype
+
+
+def _make_kv_tensors(
+    specs: Sequence[_GroupSpec],
+    num_blocks: int = 4,
+) -> list[torch.Tensor]:
+    """Build non-MLA per-layer KV tensors shaped ``[2, NB, BS, NH, HS]``."""
+    tensors: list[torch.Tensor] = []
+    for spec in specs:
+        for _ in range(spec.num_layers):
+            tensors.append(
+                torch.empty(
+                    2,
+                    num_blocks,
+                    spec.block_size,
+                    spec.num_heads,
+                    spec.head_size,
+                    dtype=spec.dtype,
+                    device=_DEVICE,
+                )
+            )
+    return tensors
+
+
+def _build_manager(
+    tensors: list[torch.Tensor],
+    num_blocks: int = 4,
+    gpu_kv_format: "lmc_ops.GPUKVFormat" = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    layout_hints: LayoutHints | None = None,
+) -> KVLayerGroupsManager:
+    """Build a real :class:`KVLayerGroupsManager` from synthetic tensors."""
+    return KVLayerGroupsManager(
+        tensors,
+        gpu_kv_format=gpu_kv_format,
+        num_blocks=num_blocks,
+        layout_hints=layout_hints,
     )
-    ctx.kv_layer_groups_manager_ = manager
-
-    # Build flat tmp_gpu_buffer_ with prefix-sum offsets (new layout)
-    ctx.tmp_chunk_group_offsets_ = [0]
-    for gidx, grp in enumerate(manager.kv_layer_groups):
-        shape = ctx.get_kv_buffer_shape(chunk_size, gidx)
-        byte_size = shape.numel() * grp.dtype.itemsize
-        ctx.tmp_chunk_group_offsets_.append(
-            ctx.tmp_chunk_group_offsets_[-1] + byte_size
-        )
-    ctx.tmp_chunk_bytes_ = ctx.tmp_chunk_group_offsets_[-1]
-    ctx.lmcache_logical_chunk_size = chunk_size
-    ctx.tmp_gpu_buffer_ = torch.empty(
-        ctx.tmp_chunk_bytes_ * ctx.max_batch_size,
-        dtype=torch.uint8,
-        device="cuda",
-    )
-    return ctx
 
 
-def _make_context_multi_group(
-    groups: list[dict],
+def _make_temp_buffer(
+    specs: Sequence[_GroupSpec],
     chunk_size: int = 256,
-    is_mla: bool = False,
-) -> GPUCacheContext:
-    """Build a GPUCacheContext with multiple KV layer groups.
-
-    Args:
-        groups: List of dicts, each with keys:
-            - num_layers (int)
-            - num_heads  (int)
-            - head_size  (int)
-            - dtype      (torch.dtype, optional, default bfloat16)
-        chunk_size: Tokens per chunk.
-        is_mla: Whether to use MLA (kv_dim=1) layout.
-    """
-    assert not is_mla, "multi-group helper only exercises the non-MLA path"
-    ctx = object.__new__(GPUCacheContext)
-    ctx.is_mla_ = is_mla
-    ctx.max_batch_size = 4
-
-    kv_caches: list[torch.Tensor] = []
-    for g in groups:
-        nl = g["num_layers"]
-        nh = g["num_heads"]
-        hs = g["head_size"]
-        dt = g.get("dtype", torch.bfloat16)
-        kv_caches.extend(torch.empty(2, 1, 1, nh, hs, dtype=dt) for _ in range(nl))
-
-    ctx.num_layers_ = len(kv_caches)
-    manager = KVLayerGroupsManager(
-        kv_caches,
-        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-        num_blocks=1,
+    max_batch_size: int = 4,
+    num_blocks: int = 4,
+    layout_hints: LayoutHints | None = None,
+) -> _TempGPUBuffer:
+    """Build a ``_TempGPUBuffer`` backed by a real manager."""
+    tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
+    manager = _build_manager(tensors, num_blocks=num_blocks, layout_hints=layout_hints)
+    return _TempGPUBuffer(
+        kv_layer_groups_manager=manager,
         lmcache_logical_chunk_size=chunk_size,
+        device=_DEVICE,
+        max_batch_size=max_batch_size,
     )
-    ctx.kv_layer_groups_manager_ = manager
 
-    # Build flat tmp_gpu_buffer_ with prefix-sum offsets
-    ctx.tmp_chunk_group_offsets_ = [0]
-    for gidx, grp in enumerate(manager.kv_layer_groups):
-        shape = ctx.get_kv_buffer_shape(chunk_size, gidx)
-        byte_size = shape.numel() * grp.dtype.itemsize
-        ctx.tmp_chunk_group_offsets_.append(
-            ctx.tmp_chunk_group_offsets_[-1] + byte_size
+
+def _expected_kernel_group_shape(
+    manager: KVLayerGroupsManager, num_tokens: int, kernel_group_idx: int
+) -> torch.Size:
+    """Compute the expected kernel-group buffer shape from the manager's
+    public metadata (kv_size, num_layers, slots, hidden_dim)."""
+    group = manager.kernel_groups[kernel_group_idx]
+    num_slots = num_tokens // group.compress_ratio
+    return torch.Size(
+        (
+            group.shape_desc.kv_size,
+            group.num_layers,
+            num_slots,
+            group.hidden_dim_size,
         )
-    ctx.tmp_chunk_bytes_ = ctx.tmp_chunk_group_offsets_[-1]
-    ctx.lmcache_logical_chunk_size = chunk_size
-    ctx.tmp_gpu_buffer_ = torch.empty(
-        ctx.tmp_chunk_bytes_ * ctx.max_batch_size,
-        dtype=torch.uint8,
-        device="cuda",
     )
-    return ctx
+
+
+def _expected_kernel_group_bytes(
+    manager: KVLayerGroupsManager, chunk_size: int, kernel_group_idx: int
+) -> int:
+    """Byte size of one kernel group's per-chunk buffer."""
+    group = manager.kernel_groups[kernel_group_idx]
+    shape = _expected_kernel_group_shape(manager, chunk_size, kernel_group_idx)
+    return shape.numel() * group.dtype.itemsize
+
+
+def _byte_region(buf: torch.Tensor) -> tuple[int, int]:
+    """Return ``(start_ptr, end_ptr)`` covering a tensor's bytes."""
+    start = buf.data_ptr()
+    return start, start + buf.nelement() * buf.element_size()
+
+
+def _assert_disjoint(regions: list[tuple[int, int, str]]) -> None:
+    """Assert that no two ``(start, end, label)`` byte ranges overlap."""
+    for i in range(len(regions)):
+        for j in range(i + 1, len(regions)):
+            s_i, e_i, label_i = regions[i]
+            s_j, e_j, label_j = regions[j]
+            assert e_i <= s_j or e_j <= s_i, f"Overlap between {label_i} and {label_j}"
+
+
+class _FakeIPCWrapper:
+    """Test-only stand-in for ``CudaIPCWrapper``.
+
+    ``GPUCacheContext`` only needs ``to_tensor()`` from each entry of its
+    ``kv_caches`` argument. Same-process CUDA IPC cannot reopen its own handle,
+    so this test double simply hands back a locally allocated CUDA tensor,
+    letting the real ``GPUCacheContext`` constructor run end to end.
+    """
+
+    def __init__(self, tensor: torch.Tensor) -> None:
+        self._tensor = tensor
+
+    def to_tensor(self) -> torch.Tensor:
+        """Return the wrapped local CUDA tensor (test-only)."""
+        return self._tensor
+
+
+def _make_context(
+    specs: Sequence[_GroupSpec],
+    chunk_size: int = 256,
+    num_blocks: int = 4,
+    layout_hints: LayoutHints | None = None,
+) -> GPUCacheContext:
+    """Build a real ``GPUCacheContext`` via its public constructor."""
+    tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
+    kv_caches = [_FakeIPCWrapper(t) for t in tensors]
+    return GPUCacheContext(
+        kv_caches,  # type: ignore
+        lmcache_logical_chunk_size=chunk_size,
+        layout_hints=layout_hints,
+    )
+
+
+# Common group layouts reused across tests.
+_SINGLE_GROUP = [_GroupSpec(num_layers=4, num_heads=8, head_size=64)]
+_MULTI_GROUP = [
+    _GroupSpec(num_layers=4, num_heads=8, head_size=64, dtype=torch.bfloat16),
+    _GroupSpec(num_layers=2, num_heads=16, head_size=64, dtype=torch.float16),
+]
 
 
 # ---------------------------------------------------------------------------
-# get_tmp_chunk_gpu_buffer tests
+# _TempGPUBuffer tests
 # ---------------------------------------------------------------------------
 
 
-class TestGetTmpChunkGpuBuffer:
-    def test_contiguity(self) -> None:
-        ctx = _make_context(chunk_size=256)
-        buf = ctx.get_tmp_chunk_gpu_buffer()
-        assert buf.is_contiguous(), "Buffer not contiguous"
+class TestTempGPUBufferConstruction:
+    def test_max_batch_size_property(self) -> None:
+        buf = _make_temp_buffer(_SINGLE_GROUP, max_batch_size=3)
+        assert buf.max_batch_size == 3
 
-    def test_shape(self) -> None:
-        ctx = _make_context(chunk_size=256)
-        buf = ctx.get_tmp_chunk_gpu_buffer()
-        expected = ctx.get_kv_buffer_shape(256)
-        assert buf.shape == expected
 
-    def test_shape_mla(self) -> None:
-        ctx = _make_context(is_mla=True, num_heads=1, head_size=576, chunk_size=256)
-        buf = ctx.get_tmp_chunk_gpu_buffer()
-        expected = ctx.get_kv_buffer_shape(256)
-        assert buf.shape == expected
-        assert buf.shape[0] == 1  # kv_dim=1 for MLA
+class TestTempGPUBufferKernelGroupBuffer:
+    def test_shape_and_dtype(self) -> None:
+        tensors = _make_kv_tensors(_MULTI_GROUP)
+        manager = _build_manager(tensors)
+        buf = _TempGPUBuffer(manager, 256, _DEVICE)
+        for kg in range(manager.num_kernel_groups):
+            tensor = buf.get_temp_kernel_group_buffer(0, kg)
+            assert tensor.shape == _expected_kernel_group_shape(manager, 256, kg)
+            assert tensor.dtype == manager.kernel_groups[kg].dtype
+
+    def test_contiguous(self) -> None:
+        buf = _make_temp_buffer(_SINGLE_GROUP)
+        assert buf.get_temp_kernel_group_buffer(0, 0).is_contiguous()
 
     def test_repeated_calls_same_ptr(self) -> None:
-        """Two calls should return the same base pointer (same pre-allocated slot)."""
-        ctx = _make_context(chunk_size=256)
-        buf1 = ctx.get_tmp_chunk_gpu_buffer()
-        buf2 = ctx.get_tmp_chunk_gpu_buffer()
-        assert buf1.data_ptr() == buf2.data_ptr()
+        buf = _make_temp_buffer(_SINGLE_GROUP)
+        first = buf.get_temp_kernel_group_buffer(1, 0)
+        second = buf.get_temp_kernel_group_buffer(1, 0)
+        assert first.data_ptr() == second.data_ptr()
 
-    def test_write_read_roundtrip(self) -> None:
-        """Write a pattern, read it back to verify the view is correct."""
-        ctx = _make_context(num_layers=2, num_heads=2, head_size=16, chunk_size=32)
-        buf = ctx.get_tmp_chunk_gpu_buffer()
-        buf.fill_(42.0)
-        assert buf.to(torch.float32).sum().item() == pytest.approx(
-            42.0 * buf.numel(), rel=1e-3
+    def test_invalid_batch_idx_raises(self) -> None:
+        buf = _make_temp_buffer(_SINGLE_GROUP, max_batch_size=4)
+        with pytest.raises(ValueError, match="Invalid batch_idx"):
+            buf.get_temp_kernel_group_buffer(4, 0)
+
+    def test_invalid_kernel_group_idx_raises(self) -> None:
+        buf = _make_temp_buffer(_SINGLE_GROUP)
+        with pytest.raises(ValueError, match="kernel_group_idx"):
+            buf.get_temp_kernel_group_buffer(0, 99)
+
+    def test_buffers_non_overlapping(self) -> None:
+        """Every (batch, kernel_group) buffer occupies disjoint memory."""
+        tensors = _make_kv_tensors(_MULTI_GROUP)
+        manager = _build_manager(tensors)
+        max_batch_size = 4
+        buf = _TempGPUBuffer(manager, 256, _DEVICE, max_batch_size=max_batch_size)
+        regions: list[tuple[int, int, str]] = []
+        for batch in range(max_batch_size):
+            for kg in range(manager.num_kernel_groups):
+                tensor = buf.get_temp_kernel_group_buffer(batch, kg)
+                start, end = _byte_region(tensor)
+                regions.append((start, end, f"batch={batch},kg={kg}"))
+        _assert_disjoint(regions)
+
+    def test_write_isolation(self) -> None:
+        """Writing to one batch slot must not corrupt another."""
+        buf = _make_temp_buffer(
+            [_GroupSpec(num_layers=2, num_heads=2, head_size=16)],
+            chunk_size=32,
+            max_batch_size=4,
+        )
+        for batch in range(4):
+            buf.get_temp_kernel_group_buffer(batch, 0).fill_(float(batch + 1))
+        for batch in range(4):
+            tensor = buf.get_temp_kernel_group_buffer(batch, 0).to(torch.float32)
+            assert tensor.min().item() == pytest.approx(batch + 1, rel=1e-3)
+            assert tensor.max().item() == pytest.approx(batch + 1, rel=1e-3)
+
+
+class TestTempGPUBufferObjectGroupBuffer:
+    def test_flat_uint8(self) -> None:
+        buf = _make_temp_buffer(_MULTI_GROUP)
+        tensor = buf.get_temp_object_group_buffer(0, 0)
+        assert tensor.dtype == torch.uint8
+        assert tensor.dim() == 1
+        assert tensor.is_contiguous()
+
+    def test_size_covers_all_kernel_groups(self) -> None:
+        """The single object group's flat buffer spans every kernel group's
+        bytes for one chunk."""
+        tensors = _make_kv_tensors(_MULTI_GROUP)
+        manager = _build_manager(tensors)
+        chunk_size = 256
+        buf = _TempGPUBuffer(manager, chunk_size, _DEVICE)
+        obj_group = manager.object_groups[0]
+        expected_bytes = sum(
+            _expected_kernel_group_bytes(manager, chunk_size, kg)
+            for kg in obj_group.kernel_group_indices
+        )
+        assert buf.get_temp_object_group_buffer(0, 0).numel() == expected_bytes
+
+    def test_starts_at_first_kernel_group(self) -> None:
+        """The object-group flat view aliases the same memory as its first
+        kernel group's buffer."""
+        tensors = _make_kv_tensors(_MULTI_GROUP)
+        manager = _build_manager(tensors)
+        buf = _TempGPUBuffer(manager, 256, _DEVICE)
+        first_kg = manager.object_groups[0].kernel_group_indices[0]
+        obj_buf = buf.get_temp_object_group_buffer(0, 0)
+        kg_buf = buf.get_temp_kernel_group_buffer(0, first_kg)
+        assert obj_buf.data_ptr() == kg_buf.data_ptr()
+
+    def test_invalid_indices_raise(self) -> None:
+        buf = _make_temp_buffer(_SINGLE_GROUP, max_batch_size=4)
+        with pytest.raises(ValueError, match="object_group_idx"):
+            buf.get_temp_object_group_buffer(0, 99)
+        with pytest.raises(ValueError, match="batch_idx"):
+            buf.get_temp_object_group_buffer(4, 0)
+
+    def test_contains_kernel_group_data(self) -> None:
+        """Bytes written through kernel-group views are visible through the
+        object-group flat view at matching offsets."""
+        tensors = _make_kv_tensors(_MULTI_GROUP)
+        manager = _build_manager(tensors)
+        chunk_size = 64
+        buf = _TempGPUBuffer(manager, chunk_size, _DEVICE)
+        obj_group = manager.object_groups[0]
+
+        for offset_kg, kg in enumerate(obj_group.kernel_group_indices):
+            buf.get_temp_kernel_group_buffer(0, kg).view(torch.uint8).fill_(
+                offset_kg + 1
+            )
+
+        flat = buf.get_temp_object_group_buffer(0, 0)
+        cursor = 0
+        for offset_kg, kg in enumerate(obj_group.kernel_group_indices):
+            size = _expected_kernel_group_bytes(manager, chunk_size, kg)
+            region = flat[cursor : cursor + size]
+            assert region.min().item() == offset_kg + 1
+            assert region.max().item() == offset_kg + 1
+            cursor += size
+
+    def test_object_groups_non_overlapping(self) -> None:
+        """Object-group buffers across batch slots occupy disjoint memory."""
+        tensors = _make_kv_tensors(_MULTI_GROUP)
+        manager = _build_manager(tensors)
+        max_batch_size = 4
+        buf = _TempGPUBuffer(manager, 256, _DEVICE, max_batch_size=max_batch_size)
+        regions: list[tuple[int, int, str]] = []
+        for batch in range(max_batch_size):
+            for og in range(manager.num_object_groups):
+                start, end = _byte_region(buf.get_temp_object_group_buffer(batch, og))
+                regions.append((start, end, f"batch={batch},og={og}"))
+        _assert_disjoint(regions)
+
+
+class TestTempGPUBufferShapeDtype:
+    def test_shape_scales_with_num_tokens(self) -> None:
+        tensors = _make_kv_tensors(_SINGLE_GROUP)
+        manager = _build_manager(tensors)
+        buf = _TempGPUBuffer(manager, 256, _DEVICE)
+        for num_tokens in (16, 128, 256):
+            shape, dtype = buf.get_kernel_group_shape_dtype(num_tokens, 0)
+            assert shape == _expected_kernel_group_shape(manager, num_tokens, 0)
+            assert dtype == manager.kernel_groups[0].dtype
+
+    def test_shape_compressed_group(self) -> None:
+        """For a compressed group, the token dim is divided by compress_ratio."""
+        tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
+        manager = _build_manager(
+            tensors, layout_hints={"inference_engine_logical_block_size": 16}
+        )
+        assert manager.kernel_groups[0].compress_ratio == 2
+        buf = _TempGPUBuffer(manager, 256, _DEVICE)
+        shape, _ = buf.get_kernel_group_shape_dtype(256, 0)
+        assert shape[2] == 256 // 2
+
+    def test_not_divisible_by_compress_ratio_raises(self) -> None:
+        tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
+        manager = _build_manager(
+            tensors, layout_hints={"inference_engine_logical_block_size": 16}
+        )
+        buf = _TempGPUBuffer(manager, 256, _DEVICE)
+        with pytest.raises(ValueError, match="not a multiple of"):
+            buf.get_kernel_group_shape_dtype(255, 0)
+
+
+class TestTempGPUBufferCacheSize:
+    def test_cache_size_per_token(self) -> None:
+        tensors = _make_kv_tensors(_MULTI_GROUP)
+        manager = _build_manager(tensors)
+        chunk_size = 256
+        buf = _TempGPUBuffer(manager, chunk_size, _DEVICE)
+        expected = (
+            sum(
+                _expected_kernel_group_bytes(manager, chunk_size, kg)
+                for kg in range(manager.num_kernel_groups)
+            )
+            // chunk_size
+        )
+        assert buf.get_cache_size_per_token() == expected
+
+    def test_cache_size_per_token_compressed(self) -> None:
+        """Compression halves per-physical-slot bytes, so the per-logical-token
+        size of a 2x-compressed group is half its uncompressed counterpart."""
+        uncompressed = _make_temp_buffer([_GroupSpec(num_layers=2, block_size=16)])
+        compressed = _make_temp_buffer(
+            [_GroupSpec(num_layers=2, block_size=8)],
+            layout_hints={"inference_engine_logical_block_size": 16},
+        )
+        assert (
+            compressed.get_cache_size_per_token() * 2
+            == uncompressed.get_cache_size_per_token()
         )
 
 
 # ---------------------------------------------------------------------------
-# get_tmp_chunk_gpu_buffer_batched tests
+# GPUCacheContext tests
 # ---------------------------------------------------------------------------
 
 
-class TestGetTmpChunkGpuBufferBatched:
-    @pytest.mark.parametrize("batch_size", [1, 2, 3, 4])
-    def test_contiguity(self, batch_size: int) -> None:
-        ctx = _make_context(chunk_size=256)
-        buffers = ctx.get_tmp_chunk_gpu_buffer_batched(batch_size)
-        assert len(buffers) == batch_size
-        for i, buf in enumerate(buffers):
-            assert buf.is_contiguous(), f"Buffer {i} not contiguous"
+class TestGPUCacheContextBuffers:
+    def test_max_batch_size(self) -> None:
+        ctx = _make_context(_SINGLE_GROUP)
+        assert ctx.max_batch_size == 4
 
-    @pytest.mark.parametrize("batch_size", [1, 2, 3, 4])
-    def test_shapes(self, batch_size: int) -> None:
-        ctx = _make_context(chunk_size=256)
-        buffers = ctx.get_tmp_chunk_gpu_buffer_batched(batch_size)
-        expected_shape = ctx.get_kv_buffer_shape(256)
-        for buf in buffers:
-            assert buf.shape == expected_shape
+    def test_kv_layer_groups_manager(self) -> None:
+        ctx = _make_context(_MULTI_GROUP)
+        manager = ctx.kv_layer_groups_manager
+        assert isinstance(manager, KVLayerGroupsManager)
+        assert manager.num_kernel_groups == 2
 
-    @pytest.mark.parametrize("batch_size", [2, 3, 4])
-    def test_non_overlapping(self, batch_size: int) -> None:
-        """Buffers in a batch must not overlap in memory."""
-        ctx = _make_context(chunk_size=256)
-        buffers = ctx.get_tmp_chunk_gpu_buffer_batched(batch_size)
-        for i in range(len(buffers)):
-            for j in range(i + 1, len(buffers)):
-                start_i = buffers[i].data_ptr()
-                end_i = start_i + buffers[i].nelement() * buffers[i].element_size()
-                start_j = buffers[j].data_ptr()
-                end_j = start_j + buffers[j].nelement() * buffers[j].element_size()
-                assert end_i <= start_j or end_j <= start_i, (
-                    f"Buffers {i} and {j} overlap"
-                )
+    def test_get_temp_kernel_group_buffer(self) -> None:
+        ctx = _make_context(_MULTI_GROUP)
+        manager = ctx.kv_layer_groups_manager
+        for kg in range(manager.num_kernel_groups):
+            tensor = ctx.get_temp_kernel_group_buffer(0, kg)
+            assert tensor.shape == _expected_kernel_group_shape(manager, 256, kg)
+            assert tensor.dtype == manager.kernel_groups[kg].dtype
 
-    def test_write_isolation(self) -> None:
-        """Writing to one buffer must not affect another."""
-        ctx = _make_context(num_layers=2, num_heads=2, head_size=16, chunk_size=32)
-        buffers = ctx.get_tmp_chunk_gpu_buffer_batched(4)
+    def test_get_temp_object_group_buffer(self) -> None:
+        ctx = _make_context(_MULTI_GROUP)
+        tensor = ctx.get_temp_object_group_buffer(0, 0)
+        assert tensor.dtype == torch.uint8
+        assert tensor.dim() == 1
 
-        # Write distinct values to each buffer
-        for i, buf in enumerate(buffers):
-            buf.fill_(float(i + 1))
-
-        # Verify each buffer has its own value
-        for i, buf in enumerate(buffers):
-            expected = float(i + 1)
-            assert buf.to(torch.float32).min().item() == pytest.approx(
-                expected, rel=1e-3
-            )
-            assert buf.to(torch.float32).max().item() == pytest.approx(
-                expected, rel=1e-3
-            )
-
-    def test_batch_exceeds_max_raises(self) -> None:
-        ctx = _make_context(chunk_size=256)
-        with pytest.raises(ValueError, match="exceeds max"):
-            ctx.get_tmp_chunk_gpu_buffer_batched(5)
-
-    @pytest.mark.parametrize("batch_size", [1, 2, 3, 4])
-    def test_mla(self, batch_size: int) -> None:
-        ctx = _make_context(is_mla=True, num_heads=1, head_size=576, chunk_size=256)
-        buffers = ctx.get_tmp_chunk_gpu_buffer_batched(batch_size)
-        for buf in buffers:
-            assert buf.is_contiguous()
-            assert buf.shape[0] == 1  # kv_dim=1 for MLA
-
-    def test_consistent_with_single(self) -> None:
-        """get_tmp_chunk_gpu_buffer_batched(1)[0] should have the same data_ptr
-        and shape as get_tmp_chunk_gpu_buffer()."""
-        ctx = _make_context(chunk_size=256)
-        single = ctx.get_tmp_chunk_gpu_buffer()
-        batched = ctx.get_tmp_chunk_gpu_buffer_batched(1)
-        assert len(batched) == 1
-        assert batched[0].data_ptr() == single.data_ptr()
-        assert batched[0].shape == single.shape
+    def test_get_kernel_group_shape_dtype(self) -> None:
+        ctx = _make_context(_SINGLE_GROUP)
+        manager = ctx.kv_layer_groups_manager
+        shape, dtype = ctx.get_kernel_group_shape_dtype(128, 0)
+        assert shape == _expected_kernel_group_shape(manager, 128, 0)
+        assert dtype == manager.kernel_groups[0].dtype
 
 
-# ---------------------------------------------------------------------------
-# Multi-group tests
-# ---------------------------------------------------------------------------
+class TestGPUCacheContextPointers:
+    def test_get_kernel_group_kv_pointers(self) -> None:
+        ctx = _make_context(_MULTI_GROUP)
+        manager = ctx.kv_layer_groups_manager
+        for kg in range(manager.num_kernel_groups):
+            pointers = ctx.get_kernel_group_kv_pointers(kg)
+            assert pointers.dtype == torch.long
+            # One pointer per layer in the group.
+            assert pointers.numel() == manager.kernel_groups[kg].num_layers
 
 
-class TestMultiGroup:
-    """Tests for multi-group flat buffer layout."""
+class TestGPUCacheContextBlocks:
+    def test_calculate_num_blocks_uncompressed(self) -> None:
+        # block_size=16, compress_ratio=1 -> 256 tokens span 16 blocks.
+        ctx = _make_context([_GroupSpec(num_layers=2, block_size=16)])
+        assert ctx.calculate_num_blocks(256, 0) == 16
 
-    GROUPS_SAME_DTYPE = [
-        {"num_layers": 4, "num_heads": 8, "head_size": 128, "dtype": torch.bfloat16},
-        {"num_layers": 4, "num_heads": 8, "head_size": 128, "dtype": torch.bfloat16},
-    ]
-    GROUPS_DIFF_DTYPE = [
-        {"num_layers": 4, "num_heads": 8, "head_size": 128, "dtype": torch.bfloat16},
-        {"num_layers": 2, "num_heads": 4, "head_size": 64, "dtype": torch.float16},
-    ]
-
-    def test_prefix_sum_length(self) -> None:
-        """tmp_chunk_group_offsets_ should have num_groups+1 entries."""
-        ctx = _make_context_multi_group(self.GROUPS_SAME_DTYPE)
-        num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
-        assert len(ctx.tmp_chunk_group_offsets_) == num_groups + 1
-
-    def test_prefix_sum_monotone(self) -> None:
-        """Offsets must be strictly increasing."""
-        ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE)
-        offsets = ctx.tmp_chunk_group_offsets_
-        for i in range(1, len(offsets)):
-            assert offsets[i] > offsets[i - 1], (
-                f"Offset not increasing at index {i}: {offsets}"
+    def test_calculate_num_blocks_matches_manager(self) -> None:
+        ctx = _make_context(_MULTI_GROUP)
+        manager = ctx.kv_layer_groups_manager
+        for kg in range(manager.num_kernel_groups):
+            assert ctx.calculate_num_blocks(256, kg) == manager.calculate_num_blocks(
+                kg, 256
             )
 
-    def test_flat_buffer_total_size(self) -> None:
-        """tmp_gpu_buffer_ byte count == tmp_chunk_bytes_ * max_batch_size."""
-        ctx = _make_context_multi_group(self.GROUPS_SAME_DTYPE)
-        assert ctx.tmp_gpu_buffer_.numel() == ctx.tmp_chunk_bytes_ * ctx.max_batch_size
 
-    def test_groups_non_overlapping_in_chunk(self) -> None:
-        """Within a single chunk, different groups must occupy disjoint byte ranges."""
-        ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE)
-        offsets = ctx.tmp_chunk_group_offsets_
-        num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
-        for i in range(num_groups):
-            for j in range(i + 1, num_groups):
-                # [offsets[i], offsets[i+1]) vs [offsets[j], offsets[j+1])
-                assert offsets[i + 1] <= offsets[j] or offsets[j + 1] <= offsets[i], (
-                    f"Groups {i} and {j} overlap in chunk layout"
-                )
+class TestGPUCacheContextReportStatus:
+    def test_report_status_fields(self) -> None:
+        ctx = _make_context(_SINGLE_GROUP)
+        status = ctx.report_status()
 
-    def test_get_tmp_chunk_gpu_buffer_shape_per_group(self) -> None:
-        """get_tmp_chunk_gpu_buffer returns the correct shape for each group."""
-        ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE, chunk_size=256)
-        num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
-        for gidx in range(num_groups):
-            buf = ctx.get_tmp_chunk_gpu_buffer(group_idx=gidx)
-            expected = ctx.get_kv_buffer_shape(256, gidx)
-            assert buf.shape == expected, (
-                f"Group {gidx}: expected {expected}, got {buf.shape}"
-            )
+        expected_keys = {
+            "num_layers",
+            "inference_engine_logical_block_size",
+            "group_physical_block_sizes",
+            "group_compress_ratios",
+            "hidden_dim_sizes",
+            "dtype",
+            "is_mla",
+            "num_blocks",
+            "gpu_kv_format",
+            "gpu_kv_shape",
+            "gpu_kv_concrete_shape",
+            "attention_backend",
+            "cache_size_per_token",
+        }
+        assert set(status.keys()) == expected_keys
 
-    def test_get_tmp_chunk_gpu_buffer_dtype_per_group(self) -> None:
-        """get_tmp_chunk_gpu_buffer returns the correct dtype for each group."""
-        ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE, chunk_size=256)
-        groups = ctx.kv_layer_groups_manager_.kv_layer_groups
-        for gidx, grp in enumerate(groups):
-            buf = ctx.get_tmp_chunk_gpu_buffer(group_idx=gidx)
-            assert buf.dtype == grp.dtype, (
-                f"Group {gidx}: expected dtype {grp.dtype}, got {buf.dtype}"
-            )
+        assert status["num_layers"] == 4
+        assert status["is_mla"] is False
+        assert status["group_compress_ratios"] == [1]
+        assert status["gpu_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
+        assert status["dtype"] == str(ctx.dtype)
+        assert status["cache_size_per_token"] == ctx.cache_size_per_token()
 
-    def test_groups_data_ptr_matches_offsets(self) -> None:
-        """data_ptr of each group's buffer should equal base + group offset."""
-        ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE, chunk_size=256)
-        base_ptr = ctx.tmp_gpu_buffer_.data_ptr()
-        num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
-        for gidx in range(num_groups):
-            buf = ctx.get_tmp_chunk_gpu_buffer(group_idx=gidx)
-            expected_ptr = base_ptr + ctx.tmp_chunk_group_offsets_[gidx]
-            assert buf.data_ptr() == expected_ptr, (
-                f"Group {gidx}: expected ptr offset "
-                f"{ctx.tmp_chunk_group_offsets_[gidx]}, "
-                f"got {buf.data_ptr() - base_ptr}"
-            )
+    def test_report_status_multi_group(self) -> None:
+        ctx = _make_context(_MULTI_GROUP)
+        manager = ctx.kv_layer_groups_manager
+        status = ctx.report_status()
+        assert status["num_layers"] == 6
+        assert len(status["group_physical_block_sizes"]) == manager.num_kernel_groups
+        assert len(status["group_compress_ratios"]) == manager.num_kernel_groups
 
-    def test_write_isolation_across_groups(self) -> None:
-        """Writing to one group's buffer must not corrupt another group."""
-        ctx = _make_context_multi_group(self.GROUPS_SAME_DTYPE, chunk_size=64)
-        num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
-        buffers = [ctx.get_tmp_chunk_gpu_buffer(group_idx=g) for g in range(num_groups)]
 
-        for i, buf in enumerate(buffers):
-            buf.fill_(float(i + 1))
-
-        for i, buf in enumerate(buffers):
-            expected = float(i + 1)
-            assert buf.to(torch.float32).min().item() == pytest.approx(
-                expected, rel=1e-3
-            ), f"Group {i} was corrupted"
-            assert buf.to(torch.float32).max().item() == pytest.approx(
-                expected, rel=1e-3
-            ), f"Group {i} was corrupted"
-
-    @pytest.mark.parametrize("batch_size", [1, 2, 4])
-    def test_batched_non_overlapping_across_groups_and_chunks(
-        self, batch_size: int
-    ) -> None:
-        """All (group, chunk_idx) combinations must occupy disjoint memory."""
-        ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE, chunk_size=256)
-        num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
-
-        # Collect (data_ptr, end_ptr) for every (group, chunk) combination
-        regions: list[tuple[int, int, str]] = []
-        for gidx in range(num_groups):
-            bufs = ctx.get_tmp_chunk_gpu_buffer_batched(batch_size, group_idx=gidx)
-            for cidx, buf in enumerate(bufs):
-                start = buf.data_ptr()
-                end = start + buf.nelement() * buf.element_size()
-                regions.append((start, end, f"group={gidx},chunk={cidx}"))
-
-        for i in range(len(regions)):
-            for j in range(i + 1, len(regions)):
-                s_i, e_i, label_i = regions[i]
-                s_j, e_j, label_j = regions[j]
-                assert e_i <= s_j or e_j <= s_i, (
-                    f"Overlap between {label_i} and {label_j}"
-                )
-
-    def test_flat_buffer_covers_all_groups(self) -> None:
-        """get_tmp_gpu_buffer_flat covers the full chunk (all groups)."""
-        ctx = _make_context_multi_group(self.GROUPS_DIFF_DTYPE, chunk_size=256)
-        flat = ctx.get_tmp_gpu_buffer_flat(chunk_idx=0)
-        assert flat.numel() == ctx.tmp_chunk_bytes_
-        assert flat.dtype == torch.uint8
-
-    def test_flat_buffer_chunk_idx_raises(self) -> None:
-        """chunk_idx >= max_batch_size should raise ValueError."""
-        ctx = _make_context_multi_group(self.GROUPS_SAME_DTYPE)
-        with pytest.raises(ValueError, match="exceeds max_batch_size"):
-            ctx.get_tmp_gpu_buffer_flat(chunk_idx=ctx.max_batch_size)
-
-    def test_flat_buffer_contains_group_data(self) -> None:
-        """Data written via get_tmp_chunk_gpu_buffer should be visible in flat view."""
-        ctx = _make_context_multi_group(self.GROUPS_SAME_DTYPE, chunk_size=64)
-        num_groups = len(ctx.kv_layer_groups_manager_.kv_layer_groups)
-
-        # Fill each group with a distinct byte value
-        for gidx in range(num_groups):
-            buf = ctx.get_tmp_chunk_gpu_buffer(group_idx=gidx)
-            # Use view(torch.uint8) to fill raw bytes
-            buf.view(torch.uint8).fill_(gidx + 1)
-
-        flat = ctx.get_tmp_gpu_buffer_flat(chunk_idx=0)
-        for gidx in range(num_groups):
-            g_start = ctx.tmp_chunk_group_offsets_[gidx]
-            g_end = ctx.tmp_chunk_group_offsets_[gidx + 1]
-            region = flat[g_start:g_end]
-            assert region.min().item() == gidx + 1, (
-                f"Group {gidx} flat region has wrong min value"
-            )
-            assert region.max().item() == gidx + 1, (
-                f"Group {gidx} flat region has wrong max value"
-            )
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
