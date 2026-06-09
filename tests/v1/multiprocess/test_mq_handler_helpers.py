@@ -13,7 +13,7 @@ from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     KVCache,
 )
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import KeyType
 
 # ==============================================================================
@@ -41,7 +41,7 @@ def register_kv_cache_handler(
     world_size: int,
     engine_type: EngineType,
     layout_hints: LayoutHints,
-    group_views: list[LMCacheGroupView],
+    engine_group_infos: list[EngineGroupInfo],
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -56,7 +56,7 @@ def register_kv_cache_handler(
             ``layout_hints["inference_engine_logical_block_size"]``
             carries the logical tokens-per-engine-block (previously a
             standalone argument).
-        group_views: Engine-neutral KV cache group metadata,
+        engine_group_infos: Engine-neutral KV cache group metadata,
             msgspec-decoded from the request payload.
 
     Returns:
@@ -86,8 +86,8 @@ def register_kv_cache_handler(
         "Expected layout_hints['inference_engine_logical_block_size'] to be int, got "
         f"{type(ie_logical_block_size)}"
     )
-    assert isinstance(group_views, list), (
-        f"Expected group_views to be a list, got {type(group_views)}"
+    assert isinstance(engine_group_infos, list), (
+        f"Expected engine_group_infos to be a list, got {type(engine_group_infos)}"
     )
     # No return value (returns None implicitly)
 

@@ -25,14 +25,14 @@ from lmcache.v1.multiprocess.custom_types import KVCache
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 
 def create_cache_context(
     kv_caches: KVCache,
     lmcache_logical_chunk_size: int = 256,
     layout_hints: LayoutHints | None = None,
-    group_views: "Sequence[LMCacheGroupView]" = (),
+    engine_group_infos: "Sequence[EngineGroupInfo]" = (),
     engine_type: EngineType = EngineType.VLLM,
 ) -> Any:
     """Create the appropriate cache context.
@@ -50,7 +50,7 @@ def create_cache_context(
         lmcache_logical_chunk_size: Number of tokens per LMCache chunk.
         layout_hints: Optional hints for GPU KV format detection.
             Forwarded verbatim to the concrete context constructor.
-        group_views: Engine-neutral KV cache group metadata.
+        engine_group_infos: Engine-neutral KV cache group metadata.
         engine_type: Which serving engine produced the caches.
 
     Returns:
@@ -70,6 +70,6 @@ def create_cache_context(
         kv_caches,
         lmcache_logical_chunk_size,
         layout_hints,
-        group_views,
+        engine_group_infos,
         engine_type,
     )

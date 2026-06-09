@@ -25,15 +25,21 @@ L2 adapters.
    Model:           meta-llama/Llama-3.1-70B-Instruct
    World size:                                      4
    GPU IDs:                                0, 1, 2, 3
+   Num layers:                                     80
+   Num blocks:                                   2048
+   Cache size per token (bytes):               327680
+   --- Kernel group 0 (meta-llama/Llama-3.1-70B-Instruct) ---
+   Kernel group index:                              0
+   Engine group index:                              0
+   Object group index:                              0
+   Num layers:                                     80
+   Physical block size:                           128
+   Compress ratio:                                  1
+   Dtype:                               torch.float16
+   MLA:                                         False
    Attention backend:    vLLM non-MLA flash attention
    GPU KV shape:             NL x [2, NB, BS, NH, HS]
    GPU KV tensor shape:   80 x [2, 2048, 128, 8, 128]
-   Num layers:                                     80
-   Block size:                                    128
-   Hidden dim sizes:                             1024
-   Dtype:                               torch.float16
-   MLA:                                         False
-   Num blocks:                                   2048
    ------------- L2: NixlStoreL2Adapter -------------
    Type:                           NixlStoreL2Adapter
    Health:                                         OK
@@ -46,8 +52,9 @@ The output shows:
 
 - **Overview** — health status, engine type, chunk size.
 - **L1 storage** — capacity, usage, eviction policy, cached object count.
-- **Registered models** — per-model KV cache layout including the GPU KV
-  tensor shape (symbolic and concrete), attention backend, and layer details.
+- **Registered models** — per-model KV cache layout: a context-wide summary
+  followed by one kernel group section per kernel group, each with the GPU KV
+  tensor shape (symbolic and concrete), attention backend, and group geometry.
 - **L2 adapters** — type, health, backend, stored objects, and utilization.
 
 Options
@@ -74,8 +81,8 @@ Options
 JSON Output
 -----------
 
-Use ``--format json`` for machine-readable output. Models and L2 adapters
-are collected into lists for easy programmatic access:
+Use ``--format json`` for machine-readable output. Models, kernel groups, and
+L2 adapters are collected into lists for easy programmatic access:
 
 .. code-block:: bash
 
@@ -100,15 +107,25 @@ are collected into lists for easy programmatic access:
            "model": "meta-llama/Llama-3.1-70B-Instruct",
            "world_size": 4,
            "gpu_ids": "0, 1, 2, 3",
-           "attention_backend": "vLLM non-MLA flash attention",
-           "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
-           "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
            "num_layers": 80,
-           "block_size": 128,
-           "hidden_dim_sizes": [1024],
+           "num_blocks": 2048,
+           "cache_size_per_token": 327680
+         }
+       ],
+       "kernel_groups": [
+         {
+           "model": "meta-llama/Llama-3.1-70B-Instruct",
+           "kernel_group_idx": 0,
+           "engine_group_idx": 0,
+           "object_group_idx": 0,
+           "num_layers": 80,
+           "physical_block_size": 128,
+           "compress_ratio": 1,
            "dtype": "torch.float16",
            "is_mla": false,
-           "num_blocks": 2048
+           "attention_backend": "vLLM non-MLA flash attention",
+           "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+           "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]"
          }
        ],
        "l2_adapters": [
