@@ -225,122 +225,53 @@ Native TurboQuant across the tested presets:
 | LMCache serde round2 | k3v4_nc | 0.982 |
 | LMCache serde round2 | 3bit_nc | 0.988 |
 
-On longer-context CLBench, the current LMCache TurboQuant serde-only path is
-unstable:
+For the follow-up correctness check, I used a smaller but more diagnostic
+CLBench subset instead of the full 163-case table.
 
-| Group | Preset | Score |
+Subset construction:
+
+- First, I ran the bf16/fp16 baseline on the long-context CLBench samples.
+- Then I selected 64 samples where the baseline model scored highly. This avoids
+  cases where the base model itself fails, because those samples are not useful
+  for comparing KV-cache correctness.
+- Therefore, this subset is not meant to report absolute CLBench capability. It
+  is meant to compare relative correctness degradation between no-serde, native
+  TurboQuant, and LMCache TurboQuant serde on cases where the model can normally
+  answer.
+
+Metric:
+
+- I used the official CLBench-style rubric judge.
+- For each task:
+
+      task_score = passed_rubrics / len(rubrics[:50])
+
+- For each context:
+
+      context_score = mean(task_score over tasks in that context)
+
+- Final score:
+
+      avg_context_score = mean(context_score over contexts)
+
+This gives each context equal weight, so contexts with more tasks or more rubrics
+do not dominate the result.
+
+Results on the selected 64-sample subset:
+
+| Group | Preset | Avg context score |
 | --- | --- | ---: |
-| Base | none | 9/163 |
-| Native TQ | k8v4 | 7/163 |
-| Native TQ | 4bit_nc | 8/163 |
-| Native TQ | k3v4_nc | 5/163 |
-| Native TQ | 3bit_nc | 9/163 |
-| LMCache serde | k8v4 | 0/163 |
-| LMCache serde | 4bit_nc | 0/163 |
-| LMCache serde | k3v4_nc | 0/163 |
-| LMCache serde | 3bit_nc | 0/163 |
+| LMCache | no serde | 0.8343 |
+| Native TQ | 4bit_nc | 0.8073 |
+| Native TQ | k3v4_nc | 0.7669 |
+| Native TQ | 3bit_nc | 0.7647 |
+| LMCache serde | 4bit_nc | 0.7725 |
+| LMCache serde | k3v4_nc | 0.7628 |
+| LMCache serde | 3bit_nc | 0.8409 |
 
-This suggests that the current serde-only path can preserve generation quality
-on the shorter 8K replay setting, but it is not yet robust for longer-context
-generation. Since Native TurboQuant does not show the same collapse on CLBench,
-the issue is unlikely to be TurboQuant quantization alone. It is more likely
-related to the LMCache restore path, including restored KV layout, block/slot
-mapping, K/V-specific metadata, or the mismatch between restoring bf16 KV and
-the native backend computing directly in the rotated quantized space.
+The main point is that, after the serde fix, LMCache TurboQuant serde is in the
+same range as native TurboQuant and no-serde on this controlled subset.
 
-One possible source of the mismatch is that Native TurboQuant computes attention
-scores directly in the rotated quantized space:
-
-$$
-\hat{s}^{native}_i
-=
-(P^\top q)^\top Q(P^\top k_i)
-$$
-
-Define the quantization error in the rotated key space as:
-
-$$
-\epsilon_i = Q(P^\top k_i) - P^\top k_i
-$$
-
-Then the Native TurboQuant score error is:
-
-$$
-\Delta_{native,i}
-=
-\hat{s}^{native}_i - s_i
-=
-(P^\top q)^\top \epsilon_i
-$$
-
-The bf16 restore path first reconstructs an ordinary key:
-
-$$
-\hat{k}^{bf16}_i
-=
-\mathrm{bf16}(P Q(P^\top k_i))
-$$
-
-Define the bf16 restore error as:
-
-$$
-\rho_i
-=
-\mathrm{bf16}(P Q(P^\top k_i))
--
-P Q(P^\top k_i)
-$$
-
-Normal FlashAttention then computes:
-
-$$
-\hat{s}^{bf16}_i
-=
-q^\top \hat{k}^{bf16}_i
-$$
-
-Therefore, the bf16 restore path has:
-
-$$
-\Delta_{bf16,i}
-=
-(P^\top q)^\top \epsilon_i
-+
-q^\top \rho_i
-$$
-
-Compared with Native TurboQuant, the bf16 restore path introduces the extra
-score error:
-
-$$
-\Delta_{bf16,i} - \Delta_{native,i}
-=
-q^\top \rho_i
-$$
-
-After softmax, the two paths become:
-
-$$
-\hat{p}^{native}_i
-\propto
-\exp(s_i + (P^\top q)^\top \epsilon_i)
-$$
-
-$$
-\hat{p}^{bf16}_i
-\propto
-\exp(s_i + (P^\top q)^\top \epsilon_i + q^\top \rho_i)
-$$
-
-Thus, \(q^\top \rho_i\) is an additional error term introduced by the bf16
-restore path, and it can be amplified by the exponential form of softmax. This
-extra score perturbation may be more visible in long-context generation than in
-shorter replay-style retrieval tasks.
-
-Therefore, the TurboQuant serde-only path is currently best treated as an
-initial correctness / integration prototype. A follow-up direction is to further
-align LMCache TurboQuant with the serving backend semantics, rather than
-treating TurboQuant only as an independent external serde format.
 
 
 ## Limitations
