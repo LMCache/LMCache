@@ -36,7 +36,7 @@ from lmcache.v1.multiprocess.engine_module import (
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
@@ -49,29 +49,35 @@ logger = init_logger(__name__)
 
 
 def get_layout_desc(
-    cache_context: GPUCacheContext, num_tokens: int
+    gpu_context: GPUCacheContext,
+    num_tokens: int,
+    object_group_id: int = 0,
 ) -> MemoryLayoutDesc:
-    """Get the memory layout description for a given GPU context and number of tokens.
+    """Get the memory layout description for a specific object group.
 
-    Supports multiple KV layer groups with different shapes and dtypes.
+    The returned layout describes the single memory object that backs
+    ``object_group_id``: one (shape, dtype) entry per kernel group in that
+    object group, in the kernel groups' declared layout order. Kernel groups
+    may have different shapes and dtypes.
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
         num_tokens: The number of tokens to determine the layout for.
+        object_group_id: Index of the object group whose layout to build.
+            Defaults to 0; under the current single-object-group assumption this
+            covers every kernel group.
 
     Returns:
-        MemoryLayoutDesc: The memory layout description containing shapes and dtypes.
+        MemoryLayoutDesc: The memory layout description containing shapes and
+        dtypes, one entry per kernel group in the object group.
     """
-    num_groups = cache_context.kv_layer_groups_manager.num_groups
-    shapes = [
-        cache_context.get_kv_buffer_shape(num_tokens, group_idx)
-        for group_idx in range(num_groups)
+    object_group = gpu_context.kv_layer_groups_manager.object_groups[object_group_id]
+    shapes_and_dtypes = [
+        gpu_context.get_kernel_group_shape_dtype(num_tokens, kernel_group_idx)
+        for kernel_group_idx in object_group.kernel_group_indices
     ]
-    dtypes = [
-        cache_context.kv_layer_groups_manager.kv_layer_groups[group_idx].dtype
-        for group_idx in range(num_groups)
-    ]
-    return MemoryLayoutDesc(shapes=shapes, dtypes=dtypes)
+    shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
+    return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
 
 
 def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None]:
@@ -198,23 +204,7 @@ class GPUTransferModule:
             cache_context_meta[str(instance_id)] = {
                 "model_name": entry.model_name,
                 "world_size": entry.world_size,
-                "kv_cache_layout": {
-                    "num_layers": ctx.num_layers,
-                    "inference_engine_logical_block_size": (
-                        ctx.kv_layer_groups_manager.inference_engine_logical_block_size
-                    ),
-                    "group_physical_block_sizes": ctx.group_physical_block_sizes,
-                    "group_compress_ratios": ctx.group_compress_ratios,
-                    "hidden_dim_sizes": str(ctx.hidden_dim_sizes),
-                    "dtype": str(ctx.dtype),
-                    "is_mla": ctx.is_mla,
-                    "num_blocks": ctx.num_blocks,
-                    "gpu_kv_format": ctx.gpu_kv_format_name,
-                    "gpu_kv_shape": ctx.gpu_kv_shape,
-                    "gpu_kv_concrete_shape": ctx.concrete_gpu_kv_shape,
-                    "attention_backend": ctx.attention_backend,
-                    "cache_size_per_token": ctx.cache_size_per_token(),
-                },
+                "kv_cache_layout": ctx.report_status(),
             }
 
         return {
@@ -241,7 +231,7 @@ class GPUTransferModule:
         world_size: int,
         engine_type: EngineType,
         layout_hints: LayoutHints,
-        group_views: list[LMCacheGroupView],
+        engine_group_infos: list[EngineGroupInfo],
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -255,7 +245,7 @@ class GPUTransferModule:
                 Forwarded to GPUCacheContext for format detection.
             layout_hints: See LayoutHints.  Forwarded to
                 GPUCacheContext for GPU KV format detection.
-            group_views: Engine-neutral KV cache group metadata
+            engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
         """
         if instance_id in self._cache_contexts:
@@ -270,7 +260,7 @@ class GPUTransferModule:
             kv_caches,
             self._ctx.chunk_size,
             layout_hints=layout_hints or None,
-            group_views=group_views,
+            engine_group_infos=engine_group_infos,
             engine_type=engine_type,
         )
         self._cache_contexts[instance_id] = ContextEntry(
@@ -279,7 +269,9 @@ class GPUTransferModule:
             world_size=world_size,
         )
 
-        layout_desc = get_layout_desc(cache_context, self._ctx.chunk_size)
+        layout_desc = get_layout_desc(
+            cache_context, self._ctx.chunk_size, object_group_id=0
+        )
         self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
 
         logger.info(
@@ -351,11 +343,14 @@ class GPUTransferModule:
         cache_context = entry.cache_context
         model_name = entry.model_name
 
+        # TODO(refactor): only single-object-group transfers are wired up so far.
+        assert cache_context.kv_layer_groups_manager.num_object_groups == 1
+
         # NOTE: different engine groups may have different block sizes, so
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
         # group ``i``.
         blocks_per_chunk = [
-            cache_context.blocks_for_tokens(self._ctx.chunk_size, group_idx)
+            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
             for group_idx in range(cache_context.kv_layer_groups_manager.num_groups)
         ]
 
@@ -431,7 +426,9 @@ class GPUTransferModule:
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
             store_succeeded = False
             try:
-                layout_desc = get_layout_desc(cache_context, self._ctx.chunk_size)
+                layout_desc = get_layout_desc(
+                    cache_context, self._ctx.chunk_size, object_group_id=0
+                )
                 reserved_dict = self._ctx.storage_manager.reserve_write(
                     obj_keys, layout_desc, "new"
                 )
@@ -454,8 +451,11 @@ class GPUTransferModule:
                         chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
                             idx * bpc : (idx + 1) * bpc
                         ]
-                        tmp_buffer = cache_context.get_tmp_chunk_gpu_buffer(group_idx)
-                        group_kv_pointers = cache_context.get_group_kv_pointers(
+                        # Store is not batched, so we always use batch_idx=0.
+                        tmp_buffer = cache_context.get_temp_kernel_group_buffer(
+                            0, group_idx
+                        )
+                        group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                             group_idx
                         )
                         # Kernel contract: ``group_lmcache_chunk_size`` here is the
@@ -475,9 +475,10 @@ class GPUTransferModule:
                             cache_context.gpu_kv_format_,
                             0,
                         )
-                    # Store is not batched, so we always use chunk_idx=0 (single slot)
+                    # Store is not batched, so we always use batch_idx=0 (single
+                    # slot). Single object group => object_group_idx=0.
                     lmcache_memcpy_async_d2h(
-                        cache_context.get_tmp_gpu_buffer_flat(chunk_idx=0), memory_obj
+                        cache_context.get_temp_object_group_buffer(0, 0), memory_obj
                     )
                 store_succeeded = True
             except Exception:
@@ -565,6 +566,9 @@ class GPUTransferModule:
         cache_context = entry.cache_context
         model_name = entry.model_name
 
+        # TODO(refactor): only single-object-group transfers are wired up so far.
+        assert cache_context.kv_layer_groups_manager.num_object_groups == 1
+
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
         # drain thread sees it before MP_REQUEST_END can race MP_RETRIEVE_END.
@@ -634,12 +638,13 @@ class GPUTransferModule:
                 # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
                 # H2D copy: each memory_obj maps to its own batch slot
                 for chunk_idx, memory_obj in enumerate(memory_obj_batch):
+                    # Single object group => object_group_idx=0.
                     lmcache_memcpy_async_h2d(
                         memory_obj,
-                        cache_context.get_tmp_gpu_buffer_flat(chunk_idx=chunk_idx),
+                        cache_context.get_temp_object_group_buffer(chunk_idx, 0),
                     )
                 for group_idx, group in enumerate(groups):
-                    bpc = cache_context.blocks_for_tokens(
+                    bpc = cache_context.calculate_num_blocks(
                         self._ctx.chunk_size, group_idx
                     )
                     chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
@@ -656,13 +661,16 @@ class GPUTransferModule:
                             f"expected={batch_len * bpc} "
                             f"got={chunk_block_ids_gpu.shape[0]}"
                         )
-                    group_skip_blocks = cache_context.blocks_for_tokens(
+                    group_skip_blocks = cache_context.calculate_num_blocks(
                         skip_tokens_in_chunk, group_idx
                     )
-                    tmp_buffers = cache_context.get_tmp_chunk_gpu_buffer_batched(
-                        batch_len, group_idx
+                    tmp_buffers = [
+                        cache_context.get_temp_kernel_group_buffer(i, group_idx)
+                        for i in range(batch_len)
+                    ]
+                    group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
+                        group_idx
                     )
-                    group_kv_pointers = cache_context.get_group_kv_pointers(group_idx)
                     group_lmcache_chunk_size = cache_context.get_physical_chunk_size(
                         group_idx
                     )

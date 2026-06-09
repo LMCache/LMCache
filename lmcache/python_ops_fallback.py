@@ -290,6 +290,12 @@ class GPUKVFormat(IntEnum):
     # used by: SGLang MHA via the MP daemon path
     TWO_X_NL_X_NB_BS_NH_HS = 9
 
+    # used by: vLLM non-MLA blocks-first attention with K/V fused into the
+    # trailing dim. Per-layer physical shape
+    # [num_blocks, num_heads, block_size, 2, head_size] -- the K/V "2" axis is
+    # second-to-last, recovered by splitting the fused [..., 2 * head_size].
+    NL_X_NB_NH_BS_TWO_HS = 10
+
 
 class PageBufferShapeDesc:
     """Python stand-in for the C++ ``PageBufferShapeDesc`` struct.

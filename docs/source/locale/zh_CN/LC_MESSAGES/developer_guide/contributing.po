@@ -28,7 +28,7 @@ msgid ""
 "Thank you for your interest in contributing to LMCache! We welcome and "
 "accept all kinds of contributions, no matter how small or large. There "
 "are several ways you can contribute to the project:"
-msgstr "感谢您对为 LMCache 贡献的兴趣！我们欢迎并接受各种形式的贡献，无论大小。您可以通过几种方式为项目做出贡献："
+msgstr "感谢您有兴趣为 LMCache 做出贡献！我们欢迎并接受各种形式的贡献，无论大小。您可以通过以下几种方式为项目做出贡献："
 
 #: ../../source/developer_guide/contributing.rst:6
 msgid "Identify and report any issues or bugs"
@@ -51,7 +51,7 @@ msgid ""
 "A comprehensive list of good first issues can be found in the issue "
 "`[Onboarding][Q4] Welcoming contributors with good first issues! "
 "<https://github.com/LMCache/LMCache/issues/1882>`_."
-msgstr "可以在问题 `[Onboarding][Q4] 欢迎贡献者的好第一问题！ <https://github.com/LMCache/LMCache/issues/1882>`_ 中找到一个全面的好第一问题列表。"
+msgstr "可以在 Issue `[Onboarding][Q4] Welcoming contributors with good first issues! <https://github.com/LMCache/LMCache/issues/1882>`_ 中找到完整的适合新手的 Issue 列表。"
 
 #: ../../source/developer_guide/contributing.rst:13
 msgid ""
@@ -103,7 +103,7 @@ msgid ""
 "and there is always a need for more test coverage. If you see something "
 "that you think should be fixed, take ownership! Here is how you get "
 "started."
-msgstr "对开源项目的帮助总是受欢迎的，总有一些可以改进的地方。例如，文档（就像您现在正在阅读的文本）总是可以改进，代码总是可以更清晰，变量或函数总是可以重命名或添加注释，并且总是需要更多的测试覆盖率。如果您看到认为应该修复的内容，请主动承担责任！以下是您如何开始的指南。"
+msgstr "对开源项目的帮助总是受欢迎的，总有一些可以改进的地方。例如，文档（就像您现在正在阅读的文本）总是可以改进，代码总是可以更清晰，变量或函数总是可以重命名或添加注释，并且总是需要更多的测试覆盖率。如果您看到认为应该修复的内容，请主动承担责任！以下是入门指南。"
 
 #: ../../source/developer_guide/contributing.rst:33
 msgid "How Can I Contribute?"
@@ -487,7 +487,7 @@ msgstr "在 http://localhost:8000 本地服务文档页面： :code:`python -m h
 
 #: ../../source/developer_guide/contributing.rst:201
 msgid "Thank You"
-msgstr "谢谢你"
+msgstr "感谢"
 
 #: ../../source/developer_guide/contributing.rst:203
 msgid ""

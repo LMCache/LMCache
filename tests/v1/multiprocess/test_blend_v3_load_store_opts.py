@@ -230,25 +230,20 @@ def _build_fake_gpu_context(batch_size: int, num_groups: int):
     """Returns a MagicMock matching the minimal GPUCacheContext surface
     used by _apply_cb_rope_batched."""
     gpu_context = MagicMock()
-    gpu_context.kv_layer_groups_manager.num_groups = num_groups
+    gpu_context.kv_layer_groups_manager.num_kernel_groups = num_groups
     # All groups: compress_ratio=1, kv_size=2.
     groups = [SimpleNamespace(compress_ratio=1) for _ in range(num_groups)]
-    gpu_context.kv_layer_groups_manager.kv_layer_groups = groups
+    gpu_context.kv_layer_groups_manager.kernel_groups = groups
 
-    # all_slots = [tmp_for_slot_0, ..., tmp_for_slot_{batch-1}]
-    # Each tmp shape: (2 kv, num_layers, slots_per_chunk, hidden_dim).
+    # Each per-(slot, group) buffer has shape
+    # (2 kv, num_layers, slots_per_chunk, hidden_dim).
     num_layers, slots_per_chunk, hidden_dim = 2, 4, 64
     head_size = 32
 
-    def _get_tmp_chunk_gpu_buffer_batched(batch_size, group_idx):
-        return [
-            _FakeTensor((2, num_layers, slots_per_chunk, hidden_dim))
-            for _ in range(batch_size)
-        ]
+    def _get_temp_kernel_group_buffer(batch_idx, kernel_group_idx):
+        return _FakeTensor((2, num_layers, slots_per_chunk, hidden_dim))
 
-    gpu_context.get_tmp_chunk_gpu_buffer_batched.side_effect = (
-        _get_tmp_chunk_gpu_buffer_batched
-    )
+    gpu_context.get_temp_kernel_group_buffer.side_effect = _get_temp_kernel_group_buffer
     return gpu_context, head_size
 
 
@@ -292,8 +287,10 @@ def test_batched_rope_calls_kernel_per_group_per_slot():
 
         eng._apply_cb_rope_batched(gpu_context, rope_state, 4, slots_to_rope)
 
-    # Per-group setup (get_tmp_chunk_gpu_buffer_batched) called once per group.
-    assert gpu_context.get_tmp_chunk_gpu_buffer_batched.call_count == 2
+    # all_slots is built once per group (G=2), each fetching the full batch
+    # of slot buffers => batch_len(4) × G(2) = 8 buffer fetches, independent
+    # of how many slots are actually re-RoPE'd.
+    assert gpu_context.get_temp_kernel_group_buffer.call_count == 8
     # Kernel called N=2 slots × G=2 groups = 4 times.
     assert ops.rotary_embedding_k_fused.call_count == 4
 
@@ -315,7 +312,7 @@ def test_batched_rope_noop_on_empty_slots():
     with patch.object(v3_mod, "lmc_ops") as ops:
         eng._apply_cb_rope_batched(gpu_context, rope_state, 2, [])
 
-    assert gpu_context.get_tmp_chunk_gpu_buffer_batched.call_count == 0
+    assert gpu_context.get_temp_kernel_group_buffer.call_count == 0
     assert ops.rotary_embedding_k_fused.call_count == 0
 
 
@@ -325,8 +322,8 @@ def test_batched_rope_raises_on_compressed_layout():
     from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
 
     gpu_context = MagicMock()
-    gpu_context.kv_layer_groups_manager.num_groups = 1
-    gpu_context.kv_layer_groups_manager.kv_layer_groups = [
+    gpu_context.kv_layer_groups_manager.num_kernel_groups = 1
+    gpu_context.kv_layer_groups_manager.kernel_groups = [
         SimpleNamespace(compress_ratio=2)
     ]
     rope_state = SimpleNamespace(
