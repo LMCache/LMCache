@@ -639,17 +639,6 @@ class GPUCacheContext:
     def report_status(self) -> dict:
         """Return this context's KV cache layout metadata for ``/status``.
 
-        Builds the ``kv_cache_layout`` sub-dict surfaced by the ``/status``
-        HTTP endpoint (see ``GPUTransferModule.report_status``) and consumed by
-        the ``lmcache`` CLI (``lmcache describe kvcache`` and
-        ``lmcache bench engine``). It describes only the KV cache geometry; the
-        owning module wraps it with ``model_name``/``world_size``, which this
-        context does not track.
-
-        The report is organised **per kernel group** so that hybrid models
-        (whose groups differ in geometry) are described accurately, with a
-        small set of genuinely context-wide fields kept at the top level.
-
         Returns:
             A dict with these top-level fields:
 
@@ -675,13 +664,6 @@ class GPUCacheContext:
               - ``gpu_kv_shape`` (str): symbolic shape description.
               - ``attention_backend`` (str)
         """
-        # TODO(compat): the key names and value *formatting* below are a
-        # contract with the `/status` endpoint and the `lmcache` CLI.
-        # `lmcache bench engine` (`bench/engine_bench/config.py`) reads the
-        # top-level `cache_size_per_token`; `lmcache describe kvcache`
-        # (`lmcache/cli/commands/describe.py`) renders the top-level summary
-        # and the per-group `kernel_groups` entries. Renaming a key breaks
-        # those consumers.
         manager = self.kv_layer_groups_manager
         kernel_groups = manager.kernel_groups
 
