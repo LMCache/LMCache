@@ -454,6 +454,20 @@ def gather_paged_kv_to_cpu(
             paged_arg = normalized
             objs_arg = chunks
             block_ids_arg = selected_block_ids
+
+            # call kernel in one shot
+            lmc_ops.multi_layer_block_kv_transfer(
+                paged_arg,
+                objs_arg,
+                block_ids_arg,
+                tensors[0].device,
+                lmc_ops.TransferDirection.D2H,
+                shape_desc,
+                chunk_tokens,
+                gpu_kv_format,
+                0,
+            )
+
         else:
             # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
             _ptrs_np = np.array(
@@ -470,17 +484,47 @@ def gather_paged_kv_to_cpu(
                 selected_block_ids, dtype=torch.int64, device=tensors[0].device
             )
 
-        lmc_ops.multi_layer_block_kv_transfer(
-            paged_arg,
-            objs_arg,
-            block_ids_arg,
-            tensors[0].device,
-            lmc_ops.TransferDirection.D2H,
-            shape_desc,
-            chunk_tokens,
-            gpu_kv_format,
-            0,
-        )
+            # Split transfer to respect CUDA kernel's object count limitation
+            MAX_OBJECTS = 4
+            req_blocks_per_obj = len(selected_block_ids) // len(objs_arg)
+            total_objects = len(objs_arg)
+
+            for i in range(0, total_objects, MAX_OBJECTS):
+                # 1. Slice object pointers and corresponding block IDs
+                batch_objs_ptrs = objs_arg[i : i + MAX_OBJECTS]
+
+                start_block = i * req_blocks_per_obj
+                end_block = min(
+                    (i + MAX_OBJECTS) * req_blocks_per_obj, len(selected_block_ids)
+                )
+                batch_blocks = block_ids_arg[start_block:end_block]
+
+                # 2. Dynamically adjust metadata to satisfy C++ TORCH_CHECK constraint
+                # Ensure the ratio of blocks to objects matches the expected alignment
+                actual_num_objects = len(batch_objs_ptrs)
+                actual_blocks_per_obj = len(batch_blocks) // actual_num_objects
+
+                current_shape_desc = make_page_buffer_shape_desc(
+                    normalized,
+                    gpu_kv_format,
+                    layer_idx=0,
+                    num_layers_in_group=num_layers,
+                    num_blocks=actual_blocks_per_obj,
+                    block_size=block_size,
+                )
+
+                # 3. Execute batched transfer
+                lmc_ops.multi_layer_block_kv_transfer(
+                    paged_arg,
+                    batch_objs_ptrs,
+                    batch_blocks,
+                    tensors[0].device,
+                    lmc_ops.TransferDirection.D2H,
+                    current_shape_desc,
+                    chunk_tokens,
+                    gpu_kv_format,
+                    0,
+                )
 
     # --- Final reconciliation ---
     # If we used a staging buffer to protect unpinned shared memory,
@@ -550,7 +594,6 @@ def scatter_cpu_to_paged_kv(
 
     if not chunks:
         return
-
     # Require enough block IDs to cover every chunk. Extra trailing block IDs
     # are ignored by the per-chunk slicing below, mirroring the gather-side
     # ``out`` length check for consistency.
@@ -572,6 +615,8 @@ def scatter_cpu_to_paged_kv(
     num_layers = get_num_layers(normalized, gpu_kv_format)
     num_blocks = get_num_blocks(normalized, gpu_kv_format)
     chunk_tokens = blocks_per_chunk * block_size
+
+    print(f"DEBUG: Scattering {len(chunks)} chunks, num_blocks={num_blocks}")
 
     # Block-level transfer can only skip whole blocks. A non-aligned prefix is
     # rounded down to the nearest block (matching the GPU transfer path in
@@ -610,6 +655,18 @@ def scatter_cpu_to_paged_kv(
         paged_arg = normalized
         objs_arg = chunks
         block_ids_arg = selected_block_ids
+
+        lmc_ops.multi_layer_block_kv_transfer(
+            paged_arg,
+            objs_arg,
+            block_ids_arg,
+            tensors[0].device,
+            lmc_ops.TransferDirection.H2D,
+            shape_desc,
+            chunk_tokens,
+            gpu_kv_format,
+            skip_prefix_n_blocks,
+        )
     else:
         # assuming this is c ops path which requires pin memory
         # TODO: may have a better approach here
@@ -638,17 +695,49 @@ def scatter_cpu_to_paged_kv(
             selected_block_ids, dtype=torch.int64, device=tensors[0].device
         )
 
-    lmc_ops.multi_layer_block_kv_transfer(
-        paged_arg,
-        objs_arg,
-        block_ids_arg,
-        tensors[0].device,
-        lmc_ops.TransferDirection.H2D,
-        shape_desc,
-        chunk_tokens,
-        gpu_kv_format,
-        skip_prefix_n_blocks,
-    )
+        # Batched transfer to satisfy cuda's limitation (max 4 objects)
+        MAX_OBJECTS = 4
+        req_blocks_per_obj = (
+            blocks_per_chunk  # Each chunk corresponds to one object's blocks
+        )
+        total_chunks = len(chunks)
+
+        for i in range(0, total_chunks, MAX_OBJECTS):
+            # Slice objects and block IDs for this batch
+            batch_objs_ptrs = objs_arg[i : i + MAX_OBJECTS]
+
+            start_block = i * req_blocks_per_obj
+            end_block = min(
+                (i + MAX_OBJECTS) * req_blocks_per_obj, len(selected_block_ids)
+            )
+            batch_blocks = block_ids_arg[start_block:end_block]
+
+            # Adjust num_blocks in shape_desc to match the batch size
+            # This ensures: actual_blocks_per_obj * block_size == lmcache_chunk_size
+            actual_num_objects = len(batch_objs_ptrs)
+            actual_blocks_per_obj = len(batch_blocks) // actual_num_objects
+
+            current_shape_desc = make_page_buffer_shape_desc(
+                normalized,
+                gpu_kv_format,
+                layer_idx=0,
+                num_layers_in_group=num_layers,
+                num_blocks=actual_blocks_per_obj,
+                block_size=block_size,
+            )
+
+            # Execute transfer for this batch
+            lmc_ops.multi_layer_block_kv_transfer(
+                paged_arg,
+                batch_objs_ptrs,
+                batch_blocks,
+                tensors[0].device,
+                lmc_ops.TransferDirection.H2D,
+                current_shape_desc,
+                chunk_tokens,
+                gpu_kv_format,
+                skip_prefix_n_blocks,
+            )
     # Fast path: The async GPU copy might still be in progress.
     # We intentionally omit synchronization here for performance.
     # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
