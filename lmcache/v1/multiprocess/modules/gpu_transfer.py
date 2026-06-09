@@ -7,6 +7,9 @@ from itertools import islice
 from typing import Generator
 import time
 
+# Third Party
+import torch
+
 # First Party
 from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
@@ -98,6 +101,280 @@ def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None
     it = iter(lst)
     while batch := tuple(islice(it, batch_size)):
         yield batch
+
+
+def batched_iteration_with_skip(
+    lst: list,
+    batch_size: int,
+    skip_count: int,
+) -> Generator[tuple[int, tuple], None, None]:
+    """Utility function to iterate over a list in batches with an initial skip.
+
+    Args:
+        lst: The list to iterate over.
+        batch_size: The size of each batch.
+        skip_count: The number of items to skip at the start of the list.
+
+    Yields:
+        Tuples of (batch_start_idx, batch) where batch is a tuple of items
+        from the list, and batch_start_idx is the "original" index of the first
+        item in the batch.
+
+    Raises:
+        ValueError: If batch_size is less than 1 or skip_count is negative.
+
+    Note:
+        Batch_idx is the index of the batch in the original list, accounting
+        for the skipped items. For example, if skip_count is 10 and batch_size
+        is 5, the first yielded batch will have batch_start_idx=10.
+    """
+    if batch_size < 1:
+        raise ValueError("batch size must be at least one")
+    if skip_count < 0:
+        raise ValueError("skip_count must be non-negative")
+
+    it = iter(lst)
+    # Skip the initial items
+    for _ in range(skip_count):
+        next(it, None)
+    batch_start_idx = skip_count
+    while batch := tuple(islice(it, batch_size)):
+        yield batch_start_idx, batch
+        batch_start_idx += len(batch)
+
+
+def cut_and_stage_block_ids(
+    cache_context: GPUCacheContext,
+    block_ids: list[list[int]],
+) -> list[torch.Tensor]:
+    """Cut the block id lists to skip the unneeded blocks in a chunk and
+    stage it into GPU tensors for later use.
+
+    This mainly targets the case where a portion of the blocks are not
+    needed for every chunk, such as deepseek v4's swa cache.
+
+    Note that the we do NOT do any object-level skipping here.
+
+    Args:
+        cache_context: The GPU cache context containing the KV cache information.
+        block_ids: The original block id lists, indexed by LMCache KV group index.
+
+    Returns:
+        The cut block id lists, indexed by LMCache KV group index.
+
+    Note:
+        This function has some coupled logic with gpu_kv_copy_helper below. The
+        caller need to make sure that the block ids seen by gpu_kv_copy_helper
+        are produced by this function.
+
+    Example:
+        If a model have 2 kernel groups, one is full attention with block size 32,
+        one is swa attention with block size 32 and sliding window size 64, and
+        LMCache has a chunk size of 128. And there are 2 chunks in total (256 tokens).
+
+        The input will be:
+        [
+          [1, 2, 3, 4, 5, 6, 7, 8],  # block ids for the full attention group
+          [11, 12, 13, 14, 15, 16, 17, 18], # block ids for the swa attention group
+        ]
+
+        The output will be
+        [
+          [1, 2, 3, 4, 5, 6, 7, 8],  # full attention group still needs all block ids
+          [13, 14, 17, 18], # swa attention group only needs the last 2 block per chunk
+        ]
+    """
+    num_kernel_groups = cache_context.kv_layer_groups_manager.num_groups
+    for kernel_group_id in range(num_kernel_groups):
+        # TODO: we need to get the actual sliding window size from the kernel
+        # group
+        placeholder_sliding_window_size = cache_context.lmcache_logical_chunk_size
+        tokens_per_chunk = min(
+            cache_context.lmcache_logical_chunk_size, placeholder_sliding_window_size
+        )
+        keep_blocks_per_chunk = cache_context.calculate_num_blocks(
+            tokens_per_chunk, kernel_group_id
+        )
+        total_blocks_per_chunk = cache_context.calculate_num_blocks(
+            cache_context.lmcache_logical_chunk_size, kernel_group_id
+        )
+
+        new_block_ids = []
+        old_block_ids = block_ids[kernel_group_id]
+        assert len(old_block_ids) % total_blocks_per_chunk == 0, (
+            f"len(block_ids[{kernel_group_id}]) should be a multiple "
+            f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
+            f"{len(old_block_ids)}"
+        )
+
+        for i in range(0, len(old_block_ids), total_blocks_per_chunk):
+            chunk_block_ids = old_block_ids[i : i + total_blocks_per_chunk]
+            new_block_ids.extend(chunk_block_ids[-keep_blocks_per_chunk:])
+
+        block_ids[kernel_group_id] = new_block_ids
+
+    # Stage the cut block ids into GPU tensors
+    block_ids_gpu = cache_context.copy_view_block_ids_to_gpu(block_ids)
+    return block_ids_gpu
+
+
+def _recalculate_blocks_to_skip(
+    blocks_per_chunk: int,
+    blocks_per_window: int,
+    blocks_to_skip: int,
+) -> int:
+    """Re-calculate the number of blocks to skip for a batch of chunks based
+    on the blocks per chunk and blocks per sliding window WHEN the window
+    size is smaller than the lmcache chunk size.
+
+    Args:
+        blocks_per_chunk: The total number of blocks in one chunk for the
+            current group.
+        blocks_per_window: The number of blocks in the sliding window
+            for the current group. Should be less than or equal to
+            blocks_per_chunk.
+        blocks_to_skip: The number of blocks to skip.
+
+    Returns:
+        The re-calculated number of blocks to skip for the current batch of
+        chunks.
+    """
+    if blocks_per_chunk == blocks_per_window:
+        return blocks_to_skip
+
+    full_windows_to_skip = blocks_to_skip // blocks_per_chunk
+    tail_blocks = blocks_to_skip % blocks_per_chunk
+    tail_blocks_to_skip = tail_blocks - (blocks_per_chunk - blocks_per_window)
+    return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
+
+
+def gpu_kv_copy_helper(
+    cache_context: GPUCacheContext,
+    block_ids_gpu: list[torch.Tensor],
+    memory_objs: list[MemoryObj],
+    object_group_id: int,
+    batch_size: int,
+    skip_first_n_tokens: int,
+    direction: "lmc_ops.TransferDirection",
+) -> None:
+    """Helper function to transfer a batch of memory objects to/from GPU.
+
+    Args:
+        cache_context: The GPU cache context containing the KV cache information.
+        block_ids_gpu: GPU block IDs to retrieve into, indexed by LMCache KV group
+            index. It should satisfy `len(block_ids_gpu[i]) == len(memory_objs) *
+            blocks_per_chunk[i]` for each group `i`.
+            Note that the block IDs list are already on GPU.
+        memory_objs: The list of MemoryObj instances to copy from.
+        object_group_id: Index of the object group being copied.
+        batch_size: The number of memory objects to perform batched copy
+        skip_first_n_tokens: Number of tokens to skip writing at the start of
+            the retrieve range. This avoids overwriting APC-shared GPU blocks that
+            may be read concurrently by other requests.
+        direction: The transfer direction, H2D (retrieve) or D2H (store).
+
+    Note:
+        This function expects the caller to stage the block ids (list[list[int]])
+        into GPU tensors and pass them in as `block_ids_gpu`.
+    """
+    # TODO(ApostaC): this is for the sliding window optimization. We will have
+    # num_objects_to_skip calculated based on the sliding window size.
+    # In most of cases, it will be:
+    # - `len(memory_objs) - chunks_in_sliding_window`
+    # where the `chunks_in_sliding_window` is calculated as:
+    # - `cdiv(sliding_window_size_in_token, chunk_size)`
+    num_objects_to_skip = 0
+    lmcache_chunk_size = cache_context.lmcache_logical_chunk_size
+    object_group = cache_context.kv_layer_groups_manager.object_groups[object_group_id]
+    kernel_group_ids = object_group.kernel_group_indices
+    is_h2d = direction == lmc_ops.TransferDirection.H2D
+
+    for start_object_idx, memory_object_batch in batched_iteration_with_skip(
+        memory_objs, batch_size, skip_count=num_objects_to_skip
+    ):
+        batch_len = len(memory_object_batch)
+        batch_start_token = start_object_idx * lmcache_chunk_size
+        batch_end_token = batch_start_token + batch_len * lmcache_chunk_size
+
+        effective_start = max(batch_start_token, skip_first_n_tokens)
+        if effective_start >= batch_end_token:
+            continue
+
+        skip_tokens_in_chunk = effective_start - batch_start_token
+
+        # For H2D, copy from CPU to GPU tmp buffers before the kernel launch
+        if is_h2d:
+            for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                lmcache_memcpy_async_h2d(
+                    memory_obj,
+                    cache_context.get_temp_object_group_buffer(
+                        chunk_idx, object_group_id
+                    ),
+                )
+
+        # Do paged KV copy
+        for kernel_group_id in kernel_group_ids:
+            blocks_per_chunk = cache_context.calculate_num_blocks(
+                lmcache_chunk_size, kernel_group_id
+            )
+            # TODO(ApostaC): we need to get the sliding window information
+            # from the kernel group
+            placeholder_blocks_per_window = blocks_per_chunk
+
+            # Get the block ids for this chunk
+            start_block_pos = start_object_idx * placeholder_blocks_per_window
+            end_block_pos = (
+                start_object_idx + batch_len
+            ) * placeholder_blocks_per_window
+
+            block_ids_curr_batch = block_ids_gpu[kernel_group_id][
+                start_block_pos:end_block_pos
+            ]
+
+            # Re-calculate the skip blocks for this kernel group
+            orig_skip_blocks = cache_context.calculate_num_blocks(
+                skip_tokens_in_chunk, kernel_group_id
+            )
+            recalculated_skip_blocks = _recalculate_blocks_to_skip(
+                blocks_per_chunk,
+                placeholder_blocks_per_window,
+                orig_skip_blocks,
+            )
+
+            # Launch kernel
+            group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
+                kernel_group_id
+            )
+            group_lmcache_chunk_size = cache_context.get_physical_chunk_size(
+                kernel_group_id
+            )
+            tmp_gpu_buffers_batched = [
+                cache_context.get_temp_kernel_group_buffer(
+                    i, kernel_group_id
+                ).data_ptr()
+                for i in range(batch_len)
+            ]
+            lmc_ops.multi_layer_block_kv_transfer(
+                group_kv_pointers,
+                tmp_gpu_buffers_batched,
+                block_ids_curr_batch,
+                cache_context.device,
+                direction,
+                cache_context.get_shape_desc(kernel_group_id),
+                group_lmcache_chunk_size,
+                cache_context.gpu_kv_format_,
+                recalculated_skip_blocks,
+            )
+
+        # For D2H, copy from GPU tmp buffers to CPU after the kernel launch
+        if not is_h2d:
+            for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                lmcache_memcpy_async_d2h(
+                    cache_context.get_temp_object_group_buffer(
+                        chunk_idx, object_group_id
+                    ),
+                    memory_obj,
+                )
 
 
 @dataclass
@@ -361,8 +638,8 @@ class GPUTransferModule:
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            block_ids_per_group_gpu = cache_context.copy_view_block_ids_to_gpu(
-                gpu_block_ids
+            block_ids_per_group_gpu = cut_and_stage_block_ids(
+                cache_context, gpu_block_ids
             )
 
             # Fail closed: every LMCache group must have block IDs covering all
@@ -444,41 +721,24 @@ class GPUTransferModule:
                     else:
                         continue
 
-                    # Copy from GPU paged buffer to tmp buffer, then to CPU — per
-                    # group. Each group uses its own block-id list (HMA).
-                    for group_idx in range(num_groups):
-                        bpc = blocks_per_chunk[group_idx]
-                        chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
-                            idx * bpc : (idx + 1) * bpc
+                    # Store is not batched (skipped keys make block_ids
+                    # non-contiguous), so transfer one chunk at a time by slicing
+                    # this chunk's block IDs out of each group's list.
+                    chunk_block_ids_gpu = [
+                        block_ids_per_group_gpu[group_idx][
+                            idx * blocks_per_chunk[group_idx] : (idx + 1)
+                            * blocks_per_chunk[group_idx]
                         ]
-                        # Store is not batched, so we always use batch_idx=0.
-                        tmp_buffer = cache_context.get_temp_kernel_group_buffer(
-                            0, group_idx
-                        )
-                        group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
-                            group_idx
-                        )
-                        # Kernel contract: ``group_lmcache_chunk_size`` here is the
-                        # number of *physical* slots per chunk for this group
-                        # (= logical chunk_size // compress_ratio).
-                        group_lmcache_chunk_size = (
-                            cache_context.get_physical_chunk_size(group_idx)
-                        )
-                        lmc_ops.multi_layer_block_kv_transfer(
-                            group_kv_pointers,
-                            [tmp_buffer.data_ptr()],
-                            chunk_block_ids_gpu,
-                            cache_context.device,
-                            lmc_ops.TransferDirection.D2H,
-                            cache_context.get_shape_desc(group_idx),
-                            group_lmcache_chunk_size,
-                            cache_context.gpu_kv_format_,
-                            0,
-                        )
-                    # Store is not batched, so we always use batch_idx=0 (single
-                    # slot). Single object group => object_group_idx=0.
-                    lmcache_memcpy_async_d2h(
-                        cache_context.get_temp_object_group_buffer(0, 0), memory_obj
+                        for group_idx in range(num_groups)
+                    ]
+                    gpu_kv_copy_helper(
+                        cache_context,
+                        chunk_block_ids_gpu,
+                        [memory_obj],
+                        object_group_id=0,
+                        batch_size=1,
+                        skip_first_n_tokens=0,
+                        direction=lmc_ops.TransferDirection.D2H,
                     )
                 store_succeeded = True
             except Exception:
@@ -601,99 +861,30 @@ class GPUTransferModule:
             cache_context.kv_layer_groups_manager.inference_engine_logical_block_size
         )
 
-        def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
-            _BATCH_SIZE = cache_context.max_batch_size
-            groups = cache_context.kv_layer_groups_manager.kv_layer_groups
-            for batch_idx, memory_obj_batch in enumerate(
-                batched_iteration(memory_objs, batch_size=_BATCH_SIZE)
-            ):
-                batch_len = len(memory_obj_batch)
-                chunk_start = batch_idx * self._ctx.chunk_size * _BATCH_SIZE
-                chunk_end = chunk_start + self._ctx.chunk_size * batch_len
+        # Block IDs are expressed in engine-block units (logical tokens), which
+        # is what the kernel's skip argument expects regardless of per-group
+        # compression. Warn if the skip prefix is not block-aligned.
+        if skip_first_n_tokens % ie_logical_block_size != 0:
+            logger.error(
+                "skip_first_n_tokens (%d) is not aligned to "
+                "inference_engine_logical_block_size (%d); it will be rounded "
+                "down to a block boundary",
+                skip_first_n_tokens,
+                ie_logical_block_size,
+            )
 
-                effective_start = max(chunk_start, skip_first_n_tokens)
-                if effective_start >= chunk_end:
-                    # Entire batch is within APC range, skip it
-                    continue
-
-                skip_tokens_in_chunk = max(
-                    0,
-                    min(
-                        effective_start - chunk_start,
-                        self._ctx.chunk_size * batch_len - 1,
-                    ),
-                )
-                if skip_tokens_in_chunk % ie_logical_block_size != 0:
-                    logger.error(
-                        "skip_first_n_tokens (%d) is not aligned to "
-                        "inference_engine_logical_block_size (%d), "
-                        "rounding down from %d tokens to %d blocks",
-                        skip_first_n_tokens,
-                        ie_logical_block_size,
-                        skip_tokens_in_chunk,
-                        skip_tokens_in_chunk // ie_logical_block_size,
-                    )
-                start_chunk_id = batch_idx * _BATCH_SIZE
-                end_chunk_id = start_chunk_id + batch_len
-                # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
-                # H2D copy: each memory_obj maps to its own batch slot
-                for chunk_idx, memory_obj in enumerate(memory_obj_batch):
-                    # Single object group => object_group_idx=0.
-                    lmcache_memcpy_async_h2d(
-                        memory_obj,
-                        cache_context.get_temp_object_group_buffer(chunk_idx, 0),
-                    )
-                for group_idx, group in enumerate(groups):
-                    bpc = cache_context.calculate_num_blocks(
-                        self._ctx.chunk_size, group_idx
-                    )
-                    chunk_block_ids_gpu = block_ids_per_group_gpu[group_idx][
-                        start_chunk_id * bpc : end_chunk_id * bpc
-                    ]
-                    if chunk_block_ids_gpu.shape[0] != batch_len * bpc:
-                        # Fail closed: a short block-id slice would make the
-                        # transfer kernel write out-of-bounds GPU memory.
-                        raise ValueError(
-                            "RETRIEVE block ID underflow: "
-                            f"group_idx={group_idx} "
-                            f"engine_group_idx={group.engine_group_idx} "
-                            f"batch={batch_idx} "
-                            f"expected={batch_len * bpc} "
-                            f"got={chunk_block_ids_gpu.shape[0]}"
-                        )
-                    group_skip_blocks = cache_context.calculate_num_blocks(
-                        skip_tokens_in_chunk, group_idx
-                    )
-                    tmp_buffers = [
-                        cache_context.get_temp_kernel_group_buffer(i, group_idx)
-                        for i in range(batch_len)
-                    ]
-                    group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
-                        group_idx
-                    )
-                    group_lmcache_chunk_size = cache_context.get_physical_chunk_size(
-                        group_idx
-                    )
-
-                    lmc_ops.multi_layer_block_kv_transfer(
-                        group_kv_pointers,
-                        [tb.data_ptr() for tb in tmp_buffers],
-                        chunk_block_ids_gpu,
-                        cache_context.device,
-                        lmc_ops.TransferDirection.H2D,
-                        cache_context.get_shape_desc(group_idx),
-                        group_lmcache_chunk_size,
-                        cache_context.gpu_kv_format_,
-                        group_skip_blocks,
-                    )
+        blocks_per_chunk = [
+            cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
+            for group_idx in range(cache_context.kv_layer_groups_manager.num_groups)
+        ]
 
         with (
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
-            # Copy all block_ids to GPU once before the loop
-            block_ids_per_group_gpu = cache_context.copy_view_block_ids_to_gpu(
-                gpu_block_ids
+            # Cut and stage all block_ids to GPU once before the transfer
+            block_ids_per_group_gpu = cut_and_stage_block_ids(
+                cache_context, gpu_block_ids
             )
 
             check_interprocess_event_support()
@@ -712,7 +903,31 @@ class GPUTransferModule:
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     total_bytes = sum(mo.get_size() for mo in memory_objs)
-                    _retrieve_loop(obj_keys, memory_objs)
+
+                    # Fail closed: a short block-id list would drive the
+                    # transfer kernel to write out-of-bounds GPU memory.
+                    if any(
+                        group_block_ids.shape[0] < len(memory_objs) * bpc
+                        for group_block_ids, bpc in zip(
+                            block_ids_per_group_gpu, blocks_per_chunk, strict=True
+                        )
+                    ):
+                        raise ValueError(
+                            "RETRIEVE block ID underflow for request_id="
+                            f"{key.request_id}: each group needs len(memory_objs) "
+                            f"* blocks_per_chunk block IDs for {len(memory_objs)} "
+                            f"chunks (per-group blocks_per_chunk={blocks_per_chunk})"
+                        )
+
+                    gpu_kv_copy_helper(
+                        cache_context,
+                        block_ids_per_group_gpu,
+                        memory_objs,
+                        object_group_id=0,
+                        batch_size=cache_context.max_batch_size,
+                        skip_first_n_tokens=skip_first_n_tokens,
+                        direction=lmc_ops.TransferDirection.H2D,
+                    )
                 # Only set True when with-block exits normally
                 retrieve_succeeded = True
             except Exception:
