@@ -31,6 +31,9 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
+    get_attention_backend,
+    get_concrete_gpu_kv_shape_from_shape_desc,
+    get_gpu_kv_shape_description,
     get_group_data_ptrs,
     get_num_blocks,
     get_num_layers,
@@ -94,7 +97,7 @@ class CpuCacheContext:
         # PageBufferShapeDesc here. ``layout_hints`` / ``engine_type``
         # are forwarded so the signature matches GPUCacheContext.
         (
-            self.gpu_kv_format_,
+            self._gpu_kv_format,
             kv_caches_normalized,
         ) = normalize_kv_and_discover_format(
             unwrapped,
@@ -102,12 +105,12 @@ class CpuCacheContext:
             layout_hints=layout_hints,
         )
         self.kv_caches_: list[torch.Tensor] = list(kv_caches_normalized)
-        self.is_mla_ = is_mla(self.gpu_kv_format_)
-        self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
-        self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
+        self.is_mla_ = is_mla(self._gpu_kv_format)
+        self.num_layers_ = get_num_layers(self.kv_caches_, self._gpu_kv_format)
+        self.num_blocks_ = get_num_blocks(self.kv_caches_, self._gpu_kv_format)
         self.kv_layer_groups_manager_ = KVLayerGroupsManager(
             self.kv_caches_,
-            gpu_kv_format=self.gpu_kv_format_,
+            gpu_kv_format=self._gpu_kv_format,
             num_blocks=self.num_blocks_,
             layout_hints=layout_hints,
             engine_group_infos=engine_group_infos,
@@ -302,24 +305,43 @@ class CpuCacheContext:
         return self.kv_layer_groups_manager_
 
     @property
-    def gpu_kv_format_name(self) -> str:
-        """Returns the GPU KV format enum name."""
-        return self.gpu_kv_format_.name
+    def gpu_kv_format_(self):
+        """Returns the GPU KV format enum (API parity with GPUCacheContext)."""
+        return self._gpu_kv_format
 
     @property
     def gpu_kv_shape(self) -> str:
-        """Returns the GPU KV cache layout description."""
-        return "NL_X_TWO_NB_BS_NH_HS"
+        """Returns the symbolic GPU KV cache layout description."""
+        return get_gpu_kv_shape_description(self._gpu_kv_format)
 
     @property
     def attention_backend(self) -> str:
         """Returns the attention backend name."""
-        return "cpu"
+        return get_attention_backend(self._gpu_kv_format)
 
     @property
     def concrete_gpu_kv_shape(self) -> str:
-        """Returns the GPU KV shape with actual values."""
-        return "cpu-context"
+        """Returns the GPU KV shape with actual numeric values."""
+        group = self.kv_layer_groups_manager_.kv_layer_groups[0]
+        return get_concrete_gpu_kv_shape_from_shape_desc(
+            group.shape_desc, self._gpu_kv_format
+        )
+
+    def calculate_num_blocks(self, num_tokens: int, kernel_group_idx: int) -> int:
+        """Calculate the number of blocks for a given number of tokens.
+
+        Mirrors :meth:`GPUCacheContext.calculate_num_blocks`.
+
+        Args:
+            num_tokens: The total number of tokens to be processed.
+            kernel_group_idx: 0-based index of the kernel group.
+
+        Returns:
+            The number of blocks.
+        """
+        return self.kv_layer_groups_manager_.calculate_num_blocks(
+            kernel_group_idx, num_tokens
+        )
 
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given group."""
@@ -341,6 +363,13 @@ class CpuCacheContext:
     def get_group_kv_pointers(self, group_idx: int) -> torch.Tensor:
         """Returns the KV cache pointer tensor for the given group."""
         return self.group_kv_pointers_[group_idx]
+
+    def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
+        """Returns the KV pointer tensor for the given kernel group.
+
+        Mirrors :meth:`GPUCacheContext.get_kernel_group_kv_pointers`.
+        """
+        return self.group_kv_pointers_[kernel_group_idx]
 
     def get_kernel_group_shape_dtype(
         self,
@@ -408,6 +437,69 @@ class CpuCacheContext:
             )
         start = chunk_idx * self.tmp_chunk_bytes_
         return self.tmp_cpu_buffer_[start : start + self.tmp_chunk_bytes_]
+
+    def get_temp_kernel_group_buffer(
+        self, batch_idx: int, kernel_group_idx: int
+    ) -> torch.Tensor:
+        """Returns the typed temp buffer for the given batch and kernel group.
+
+        Mirrors :meth:`GPUCacheContext.get_temp_kernel_group_buffer`.
+
+        Args:
+            batch_idx: Batch slot index (0 <= batch_idx < max_batch_size).
+            kernel_group_idx: Index of the kernel group.
+
+        Returns:
+            A typed tensor view with the correct shape and dtype.
+        """
+        if batch_idx >= self.max_batch_size:
+            raise ValueError(
+                "batch_idx %d >= max_batch_size %d" % (batch_idx, self.max_batch_size)
+            )
+        group = self.kv_layer_groups_manager_.kv_layer_groups[kernel_group_idx]
+        shape = self.get_kv_buffer_shape(
+            self.lmcache_logical_chunk_size, kernel_group_idx
+        )
+        g_start = self.tmp_chunk_group_offsets_[kernel_group_idx]
+        g_end = self.tmp_chunk_group_offsets_[kernel_group_idx + 1]
+        chunk = self.tmp_chunk_bytes_
+        return (
+            self.tmp_cpu_buffer_[
+                batch_idx * chunk + g_start : batch_idx * chunk + g_end
+            ]
+            .view(group.dtype)
+            .view(shape)
+        )
+
+    def get_temp_object_group_buffer(
+        self, batch_idx: int, object_group_idx: int
+    ) -> torch.Tensor:
+        """Returns the flat uint8 temp buffer for the given batch and object
+        group.
+
+        Mirrors :meth:`GPUCacheContext.get_temp_object_group_buffer`.
+
+        Args:
+            batch_idx: Batch slot index (0 <= batch_idx < max_batch_size).
+            object_group_idx: Index of the object group.
+
+        Returns:
+            A flat uint8 tensor view covering the object group's byte range.
+        """
+        if batch_idx >= self.max_batch_size:
+            raise ValueError(
+                "batch_idx %d >= max_batch_size %d" % (batch_idx, self.max_batch_size)
+            )
+        manager = self.kv_layer_groups_manager_
+        object_group = manager.object_groups[object_group_idx]
+        kg_indices = object_group.kernel_group_indices
+        # Object group spans from the first to the last kernel group's range.
+        g_start = self.tmp_chunk_group_offsets_[kg_indices[0]]
+        g_end = self.tmp_chunk_group_offsets_[kg_indices[-1] + 1]
+        chunk = self.tmp_chunk_bytes_
+        return self.tmp_cpu_buffer_[
+            batch_idx * chunk + g_start : batch_idx * chunk + g_end
+        ]
 
     def get_tmp_chunk_gpu_buffer(self, group_idx: int = 0) -> torch.Tensor:
         """Returns a typed view of the temp buffer for one chunk."""
@@ -483,6 +575,58 @@ class CpuCacheContext:
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
             for i in range(len(block_ids_per_group))
         ]
+
+    def report_status(self) -> dict:
+        """Return this context's KV cache layout metadata.
+
+        Mirrors :meth:`GPUCacheContext.report_status` so
+        ``GPUTransferModule.report_status`` can duck-type across backends.
+        """
+        manager = self.kv_layer_groups_manager_
+        kernel_groups = manager.kernel_groups
+
+        kernel_group_to_object_group: dict[int, int] = {
+            kg_idx: og_idx
+            for og_idx, og in enumerate(manager.object_groups)
+            for kg_idx in og.kernel_group_indices
+        }
+
+        gpu_kv_format = self._gpu_kv_format
+        group_reports: list[dict] = []
+        for kernel_group_idx, group in enumerate(kernel_groups):
+            group_reports.append(
+                {
+                    "kernel_group_idx": kernel_group_idx,
+                    "engine_group_idx": group.engine_group_idx,
+                    "object_group_idx": kernel_group_to_object_group.get(
+                        kernel_group_idx, 0
+                    ),
+                    "num_layers": group.num_layers,
+                    "layer_indices": list(group.layer_indices),
+                    "physical_block_size": group.shape_desc.bs,
+                    "compress_ratio": group.compress_ratio,
+                    "dtype": str(group.dtype),
+                    "gpu_kv_concrete_shape": (
+                        get_concrete_gpu_kv_shape_from_shape_desc(
+                            group.shape_desc, gpu_kv_format
+                        )
+                    ),
+                    "is_mla": is_mla(gpu_kv_format),
+                    "gpu_kv_format": gpu_kv_format.name,
+                    "gpu_kv_shape": get_gpu_kv_shape_description(gpu_kv_format),
+                    "attention_backend": get_attention_backend(gpu_kv_format),
+                }
+            )
+
+        return {
+            "num_layers": self.num_layers_,
+            "inference_engine_logical_block_size": (
+                manager.inference_engine_logical_block_size
+            ),
+            "num_blocks": self.num_blocks_,
+            "cache_size_per_token": self.cache_size_per_token(),
+            "kernel_groups": group_reports,
+        }
 
     def cache_size_per_token(self) -> int:
         """Returns cache size per *logical* token in bytes,
