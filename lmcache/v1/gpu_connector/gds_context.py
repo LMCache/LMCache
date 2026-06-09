@@ -19,6 +19,7 @@ do not survive a restart (GDS L1 is treated like DRAM).
 """
 
 # Standard
+from dataclasses import dataclass, field
 from typing import Optional
 import bisect
 import functools
@@ -44,6 +45,24 @@ _CUFILE_ALIGNMENT = 4096
 _SUBMISSION_CHECKPOINT_EVERY = 64
 
 
+@dataclass
+class _StreamSubmissions:
+    """Per-stream cuFile submission tracking.
+
+    Keeps each ``Submission``'s ctypes storage alive until the DMA that reads it
+    has executed *on this stream*: submissions accumulate in ``uncommitted``,
+    move to ``inflight`` behind a CUDA event recorded on the stream, and drop
+    once that event completes. Per-stream because an event only orders work on
+    its own stream -- one stream's event can't gate another stream's DMA.
+    """
+
+    uncommitted: list[ca.Submission] = field(default_factory=list)
+    inflight: list[tuple[torch.Event, list[ca.Submission]]] = field(
+        default_factory=list
+    )
+    ops_since_checkpoint: int = 0
+
+
 class GDSContext:
     """Per-process cuFile context owning the slab file and its DMA path.
 
@@ -63,12 +82,11 @@ class GDSContext:
         self._slab_size = 0
         self._slab_path = ""
         self._slab_handle: Optional[ca.AsyncHandle] = None
-        # In-flight submissions, released once a CUDA event recorded after them
-        # on the cuFile stream completes (see ``_checkpoint_submissions_locked``).
-        self._uncommitted_submissions: list[ca.Submission] = []
-        self._inflight_submissions: list[tuple[torch.Event, list[ca.Submission]]] = []
-        self._ops_since_checkpoint = 0
+        # Per-stream in-flight submissions (keyed by raw ``CUstream``), released
+        # once a CUDA event recorded on that stream completes. Guarded by
+        # ``_submissions_lock`` (see ``_record_submission``).
         self._submissions_lock = threading.Lock()
+        self._submissions: dict[int, _StreamSubmissions] = {}
         # Registry of cuFile-registered GPU regions and the CUDA streams they run on
         self._registry_lock = threading.Lock()
         self._buffers: list[torch.Tensor] = []
@@ -156,6 +174,9 @@ class GDSContext:
                         "GDSContext.deregister_gpu_buffer: deregister_stream: %s", e
                     )
                 self._registered_streams.discard(raw_stream)
+        # Stream is synced above, so its submissions' DMAs are done -- drop them.
+        with self._submissions_lock:
+            self._submissions.pop(raw_stream, None)
 
     def write_async(
         self, memory_obj: GDSMemoryObject, gpu_buffer: torch.Tensor
@@ -212,9 +233,7 @@ class GDSContext:
         if self._buffers:
             torch_dev.synchronize(device=self._buffers[0].device)
         with self._submissions_lock:
-            self._uncommitted_submissions = []
-            self._inflight_submissions = []
-            self._ops_since_checkpoint = 0
+            self._submissions.clear()
         # Deregister any regions/streams still live (per-instance teardown via
         # ``deregister_gpu_buffer`` normally clears these first; this is the
         # shutdown sweep for anything left).
@@ -402,40 +421,46 @@ class GDSContext:
         self._record_submission(sub)
 
     def _record_submission(self, sub: "ca.Submission") -> None:
-        """Track one in-flight cuFile submission, draining completed batches.
+        """Track one in-flight cuFile submission on the caller's stream.
 
         The submission's ctypes storage must outlive the stream op, so
-        submissions are accumulated and only released once a CUDA event
-        recorded after them on the cuFile stream reports complete. A checkpoint
-        is taken every ``_SUBMISSION_CHECKPOINT_EVERY`` ops to keep the live set
-        bounded.
+        submissions are accumulated per stream and only released once a CUDA
+        event recorded after them *on that stream* reports complete. A
+        checkpoint is taken every ``_SUBMISSION_CHECKPOINT_EVERY`` ops per stream
+        to keep the live set bounded. Called on the same stream the op was
+        submitted on (the caller's current stream).
         """
+        stream = torch_dev.current_stream()
+        raw_stream = stream.cuda_stream
         with self._submissions_lock:
-            self._uncommitted_submissions.append(sub)
-            self._ops_since_checkpoint += 1
-            if self._ops_since_checkpoint >= _SUBMISSION_CHECKPOINT_EVERY:
-                self._checkpoint_submissions_locked()
+            st = self._submissions.get(raw_stream)
+            if st is None:
+                st = self._submissions[raw_stream] = _StreamSubmissions()
+            st.uncommitted.append(sub)
+            st.ops_since_checkpoint += 1
+            if st.ops_since_checkpoint >= _SUBMISSION_CHECKPOINT_EVERY:
+                self._checkpoint_submissions_locked(st, stream)
 
-    def _checkpoint_submissions_locked(self) -> None:
-        """Close the current submission batch and release completed ones.
+    def _checkpoint_submissions_locked(
+        self, st: _StreamSubmissions, stream: "torch.Stream"
+    ) -> None:
+        """Close ``st``'s current batch and release completed ones.
 
-        Records a CUDA event on the current (transfer) stream marking the point
-        after every uncommitted submission, then drops any earlier batch whose
-        event has completed (non-blocking ``query()``). Callers submit on the
-        current stream, so the event orders correctly behind those submissions.
+        Records a CUDA event on ``stream`` marking the point after every
+        uncommitted submission, then drops any earlier batch whose event has
+        completed (non-blocking ``query()``). The event is recorded on the
+        submissions' own stream, so it orders correctly behind them.
 
         Must be called while holding ``self._submissions_lock``.
         """
-        if self._uncommitted_submissions:
+        if st.uncommitted:
             event = torch_dev.Event()
-            event.record()
-            self._inflight_submissions.append((event, self._uncommitted_submissions))
-            self._uncommitted_submissions = []
-        self._ops_since_checkpoint = 0
-        self._inflight_submissions = [
-            (event, subs)
-            for (event, subs) in self._inflight_submissions
-            if not event.query()
+            event.record(stream)
+            st.inflight.append((event, st.uncommitted))
+            st.uncommitted = []
+        st.ops_since_checkpoint = 0
+        st.inflight = [
+            (event, subs) for (event, subs) in st.inflight if not event.query()
         ]
 
 
