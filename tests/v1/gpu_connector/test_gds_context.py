@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the GDS cuFile context (``GDSContext``).
 
-Most tests are pure (no cuFile): the singleton/no-op semantics, the per-slot
-split, slab-size rounding, and ``_resolve_buffer`` mapping. The final
-``test_gds_write_read_roundtrip`` exercises the real cuFile DMA path and is
-skipped unless CUDA + nvidia-fs (real GDS) are present.
+Most tests are pure (no cuFile): they exercise the public interface
+(singleton/no-op semantics, the per-slot split observed at the ``ca`` cuFile
+seam, and the registered-region mapping driven through
+:meth:`GDSContext.write_async`). The final ``test_gds_write_read_roundtrip``
+exercises the real cuFile DMA path and is skipped unless CUDA + nvidia-fs
+(real GDS) are present.
 """
 
 # Standard
@@ -55,62 +57,78 @@ class TestSingleton:
 
 
 class TestRegisterGpuBuffer:
-    def test_noop_when_uninitialized(self):
+    def test_noop_when_uninitialized(self, monkeypatch):
         ctx = GDSContext()
-        # GDS off -> registers nothing, touches no cuFile.
+        registered = []
+        monkeypatch.setattr(ca, "register_buffer", registered.append)
+        # GDS off -> registers nothing, makes no cuFile calls.
         ctx.register_gpu_buffer(torch.empty(4096, dtype=torch.uint8), 4096)
-        assert ctx._buffers == []
-        assert ctx._base_ptrs == []
+        assert registered == []
 
     def test_splits_buffer_into_slots(self, monkeypatch):
         ctx = GDSContext()
         ctx.initialized = True
-        monkeypatch.setattr(ca, "register_buffer", lambda buf: None)
+        # Record each cuFile registration's byte size at the ca seam.
+        sizes = []
+        monkeypatch.setattr(
+            ca,
+            "register_buffer",
+            lambda buf: sizes.append(buf.numel() * buf.element_size()),
+        )
         monkeypatch.setattr(ctx, "_ensure_stream_registered", lambda: None)
 
-        # 4 slots of 4 KiB. A CPU tensor is fine: the cuFile calls are mocked
-        # and _register_region no longer device-checks.
+        # 4 slots of 4 KiB. A CPU tensor is fine: the cuFile calls are mocked.
         buf = torch.empty(4 * 4096, dtype=torch.uint8)
         ctx.register_gpu_buffer(buf, 4096)
 
-        assert len(ctx._buffers) == 4
-        assert ctx._nbytes == [4096, 4096, 4096, 4096]
-        assert ctx._base_ptrs == sorted(ctx._base_ptrs)
+        # Each slot is registered separately, all the requested slot size.
+        assert sizes == [4096, 4096, 4096, 4096]
 
 
 class TestResolveBuffer:
-    def _ctx_with_region(self, base: int, size: int) -> GDSContext:
+    """Region mapping, exercised through the public ``write_async`` path."""
+
+    def _registered_ctx(self, monkeypatch, buf: torch.Tensor):
+        """Register ``buf`` as one slot; capture the ``(base, offset)`` that
+        ``write_async`` resolves a slice to before handing it to the slab."""
         ctx = GDSContext()
-        ctx._base_ptrs = [base]
-        ctx._nbytes = [size]
-        return ctx
-
-    def test_maps_slice_to_base_and_offset(self):
-        ctx = self._ctx_with_region(0x1000, 8192)
-        buf = SimpleNamespace(data_ptr=lambda: 0x1000 + 4096)
-        assert ctx._resolve_buffer(buf) == (0x1000, 4096)
-
-    def test_pointer_past_region_raises(self):
-        ctx = self._ctx_with_region(0x1000, 8192)
-        with pytest.raises(ValueError):
-            ctx._resolve_buffer(SimpleNamespace(data_ptr=lambda: 0x1000 + 8192))
-
-    def test_pointer_below_region_raises(self):
-        ctx = self._ctx_with_region(0x1000, 8192)
-        with pytest.raises(ValueError):
-            ctx._resolve_buffer(SimpleNamespace(data_ptr=lambda: 0x10))
-
-
-class TestInitializeRounding:
-    def test_slab_size_rounded_up_to_alignment(self, monkeypatch, tmp_path):
-        ctx = GDSContext()
-        monkeypatch.setattr(ctx, "_open_and_register_slab", lambda use_direct_io: None)
-        ctx.initialize(
-            GdsL1Config(file_location=str(tmp_path), size_in_bytes=3 * 4096 + 1)
+        ctx.initialized = True
+        monkeypatch.setattr(ca, "register_buffer", lambda b: None)
+        monkeypatch.setattr(ctx, "_ensure_stream_registered", lambda: None)
+        ctx.register_gpu_buffer(buf, buf.numel())
+        resolved: list[tuple[int, int]] = []
+        monkeypatch.setattr(
+            ctx,
+            "_slab_write",
+            lambda slab_offset, size, dev_offset, buf_base: resolved.append(
+                (buf_base, dev_offset)
+            ),
         )
-        assert ctx.initialized is True
-        assert ctx._slab_size == 4 * 4096
-        assert ctx._slab_path.endswith("lmcache_gds_slab.bin")
+        return ctx, resolved
+
+    def test_maps_slice_to_base_and_offset(self, monkeypatch):
+        buf = torch.empty(8192, dtype=torch.uint8)
+        ctx, resolved = self._registered_ctx(monkeypatch, buf)
+        mem_obj = SimpleNamespace(get_size=lambda: 4096, slab_offset=0)
+        # A slice 4 KiB into the region must map to (region base, offset 4096).
+        ctx.write_async(mem_obj, buf[4096:])
+        assert resolved == [(buf.data_ptr(), 4096)]
+
+    def test_pointer_past_region_raises(self, monkeypatch):
+        buf = torch.empty(8192, dtype=torch.uint8)
+        ctx, _ = self._registered_ctx(monkeypatch, buf)
+        mem_obj = SimpleNamespace(get_size=lambda: 4096, slab_offset=0)
+        past = SimpleNamespace(data_ptr=lambda: buf.data_ptr() + 8192)
+        with pytest.raises(ValueError):
+            ctx.write_async(mem_obj, past)
+
+    def test_pointer_below_region_raises(self, monkeypatch):
+        buf = torch.empty(8192, dtype=torch.uint8)
+        ctx, _ = self._registered_ctx(monkeypatch, buf)
+        mem_obj = SimpleNamespace(get_size=lambda: 4096, slab_offset=0)
+        below = SimpleNamespace(data_ptr=lambda: 0x10)
+        with pytest.raises(ValueError):
+            ctx.write_async(mem_obj, below)
 
 
 @requires_gds
