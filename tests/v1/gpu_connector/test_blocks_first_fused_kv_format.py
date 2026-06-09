@@ -16,7 +16,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache.python_ops_fallback import set_shape_desc_dtype
+from lmcache.python_ops_fallback import (
+    multi_layer_block_kv_transfer as fallback_multi_layer_block_kv_transfer,
+)
+from lmcache.python_ops_fallback import (
+    set_shape_desc_dtype,
+)
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import utils as U
 from lmcache.v1.multiprocess.transfer_context.base import (
@@ -136,7 +141,11 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     norm_ptrs = torch.tensor([t.data_ptr() for t in norm], dtype=torch.long)
     obj_ptrs = [obj.data_ptr()]
 
-    lmc_ops.multi_layer_block_kv_transfer(
+    # Drive the python fallback directly: this regression specifically
+    # targets the CPU handle-mode path. ``lmc_ops.multi_layer_block_kv_transfer``
+    # is replaced by the CUDA C++ extension when CUDA is available, and that
+    # extension rejects ``torch.device("cpu")`` with a CUDAGuard error.
+    fallback_multi_layer_block_kv_transfer(
         norm_ptrs,
         obj_ptrs,
         block_ids,
@@ -151,7 +160,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     # H2D into a fresh per-layer buffer set; round-trip must be bit-exact.
     out = [torch.zeros_like(layer) for layer in norm]
     out_ptrs = torch.tensor([t.data_ptr() for t in out], dtype=torch.long)
-    lmc_ops.multi_layer_block_kv_transfer(
+    fallback_multi_layer_block_kv_transfer(
         out_ptrs,
         obj_ptrs,
         block_ids,
