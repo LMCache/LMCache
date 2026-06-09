@@ -81,9 +81,9 @@ def _render_banner(colored: bool) -> str:
         version += f" ({_LMCACHE_COMMIT[:9]})"
     right_text = {
         1: version,
-        2: f"website:  {LMCACHE_WEBSITE}",
-        3: f"recipes:  {LMCACHE_RECIPES}",
-        4: f"linkedin: {LMCACHE_LINKEDIN}",
+        2: f"Website:  {LMCACHE_WEBSITE}",
+        3: f"Recipes:  {LMCACHE_RECIPES}",
+        4: f"LinkedIn: {LMCACHE_LINKEDIN}",
     }
     lines = []
     for row, (lm_part, cache_part) in enumerate(zip(_LM_ART, _CACHE_ART, strict=True)):
