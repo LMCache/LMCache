@@ -98,3 +98,61 @@ def test_mp_gather_scatter_roundtrip():
     untouched = torch.tensor([b for b in range(NB) if b not in block_ids])
     for k in dst:
         assert torch.equal(dst[k][untouched], ref[k][untouched])
+
+
+def test_multi_layer_block_kv_transfer_roundtrip():
+    """Server-side copy (handle mode) D2H + H2D round-trip.
+
+    Regression for the CI ``cpu_e2e_validation (server-side copy)`` failure:
+    ``GPUTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
+    this format, so the per-layer HND fallback must recognize it and split
+    K/V at dim 3.
+    """
+    # Use canonical 5D layers so the fallback exercises the HND split path.
+    fmt, norm = U.normalize_kv_and_discover_format(
+        _raw_blocks_first_caches(), EngineType.VLLM, HINTS
+    )
+    chunk_tokens = NB * BS
+    obj = torch.zeros((2, NL, chunk_tokens, NH * HS), dtype=norm[0].dtype)
+
+    sd = lmc_ops.PageBufferShapeDesc()
+    sd.kv_size = 2
+    sd.nl = NL
+    sd.nb = NB
+    sd.bs = BS
+    sd.nh = NH
+    sd.hs = HS
+    sd.element_size = norm[0].element_size()
+    sd.block_stride_elems = NH * BS * 2 * HS
+    sd.dtype = norm[0].dtype
+
+    block_ids = torch.tensor(list(range(NB)), dtype=torch.long)
+
+    lmc_ops.multi_layer_block_kv_transfer(
+        norm,
+        [obj],
+        block_ids,
+        torch.device("cpu"),
+        lmc_ops.TransferDirection.D2H,
+        sd,
+        chunk_tokens,
+        fmt,
+        0,
+    )
+
+    # H2D into a fresh per-layer buffer set; round-trip must be bit-exact.
+    out = [torch.zeros_like(layer) for layer in norm]
+    lmc_ops.multi_layer_block_kv_transfer(
+        out,
+        [obj],
+        block_ids,
+        torch.device("cpu"),
+        lmc_ops.TransferDirection.H2D,
+        sd,
+        chunk_tokens,
+        fmt,
+        0,
+    )
+
+    for original, recovered in zip(norm, out, strict=True):
+        assert torch.equal(original, recovered)
