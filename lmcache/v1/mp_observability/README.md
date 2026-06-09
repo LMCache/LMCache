@@ -59,10 +59,6 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `--otlp-endpoint URL` | *(none)* | OTLP gRPC endpoint (e.g. `http://localhost:4317`). When set, metrics and traces are pushed to an OTel collector. When unset, metrics fall back to Prometheus pull mode. |
 | `--prometheus-port PORT` | `9090` | Port for the Prometheus `/metrics` endpoint. Only used when `--otlp-endpoint` is not set. |
 
-The OTel Resource attribute `service.instance.id` is not set here. It is
-projected from the MP server's `--instance-id` (see the MP server config), so
-metrics, traces, and coordinator membership all key on the same id.
-
 ### `ObservabilityConfig` fields
 
 | Field | Type | Default | Description |
