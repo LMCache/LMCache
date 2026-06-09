@@ -2680,7 +2680,7 @@
           "datasource": {
             "uid": "tempo"
           },
-          "description": "Waterfall of CacheBlend (blend server) request spans: cb.request \u2192 cb.lookup {cb.fingerprint_match, cb.prefix_lookup, cb.sparse_prefetch}, cb.retrieve {cb.scatter}, cb.store_pre_computed, cb.store_final. Click a row for the full Tempo waterfall.",
+          "description": "Waterfall of CacheBlend (blend server) request spans: cb.request \u2192 cb.lookup {cb.fingerprint_match, cb.sparse_prefetch}, cb.retrieve {cb.scatter}, cb.store_pre_computed, cb.store_final. Click a row for the full Tempo waterfall.",
           "fieldConfig": {
             "defaults": {},
             "overrides": []

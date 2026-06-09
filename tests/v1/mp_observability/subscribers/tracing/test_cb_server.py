@@ -919,8 +919,9 @@ class TestCBHitRateAttributes:
 
 
 class TestCBLookupSubspans:
-    """V3 lookup sub-spans (cb.fingerprint_match / cb.prefix_lookup /
-    cb.sparse_prefetch) nest under cb.lookup, not the cb.request root."""
+    """V3 lookup sub-spans (cb.fingerprint_match / cb.sparse_prefetch) nest under
+    cb.lookup, not the cb.request root. The prefix lookup has no cb.* span (it is
+    traced by mp.lookup_prefetch); prefix_chunks rides on cb.lookup."""
 
     @pytest.fixture
     def exporter(self):
@@ -951,13 +952,11 @@ class TestCBLookupSubspans:
         seq = [
             (EventType.CB_REQUEST_START, {}),
             (EventType.CB_LOOKUP_START, {"num_tokens": 1024}),
-            (EventType.CB_PREFIX_LOOKUP_START, {}),
             (EventType.CB_FINGERPRINT_MATCH_START, {}),
             (EventType.CB_FINGERPRINT_MATCH_END, {"matches": 7}),
-            (EventType.CB_PREFIX_LOOKUP_END, {"prefix_chunks": 2}),
             (EventType.CB_SPARSE_PREFETCH_START, {"n_chunks": 5}),
             (EventType.CB_SPARSE_PREFETCH_END, {"found_keys": 5}),
-            (EventType.CB_LOOKUP_END, {"num_tokens": 1024}),
+            (EventType.CB_LOOKUP_END, {"num_tokens": 1024, "prefix_chunks": 2}),
             (EventType.CB_REQUEST_END, {}),
         ]
         for i, (et, md) in enumerate(seq):
@@ -976,12 +975,13 @@ class TestCBLookupSubspans:
         for name in (
             "cb.lookup",
             "cb.fingerprint_match",
-            "cb.prefix_lookup",
             "cb.sparse_prefetch",
         ):
             assert name in spans, f"missing span {name}; have {sorted(spans)}"
+        # No cb.prefix_lookup span (traced by mp.lookup_prefetch instead).
+        assert "cb.prefix_lookup" not in spans
         lookup_id = spans["cb.lookup"].context.span_id
-        for name in ("cb.fingerprint_match", "cb.prefix_lookup", "cb.sparse_prefetch"):
+        for name in ("cb.fingerprint_match", "cb.sparse_prefetch"):
             assert spans[name].parent is not None, f"{name} has no parent span"
             assert spans[name].parent.span_id == lookup_id, (
                 f"{name} should nest under cb.lookup"
@@ -990,6 +990,8 @@ class TestCBLookupSubspans:
         assert spans["cb.lookup"].parent.span_id == spans["cb.request"].context.span_id
         # sub-span metadata propagates as attributes.
         assert spans["cb.fingerprint_match"].attributes.get("matches") == "7"
+        # prefix coverage rides on cb.lookup (no dedicated prefix span).
+        assert spans["cb.lookup"].attributes.get("prefix_chunks") == "2"
         assert spans["cb.sparse_prefetch"].attributes.get("found_keys") == "5"
 
     def test_scatter_span_nests_under_cb_retrieve(self, exporter):

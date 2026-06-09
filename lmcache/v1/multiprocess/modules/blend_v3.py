@@ -736,10 +736,9 @@ class BlendV3Module:
                     metadata={"num_tokens": len(key.token_ids)},
                 )
             )
-            # Prefix leg: submit (non-blocking); span ends when it lands below.
-            self._event_bus.publish(
-                Event(event_type=EventType.CB_PREFIX_LOOKUP_START, session_id=rid)
-            )
+            # Prefix leg: submit (non-blocking). Already traced upstream by
+            # mp.lookup_prefetch (LookupModule self-instruments); prefix_chunks
+            # lands on cb.lookup via CB_LOOKUP_END below.
             self._lookup_module.lookup(key, tp_size)
             # Fingerprint match: CPU-bound, tight span.
             self._event_bus.publish(
@@ -763,13 +762,6 @@ class BlendV3Module:
             if p is None:
                 return None  # prefix still loading -> defer
             job.prefix_chunks = p
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_PREFIX_LOOKUP_END,
-                    session_id=rid,
-                    metadata={"prefix_chunks": p},
-                )
-            )
 
         # Prefix done: reconcile the complement outside the prefix coverage and
         # submit one sparse prefetch for it (once). Prefix-covered chunks never
@@ -858,6 +850,7 @@ class BlendV3Module:
                     "num_tokens": num_tokens,
                     "fingerprint_hits": len(found),
                     "prefix_hits": job.prefix_chunks,
+                    "prefix_chunks": job.prefix_chunks,
                     "storage_hits": len(found),
                     "stale_chunks": len(job.non_prefix or []) - len(found),
                     "no_gpu_context": False,

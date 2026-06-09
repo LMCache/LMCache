@@ -36,9 +36,9 @@ cb.request                         [scheduler — root]  request_id, model, worl
 │
 ├─ cb.schedule                     [scheduler]  the get_num_new_matched_tokens defer loop
 │  ├─ cb.lookup.rpc                [scheduler]  CB_UNIFIED_LOOKUP incl. N poll re-issues; attr: n_polls
-│  │  └─ cb.lookup                 [SERVER]  ← cross-process child
+│  │  └─ cb.lookup                 [SERVER]  ← cross-process child; attr prefix_chunks
 │  │     ├─ cb.fingerprint_match   [server]  n_probes, table_hits, matches (token-stride=1, any offset)
-│  │     ├─ cb.prefix_lookup       [server]  prefix_chunks
+│  │     │  (no cb.prefix_lookup span — prefix is traced by mp.lookup_prefetch)
 │  │     ├─ cb.sparse_prefetch     [server]  n_keys, l1_hits, l2_misses
 │  │     │  └─ cb.l2_load          [server·IO]  chunks, bytes, ms        (coalesced L2→L1)
 │  │     └─ cb.classify            [server]  found, stale, per_rank_ok
@@ -97,7 +97,7 @@ timing is GPU-accurate):
 | new event pair | span | timing source |
 |---|---|---|
 | `CB_FINGERPRINT_MATCH_*` | `cb.fingerprint_match` | CPU |
-| `CB_PREFIX_LOOKUP_*` | `cb.prefix_lookup` | CPU |
+| (prefix lookup) | `mp.lookup_prefetch` (reused; `prefix_chunks` attr on `cb.lookup`) | CPU |
 | `CB_SPARSE_PREFETCH_*` | `cb.sparse_prefetch` (+ existing L2 prefetch span as `cb.l2_load`) | CPU + IO |
 | `CB_SCATTER_*` | `cb.scatter` (re-RoPE folded in via `n_shifted`) | `publish_on_stream` (GPU) |
 
@@ -183,7 +183,8 @@ each side; Option A only adds the *cross*-process edge.
    gate with `CB_TRACING`. (plugin repo)
 2. **V3 server sub-spans** — add the §3(a) events + `SPAN_DEFS`; simplify the
    §3(b) V3 deferral. (LMCache) — **DONE**: `cb.fingerprint_match` /
-   `cb.prefix_lookup` / `cb.sparse_prefetch` nest under `cb.lookup`; `cb.scatter`
+   `cb.sparse_prefetch` nest under `cb.lookup` (prefix lookup reuses
+   `mp.lookup_prefetch`; `prefix_chunks` is a `cb.lookup` attr); `cb.scatter`
    (re-RoPE folded) nests under `cb.retrieve`; `hit_rate` = prefix + non-prefix.
    `cb.l2_load` GB/s is already covered by the existing `L2ThroughputSubscriber`
    (`L2_LOAD_TASK_*`), correlated by request; nesting that span under

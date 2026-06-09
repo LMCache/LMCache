@@ -106,9 +106,8 @@ Click a `cb.request` row to open the waterfall:
 
 ```
 cb.request
-  cb.lookup
+  cb.lookup                (attr prefix_chunks; prefix timing is in mp.lookup_prefetch)
     cb.fingerprint_match   match probe hashes vs stored fingerprints
-    cb.prefix_lookup       prefix KV (L1 + L2-promoted)
     cb.sparse_prefetch     non-prefix (shifted) chunks, sparse L2->L1
                            (emitted only on an actual L2 load; carries l2_keys)
   cb.retrieve
