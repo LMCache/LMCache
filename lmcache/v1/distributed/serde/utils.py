@@ -39,9 +39,9 @@ def make_temp_key(original_key: ObjectKey) -> ObjectKey:
     effectively zero at any realistic scale, so the same original key
     can be serde'd repeatedly without practical concern.
 
-    ``cache_salt`` and ``object_group_id`` are propagated so per-tenant
-    L1 byte accounting and quota / eviction logic continue to attribute
-    temp buffers to the same bucket as the originals.
+    ``cache_salt`` are propagated so per-tenant L1 byte accounting and
+    quota / eviction logic continue to attribute temp buffers to the
+    same bucket as the originals.
 
     Args:
         original_key: The original ObjectKey to derive from.
