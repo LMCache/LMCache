@@ -655,8 +655,8 @@ class LocalDiskBackend(StorageBackendInterface):
                 f.write(buffer)
         else:
             fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_DIRECT, 0o644)
-            os.write(fd, buffer)
-            os.close(fd)
+            with os.fdopen(fd, "wb", buffering=0) as fdo:
+                fdo.write(buffer)
         disk_write_time = time.time() - start_time
         logger.debug(
             f"Disk write size: {size} bytes, "
