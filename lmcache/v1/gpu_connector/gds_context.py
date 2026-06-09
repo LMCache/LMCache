@@ -362,8 +362,10 @@ class GDSContext:
                 "GDSContext._slab_read: cuFile stream not registered; "
                 "call register_gpu_buffer first"
             )
+        # Submit on the caller's current stream
+        stream_handle = torch_dev.current_stream().cuda_stream
         sub = self._slab_handle.read_async(
-            buf_base, size, slab_offset, dev_offset, self._registered_stream_handle
+            buf_base, size, slab_offset, dev_offset, stream_handle
         )
         self._record_submission(sub)
 
@@ -378,8 +380,10 @@ class GDSContext:
                 "GDSContext._slab_write: cuFile stream not registered; "
                 "call register_gpu_buffer first"
             )
+        # Submit on the caller's current stream
+        stream_handle = torch_dev.current_stream().cuda_stream
         sub = self._slab_handle.write_async(
-            buf_base, size, slab_offset, dev_offset, self._registered_stream_handle
+            buf_base, size, slab_offset, dev_offset, stream_handle
         )
         self._record_submission(sub)
 
