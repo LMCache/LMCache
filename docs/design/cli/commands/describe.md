@@ -33,15 +33,21 @@ Uptime:                                  2h 14m 32s
 ------ Model: meta-llama/Llama-3.1-70B-Instruct ---
 World size:                              4
 GPU IDs:                                 0, 1, 2, 3
+Num layers:                              80
+Num blocks:                              2048
+Cache size per token (bytes):            327680
+--- Kernel group 0 (meta-llama/Llama-3.1-70B-Instruct) ---
+Kernel group index:                      0
+Engine group index:                      0
+Object group index:                      0
+Num layers:                              80
+Physical block size:                     128
+Compress ratio:                          1
+Dtype:                                   torch.float16
+MLA:                                     False
 Attention backend:         vLLM non-MLA flash attention
 GPU KV shape:              NL x [2, NB, BS, NH, HS]
 GPU KV tensor shape:       80 x [2, 2048, 128, 8, 128]
-Num layers:                              80
-Block size:                              128
-Hidden dim size:                         1024
-Dtype:                                   torch.float16
-MLA:                                     False
-Num blocks:                              2048
 ----------- L2: NixlStoreL2Adapter ------------
 Type:                          NixlStoreL2Adapter
 Health:                                  OK
@@ -67,15 +73,25 @@ programmatic access:
         "model": "meta-llama/Llama-3.1-70B-Instruct",
         "world_size": 4,
         "gpu_ids": "0, 1, 2, 3",
-        "attention_backend": "vLLM non-MLA flash attention",
-        "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
-        "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
         "num_layers": 80,
-        "block_size": 128,
-        "hidden_dim_size": 1024,
+        "num_blocks": 2048,
+        "cache_size_per_token": 327680
+      }
+    ],
+    "kernel_groups": [
+      {
+        "model": "meta-llama/Llama-3.1-70B-Instruct",
+        "kernel_group_idx": 0,
+        "engine_group_idx": 0,
+        "object_group_idx": 0,
+        "num_layers": 80,
+        "physical_block_size": 128,
+        "compress_ratio": 1,
         "dtype": "torch.float16",
         "is_mla": false,
-        "num_blocks": 2048
+        "attention_backend": "vLLM non-MLA flash attention",
+        "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+        "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]"
       }
     ],
     "l2_adapters": [
@@ -92,8 +108,21 @@ programmatic access:
 ```
 
 Per-model sections are generated for each unique `(model_name, world_size)` pair
-registered with the engine. The section includes:
+registered with the engine. The model section carries the context-wide fields —
+`num_layers`, `num_blocks`, and `cache_size_per_token` — and is followed by one
+**kernel group** section per kernel group, since a hybrid model's groups can
+differ in geometry.
 
+Each kernel group section includes:
+
+- **Kernel / engine / object group index** — the group's identity:
+  `kernel_group_idx` enumerates the manager's kernel groups, `engine_group_idx`
+  is the paged-block address space (0 for non-hybrid), and `object_group_idx` is
+  the owning object group.
+- **Num layers** and **Physical block size** — the group's layer count and
+  `shape_desc.bs`.
+- **Compress ratio** — logical tokens per physical slot (1 for non-compressed).
+- **Dtype** and **MLA** — the group's torch dtype and MLA flag.
 - **Attention backend** — which attention implementation is active (e.g.,
   `vLLM non-MLA flash attention`, `vLLM MLA`, `SGLang MHA`), derived from the
   `GPUKVFormat` enum.
@@ -101,9 +130,8 @@ registered with the engine. The section includes:
   `GPUKVFormat` enum (NB=num_blocks, NL=num_layers, BS=block_size, NH=num_heads,
   HS=head_size, PBS=page_buffer_size). E.g., `NL x [2, NB, BS, NH, HS]`.
 - **GPU KV tensor shape** — the same layout with actual numeric values substituted
-  (e.g., `80 x [2, 2048, 128, 8, 128]`).
-- **Layout details** — num_layers, block_size, hidden_dim_size, dtype, MLA flag,
-  num_blocks.
+  from the group's `shape_desc` (e.g., `80 x [2, 2048, 128, 8, 128]`), so it is
+  group-accurate.
 
 L2 adapter sections are generated for each adapter in
 `storage_manager.l2_adapters`. Fields shown depend on the adapter type:
@@ -258,22 +286,41 @@ Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 
 **Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/multiprocess/gpu_context.py`, `lmcache/v1/multiprocess/server.py`
 
-Three new helper functions in `utils.py` (derived from `legible_print_gpu_kv_format()`):
-- `get_gpu_kv_shape_description(gpu_kv_format)` — symbolic shape (e.g., `List[num_layers] of [2, num_blocks, ...]`)
+Helper functions in `utils.py` (derived from `legible_print_gpu_kv_format()`):
+- `get_gpu_kv_shape_description(gpu_kv_format)` — symbolic shape (e.g., `NL x [2, NB, BS, NH, HS]`)
 - `get_attention_backend(gpu_kv_format)` — backend name (e.g., `vLLM non-MLA flash attention`)
-- `get_concrete_gpu_kv_shape(kv_caches, gpu_kv_format)` — shape with actual values (e.g., `List[80] of [2, 2048, 128, 8, 128]`)
+- `get_concrete_gpu_kv_shape(kv_caches, gpu_kv_format)` — whole-context shape with actual values
+- `get_concrete_gpu_kv_shape_from_shape_desc(shape_desc, gpu_kv_format)` — **group-accurate** shape with actual values, read from a single kernel group's `PageBufferShapeDesc` (used by `report_status`)
 
-`GPUCacheContext` exposes these as properties: `gpu_kv_format_name`, `gpu_kv_shape`, `concrete_gpu_kv_shape`, `attention_backend`.
-
-`report_status()` includes them in the per-GPU `kv_cache_layout` dict:
+`report_status()` is organised **per kernel group**: a small set of context-wide
+fields at the top level, plus a `kernel_groups` list where each entry is
+self-describing. The format-derived fields (`gpu_kv_format`, `gpu_kv_shape`,
+`attention_backend`, `is_mla`) and the group-accurate `gpu_kv_concrete_shape`
+live inside each group:
 
 ```python
 "kv_cache_layout": {
-    ...,
-    "gpu_kv_format": "NL_X_TWO_NB_BS_NH_HS",
-    "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
-    "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
-    "attention_backend": "vLLM non-MLA flash attention",
+    "num_layers": 80,
+    "inference_engine_logical_block_size": 128,
+    "num_blocks": 2048,
+    "cache_size_per_token": 327680,
+    "kernel_groups": [
+        {
+            "kernel_group_idx": 0,
+            "engine_group_idx": 0,
+            "object_group_idx": 0,
+            "num_layers": 80,
+            "layer_indices": [0, 1, ...],
+            "physical_block_size": 128,
+            "compress_ratio": 1,
+            "dtype": "torch.float16",
+            "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
+            "is_mla": false,
+            "gpu_kv_format": "NL_X_TWO_NB_BS_NH_HS",
+            "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+            "attention_backend": "vLLM non-MLA flash attention",
+        },
+    ],
 }
 ```
 

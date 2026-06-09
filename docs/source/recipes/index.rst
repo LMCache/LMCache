@@ -58,6 +58,13 @@ Supported architectures
      - —
      - :doc:`gemma4`
 
+   * - ``Gemma4UnifiedForConditionalGeneration``
+     - ``google/gemma-4-12B-it``
+     - ✓
+     - —
+     - —
+     - :doc:`gemma4`
+
    * - ``Gemma3ForConditionalGeneration``
      - ``google/gemma-3-4b-it``
      - ✓
