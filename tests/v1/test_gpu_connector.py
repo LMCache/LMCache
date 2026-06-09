@@ -983,6 +983,7 @@ def test_vllm_paged_connector_active_concurrency_race():
         num_blocks=num_blocks,
         device=device,
         block_size=block_size,
+        num_layers=num_layers,
         gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
     )
 
