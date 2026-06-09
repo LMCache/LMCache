@@ -79,10 +79,8 @@ def fake_adapter(monkeypatch):
 
     parallel_strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=1,
-        kv_worker_id=0,
-        actual_world_size=1,
-        actual_worker_id=0,
+        vllm_world_size=1,
+        vllm_worker_id=0,
         tp_size=1,
         pp_size=1,
     )
