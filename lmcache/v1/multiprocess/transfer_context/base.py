@@ -60,7 +60,12 @@ def _detect_block_transfer_accepts_tensor() -> bool:
 
         fn = _lmc_ops.multi_layer_block_kv_transfer
 
-        # Attempt 1: use inspect.signature (works on newer pybind11 builds)
+        # Attempt: use inspect.signature (works on newer pybind11 builds)
+        # Assumptions: if lmcache_objects_ptrs accepts tensors,
+        # it's fallback path, and we do not convert tensors to ptrs explicitly.
+        # TODO: String matching on annotations is fragile. Wait for lmc_ops to
+        # expose a direct version flag (e.g., lmc_ops.__version__) or
+        # an explicit capability boolean.
         try:
             sig = inspect.signature(fn)
             param = sig.parameters.get("lmcache_objects_ptrs")

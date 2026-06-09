@@ -898,7 +898,6 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     # chunk_tokens = blocks_per_chunk * block_size = 2 * 4 = 8.
     out0 = torch.zeros(2, 2, 8, 16)
     out2 = torch.zeros(2, 2, 8, 16)
-
     out_buffers = [out0, out2]
 
     # With chunk_indices=[0, 2], gather only chunks at positions 0 and 2
