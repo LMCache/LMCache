@@ -7,6 +7,7 @@ manager wiring while keeping CI portable.
 """
 
 # Standard
+from typing import cast
 import gc
 import os
 
@@ -26,9 +27,12 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
-from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    L2AdaptersConfig,
+)
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
-from lmcache.v1.memory_management import DevDaxMemoryAllocator
+from lmcache.v1.memory_management import DevDaxMemoryAllocator, MixedMemoryAllocator
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 import lmcache.v1.memory_management as memory_management
 
@@ -55,36 +59,36 @@ def _layout(num_bytes: int = 4096) -> MemoryLayoutDesc:
 
 
 class _FakeMooncakeL2Config:
-    def __init__(self, setup_config: dict[str, str]):
+    def __init__(self, setup_config: dict[str, str]) -> None:
         self.setup_config = setup_config
 
 
 class _FakeCudaRuntime:
-    def __init__(self, register_error: int = 0):
+    def __init__(self, register_error: int = 0) -> None:
         self.register_error = register_error
         self.register_calls: list[tuple[int, int, int]] = []
         self.unregister_calls: list[int] = []
         self.synchronize_calls = 0
 
-    def is_available(self):
+    def is_available(self) -> bool:
         return True
 
-    def synchronize(self):
+    def synchronize(self) -> None:
         self.synchronize_calls += 1
 
-    def cudart(self):
+    def cudart(self) -> "_FakeCudaRuntime":
         return self
 
-    def cudaHostRegister(self, ptr: int, size: int, flags: int):
+    def cudaHostRegister(self, ptr: int, size: int, flags: int) -> int:
         self.register_calls.append((ptr, size, flags))
         return self.register_error
 
-    def cudaHostUnregister(self, ptr: int):
+    def cudaHostUnregister(self, ptr: int) -> int:
         self.unregister_calls.append(ptr)
         return 0
 
 
-def _hybrid_storage_config(path: str, adapter_config) -> StorageManagerConfig:
+def _hybrid_storage_config(path: str, adapter_config: object) -> StorageManagerConfig:
     config = StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(
             memory_config=L1MemoryManagerConfig(
@@ -95,7 +99,9 @@ def _hybrid_storage_config(path: str, adapter_config) -> StorageManagerConfig:
             )
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
-        l2_adapter_config=L2AdaptersConfig(adapters=[adapter_config]),
+        l2_adapter_config=L2AdaptersConfig(
+            adapters=[cast(L2AdapterConfigBase, adapter_config)]
+        ),
     )
     normalize_storage_manager_config(config)
     return config
@@ -234,6 +240,35 @@ def test_devdax_allocator_falls_back_when_cuda_host_register_fails(
     gc.collect()
     allocator.close()
     assert cuda_runtime.unregister_calls == []
+
+
+def test_mixed_allocator_forwards_update_stats_to_primary_free(tmp_path, monkeypatch):
+    path = _make_mmap_file(tmp_path, size=8192)
+    allocator = MixedMemoryAllocator(
+        8192,
+        use_lazy=False,
+        align_bytes=4096,
+        devdax_path=path,
+        devdax_size=8192,
+    )
+    original_batched_free = allocator.pin_allocator.batched_free
+    update_stats_values: list[bool] = []
+
+    def record_primary_batched_free(
+        memory_objs, allocator_type=None, update_stats: bool = True
+    ):
+        update_stats_values.append(update_stats)
+        return original_batched_free(memory_objs, allocator_type, update_stats)
+
+    monkeypatch.setattr(
+        allocator.pin_allocator, "batched_free", record_primary_batched_free
+    )
+    objs = allocator.batched_allocate(torch.Size([4096]), torch.uint8, 2)
+
+    assert objs is not None
+    allocator.batched_free(objs, update_stats=False)
+    assert update_stats_values == [False]
+    allocator.close()
 
 
 def test_devdax_close_failure_preserves_allocator_state(tmp_path):
@@ -396,18 +431,20 @@ def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
 
 def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):
     path = _make_mmap_file(tmp_path)
-    config = parse_args(
-        [
-            "--l1-size-gb",
-            "1",
-            "--eviction-policy",
-            "LRU",
-            "--l1-devdax-path",
-            path,
-        ]
+    config = StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=1024 * 1024,
+                use_lazy=False,
+                devdax_path=path,
+            )
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
     )
+    context = MPCacheEngineContext(config)
 
-    pool_info = MPCacheEngineContext._compute_shm_pool_info(config)
-
-    assert pool_info == {"shm_name": "", "pool_size": 0}
-    assert os.path.exists(path)
+    try:
+        assert context.shm_pool_info == {"shm_name": "", "pool_size": 0}
+        assert os.path.exists(path)
+    finally:
+        context.storage_manager.close()

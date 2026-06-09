@@ -2350,7 +2350,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
@@ -2376,7 +2376,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
+    ) -> None:
         if not memory_objs:
             return
 
@@ -2403,7 +2403,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             ]
             if primary_objs:
                 with self.host_mem_lock:
-                    self.pin_allocator.batched_free(primary_objs)
+                    self.pin_allocator.batched_free(
+                        primary_objs, update_stats=update_stats
+                    )
             if devdax_objs:
                 assert self.devdax_allocator is not None
                 self.devdax_allocator.batched_free(
@@ -2412,7 +2414,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
-    def memcheck(self):
+    def memcheck(self) -> bool:
         with self.host_mem_lock:
             primary_ok = self.pin_allocator.memcheck()
         if self.devdax_allocator is None:
@@ -2431,7 +2433,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         devdax_used = devdax_total - devdax_manager.get_free_size()
         return primary_used + devdax_used, primary_total + devdax_total
 
-    def close(self):
+    def close(self) -> None:
         if self.devdax_allocator is not None:
             self.devdax_allocator.close()
         if not self._unregistered:
@@ -2460,7 +2462,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.get_paged_buffers()
         return None
 
-    def __str__(self):
+    def __str__(self) -> str:
         return "MixedMemoryAllocator"
 
 
@@ -2479,7 +2481,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         size: int,
         device_path: str,
         align_bytes: int = AddressManager.ALIGN_BYTES,
-    ):
+    ) -> None:
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
         if size <= 0:
@@ -2656,7 +2658,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
@@ -2681,7 +2683,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ):
+    ) -> None:
         if not memory_objs:
             return
 
@@ -2704,12 +2706,12 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
-    def memcheck(self):
+    def memcheck(self) -> bool:
         with self.host_mem_lock:
             assert self.pin_allocator is not None
             return self.pin_allocator.memcheck()
 
-    def close(self):
+    def close(self) -> None:
         if self._unregistered:
             return
         if torch_dev.is_available():
@@ -2736,7 +2738,13 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             self._fd = None
         self._unregistered = True
 
-    def __str__(self):
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __str__(self) -> str:
         return "DevDaxMemoryAllocator"
 
 

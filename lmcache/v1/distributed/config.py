@@ -14,6 +14,7 @@ import os
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
     L2AdaptersConfig,
     add_l2_adapters_args,
     get_type_name_for_config,
@@ -29,7 +30,9 @@ _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS = {
 }
 
 
-def _requires_single_l1_memory_region(adapter_config) -> str | None:
+def _requires_single_l1_memory_region(
+    adapter_config: L2AdapterConfigBase,
+) -> str | None:
     type_name = get_type_name_for_config(adapter_config)
     if type_name in _HYBRID_L1_SINGLE_REGION_L2_ADAPTERS:
         return type_name
@@ -186,6 +189,18 @@ class StorageManagerConfig:
 
 
 def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
+    """Normalize and validate storage manager configuration.
+
+    This consumes a matching DAX adapter as hybrid L1 Device-DAX overflow
+    capacity and rejects L2 adapters that require a single contiguous L1
+    memory descriptor when hybrid L1 is enabled.
+
+    Args:
+        config: Storage manager configuration to normalize in place.
+
+    Raises:
+        ValueError: If hybrid L1 is paired with incompatible L2 adapters.
+    """
     memory_config = config.l1_manager_config.memory_config
     _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
