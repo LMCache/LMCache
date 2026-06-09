@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
+import sys
 
 # Third Party
 from vllm.config import VllmConfig
@@ -36,6 +37,7 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
+from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
@@ -550,6 +552,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
+            # Banner from the scheduler role only, so tensor-parallel
+            # deployments print it once rather than once per worker.
+            print_banner_once(sys.stderr)
             self.scheduler_adapter = create_scheduler_adapter(
                 server_url,
                 zmq_context,
