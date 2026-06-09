@@ -6,6 +6,11 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any
 
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
 
 class StubDeviceProperties:
     """Stub for torch_dev.get_device_properties() return value."""
@@ -133,8 +138,8 @@ class StubStream:
         """
         try:
             callback(arg)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning("launch_host_func callback raised: %s", e)
 
     def synchronize(self) -> None:
         """Block the host until all kernels on this stream complete.

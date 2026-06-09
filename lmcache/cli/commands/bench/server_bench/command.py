@@ -36,7 +36,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import argparse
 import itertools
-import mmap as _mmap
+import mmap
 import os
 import sys
 import time
@@ -457,7 +457,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         # and size; the bench mmaps the same pool so STORE/RETRIEVE
         # can exchange tensor data via slot descriptors instead of
         # round-tripping pickle through the RPC layer.
-        server_pool: "_mmap.mmap | None" = None
+        server_pool: "mmap.mmap | None" = None
         if not use_handle and not isinstance(register_result, bool):
             shm_name = getattr(register_result, "shm_name", "")
             pool_size = getattr(register_result, "pool_size", 0)

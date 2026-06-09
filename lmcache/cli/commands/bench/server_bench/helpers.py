@@ -21,7 +21,7 @@ from typing import Any
 import ctypes
 import hashlib
 import json
-import mmap as _mmap
+import mmap
 import sys
 import time
 import urllib.error
@@ -450,7 +450,7 @@ def _make_event_handle(use_gpu: bool = True) -> bytes:
 
 
 def _build_server_slot_views(
-    server_pool: "_mmap.mmap",
+    server_pool: "mmap.mmap",
     slots: list[dict[str, Any]],
 ) -> list["torch.Tensor"]:
     """Build zero-copy tensor views over server SHM slot descriptors.
@@ -629,7 +629,7 @@ def _send_store(
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
     chunk_size: int = 0,
-    server_pool: "_mmap.mmap | None" = None,
+    server_pool: "mmap.mmap | None" = None,
 ) -> str:
     """Store KV cache blocks. Returns status string.
 
@@ -698,7 +698,7 @@ def _send_retrieve(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
-    server_pool: "_mmap.mmap | None" = None,
+    server_pool: "mmap.mmap | None" = None,
 ) -> str:
     """Retrieve KV cache blocks. Returns status.
 
@@ -854,7 +854,7 @@ def _process_request(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
-    server_pool: "_mmap.mmap | None" = None,
+    server_pool: "mmap.mmap | None" = None,
 ) -> list[str] | None:
     """Run the full lookup -> retrieve/store flow.
 
