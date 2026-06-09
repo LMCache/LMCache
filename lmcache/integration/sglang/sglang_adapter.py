@@ -162,6 +162,8 @@ class LMCacheConnector:
         load_mask = torch.ones_like(token_ids, dtype=torch.bool)
         load_mask[:offset] = False
         ret_token_mask = self.lmcache_engine.retrieve(
+            token_ids,
+            mask=load_mask,
             kvcaches=self.kvcaches,
             slot_mapping=slot_mapping,
             offset=offset,
