@@ -167,17 +167,33 @@ def deregister_buffer(buf: torch.Tensor) -> None:
     )
 
 
+# cuFileStreamRegister flags (cufile.h): declare the buffer offset, file offset,
+# and size are all set at submission time (CU_FILE_STREAM_FIXED_* = 0x1|0x2|0x4).
+# Worth ~12% higher read throughput vs 0x0 in our benchmark (write unchanged).
+# PAGE_ALIGNED_INPUTS (0x8) is omitted -- transfer sizes are not always 4 KiB.
+_STREAM_REGISTER_FLAGS = 0x7
+
+
 def register_stream(raw_stream: int) -> None:
     """Register a CUDA stream with cuFile.
 
     ``raw_stream`` is the integer ``CUstream`` handle — get it via
     ``torch_dev.current_stream().cuda_stream``.
+
+    Optional for correctness (``read_async`` / ``write_async`` also take the
+    stream per call). We register with the FIXED_* flags (0x7): cuFile still
+    reads the size/offset pointers at stream-execution time -- so their storage
+    must stay alive and unchanged until completion (see ``Submission``) -- but
+    promising the values are fixed at submission lets cuFile skip per-op setup,
+    worth ~12% higher read throughput in our benchmark.
     """
     # Third Party
     from cufile.bindings import libcufile
 
     _check(
-        libcufile.cuFileStreamRegister(ctypes.c_void_p(raw_stream), 0),
+        libcufile.cuFileStreamRegister(
+            ctypes.c_void_p(raw_stream), _STREAM_REGISTER_FLAGS
+        ),
         "cuFileStreamRegister",
     )
 
