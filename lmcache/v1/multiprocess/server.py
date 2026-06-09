@@ -6,7 +6,6 @@ import argparse
 import shutil
 import sys
 import time
-import uuid
 
 # Third Party
 import zmq
@@ -236,10 +235,10 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine).
         If return_engine is False: None (blocks until interrupted).
     """
-    # Generate this server's identity once at startup. It keys the coordinator
-    # membership and, unless observability set its service.instance.id
-    # explicitly, also tags OTel metrics/traces.
-    mp_config.instance_id = str(uuid.uuid4())
+    # mp_config.instance_id is this server's single source of identity (set via
+    # --instance-id, else a random UUID v4). Project it onto the OTel
+    # service.instance.id unless observability set that attribute explicitly, so
+    # metrics/traces and coordinator membership all key on the same id.
     if obs_config.service_instance_id is None:
         obs_config.service_instance_id = mp_config.instance_id
 

@@ -10,6 +10,7 @@ import argparse
 import json
 import math
 import os
+import uuid
 
 
 @dataclass
@@ -61,10 +62,12 @@ class MPServerConfig:
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
 
-    instance_id: str = ""
-    """Internal identity of this MP server, used as the coordinator
-    membership key. Not operator-settable: ``run_cache_server`` generates a
-    random UUID at startup."""
+    instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    """Stable identity of this MP server, the single source of truth for who
+    this server is. Used as the coordinator membership key and projected onto
+    the OTel ``service.instance.id`` resource attribute (see
+    ``run_cache_server``) so metrics, traces, and coordinator state all key on
+    the same id. Set via ``--instance-id``; defaults to a random UUID v4."""
 
 
 @dataclass
@@ -137,6 +140,15 @@ def add_mp_server_args(
     """
     mp_group = parser.add_argument_group(
         "MP Server", "Configuration for the ZMQ multiprocess cache server"
+    )
+    mp_group.add_argument(
+        "--instance-id",
+        type=str,
+        default=None,
+        help="Stable identity of this MP server. Used as the coordinator "
+        "membership key and as the OTel 'service.instance.id' resource "
+        "attribute on every metric and span. Defaults to a random UUID v4 "
+        "minted at startup.",
     )
     mp_group.add_argument(
         "--host",
@@ -261,6 +273,7 @@ def parse_args_to_mp_server_config(
     except json.JSONDecodeError as exc:
         raise ValueError("--runtime-plugin-config is not valid JSON: %s" % exc) from exc
     return MPServerConfig(
+        instance_id=args.instance_id or str(uuid.uuid4()),
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
