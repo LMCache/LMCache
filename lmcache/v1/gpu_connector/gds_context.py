@@ -63,10 +63,8 @@ class GDSContext:
         self._slab_size = 0
         self._slab_path = ""
         self._slab_handle: Optional[ca.AsyncHandle] = None
-        # The CUDA stream the async ops run on, registered once and held for
-        # the context's lifetime: the torch ``Stream`` (for events) and the
-        # raw ``CUstream`` int (for the cuFile C API).
-        self._registered_stream: Optional[torch.Stream] = None
+        # The CUDA stream registered once with cuFile and held (as its raw
+        # ``CUstream`` int) for the context's lifetime; deregistered on close.
         self._registered_stream_handle: Optional[int] = None
         self._stream_lock = threading.Lock()
         # In-flight submissions, released once a CUDA event recorded after them
@@ -215,7 +213,6 @@ class GDSContext:
                 except Exception as e:
                     logger.warning("GDSContext.close: deregister_stream: %s", e)
                 self._registered_stream_handle = None
-                self._registered_stream = None
         if self._slab_handle is not None:
             try:
                 self._slab_handle.close()
@@ -315,11 +312,9 @@ class GDSContext:
         with self._stream_lock:
             if self._registered_stream_handle is not None:
                 return
-            current_stream = torch_dev.current_stream()
-            raw_stream = current_stream.cuda_stream
+            raw_stream = torch_dev.current_stream().cuda_stream
             ca.register_stream(raw_stream)
             self._registered_stream_handle = raw_stream
-            self._registered_stream = current_stream
 
     def _resolve_buffer(self, gpu_buffer: torch.Tensor) -> tuple[int, int]:
         """Find which registered region ``gpu_buffer`` belongs to.
@@ -357,11 +352,6 @@ class GDSContext:
         """Submit one ``cuFileReadAsync`` against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_read: slab handle not open")
-        if self._registered_stream_handle is None:
-            raise RuntimeError(
-                "GDSContext._slab_read: cuFile stream not registered; "
-                "call register_gpu_buffer first"
-            )
         # Submit on the caller's current stream
         stream_handle = torch_dev.current_stream().cuda_stream
         sub = self._slab_handle.read_async(
@@ -375,11 +365,6 @@ class GDSContext:
         """Submit one ``cuFileWriteAsync`` against the slab handle (stream-ordered)."""
         if self._slab_handle is None:
             raise RuntimeError("GDSContext._slab_write: slab handle not open")
-        if self._registered_stream_handle is None:
-            raise RuntimeError(
-                "GDSContext._slab_write: cuFile stream not registered; "
-                "call register_gpu_buffer first"
-            )
         # Submit on the caller's current stream
         stream_handle = torch_dev.current_stream().cuda_stream
         sub = self._slab_handle.write_async(
@@ -405,18 +390,16 @@ class GDSContext:
     def _checkpoint_submissions_locked(self) -> None:
         """Close the current submission batch and release completed ones.
 
-        Records a CUDA event on the registered cuFile stream marking the point
+        Records a CUDA event on the current (transfer) stream marking the point
         after every uncommitted submission, then drops any earlier batch whose
-        event has completed (non-blocking ``query()``).
+        event has completed (non-blocking ``query()``). Callers submit on the
+        current stream, so the event orders correctly behind those submissions.
 
         Must be called while holding ``self._submissions_lock``.
         """
         if self._uncommitted_submissions:
             event = torch_dev.Event()
-            if self._registered_stream is not None:
-                event.record(self._registered_stream)
-            else:
-                event.record()
+            event.record()
             self._inflight_submissions.append((event, self._uncommitted_submissions))
             self._uncommitted_submissions = []
         self._ops_since_checkpoint = 0
