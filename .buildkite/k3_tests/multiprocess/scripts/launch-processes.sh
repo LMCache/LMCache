@@ -80,10 +80,16 @@ echo "Port: $LMCACHE_PORT"
 # medium becomes an NVMe slab accessed via cuFile DMA instead of pinned DRAM;
 # --l1-size-gb then sizes the slab. The path must be on a GDS-capable
 # filesystem (local NVMe), provided by the /scratch hostPath mount.
+#
+# The GDS tier registers one chunk per cuFileBufRegister, which is capped at
+# 16 MiB. A chunk is 2*num_layers*chunk_size*kv_heads*head_dim*elem_size bytes,
+# so the default chunk_size=256 overflows on deep models (Qwen3-14B's 40 layers
+# = 40 MiB). Use a smaller chunk so each region stays under the cap (40 layers
+# * 64 tokens = 10 MiB). Override via GDS_CHUNK_SIZE if a model needs less.
 GDS_L1_ARG=""
 if [ -n "${GDS_L1_PATH:-}" ]; then
     echo "GDS L1 tier enabled; slab directory: $GDS_L1_PATH"
-    GDS_L1_ARG="--gds-l1-path ${GDS_L1_PATH}"
+    GDS_L1_ARG="--gds-l1-path ${GDS_L1_PATH} --chunk-size ${GDS_CHUNK_SIZE:-64}"
 fi
 
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
