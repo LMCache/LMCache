@@ -81,7 +81,7 @@ msgstr "``lmcache-cli``"
 
 #: ../../source/cli/index.rst:34
 msgid "``pip install lmcache-cli``"
-msgstr "``pip install kvcache``"
+msgstr "``pip install lmcache-cli``"
 
 #: ../../source/cli/index.rst:35
 msgid ""
@@ -161,7 +161,7 @@ msgstr "对推理引擎（``engine``）、LMCache MP 服务器（``server``）�
 
 #: ../../source/cli/index.rst:66
 msgid ":doc:`kvcache`"
-msgstr ":kvcache:"
+msgstr ":doc:`kvcache`"
 
 #: ../../source/cli/index.rst:67
 msgid "Manage KV cache state (e.g. clear L1 cache) on a running server."

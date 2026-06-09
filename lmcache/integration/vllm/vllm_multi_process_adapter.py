@@ -22,8 +22,8 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.group_view import (
-    LMCacheGroupView,
-    expand_block_ids_to_views,
+    EngineGroupInfo,
+    expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -920,7 +920,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self.group_views: list[LMCacheGroupView] = []
+        self.engine_group_infos: list[EngineGroupInfo] = []
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -1034,7 +1034,7 @@ class LMCacheMPWorkerAdapter:
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
-        group_views: Sequence[LMCacheGroupView] = (),
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -1042,7 +1042,7 @@ class LMCacheMPWorkerAdapter:
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
-            group_views: LMCache-owned engine KV cache group metadata.
+            engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -1050,11 +1050,11 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
-        self.group_views = list(group_views)
+        self.engine_group_infos = list(engine_group_infos)
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
-        return expand_block_ids_to_views(self.group_views, op.block_ids)
+        return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
     def _send_register_kv_caches_request(
         self, kv_caches: dict[str, torch.Tensor]
@@ -1090,7 +1090,7 @@ class LMCacheMPWorkerAdapter:
                 self._mq_timeout,
                 send_request=send_lmcache_request,
                 layout_hints=layout_hints,
-                group_views=self.group_views,
+                engine_group_infos=self.engine_group_infos,
             )
         except TimeoutError:
             raise ConnectionError(

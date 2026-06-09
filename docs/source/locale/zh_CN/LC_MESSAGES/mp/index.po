@@ -39,7 +39,7 @@ msgstr ""
 
 #: ../../source/mp/index.rst:10
 msgid "Key Benefits"
-msgstr "关键好处"
+msgstr "主要优势"
 
 #: ../../source/mp/index.rst:12
 msgid ""
@@ -156,4 +156,3 @@ msgstr "（遗留）仅支持 ZMQ 的服务器，没有 HTTP 端点；与 ``lmca
 #~ "(Legacy) CacheBlend-enabled server. Prefer "
 #~ "``lmcache server --engine-type blend``."
 #~ msgstr "（遗留）启用 CacheBlend 的服务器。建议使用 ``lmcache server --engine-type blend``。"
-

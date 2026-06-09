@@ -29,7 +29,7 @@ msgstr "入门指南"
 
 #: ../../source/index.rst:85
 msgid "Recipes"
-msgstr "食谱"
+msgstr "使用指南"
 
 #: ../../source/index.rst:93
 msgid "KV Cache offloading and sharing"
