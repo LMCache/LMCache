@@ -5,7 +5,7 @@ import msgspec
 # First Party
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
-    expand_block_ids_to_views,
+    expand_engine_block_ids,
     get_engine_group_indices,
     num_engine_group_infos,
     num_engine_groups,
@@ -30,14 +30,14 @@ def test_engine_group_infos_build_per_layer_engine_group_indices():
     assert get_engine_group_indices(groups, 4) == [0, 1, 0, 1]
 
 
-def test_engine_group_infos_expand_block_ids_to_views():
+def test_engine_group_infos_expand_engine_block_ids():
     groups = [
         EngineGroupInfo(0, (0, 2)),
         EngineGroupInfo(0, (4,)),
         EngineGroupInfo(1, (1, 3)),
     ]
 
-    assert expand_block_ids_to_views(groups, [[10, 11], [20, 21]]) == [
+    assert expand_engine_block_ids(groups, [[10, 11], [20, 21]]) == [
         [10, 11],
         [10, 11],
         [20, 21],

@@ -93,11 +93,11 @@ def _engine_group_id_per_view(
     return tuple(group.engine_group_id for group in groups)
 
 
-def expand_block_ids_to_views(
+def expand_engine_block_ids(
     groups: Sequence[EngineGroupInfo],
     engine_side_block_ids: Sequence[Sequence[int]] | Sequence[int],
 ) -> list[list[int]]:
-    """Re-index engine-side block IDs to one list per LMCache group.
+    """Expand the engine-side block id list to the list per LMCache kernel group.
 
     The serving engine reports block IDs per engine group. LMCache transfer
     requests are indexed by LMCache KV group, so each LMCache group reuses the

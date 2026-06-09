@@ -42,7 +42,7 @@ store/retrieve address those infos directly.
   transfer identity. The list order is the protocol-visible group order; an
   empty list means a single non-hybrid group.
 - Helpers in `group_view.py` operate on `Sequence[EngineGroupInfo]`:
-  `num_engine_groups`, `num_engine_group_infos`, `expand_block_ids_to_views`,
+  `num_engine_groups`, `num_engine_group_infos`, `expand_engine_block_ids`,
   `get_engine_group_indices`.
 - **`KVLayerGroupInfo`** (runtime, server-only): layer indices,
   `PageBufferShapeDesc`, dtype, compress ratio, physical chunk size,
@@ -78,7 +78,7 @@ KVLayerGroupInfo list   --STORE/RETRIEVE block_ids per info-->  transfer kernels
 ## Store and retrieve
 
 vLLM reports block IDs per engine group. The worker adapter re-indexes them to
-engine-group-info order with `expand_block_ids_to_views(engine_group_infos, block_ids)` (each
+engine-group-info order with `expand_engine_block_ids(engine_group_infos, block_ids)` (each
 info reuses its source engine group's block IDs), so `STORE`/`RETRIEVE` receive
 `list[list[int]]` indexed by info order. The server loop is then trivial: for
 info `i`, use `gpu_block_ids[i]`.
