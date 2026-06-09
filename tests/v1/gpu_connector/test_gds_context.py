@@ -18,6 +18,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
@@ -28,6 +29,12 @@ from lmcache.v1.gpu_connector.gds_context import (
     get_gds_context,
     initialize_gds_context,
 )
+
+
+def _fake_stream(handle: int):
+    """A stand-in for ``torch_dev.current_stream()`` (no CUDA needed)."""
+    return SimpleNamespace(cuda_stream=handle, synchronize=lambda: None)
+
 
 requires_gds = pytest.mark.skipif(
     not (torch.cuda.is_available() and os.path.exists("/proc/driver/nvidia-fs/stats")),
@@ -75,7 +82,8 @@ class TestRegisterGpuBuffer:
             "register_buffer",
             lambda buf: sizes.append(buf.numel() * buf.element_size()),
         )
-        monkeypatch.setattr(ctx, "_ensure_stream_registered", lambda: None)
+        monkeypatch.setattr(ca, "register_stream", lambda raw: None)
+        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
 
         # 4 slots of 4 KiB. A CPU tensor is fine: the cuFile calls are mocked.
         buf = torch.empty(4 * 4096, dtype=torch.uint8)
@@ -94,7 +102,8 @@ class TestResolveBuffer:
         ctx = GDSContext()
         ctx.initialized = True
         monkeypatch.setattr(ca, "register_buffer", lambda b: None)
-        monkeypatch.setattr(ctx, "_ensure_stream_registered", lambda: None)
+        monkeypatch.setattr(ca, "register_stream", lambda raw: None)
+        monkeypatch.setattr(torch_dev, "current_stream", lambda: _fake_stream(0))
         ctx.register_gpu_buffer(buf, buf.numel())
         resolved: list[tuple[int, int]] = []
         monkeypatch.setattr(
@@ -129,6 +138,48 @@ class TestResolveBuffer:
         below = SimpleNamespace(data_ptr=lambda: 0x10)
         with pytest.raises(ValueError):
             ctx.write_async(mem_obj, below)
+
+
+class TestPerStreamRegistration:
+    """Each distinct stream is cuFile-registered once and deregistered once its
+    last region is gone -- observed at the ``ca`` seam (no private state)."""
+
+    def test_register_and_deregister_per_stream(self, monkeypatch):
+        ctx = GDSContext()
+        ctx.initialized = True
+        reg_str: list[int] = []
+        dereg_str: list[int] = []
+        dereg_buf: list[int] = []
+        monkeypatch.setattr(ca, "register_buffer", lambda b: None)
+        monkeypatch.setattr(
+            ca, "deregister_buffer", lambda b: dereg_buf.append(b.data_ptr())
+        )
+        monkeypatch.setattr(ca, "register_stream", reg_str.append)
+        monkeypatch.setattr(ca, "deregister_stream", dereg_str.append)
+
+        def use_stream(handle: int):
+            monkeypatch.setattr(
+                torch_dev, "current_stream", lambda: _fake_stream(handle)
+            )
+
+        buf_a = torch.empty(2 * 4096, dtype=torch.uint8)  # 2 slots on stream 11
+        buf_b = torch.empty(4096, dtype=torch.uint8)  # 1 slot on stream 22
+        use_stream(11)
+        ctx.register_gpu_buffer(buf_a, 4096)
+        use_stream(22)
+        ctx.register_gpu_buffer(buf_b, 4096)
+        # Each distinct stream registered exactly once.
+        assert reg_str == [11, 22]
+
+        # Deregistering buf_b frees stream 22's only region -> stream 22 dropped.
+        use_stream(22)
+        ctx.deregister_gpu_buffer(buf_b, 4096)
+        assert dereg_str == [22]
+        # Stream 11 still has 2 regions, so not yet dropped.
+        use_stream(11)
+        ctx.deregister_gpu_buffer(buf_a, 4096)
+        assert dereg_str == [22, 11]
+        assert len(dereg_buf) == 3  # all three slots deregistered
 
 
 @requires_gds

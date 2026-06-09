@@ -19,7 +19,6 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -102,9 +101,7 @@ class MPCacheEngine:
         """Close all modules and release shared resources."""
         for module in self._modules:
             module.close()
-        self._context.storage_manager.close()
-        # Tear down the GDS cuFile context
-        get_gds_context().close()
+        self._context.close()
         logger.info("MPCacheEngine closed")
 
     # HTTP-layer passthroughs lost in the engine refactor.

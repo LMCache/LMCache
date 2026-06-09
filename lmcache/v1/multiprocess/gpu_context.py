@@ -181,6 +181,15 @@ class GPUCacheContext:
             logger,
         )
 
+    def close(self) -> None:
+        """
+        Deregister this context's GDS staging buffer (reverse of __init__).
+        """
+        with torch_dev.stream(self.cuda_stream_):
+            get_gds_context().deregister_gpu_buffer(
+                self.tmp_gpu_buffer_, self.tmp_chunk_bytes_
+            )
+
     @property
     def dtype(self) -> torch.dtype:
         return get_dtype(self.kv_caches_, self.gpu_kv_format_)

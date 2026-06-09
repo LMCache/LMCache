@@ -63,21 +63,18 @@ class GDSContext:
         self._slab_size = 0
         self._slab_path = ""
         self._slab_handle: Optional[ca.AsyncHandle] = None
-        # The CUDA stream registered once with cuFile and held (as its raw
-        # ``CUstream`` int) for the context's lifetime; deregistered on close.
-        self._registered_stream_handle: Optional[int] = None
-        self._stream_lock = threading.Lock()
         # In-flight submissions, released once a CUDA event recorded after them
         # on the cuFile stream completes (see ``_checkpoint_submissions_locked``).
         self._uncommitted_submissions: list[ca.Submission] = []
         self._inflight_submissions: list[tuple[torch.Event, list[ca.Submission]]] = []
         self._ops_since_checkpoint = 0
         self._submissions_lock = threading.Lock()
-        # One entry per cuFile-registered region, parallel lists kept sorted by
-        # ``_base_ptrs`` ascending for ``_resolve_buffer``'s bisect.
+        # Registry of cuFile-registered GPU regions and the CUDA streams they run on
+        self._registry_lock = threading.Lock()
         self._buffers: list[torch.Tensor] = []
         self._base_ptrs: list[int] = []
         self._nbytes: list[int] = []
+        self._registered_streams: set[int] = set()  # maintained for close()
 
     def initialize(self, config: GdsL1Config) -> None:
         """Create + clear the slab and register it with cuFile.
@@ -114,30 +111,51 @@ class GDSContext:
     # --- Public API ---------------------------------------------------
 
     def register_gpu_buffer(self, buffer: torch.Tensor, slot_bytes: int) -> None:
-        """Register a GPU staging buffer with cuFile, split into slots.
-
-        No-op when the context is uninitialized (GDS L1 is off), so callers can
-        invoke it unconditionally from ``GPUCacheContext.__init__``.
-
-        ``buffer`` is split into ``slot_bytes``-sized regions, each registered
-        separately. The split keeps every registration under nvidia-fs's 16 MiB
-        ``cuFileBufRegister`` cap and -- because callers later hand per-slot
-        slices to :meth:`read_async` / :meth:`write_async` -- guarantees each
-        such slice lies within a single registration (so :meth:`_resolve_buffer`
-        can map it).
+        """Register a GPU staging buffer (and its CUDA stream) with cuFile.
 
         Args:
-            buffer: The contiguous CUDA staging buffer (chunk-major), whose
-                size is a multiple of ``slot_bytes``.
-            slot_bytes: Size of one chunk slot in bytes; each slot must be
-                4 KiB-aligned and <= 16 MiB.
+            buffer: Contiguous CUDA staging buffer; size a multiple of
+                ``slot_bytes``.
+            slot_bytes: One slot's size; must be 4 KiB-aligned and <= 16 MiB.
         """
         if not self.initialized:
             return
+        raw_stream = torch_dev.current_stream().cuda_stream
         buf = buffer.view(torch.uint8)
         nbytes = buf.numel()
-        for start in range(0, nbytes, slot_bytes):
-            self._register_region(buf[start : start + slot_bytes])
+        with self._registry_lock:
+            if raw_stream not in self._registered_streams:
+                ca.register_stream(raw_stream)
+                self._registered_streams.add(raw_stream)
+            for start in range(0, nbytes, slot_bytes):
+                self._register_region_locked(buf[start : start + slot_bytes])
+
+    def deregister_gpu_buffer(self, buffer: torch.Tensor, slot_bytes: int) -> None:
+        """Reverse of :meth:`register_gpu_buffer`: deregister its slots + stream.
+
+        Args:
+            buffer: The buffer passed to :meth:`register_gpu_buffer`.
+            slot_bytes: The same slot size used at registration.
+        """
+        if not self.initialized:
+            return
+        stream = torch_dev.current_stream()
+        raw_stream = stream.cuda_stream
+        # No in-flight DMA on this stream may still reference the buffer.
+        stream.synchronize()
+        buf = buffer.view(torch.uint8)
+        nbytes = buf.numel()
+        with self._registry_lock:
+            for start in range(0, nbytes, slot_bytes):
+                self._deregister_region_locked(buf[start : start + slot_bytes])
+            if raw_stream in self._registered_streams:
+                try:
+                    ca.deregister_stream(raw_stream)
+                except Exception as e:
+                    logger.warning(
+                        "GDSContext.deregister_gpu_buffer: deregister_stream: %s", e
+                    )
+                self._registered_streams.discard(raw_stream)
 
     def write_async(
         self, memory_obj: GDSMemoryObject, gpu_buffer: torch.Tensor
@@ -197,7 +215,10 @@ class GDSContext:
             self._uncommitted_submissions = []
             self._inflight_submissions = []
             self._ops_since_checkpoint = 0
-        if self._buffers:
+        # Deregister any regions/streams still live (per-instance teardown via
+        # ``deregister_gpu_buffer`` normally clears these first; this is the
+        # shutdown sweep for anything left).
+        with self._registry_lock:
             for buf in self._buffers:
                 try:
                     ca.deregister_buffer(buf)
@@ -206,13 +227,12 @@ class GDSContext:
             self._buffers.clear()
             self._base_ptrs.clear()
             self._nbytes.clear()
-        with self._stream_lock:
-            if self._registered_stream_handle is not None:
+            for raw_stream in list(self._registered_streams):
                 try:
-                    ca.deregister_stream(self._registered_stream_handle)
+                    ca.deregister_stream(raw_stream)
                 except Exception as e:
                     logger.warning("GDSContext.close: deregister_stream: %s", e)
-                self._registered_stream_handle = None
+            self._registered_streams.clear()
         if self._slab_handle is not None:
             try:
                 self._slab_handle.close()
@@ -264,8 +284,11 @@ class GDSContext:
             use_direct_io,
         )
 
-    def _register_region(self, buffer: torch.Tensor) -> None:
-        """Register one <=16 MiB region with cuFile and the CUDA stream.
+    def _register_region_locked(self, buffer: torch.Tensor) -> None:
+        """Register one <=16 MiB region with cuFile (caller holds the lock).
+
+        The caller has already cuFile-registered the stream this region's
+        transfers run on.
 
         Args:
             buffer: A CUDA staging-buffer slot, 4 KiB-aligned in size and no
@@ -288,7 +311,6 @@ class GDSContext:
             )
         base = buffer.data_ptr()
         ca.register_buffer(buffer)
-        self._ensure_stream_registered()
         idx = bisect.bisect_left(self._base_ptrs, base)
         self._buffers.insert(idx, buffer)
         self._base_ptrs.insert(idx, base)
@@ -301,20 +323,24 @@ class GDSContext:
             len(self._buffers),
         )
 
-    def _ensure_stream_registered(self) -> None:
-        """Register the caller's current CUDA stream with cuFile (idempotent).
+    def _deregister_region_locked(self, buffer: torch.Tensor) -> None:
+        """Deregister one region with cuFile (caller holds the lock).
 
-        The first call records the stream that ``cuFileReadAsync`` /
-        ``cuFileWriteAsync`` run on; later calls are no-ops. cuFile mishandles
-        repeated register/deregister cycles on the same stream, so we register
-        exactly once and keep it for the context's lifetime.
+        Args:
+            buffer: A staging-buffer slot previously registered.
         """
-        with self._stream_lock:
-            if self._registered_stream_handle is not None:
-                return
-            raw_stream = torch_dev.current_stream().cuda_stream
-            ca.register_stream(raw_stream)
-            self._registered_stream_handle = raw_stream
+        base = buffer.data_ptr()
+        idx = bisect.bisect_left(self._base_ptrs, base)
+        if idx >= len(self._base_ptrs) or self._base_ptrs[idx] != base:
+            logger.warning("GDSContext: region 0x%x not registered; skipping", base)
+            return
+        try:
+            ca.deregister_buffer(self._buffers[idx])
+        except Exception as e:
+            logger.warning("GDSContext: deregister_buffer: %s", e)
+        del self._buffers[idx]
+        del self._base_ptrs[idx]
+        del self._nbytes[idx]
 
     def _resolve_buffer(self, gpu_buffer: torch.Tensor) -> tuple[int, int]:
         """Find which registered region ``gpu_buffer`` belongs to.
@@ -330,14 +356,17 @@ class GDSContext:
                 single registered region.
         """
         ptr = gpu_buffer.data_ptr()
-        idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
-        if idx < 0:
-            raise ValueError(
-                f"GDSContext: gpu_buffer pointer 0x{ptr:x} is below every "
-                f"registered region"
-            )
-        base = self._base_ptrs[idx]
-        nbytes = self._nbytes[idx]
+        # Held briefly so a concurrent deregister can't mutate the parallel
+        # lists mid-lookup.
+        with self._registry_lock:
+            idx = bisect.bisect_right(self._base_ptrs, ptr) - 1
+            if idx < 0:
+                raise ValueError(
+                    f"GDSContext: gpu_buffer pointer 0x{ptr:x} is below every "
+                    f"registered region"
+                )
+            base = self._base_ptrs[idx]
+            nbytes = self._nbytes[idx]
         offset = ptr - base
         if offset < 0 or offset >= nbytes:
             raise ValueError(

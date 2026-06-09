@@ -141,7 +141,6 @@ def register_buffer(buf: torch.Tensor) -> None:
     """
     if not buf.is_cuda:
         raise ValueError("register_buffer: tensor must be on CUDA")
-    _ensure_driver_open()
     # Third Party
     from cufile.bindings import libcufile
 
@@ -190,6 +189,7 @@ def register_stream(raw_stream: int) -> None:
     # Third Party
     from cufile.bindings import libcufile
 
+    _ensure_driver_open()
     _check(
         libcufile.cuFileStreamRegister(
             ctypes.c_void_p(raw_stream), _STREAM_REGISTER_FLAGS
