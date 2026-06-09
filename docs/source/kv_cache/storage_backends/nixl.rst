@@ -30,29 +30,38 @@ Example ``lmcache-config.yaml`` for POSIX backend:
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    local_cpu_use_hugepages: true  # optional, requires pre-allocated hugepages
     extra_config:
       enable_nixl_storage: true
       nixl_backend: POSIX
       nixl_pool_size: 64
       nixl_path: /mnt/nixl/cache/
       use_direct_io: true
-      nixl_use_hugepages: true  # optional, requires pre-allocated hugepages
 
 Key settings:
 
-- ``nixl_buffer_size``: buffer size for NIXL transfers.
+- ``nixl_buffer_size``: buffer size for NIXL transfers. **GPU mode only** (``nixl_buffer_device: cuda``). Setting this with ``nixl_buffer_device: cpu`` is a configuration error and will be rejected — in CPU mode NIXL shares ``LocalCPUBackend``'s pinned pool, which is sized by ``max_local_cpu_size``.
+
+- ``max_local_cpu_size``: size of ``LocalCPUBackend``'s pinned pool in GiB. In CPU mode, this pool is shared with NIXL and must accommodate both the hot cache and concurrent NIXL I/O in flight. Must be > 0 when ``nixl_buffer_device: cpu``. Default: ``5.0``.
 
 - ``nixl_pool_size``: number of descriptors opened at init time for nixl backend. Set to 0 for dynamic mode.
 
 - ``nixl_path``: directory under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file.
 
-- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu".
+- ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu". In CPU mode, NIXL shares ``LocalCPUBackend``'s pinned buffer; ``LocalCPUBackend`` is always created when ``nixl_buffer_device: cpu``, regardless of the ``local_cpu`` setting. ``local_cpu: false`` still suppresses hot-cache promotions — the backend acts as a staging buffer only, mirroring how ``local_disk`` already uses ``LocalCPUBackend``.
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
-- ``nixl_use_hugepages``: whether to use Linux hugepages (2 MiB) for the NIXL CPU buffer. Not supported for GPU buffers. Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``.
+- ``local_cpu_use_hugepages``: whether to use Linux hugepages (2 MiB) for ``LocalCPUBackend``'s pinned pool (which NIXL shares in CPU mode). Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``. **Deprecated alias:** ``extra_config.nixl_use_hugepages`` — accepted with a warning and copied into this field; will be removed in a future release.
+
+.. note::
+
+    In CPU mode, the shared paged allocator consumes one full page per object. With ``save_unfull_chunk: true`` (only valid in static mode — dynamic mode rejects it; see "Dynamic Mode" → "Restrictions" below), partial chunks still occupy a full page each, so effective capacity degrades proportionally to the fraction of unfull last chunks across active sequences.
+
+.. note::
+
+    ``enable_p2p: true`` is rejected together with ``nixl_buffer_device: cpu``. The combination is structurally supported — both backends share ``LocalCPUBackend``'s pinned pool, each runs its own NIXL agent over it, and allocations route through ``LocalCPUBackend.allocate()`` — but it has not been exercised end-to-end and has no CI coverage. Use ``enable_p2p: true`` with ``nixl_buffer_device: cuda`` instead, or disable ``enable_p2p`` when running the NIXL CPU shared pool.
 
 .. note::
 
@@ -65,8 +74,8 @@ Example ``lmcache-config.yaml`` for OBJ backend using S3 API:
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
     extra_config:
       enable_nixl_storage: true
       nixl_backend: OBJ
@@ -87,8 +96,8 @@ Example ``lmcache-config.yaml`` for POSIX backend using liburing:
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
     extra_config:
       enable_nixl_storage: true
       nixl_backend: POSIX
@@ -103,8 +112,8 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend to offload using Azure Bl
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
     extra_config:
       enable_nixl_storage: true
       nixl_backend: AZURE_BLOB
@@ -169,10 +178,8 @@ Example ``lmcache-config.yaml`` for OBJ backend with dynamic mode:
   local_cpu: False
   save_unfull_chunk: False
   enable_async_loading: False # set to True to test async loading
-  # buffer size has to be divisible by chunk size
-  # 2880MiB is divisible by 256 token chunk for Qwen3-4B/8B/32B
-  nixl_buffer_size: 3019898880
   nixl_buffer_device: cpu
+  max_local_cpu_size: 3  # GiB
   extra_config:
     enable_nixl_storage: true
     nixl_backend: OBJ
@@ -196,10 +203,8 @@ Example ``lmcache-config.yaml`` for AZURE_BLOB backend with dynamic mode:
   local_cpu: False
   save_unfull_chunk: False
   enable_async_loading: False # set to True to test async loading
-  # buffer size has to be divisible by chunk size
-  # 2880MiB is divisible by 256 token chunk for Qwen3-4B/8B/32B
-  nixl_buffer_size: 3019898880
   nixl_buffer_device: cpu
+  max_local_cpu_size: 3  # GiB
   extra_config:
     enable_nixl_storage: true
     nixl_backend: AZURE_BLOB
@@ -228,8 +233,8 @@ model/chunk debug information) and uniqueness is probabilistic at 128 bits.
 .. code-block:: yaml
 
     chunk_size: 256
-    nixl_buffer_size: 1073741824 # 1GB
     nixl_buffer_device: cpu
+    max_local_cpu_size: 1  # GiB
     extra_config:
       enable_nixl_storage: true
       nixl_backend: DOCA_MEMOS

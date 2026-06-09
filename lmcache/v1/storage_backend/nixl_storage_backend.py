@@ -16,7 +16,18 @@
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Sequence, Set, Tuple, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+    Union,
+    cast,
+)
 from urllib.parse import quote as url_quote
 import asyncio
 import hashlib
@@ -59,6 +70,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     MemoryObjMetadata,
+    MixedMemoryAllocator,
     PagedTensorMemoryAllocator,
     _allocate_cpu_memory,
     _allocate_gpu_memory,
@@ -68,6 +80,10 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
 
@@ -113,8 +129,9 @@ class NixlStorageConfig:
     def from_cache_engine_config(
         config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ):
-        assert config.nixl_buffer_size is not None
         assert config.nixl_buffer_device is not None
+        if config.nixl_buffer_device != "cpu":
+            assert config.nixl_buffer_size is not None
 
         extra_config = config.extra_config
         assert extra_config is not None
@@ -190,19 +207,27 @@ class NixlStorageConfig:
             config.nixl_buffer_device, metadata.worker_id
         )
 
-        # align the buffer size to have the required alignment
-        align_bytes = get_size_bytes(
-            [torch.Size(metadata.kv_shape)], [metadata.kv_dtype]
-        )
-        if config.nixl_buffer_size % align_bytes != 0:
-            buffer_size = (
-                (config.nixl_buffer_size + align_bytes - 1) // align_bytes
-            ) * align_bytes
-            logger.warning(
-                f"Nixl buffer size {config.nixl_buffer_size} is not a multiple of "
-                f"align bytes {align_bytes}, auto aligned to {buffer_size}"
+        # align the buffer size to have the required alignment. In CPU mode the
+        # pool is owned by LocalCPUBackend (sized by max_local_cpu_size) and the
+        # nixl_buffer_size config field is unused; the buffer_size on the
+        # resulting NixlStorageConfig is left as 0.
+        if config.nixl_buffer_device == "cpu":
+            buffer_size = 0
+        else:
+            align_bytes = get_size_bytes(
+                [torch.Size(metadata.kv_shape)], [metadata.kv_dtype]
             )
-            config.nixl_buffer_size = buffer_size
+            if config.nixl_buffer_size % align_bytes != 0:
+                buffer_size = (
+                    (config.nixl_buffer_size + align_bytes - 1) // align_bytes
+                ) * align_bytes
+                logger.warning(
+                    f"Nixl buffer size {config.nixl_buffer_size} is not a multiple of "
+                    f"align bytes {align_bytes}, auto aligned to {buffer_size}"
+                )
+                config.nixl_buffer_size = buffer_size
+            else:
+                buffer_size = config.nixl_buffer_size
 
         assert NixlStorageConfig.validate_nixl_backend(
             backend, config.nixl_buffer_device
@@ -212,7 +237,7 @@ class NixlStorageConfig:
             assert path is not None, f"nixl_path must be provided for {backend} backend"
 
         return NixlStorageConfig(
-            buffer_size=config.nixl_buffer_size,
+            buffer_size=buffer_size,
             pool_size=pool_size,
             buffer_device=corrected_device,
             backend=backend,
@@ -725,12 +750,22 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: Optional["LocalCPUBackend"] = None,
     ):
         """
         Initialize the Nixl storage backend.
 
-        :param dst_device: the device where the blocking retrieved KV is stored,
-            could be either "cpu", "cuda", or "cuda:0", "cuda:1", etc.
+        :param nixl_config: The Nixl storage configuration.
+        :param config: The LMCache engine configuration.
+        :param metadata: The LMCache metadata.
+        :param loop: The asyncio event loop.
+        :param local_cpu_backend: The LocalCPUBackend whose MixedMemoryAllocator
+            (with use_paging=True) will be shared with this NIXL backend in CPU
+            mode.  Must be provided (and non-None) when nixl_config.buffer_device
+            is ``"cpu"``.  Ignored in GPU mode.
+        :raises RuntimeError: In CPU mode, if *local_cpu_backend* is None, or if
+            its allocator is not a MixedMemoryAllocator wrapping a
+            PagedTensorMemoryAllocator.
         """
         super().__init__(dst_device=nixl_config.buffer_device)
 
@@ -741,7 +776,38 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         self.progress_set: Set[CacheEngineKey] = set()
 
         self.nixl_config = nixl_config
-        self.memory_allocator = self.initialize_allocator(config, metadata)
+        self._local_cpu_backend: Optional["LocalCPUBackend"] = None
+
+        if nixl_config.buffer_device != "cpu":
+            # GPU mode: allocate own staging buffer now
+            self.memory_allocator: PagedTensorMemoryAllocator = (
+                self.initialize_allocator(config, metadata)
+            )
+        else:
+            # CPU mode: share the LocalCPUBackend's PagedTensorMemoryAllocator
+            if local_cpu_backend is None:
+                raise RuntimeError(
+                    "nixl_buffer_device=cpu requires a LocalCPUBackend staging buffer "
+                    "(set max_local_cpu_size > 0)"
+                )
+            allocator = local_cpu_backend.get_memory_allocator()
+            if not isinstance(allocator, MixedMemoryAllocator) or not isinstance(
+                allocator.pin_allocator, PagedTensorMemoryAllocator
+            ):
+                raise RuntimeError(
+                    "LocalCPUBackend must use MixedMemoryAllocator(use_paging=True) "
+                    "when NIXL CPU mode is enabled. Ensure enable_nixl_storage + "
+                    "nixl_buffer_device=cpu triggered the paged allocator path in "
+                    "LocalCPUBackend.initialize_allocator()."
+                )
+            self.memory_allocator = allocator.pin_allocator
+            self._local_cpu_backend = local_cpu_backend
+            self.free_pinned_buffer = False
+            logger.debug(
+                "nixl_buffer_device=cpu: NIXL sharing LocalCPUBackend's pool "
+                "(sized by max_local_cpu_size=%.2f GiB)",
+                config.max_local_cpu_size,
+            )
 
     def initialize_allocator(
         self,
@@ -785,6 +851,8 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         )
 
     def get_memory_allocator(self):
+        if self._local_cpu_backend is not None:
+            return self._local_cpu_backend.get_memory_allocator()
         return self.memory_allocator
 
     def allocate(
@@ -798,6 +866,10 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         if busy_loop:
             logger.warning("NixlStorageBackend does not support busy loop for now")
 
+        if self._local_cpu_backend is not None:
+            return self._local_cpu_backend.allocate(
+                shapes, dtypes, fmt, eviction=eviction, busy_loop=False
+            )
         return self.memory_allocator.allocate(shapes, dtypes, fmt)
 
     def batched_allocate(
@@ -812,9 +884,15 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         if busy_loop:
             logger.warning("NixlStorageBackend does not support busy loop for now")
 
+        if self._local_cpu_backend is not None:
+            return self._local_cpu_backend.batched_allocate(
+                shapes, dtypes, batch_size, fmt, eviction=eviction, busy_loop=False
+            )
         return self.memory_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
 
     def get_allocator_backend(self):
+        if self._local_cpu_backend is not None:
+            return self._local_cpu_backend
         return self
 
     @abstractmethod
@@ -869,12 +947,17 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         metadata: LMCacheMetadata,
+        local_cpu_backend: Optional["LocalCPUBackend"] = None,
     ):
         """
         Create a Nixl backend with the given configuration.
 
-        :param nixl_config: The Nixl configuration.
-        :param dst_device: The device where the data is stored.
+        :param config: The LMCache engine configuration.
+        :param loop: The asyncio event loop.
+        :param metadata: The LMCache metadata.
+        :param local_cpu_backend: The LocalCPUBackend whose MixedMemoryAllocator
+            (with use_paging=True) will be shared with this NIXL backend in CPU
+            mode.  Required when ``config.nixl_buffer_device == "cpu"``.
 
         :return: A NixlBackend instance.
         """
@@ -882,9 +965,13 @@ class NixlStorageBackend(AllocatorBackendInterface, ABC):
         nixl_config = NixlStorageConfig.from_cache_engine_config(config, metadata)
         # Create the Nixl backend
         if nixl_config.dynamic_storage:
-            return NixlDynamicStorageBackend(nixl_config, config, metadata, loop)
+            return NixlDynamicStorageBackend(
+                nixl_config, config, metadata, loop, local_cpu_backend
+            )
         else:
-            return NixlStaticStorageBackend(nixl_config, config, metadata, loop)
+            return NixlStaticStorageBackend(
+                nixl_config, config, metadata, loop, local_cpu_backend
+            )
 
 
 class NixlStaticStorageBackend(NixlStorageBackend):
@@ -894,8 +981,9 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: Optional["LocalCPUBackend"] = None,
     ):
-        super().__init__(nixl_config, config, metadata, loop)
+        super().__init__(nixl_config, config, metadata, loop, local_cpu_backend)
 
         self.cache_policy = get_cache_policy(config.cache_policy)
         self.key_dict = self.cache_policy.init_mutable_mapping()
@@ -908,7 +996,10 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         )
         assert self.pool is not None
 
-        self.agent = NixlStaticStorageAgent(
+        # In CPU mode self.memory_allocator was set by the base __init__
+        # (from local_cpu_backend); in GPU mode it was allocated there too.
+        # Either way it is ready here.
+        self.agent: NixlStaticStorageAgent = NixlStaticStorageAgent(
             self.memory_allocator,
             self.pool,
             nixl_config.buffer_device,
@@ -999,12 +1090,24 @@ class NixlStaticStorageBackend(NixlStorageBackend):
             assert shape is not None
             assert fmt is not None
 
-            obj = self.memory_allocator.allocate(shape, dtype, fmt)
-            if obj is None:
-                logger.warning(
-                    "Failed to allocate memory, consider increasing the "
-                    "`nixl_buffer_size` value"
+            if self._local_cpu_backend is not None:
+                obj = self._local_cpu_backend.allocate(
+                    shape, dtype, fmt, eviction=True, busy_loop=False
                 )
+            else:
+                obj = self.memory_allocator.allocate(shape, dtype, fmt)
+            if obj is None:
+                if self._local_cpu_backend is not None:
+                    logger.warning(
+                        "Failed to allocate from the NIXL/LocalCPUBackend "
+                        "shared pool — all pages are pinned. Consider "
+                        "increasing `max_local_cpu_size`."
+                    )
+                else:
+                    logger.warning(
+                        "Failed to allocate memory, consider increasing the "
+                        "`nixl_buffer_size` value"
+                    )
                 break
 
             obj_list.append(obj)
@@ -1179,9 +1282,12 @@ class NixlStaticStorageBackend(NixlStorageBackend):
         """
         Close the storage backend.
         """
-        self.agent.close()
+        if self.agent is not None:
+            self.agent.close()
         self.pool.close()
-        self.memory_allocator.close()
+        # In CPU mode the allocator is owned by LocalCPUBackend; do not close it here.
+        if self._local_cpu_backend is None and self.memory_allocator is not None:
+            self.memory_allocator.close()
 
         if self.free_pinned_buffer:
             _free_cpu_memory(
@@ -1196,9 +1302,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         config: LMCacheEngineConfig,
         metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: Optional["LocalCPUBackend"] = None,
         cache_policy: Optional[PresenceCache] = None,
     ) -> None:
-        super().__init__(nixl_config, config, metadata, loop)
+        super().__init__(nixl_config, config, metadata, loop, local_cpu_backend)
 
         self.async_mode = nixl_config.enable_async_put
         self.enable_presence_cache = nixl_config.enable_presence_cache
@@ -1237,7 +1344,10 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         self._device_id_counter = 0
         self._device_id_lock = threading.Lock()
 
-        self.agent = NixlDynamicStorageAgent(
+        # In CPU mode self.memory_allocator was set by the base __init__
+        # (from local_cpu_backend); in GPU mode it was allocated there too.
+        # Either way it is ready here.
+        self.agent: NixlDynamicStorageAgent = NixlDynamicStorageAgent(
             self.memory_allocator,
             nixl_config.buffer_device,
             nixl_config.backend,
@@ -1455,14 +1565,30 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         mem_indices: List[int] = []
         storage_indices: List[int] = []
         for idx in range(len(keys)):
-            obj = self.memory_allocator.allocate(
-                self.meta_shape, self.meta_dtype, self.meta_fmt
-            )
-            if obj is None:
-                logger.warning(
-                    "Failed to allocate memory, consider increasing the "
-                    "`nixl_buffer_size` value"
+            if self._local_cpu_backend is not None:
+                obj = self._local_cpu_backend.allocate(
+                    self.meta_shape,
+                    self.meta_dtype,
+                    self.meta_fmt,
+                    eviction=True,
+                    busy_loop=False,
                 )
+            else:
+                obj = self.memory_allocator.allocate(
+                    self.meta_shape, self.meta_dtype, self.meta_fmt
+                )
+            if obj is None:
+                if self._local_cpu_backend is not None:
+                    logger.warning(
+                        "Failed to allocate from the NIXL/LocalCPUBackend "
+                        "shared pool — all pages are pinned. Consider "
+                        "increasing `max_local_cpu_size`."
+                    )
+                else:
+                    logger.warning(
+                        "Failed to allocate memory, consider increasing the "
+                        "`nixl_buffer_size` value"
+                    )
                 for obj in obj_list:
                     if obj is not None:
                         obj.ref_count_down()
@@ -1924,8 +2050,11 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """
         Close the storage backend.
         """
-        self.agent.close()
-        self.memory_allocator.close()
+        if self.agent is not None:
+            self.agent.close()
+        # In CPU mode the allocator is owned by LocalCPUBackend; do not close it here.
+        if self._local_cpu_backend is None and self.memory_allocator is not None:
+            self.memory_allocator.close()
 
         if self.free_pinned_buffer:
             _free_cpu_memory(

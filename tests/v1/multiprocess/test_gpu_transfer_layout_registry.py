@@ -41,6 +41,7 @@ def stub_native_storage_ops() -> Any:
     module_any = cast(Any, module)
     module_any.TTLLock = type("TTLLock", (), {})
     module_any.Bitmap = type("Bitmap", (), {})
+    module_any.PeriodicEventNotifier = type("PeriodicEventNotifier", (), {})
     with patch.dict(
         sys.modules,
         {
@@ -70,13 +71,20 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     ctx.chunk_size = 16
     ctx.layout_desc_registry = LayoutDescRegistry()
 
-    def fake_gpu_context(*args: object, **kwargs: object) -> _FakeGPUContext:
-        """Return a fake GPU context without touching CUDA."""
+    def fake_create_cache_context(
+        kv_caches: object,
+        lmcache_logical_chunk_size: int,
+        layout_hints: object = None,
+        engine_group_infos: object = (),
+        engine_type: object = None,
+    ) -> _FakeGPUContext:
+        """Return a fake cache context without touching CUDA or wrappers."""
         return _FakeGPUContext()
 
     def fake_layout_desc(
         gpu_context: _FakeGPUContext,
         num_tokens: int,
+        object_group_id: int = 0,
     ) -> MemoryLayoutDesc:
         """Return the shared layout descriptor used by both registrations."""
         return layout_desc
@@ -86,7 +94,9 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         "DeviceHostFuncDispatcher",
         _FakeDeviceHostFuncDispatcher,
     )
-    monkeypatch.setattr(gpu_transfer_mod, "GPUCacheContext", fake_gpu_context)
+    monkeypatch.setattr(
+        gpu_transfer_mod, "create_cache_context", fake_create_cache_context
+    )
     monkeypatch.setattr(gpu_transfer_mod, "get_layout_desc", fake_layout_desc)
     monkeypatch.setattr(
         gpu_transfer_mod.torch_dev,
