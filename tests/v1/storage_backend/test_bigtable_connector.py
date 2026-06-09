@@ -73,22 +73,25 @@ sys.modules["google.oauth2"] = mock_oauth2
 sys.modules["google.oauth2.service_account"] = mock_service_account
 
 # Attach mocks to pre-existing modules in sys.modules to prevent
-# AttributeError in full test suite runs
+# AttributeError in full test suite runs.
+# Note: We must use `# type: ignore[attr-defined]` here because `google`
+# is a namespace package and does not statically define submodules
+# like `oauth2` or `cloud`, which causes mypy to fail.
 if "google" in sys.modules:
     google_mod = sys.modules["google"]
-    google_mod.oauth2 = mock_oauth2
-    google_mod.cloud = mock_cloud
-    google_mod.api_core = mock_api_core
+    google_mod.oauth2 = mock_oauth2  # type: ignore[attr-defined]
+    google_mod.cloud = mock_cloud  # type: ignore[attr-defined]
+    google_mod.api_core = mock_api_core  # type: ignore[attr-defined]
 
 if "google.cloud" in sys.modules:
-    sys.modules["google.cloud"].bigtable = mock_bigtable
+    sys.modules["google.cloud"].bigtable = mock_bigtable  # type: ignore[attr-defined]
 
 if "google.oauth2" in sys.modules:
-    sys.modules["google.oauth2"].service_account = mock_service_account
+    sys.modules["google.oauth2"].service_account = mock_service_account  # type: ignore[attr-defined]
 
 if "google.api_core" in sys.modules:
-    sys.modules["google.api_core"].exceptions = mock_exceptions
-    sys.modules["google.api_core"].gapic_v1 = mock_gapic
+    sys.modules["google.api_core"].exceptions = mock_exceptions  # type: ignore[attr-defined]
+    sys.modules["google.api_core"].gapic_v1 = mock_gapic  # type: ignore[attr-defined]
 
 # Third Party
 import pytest  # noqa: E402
