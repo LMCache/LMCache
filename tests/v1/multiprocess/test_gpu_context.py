@@ -474,41 +474,67 @@ class TestGPUCacheContextBlocks:
 
 
 class TestGPUCacheContextReportStatus:
+    _TOP_LEVEL_KEYS = {
+        "num_layers",
+        "inference_engine_logical_block_size",
+        "num_blocks",
+        "cache_size_per_token",
+        "kernel_groups",
+    }
+    _GROUP_KEYS = {
+        "kernel_group_idx",
+        "engine_group_idx",
+        "object_group_idx",
+        "num_layers",
+        "layer_indices",
+        "physical_block_size",
+        "compress_ratio",
+        "dtype",
+        "gpu_kv_concrete_shape",
+        "is_mla",
+        "gpu_kv_format",
+        "gpu_kv_shape",
+        "attention_backend",
+    }
+
     def test_report_status_fields(self) -> None:
         ctx = _make_context(_SINGLE_GROUP)
         status = ctx.report_status()
 
-        expected_keys = {
-            "num_layers",
-            "inference_engine_logical_block_size",
-            "group_physical_block_sizes",
-            "group_compress_ratios",
-            "hidden_dim_sizes",
-            "dtype",
-            "is_mla",
-            "num_blocks",
-            "gpu_kv_format",
-            "gpu_kv_shape",
-            "gpu_kv_concrete_shape",
-            "attention_backend",
-            "cache_size_per_token",
-        }
-        assert set(status.keys()) == expected_keys
-
+        assert set(status.keys()) == self._TOP_LEVEL_KEYS
         assert status["num_layers"] == 4
-        assert status["is_mla"] is False
-        assert status["group_compress_ratios"] == [1]
-        assert status["gpu_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
-        assert status["dtype"] == str(ctx.dtype)
         assert status["cache_size_per_token"] == ctx.cache_size_per_token()
+
+        assert len(status["kernel_groups"]) == 1
+        group = status["kernel_groups"][0]
+        assert set(group.keys()) == self._GROUP_KEYS
+        assert group["kernel_group_idx"] == 0
+        assert group["num_layers"] == 4
+        assert group["layer_indices"] == [0, 1, 2, 3]
+        assert group["is_mla"] is False
+        assert group["compress_ratio"] == 1
+        assert group["gpu_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
+        assert group["dtype"] == str(ctx.dtype)
 
     def test_report_status_multi_group(self) -> None:
         ctx = _make_context(_MULTI_GROUP)
         manager = ctx.kv_layer_groups_manager
         status = ctx.report_status()
         assert status["num_layers"] == 6
-        assert len(status["group_physical_block_sizes"]) == manager.num_kernel_groups
-        assert len(status["group_compress_ratios"]) == manager.num_kernel_groups
+        assert len(status["kernel_groups"]) == manager.num_kernel_groups
+
+        # Group reports enumerate in order and stay self-consistent with the
+        # manager's kernel groups.
+        for kg_idx, (group, kernel_group) in enumerate(
+            zip(status["kernel_groups"], manager.kernel_groups, strict=False)
+        ):
+            assert set(group.keys()) == self._GROUP_KEYS
+            assert group["kernel_group_idx"] == kg_idx
+            assert group["engine_group_idx"] == kernel_group.engine_group_idx
+            assert group["num_layers"] == kernel_group.num_layers
+            assert group["physical_block_size"] == kernel_group.shape_desc.bs
+            assert group["compress_ratio"] == kernel_group.compress_ratio
+            assert 0 <= group["object_group_idx"] < manager.num_object_groups
 
 
 if __name__ == "__main__":
