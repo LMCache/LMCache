@@ -26,40 +26,6 @@ steps:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
         artifact_paths: ["*.log"]
 
-      # HMA (hybrid memory allocator) correctness check on google/gemma-4-31B-it.
-      # It interleaves sliding + full attention whose full layers use a larger
-      # head_dim (512 vs 256), so vLLM gives its KV cache groups different block
-      # sizes -- exercising LMCache's per-group block-size handling. Runs gsm8k,
-      # resets vLLM's local prefix cache (LMCache preserved), reruns, and asserts
-      # the scores match (run1 == run2 == no-LMCache baseline). Needs 2 GPUs
-      # (LMCache+vLLM + baseline). It is public (no HF_TOKEN), forces TRITON_ATTN
-      # (so ATTENTION_BACKEND=auto and a non-zero SCORE_TOLERANCE, since
-      # TRITON_ATTN is not bit-exact under batch invariance), and its ~63GB of
-      # weights need a higher GPU_MEMORY_UTILIZATION than the 0.5 default.
-      - label: ":compression: hma_lm_eval_gemma4"
-        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
-        timeout_in_minutes: 60
-        env:
-          MODEL: "google/gemma-4-31B-it"
-          SCORE_TOLERANCE: "0.05"
-          ATTENTION_BACKEND: "auto"
-          GPU_MEMORY_UTILIZATION: "0.85"
-          # Skip CUDA-graph capture so the large model doesn't time out at launch
-          # (safe here: this test uses a tolerance, not the bit-exact check).
-          ENFORCE_EAGER: "1"
-          # 31B weights are large; allow longer for download + load before the
-          # readiness probe gives up (other models keep the 300s default).
-          MAX_WAIT_SECONDS: "400"
-          # LIMIT = number of gsm8k samples. 31B's large per-token KV makes the
-          # full 200-sample working set overflow the CPU pool and thrash, so run
-          # 2 misses LMCache; cap the samples and enlarge the pool to keep run 2
-          # cache-served. CPU_BUFFER_SIZE (GB) is bounded by node RAM.
-          LIMIT: "100"
-          CPU_BUFFER_SIZE: "200"
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
-
       - label: ":compression: long_doc_qa"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         timeout_in_minutes: 30
@@ -97,6 +63,30 @@ steps:
                     resources: { limits: { "nvidia.com/gpu": "1" } }
                     volumeMounts: *vol-mounts
                 volumes: *vols
+        artifact_paths: ["*.log"]
+
+      # HMA correctness check on google/gemma-4-31B-it (a hybrid model whose KV
+      # cache groups get different block sizes). Runs gsm8k, resets vLLM's prefix
+      # cache (LMCache preserved), reruns served by LMCache, and asserts the two
+      # runs' scores match. Single GPU, no baseline.
+      - label: ":compression: hma_lm_eval_gemma4"
+        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
+        timeout_in_minutes: 60
+        env:
+          MODEL: "google/gemma-4-31B-it"
+          # Require an exact score match between the two runs.
+          SCORE_TOLERANCE: "0"
+          ATTENTION_BACKEND: "auto"
+          GPU_MEMORY_UTILIZATION: "0.85"
+          # 31B load + CUDA-graph capture is slow; raise the readiness timeout
+          # above the 300s default.
+          MAX_WAIT_SECONDS: "600"
+          # Cap samples and enlarge the CPU pool so the retrieve run stays
+          # cache-served (31B's per-token KV is large).
+          LIMIT: "100"
+          CPU_BUFFER_SIZE: "200"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
       - label: ":compression: fault_tolerance"

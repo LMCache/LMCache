@@ -237,16 +237,26 @@ prefetch jobs. Intended for operators and debugging, not for monitoring
           "world_size": 1,
           "kv_cache_layout": {
             "num_layers": 32,
-            "block_size": 16,
-            "hidden_dim_sizes": "...",
-            "dtype": "torch.bfloat16",
-            "is_mla": false,
+            "inference_engine_logical_block_size": 16,
             "num_blocks": 12345,
-            "gpu_kv_format": "...",
-            "gpu_kv_shape": "...",
-            "gpu_kv_concrete_shape": "...",
-            "attention_backend": "...",
-            "cache_size_per_token": 131072
+            "cache_size_per_token": 131072,
+            "kernel_groups": [
+              {
+                "kernel_group_idx": 0,
+                "engine_group_idx": 0,
+                "object_group_idx": 0,
+                "num_layers": 32,
+                "layer_indices": [0, 1, "..."],
+                "physical_block_size": 16,
+                "compress_ratio": 1,
+                "dtype": "torch.bfloat16",
+                "gpu_kv_concrete_shape": "...",
+                "is_mla": false,
+                "gpu_kv_format": "...",
+                "gpu_kv_shape": "...",
+                "attention_backend": "..."
+              }
+            ]
           }
         }
       },

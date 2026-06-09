@@ -376,16 +376,19 @@ class CBMatchResult:
 
 @dataclass
 class CBUnifiedLookupResult:
-    """Result of ``CB_UNIFIED_LOOKUP``: prefix lookup + non-prefix fingerprint
-    match, reconciled in one RPC.
+    """Resolved payload of ``CB_UNIFIED_LOOKUP``: prefix lookup + non-prefix
+    fingerprint match, reconciled in one RPC. The RPC returns ``None`` (not this)
+    while either leg's KV is still loading into L1; this type is sent only once
+    both are resident.
 
     Attributes:
         prefix_coverage_tokens: Contiguous prefix-cache coverage (L1+L2) in
             tokens — what the standard LOOKUP would report.
-        non_prefix_segments: Block-aligned matches outside the prefix coverage
+        non_prefix_segments: Fingerprint matches outside the prefix coverage
             (cur_st order), each carrying ``(old_st, old_ed, cur_st, cur_ed,
-            hash)``. Already sparse-prefetched, so the retrieve set equals the
-            prefetched set.
+            hash)``. Token-aligned (any offset, not block-aligned): the per-token
+            slot scatter handles them. Already resident in L1, so the retrieve
+            set equals the prefetched set.
     """
 
     prefix_coverage_tokens: int

@@ -18,7 +18,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
 from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import RegisterNonGpuContextResponse
@@ -126,7 +126,7 @@ class TransferContext(ABC):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        group_views: Sequence[LMCacheGroupView] = (),
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -140,7 +140,7 @@ class TransferContext(ABC):
             mq_timeout: Timeout in seconds for synchronous request wait.
             send_request: Request sender callable used to issue MQ requests.
             layout_hints: Optional inference-engine-provided layout hints.
-            group_views: LMCache-owned engine KV cache group metadata.
+            engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Raises:
             TimeoutError: If server registration does not complete before
@@ -232,7 +232,7 @@ class HandleTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        group_views: Sequence[LMCacheGroupView] = (),
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
         # First Party
         from lmcache.integration.vllm.vllm_multi_process_adapter import wrap_kv_caches
@@ -249,7 +249,7 @@ class HandleTransferContext(TransferContext):
                 world_size,
                 EngineType.VLLM,
                 layout_hints,
-                list(group_views),
+                list(engine_group_infos),
             ],
         )
         future.result(timeout=mq_timeout)
@@ -321,11 +321,11 @@ class DataTransferContext(TransferContext):
         mq_timeout: float,
         send_request: SendRequest,
         layout_hints: LayoutHints | None = None,
-        group_views: Sequence[LMCacheGroupView] = (),
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
-        ``group_views`` is accepted to satisfy the base interface but
+        ``engine_group_infos`` is accepted to satisfy the base interface but
         is currently a no-op: the non-GPU transfer path does not support
         hybrid KV cache groups and rejects multi-group transfers at store /
         retrieve time (see ``_single_group_block_ids``).
