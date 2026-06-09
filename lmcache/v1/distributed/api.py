@@ -55,6 +55,9 @@ class ObjectKey:
     kv_rank: int
     """ The rank that uniquely identifies the slice of the KV cache """
 
+    object_group_id: int = 0
+    """ Index of the object group this chunk belongs to. """
+
     cache_salt: str = ""
     """ Per-user isolation salt. Same content from different users with
     different cache_salt values produces different ObjectKeys, giving
@@ -78,6 +81,10 @@ class ObjectKey:
         if "@" in self.model_name:
             raise ValueError(
                 f"model_name must not contain '@' (got {self.model_name!r})"
+            )
+        if self.object_group_id < 0:
+            raise ValueError(
+                f"object_group_id must be >= 0 (got {self.object_group_id})"
             )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
@@ -202,6 +209,7 @@ class PrefetchHandle:
 def ipc_key_to_object_keys(
     ipc_key: IPCCacheEngineKey,
     chunk_hashes: list[bytes],
+    object_group_id: int = 0,
 ) -> list[ObjectKey]:
     """
     Convert a single IPCCacheEngineKey and its chunk hashes to a list of ObjectKey.
@@ -219,6 +227,8 @@ def ipc_key_to_object_keys(
         ipc_key: The IPC key providing model_name, world_size, worker_id,
             and cache_salt.
         chunk_hashes: List of chunk hash bytes, one per chunk.
+        object_group_id: Index of the object group the chunks belong to.
+            Defaults to 0, the single-group case.
 
     Returns:
         list[ObjectKey]: The converted list of ObjectKey.
@@ -243,6 +253,7 @@ def ipc_key_to_object_keys(
                         chunk_hash=chunk_hash,
                         model_name=ipc_key.model_name,
                         kv_rank=kv_rank,
+                        object_group_id=object_group_id,
                         cache_salt=cache_salt,
                     )
                 )
@@ -259,6 +270,7 @@ def ipc_key_to_object_keys(
                     chunk_hash=chunk_hash,
                     model_name=ipc_key.model_name,
                     kv_rank=kv_rank,
+                    object_group_id=object_group_id,
                     cache_salt=cache_salt,
                 )
             )

@@ -219,19 +219,28 @@ class TestObjectKeySerialization:
         assert _object_key_to_string(k1) != _object_key_to_string(k2)
 
     def test_serialization_format(self):
-        """Unsalted keys use the 3-field shape — identical to the
-        pre-cache_salt wire format, so existing remote storage
-        stays valid."""
+        """Unsalted keys use the 4-field shape with object_group_id
+        embedded right after kv_rank."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
             kv_rank=255,
         )
         s = _object_key_to_string(key)
-        assert s == "llama@000000ff@00010203"
+        assert s == "llama@000000ff@0@00010203"
+
+    def test_object_group_id_embedded(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            object_group_id=5,
+        )
+        s = _object_key_to_string(key)
+        assert s == "llama@000000ff@5@00010203"
 
     def test_salted_serialization_format(self):
-        """Salted keys append ``@<cache_salt>`` as a 4th field."""
+        """Salted keys append ``@<cache_salt>`` as a 5th field."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
@@ -239,7 +248,7 @@ class TestObjectKeySerialization:
             cache_salt="alice",
         )
         s = _object_key_to_string(key)
-        assert s == "llama@000000ff@00010203@alice"
+        assert s == "llama@000000ff@0@00010203@alice"
 
     def test_different_salts_produce_different_strings(self):
         base = {
@@ -256,7 +265,7 @@ class TestObjectKeySerialization:
         assert s_empty != s_alice
         assert s_alice != s_bob
         # Empty salt has no trailing "@salt", salted keys do.
-        assert s_empty.count("@") == 2  # 3 fields
+        assert s_empty.count("@") == 3  # 4 fields (model, kv_rank, group, hash)
         assert s_alice.endswith("@alice")
         assert s_bob.endswith("@bob")
 
