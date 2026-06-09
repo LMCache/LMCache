@@ -594,7 +594,12 @@ class LMCStatsMonitor:
         self.interval_prompt_tokens += delta
 
     @thread_safe
-    def update_interval_async_prefetch_skipped_tokens(self, delta: int):
+    def update_interval_async_prefetch_skipped_tokens(self, delta: int) -> None:
+        """Increment the count of async-prefetch tokens skipped this interval.
+
+        Args:
+            delta: Number of tokens to add to the skipped-token counter.
+        """
         self.interval_async_prefetch_skipped_tokens += delta
 
     def _clear(self):
