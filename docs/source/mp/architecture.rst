@@ -404,8 +404,9 @@ Adding a new request type
 
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``, or
-   ``blend_v2``) and add the request name to that module's ``REQUEST_NAMES``.
+   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
+   ``blend_v2``, or ``blend_v3``) and add the request name to that
+   module's ``REQUEST_NAMES``.
 3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``).
 4. Register the handler in ``run_cache_server()`` via ``add_handler_helper()``.
 
@@ -431,8 +432,11 @@ Key Source Files
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``gpu_transfer.py``
        (``GPUTransferModule``), ``non_gpu_transfer.py``
-       (``NonGPUTransferModule``), and ``blend.py``
-       (``BlendModule`` / ``BlendEngineV2``).
+       (``NonGPUTransferModule``), ``blend.py``
+       (``BlendModule`` / ``BlendEngineV2``, selected by
+       ``--engine-type blend_legacy``), and ``blend_v3.py``
+       (``BlendV3Module``, the paged-aware CacheBlend V3 pipeline
+       selected by ``--engine-type blend``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``
