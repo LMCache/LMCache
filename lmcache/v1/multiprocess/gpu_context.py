@@ -26,7 +26,7 @@ from lmcache.utils import EngineType, lmcache_deprecate
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
-    get_concrete_gpu_kv_shape,
+    get_concrete_gpu_kv_shape_from_shape_desc,
     get_device,
     get_dtype,
     get_gpu_kv_shape_description,
@@ -646,52 +646,85 @@ class GPUCacheContext:
         owning module wraps it with ``model_name``/``world_size``, which this
         context does not track.
 
-        Returns:
-            A dict with one entry per documented layout field:
+        The report is organised **per kernel group** so that hybrid models
+        (whose groups differ in geometry) are described accurately, with a
+        small set of genuinely context-wide fields kept at the top level.
 
-            - ``num_layers`` (int)
+        Returns:
+            A dict with these top-level fields:
+
+            - ``num_layers`` (int): total layers in the model.
             - ``inference_engine_logical_block_size`` (int)
-            - ``group_physical_block_sizes`` (list[int]): per-group
-              ``shape_desc.bs``
-            - ``group_compress_ratios`` (list[int]): per-group compress ratio
-            - ``hidden_dim_sizes`` (str): stringified per-group hidden-dim list
-            - ``dtype`` (str): stringified torch dtype
-            - ``is_mla`` (bool)
             - ``num_blocks`` (int)
-            - ``gpu_kv_format`` (str): GPU KV format enum name
-            - ``gpu_kv_shape`` (str): symbolic shape description
-            - ``gpu_kv_concrete_shape`` (str): shape with numeric values
-            - ``attention_backend`` (str)
-            - ``cache_size_per_token`` (int): bytes per logical token
+            - ``cache_size_per_token`` (int): bytes per logical token,
+              summed across groups.
+            - ``kernel_groups`` (list[dict]): one entry per kernel group,
+              each with:
+
+              - ``kernel_group_idx`` (int): index into ``manager.kernel_groups``.
+              - ``engine_group_idx`` (int): paged-block address space.
+              - ``object_group_idx`` (int): owning object group.
+              - ``num_layers`` (int): layers in this group.
+              - ``layer_indices`` (list[int]): the group's layer indices.
+              - ``physical_block_size`` (int): ``shape_desc.bs``.
+              - ``compress_ratio`` (int)
+              - ``dtype`` (str): stringified torch dtype.
+              - ``gpu_kv_concrete_shape`` (str): group-accurate numeric shape.
+              - ``is_mla`` (bool)
+              - ``gpu_kv_format`` (str): GPU KV format enum name.
+              - ``gpu_kv_shape`` (str): symbolic shape description.
+              - ``attention_backend`` (str)
         """
         # TODO(compat): the key names and value *formatting* below are a
-        # contract with the `/status` endpoint and the `lmcache` CLI
-        # (`lmcache/cli/commands/describe.py`, `bench/engine_bench/config.py`).
-        # Renaming a key breaks `lmcache describe kvcache`; dropping
-        # `cache_size_per_token` breaks `lmcache bench engine`. `hidden_dim_sizes`
-        # and `dtype` are stringified only for back-compat with those consumers
-        # and should become a real list / structured value once the CLI is
-        # updated to parse them.
+        # contract with the `/status` endpoint and the `lmcache` CLI.
+        # `lmcache bench engine` (`bench/engine_bench/config.py`) reads the
+        # top-level `cache_size_per_token`; `lmcache describe kvcache`
+        # (`lmcache/cli/commands/describe.py`) renders the top-level summary
+        # and the per-group `kernel_groups` entries. Renaming a key breaks
+        # those consumers.
         manager = self.kv_layer_groups_manager
         kernel_groups = manager.kernel_groups
+
+        # Reverse-map each kernel group to its owning object group.
+        kernel_group_to_object_group: dict[int, int] = {
+            kg_idx: og_idx
+            for og_idx, og in enumerate(manager.object_groups)
+            for kg_idx in og.kernel_group_indices
+        }
+
+        gpu_kv_format = self.gpu_kv_format_
+        group_reports: list[dict] = []
+        for kernel_group_idx, group in enumerate(kernel_groups):
+            group_reports.append(
+                {
+                    "kernel_group_idx": kernel_group_idx,
+                    "engine_group_idx": group.engine_group_idx,
+                    "object_group_idx": kernel_group_to_object_group.get(
+                        kernel_group_idx, 0
+                    ),
+                    "num_layers": group.num_layers,
+                    "layer_indices": list(group.layer_indices),
+                    "physical_block_size": group.shape_desc.bs,
+                    "compress_ratio": group.compress_ratio,
+                    "dtype": str(group.dtype),
+                    "gpu_kv_concrete_shape": get_concrete_gpu_kv_shape_from_shape_desc(
+                        group.shape_desc, gpu_kv_format
+                    ),
+                    "is_mla": is_mla(gpu_kv_format),
+                    "gpu_kv_format": gpu_kv_format.name,
+                    "gpu_kv_shape": get_gpu_kv_shape_description(gpu_kv_format),
+                    "attention_backend": get_attention_backend(gpu_kv_format),
+                }
+            )
+
         return {
             "num_layers": self.num_layers,
             "inference_engine_logical_block_size": (
                 manager.inference_engine_logical_block_size
             ),
-            "group_physical_block_sizes": [g.shape_desc.bs for g in kernel_groups],
-            "group_compress_ratios": [g.compress_ratio for g in kernel_groups],
-            "hidden_dim_sizes": str([g.hidden_dim_size for g in kernel_groups]),
-            "dtype": str(self.dtype),
-            "is_mla": self.is_mla,
             "num_blocks": self.num_blocks,
-            "gpu_kv_format": self.gpu_kv_format_.name,
-            "gpu_kv_shape": get_gpu_kv_shape_description(self.gpu_kv_format_),
-            "gpu_kv_concrete_shape": get_concrete_gpu_kv_shape(
-                self.kv_caches_, self.gpu_kv_format_
-            ),
-            "attention_backend": get_attention_backend(self.gpu_kv_format_),
             "cache_size_per_token": self.cache_size_per_token(),
+            "kernel_groups": group_reports,
         }
 
 

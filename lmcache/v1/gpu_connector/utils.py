@@ -417,6 +417,76 @@ def get_concrete_gpu_kv_shape(
     return f"Unknown ({gpu_kv_format})"
 
 
+def get_concrete_gpu_kv_shape_from_shape_desc(
+    shape_desc: "lmc_ops.PageBufferShapeDesc",
+    gpu_kv_format: "lmc_ops.GPUKVFormat",
+) -> str:
+    """Return the concrete shape for a single kernel group's ``shape_desc``.
+
+    Like :func:`get_concrete_gpu_kv_shape`, but the numeric values are
+    read from a per-group :class:`PageBufferShapeDesc` instead of from
+    the whole ``kv_caches`` structure. This makes the result
+    *group-accurate*: ``shape_desc.nl`` is the number of layers in the
+    group (not the model total), so for hybrid models each kernel group
+    reports its own shape.
+
+    For example, instead of ``NL x [2, NB, BS, NH, HS]`` this returns
+    ``80 x [2, 2048, 128, 8, 128]``.
+
+    Args:
+        shape_desc: The kernel group's shape descriptor. Numeric values
+            are pulled from its ``nl``/``nb``/``bs``/``nh``/``hs`` fields;
+            the page-buffer-size (``PBS``) formats use ``nb * bs``.
+        gpu_kv_format: The GPU KV format that determines the symbolic
+            shape template.
+
+    Returns:
+        The shape string with numeric values substituted, or
+        ``"Unknown (<format>)"`` for an unrecognised format.
+    """
+    nl = shape_desc.nl
+    nb = shape_desc.nb
+    bs = shape_desc.bs
+    nh = shape_desc.nh
+    hs = shape_desc.hs
+    pbs = nb * bs
+
+    fmt = gpu_kv_format
+    F = lmc_ops.GPUKVFormat
+
+    if fmt == F.NB_NL_TWO_BS_NH_HS:
+        return f"[{nb}, {nl}, 2, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_TWO_NB_BS_NH_HS:
+        return f"{nl} x [2, {nb}, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NB_TWO_BS_NH_HS:
+        return f"{nl} x [{nb}, 2, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NB_BS_HS:
+        return f"{nl} x [{nb}, {bs}, {hs}]"
+
+    if fmt == F.TWO_X_NL_X_NBBS_NH_HS:
+        return f"2 x {nl} x [{pbs}, {nh}, {hs}]"
+
+    if fmt == F.TWO_X_NL_X_NB_BS_NH_HS:
+        return f"2 x {nl} x [{nb}, {bs}, {nh}, {hs}]"
+
+    if fmt == F.NL_X_NBBS_ONE_HS:
+        return f"{nl} x [{pbs}, 1, {hs}]"
+
+    if fmt == F.NL_X_TWO_NB_NH_BS_HS:
+        return f"{nl} x [2, {nb}, {nh}, {bs}, {hs}]"
+
+    if fmt == F.NL_X_NB_TWO_NH_BS_HS:
+        return f"{nl} x [{nb}, 2, {nh}, {bs}, {hs}]"
+
+    if fmt == F.NB_NL_TWO_NH_BS_HS:
+        return f"[{nb}, {nl}, 2, {nh}, {bs}, {hs}]"
+
+    return f"Unknown ({gpu_kv_format})"
+
+
 def legible_print_gpu_kv_format(gpu_kv_format: "lmc_ops.GPUKVFormat"):
     """
     Print the GPU KV Format in a legible way
