@@ -342,6 +342,40 @@ class CpuCacheContext:
         """Returns the KV cache pointer tensor for the given group."""
         return self.group_kv_pointers_[group_idx]
 
+    def get_kernel_group_shape_dtype(
+        self,
+        num_tokens: int,
+        kernel_group_idx: int,
+    ) -> tuple[torch.Size, torch.dtype]:
+        """Returns the shape and dtype for the given kernel group index and
+        number of tokens.
+
+        Mirrors :meth:`GPUCacheContext.get_kernel_group_shape_dtype` so
+        callers such as ``gpu_transfer.get_layout_desc`` can duck-type
+        across GPU and CPU backends.
+
+        Args:
+            num_tokens: Number of tokens.
+            kernel_group_idx: Index of the kernel group.
+
+        Returns:
+            A ``(shape, dtype)`` tuple for the given kernel group.
+        """
+        group = self.kv_layer_groups_manager_.kv_layer_groups[kernel_group_idx]
+        compress_ratio = group.compress_ratio
+        if num_tokens % compress_ratio != 0:
+            raise ValueError(
+                "num_tokens (%d) is not a multiple of compress_ratio (%d) "
+                "for kernel_group_idx %d"
+                % (num_tokens, compress_ratio, kernel_group_idx)
+            )
+        num_slots = num_tokens // compress_ratio
+        sd = group.shape_desc
+        shape = torch.Size(
+            (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
+        )
+        return shape, group.dtype
+
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0
     ) -> torch.Size:
