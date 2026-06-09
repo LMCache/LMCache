@@ -129,9 +129,16 @@ def test_multi_layer_block_kv_transfer_roundtrip():
 
     block_ids = torch.tensor(list(range(NB)), dtype=torch.long)
 
+    # Match the C++ binding's strict signature: 1D int64 tensor of paged
+    # buffer ``data_ptr()`` values, and a list of int ``data_ptr()`` for
+    # the lmcache objects (the fallback also accepts tensors directly,
+    # but the compiled extension does not).
+    norm_ptrs = torch.tensor([t.data_ptr() for t in norm], dtype=torch.long)
+    obj_ptrs = [obj.data_ptr()]
+
     lmc_ops.multi_layer_block_kv_transfer(
-        norm,
-        [obj],
+        norm_ptrs,
+        obj_ptrs,
         block_ids,
         torch.device("cpu"),
         lmc_ops.TransferDirection.D2H,
@@ -143,9 +150,10 @@ def test_multi_layer_block_kv_transfer_roundtrip():
 
     # H2D into a fresh per-layer buffer set; round-trip must be bit-exact.
     out = [torch.zeros_like(layer) for layer in norm]
+    out_ptrs = torch.tensor([t.data_ptr() for t in out], dtype=torch.long)
     lmc_ops.multi_layer_block_kv_transfer(
-        out,
-        [obj],
+        out_ptrs,
+        obj_ptrs,
         block_ids,
         torch.device("cpu"),
         lmc_ops.TransferDirection.H2D,
