@@ -11,7 +11,7 @@ import pytest
 from lmcache import banner
 from lmcache.banner import (
     DISABLE_BANNER_ENV,
-    LMCACHE_DOCS,
+    LMCACHE_LINKEDIN,
     LMCACHE_RECIPES,
     LMCACHE_WEBSITE,
     print_banner_once,
@@ -38,8 +38,8 @@ def test_banner_contains_version_links_and_opt_out_hint():
     output = stream.getvalue()
     assert "LMCache v" in output
     assert LMCACHE_WEBSITE in output
-    assert LMCACHE_DOCS in output
     assert LMCACHE_RECIPES in output
+    assert LMCACHE_LINKEDIN in output
     assert DISABLE_BANNER_ENV in output
 
 

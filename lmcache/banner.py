@@ -24,8 +24,8 @@ except ImportError:  # pragma: no cover - version file is generated at build tim
 DISABLE_BANNER_ENV = "LMCACHE_DISABLE_BANNER"
 
 LMCACHE_WEBSITE = "https://lmcache.ai/"
-LMCACHE_DOCS = "https://docs.lmcache.ai/"
 LMCACHE_RECIPES = "https://docs.lmcache.ai/recipes"
+LMCACHE_LINKEDIN = "https://www.linkedin.com/company/lmcache-lab"
 
 # Solarized palette, 24-bit ANSI escapes (TTY only): "LM" in bold italic
 # orange (#cb4b16), "Cache" in cyan (#2aa198).
@@ -67,8 +67,8 @@ def _render_banner(colored: bool) -> str:
 
     Returns:
         The multi-line banner: the LMCache logo with the version (and
-        commit id when available), website, docs, and recipes links on
-        its right, and a final line describing the
+        commit id when available), website, recipes, and LinkedIn links
+        on its right, and a final line describing the
         ``LMCACHE_DISABLE_BANNER`` opt-out.
     """
     lm_style = _LM_STYLE if colored else ""
@@ -81,9 +81,9 @@ def _render_banner(colored: bool) -> str:
         version += f" ({_LMCACHE_COMMIT[:9]})"
     right_text = {
         1: version,
-        2: f"website: {LMCACHE_WEBSITE}",
-        3: f"docs:    {LMCACHE_DOCS}",
-        4: f"recipes: {LMCACHE_RECIPES}",
+        2: f"website:  {LMCACHE_WEBSITE}",
+        3: f"recipes:  {LMCACHE_RECIPES}",
+        4: f"linkedin: {LMCACHE_LINKEDIN}",
     }
     lines = []
     for row, (lm_part, cache_part) in enumerate(zip(_LM_ART, _CACHE_ART, strict=True)):
