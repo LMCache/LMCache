@@ -17,6 +17,9 @@ class _FakeGPUContext:
 
     num_layers: int = 2
 
+    def close(self) -> None:
+        """No-op teardown (real GPUCacheContext.close deregisters its GDS buffer)."""
+
 
 class _FakeDeviceHostFuncDispatcher:
     """No-op dispatcher to avoid starting native completion threads."""
