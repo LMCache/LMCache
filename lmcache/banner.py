@@ -13,13 +13,19 @@ import os
 
 try:
     # First Party
-    from lmcache._version import __version__ as _LMCACHE_VERSION
+    from lmcache import _version
+
+    _LMCACHE_VERSION = getattr(_version, "__version__", "unknown")
+    _LMCACHE_COMMIT = getattr(_version, "__commit_id__", "")
 except ImportError:  # pragma: no cover - version file is generated at build time
     _LMCACHE_VERSION = "unknown"
+    _LMCACHE_COMMIT = ""
 
 DISABLE_BANNER_ENV = "LMCACHE_DISABLE_BANNER"
 
 LMCACHE_WEBSITE = "https://lmcache.ai/"
+LMCACHE_DOCS = "https://docs.lmcache.ai/"
+LMCACHE_RECIPES = "https://docs.lmcache.ai/recipes"
 
 # Solarized palette, 24-bit ANSI escapes (TTY only): "LM" in bold italic
 # orange (#cb4b16), "Cache" in cyan (#2aa198).
@@ -60,8 +66,9 @@ def _render_banner(colored: bool) -> str:
         colored: Whether to wrap the logo in ANSI color escapes.
 
     Returns:
-        The multi-line banner: the LMCache logo with the version and
-        website on its right, and a final line describing the
+        The multi-line banner: the LMCache logo with the version (and
+        commit id when available), website, docs, and recipes links on
+        its right, and a final line describing the
         ``LMCACHE_DISABLE_BANNER`` opt-out.
     """
     lm_style = _LM_STYLE if colored else ""
@@ -69,9 +76,14 @@ def _render_banner(colored: bool) -> str:
     dim_style = _DIM_STYLE if colored else ""
     reset = _RESET if colored else ""
 
+    version = f"LMCache v{_LMCACHE_VERSION}"
+    if _LMCACHE_COMMIT:
+        version += f" ({_LMCACHE_COMMIT[:9]})"
     right_text = {
-        1: f"LMCache v{_LMCACHE_VERSION}",
-        2: LMCACHE_WEBSITE,
+        1: version,
+        2: f"website: {LMCACHE_WEBSITE}",
+        3: f"docs:    {LMCACHE_DOCS}",
+        4: f"recipes: {LMCACHE_RECIPES}",
     }
     lines = []
     for row, (lm_part, cache_part) in enumerate(zip(_LM_ART, _CACHE_ART, strict=True)):

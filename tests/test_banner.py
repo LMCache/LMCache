@@ -9,7 +9,13 @@ import pytest
 
 # First Party
 from lmcache import banner
-from lmcache.banner import DISABLE_BANNER_ENV, LMCACHE_WEBSITE, print_banner_once
+from lmcache.banner import (
+    DISABLE_BANNER_ENV,
+    LMCACHE_DOCS,
+    LMCACHE_RECIPES,
+    LMCACHE_WEBSITE,
+    print_banner_once,
+)
 
 
 class _TTYStream(io.StringIO):
@@ -26,12 +32,14 @@ def _fresh_banner_state(monkeypatch):
     monkeypatch.delenv(DISABLE_BANNER_ENV, raising=False)
 
 
-def test_banner_contains_version_website_and_opt_out_hint():
+def test_banner_contains_version_links_and_opt_out_hint():
     stream = io.StringIO()
     print_banner_once(stream)
     output = stream.getvalue()
     assert "LMCache v" in output
     assert LMCACHE_WEBSITE in output
+    assert LMCACHE_DOCS in output
+    assert LMCACHE_RECIPES in output
     assert DISABLE_BANNER_ENV in output
 
 
