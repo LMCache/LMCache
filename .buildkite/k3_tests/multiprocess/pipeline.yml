@@ -119,7 +119,10 @@ steps:
 
   # GDS L1 tier: the same three workloads, but the LMCache L1 medium is an NVMe
   # slab via cuFile DMA instead of pinned DRAM (run.sh prefixes the name gds_).
-  # Mounts /data/gds-scratch at /scratch -- the GDS-capable NVMe scratch.
+  # Mounts /data/gds-scratch at /scratch -- the GDS-capable NVMe scratch -- plus
+  # the host's /run/udev (read-only): cuFile resolves the slab device's
+  # attributes via libudev, and a pod's /run/udev is empty, so without this
+  # cuFileHandleRegister fails (err 5027) and the server won't start.
   - group: ":compression: Multiprocess (GDS L1, NVMe slab)"
     steps:
       - label: ":compression: gds_vllm_bench"
@@ -137,9 +140,11 @@ steps:
                     volumeMounts: &vol-mounts-gds
                       - { name: hf-cache, mountPath: /root/.cache/huggingface }
                       - { name: scratch, mountPath: /scratch }
+                      - { name: udev, mountPath: /run/udev, readOnly: true }
                 volumes: &vols-gds
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
                   - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
+                  - { name: udev, hostPath: { path: /run/udev, type: Directory } }
         artifact_paths: ["*.log"]
 
       - label: ":compression: gds_long_doc_qa"
