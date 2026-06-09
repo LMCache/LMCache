@@ -352,6 +352,7 @@ class LocalDiskBackend(StorageBackendInterface):
                 self.cache_policy.update_on_put(key)
 
         if not evict_success:
+            self.disk_worker.remove_put_task(key)
             return None
 
         memory_obj.ref_count_up()
