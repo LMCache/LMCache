@@ -79,6 +79,7 @@ class _CBUnifiedJob:
     per_hash_obj_keys: dict | None = None
     expanded_uidx: list[int] | None = None
     found_uidx: set[int] | None = None  # stashed when the sparse poll completes
+    l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
 
 
 class BlendTokenRangeMatcherV3:
@@ -788,17 +789,22 @@ class BlendV3Module:
                         job.per_hash_obj_keys,
                         job.expanded_uidx,
                     ) = self._sparse_prefetch_submit(key, layout_desc, job.non_prefix)
-                    self._event_bus.publish(
-                        Event(
-                            event_type=EventType.CB_SPARSE_PREFETCH_START,
-                            session_id=rid,
-                            metadata={
-                                "n_chunks": len(job.non_prefix),
-                                "world_size": key.world_size,
-                                "n_keys": len(job.non_prefix) * key.world_size,
-                            },
+                    # Only trace the span when the prefetch actually reads L2;
+                    # all-L1-resident matches do no L2 work worth a span.
+                    job.l2_keys = len(job.handle.l2_orig_indices)
+                    if job.l2_keys > 0:
+                        self._event_bus.publish(
+                            Event(
+                                event_type=EventType.CB_SPARSE_PREFETCH_START,
+                                session_id=rid,
+                                metadata={
+                                    "n_chunks": len(job.non_prefix),
+                                    "world_size": key.world_size,
+                                    "n_keys": len(job.non_prefix) * key.world_size,
+                                    "l2_keys": job.l2_keys,
+                                },
+                            )
                         )
-                    )
                 else:
                     logger.error(
                         "No CB GPU context for model %s ws %d during cb_unified_lookup",
@@ -814,13 +820,17 @@ class BlendV3Module:
             if bm is None:
                 return None  # sparse still loading -> defer
             job.found_uidx = set(bm.get_indices_list())
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_SPARSE_PREFETCH_END,
-                    session_id=rid,
-                    metadata={"found_keys": len(job.found_uidx)},
+            if job.l2_keys > 0:
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_SPARSE_PREFETCH_END,
+                        session_id=rid,
+                        metadata={
+                            "found_keys": len(job.found_uidx),
+                            "l2_keys": job.l2_keys,
+                        },
+                    )
                 )
-            )
 
         # --- BOTH legs ready: classify the complement + finalize. ---
         if job.handle is not None:

@@ -332,23 +332,24 @@ class BlendTracingSubscriber(EventSubscriber):
                 root_span, _ = root_entry
                 hit_tokens = int(event.metadata.get("hit_tokens", 0))
                 requested_tokens = int(event.metadata.get("requested_tokens", 0))
-                hit_rate = (
-                    hit_tokens / requested_tokens if requested_tokens > 0 else 0.0
+                prefix_hit_tokens = int(event.metadata.get("prefix_hit_tokens", 0))
+                non_prefix_hit_tokens = int(
+                    event.metadata.get("non_prefix_hit_tokens", 0)
                 )
+                denom = requested_tokens or 1  # avoid /0; rates are 0 when requested=0
                 root_span.set_attribute("hit_tokens", hit_tokens)
                 root_span.set_attribute("requested_tokens", requested_tokens)
                 # hit_rate numerator = prefix + non-prefix reuse (hit_tokens).
-                root_span.set_attribute("hit_rate", hit_rate)
+                root_span.set_attribute("hit_rate", hit_tokens / denom)
                 root_span.set_attribute(
                     "prefix_hits", int(event.metadata.get("prefix_hits", 0))
                 )
+                root_span.set_attribute("prefix_hit_tokens", prefix_hit_tokens)
+                root_span.set_attribute("non_prefix_hit_tokens", non_prefix_hit_tokens)
+                # Per-component hit rates (sum to hit_rate).
+                root_span.set_attribute("prefix_hit_rate", prefix_hit_tokens / denom)
                 root_span.set_attribute(
-                    "prefix_hit_tokens",
-                    int(event.metadata.get("prefix_hit_tokens", 0)),
-                )
-                root_span.set_attribute(
-                    "non_prefix_hit_tokens",
-                    int(event.metadata.get("non_prefix_hit_tokens", 0)),
+                    "non_prefix_hit_rate", non_prefix_hit_tokens / denom
                 )
 
         if event.event_type in self._GPU_OP_END_EVENTS:
