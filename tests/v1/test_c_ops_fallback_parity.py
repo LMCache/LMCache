@@ -212,9 +212,7 @@ def _has_real_names(params):
 # ── Discover the intersection automatically ──
 
 # Functions intentionally excluded from parity checks.
-_EXCLUDED_FUNCS: set[str] = {
-    "multi_layer_block_kv_transfer",
-}
+_EXCLUDED_FUNCS: set[str] = set()
 
 _fallback_callables = _public_callables(fallback)
 _c_ops_callables = _public_callables(c_ops) if HAS_C_OPS else {}
