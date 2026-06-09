@@ -66,6 +66,8 @@ class TurboQuantSerdeConfig:
         preset: TurboQuant compression preset.
         head_dim: Per-head hidden dimension.
         block_size: Token block size used by the compressed layout.
+        skip_first_layers: Number of leading layers stored without quantization.
+        skip_last_layers: Number of trailing layers stored without quantization.
         cuda_device: CUDA staging device used when both source and destination
             tensors are CPU tensors. Empty string means automatically select a
             CUDA device with sufficient free memory and the lowest GPU
@@ -75,7 +77,13 @@ class TurboQuantSerdeConfig:
     preset: str = "turboquant_k8v4"
     head_dim: int = 128
     block_size: int = 16
+    skip_first_layers: int = 2
+    skip_last_layers: int = 2
     cuda_device: str = ""
+
+    def __post_init__(self) -> None:
+        if self.skip_first_layers < 0 or self.skip_last_layers < 0:
+            raise ValueError("TurboQuant skipped layer counts must be non-negative")
 
     @property
     def _preset_config(self) -> dict[str, object]:
@@ -185,12 +193,43 @@ def _validate_layout_shape(
     return num_layers, num_tokens, num_heads, head_dim
 
 
-def _serialized_nbytes_for_shape(shape: torch.Size, cfg: TurboQuantSerdeConfig) -> int:
+def _layer_ranges(
+    num_layers: int, cfg: TurboQuantSerdeConfig
+) -> tuple[int, int]:
+    """Return the half-open range of layers compressed with TurboQuant."""
+    quant_start = min(cfg.skip_first_layers, num_layers)
+    quant_end = max(quant_start, num_layers - cfg.skip_last_layers)
+    return quant_start, quant_end
+
+
+def _raw_group_nbytes(
+    shape: torch.Size,
+    dtype: torch.dtype,
+    num_layers: int,
+) -> int:
+    _, _, num_tokens, hidden_dim = shape
+    return (
+        2
+        * num_layers
+        * int(num_tokens)
+        * int(hidden_dim)
+        * torch.empty((), dtype=dtype).element_size()
+    )
+
+
+def _serialized_nbytes_for_shape(
+    shape: torch.Size,
+    dtype: torch.dtype,
+    cfg: TurboQuantSerdeConfig,
+) -> int:
     """Return serialized size in bytes for one LMCache KV tensor."""
     num_layers, num_tokens, num_heads, _ = _validate_layout_shape(shape, cfg)
     num_blocks = math.ceil(num_tokens / cfg.block_size)
-    return (
-        num_layers
+    quant_start, quant_end = _layer_ranges(num_layers, cfg)
+    quant_layers = quant_end - quant_start
+    raw_layers = num_layers - quant_layers
+    return _raw_group_nbytes(shape, dtype, raw_layers) + (
+        quant_layers
         * num_blocks
         * cfg.block_size
         * num_heads
@@ -199,10 +238,14 @@ def _serialized_nbytes_for_shape(shape: torch.Size, cfg: TurboQuantSerdeConfig) 
 
 
 def _compressed_layout_for_shape(
-    shape: torch.Size, cfg: TurboQuantSerdeConfig
+    shape: torch.Size,
+    cfg: TurboQuantSerdeConfig,
+    num_layers: int | None = None,
 ) -> tuple[int, int, int, int, int]:
     """Return compressed layout [L, num_blocks, block_size, H, slot_size]."""
-    num_layers, num_tokens, num_heads, _ = _validate_layout_shape(shape, cfg)
+    total_layers, num_tokens, num_heads, _ = _validate_layout_shape(shape, cfg)
+    if num_layers is None:
+        num_layers = total_layers
     num_blocks = math.ceil(num_tokens / cfg.block_size)
     return (
         num_layers,
@@ -519,7 +562,9 @@ class TurboQuantSerializer(Serializer):
         if src_tensor is None or dst_tensor is None:
             raise ValueError("TurboQuant serde requires src and dst to have tensors")
 
-        n_bytes = _serialized_nbytes_for_shape(src_tensor.shape, self._cfg)
+        n_bytes = _serialized_nbytes_for_shape(
+            src_tensor.shape, src_tensor.dtype, self._cfg
+        )
         if dst_tensor.numel() < n_bytes:
             raise ValueError(
                 f"Destination buffer too small: got {dst_tensor.numel()} bytes, "
@@ -549,7 +594,7 @@ class TurboQuantSerializer(Serializer):
         src_work = (
             src_tensor
             if src_tensor.is_cuda
-            else src_tensor.to(device=cuda_device, non_blocking=True)
+            else src_tensor.clone().to(device=cuda_device)
         )
         dst_work = (
             dst_tensor
@@ -557,47 +602,66 @@ class TurboQuantSerializer(Serializer):
             else torch.empty(n_bytes, dtype=torch.uint8, device=cuda_device)
         )
 
-        from lmcache.v1.distributed.serde.turboquant.store_kernel import (
-            triton_turboquant_store,
-        )
-
         cfg = self._cfg
         num_layers, num_tokens, num_heads, head_dim = _validate_layout_shape(
             src_work.shape, cfg
         )
-        compressed_shape = _compressed_layout_for_shape(src_work.shape, cfg)
-        dst_view = dst_work.flatten()[:n_bytes].view(*compressed_shape)
+        quant_start, quant_end = _layer_ranges(num_layers, cfg)
+        quant_layers = quant_end - quant_start
+        dst_flat = dst_work.flatten()[:n_bytes]
+        offset = 0
 
-        slot_mapping = _make_slot_mapping(num_tokens, cuda_device)
+        first_raw_bytes = _raw_group_nbytes(
+            src_work.shape, src_work.dtype, quant_start
+        )
+        if first_raw_bytes:
+            raw = src_work[:, :quant_start].contiguous().view(torch.uint8).flatten()
+            dst_flat[:first_raw_bytes].copy_(raw)
+            offset = first_raw_bytes
 
-        # LMCache layout: [2, L, T, hidden_dim]
-        # Kernel input layout per layer: key/value [T, H, D]
-        for layer_idx in range(num_layers):
-            key = src_work[0, layer_idx].view(
-                num_tokens, num_heads, head_dim
-            ).contiguous()
-            value = src_work[1, layer_idx].view(
-                num_tokens, num_heads, head_dim
-            ).contiguous()
-            kv_cache_layer = dst_view[layer_idx]
-            pi_t, midpoints, _ = _make_tq_tensors_for_layer(
-                cfg,
-                layer_idx,
-                cuda_device,
+        if quant_layers:
+            from lmcache.v1.distributed.serde.turboquant.store_kernel import (
+                triton_turboquant_store,
             )
 
-            triton_turboquant_store(
-                key,
-                value,
-                kv_cache_layer,
-                slot_mapping,
-                pi_t,
-                midpoints,
-                mse_bits=cfg.key_mse_bits,
-                key_packed_size=cfg.key_packed_size,
-                value_quant_bits=cfg.value_quant_bits,
-                key_fp8=cfg.key_fp8,
+            compressed_shape = _compressed_layout_for_shape(
+                src_work.shape, cfg, quant_layers
             )
+            compressed_bytes = math.prod(compressed_shape)
+            dst_view = dst_flat[offset : offset + compressed_bytes].view(
+                *compressed_shape
+            )
+            slot_mapping = _make_slot_mapping(num_tokens, cuda_device)
+
+            # LMCache layout: [2, L, T, hidden_dim]
+            # Kernel input layout per layer: key/value [T, H, D]
+            for compressed_idx, layer_idx in enumerate(range(quant_start, quant_end)):
+                key = src_work[0, layer_idx].view(
+                    num_tokens, num_heads, head_dim
+                ).contiguous()
+                value = src_work[1, layer_idx].view(
+                    num_tokens, num_heads, head_dim
+                ).contiguous()
+                pi_t, midpoints, _ = _make_tq_tensors_for_layer(
+                    cfg, layer_idx, cuda_device
+                )
+                triton_turboquant_store(
+                    key,
+                    value,
+                    dst_view[compressed_idx],
+                    slot_mapping,
+                    pi_t,
+                    midpoints,
+                    mse_bits=cfg.key_mse_bits,
+                    key_packed_size=cfg.key_packed_size,
+                    value_quant_bits=cfg.value_quant_bits,
+                    key_fp8=cfg.key_fp8,
+                )
+            offset += compressed_bytes
+
+        if quant_end < num_layers:
+            raw = src_work[:, quant_end:].contiguous().view(torch.uint8).flatten()
+            dst_flat[offset : offset + raw.numel()].copy_(raw)
 
         if not dst_tensor.is_cuda:
             dst_tensor.flatten()[:n_bytes].copy_(dst_work.cpu().flatten()[:n_bytes])
@@ -606,8 +670,8 @@ class TurboQuantSerializer(Serializer):
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
         total = 0
-        for shape in layout_desc.shapes:
-            total += _serialized_nbytes_for_shape(shape, self._cfg)
+        for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes):
+            total += _serialized_nbytes_for_shape(shape, dtype, self._cfg)
         return total
 
 
@@ -639,7 +703,9 @@ class TurboQuantDeserializer(Deserializer):
         if src_tensor is None or dst_tensor is None:
             raise ValueError("TurboQuant serde requires src and dst to have tensors")
 
-        n_bytes = _serialized_nbytes_for_shape(dst_tensor.shape, self._cfg)
+        n_bytes = _serialized_nbytes_for_shape(
+            dst_tensor.shape, dst_tensor.dtype, self._cfg
+        )
         if src_tensor.numel() < n_bytes:
             raise ValueError(
                 f"Source buffer too small: got {src_tensor.numel()} bytes, "
@@ -669,10 +735,7 @@ class TurboQuantDeserializer(Deserializer):
         src_work = (
             src_tensor
             if src_tensor.is_cuda
-            else src_tensor.flatten()[:n_bytes].to(
-                device=cuda_device,
-                non_blocking=True,
-            )
+            else src_tensor.flatten()[:n_bytes].clone().to(device=cuda_device)
         )
         dst_work = (
             dst_tensor
@@ -684,103 +747,127 @@ class TurboQuantDeserializer(Deserializer):
             )
         )
 
-        from lmcache.v1.distributed.serde.turboquant.decode_kernel import (
-            _tq_full_dequant_kv,
-            _use_fp8_e4b15,
-        )
-
         cfg = self._cfg
         num_layers, num_tokens, num_heads, head_dim = _validate_layout_shape(
             dst_work.shape, cfg
         )
-        compressed_shape = _compressed_layout_for_shape(dst_work.shape, cfg)
-        src_view = src_work.flatten()[:n_bytes].view(*compressed_shape)
+        hidden_dim = num_heads * head_dim
+        quant_start, quant_end = _layer_ranges(num_layers, cfg)
+        quant_layers = quant_end - quant_start
+        src_flat = src_work.flatten()[:n_bytes]
+        offset = 0
 
-        num_blocks = compressed_shape[1]
-        alloc_len = num_blocks * cfg.block_size
-        block_table = _make_block_table(num_blocks, cuda_device)
-
-        block_d = 1 << (head_dim - 1).bit_length()
-        val_data_bytes = math.ceil(head_dim * cfg.value_quant_bits / 8)
-        mse_bytes = (
-            math.ceil(head_dim * cfg.key_mse_bits / 8)
-            if not cfg.key_fp8
-            else head_dim
+        first_raw_bytes = _raw_group_nbytes(
+            dst_work.shape, dst_work.dtype, quant_start
         )
+        if first_raw_bytes:
+            raw = torch.empty(
+                (2, quant_start, num_tokens, hidden_dim),
+                dtype=dst_work.dtype,
+                device=cuda_device,
+            )
+            raw.view(torch.uint8).flatten().copy_(src_flat[:first_raw_bytes])
+            dst_work[:, :quant_start].copy_(raw)
+            offset = first_raw_bytes
 
-        k_out = torch.empty(
-            (1, num_heads, alloc_len, head_dim),
-            dtype=torch.float16,
-            device=cuda_device,
-        )
-        v_out = torch.empty(
-            (1, num_heads, alloc_len, head_dim),
-            dtype=torch.float16,
-            device=cuda_device,
-        )
-
-        for layer_idx in range(num_layers):
-            kv_cache_layer = src_view[layer_idx]
-            pi_t, _, centroids = _make_tq_tensors_for_layer(
-                cfg,
-                layer_idx,
-                cuda_device,
+        if quant_layers:
+            from lmcache.v1.distributed.serde.turboquant.decode_kernel import (
+                _tq_full_dequant_kv,
+                _use_fp8_e4b15,
             )
 
-            grid = (alloc_len, num_heads)
-            _tq_full_dequant_kv[grid](
-                kv_cache_layer,
-                block_table,
-                centroids,
-                k_out,
-                v_out,
-                k_out.stride(0),
-                k_out.stride(1),
-                k_out.stride(2),
-                v_out.stride(0),
-                v_out.stride(1),
-                v_out.stride(2),
-                kv_cache_layer.stride(0),
-                kv_cache_layer.stride(1),
-                kv_cache_layer.stride(2),
-                block_table.stride(0),
-                HEAD_DIM=head_dim,
-                BLOCK_SIZE=cfg.block_size,
-                NUM_KV_HEADS=num_heads,
-                MSE_BYTES=mse_bytes,
-                KPS=cfg.key_packed_size,
-                VQB=cfg.value_quant_bits,
-                VAL_DATA_BYTES=val_data_bytes,
-                MSE_BITS=cfg.key_mse_bits,
-                KEY_FP8=1 if cfg.key_fp8 else 0,
-                BLOCK_D=block_d,
-                NORM_CORRECTION=1 if cfg.norm_correction else 0,
-                FP8_E4B15=_use_fp8_e4b15(cuda_device.index or 0),
-                num_warps=4,
+            compressed_shape = _compressed_layout_for_shape(
+                dst_work.shape, cfg, quant_layers
             )
-
-            k_layer = k_out[0, :, :num_tokens, :].transpose(0, 1).contiguous()
-            if not cfg.key_fp8:
-                # _tq_full_dequant_kv reconstructs the rotated key vector.
-                # LMCache serde must restore the original raw KV layout, so
-                # apply inverse WHT rotation: raw = rotated @ Pi, where
-                # Pi = PiT.T for the orthonormal WHT matrix.
-                pi = pi_t.T.contiguous()
-                k_layer = torch.matmul(
-                    k_layer.to(torch.float32),
-                    pi,
-                ).to(k_out.dtype)
-
-            key = k_layer.contiguous().view(num_tokens, num_heads * head_dim)
-            value = (
-                v_out[0, :, :num_tokens, :]
-                .transpose(0, 1)
-                .contiguous()
-                .view(num_tokens, num_heads * head_dim)
+            compressed_bytes = math.prod(compressed_shape)
+            src_view = src_flat[offset : offset + compressed_bytes].view(
+                *compressed_shape
             )
+            num_blocks = compressed_shape[1]
+            alloc_len = num_blocks * cfg.block_size
+            block_table = _make_block_table(num_blocks, cuda_device)
+            block_d = 1 << (head_dim - 1).bit_length()
+            val_data_bytes = math.ceil(head_dim * cfg.value_quant_bits / 8)
+            mse_bytes = (
+                math.ceil(head_dim * cfg.key_mse_bits / 8)
+                if not cfg.key_fp8
+                else head_dim
+            )
+            k_out = torch.empty(
+                (1, num_heads, alloc_len, head_dim),
+                dtype=torch.float16,
+                device=cuda_device,
+            )
+            v_out = torch.empty_like(k_out)
 
-            dst_work[0, layer_idx].copy_(key.to(dst_work.dtype))
-            dst_work[1, layer_idx].copy_(value.to(dst_work.dtype))
+            for compressed_idx, layer_idx in enumerate(range(quant_start, quant_end)):
+                kv_cache_layer = src_view[compressed_idx]
+                pi_t, _, centroids = _make_tq_tensors_for_layer(
+                    cfg, layer_idx, cuda_device
+                )
+                grid = (alloc_len, num_heads)
+                _tq_full_dequant_kv[grid](
+                    kv_cache_layer,
+                    block_table,
+                    centroids,
+                    k_out,
+                    v_out,
+                    k_out.stride(0),
+                    k_out.stride(1),
+                    k_out.stride(2),
+                    v_out.stride(0),
+                    v_out.stride(1),
+                    v_out.stride(2),
+                    kv_cache_layer.stride(0),
+                    kv_cache_layer.stride(1),
+                    kv_cache_layer.stride(2),
+                    block_table.stride(0),
+                    HEAD_DIM=head_dim,
+                    BLOCK_SIZE=cfg.block_size,
+                    NUM_KV_HEADS=num_heads,
+                    MSE_BYTES=mse_bytes,
+                    KPS=cfg.key_packed_size,
+                    VQB=cfg.value_quant_bits,
+                    VAL_DATA_BYTES=val_data_bytes,
+                    MSE_BITS=cfg.key_mse_bits,
+                    KEY_FP8=1 if cfg.key_fp8 else 0,
+                    BLOCK_D=block_d,
+                    NORM_CORRECTION=1 if cfg.norm_correction else 0,
+                    FP8_E4B15=_use_fp8_e4b15(cuda_device.index or 0),
+                    num_warps=4,
+                )
+
+                k_layer = k_out[0, :, :num_tokens, :].transpose(0, 1).contiguous()
+                if not cfg.key_fp8:
+                    # Restore the original key after TurboQuant's WHT rotation.
+                    k_layer = torch.matmul(
+                        k_layer.to(torch.float32), pi_t.T.contiguous()
+                    ).to(k_out.dtype)
+                key = k_layer.contiguous().view(num_tokens, hidden_dim)
+                value = (
+                    v_out[0, :, :num_tokens, :]
+                    .transpose(0, 1)
+                    .contiguous()
+                    .view(num_tokens, hidden_dim)
+                )
+                dst_work[0, layer_idx].copy_(key.to(dst_work.dtype))
+                dst_work[1, layer_idx].copy_(value.to(dst_work.dtype))
+            offset += compressed_bytes
+
+        last_raw_layers = num_layers - quant_end
+        if last_raw_layers:
+            last_raw_bytes = _raw_group_nbytes(
+                dst_work.shape, dst_work.dtype, last_raw_layers
+            )
+            raw = torch.empty(
+                (2, last_raw_layers, num_tokens, hidden_dim),
+                dtype=dst_work.dtype,
+                device=cuda_device,
+            )
+            raw.view(torch.uint8).flatten().copy_(
+                src_flat[offset : offset + last_raw_bytes]
+            )
+            dst_work[:, quant_end:].copy_(raw)
 
         if not dst_tensor.is_cuda:
             dst_tensor.copy_(dst_work.cpu())
@@ -790,12 +877,20 @@ def _create_turboquant_serde(kwargs: dict[str, object]) -> SerdeProcessor:
     preset = str(kwargs.get("preset", "turboquant_k8v4"))
     head_dim = int(kwargs.get("head_dim", 128))  # type: ignore[arg-type]
     block_size = int(kwargs.get("block_size", 16))  # type: ignore[arg-type]
+    skip_first_layers = int(
+        kwargs.get("skip_first_layers", 2)  # type: ignore[arg-type]
+    )
+    skip_last_layers = int(
+        kwargs.get("skip_last_layers", 2)  # type: ignore[arg-type]
+    )
     max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[arg-type]
 
     cfg = TurboQuantSerdeConfig(
         preset=preset,
         head_dim=head_dim,
         block_size=block_size,
+        skip_first_layers=skip_first_layers,
+        skip_last_layers=skip_last_layers,
     )
 
     return AsyncSerdeProcessor(
