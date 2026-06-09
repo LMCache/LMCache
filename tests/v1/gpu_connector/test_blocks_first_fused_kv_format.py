@@ -16,6 +16,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import utils as U
 from lmcache.v1.multiprocess.transfer_context.base import (
@@ -124,7 +125,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     sd.hs = HS
     sd.element_size = norm[0].element_size()
     sd.block_stride_elems = NH * BS * 2 * HS
-    sd.dtype = norm[0].dtype
+    set_shape_desc_dtype(sd, norm[0].dtype)
 
     block_ids = torch.tensor(list(range(NB)), dtype=torch.long)
 
