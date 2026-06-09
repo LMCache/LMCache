@@ -183,6 +183,62 @@ class TestPerStreamRegistration:
 
 
 @requires_gds
+def test_gds_two_stream_write_read(tmp_path):
+    """Two CUDA streams each register their own buffer and round-trip a chunk
+    through real cuFile DMA; verify the data stays isolated per stream."""
+    cfg = GdsL1Config(file_location=str(tmp_path), size_in_bytes=64 << 20)
+    chunk_bytes = 8 << 20
+    ctx = GDSContext()
+    ctx.initialize(cfg)
+    mgr = GDSL1MemoryManager(cfg)
+
+    def register_and_write(stream, pattern):
+        """Register a buffer on ``stream`` and write ``pattern`` to a chunk."""
+        with torch.cuda.stream(stream):
+            buf = torch.empty(chunk_bytes, dtype=torch.uint8, device="cuda")
+            ctx.register_gpu_buffer(buf, chunk_bytes)
+            err, objs = mgr.allocate(
+                MemoryLayoutDesc(
+                    shapes=[torch.Size([chunk_bytes])], dtypes=[torch.uint8]
+                ),
+                1,
+            )
+            assert err == L1Error.SUCCESS
+            buf.fill_(pattern)
+            torch.cuda.synchronize()
+            ctx.write_async(objs[0], buf)
+            torch.cuda.synchronize()
+        return buf, objs[0]
+
+    stream_a = torch.cuda.Stream()
+    stream_b = torch.cuda.Stream()
+    try:
+        buf_a, mem_a = register_and_write(stream_a, 0xA1)
+        buf_b, mem_b = register_and_write(stream_b, 0xB2)
+
+        # Read each chunk back on its own stream; each must see its own pattern,
+        # confirming the two streams' buffers/regions don't clobber each other.
+        for stream, buf, mem, pattern in (
+            (stream_a, buf_a, mem_a, 0xA1),
+            (stream_b, buf_b, mem_b, 0xB2),
+        ):
+            with torch.cuda.stream(stream):
+                buf.zero_()
+                torch.cuda.synchronize()
+                ctx.read_async(mem, buf)
+                torch.cuda.synchronize()
+                expected = torch.full((chunk_bytes,), pattern, dtype=torch.uint8)
+                assert torch.equal(buf.cpu(), expected)
+
+        # Deregister each buffer on its own stream.
+        for stream, buf in ((stream_a, buf_a), (stream_b, buf_b)):
+            with torch.cuda.stream(stream):
+                ctx.deregister_gpu_buffer(buf, chunk_bytes)
+    finally:
+        ctx.close()
+
+
+@requires_gds
 def test_gds_write_read_roundtrip(tmp_path):
     """Cold write then read of a chunk through the real cuFile DMA path."""
     cfg = GdsL1Config(file_location=str(tmp_path), size_in_bytes=64 << 20)
