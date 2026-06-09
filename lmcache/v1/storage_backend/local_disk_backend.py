@@ -577,17 +577,39 @@ class LocalDiskBackend(StorageBackendInterface):
 
         logger.debug("Executing `async_load_bytes` from disk.")
         # TODO (Jiayi): handle the case where loading fails.
-        for path, key, mem_obj in zip(paths, keys, memory_objs, strict=False):
+        for index, (path, key, mem_obj) in enumerate(
+            zip(paths, keys, memory_objs, strict=False)
+        ):
             buffer = mem_obj.byte_array
-            self.read_file(key, buffer, path)
+            if not self.read_file(buffer, path):
+                self._remove_stale_disk_entry(key)
+                for stale_mem_obj in memory_objs[index:]:
+                    stale_mem_obj.unpin()
+                    stale_mem_obj.ref_count_down()
+                with self.disk_lock:
+                    for tail_key in keys[index + 1 :]:
+                        if tail_meta := self.dict.get(tail_key):
+                            tail_meta.unpin()
+                return memory_objs[:index]
 
             # TODO(Jiayi): Please recover the metadata in a more
             # elegant way in the future.
-            cached_positions = self.dict[key].cached_positions
-            mem_obj.metadata.cached_positions = cached_positions
-
             with self.disk_lock:
-                self.dict[key].unpin()
+                if (disk_meta := self.dict.get(key)) is None:
+                    logger.warning(
+                        "Metadata for key %s disappeared during disk load", key
+                    )
+                    for stale_mem_obj in memory_objs[index:]:
+                        stale_mem_obj.unpin()
+                        stale_mem_obj.ref_count_down()
+                    for tail_key in keys[index + 1 :]:
+                        if tail_meta := self.dict.get(tail_key):
+                            tail_meta.unpin()
+                    return memory_objs[:index]
+
+                cached_positions = disk_meta.cached_positions
+                disk_meta.unpin()
+            mem_obj.metadata.cached_positions = cached_positions
 
         return memory_objs
 
@@ -607,11 +629,20 @@ class LocalDiskBackend(StorageBackendInterface):
         assert memory_obj is not None, "Memory allocation failed during disk load."
 
         buffer = memory_obj.byte_array
-        self.read_file(key, buffer, path)
+        if not self.read_file(buffer, path):
+            self._remove_stale_disk_entry(key)
+            memory_obj.ref_count_down()
+            return None
 
         # TODO(Jiayi): Please recover the metadata in a more
         # elegant way in the future.
-        cached_positions = self.dict[key].cached_positions
+        with self.disk_lock:
+            disk_meta = self.dict.get(key)
+            if disk_meta is None:
+                logger.warning("Metadata for key %s disappeared during disk load", key)
+                memory_obj.ref_count_down()
+                return None
+            cached_positions = disk_meta.cached_positions
         memory_obj.metadata.cached_positions = cached_positions
 
         return memory_obj
@@ -633,7 +664,7 @@ class LocalDiskBackend(StorageBackendInterface):
         )
 
     @_lmcache_nvtx_annotate
-    def read_file(self, key, buffer, path):
+    def read_file(self, buffer: Any, path: str) -> bool:
         start_time = time.time()
         size = len(buffer)
         fblock_aligned = size % self.os_disk_bs == 0
@@ -653,15 +684,32 @@ class LocalDiskBackend(StorageBackendInterface):
                     fdo.readinto(buffer)
         except FileNotFoundError:
             logger.warning(f"File not found on disk: {path}")
-            if self.dict.get(key, None):
-                self.dict.pop(key)
-            return
+            return False
 
         disk_read_time = time.time() - start_time
         logger.debug(
             f"Disk read size: {size} bytes, "
             f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
         )
+        return True
+
+    def _remove_stale_disk_entry(self, key: CacheEngineKey) -> None:
+        with self.disk_lock:
+            if meta := self.dict.pop(key, None):
+                new_cache_size = self.current_cache_size - meta.size
+                new_usage = self.usage - meta.size
+                if new_cache_size < 0 or new_usage < 0:
+                    logger.warning(
+                        "Local disk accounting underflow while removing stale "
+                        "key %s: current_cache_size=%s, usage=%s, meta_size=%s",
+                        key,
+                        self.current_cache_size,
+                        self.usage,
+                        meta.size,
+                    )
+                self.current_cache_size = max(0.0, new_cache_size)
+                self.usage = max(0, new_usage)
+                self.stats_monitor.update_local_storage_usage(self.usage)
 
     def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
