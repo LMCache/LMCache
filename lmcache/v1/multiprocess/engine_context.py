@@ -15,9 +15,9 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.gpu_connector.gds_context import initialize_gds_context
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
-from lmcache.v1.multiprocess.gds_context import initialize_gds_context
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 

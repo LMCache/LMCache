@@ -24,7 +24,7 @@ Surface:
 
 This module is intentionally narrow: no thread pool, no future
 abstraction, no LRU. It is the layer :class:`GDSContext`
-(``lmcache.v1.multiprocess.gds_context``) uses to talk to libcufile on
+(``lmcache.v1.gpu_connector.gds_context``) uses to talk to libcufile on
 the GDS DMA fast path.
 """
 

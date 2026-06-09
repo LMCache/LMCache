@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType
+from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
@@ -38,7 +39,6 @@ from lmcache.v1.gpu_connector.utils import (
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.multiprocess.gds_context import get_gds_context
 from lmcache.v1.multiprocess.group_view import LMCacheGroupView
 
 # Backend selection (c_ops when CUDA is available, otherwise a pure-Python

@@ -19,6 +19,7 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -37,7 +38,6 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.gds_context import get_gds_context
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule

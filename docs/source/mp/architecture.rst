@@ -244,7 +244,7 @@ tiers selected at startup (both satisfy ``L1ManagerProtocol``):
 - ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
   The bytes live on disk; reads/writes DMA directly between the GPU staging
   buffer and the slab via cuFile, driven by the process-global ``GDSContext``
-  (``multiprocess/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
+  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
   tier is disabled in this mode.
 
 L2 Adapters

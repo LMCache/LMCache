@@ -16,12 +16,12 @@ import pytest
 import torch
 
 # First Party
-from lmcache import _cufile_async as ca
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.memory_manager import GDSL1MemoryManager
-from lmcache.v1.multiprocess.gds_context import (
+from lmcache.v1.gpu_connector import _cufile_async as ca
+from lmcache.v1.gpu_connector.gds_context import (
     GDSContext,
     get_gds_context,
     initialize_gds_context,

@@ -29,10 +29,10 @@ import threading
 import torch
 
 # First Party
-from lmcache import _cufile_async as ca
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import GdsL1Config
+from lmcache.v1.gpu_connector import _cufile_async as ca
 from lmcache.v1.memory_management import GDSMemoryObject
 
 logger = init_logger(__name__)

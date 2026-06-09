@@ -31,7 +31,7 @@ class GDSL1MemoryManager:
     It owns an :class:`AddressManager` over the slab's byte-offset space and
     hands out :class:`GDSMemoryObject` chunks; the actual GPU<->slab DMA is
     performed by the global
-    :class:`~lmcache.v1.multiprocess.gds_context.GDSContext`, reached from the
+    :class:`~lmcache.v1.gpu_connector.gds_context.GDSContext`, reached from the
     ``gpu_ops`` dispatch.
 
     There is no on-disk index: the slab is created and cleared at startup
