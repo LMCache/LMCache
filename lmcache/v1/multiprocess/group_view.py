@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""LMCache's engine-neutral view of a serving engine's KV cache groups.
+"""LMCache's engine-neutral description of a serving engine's KV cache groups.
 
 An *engine group* is one distinct paged-block address space exposed by the
 serving engine (e.g. one of vLLM's hybrid KV cache groups): block IDs are only
@@ -7,8 +7,8 @@ meaningful within a single group, and layers from different groups must never be
 merged into one LMCache KV group. Engine group ids are assumed dense and
 consecutive starting from 0.
 
-LMCache's neutral KV cache spec is simply a ``list[LMCacheGroupView]`` (passed as
-a ``Sequence[LMCacheGroupView]`` where only order matters). The group order is
+LMCache's neutral KV cache spec is simply a ``list[EngineGroupInfo]`` (passed as
+a ``Sequence[EngineGroupInfo]`` where only order matters). The group order is
 the protocol-visible LMCache group order used by store/retrieve block IDs. An
 empty list means a single non-hybrid group (the default for engines that do not
 report KV cache group metadata). Engine-specific conversion belongs in the
@@ -23,26 +23,26 @@ from typing import cast
 import msgspec
 
 
-class LMCacheGroupView(msgspec.Struct, frozen=True):
+class EngineGroupInfo(msgspec.Struct, frozen=True):
     """One LMCache KV group: layers of one engine group that share a copy kernel.
 
     Carries the layer indices and which engine group they belong to. Several
-    ``LMCacheGroupView`` instances may share the same ``engine_group_id`` when
+    ``EngineGroupInfo`` instances may share the same ``engine_group_id`` when
     one engine group is split by physical transfer identity (e.g. differing
-    hidden dims). A ``list[LMCacheGroupView]`` is carried verbatim in the
+    hidden dims). A ``list[EngineGroupInfo]`` is carried verbatim in the
     ``REGISTER_KV_CACHE`` IPC payload; the message queue handles
     encoding/decoding.
     """
 
     engine_group_id: int
-    """Engine group this view's layers live in (one distinct paged-block address
+    """Engine group these layers live in (one distinct paged-block address
     space). Selects which request block-id list applies. Dense from 0."""
 
     layer_indices: tuple[int, ...] = ()
     """Registered KV tensor indices assigned to this group."""
 
 
-def num_engine_groups(groups: Sequence[LMCacheGroupView]) -> int:
+def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).
 
     Engine group ids are assumed dense and consecutive from 0.
@@ -59,7 +59,7 @@ def num_engine_groups(groups: Sequence[LMCacheGroupView]) -> int:
     return max(group.engine_group_id for group in groups) + 1
 
 
-def num_group_views(groups: Sequence[LMCacheGroupView]) -> int:
+def num_engine_group_infos(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of LMCache KV groups visible to transfer requests.
 
     Args:
@@ -75,7 +75,7 @@ def num_group_views(groups: Sequence[LMCacheGroupView]) -> int:
 
 
 def _engine_group_id_per_view(
-    groups: Sequence[LMCacheGroupView],
+    groups: Sequence[EngineGroupInfo],
 ) -> tuple[int, ...]:
     """Return, per LMCache group, the engine group it draws block IDs from.
 
@@ -84,7 +84,7 @@ def _engine_group_id_per_view(
 
     Returns:
         A tuple whose length equals the number of LMCache groups (i.e.
-        :func:`num_group_views`); element ``i`` is the engine group id
+        :func:`num_engine_group_infos`); element ``i`` is the engine group id
         that LMCache group ``i`` reads block IDs from. ``(0,)`` for an empty
         ``groups`` (single non-hybrid group).
     """
@@ -93,11 +93,11 @@ def _engine_group_id_per_view(
     return tuple(group.engine_group_id for group in groups)
 
 
-def expand_block_ids_to_views(
-    groups: Sequence[LMCacheGroupView],
+def expand_engine_block_ids(
+    groups: Sequence[EngineGroupInfo],
     engine_side_block_ids: Sequence[Sequence[int]] | Sequence[int],
 ) -> list[list[int]]:
-    """Re-index engine-side block IDs to one list per LMCache group.
+    """Expand the engine-side block id list to the list per LMCache kernel group.
 
     The serving engine reports block IDs per engine group. LMCache transfer
     requests are indexed by LMCache KV group, so each LMCache group reuses the
@@ -174,7 +174,7 @@ def slice_block_ids_per_group(
 
 
 def get_engine_group_indices(
-    groups: Sequence[LMCacheGroupView],
+    groups: Sequence[EngineGroupInfo],
     num_registered_layers: int,
 ) -> list[int] | None:
     """Return the engine group index for each registered KV tensor.

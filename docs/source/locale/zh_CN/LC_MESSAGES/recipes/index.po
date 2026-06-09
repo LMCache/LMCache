@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/recipes/index.rst:4
 msgid "Recipes"
-msgstr "食谱"
+msgstr "使用指南"
 
 #: ../../source/recipes/index.rst:6
 msgid ""
@@ -34,15 +34,15 @@ msgstr "本节列出了经过 LMCache 端到端验证的模型架构，每个架
 msgid ""
 "Engine-side documentation (how to serve the model itself) lives with the "
 "serving engine. Recipe pages link out rather than duplicate."
-msgstr "引擎端文档（如何服务模型本身）与服务引擎一起存在。食谱页面链接而不是重复。"
+msgstr "引擎端文档（如何服务模型本身）随服务引擎一起维护。使用指南页面提供外部链接，不重复已有内容。"
 
 #: ../../source/recipes/index.rst:14
 msgid "Recipe page contents"
-msgstr "食谱页面内容"
+msgstr "使用指南页面内容"
 
 #: ../../source/recipes/index.rst:16
 msgid "Each recipe page is intentionally minimal:"
-msgstr "每个食谱页面都故意保持简约："
+msgstr "每个使用指南页面都故意保持简约："
 
 #: ../../source/recipes/index.rst:18
 msgid "**Validated models** -- exact HF repo IDs that have been tested."
@@ -81,7 +81,7 @@ msgid ""
 msgstr ""
 "有关通用 LMCache + 引擎连接（端口、远程主机、进程内模式、发送第一个请求），请参阅 "
 ":doc:`../getting_started/quickstart` 和 "
-":doc:`../mp/quickstart`。食谱假设这些页面是先决条件。"
+":doc:`../mp/quickstart`。使用指南假设这些页面是先决条件。"
 
 #: ../../source/recipes/index.rst:33
 msgid "Supported architectures"
@@ -109,7 +109,7 @@ msgstr "TRT-LLM"
 
 #: ../../source/recipes/index.rst:44
 msgid "Recipe"
-msgstr "食谱"
+msgstr "使用指南"
 
 #: ../../source/recipes/index.rst:46
 msgid "``MiniMaxM2ForCausalLM``"
@@ -231,7 +231,7 @@ msgstr "图例：``✓`` 已验证，``—`` 未验证。"
 
 #: ../../source/recipes/index.rst:105
 msgid "Contributing a recipe"
-msgstr "贡献一个食谱"
+msgstr "贡献一个使用指南"
 
 #: ../../source/recipes/index.rst:107
 msgid "To add a new architecture:"

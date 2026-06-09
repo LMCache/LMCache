@@ -37,7 +37,7 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.integration.vllm.kv_cache_groups import (
-    create_group_views_from_vllm,
+    create_engine_group_infos_from_vllm,
 )
 from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
@@ -510,7 +510,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
                 f"direction={req_meta.direction}, "
-                f"num_blocks={len(req_meta.op.block_ids[0])}, "
+                f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
         return "[" + "\n".join(request_strs) + "]"
@@ -619,12 +619,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        group_views = create_group_views_from_vllm(
+        engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,
             layout_hints=vllm_layout_hints(),
         )
-        self.worker_adapter.register_kv_caches(kv_caches, group_views=group_views)
+        self.worker_adapter.register_kv_caches(
+            kv_caches, engine_group_infos=engine_group_infos
+        )
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
