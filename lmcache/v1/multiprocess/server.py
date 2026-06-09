@@ -37,6 +37,7 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
+from lmcache.v1.multiprocess.gds_context import get_gds_context
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
@@ -102,6 +103,8 @@ class MPCacheEngine:
         for module in self._modules:
             module.close()
         self._context.storage_manager.close()
+        # Tear down the GDS cuFile context
+        get_gds_context().close()
         logger.info("MPCacheEngine closed")
 
     # HTTP-layer passthroughs lost in the engine refactor.
