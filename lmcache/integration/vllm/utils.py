@@ -343,9 +343,12 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     """
     Calculate the local worker id and local world size.
 
-    Current assumption (TODO: add custom logic in the future):
-    - Tensor Parallel is intra-node
-    - Pipeline Parallel is inter-node
+    ``local_worker_id`` is the local device index this worker is bound to,
+    read from the device module. This function only runs for non-scheduler
+    roles; by then vLLM has already bound the worker to its device.
+
+    ``local_world_size`` assumes tensor parallelism is intra-node and
+    pipeline parallelism is inter-node.
 
     Returns:
         Tuple[int, int]: (local_worker_id, local_world_size)
@@ -354,23 +357,18 @@ def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int,
     from lmcache import torch_dev
 
     parallel_config = vllm_config.parallel_config
-    global_rank = parallel_config.rank
     global_world_size = parallel_config.world_size
     num_gpus = torch_dev.device_count()
+
+    # vLLM has already bound this worker to its device; read it back.
+    local_worker_id = torch_dev.current_device()
+
     if global_world_size <= num_gpus:
         # single node case
-        return parallel_config.rank, parallel_config.world_size
+        local_world_size = global_world_size
     else:
-        tp_size = parallel_config.tensor_parallel_size
-        pp_size = parallel_config.pipeline_parallel_size
-        local_world_size = global_world_size // pp_size
-        assert local_world_size == tp_size, (
-            "LMCache is operating under the assumption that the "
-            "local world size is equal to the tensor parallel size "
-            "in multi-node deployment."
-        )
-        local_worker_id = global_rank % local_world_size
-        return local_worker_id, local_world_size
+        local_world_size = global_world_size // parallel_config.pipeline_parallel_size
+    return local_worker_id, local_world_size
 
 
 def validate_mla_config(config: LMCacheEngineConfig, use_mla: bool) -> None:
