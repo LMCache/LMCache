@@ -30,6 +30,7 @@ from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import DevDaxMemoryAllocator
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+import lmcache.v1.memory_management as memory_management
 
 
 def _make_mmap_file(
@@ -56,6 +57,31 @@ def _layout(num_bytes: int = 4096) -> MemoryLayoutDesc:
 class _FakeMooncakeL2Config:
     def __init__(self, setup_config: dict[str, str]):
         self.setup_config = setup_config
+
+
+class _FakeCudaRuntime:
+    def __init__(self, register_error: int = 0):
+        self.register_error = register_error
+        self.register_calls: list[tuple[int, int, int]] = []
+        self.unregister_calls: list[int] = []
+        self.synchronize_calls = 0
+
+    def is_available(self):
+        return True
+
+    def synchronize(self):
+        self.synchronize_calls += 1
+
+    def cudart(self):
+        return self
+
+    def cudaHostRegister(self, ptr: int, size: int, flags: int):
+        self.register_calls.append((ptr, size, flags))
+        return self.register_error
+
+    def cudaHostUnregister(self, ptr: int):
+        self.unregister_calls.append(ptr)
+        return 0
 
 
 def _hybrid_storage_config(path: str, adapter_config) -> StorageManagerConfig:
@@ -163,6 +189,51 @@ def test_devdax_allocator_uses_mmap_backing_file(tmp_path):
 
     with open(path, "rb") as f:
         assert f.read(4096) == bytes([0x5A]) * 4096
+
+
+def test_devdax_allocator_registers_cuda_host_mapping(tmp_path, monkeypatch):
+    path = _make_mmap_file(tmp_path)
+    cuda_runtime = _FakeCudaRuntime()
+    monkeypatch.setattr(memory_management, "torch_device_type", "cuda")
+    monkeypatch.setattr(memory_management, "torch_dev", cuda_runtime)
+
+    allocator = DevDaxMemoryAllocator(
+        size=1024 * 1024,
+        device_path=path,
+        align_bytes=4096,
+    )
+    ptr = allocator.buffer.data_ptr()
+
+    assert cuda_runtime.register_calls == [(ptr, 1024 * 1024, 0)]
+    allocator.close()
+    assert cuda_runtime.unregister_calls == [ptr]
+
+
+def test_devdax_allocator_falls_back_when_cuda_host_register_fails(
+    tmp_path, monkeypatch
+):
+    path = _make_mmap_file(tmp_path)
+    cuda_runtime = _FakeCudaRuntime(register_error=1)
+    monkeypatch.setattr(memory_management, "torch_device_type", "cuda")
+    monkeypatch.setattr(memory_management, "torch_dev", cuda_runtime)
+
+    allocator = DevDaxMemoryAllocator(
+        size=1024 * 1024,
+        device_path=path,
+        align_bytes=4096,
+    )
+    obj = allocator.allocate(torch.Size([4096]), torch.uint8)
+
+    assert cuda_runtime.register_calls == [
+        (allocator.buffer.data_ptr(), 1024 * 1024, 0)
+    ]
+    assert cuda_runtime.unregister_calls == []
+    assert obj is not None
+    allocator.free(obj)
+    del obj
+    gc.collect()
+    allocator.close()
+    assert cuda_runtime.unregister_calls == []
 
 
 def test_devdax_close_failure_preserves_allocator_state(tmp_path):

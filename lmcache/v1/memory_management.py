@@ -2496,6 +2496,8 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self._fd: int | None = None
         self._mmap_obj: mmap.mmap | None = None
         self._mmap_buffer: Any | None = None
+        self._cuda_registered_ptr: int | None = None
+        self._cuda_runtime: Any | None = None
         self._unregistered = False
 
         self.buffer = self._map_devdax()
@@ -2503,6 +2505,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             self.buffer, align_bytes=self.align_bytes
         )
         self.address_manager = self.pin_allocator.address_manager
+        self._register_cuda_host_memory()
 
     def _map_devdax(self) -> torch.Tensor:
         fd: int | None = None
@@ -2536,6 +2539,62 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             if fd is not None:
                 os.close(fd)
             raise
+
+    def _register_cuda_host_memory(self) -> None:
+        if torch_device_type != "cuda" or not torch_dev.is_available():
+            return
+        if not hasattr(torch_dev, "cudart"):
+            logger.warning(
+                "Skipping cudaHostRegister for Device-DAX L1 mapping: "
+                "torch CUDA runtime is unavailable"
+            )
+            return
+
+        ptr = self.buffer.data_ptr()
+        runtime = torch_dev.cudart()
+        try:
+            err = runtime.cudaHostRegister(ptr, self.size, 0)
+        except Exception as e:
+            logger.warning(
+                "cudaHostRegister failed for Device-DAX L1 mapping; "
+                "falling back to pageable host copies: %s",
+                e,
+            )
+            return
+
+        if err != 0:
+            logger.warning(
+                "cudaHostRegister failed for Device-DAX L1 mapping with "
+                "error code %s; falling back to pageable host copies",
+                err,
+            )
+            return
+
+        self._cuda_registered_ptr = ptr
+        self._cuda_runtime = runtime
+
+    def _unregister_cuda_host_memory(self) -> None:
+        if self._cuda_registered_ptr is None:
+            return
+
+        assert self._cuda_runtime is not None
+        ptr = self._cuda_registered_ptr
+        try:
+            err = self._cuda_runtime.cudaHostUnregister(ptr)
+            if err != 0:
+                logger.warning(
+                    "cudaHostUnregister failed for Device-DAX L1 mapping "
+                    "with error code %s",
+                    err,
+                )
+        except Exception as e:
+            logger.warning(
+                "cudaHostUnregister failed for Device-DAX L1 mapping: %s",
+                e,
+            )
+        finally:
+            self._cuda_registered_ptr = None
+            self._cuda_runtime = None
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -2664,6 +2723,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 raise BufferError(
                     "cannot close DevDaxMemoryAllocator with active allocations"
                 )
+            self._unregister_cuda_host_memory()
             self.pin_allocator = None
             self.buffer = torch.empty(0, dtype=torch.uint8)
             self._mmap_buffer = None
