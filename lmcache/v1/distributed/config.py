@@ -198,6 +198,9 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
     Args:
         config: Storage manager configuration to normalize in place.
 
+    Returns:
+        None.
+
     Raises:
         ValueError: If hybrid L1 is paired with incompatible L2 adapters.
     """
