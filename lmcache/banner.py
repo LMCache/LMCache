@@ -69,7 +69,8 @@ def _render_banner(colored: bool) -> str:
         The multi-line banner: the LMCache logo with the version (and
         commit id when available), website, recipes, and LinkedIn links
         on its right, and a final line describing the
-        ``LMCACHE_DISABLE_BANNER`` opt-out.
+        ``LMCACHE_DISABLE_BANNER`` opt-out. A blank line surrounds the
+        banner on each side to set it apart from adjacent log output.
     """
     lm_style = _LM_STYLE if colored else ""
     cache_style = _CACHE_STYLE if colored else ""
@@ -85,13 +86,14 @@ def _render_banner(colored: bool) -> str:
         3: f"Recipes:  {LMCACHE_RECIPES}",
         4: f"LinkedIn: {LMCACHE_LINKEDIN}",
     }
-    lines = []
+    lines = [""]
     for row, (lm_part, cache_part) in enumerate(zip(_LM_ART, _CACHE_ART, strict=True)):
         line = f"{lm_style}{lm_part}{reset} {cache_style}{cache_part}{reset}"
         if row in right_text:
             line += _RIGHT_TEXT_GAP + right_text[row]
         lines.append(line)
     lines.append(f"{dim_style}Set {DISABLE_BANNER_ENV}=1 to hide this banner.{reset}")
+    lines.append("")
     return "\n".join(lines)
 
 
