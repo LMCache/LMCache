@@ -286,7 +286,7 @@ class ParallelStrategy:
     """Whether to use the MLA."""
 
     vllm_world_size: int
-    """Number of workers managed by one vLLM scheduler (TP × PP, excluding DP).
+    """Number of workers managed by one vLLM scheduler (TP × PP; excludes DP).
 
     Mirrors ``vllm.parallel_config.world_size``.
     """
