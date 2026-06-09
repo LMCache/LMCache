@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-29 22:44+0000\n"
+"POT-Creation-Date: 2026-06-08 10:45+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -119,21 +119,23 @@ msgstr "``MiniMaxM2ForCausalLM``"
 msgid "``MiniMaxAI/MiniMax-M2``"
 msgstr "``MiniMaxAI/MiniMax-M2``"
 
-#: ../../source/recipes/index.rst:48 ../../source/recipes/index.rst:55
-#: ../../source/recipes/index.rst:62 ../../source/recipes/index.rst:69
-#: ../../source/recipes/index.rst:76 ../../source/recipes/index.rst:83
-#: ../../source/recipes/index.rst:90 ../../source/recipes/index.rst:97
+#: ../../source/recipes/index.rst:48 ../../source/recipes/index.rst:56
+#: ../../source/recipes/index.rst:63 ../../source/recipes/index.rst:70
+#: ../../source/recipes/index.rst:77 ../../source/recipes/index.rst:84
+#: ../../source/recipes/index.rst:91 ../../source/recipes/index.rst:98
+#: ../../source/recipes/index.rst:105
 msgid "✓"
 msgstr "✓"
 
 #: ../../source/recipes/index.rst:49 ../../source/recipes/index.rst:50
-#: ../../source/recipes/index.rst:56 ../../source/recipes/index.rst:57
-#: ../../source/recipes/index.rst:63 ../../source/recipes/index.rst:64
-#: ../../source/recipes/index.rst:70 ../../source/recipes/index.rst:71
-#: ../../source/recipes/index.rst:77 ../../source/recipes/index.rst:78
-#: ../../source/recipes/index.rst:84 ../../source/recipes/index.rst:85
-#: ../../source/recipes/index.rst:91 ../../source/recipes/index.rst:92
-#: ../../source/recipes/index.rst:98 ../../source/recipes/index.rst:99
+#: ../../source/recipes/index.rst:57 ../../source/recipes/index.rst:58
+#: ../../source/recipes/index.rst:64 ../../source/recipes/index.rst:65
+#: ../../source/recipes/index.rst:71 ../../source/recipes/index.rst:72
+#: ../../source/recipes/index.rst:78 ../../source/recipes/index.rst:79
+#: ../../source/recipes/index.rst:85 ../../source/recipes/index.rst:86
+#: ../../source/recipes/index.rst:92 ../../source/recipes/index.rst:93
+#: ../../source/recipes/index.rst:99 ../../source/recipes/index.rst:100
+#: ../../source/recipes/index.rst:106 ../../source/recipes/index.rst:107
 msgid "—"
 msgstr "—"
 
@@ -145,105 +147,121 @@ msgstr ":doc:`minimax_m2`"
 msgid "``Gemma4ForConditionalGeneration``"
 msgstr "``Gemma4ForConditionalGeneration``"
 
-#: ../../source/recipes/index.rst:54
+#: ../../source/recipes/index.rst
 msgid "``google/gemma-4-31B-it``"
 msgstr "``google/gemma-4-31B-it``"
 
-#: ../../source/recipes/index.rst:58
+#: ../../source/recipes/index.rst
+msgid "``google/gemma-4-E4B-it``"
+msgstr "``google/gemma-4-E4B-it``"
+
+#: ../../source/recipes/index.rst:59
 msgid ":doc:`gemma4`"
 msgstr ":doc:`gemma4`"
 
-#: ../../source/recipes/index.rst:60
+#: ../../source/recipes/index.rst:61
+msgid "``Gemma3ForConditionalGeneration``"
+msgstr "``Gemma3ForConditionalGeneration``"
+
+#: ../../source/recipes/index.rst:62
+msgid "``google/gemma-3-4b-it``"
+msgstr "``google/gemma-3-4b-it``"
+
+#: ../../source/recipes/index.rst:66
+msgid ":doc:`gemma3`"
+msgstr "`:doc:`gemma3``"
+
+#: ../../source/recipes/index.rst:68
 msgid "``MistralForCausalLM``"
 msgstr "``MistralForCausalLM``"
 
-#: ../../source/recipes/index.rst:61
+#: ../../source/recipes/index.rst:69
 msgid "``mistralai/Devstral-2-123B-Instruct-2512``"
 msgstr "``mistralai/Devstral-2-123B-Instruct-2512``"
 
-#: ../../source/recipes/index.rst:65
+#: ../../source/recipes/index.rst:73
 msgid ":doc:`devstral`"
 msgstr ":doc:`devstral`"
 
-#: ../../source/recipes/index.rst:67
+#: ../../source/recipes/index.rst:75
 msgid "``GptOssForCausalLM``"
 msgstr "``GptOssForCausalLM``"
 
-#: ../../source/recipes/index.rst:68
+#: ../../source/recipes/index.rst:76
 msgid "``openai/gpt-oss-120b``"
 msgstr "``openai/gpt-oss-120b``"
 
-#: ../../source/recipes/index.rst:72
+#: ../../source/recipes/index.rst:80
 msgid ":doc:`gpt_oss`"
 msgstr ":gpt_oss:"
 
-#: ../../source/recipes/index.rst:74
+#: ../../source/recipes/index.rst:82
 msgid "``Qwen3MoeForCausalLM``"
 msgstr "``Qwen3MoeForCausalLM``"
 
-#: ../../source/recipes/index.rst:75
+#: ../../source/recipes/index.rst:83
 msgid "``Qwen/Qwen3-235B-A22B``"
 msgstr "``Qwen/Qwen3-235B-A22B``"
 
-#: ../../source/recipes/index.rst:79
+#: ../../source/recipes/index.rst:87
 msgid ":doc:`qwen3`"
 msgstr "：doc:`qwen3`"
 
-#: ../../source/recipes/index.rst:81
+#: ../../source/recipes/index.rst:89
 msgid "``LlamaForCausalLM``"
 msgstr "``LlamaForCausalLM``"
 
-#: ../../source/recipes/index.rst:82
+#: ../../source/recipes/index.rst:90
 msgid "``meta-llama/Meta-Llama-3.1-70B-Instruct``"
 msgstr "``meta-llama/Meta-Llama-3.1-70B-Instruct``"
 
-#: ../../source/recipes/index.rst:86
+#: ../../source/recipes/index.rst:94
 msgid ":doc:`llama`"
 msgstr "`:doc:`llama`"
 
-#: ../../source/recipes/index.rst:88
+#: ../../source/recipes/index.rst:96
 msgid "``Phi3ForCausalLM``"
 msgstr "``Phi3ForCausalLM``"
 
-#: ../../source/recipes/index.rst:89
+#: ../../source/recipes/index.rst:97
 msgid "``microsoft/Phi-4-mini-instruct``"
 msgstr "``microsoft/Phi-4-mini-instruct``"
 
-#: ../../source/recipes/index.rst:93
+#: ../../source/recipes/index.rst:101
 msgid ":doc:`phi3`"
 msgstr ":doc:`phi3`"
 
-#: ../../source/recipes/index.rst:95
+#: ../../source/recipes/index.rst:103
 msgid "``MixtralForCausalLM``"
 msgstr "``MixtralForCausalLM``"
 
-#: ../../source/recipes/index.rst:96
+#: ../../source/recipes/index.rst:104
 msgid "``mistralai/Mixtral-8x7B-Instruct-v0.1``"
 msgstr "``mistralai/Mixtral-8x7B-Instruct-v0.1``"
 
-#: ../../source/recipes/index.rst:100
+#: ../../source/recipes/index.rst:108
 msgid ":doc:`mixtral`"
 msgstr ":doc:`mixtral`"
 
-#: ../../source/recipes/index.rst:102
+#: ../../source/recipes/index.rst:110
 msgid "Legend: ``✓`` validated, ``—`` not validated."
 msgstr "图例：``✓`` 已验证，``—`` 未验证。"
 
-#: ../../source/recipes/index.rst:105
+#: ../../source/recipes/index.rst:113
 msgid "Contributing a recipe"
 msgstr "贡献一个使用指南"
 
-#: ../../source/recipes/index.rst:107
+#: ../../source/recipes/index.rst:115
 msgid "To add a new architecture:"
 msgstr "要添加一个新架构："
 
-#: ../../source/recipes/index.rst:109
+#: ../../source/recipes/index.rst:117
 msgid ""
 "Copy an existing page (e.g. ``minimax_m2.rst``) to "
 "``recipes/<architecture_snake_case>.rst``."
 msgstr "将现有页面（例如 ``minimax_m2.rst``）复制到 ``recipes/<architecture_snake_case>.rst``。"
 
-#: ../../source/recipes/index.rst:111
+#: ../../source/recipes/index.rst:119
 msgid ""
 "Fill in **Validated models**, **Engines**, **LMCache configuration**, and"
 " **Caveats**. Keep each section terse -- if a field has nothing to say, "
@@ -252,7 +270,7 @@ msgstr ""
 "填写 **已验证模型**、**引擎**、**LMCache 配置** 和 **注意事项**。保持每个部分简洁 -- "
 "如果某个字段没有内容，请用一行说明，而不是填充内容。"
 
-#: ../../source/recipes/index.rst:114
+#: ../../source/recipes/index.rst:122
 msgid "Add a row to the table above and an entry to the hidden toctree below."
 msgstr "在上面的表格中添加一行，并在下面的隐藏 toctree 中添加一个条目。"
 

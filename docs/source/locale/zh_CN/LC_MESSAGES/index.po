@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-29 22:44+0000\n"
+"POT-Creation-Date: 2026-06-08 10:45+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,59 +27,59 @@ msgstr "欢迎使用 LMCache"
 msgid "Getting Started"
 msgstr "入门指南"
 
-#: ../../source/index.rst:86
+#: ../../source/index.rst:85
 msgid "Recipes"
 msgstr "使用指南"
 
-#: ../../source/index.rst:94
+#: ../../source/index.rst:93
 msgid "KV Cache offloading and sharing"
 msgstr "KV Cache 卸载和共享"
 
-#: ../../source/index.rst:105
+#: ../../source/index.rst:104
 msgid "Non-KV caching"
 msgstr "非 KV 缓存"
 
-#: ../../source/index.rst:113
+#: ../../source/index.rst:112
 msgid "Multiprocess Mode"
 msgstr "多进程模式"
 
-#: ../../source/index.rst:121
+#: ../../source/index.rst:120
 msgid "Disaggregated prefill"
 msgstr "分离式 Prefill"
 
-#: ../../source/index.rst:130
+#: ../../source/index.rst:129
 msgid "KV Cache management"
 msgstr "KV Cache 管理"
 
-#: ../../source/index.rst:138
+#: ../../source/index.rst:137
 msgid "KV Cache Optimizations"
 msgstr "KV Cache 优化"
 
-#: ../../source/index.rst:148
+#: ../../source/index.rst:147
 msgid "Use LMCache in production"
 msgstr "在生产中使用 LMCache"
 
-#: ../../source/index.rst:160
+#: ../../source/index.rst:159
 msgid "CLI"
 msgstr "命令行界面"
 
-#: ../../source/index.rst:168
+#: ../../source/index.rst:167
 msgid "Internal API Server"
 msgstr "内部 API 服务器"
 
-#: ../../source/index.rst:176
+#: ../../source/index.rst:175
 msgid "Controller WebUI"
 msgstr "控制器 WebUI"
 
-#: ../../source/index.rst:184
+#: ../../source/index.rst:183
 msgid "Developer Guide"
 msgstr "开发者指南"
 
-#: ../../source/index.rst:197
+#: ../../source/index.rst:196
 msgid "API Reference"
 msgstr "API 参考"
 
-#: ../../source/index.rst:208
+#: ../../source/index.rst:207
 msgid "Community"
 msgstr "社区"
 
@@ -109,9 +109,9 @@ msgstr "`LMCache 博客 <https://lmcache.github.io>`_"
 #: ../../source/index.rst:49
 msgid ""
 "`Join LMCache slack workspace "
-"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3eck2v8ub-"
-"j2hPn0AdzcfyykatTBXSTg>`_"
-msgstr "`加入 LMCache Slack 工作区 <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3eck2v8ub-j2hPn0AdzcfyykatTBXSTg>`_"
+"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-"
+"3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
+msgstr "`加入 LMCache Slack 工作区 <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
 
 #: ../../source/index.rst:50
 msgid "Our papers:"
@@ -121,7 +121,9 @@ msgstr "我们的论文："
 msgid ""
 "`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
 "Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
-msgstr "`CacheGen: KV Cache 压缩与流式传输以快速服务大型语言模型 <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
+msgstr ""
+"`CacheGen: KV Cache 压缩与流式传输以快速服务大型语言模型 "
+"<https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 
 #: ../../source/index.rst:53
 msgid ""
@@ -135,14 +137,14 @@ msgid ""
 "<https://arxiv.org/abs/2409.13761>`_"
 msgstr "`大型语言模型需要内容分发网络吗？ <https://arxiv.org/abs/2409.13761>`_"
 
-#: ../../source/index.rst:56 ../../source/index.rst:84
-#: ../../source/index.rst:92 ../../source/index.rst:103
-#: ../../source/index.rst:111 ../../source/index.rst:119
-#: ../../source/index.rst:128 ../../source/index.rst:136
-#: ../../source/index.rst:146 ../../source/index.rst:158
-#: ../../source/index.rst:166 ../../source/index.rst:174
-#: ../../source/index.rst:182 ../../source/index.rst:195
-#: ../../source/index.rst:206 ../../source/index.rst:215
+#: ../../source/index.rst:56 ../../source/index.rst:83
+#: ../../source/index.rst:91 ../../source/index.rst:102
+#: ../../source/index.rst:110 ../../source/index.rst:118
+#: ../../source/index.rst:127 ../../source/index.rst:135
+#: ../../source/index.rst:145 ../../source/index.rst:157
+#: ../../source/index.rst:165 ../../source/index.rst:173
+#: ../../source/index.rst:181 ../../source/index.rst:194
+#: ../../source/index.rst:205 ../../source/index.rst:214
 msgid ":raw-html:`<br />`"
 msgstr ":raw-html:`<br />`"
 

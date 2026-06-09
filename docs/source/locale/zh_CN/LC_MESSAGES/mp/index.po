@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-06-08 10:45+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -19,7 +19,7 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/mp/index.rst:54
+#: ../../source/mp/index.rst:50
 msgid "Contents"
 msgstr "目录"
 
@@ -33,7 +33,9 @@ msgid ""
 "that vLLM instances connect to over ZMQ.  One LMCache server per node can"
 " serve multiple vLLM pods, providing process isolation, shared caching, "
 "and independent resource scaling."
-msgstr "LMCache 多进程 (MP) 模式将 LMCache 作为一个 **独立服务** 运行，vLLM 实例通过 ZMQ 连接到该服务。每个节点的 LMCache 服务器可以为多个 vLLM pod 提供服务，提供进程隔离、共享缓存和独立资源扩展。"
+msgstr ""
+"LMCache 多进程 (MP) 模式将 LMCache 作为一个 **独立服务** 运行，vLLM 实例通过 ZMQ 连接到该服务。每个节点的 "
+"LMCache 服务器可以为多个 vLLM pod 提供服务，提供进程隔离、共享缓存和独立资源扩展。"
 
 #: ../../source/mp/index.rst:10
 msgid "Key Benefits"
@@ -52,7 +54,9 @@ msgid ""
 "running LMCache in a separate process, its Python GIL and CPU work "
 "(hashing, memory management, L2 I/O) do not compete with vLLM's inference"
 " threads."
-msgstr "**推理路径上没有 GIL 争用或 Python 开销** -- 通过在单独的进程中运行 LMCache，它的 Python GIL 和 CPU 工作（哈希、内存管理、L2 I/O）不会与 vLLM 的推理线程竞争。"
+msgstr ""
+"**推理路径上没有 GIL 争用或 Python 开销** -- 通过在单独的进程中运行 LMCache，它的 Python GIL 和 CPU "
+"工作（哈希、内存管理、L2 I/O）不会与 vLLM 的推理线程竞争。"
 
 #: ../../source/mp/index.rst:17
 msgid ""
@@ -95,8 +99,8 @@ msgid "Server Variants"
 msgstr "服务器变体"
 
 #: ../../source/mp/index.rst:35
-msgid "LMCache ships three server entry points:"
-msgstr "LMCache 提供三个服务器入口点："
+msgid "LMCache ships two server entry points:"
+msgstr "LMCache 提供两个服务器入口点："
 
 #: ../../source/mp/index.rst:41
 msgid "Entry Point"
@@ -111,30 +115,44 @@ msgid "``lmcache server``"
 msgstr "``lmcache server``"
 
 #: ../../source/mp/index.rst:44
-msgid ""
-"**Recommended.** ZMQ + FastAPI HTTP frontend (adds ``/healthcheck`` for "
-"K8s probes, ``/clear-cache``, ``/status`` — see :doc:`http_api`). Use "
-"``--engine-type blend`` to enable BlendEngineV2 for cross-request KV "
-"reuse."
-msgstr "**推荐。** ZMQ + FastAPI HTTP 前端（为 K8s 探针添加 ``/healthcheck``、``/clear-cache``、``/status`` — 参见 :doc:`http_api`）。使用 ``--engine-type blend`` 启用 BlendEngineV2 以实现跨请求的 KV 重用。"
+msgid "**Recommended.** ZMQ + FastAPI HTTP frontend — see :doc:`http_api`."
+msgstr "**推荐。** ZMQ + FastAPI HTTP 前端 — 参见 :doc:`http_api`。"
 
-#: ../../source/mp/index.rst:48
+#: ../../source/mp/index.rst:45
 msgid "``python3 -m lmcache.v1.multiprocess.server``"
 msgstr "``python3 -m lmcache.v1.multiprocess.server``"
 
-#: ../../source/mp/index.rst:49
+#: ../../source/mp/index.rst:46
 msgid ""
-"(Legacy) ZMQ-only server using MPCacheEngine (no HTTP endpoints). Prefer "
+"(Legacy) ZMQ-only server with no HTTP endpoints; same ``--engine-type`` /"
+" ``--supported-transfer-mode`` flags as ``lmcache server``. Prefer "
 "``lmcache server``."
-msgstr "（遗留）仅使用 MPCacheEngine 的 ZMQ 服务器（没有 HTTP 端点）。请使用 ``lmcache server``。"
+msgstr "（遗留）仅支持 ZMQ 的服务器，没有 HTTP 端点；与 ``lmcache server`` 相同的 ``--engine-type`` / ``--supported-transfer-mode`` 标志。建议使用 ``lmcache server``。"
 
-#: ../../source/mp/index.rst:51
-msgid "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
-msgstr "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
+#~ msgid ""
+#~ "**Recommended.** ZMQ + FastAPI HTTP "
+#~ "frontend (adds ``/healthcheck`` for K8s "
+#~ "probes, ``/clear-cache``, ``/status`` — "
+#~ "see :doc:`http_api`). Use ``--engine-type "
+#~ "blend`` to enable BlendEngineV2 for "
+#~ "cross-request KV reuse."
+#~ msgstr ""
+#~ "**推荐。** ZMQ + FastAPI HTTP 前端（为 "
+#~ "K8s 探针添加 ``/healthcheck``、``/clear-"
+#~ "cache``、``/status`` — 参见 :doc:`http_api`）。使用 "
+#~ "``--engine-type blend`` 启用 BlendEngineV2 "
+#~ "以实现跨请求的 KV 重用。"
 
-#: ../../source/mp/index.rst:52
-msgid ""
-"(Legacy) CacheBlend-enabled server. Prefer ``lmcache server --engine-type"
-" blend``."
-msgstr "（遗留）启用 CacheBlend 的服务器。建议使用 ``lmcache server --engine-type blend``。"
+#~ msgid ""
+#~ "(Legacy) ZMQ-only server using "
+#~ "MPCacheEngine (no HTTP endpoints). Prefer "
+#~ "``lmcache server``."
+#~ msgstr "(遗留) 仅使用 MPCacheEngine 的 ZMQ 服务器（没有 HTTP 端点）。请使用 ``lmcache server``。"
 
+#~ msgid "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
+#~ msgstr "``python3 -m lmcache.v1.multiprocess.blend_server_v2``"
+
+#~ msgid ""
+#~ "(Legacy) CacheBlend-enabled server. Prefer "
+#~ "``lmcache server --engine-type blend``."
+#~ msgstr "（遗留）启用 CacheBlend 的服务器。建议使用 ``lmcache server --engine-type blend``。"

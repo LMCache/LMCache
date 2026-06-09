@@ -175,6 +175,29 @@ def get_l1_object_count(sm: StorageManager) -> int:
     return sm.report_status()["l1_manager"]["total_object_count"]
 
 
+def clear_and_wait_drained(sm: StorageManager, timeout: float = 10.0) -> None:
+    """Clear L1 and poll until every object is evicted.
+
+    After an L2 store the StoreController holds read locks on the stored objects
+    for a short window, and ``StorageManager.clear`` keeps locked objects intact.
+    A single clear right after the store therefore races the lock release and can
+    leave objects behind. Retry clear() until the locks drop and L1 drains rather
+    than relying on a fixed sleep.
+
+    Raises:
+        AssertionError: If L1 still holds objects after ``timeout`` seconds.
+    """
+
+    def drained() -> bool:
+        sm.clear()
+        return get_l1_object_count(sm) == 0
+
+    if not wait_for_condition(drained, timeout=timeout):
+        raise AssertionError(
+            f"L1 did not drain after clear: {get_l1_object_count(sm)} objects remain"
+        )
+
+
 # =============================================================================
 # Tests: Full round-trip through serde
 # =============================================================================
@@ -196,9 +219,7 @@ class TestSerdeRoundTrip:
 
         write_and_wait_for_l2(sm, keys, layout)
 
-        # Brief sleep so StoreController releases read locks after L2 store
-        time.sleep(1)
-        sm.clear()
+        clear_and_wait_drained(sm)
         assert get_l1_object_count(sm) == 0
 
         # Prefetch from L2
@@ -222,8 +243,7 @@ class TestSerdeRoundTrip:
         keys = [make_object_key(i) for i in range(3)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(1)
-        sm.clear()
+        clear_and_wait_drained(sm)
 
         # Prefetch
         handle = sm.submit_prefetch_task(keys, layout)
@@ -263,8 +283,7 @@ class TestSerdeDisabled:
         keys = [make_object_key(i) for i in range(5)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(1)
-        sm.clear()
+        clear_and_wait_drained(sm)
 
         handle = sm.submit_prefetch_task(keys, layout)
         hits = wait_for_prefetch_status(sm, handle)
@@ -285,8 +304,7 @@ class TestSerdeDisabled:
         keys = [make_object_key(i) for i in range(3)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(1)
-        sm.clear()
+        clear_and_wait_drained(sm)
 
         handle = sm.submit_prefetch_task(keys, layout)
         hits = wait_for_prefetch_status(sm, handle)
@@ -318,8 +336,7 @@ class TestSerdePartialPrefix:
         # Write only keys 0, 1, 3, 4 (skip 2)
         keys_to_write = [make_object_key(i) for i in [0, 1, 3, 4]]
         write_and_wait_for_l2(sm, keys_to_write, layout)
-        time.sleep(1)
-        sm.clear()
+        clear_and_wait_drained(sm)
 
         # Request all 5 keys — prefix should be 2 (gap at index 2)
         all_keys = [make_object_key(i) for i in range(5)]
@@ -354,8 +371,7 @@ class TestSerdeMemoryStress:
         for cycle in range(5):
             keys = [make_object_key(cycle * 10 + i) for i in range(3)]
             write_and_wait_for_l2(sm, keys, layout)
-            time.sleep(1)
-            sm.clear()
+            clear_and_wait_drained(sm)
 
             handle = sm.submit_prefetch_task(keys, layout)
             hits = wait_for_prefetch_status(sm, handle)
@@ -441,8 +457,7 @@ class TestSerdeBufferBounds:
         keys = [make_object_key(i) for i in range(num_keys)]
 
         write_and_wait_for_l2(sm, keys, layout)
-        time.sleep(1)
-        sm.clear()
+        clear_and_wait_drained(sm)
         assert get_l1_object_count(sm) == 0
 
         handle = sm.submit_prefetch_task(keys, layout)
