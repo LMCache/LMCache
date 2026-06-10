@@ -17,6 +17,7 @@ torch / zmq.
 from __future__ import annotations
 
 # Standard
+from dataclasses import dataclass
 from typing import Any
 import ctypes
 import hashlib
@@ -850,6 +851,24 @@ def _query_checksum(
 # ------------------------------------------------------------------ #
 
 
+@dataclass
+class RequestResult:
+    """Result of a single request pass (cold or warm).
+
+    Carries both the checksum list (for correctness verification) and
+    per-operation latency measurements (for metrics aggregation).
+    """
+
+    checksums: list[str] | None = None
+    lookup_ms: float | None = None
+    retrieve_ms: float | None = None
+    store_ms: float | None = None
+    hit_chunks: int = 0
+    total_chunks: int = 0
+    store_tokens: int = 0
+    retrieve_tokens: int = 0
+
+
 def _process_request(
     client: MessageQueueClient,
     seq_no: int,
@@ -864,7 +883,7 @@ def _process_request(
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
     server_pool: "mmap.mmap | None" = None,
-) -> list[str] | None:
+) -> RequestResult | None:
     """Run the full lookup -> retrieve/store flow.
 
     When ``client_tensors`` is provided (data-mode self-check), the
@@ -962,6 +981,8 @@ def _process_request(
             )
 
     # 3. RETRIEVE hit portion
+    retrieve_ms: float = 0.0
+    store_ms: float = 0.0
     if hit_chunks > 0:
         retrieve_key = _make_key(
             token_ids,
@@ -1077,7 +1098,16 @@ def _process_request(
 
     # 6. END_SESSION
     _send_end_session(client, request_id)
-    return checksums
+    return RequestResult(
+        checksums=checksums,
+        lookup_ms=lookup_ms,
+        retrieve_ms=retrieve_ms if hit_chunks > 0 else None,
+        store_ms=store_ms if miss_chunks > 0 else None,
+        hit_chunks=hit_chunks,
+        total_chunks=total_chunks,
+        store_tokens=(num_full_tokens - hit_tokens) if miss_chunks > 0 else 0,
+        retrieve_tokens=hit_tokens if hit_chunks > 0 else 0,
+    )
 
 
 # ------------------------------------------------------------------ #
