@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | vllm_bench | long_doc_qa | long_doc_qa_l2 | fault_tolerance
+#   test_name: lm_eval | hma_lm_eval_gemma4 | vllm_bench | long_doc_qa
+#              | long_doc_qa_l2 | fault_tolerance | deadlock | restart_recovery
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -20,7 +21,20 @@ export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
-export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+# Per-test default model (overridable via the MODEL env var). The HMA test needs
+# a hybrid model whose KV cache groups have different block sizes, so the
+# connector exercises the per-group hybrid-memory-allocator path.
+if [ "$TEST_NAME" = "hma_lm_eval_gemma4" ]; then
+    # gemma-4-31B-it is public (no gating, so no HF token check) and has
+    # heterogeneous head dims (head_dim 256 / global_head_dim 512), so vLLM
+    # gives its KV cache groups different block sizes -- this is what exercises
+    # LMCache's per-group block-size handling. It forces TRITON_ATTN, so the
+    # pipeline sets ATTENTION_BACKEND=auto; its ~63GB of weights also need a
+    # higher GPU_MEMORY_UTILIZATION than the default (all set in pipeline.yml).
+    export MODEL="${MODEL:-google/gemma-4-31B-it}"
+else
+    export MODEL="${MODEL:-Qwen/Qwen3-14B}"
+fi
 export CPU_BUFFER_SIZE="${CPU_BUFFER_SIZE:-80}"
 export MAX_WORKERS="${MAX_WORKERS:-4}"
 export LMCACHE_DIR="$REPO_ROOT"
@@ -86,6 +100,9 @@ case "$TEST_NAME" in
     lm_eval)
         exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
+    hma_lm_eval_gemma4)
+        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
+        ;;
     vllm_bench)
         exec_script="${SCRIPT_DIR}/run-vllm-bench.sh"
         ;;
@@ -107,9 +124,12 @@ case "$TEST_NAME" in
     cache_stats)
         exec_script="${SCRIPT_DIR}/run-cache-stats.sh"
         ;;
+    http_api)
+        exec_script="${SCRIPT_DIR}/run-http-api.sh"
+        ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats"
+        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api"
         exit 1
         ;;
 esac

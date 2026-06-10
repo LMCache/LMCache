@@ -125,7 +125,7 @@ def _find_model_meta(
     """Find the GPU metadata entry matching *model_name*.
 
     Args:
-        gpu_meta: The ``gpu_context_meta`` dict from ``/status``.
+        gpu_meta: The ``cache_context_meta`` dict from ``/status``.
         model_name: Model name to match.
 
     Returns:
@@ -171,10 +171,10 @@ def resolve_tokens_per_gb(lmcache_url: str, model_name: str) -> int:
     """
     data = _fetch_lmcache_status(lmcache_url)
 
-    gpu_meta = data.get("gpu_context_meta", {})
+    gpu_meta = data.get("cache_context_meta", {})
     if not gpu_meta:
         # CB-only deployments (engine_type="blend") populate
-        # cb_gpu_context_meta instead of gpu_context_meta.
+        # cb_gpu_context_meta instead of cache_context_meta.
         gpu_meta = data.get("cb_gpu_context_meta", {})
     if not gpu_meta:
         raise RuntimeError(

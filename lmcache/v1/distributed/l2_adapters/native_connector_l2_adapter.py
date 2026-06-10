@@ -53,18 +53,15 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
     Unsalted::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
 
     Salted (trailing ``cache_salt``)::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
-
-    Keys with ``cache_salt=""`` produce the 3-field shape, which is
-    bit-identical to the format used before ``cache_salt`` existed —
-    so existing un-salted caches remain valid with no migration.
+        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
     """
     base = (
-        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}{_KEY_SEP}{key.chunk_hash.hex()}"
+        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
+        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"

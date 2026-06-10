@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import os
 import sys
 
@@ -34,9 +34,10 @@ if os.environ.get("NO_CUDA_EXT", "0") == "1":
 # Common C++ extensions only; skip CUDA / ROCm / SYCL.
 NO_GPU_EXT = os.environ.get("NO_GPU_EXT", "0") == "1"
 
-# New environment variable to choose between CUDA, HIP, and SYCL
+# New environment variable to choose between CUDA, HIP, SYCL, and MUSA.
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
 BUILD_WITH_SYCL = os.environ.get("BUILD_WITH_SYCL", "0") == "1"
+BUILD_WITH_MUSA = os.environ.get("BUILD_WITH_MUSA", "0") == "1"
 
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 
@@ -164,6 +165,7 @@ def _common_cpp_extensions(
 
     storage_manager_sources = [
         "csrc/storage_manager/bitmap.cpp",
+        "csrc/storage_manager/periodic_event_notifier.cpp",
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
         "csrc/storage_manager/utils.cpp",
@@ -326,6 +328,10 @@ def sycl_extension() -> tuple[list, dict]:
     sycl_sources = [
         "csrc/sycl/pybind_sycl.cpp",
         "csrc/sycl/mem_kernels_sycl.cpp",
+        "csrc/sycl/cal_cdf_sycl.cpp",
+        "csrc/sycl/pos_kernels_sycl.cpp",
+        "csrc/sycl/ac_enc_sycl.cpp",
+        "csrc/sycl/ac_dec_sycl.cpp",
     ]
     # Use CppExtension with DPC++ compiler (set CXX=icpx before invoking).
     # The -fsycl flag enables SYCL compilation and linking.
@@ -368,8 +374,13 @@ def sycl_extension() -> tuple[list, dict]:
     return ext_modules, cmdclass
 
 
+def musa_extension() -> tuple[list, dict]:
+    print("MUSA GPU extensions are not built yet; skipping GPU extensions")
+    return [], {}
+
+
 def source_dist_extension() -> tuple[list, dict]:
-    print("Not building CUDA/HIP/SYCL extensions for sdist")
+    print("Not building CUDA/HIP/SYCL/MUSA extensions for sdist")
     return [], {}
 
 
@@ -400,6 +411,8 @@ def _collect_extensions() -> tuple[list, dict]:
         - `sdist`: no extensions.
         - `NO_NATIVE_EXT=1`: no extensions (pure-Python lmcache-cli wheel).
         - `NO_GPU_EXT=1`: common C++ extensions only.
+        - `BUILD_WITH_MUSA=1`: common C++ extensions only; MUSA fused GPU
+          extensions are not built yet.
         - Default: common C++ extensions + one GPU backend (CUDA/ROCm/SYCL).
     """
     if BUILDING_SDIST:
@@ -421,6 +434,8 @@ def _collect_extensions() -> tuple[list, dict]:
         gpu_ext_modules, cmdclass = sycl_extension()
     elif BUILD_WITH_HIP:
         gpu_ext_modules, cmdclass = rocm_extension()
+    elif BUILD_WITH_MUSA:
+        gpu_ext_modules, cmdclass = musa_extension()
     else:
         gpu_ext_modules, cmdclass = cuda_extension()
     ext_modules.extend(gpu_ext_modules)
@@ -433,10 +448,13 @@ if __name__ == "__main__":
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     # NO_GPU_EXT skips GPU-vendor deps (cupy / nixl).
     if not NO_GPU_EXT:
+        core_file: Optional[str]
         if BUILD_WITH_HIP:
             core_file = "rocm_core.txt"
         elif BUILD_WITH_SYCL:
             core_file = "xpu_core.txt"
+        elif BUILD_WITH_MUSA:
+            core_file = None
         else:
             # CUDA major selects between cu12 and cu13 vendor pins (cupy, nixl).
             # Defaults to cu13 (the PyPI build); cu12.9 wheel builds set
@@ -447,7 +465,10 @@ if __name__ == "__main__":
                     f"LMCACHE_CUDA_MAJOR must be '12' or '13', got '{cuda_major}'"
                 )
             core_file = f"cuda{cuda_major}_core.txt"
-        install_requires += _read_requirements(ROOT_DIR / "requirements" / core_file)
+        if core_file is not None:
+            install_requires += _read_requirements(
+                ROOT_DIR / "requirements" / core_file
+            )
 
     setup(
         packages=find_packages(

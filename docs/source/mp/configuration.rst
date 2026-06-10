@@ -48,10 +48,19 @@ Source: ``lmcache/v1/multiprocess/config.py``
        Choices: ``builtin``, ``sha256_cbor``, ``blake3``.
    * - ``--engine-type``
      - ``default``
-     - Cache engine backend type.
-       ``default`` uses MPCacheEngine; ``blend`` uses BlendEngineV2
-       for cross-request KV reuse.
+     - Cache engine backend type. ``default`` uses standard prefix
+       caching; ``blend`` enables CacheBlend non-prefix KV reuse
+       (composes a ``BlendModule`` into the engine, which requires
+       ``--supported-transfer-mode`` to be ``gpu`` or ``auto``).
        Choices: ``default``, ``blend``.
+   * - ``--supported-transfer-mode``
+     - ``auto``
+     - Which worker → server transfer paths the server loads.
+       ``gpu`` enables only GPU-based IPC transfer (STORE/RETRIEVE);
+       ``non_gpu`` enables only the non-GPU (PREPARE/COMMIT) transfer
+       path; ``auto`` (default) loads both so workers of either device
+       type can connect without manual configuration.
+       Choices: ``gpu``, ``non_gpu``, ``auto``.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to
@@ -63,6 +72,20 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - JSON string of extra key-value config forwarded to runtime
        plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
        ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
+   * - ``--script-allowed-imports``
+     - ``[]``
+     - Space-separated list of Python module names that scripts posted
+       to the HTTP ``/run_script`` endpoint are allowed to import.
+       Example: ``--script-allowed-imports numpy pandas``.
+   * - ``--shm-name``
+     - *(not set)*
+     - SHM segment name for non-GPU KV transfer (only used when the
+       non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
+       ``auto`` or ``non_gpu``).
+       Not set (default): auto-allocate a shared-memory pool.
+       ``""`` (empty string): disable SHM and force the pickle transfer
+       path.  Any other value: use that exact name for the SHM pool
+       segment.
 
 Lookup Hash Logging
 -------------------
@@ -235,6 +258,13 @@ Source: ``lmcache/v1/distributed/config.py``
      - Maximum number of concurrent prefetch (L2 load) requests.
        Limits how many in-flight loads the PrefetchController may
        issue at once, preventing excessive L1 memory pressure.
+   * - ``--periodic-notifier-interval-ms``
+     - ``5``
+     - Interval in milliseconds for the periodic event notifier
+       heartbeat.  A native C++ background thread writes to all
+       registered file descriptors at this interval, waking
+       controller poll loops for L2 adapters that lack native
+       async completion callbacks.
 
 L2 Adapters
 -----------
@@ -415,9 +445,15 @@ On the vLLM side, specify the LMCache server host and port via the
 ``LMCacheMPConnector`` reads the following keys from
 ``kv_connector_extra_config``:
 
+Connector ``extra_config`` Keys
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All connector-level options are passed through
+``kv_connector_extra_config`` and use the ``lmcache.mp.`` prefix.
+
 .. list-table::
    :header-rows: 1
-   :widths: 35 20 45
+   :widths: 30 15 55
 
    * - Key
      - Default
@@ -438,6 +474,12 @@ On the vLLM side, specify the LMCache server host and port via the
      - ``10.0``
      - Interval (seconds) between periodic heartbeat pings sent from the
        connector to the server.
+   * - ``lmcache.mp.mp_transfer_mode``
+     - ``auto``
+     - Routing mode for the worker -> server transfer context. One of
+       ``auto`` (CUDA -> handle, others -> data), ``handle`` (force IPC /
+       SHM zero-copy), or ``data`` (force worker-side gather/scatter copy).
+       Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
 
 Environment Variables
 ---------------------
@@ -484,6 +526,7 @@ Full Example
         --eviction-ratio 0.1 \
         --l2-prefetch-policy default \
         --l2-prefetch-max-in-flight 8 \
+        --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
         --metrics-sample-rate 0.01 \

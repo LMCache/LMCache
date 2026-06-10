@@ -358,7 +358,7 @@ Settings for using Nixl as a storage backend instead of disaggregated prefill. T
    * - nixl_endpoint_list
      - List of object-storage endpoint URLs for per-worker distribution. Each TP worker selects an entry round-robin by ``local_worker_id``, overriding ``nixl_backend_params.endpoint_override``. Only applied when ``nixl_backend`` is ``"OBJ"`` (silently ignored otherwise). Each entry must start with ``http://`` or ``https://``; an empty list raises ``ValueError`` at engine init.
    * - nixl_use_hugepages
-     - Whether to use Linux hugepages (2 MiB) for the NIXL CPU buffer. Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Values: true/false. Default: false
+     - **Deprecated.** Use ``local_cpu_use_hugepages`` instead. When set, the value is copied into ``local_cpu_use_hugepages`` (a warning is logged) and the key is dropped. Hugepages have never applied to GPU buffers; in CPU mode the NIXL pool is now owned by ``LocalCPUBackend``.
 
 
 Additional Storage Configurations

@@ -236,6 +236,19 @@ def test_boundary_alloc(alloc_cls):
     allocator.close()
 
 
+def test_mixed_allocator_owns_returned_tensor_object():
+    allocator = MixedMemoryAllocator(1024 * 1024)
+
+    data = allocator.allocate(torch.Size([4096]), torch.float)
+    assert data is not None
+    assert data.parent() is allocator
+
+    data.ref_count_down()
+    assert not data.is_valid()
+    assert allocator.memcheck()
+    allocator.close()
+
+
 @pytest.mark.parametrize(
     "alloc_cls",
     [

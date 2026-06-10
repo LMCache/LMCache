@@ -10,7 +10,7 @@ The controller runs a background thread with an event-driven loop that:
 """
 
 # Standard
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 import enum
 import select
@@ -508,6 +508,9 @@ class StoreController(StorageControllerInterface):
                         "l2_name": self._adapter_descriptors[adapter_index].type_name,
                         "key_count": len(successful_keys),
                         "total_bytes": total_bytes,
+                        "key_count_per_salt": Counter(
+                            k.cache_salt for k in successful_keys
+                        ),
                     },
                 )
             )
@@ -579,6 +582,7 @@ class StoreController(StorageControllerInterface):
                         **completion_meta,
                         "succeeded_count": len(task.keys),
                         "failed_count": 0,
+                        "key_count_per_salt": Counter(k.cache_salt for k in task.keys),
                     },
                 )
             )

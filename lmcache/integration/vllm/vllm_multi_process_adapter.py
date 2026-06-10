@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, Protocol
 import enum
 import os
 import threading
@@ -17,17 +18,22 @@ from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    CudaIPCWrapper,
     IPCCacheEngineKey,
     KVCache,
+)
+from lmcache.v1.multiprocess.group_view import (
+    EngineGroupInfo,
+    expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
+    DataTransferContext,
     TransferContext,
     create_transfer_context,
 )
 from lmcache.v1.periodic_thread import PeriodicThread, ThreadLevel, ThreadRunSummary
+from lmcache.v1.platform import _registry as platform_registry
 
 logger = init_logger(__name__)
 
@@ -46,6 +52,13 @@ class ExtraConfigDefault(enum.Enum):
     # Interval (seconds) between periodic heartbeat pings
     # to the server.
     heartbeat_interval = 10.0
+    # Routing mode for ``create_transfer_context``: ``auto`` keeps the
+    # historical CUDA -> handle / others -> data dispatch; ``handle``
+    # forces the IPC / SHM zero-copy path; ``data`` forces the
+    # worker-side gather/scatter copy path. Mirrors the
+    # ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config key wins
+    # when both are set.
+    mp_transfer_mode = "auto"
 
 
 # Backward-compatible aliases for the legacy `lmcache_mp_connector_0180`
@@ -107,6 +120,10 @@ def _resolve_extra_config(
     return resolved
 
 
+class _IpcEvent(Protocol):
+    def ipc_handle(self) -> Any: ...
+
+
 def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # Emit a per-layer (name, shape, dtype) summary so the operator can
     # verify the exact layer set & tensor geometry being shipped to the
@@ -124,7 +141,52 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
         ),
     )
     logger.info("Wrapping %d KV cache tensors for IPC", len(kv_caches))
-    return [CudaIPCWrapper(tensor) for tensor in kv_caches.values()]
+    # Per-iteration resource management: if wrapping the N-th tensor
+    # raises, ``shm_unlink`` whatever earlier iterations already
+    # registered with POSIX SHM so the named segments do not outlive
+    # the failed batch. CUDA wrappers do not own a named segment and
+    # are skipped via the duck-typed ``shm_name`` check.
+    wrappers: KVCache = []
+    try:
+        for tensor in kv_caches.values():
+            wrappers.append(wrap_one_kv_cache(tensor))
+    except BaseException:
+        _release_partial_kv_wrappers(wrappers)
+        raise
+    return wrappers
+
+
+def _release_partial_kv_wrappers(wrappers: list[Any]) -> None:
+    """Best-effort unlink of SHM segments owned by partially built wrappers.
+
+    Used by :func:`wrap_kv_caches` to roll back a half-finished batch
+    when a later iteration raises. Only POSIX-SHM-backed wrappers carry
+    a ``shm_name`` attribute, so other wrapper kinds (e.g. CUDA-IPC)
+    are silently skipped.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.posix_shm import shm_unlink
+
+    for w in wrappers:
+        name = getattr(w, "shm_name", None)
+        if name is None:
+            continue
+        try:
+            shm_unlink(name)
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("shm_unlink failed during rollback", exc_info=True)
+
+
+def wrap_one_kv_cache(tensor: torch.Tensor) -> Any:
+    """Dispatch by ``tensor.device.type`` via the platform registry.
+
+    Concrete factories self-register at import time (CUDA in
+    ``lmcache.v1.platform.cuda``, CPU SHM in
+    ``lmcache.v1.platform.cpu``), so this call site stays free of
+    if/elif chains and new accelerators plug in by registering a
+    sibling factory.
+    """
+    return platform_registry.get_kv_wrapper_factory(tensor.device.type)(tensor)
 
 
 def send_lmcache_request(
@@ -223,32 +285,44 @@ class ParallelStrategy:
     use_mla: bool
     """Whether to use the MLA."""
 
-    kv_world_size: int
-    """
-    The kv world size, kv_world_size may not be equal to the actual_world_size, 
-    in the case of mla, it will 'exclude' the effect of TP, the value is 
-    calculated by `extract_world_size_and_kv_rank` in `lmcache_mp_connector.py`.
+    vllm_world_size: int
+    """Number of workers managed by one vLLM scheduler (TP × PP; excludes DP).
+
+    Mirrors ``vllm.parallel_config.world_size``.
     """
 
-    kv_worker_id: int
-    """
-    The kv worker id of the sub-process, kv_worker_id may not be equal to the 
-    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP, 
-    the value is calculated by `extract_world_size_and_kv_rank` in 
-    `lmcache_mp_connector.py`.
-    """
-
-    actual_world_size: int
-    """The actual world size."""
-
-    actual_worker_id: int
-    """The actual worker id of the sub-process."""
+    vllm_worker_id: int
+    """This worker's rank within its scheduler group."""
 
     tp_size: int
     """The tensor parallel size."""
 
     pp_size: int
     """The pipeline parallel size."""
+
+    @property
+    def kv_world_size(self) -> int:
+        """Number of pieces a single token chunk's KV cache is split into
+        on the LMCache server storage."""
+        if self.use_mla:
+            return self.vllm_world_size // self.tp_size
+        return self.vllm_world_size
+
+    @property
+    def kv_worker_id(self) -> int:
+        """Index of the piece of a single token chunk's KV cache
+        that the current worker is responsible for,
+        in ``[0, kv_world_size)``."""
+        if self.use_mla:
+            return self.vllm_worker_id // self.tp_size
+        return self.vllm_worker_id
+
+    @property
+    def is_kv_writer(self) -> bool:
+        """Whether this rank is responsible for storing KV."""
+        if not self.use_mla:
+            return True
+        return self.vllm_worker_id % self.tp_size == 0
 
 
 def _normalize_adapter_init_args(
@@ -287,10 +361,8 @@ def _normalize_adapter_init_args(
     kv_worker_id = int(parallel_strategy)
     strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=kv_world_size,
-        kv_worker_id=kv_worker_id,
-        actual_world_size=kv_world_size,
-        actual_worker_id=kv_worker_id,
+        vllm_world_size=kv_world_size,
+        vllm_worker_id=kv_worker_id,
         tp_size=kv_world_size,
         pp_size=1,
     )
@@ -395,8 +467,11 @@ class LoadStoreOp:
     token_ids: list[int]
     """Token IDs for the load/store operation"""
 
-    block_ids: list[int]
-    """Block ids for the load/store operation"""
+    block_ids: list[list[int]]
+    """Block IDs for the load/store operation, indexed by engine KV cache
+    group (one inner list per engine group). Worker submit paths expand
+    this to LMCache KV group order before sending requests to the server.
+    """
 
     start: int = 0
     """Start token index"""
@@ -408,8 +483,26 @@ class LoadStoreOp:
     """Number of tokens to skip writing at the beginning of the retrieve
     range. Used to avoid overwriting APC-shared GPU blocks during retrieve."""
 
-    def __len__(self) -> int:
-        return len(self.block_ids)
+    @property
+    def flat_block_ids(self) -> list[int]:
+        """Return all block IDs flattened for group-blind error paths.
+
+        Handles both the normal ``list[list[int]]`` format and the
+        IPC-flattened ``list[int]`` format that vLLM v0.19.0 produces when
+        ``SchedulerOutput`` serializes single-element nested lists across
+        process boundaries (e.g. ``[[20, 21]]`` → ``[20, 21]``).
+        Returns an empty list when ``block_ids`` is empty.
+        """
+        if not self.block_ids:
+            return []
+        # Defend against IPC serialization flattening [[20, 21, …]] → [20, 21, …]
+        if isinstance(self.block_ids[0], int):
+            return list(self.block_ids)
+        return [
+            block_id
+            for group_block_ids in self.block_ids
+            for block_id in group_block_ids
+        ]
 
 
 StoreResult = bool
@@ -826,6 +919,19 @@ class LMCacheMPWorkerAdapter:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
+            # Only treat ``mp_transfer_mode`` as an explicit override when
+            # the user actually set it in extra_config; otherwise leave it
+            # as ``None`` so ``create_transfer_context`` can still consult
+            # the ``LMCACHE_MP_TRANSFER_MODE`` env var.
+            mp_mode_key = (
+                _EXTRA_CONFIG_KEY_PREFIX + ExtraConfigDefault.mp_transfer_mode.name
+            )
+            if mp_mode_key in extra_config:
+                self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
+            else:
+                self._mp_transfer_mode = None
+        else:
+            self._mp_transfer_mode = None
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -834,6 +940,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
+        self.engine_group_infos: list[EngineGroupInfo] = []
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -844,6 +951,10 @@ class LMCacheMPWorkerAdapter:
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
+        # The IPC handle is not enough by itself; CUDA needs the exporting
+        # event object to stay alive until the consumer is done with it.
+        self.store_events: dict[str, _IpcEvent] = {}
+        self.retrieve_events: dict[str, _IpcEvent] = {}
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
@@ -928,25 +1039,22 @@ class LMCacheMPWorkerAdapter:
         return self.parallel_strategy.kv_worker_id
 
     @property
-    def use_mla(self) -> bool:
-        """Whether to use MLA."""
-        return self.parallel_strategy.use_mla
+    def is_kv_writer(self) -> bool:
+        """Whether this worker is responsible for storing KV."""
+        return self.parallel_strategy.is_kv_writer
 
-    @property
-    def is_first_rank_of_pp_group(self) -> bool:
-        """Is the first rank of the pipeline parallel group."""
-        return (
-            self.parallel_strategy.actual_worker_id % self.parallel_strategy.tp_size
-            == 0
-        )
-
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
+    ) -> None:
         """
         Register the kv caches with LMCache server.
 
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
+            engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -954,7 +1062,11 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Registering kv caches")
         self.kv_caches = kv_caches
+        self.engine_group_infos = list(engine_group_infos)
         self._send_register_kv_caches_request(kv_caches)
+
+    def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
+        return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
     def _send_register_kv_caches_request(
         self, kv_caches: dict[str, torch.Tensor]
@@ -972,7 +1084,9 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        self.transfer_ctx = create_transfer_context(kv_caches)
+        self.transfer_ctx = create_transfer_context(
+            kv_caches, mode=self._mp_transfer_mode
+        )
         layout_hints = vllm_layout_hints()
         layout_hints["inference_engine_logical_block_size"] = (
             self.vllm_logical_block_size
@@ -988,6 +1102,7 @@ class LMCacheMPWorkerAdapter:
                 self._mq_timeout,
                 send_request=send_lmcache_request,
                 layout_hints=layout_hints,
+                engine_group_infos=self.engine_group_infos,
             )
         except TimeoutError:
             raise ConnectionError(
@@ -1052,7 +1167,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: Any,
+        event: _IpcEvent,
         cache_salt: str = "",
     ):
         """
@@ -1088,18 +1203,19 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            op.block_ids,
+            self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
         )
         self.store_futures[request_id] = future
+        self.store_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
         self,
         request_id: str,
         op: LoadStoreOp,
-        event: Any,
+        event: _IpcEvent,
         cache_salt: str = "",
     ):
         """
@@ -1115,7 +1231,7 @@ class LMCacheMPWorkerAdapter:
         self._ensure_heartbeat_started()
 
         if not self.is_healthy:
-            self.error_block_ids.update(op.block_ids)
+            self.error_block_ids.update(op.flat_block_ids)
             return
 
         assert op.token_ids is not None
@@ -1136,19 +1252,20 @@ class LMCacheMPWorkerAdapter:
             key,
             self.instance_id,
             self.kv_caches,
-            op.block_ids,
+            self._block_ids_per_group(op),
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
-        self.retrieve_futures[request_id] = (future, list(op.block_ids))
+        self.retrieve_futures[request_id] = (future, op.flat_block_ids)
+        self.retrieve_events[request_id] = event
 
     @_lmcache_nvtx_annotate
     def batched_submit_store_requests(
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: Any,
+        event: _IpcEvent,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1174,7 +1291,7 @@ class LMCacheMPWorkerAdapter:
         self,
         request_ids: list[str],
         ops: list[LoadStoreOp],
-        event: Any,
+        event: _IpcEvent,
         cache_salts: list[str] | None = None,
     ):
         """
@@ -1250,6 +1367,8 @@ class LMCacheMPWorkerAdapter:
                 self.error_block_ids.update(r_block_ids)
             self.store_futures.clear()
             self.retrieve_futures.clear()
+            self.store_events.clear()
+            self.retrieve_events.clear()
 
             ret_stores = self._process_finished_stores(
                 finished_stores, finished_req_ids_from_engine
@@ -1296,8 +1415,10 @@ class LMCacheMPWorkerAdapter:
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
             self.store_futures.pop(request_id, None)
+            self.store_events.pop(request_id, None)
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
+            self.retrieve_events.pop(request_id, None)
 
         # Update the internal states
         ret_stores = self._process_finished_stores(
@@ -1339,9 +1460,14 @@ class LMCacheMPWorkerAdapter:
         """
         logger.info("Unregistering kv caches")
         try:
+            unregister_type = (
+                RequestType.UNREGISTER_KV_CACHE_NON_GPU_CONTEXT
+                if isinstance(self.transfer_ctx, DataTransferContext)
+                else RequestType.UNREGISTER_KV_CACHE
+            )
             send_lmcache_request(
                 self.mq_client,
-                RequestType.UNREGISTER_KV_CACHE,
+                unregister_type,
                 [self.instance_id],
             ).result(timeout=self._mq_timeout)
         except TimeoutError:

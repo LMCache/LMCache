@@ -8,6 +8,7 @@ Could be implemented by native code in the future
 
 # Standard
 from dataclasses import dataclass
+import enum
 
 # Third Party
 import torch
@@ -17,6 +18,19 @@ from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 
 logger = init_logger(__name__)
+
+
+class TrimPolicy(enum.Enum):
+    """How to pick the retained subset of found keys for a prefetch.
+
+    PREFIX retains the longest contiguous run from index 0; SEGMENTED_PREFIX
+    keeps the keys that loaded when an L2 hit failed to load into L1 mid-prefix
+    (gaps and all); SPARSE retains every found key for an intentional scatter.
+    """
+
+    PREFIX = enum.auto()
+    SEGMENTED_PREFIX = enum.auto()
+    SPARSE = enum.auto()
 
 
 @dataclass(frozen=True)
@@ -41,6 +55,9 @@ class ObjectKey:
     kv_rank: int
     """ The rank that uniquely identifies the slice of the KV cache """
 
+    object_group_id: int = 0
+    """ Index of the object group this chunk belongs to. """
+
     cache_salt: str = ""
     """ Per-user isolation salt. Same content from different users with
     different cache_salt values produces different ObjectKeys, giving
@@ -64,6 +81,10 @@ class ObjectKey:
         if "@" in self.model_name:
             raise ValueError(
                 f"model_name must not contain '@' (got {self.model_name!r})"
+            )
+        if self.object_group_id < 0:
+            raise ValueError(
+                f"object_group_id must be >= 0 (got {self.object_group_id})"
             )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
@@ -171,19 +192,24 @@ class PrefetchHandle:
     external_request_id: str
     """Request ID from the caller for end-to-end tracing."""
 
-    l1_prefix_hit_count: int
-    """Number of leading keys already in L1 at submission time."""
+    l1_found_indices: tuple[int, ...]
+    """Original-key indices found (read-locked) in L1 at submission time."""
 
     total_requested_keys: int
-    """Total number of keys originally requested."""
+    """Total number of keys originally requested (the result-bitmap size)."""
 
     submit_time: float
     """Monotonic timestamp when the prefetch task was submitted."""
+
+    l2_orig_indices: tuple[int, ...] = ()
+    """Original-key index of each key submitted to L2; maps the controller's
+    local result bitmap back to original positions."""
 
 
 def ipc_key_to_object_keys(
     ipc_key: IPCCacheEngineKey,
     chunk_hashes: list[bytes],
+    object_group_id: int = 0,
 ) -> list[ObjectKey]:
     """
     Convert a single IPCCacheEngineKey and its chunk hashes to a list of ObjectKey.
@@ -201,6 +227,8 @@ def ipc_key_to_object_keys(
         ipc_key: The IPC key providing model_name, world_size, worker_id,
             and cache_salt.
         chunk_hashes: List of chunk hash bytes, one per chunk.
+        object_group_id: Index of the object group the chunks belong to.
+            Defaults to 0, the single-group case.
 
     Returns:
         list[ObjectKey]: The converted list of ObjectKey.
@@ -225,6 +253,7 @@ def ipc_key_to_object_keys(
                         chunk_hash=chunk_hash,
                         model_name=ipc_key.model_name,
                         kv_rank=kv_rank,
+                        object_group_id=object_group_id,
                         cache_salt=cache_salt,
                     )
                 )
@@ -241,6 +270,7 @@ def ipc_key_to_object_keys(
                     chunk_hash=chunk_hash,
                     model_name=ipc_key.model_name,
                     kv_rank=kv_rank,
+                    object_group_id=object_group_id,
                     cache_salt=cache_salt,
                 )
             )

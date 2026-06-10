@@ -11,6 +11,8 @@ deliberately not reachable through any public interface.
 
 # Standard
 from unittest.mock import MagicMock
+import gc
+import weakref
 
 # Third Party
 import pytest
@@ -23,7 +25,13 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
+
+
+class FakeCudaEvent:
+    def ipc_handle(self) -> bytes:
+        return b"fake-ipc-handle"
 
 
 @pytest.fixture
@@ -45,6 +53,18 @@ def fake_adapter(monkeypatch):
     send_mock = MagicMock(name="send_lmcache_request", return_value=future)
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_mock)
 
+    class FakeHeartbeatThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.recover_callback: object | None = None
+
+        def register_recover_callback(self, callback: object) -> None:
+            self.recover_callback = callback
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
     monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
@@ -59,10 +79,8 @@ def fake_adapter(monkeypatch):
 
     parallel_strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=1,
-        kv_worker_id=0,
-        actual_world_size=1,
-        actual_worker_id=0,
+        vllm_world_size=1,
+        vllm_worker_id=0,
         tp_size=1,
         pp_size=1,
     )
@@ -138,13 +156,45 @@ def test_submit_store_request_tracks_returned_future(fake_adapter, monkeypatch):
     fake_future = MagicMock()
     transfer_ctx.submit_store.return_value = fake_future
     adapter.transfer_ctx = transfer_ctx
-    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[0], start=0, end=4)
+    op = LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=[[0]], start=0, end=4)
 
     adapter.submit_store_request("req-1", op, event=MagicMock())
 
     assert transfer_ctx.submit_store.called
     assert transfer_ctx.submit_store.call_args.kwargs == {}
+    assert transfer_ctx.submit_store.call_args.args[4] == [[0]]
     assert adapter.store_futures["req-1"] is fake_future
+
+
+def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypatch):
+    adapter, _send_mock, _ = fake_adapter
+    monkeypatch.setattr(adapter, "_ensure_heartbeat_started", lambda: None)
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.kv_caches = {"layer.0": fake_tensor}
+    adapter.engine_group_infos = [
+        EngineGroupInfo(0, (0, 2)),
+        EngineGroupInfo(0, (4,)),
+        EngineGroupInfo(1, (1, 3)),
+    ]
+    transfer_ctx = MagicMock()
+    fake_future = MagicMock()
+    transfer_ctx.submit_store.return_value = fake_future
+    adapter.transfer_ctx = transfer_ctx
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[[0, 1], [10, 11]],
+        start=0,
+        end=4,
+    )
+
+    adapter.submit_store_request("req-1", op, event=MagicMock())
+
+    assert transfer_ctx.submit_store.call_args.args[4] == [
+        [0, 1],
+        [0, 1],
+        [10, 11],
+    ]
 
 
 def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatch):
@@ -160,7 +210,7 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     adapter.transfer_ctx = transfer_ctx
     op = LoadStoreOp(
         token_ids=[1, 2, 3, 4],
-        block_ids=[0],
+        block_ids=[[0]],
         start=0,
         end=4,
         skip_first_n_tokens=1,
@@ -170,4 +220,77 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
 
     assert transfer_ctx.submit_retrieve.called
     assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
+    assert transfer_ctx.submit_retrieve.call_args.args[4] == [[0]]
     assert adapter.retrieve_futures["req-1"] == (fake_future, [0])
+
+
+def test_load_store_op_accepts_per_group_block_ids():
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[[0, 1], [10, 11]],
+        start=0,
+        end=4,
+    )
+
+    assert op.block_ids == [[0, 1], [10, 11]]
+    assert op.flat_block_ids == [0, 1, 10, 11]
+
+
+def test_store_keeps_event_until_future_finishes(fake_adapter):
+    """Store requests keep the exported CUDA event alive while pending."""
+    adapter, _send_mock, _future = fake_adapter
+    cuda_future = MagicMock(name="cuda_future")
+    cuda_future.query.return_value = False
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_store.return_value = cuda_future
+    adapter.transfer_ctx = transfer_ctx
+
+    event = FakeCudaEvent()
+    event_ref = weakref.ref(event)
+    op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
+
+    adapter.submit_store_request("req-1", op, event)
+    del event
+    gc.collect()
+    assert event_ref() is not None
+
+    cuda_future.query.return_value = True
+    cuda_future.result.return_value = True
+    finished_stores, finished_retrieves = adapter.get_finished({"req-1"})
+
+    assert finished_stores == {"req-1"}
+    assert finished_retrieves == set()
+    assert "req-1" not in adapter.store_events
+    transfer_ctx.reset_mock()
+    gc.collect()
+    assert event_ref() is None
+
+
+def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
+    """Retrieve requests keep the exported CUDA event alive while pending."""
+    adapter, _send_mock, _future = fake_adapter
+    cuda_future = MagicMock(name="cuda_future")
+    cuda_future.query.return_value = False
+    transfer_ctx = MagicMock()
+    transfer_ctx.submit_retrieve.return_value = cuda_future
+    adapter.transfer_ctx = transfer_ctx
+
+    event = FakeCudaEvent()
+    event_ref = weakref.ref(event)
+    op = LoadStoreOp(token_ids=[1, 2], block_ids=[[7]], start=0, end=2)
+
+    adapter.submit_retrieve_request("req-1", op, event)
+    del event
+    gc.collect()
+    assert event_ref() is not None
+
+    cuda_future.query.return_value = True
+    cuda_future.result.return_value = True
+    finished_stores, finished_retrieves = adapter.get_finished(set())
+
+    assert finished_stores == set()
+    assert finished_retrieves == {"req-1"}
+    assert "req-1" not in adapter.retrieve_events
+    transfer_ctx.reset_mock()
+    gc.collect()
+    assert event_ref() is None

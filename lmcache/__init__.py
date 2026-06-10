@@ -31,8 +31,8 @@ def _detect_device() -> tuple[Any, str]:
 
     Returns:
         tuple[Any, str]: A tuple of (torch_device_module, device_type_string),
-            e.g. ``(torch.cuda, "cuda")`` or ``(torch.xpu, "xpu")``.
-
+            e.g. ``(torch.cuda, "cuda")``, ``(torch.musa, "musa")``, or
+            ``(torch.xpu, "xpu")``.
     """
     try:
         # Third Party
@@ -40,7 +40,10 @@ def _detect_device() -> tuple[Any, str]:
     except ImportError:
         return None, "cpu"  # fallback，CLI-only
 
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
+    if hasattr(torch, "musa") and torch.musa.is_available():  # type: ignore[attr-defined]
+        logger.info("MUSA device is available. Using MUSA for LMCache engine.")
+        return torch.musa, "musa"  # type: ignore[attr-defined]
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu, "hpu"
