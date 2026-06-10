@@ -121,7 +121,7 @@ def batched_iteration_with_skip(
         batch_start_idx += len(batch)
 
 
-def cut_and_stage_block_ids(
+def downsample_and_stage_block_ids(
     cache_context: GPUCacheContext,
     block_ids: list[list[int]],
 ) -> list[torch.Tensor]:
@@ -141,9 +141,9 @@ def cut_and_stage_block_ids(
         The cut block id lists, indexed by LMCache KV group index.
 
     Note:
-        This function has some coupled logic with gpu_kv_copy_helper below. The
-        caller need to make sure that the block ids seen by gpu_kv_copy_helper
-        are produced by this function.
+        This function has some coupled logic with transfer_kv_per_object_group below.
+        The caller need to make sure that the block ids seen by
+        transfer_kv_per_object_group are produced by this function.
 
     Example:
         If a model have 2 kernel groups, one is full attention with block size 32,
@@ -228,7 +228,7 @@ def _recalculate_blocks_to_skip(
     return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
 
 
-def gpu_kv_copy_helper(
+def transfer_kv_per_object_group(
     cache_context: GPUCacheContext,
     block_ids_gpu: list[torch.Tensor],
     memory_objs: Sequence[MemoryObj | None],
@@ -237,7 +237,8 @@ def gpu_kv_copy_helper(
     skip_first_n_tokens: int,
     direction: "lmc_ops.TransferDirection",
 ) -> None:
-    """Helper function to transfer a batch of memory objects to/from GPU.
+    """Helper function to transfer memory objects of a single object group
+    to/from GPU, with batching support.
 
     Args:
         cache_context: The GPU cache context containing the KV cache information.
@@ -668,7 +669,7 @@ class GPUTransferModule:
                 event.record()
                 return event.ipc_handle(), False
 
-            block_ids_per_group_gpu = cut_and_stage_block_ids(
+            block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
 
@@ -735,7 +736,7 @@ class GPUTransferModule:
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    gpu_kv_copy_helper(
+                    transfer_kv_per_object_group(
                         cache_context,
                         block_ids_per_group_gpu,
                         memory_objs,
@@ -855,22 +856,6 @@ class GPUTransferModule:
             ),
         )
 
-        ie_logical_block_size = (
-            cache_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
-
-        # Block IDs are expressed in engine-block units (logical tokens), which
-        # is what the kernel's skip argument expects regardless of per-group
-        # compression. Warn if the skip prefix is not block-aligned.
-        if skip_first_n_tokens % ie_logical_block_size != 0:
-            logger.error(
-                "skip_first_n_tokens (%d) is not aligned to "
-                "inference_engine_logical_block_size (%d); it will be rounded "
-                "down to a block boundary",
-                skip_first_n_tokens,
-                ie_logical_block_size,
-            )
-
         blocks_per_chunk = [
             cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
             for group_idx in range(
@@ -908,7 +893,7 @@ class GPUTransferModule:
                 return event.ipc_handle(), False
 
             # Cut and stage all block_ids to GPU once before the transfer
-            block_ids_per_group_gpu = cut_and_stage_block_ids(
+            block_ids_per_group_gpu = downsample_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
 
@@ -926,7 +911,7 @@ class GPUTransferModule:
 
                         total_bytes += sum(mo.get_size() for mo in memory_objs)
 
-                        gpu_kv_copy_helper(
+                        transfer_kv_per_object_group(
                             cache_context,
                             block_ids_per_group_gpu,
                             memory_objs,
