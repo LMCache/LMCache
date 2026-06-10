@@ -115,15 +115,17 @@ jobs:
 
       - name: Install vLLM CPU build
         run: |
-          # Mirror the macOS install path: let pip resolve the latest
-          # CPU build from the vLLM nightly CPU index instead of pinning
-          # a specific 0.19.1 wheel. This ensures we pick up versions
-          # that support kv_connector_module_path so LMCacheMPConnector
-          # can be redirected to the lmcache-provided implementation.
+          # Use the vLLM nightly CPU index as the PRIMARY index so pip
+          # accepts wheels carrying a PEP 440 local version label such
+          # as 0.22.1+cpu. If we instead used --extra-index-url, pip 26
+          # would discard those tarballs as "inconsistent version" and
+          # silently fall back to the last clean release (0.19.1), which
+          # predates kv_connector_module_path and breaks LMCacheMPConnector.
           pip install "numpy<2"
           pip install vllm \
-            --extra-index-url \
-            https://wheels.vllm.ai/nightly/cpu
+            --pre \
+            --index-url https://wheels.vllm.ai/nightly/cpu \
+            --extra-index-url https://pypi.org/simple
           python -c "import vllm, torch; print('vllm:', vllm.__version__, 'torch:', torch.__version__, 'cuda:', torch.cuda.is_available())"
 
       - name: Download facebook/opt-125m
@@ -260,13 +262,17 @@ jobs:
 
       - name: Install vLLM CPU build
         run: |
-          # macOS arm64 has no published CPU wheel on either PyPI or
-          # wheels.vllm.ai, so fall back to letting pip resolve a
-          # compatible source distribution (vLLM 0.19.x).
+          # Use the vLLM nightly CPU index as the PRIMARY index so pip
+          # accepts wheels/sdists carrying a PEP 440 local version label
+          # such as 0.22.1+cpu. With --extra-index-url, pip 26 discards
+          # them as "inconsistent version" and silently falls back to
+          # 0.19.1, which predates kv_connector_module_path and breaks
+          # LMCacheMPConnector.
           pip install "numpy<2"
           pip install vllm \
-            --extra-index-url \
-            https://wheels.vllm.ai/nightly/cpu
+            --pre \
+            --index-url https://wheels.vllm.ai/nightly/cpu \
+            --extra-index-url https://pypi.org/simple
 
       - name: Download facebook/opt-125m
         run: |

@@ -410,7 +410,26 @@ echo "✅ LMCache server is healthy"
 
 echo "[Phase 2 / Step 4] Installing libnuma (Linux only) and starting vLLM server"
 if [ "$(uname -s)" = "Linux" ]; then
-  apt-get update && apt-get install -y --no-install-recommends libnuma1
+  # libnuma1 is required by some vLLM CPU paths. On GitHub Actions
+  # ubuntu runners apt-get must be invoked via sudo; on hardened images
+  # without passwordless sudo it may not be available at all. Skip the
+  # install if the shared object is already present, and never let an
+  # apt-get hiccup fail the whole e2e step (vLLM startup itself will
+  # surface a clearer error if libnuma is genuinely missing).
+  if [ ! -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 ] \
+     && [ ! -e /lib/x86_64-linux-gnu/libnuma.so.1 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+      sudo apt-get update \
+        && sudo apt-get install -y --no-install-recommends libnuma1 \
+        || echo "⚠️  libnuma1 install via sudo apt-get failed; continuing"
+    else
+      apt-get update \
+        && apt-get install -y --no-install-recommends libnuma1 \
+        || echo "⚠️  libnuma1 install via apt-get failed; continuing"
+    fi
+  else
+    echo "libnuma1 already present, skipping apt install"
+  fi
 fi
 # VLLM_DEVICE is the modern env var (vLLM 0.8+)
 export VLLM_DEVICE=cpu
