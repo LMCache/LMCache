@@ -560,6 +560,19 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
         "env_converter": _to_bool,
     },
     # Memory management configurations
+    "store_admission_retry_ms": {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+        "description": (
+            "Maximum milliseconds to retry a store-side CPU memory allocation "
+            "(re-attempting eviction between retries) before dropping the "
+            "chunk. Useful under concurrent store pressure when eviction "
+            "candidates are temporarily pinned by in-flight requests. "
+            "Default is 0, which drops the chunk immediately without "
+            "retrying (previous behavior)."
+        ),
+    },
     "pin_timeout_sec": {
         "type": int,
         "default": 300,

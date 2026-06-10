@@ -11,6 +11,7 @@ from typing import (
     List,
     Optional,
     Tuple,
+    TypeVar,
     Union,
 )
 
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 
 # Standard
 import asyncio
+import functools
 import gc
 import multiprocessing
 import time
@@ -70,6 +72,15 @@ logger = init_logger(__name__)
 ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
 # (list of processed chunks, total kv size)
 ProcessTokensInternalResult = Tuple[List[ProcessedChunk], int]
+
+# Result type of a store-side allocation (single or layerwise-batched)
+StoreAllocationT = TypeVar("StoreAllocationT", MemoryObj, List[MemoryObj])
+
+# Sleep between store-side allocation retries (see store_admission_retry_ms)
+STORE_ADMISSION_RETRY_INTERVAL_SEC = 0.002
+
+# Rate limit for the aggregated store-drop warning log
+STORE_DROP_WARNING_INTERVAL_SEC = 10.0
 
 
 class CacheEngineEndSignal:
@@ -218,6 +229,10 @@ class LMCacheEngine:
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         # Initialize PinMonitor singleton with config
         PinMonitor.GetOrCreate(config, metadata)
+
+        # Aggregation state for the rate-limited store-drop warning
+        self._last_store_drop_warning_time: float = 0.0
+        self._store_drops_since_warning: int = 0
 
         self.post_inited = False
 
@@ -489,12 +504,17 @@ class LMCacheEngine:
                     fmt=self.fmt,
                 )
                 if memory_obj is None:
-                    logger.warning(
-                        "Local cpu memory under pressure so"
-                        " choosing to store only "
-                        f" {len(memory_objs)}"
-                        " total chunks of KV cache."
+                    memory_obj = self._retry_store_allocation(
+                        functools.partial(
+                            self.storage_manager.allocate,
+                            kv_shapes,
+                            kv_dtypes,
+                            busy_loop=False,
+                            fmt=self.fmt,
+                        )
                     )
+                if memory_obj is None:
+                    self._on_store_chunk_dropped(req_id, len(memory_objs))
                     break
 
                 starts.append(start)
@@ -675,10 +695,18 @@ class LMCacheEngine:
             )
 
             if memory_objs_multi_layer is None:
-                logger.warning(
-                    "Local cpu memory under pressure so"
-                    " choosing to not store the KV cache."
+                memory_objs_multi_layer = self._retry_store_allocation(
+                    functools.partial(
+                        self.storage_manager.batched_allocate,
+                        kv_shape_single_layer,
+                        kv_dtype,
+                        batch_size=self.num_layers,
+                        fmt=self.fmt,
+                        busy_loop=False,
+                    )
                 )
+            if memory_objs_multi_layer is None:
+                self._on_store_chunk_dropped(req_id, len(keys))
                 break
 
             starts.append(start)
@@ -1964,6 +1992,79 @@ class LMCacheEngine:
             token_count,
             compress_slot_mapping(slot_mapping_list),
         )
+
+    def _retry_store_allocation(
+        self,
+        allocate_fn: Callable[[], Optional[StoreAllocationT]],
+    ) -> Optional[StoreAllocationT]:
+        """
+        Retry a failed store-side allocation within the configured budget.
+
+        Re-attempts the allocation (which internally re-attempts eviction)
+        every STORE_ADMISSION_RETRY_INTERVAL_SEC seconds until it succeeds
+        or ``store_admission_retry_ms`` milliseconds have elapsed. Under
+        concurrent store pressure, allocations typically fail because the
+        eviction candidates are temporarily pinned by in-flight requests,
+        so a short bounded wait lets the chunk be admitted instead of
+        being dropped.
+
+        :param allocate_fn: Zero-argument callable that performs the
+            allocation and returns the allocation or None on failure.
+
+        :return: The successful allocation, or None if
+            ``store_admission_retry_ms`` is 0 (retries disabled) or the
+            retry budget was exhausted. The budget can be exceeded by at
+            most one retry interval.
+        """
+        retry_ms = self.config.store_admission_retry_ms
+        if retry_ms <= 0:
+            return None
+        deadline = time.monotonic() + retry_ms / 1000.0
+        while time.monotonic() < deadline:
+            time.sleep(STORE_ADMISSION_RETRY_INTERVAL_SEC)
+            allocation = allocate_fn()
+            if allocation is not None:
+                return allocation
+        return None
+
+    def _on_store_chunk_dropped(self, req_id: str, num_stored_chunks: int) -> None:
+        """
+        Account for a store chunk dropped because CPU memory could not be
+        allocated for it. The store path stops at the first failed chunk,
+        so the rest of the request is dropped along with it and none of
+        the dropped chunks reach any storage backend.
+
+        Updates the dropped-chunk statistics and emits a warning that is
+        rate-limited to once every STORE_DROP_WARNING_INTERVAL_SEC seconds
+        (drops in between are aggregated into the next warning) so that
+        sustained memory pressure cannot flood the logs.
+
+        :param str req_id: The request id of the store request.
+
+        :param int num_stored_chunks: The number of chunks of this request
+            that were stored before the drop.
+        """
+        self.stats_monitor.update_store_dropped_chunk_count(1)
+        self._store_drops_since_warning += 1
+        curr_time = time.monotonic()
+        if (
+            curr_time - self._last_store_drop_warning_time
+            < STORE_DROP_WARNING_INTERVAL_SEC
+        ):
+            return
+        logger.warning(
+            "[req_id=%s] Could not allocate CPU memory for a store chunk: "
+            "storing only %d chunks of this request and dropping the rest. "
+            "The dropped chunks will not reach any storage backend "
+            "(%d dropped store chunks since the last warning). Consider "
+            "increasing max_local_cpu_size or setting "
+            "store_admission_retry_ms > 0.",
+            req_id,
+            num_stored_chunks,
+            self._store_drops_since_warning,
+        )
+        self._last_store_drop_warning_time = curr_time
+        self._store_drops_since_warning = 0
 
 
 class LMCacheEngineBuilder:

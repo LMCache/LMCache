@@ -70,6 +70,8 @@ class LMCacheStats:
     interval_local_cpu_evict_keys_count: int  # evict keys count
     interval_local_cpu_evict_failed_count: int  # evict failed count
 
+    interval_store_dropped_chunk_count: int  # store chunks dropped on allocation
+
     interval_forced_unpin_count: int  # forced unpin count due to timeout
 
     # Real time value measurements (will be reset after each log)
@@ -293,6 +295,8 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_count = 0
         self.interval_local_cpu_evict_keys_count = 0
         self.interval_local_cpu_evict_failed_count = 0
+
+        self.interval_store_dropped_chunk_count = 0
 
         self.interval_forced_unpin_count = 0
 
@@ -572,6 +576,17 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_failed_count += evict_failed_count
 
     @thread_safe
+    def update_store_dropped_chunk_count(self, dropped_count: int):
+        """
+        Record store-path chunks that were dropped because CPU memory
+        could not be allocated for them.
+
+        Args:
+            dropped_count: The number of chunks that were dropped.
+        """
+        self.interval_store_dropped_chunk_count += dropped_count
+
+    @thread_safe
     def update_forced_unpin_count(self, delta: int):
         self.interval_forced_unpin_count += delta
 
@@ -627,6 +642,8 @@ class LMCStatsMonitor:
         self.interval_local_cpu_evict_count = 0
         self.interval_local_cpu_evict_keys_count = 0
         self.interval_local_cpu_evict_failed_count = 0
+
+        self.interval_store_dropped_chunk_count = 0
 
         self.interval_forced_unpin_count = 0
 
@@ -792,6 +809,7 @@ class LMCStatsMonitor:
             interval_local_cpu_evict_count=self.interval_local_cpu_evict_count,
             interval_local_cpu_evict_keys_count=self.interval_local_cpu_evict_keys_count,
             interval_local_cpu_evict_failed_count=self.interval_local_cpu_evict_failed_count,
+            interval_store_dropped_chunk_count=self.interval_store_dropped_chunk_count,
             interval_forced_unpin_count=self.interval_forced_unpin_count,
             local_cache_usage_bytes=self.local_cache_usage_bytes,
             remote_cache_usage_bytes=self.remote_cache_usage_bytes,
@@ -1035,6 +1053,13 @@ class PrometheusLogger:
         self.counter_local_cpu_evict_failed_count = self._create_counter(
             name="lmcache:local_cpu_evict_failed_count",
             documentation="Total number of failed eviction in local cpu backend",
+            labelnames=labelnames,
+        )
+
+        self.counter_store_dropped_chunk_count = self._create_counter(
+            name="lmcache:store_dropped_chunk_count",
+            documentation="Total number of KV chunks dropped on the store path "
+            "because CPU memory allocation failed",
             labelnames=labelnames,
         )
 
@@ -1739,6 +1764,10 @@ class PrometheusLogger:
         self._log_counter(
             self.counter_local_cpu_evict_failed_count,
             stats.interval_local_cpu_evict_failed_count,
+        )
+        self._log_counter(
+            self.counter_store_dropped_chunk_count,
+            stats.interval_store_dropped_chunk_count,
         )
         self._log_counter(
             self.counter_forced_unpin_count,

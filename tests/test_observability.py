@@ -93,6 +93,17 @@ def test_on_lookup_finished(stats_monitor):
     assert len(stats_monitor.lookup_requests) == 0
 
 
+def test_update_store_dropped_chunk_count(stats_monitor):
+    stats_monitor.update_store_dropped_chunk_count(dropped_count=2)
+    stats_monitor.update_store_dropped_chunk_count(dropped_count=1)
+    stats = stats_monitor.get_stats_and_clear()
+    assert stats.interval_store_dropped_chunk_count == 3
+
+    # The interval counter resets after each log
+    stats = stats_monitor.get_stats_and_clear()
+    assert stats.interval_store_dropped_chunk_count == 0
+
+
 def test_remote_read_metrics(stats_monitor):
     stats_monitor.update_interval_remote_read_metrics(read_bytes=1024)
     stats_monitor.update_interval_remote_read_metrics(read_bytes=2048)
