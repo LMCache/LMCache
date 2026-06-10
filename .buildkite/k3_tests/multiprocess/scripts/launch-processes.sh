@@ -90,9 +90,7 @@ if [ -n "${CHUNK_SIZE:-}" ]; then
     CHUNK_SIZE_ARG="--chunk-size ${CHUNK_SIZE}"
 fi
 
-# vLLM batch-invariant mode. On by default; backends without batch-invariant
-# kernels (GDN/Mamba, DeepSeek-V4-Flash's FlashMLA-Sparse) must set
-# BATCH_INVARIANT=0 and compare with a score tolerance.
+# vLLM batch-invariant mode. On by default; GDN/Mamba backends do not support it.
 BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
 
 # Mamba KV cache mode + prefix caching, set only for hybrid Mamba models.
@@ -132,7 +130,6 @@ lmcache server \
     --max-workers "$MAX_WORKERS" \
     $CHUNK_SIZE_ARG \
     --port "$LMCACHE_PORT" \
-    --http-port "${LMCACHE_HTTP_PORT:-8080}" \
     ${GDS_L1_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
