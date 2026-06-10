@@ -627,7 +627,6 @@ class GPUTransferModule:
             store completed without such a failure.
         """
         st = time.perf_counter()
-        obj_keys = self._ctx.resolve_obj_keys(key, [0])[0]
 
         entry = self._cache_contexts.get(instance_id)
         if entry is None:
@@ -635,8 +634,11 @@ class GPUTransferModule:
         cache_context = entry.cache_context
         model_name = entry.model_name
 
-        # TODO(refactor): only single-object-group transfers are wired up so far.
-        assert cache_context.kv_layer_groups_manager.num_object_groups == 1
+        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
+        obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
+            key, list(range(num_object_groups))
+        )
+        num_chunks = len(obj_keys_per_obj_group[0])
 
         # NOTE: different engine groups may have different block sizes, so
         # ``blocks_per_chunk[i]`` is the number of blocks in one chunk for
@@ -661,17 +663,17 @@ class GPUTransferModule:
             # complete. Checked on the raw block ids, before cutting drops the
             # per-chunk blocks that sliding-window groups do not need.
             if any(
-                len(group_block_ids) < len(obj_keys) * bpc
+                len(group_block_ids) < num_chunks * bpc
                 for group_block_ids, bpc in zip(
                     gpu_block_ids, blocks_per_chunk, strict=True
                 )
             ):
                 logger.warning(
                     "STORE block ID underflow for request_id=%s: each group needs "
-                    "len(obj_keys) * blocks_per_chunk block IDs for %d chunks "
+                    "num_chunks * blocks_per_chunk block IDs for %d chunks "
                     "(per-group blocks_per_chunk=%s); skipping the store.",
                     key.request_id,
-                    len(obj_keys),
+                    num_chunks,
                     blocks_per_chunk,
                 )
                 event.record()
@@ -717,31 +719,43 @@ class GPUTransferModule:
             )
 
             reserved_dict: dict[ObjectKey, MemoryObj] = {}
+            all_dict: dict[ObjectKey, MemoryObj] = {}
+            total_bytes: int = 0
             store_succeeded = False
             try:
-                layout_desc = get_layout_desc(
-                    cache_context, self._ctx.chunk_size, object_group_id=0
-                )
-                reserved_dict = self._ctx.storage_manager.reserve_write(
-                    obj_keys, layout_desc, "new"
-                )
+                for obj_group_id in range(num_object_groups):
+                    obj_keys = obj_keys_per_obj_group[obj_group_id]
+                    layout_desc = get_layout_desc(
+                        cache_context,
+                        self._ctx.chunk_size,
+                        object_group_id=obj_group_id,
+                    )
+                    reserved_dict = self._ctx.storage_manager.reserve_write(
+                        obj_keys, layout_desc, "new"
+                    )
+                    all_dict.update(reserved_dict)
+                    if reserved_dict:
+                        total_bytes += next(
+                            iter(reserved_dict.values())
+                        ).get_size() * len(reserved_dict)
 
-                # Keys not in reserved_dict (skipped by the storage manager)
-                # become None entries; the helper skips them for D2H.
-                memory_objs: list[MemoryObj | None] = [
-                    reserved_dict.get(obj_key) for obj_key in obj_keys
-                ]
+                    # Keys not in reserved_dict (skipped by the storage manager)
+                    # become None entries; the helper skips them for D2H.
+                    memory_objs: list[MemoryObj | None] = [
+                        reserved_dict.get(obj_key) for obj_key in obj_keys
+                    ]
 
-                # NOTE: batch_size must stay 1 for store.
-                gpu_kv_copy_helper(
-                    cache_context,
-                    block_ids_per_group_gpu,
-                    memory_objs,
-                    object_group_id=0,
-                    batch_size=1,
-                    skip_first_n_tokens=0,
-                    direction=lmc_ops.TransferDirection.D2H,
-                )
+                    # NOTE: batch_size must stay 1 for store.
+                    gpu_kv_copy_helper(
+                        cache_context,
+                        block_ids_per_group_gpu,
+                        memory_objs,
+                        object_group_id=obj_group_id,
+                        batch_size=1,
+                        skip_first_n_tokens=0,
+                        direction=lmc_ops.TransferDirection.D2H,
+                    )
+
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -750,20 +764,15 @@ class GPUTransferModule:
                 event.record()
                 # Fail closed: commit the reserved objects only when every chunk
                 # copied successfully; otherwise the whole store is skipped.
-                stored_count = len(reserved_dict) if store_succeeded else 0
+                stored_count = len(all_dict) if store_succeeded else 0
                 if stored_count:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_write",
-                        list(reserved_dict.keys()),
+                        list(all_dict.keys()),
                     )
-                # All reserved MemoryObjs share one layout_desc, so per-object
-                # size is identical — avoid summing N identical values.
-                total_bytes = (
-                    next(iter(reserved_dict.values())).get_size() * stored_count
-                    if stored_count
-                    else 0
-                )
+                else:
+                    total_bytes = 0
                 self._ctx.event_bus.publish_on_stream(
                     cache_context.cupy_stream,
                     Event(
@@ -780,10 +789,10 @@ class GPUTransferModule:
                 )
 
         ed = time.perf_counter()
-        if length := len(reserved_dict):
+        if stored_count:
             logger.info(
                 "Stored %d tokens in %.3f seconds",
-                length * self._ctx.chunk_size,
+                num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
         return event.ipc_handle(), True
@@ -820,7 +829,6 @@ class GPUTransferModule:
             ValueError: If no GPU context is registered for the given instance ID.
         """
         st = time.perf_counter()
-        obj_keys = self._ctx.resolve_obj_keys(key, [0])[0]
 
         entry = self._cache_contexts.get(instance_id)
         if entry is None:
@@ -828,8 +836,11 @@ class GPUTransferModule:
         cache_context = entry.cache_context
         model_name = entry.model_name
 
-        # TODO(refactor): only single-object-group transfers are wired up so far.
-        assert cache_context.kv_layer_groups_manager.num_object_groups == 1
+        num_object_groups = cache_context.kv_layer_groups_manager.num_object_groups
+        obj_keys_per_obj_group = self._ctx.resolve_obj_keys(
+            key, list(range(num_object_groups))
+        )
+        num_chunks = len(obj_keys_per_obj_group[0])
 
         # CPU-synchronous sentinel: a GPU retrieve is about to be enqueued.
         # Must be published via publish() (not publish_on_stream) so the
@@ -892,18 +903,18 @@ class GPUTransferModule:
             # block ids, before cutting drops the per-chunk blocks that
             # sliding-window groups do not need.
             if any(
-                len(group_block_ids) < len(obj_keys) * bpc
+                len(group_block_ids) < num_chunks * bpc
                 for group_block_ids, bpc in zip(
                     gpu_block_ids, blocks_per_chunk, strict=True
                 )
             ):
                 logger.error(
                     "RETRIEVE block ID underflow for request_id=%s: each group "
-                    "needs len(obj_keys) * blocks_per_chunk block IDs for %d "
+                    "needs num_chunks * blocks_per_chunk block IDs for %d "
                     "chunks (per-group blocks_per_chunk=%s); skipping the "
                     "retrieve.",
                     key.request_id,
-                    len(obj_keys),
+                    num_chunks,
                     blocks_per_chunk,
                 )
                 event.record()
@@ -915,36 +926,38 @@ class GPUTransferModule:
             )
 
             prefetched_keys: list[ObjectKey] = []
-            retrieve_succeeded = False
             total_bytes = 0
             try:
-                with self._ctx.storage_manager.read_prefetched_results(
-                    obj_keys
-                ) as memory_objs:
-                    if not memory_objs or len(memory_objs) != len(obj_keys):
-                        logger.error("Some keys not found during retrieve!")
-                        return event.ipc_handle(), False
+                for obj_group_id in range(num_object_groups):
+                    obj_keys = obj_keys_per_obj_group[obj_group_id]
+                    with self._ctx.storage_manager.read_prefetched_results(
+                        obj_keys
+                    ) as memory_objs:
+                        if not memory_objs or len(memory_objs) != len(obj_keys):
+                            logger.error("Some keys not found during retrieve!")
+                            return event.ipc_handle(), False
 
-                    prefetched_keys = obj_keys[: len(memory_objs)]
-                    total_bytes = sum(mo.get_size() for mo in memory_objs)
+                        total_bytes += sum(mo.get_size() for mo in memory_objs)
 
-                    gpu_kv_copy_helper(
-                        cache_context,
-                        block_ids_per_group_gpu,
-                        memory_objs,
-                        object_group_id=0,
-                        batch_size=cache_context.max_batch_size,
-                        skip_first_n_tokens=skip_first_n_tokens,
-                        direction=lmc_ops.TransferDirection.H2D,
-                    )
-                # Only set True when with-block exits normally
-                retrieve_succeeded = True
+                        gpu_kv_copy_helper(
+                            cache_context,
+                            block_ids_per_group_gpu,
+                            memory_objs,
+                            object_group_id=obj_group_id,
+                            batch_size=cache_context.max_batch_size,
+                            skip_first_n_tokens=skip_first_n_tokens,
+                            direction=lmc_ops.TransferDirection.H2D,
+                        )
+                        # Extend only after the copy is enqueued: on exception,
+                        # read_prefetched_results releases this group's locks
+                        # itself, and a key must not be released twice.
+                        prefetched_keys.extend(obj_keys)
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 return event.ipc_handle(), False
             finally:
                 event.record()
-                if retrieve_succeeded:
+                if prefetched_keys:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_read_prefetched",
@@ -965,7 +978,7 @@ class GPUTransferModule:
                         },
                     ),
                 )
-        tokens_retrieved = len(obj_keys) * self._ctx.chunk_size
+        tokens_retrieved = num_chunks * self._ctx.chunk_size
         ed = time.perf_counter()
         logger.info(
             "Retrieved %d tokens in %.3f seconds",
