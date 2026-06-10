@@ -34,6 +34,9 @@ configuration. Examples:
    * - gpt-oss
      - Interleaved sliding-window + full
      - Supported
+   * - Qwen3.5 (and other Gated-DeltaNet hybrids)
+     - Interleaved Mamba/GDN + full
+     - Supported (see below)
    * - Llama, Qwen2/Qwen3 (dense), Mistral, …
      - Single attention type
      - Supported
@@ -48,16 +51,54 @@ detects the model's KV cache groups automatically at registration time.
    back to a single unified group). You do not need
    ``--no-disable-hybrid-kv-cache-manager`` or any related flag.
 
+Mamba / Linear-Attention Hybrids
+--------------------------------
+
+Models that interleave **Mamba / Gated-DeltaNet layers** with full attention
+(e.g. ``Qwen/Qwen3.5-0.8B``) are supported. Their recurrent state caches are
+reinterpreted as opaque pages at registration time, so prefix caching and KV
+reuse work end to end. They need three extra flags:
+
+#. vLLM must run with prefix caching and the ``align`` Mamba cache mode::
+
+       vllm serve Qwen/Qwen3.5-0.8B \
+           --enable-prefix-caching --mamba-cache-mode align \
+           --kv-transfer-config \
+           '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+#. The LMCache server's ``--chunk-size`` must be a multiple of vLLM's unified
+   block size for the model (vLLM logs ``Setting attention block size to N
+   tokens`` at startup; for Qwen3.5-0.8B, ``N = 544``)::
+
+       lmcache server --chunk-size 544 --l1-size-gb 100 --eviction-policy LRU
+
+#. ``--max-num-batched-tokens`` must be at least the unified block size and
+   below twice it (LMCache raises at engine startup otherwise; setting it
+   equal to the block size is the simple choice)::
+
+       vllm serve ... --max-num-batched-tokens 544
+
+   ``align`` mode snapshots the Mamba state only at the *end* of each
+   scheduler step; a larger budget would let one step skip block boundaries,
+   leaving no snapshot for LMCache to store at those prefixes.
+
+Caveats:
+
+- Generation is **not bit-exact** between a cached and a fresh run: GDN
+  backends do not support vLLM's batch-invariant mode. Expect score-level
+  equivalence, not token-level.
+- The cached pages are byte-opaque, so content-aware features (CacheGen
+  compression, CacheBlend) do not apply, and cache entries must not be shared
+  across engines with different attention backends or kernel block sizes.
+
+See the :doc:`Qwen3.5 recipe <../recipes/qwen3_5>` for the validated
+end-to-end commands.
+
 What Is Not Supported Yet
 -------------------------
 
-- **Mamba / linear-attention hybrids** (e.g. Qwen3-Next, Qwen3.5, and other
-  Gated-DeltaNet models). These layers keep a recurrent *state cache* (a
-  convolution + SSM state) instead of a paged key/value cache, which LMCache's
-  transfer path cannot represent today. Such models will fail to register with
-  the LMCache server. Tracking support is future work.
-- **DeepSeek-V4-style compressed / indexer caches** are likewise not yet
-  handled by the multiprocess connector.
+- **DeepSeek-V4-style compressed / indexer caches** are not yet handled by the
+  multiprocess connector.
 
 Verifying Correctness
 ---------------------

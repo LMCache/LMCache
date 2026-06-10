@@ -101,7 +101,7 @@ class MPCacheEngine:
         """Close all modules and release shared resources."""
         for module in self._modules:
             module.close()
-        self._context.storage_manager.close()
+        self._context.close()
         logger.info("MPCacheEngine closed")
 
     # HTTP-layer passthroughs lost in the engine refactor.

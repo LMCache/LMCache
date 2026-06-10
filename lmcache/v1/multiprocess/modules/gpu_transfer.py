@@ -223,6 +223,8 @@ class GPUTransferModule:
         self._device_host_func_dispatcher.stop()
 
         had_contexts = len(self._cache_contexts) > 0
+        for entry in self._cache_contexts.values():
+            entry.cache_context.close()
         self._cache_contexts.clear()
         if had_contexts:
             torch_dev.empty_cache()
@@ -297,6 +299,7 @@ class GPUTransferModule:
             )
             return
 
+        entry.cache_context.close()
         self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
         torch_dev.empty_cache()
