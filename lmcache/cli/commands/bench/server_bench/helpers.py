@@ -18,8 +18,10 @@ from __future__ import annotations
 
 # Standard
 from typing import Any
+import ctypes
 import hashlib
 import json
+import mmap
 import sys
 import time
 import urllib.error
@@ -58,16 +60,29 @@ try:
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
     from lmcache.v1.multiprocess.protocols.base import RequestType
     from lmcache.v1.multiprocess.protocols.engine import (
         RegisterNonGpuContextResponse,
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
+    from lmcache.v1.platform.cpu.shm import (
+        CpuShmTensorWrapper,
+        shm_create_readwrite,
+    )
 except ImportError as _exc:
     _IMPORT_ERROR = _exc
     # Fallback placeholder so ``add_arguments`` can still build its
     # help text without crashing on a CLI-only install.
     DTYPE_MAP = {}  # type: ignore[assignment]
+
+    # Stubs so other modules (notably ``command.py``) can still import
+    # the SHM helpers on a slim install; ``_require_full_install`` is
+    # the gate that prevents them from ever being invoked there.
+    def shm_open_pool_as_mmap(name: str, nbytes: int) -> Any:  # type: ignore[misc]
+        raise RuntimeError(
+            "shm_open_pool_as_mmap unavailable on slim lmcache-cli install"
+        )
 
 
 def _require_full_install() -> None:
@@ -180,36 +195,18 @@ def _make_key(
 # ------------------------------------------------------------------ #
 
 
-def _alloc_tensor(
-    shape: tuple[int, ...],
-    dtype: "torch.dtype",
-    device: "torch.device | None" = None,
-) -> "torch.Tensor":
-    """Allocate a random tensor of the given shape and dtype.
-
-    ``torch.randn`` only supports floating-point dtypes; integer dtypes
-    (e.g. ``uint8`` for FP8-quantised KV) fall back to ``randint``.
-    """
-    kwargs = {} if device is None else {"device": device}
-    if dtype.is_floating_point:
-        return torch.randn(shape, dtype=dtype, **kwargs)
-    iinfo = torch.iinfo(dtype)
-    return torch.randint(iinfo.min, iinfo.max + 1, shape, dtype=dtype, **kwargs)
-
-
-def _allocate_kv_cache(
+def _allocate_gpu_kv_cache(
     num_layers: int = 32,
     num_heads: int = 8,
     head_size: int = 128,
     num_blocks: int = 1024,
     block_size: int = 16,
-    dtype: "torch.dtype | None" = None,
-    device: "str | torch.device | None" = None,
+    dtype: torch.dtype | None = None,
+    device: str | torch.device | None = None,
     kv_size: int = 2,
-    groups: "list[KVLayerGroupInfo] | None" = None,
-    use_gpu: bool = True,
-) -> "list[torch.Tensor]":
-    """Allocate paged KV cache tensors for either GPU or CPU mode.
+    groups: list[KVLayerGroupInfo] | None = None,
+) -> list[torch.Tensor]:
+    """Allocate paged GPU KV cache tensors.
 
     Each layer is a tensor of shape
     ``(kv_size, num_blocks, block_size, num_heads, head_size)``
@@ -223,39 +220,97 @@ def _allocate_kv_cache(
     (for heterogeneous multi-group specs). In that mode the flat
     ``num_heads`` / ``head_size`` / ``dtype`` / ``kv_size`` kwargs
     are ignored, and ``num_layers`` is derived from the groups.
-
-    GPU mode wraps real CUDA tensors; CPU mode (``use_gpu=False``,
-    used by ``--transfer-mode data``) allocates plain CPU tensors --
-    the server owns the SHM pool and the bench only needs these
-    tensors for client-side checksum self-check. The handle-mode
-    CPU path (true zero-copy SHM IPC with the server) will need
-    :class:`CpuShmTensorWrapper` and is left for a separate PR --
-    see ``TODO(baoloongmao)`` markers below.
     """
     # ``torch.float16`` cannot be used as a default value because the
     # module must load on ``lmcache-cli`` (no torch) installs.
     if dtype is None:
         dtype = torch.float16
     torch.random.manual_seed(42)
-    if use_gpu:
-        dev: torch.device | None = (
-            torch.device(device)
-            if device
-            else torch.device(torch_device_type, torch_dev.current_device())
-        )
-    else:
-        dev = None
+    dev = (
+        torch.device(device)
+        if device
+        else torch.device(torch_device_type, torch_dev.current_device())
+    )
+
+    def _alloc(
+        shape: tuple[int, ...],
+        a_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if a_dtype.is_floating_point:
+            return torch.randn(shape, dtype=a_dtype, device=dev)
+        # ``torch.randn`` only supports floating-point dtypes; fall
+        # back to ``randint`` for integer dtypes (e.g. ``uint8``
+        # used by FP8 quantized KV cache layouts).
+        iinfo = torch.iinfo(a_dtype)
+        return torch.randint(iinfo.min, iinfo.max + 1, shape, dtype=a_dtype, device=dev)
 
     if groups:
         tensors: list[torch.Tensor] = []
         for g in groups:
             sd = g.shape_desc
             g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
-            tensors.extend(_alloc_tensor(g_shape, g.dtype, dev) for _ in range(sd.nl))
+            tensors.extend(_alloc(g_shape, g.dtype) for _ in range(sd.nl))
         return tensors
 
     shape = (kv_size, num_blocks, block_size, num_heads, head_size)
-    return [_alloc_tensor(shape, dtype, dev) for _ in range(num_layers)]
+    return [_alloc(shape, dtype) for _ in range(num_layers)]
+
+
+# Backward-compatible alias used by tests and older callers.
+_allocate_kv_cache = _allocate_gpu_kv_cache
+
+
+def _allocate_cpu_shm_kv_cache(
+    groups: list[KVLayerGroupInfo],
+    shm_prefix: str,
+) -> tuple[list[torch.Tensor], list[CpuShmTensorWrapper], list[str]]:
+    """Allocate paged CPU KV cache tensors backed by POSIX SHM.
+
+    For each (group, layer) we ``shm_open`` a fresh segment and
+    ``mmap`` it into the client process. The returned tensors share
+    storage with the SHM mapping, and the matching
+    :class:`CpuShmTensorWrapper` instances tell the LMCache mp
+    server how to map the very same physical pages -- i.e. true
+    zero-copy across processes (matching the GPU CUDA-IPC path).
+
+    Returns:
+        ``(tensors, wrappers, shm_names)``. ``shm_names`` is kept
+        so the caller can ``shm_unlink`` on shutdown.
+    """
+    # Fixed seed so the deterministic random fill below produces
+    # reproducible checksums across cold/warm bench iterations.
+    torch.random.manual_seed(42)
+    tensors: list[torch.Tensor] = []
+    wrappers: list[CpuShmTensorWrapper] = []
+    shm_names: list[str] = []
+    layer_idx = 0
+    for g_idx, g in enumerate(groups):
+        sd = g.shape_desc
+        g_shape = (sd.kv_size, sd.nb, sd.bs, sd.nh, sd.hs)
+        for _ in range(sd.nl):
+            n_elems = 1
+            for d in g_shape:
+                n_elems *= d
+            nbytes = n_elems * g.dtype.itemsize
+            name = "%s_%d_%d" % (shm_prefix, g_idx, layer_idx)
+            addr = shm_create_readwrite(name, nbytes)
+            buf_type = ctypes.c_uint8 * nbytes
+            buf = buf_type.from_address(addr)
+            flat = torch.frombuffer(buf, dtype=torch.uint8)
+            t = flat.view(g.dtype).reshape(g_shape)
+            # Initialise with deterministic random data so the
+            # cold/warm checksum compare in the bench loop is
+            # meaningful.
+            if g.dtype.is_floating_point:
+                t.copy_(torch.randn(g_shape, dtype=g.dtype))
+            else:
+                iinfo = torch.iinfo(g.dtype)
+                t.copy_(torch.randint(iinfo.min, iinfo.max + 1, g_shape, dtype=g.dtype))
+            tensors.append(t)
+            wrappers.append(CpuShmTensorWrapper(t, name))
+            shm_names.append(name)
+            layer_idx += 1
+    return tensors, wrappers, shm_names
 
 
 def _send_register_kv_cache(
@@ -267,27 +322,18 @@ def _send_register_kv_cache(
     kv_caches: list[CudaIPCWrapper] | None = None,
     use_gpu: bool = True,
     use_handle: bool | None = None,
-) -> "tuple[bool, RegisterNonGpuContextResponse | None]":
+) -> "bool | RegisterNonGpuContextResponse":
     """Register a KV cache context with the MP server.
 
     Dispatches to the correct protocol based on ``use_handle``:
 
-    * Handle mode: ``REGISTER_KV_CACHE`` with a ``CudaIPCWrapper``
-      list (GPU only in this PR).
+    * Handle mode: ``REGISTER_KV_CACHE`` with a wrapper list
+      (``CudaIPCWrapper`` for GPU, ``CpuShmTensorWrapper`` for CPU).
     * Data mode: ``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` with a
       ``RegisterNonGpuContextPayload`` derived from ``layout_hints``.
 
-    Returns ``(success, response)`` where ``response`` is the
-    data-mode SHM pool descriptor (``None`` in handle mode or on
-    failure). Using an explicit success flag avoids relying on the
-    truthiness of a dataclass response, which is always truthy even
-    when the server returned an empty pool descriptor.
-
     ``use_handle`` defaults to ``use_gpu`` for backwards compatibility:
     GPU always goes through the handle path, CPU defaults to data.
-
-    TODO(baoloongmao): CPU handle mode (zero-copy SHM IPC with the
-    server) will be implemented in a separate PR.
     """
     if use_handle is None:
         use_handle = use_gpu
@@ -295,7 +341,7 @@ def _send_register_kv_cache(
         if not kv_caches:
             raise ValueError(
                 "kv_caches must be a non-empty list of wrappers "
-                "(CudaIPCWrapper for GPU)"
+                "(CudaIPCWrapper for GPU, CpuShmTensorWrapper for CPU)"
             )
         hints: dict = {"kv_layout": "NHD"}
         if layout_hints:
@@ -308,12 +354,12 @@ def _send_register_kv_cache(
             world_size,
             EngineType.VLLM,
             hints,
-            [],
+            [],  # group_views: empty = single non-hybrid group
         ]
         result = _call(client, RequestType.REGISTER_KV_CACHE, payloads)
-        return (result is not _TIMEOUT, None)
+        return result is not _TIMEOUT
 
-    # Data mode: use the non-GPU context registration protocol.
+    # CPU mode: use the non-GPU context registration protocol.
     # layout_hints carries num_layers, num_heads, head_size, block_size,
     # dtype.  hidden_dim_size = num_heads * head_size (NHD layout).
     hints_d: dict = layout_hints or {}
@@ -339,14 +385,13 @@ def _send_register_kv_cache(
         use_mla=False,
     )
     result = _call(client, RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT, [payload])
-    if result is _TIMEOUT or result is None:
-        return (False, None)
+    if result is _TIMEOUT:
+        return False
     # The data-mode register reply carries the server's SHM pool name
-    # and size; the bench keeps it so STORE/RETRIEVE can mmap the same
-    # pool and exchange tensor data via slot descriptors. A non-empty
-    # ``shm_name`` is the authoritative success signal here.
-    success = bool(getattr(result, "shm_name", ""))
-    return (success, result)
+    # and size; the bench keeps it on the side so STORE / RETRIEVE
+    # can mmap the same pool and exchange tensor data without going
+    # through pickle.
+    return result
 
 
 def _send_lookup(
@@ -405,7 +450,7 @@ def _make_event_handle(use_gpu: bool = True) -> bytes:
 
 
 def _build_server_slot_views(
-    server_pool: "memoryview",
+    server_pool: "mmap.mmap",
     slots: list[dict[str, Any]],
 ) -> list["torch.Tensor"]:
     """Build zero-copy tensor views over server SHM slot descriptors.
@@ -442,9 +487,12 @@ def _gather_paged_to_flat_chunks(
     """Gather paged client tensors into flat per-chunk CPU tensors.
 
     Output layout matches the server's expected ``commit_store``
-    payload: each chunk is ``[2, num_layers, chunk_size, hidden_dim]``,
+    payload (set up at register time by
+    ``register_kv_cache_non_gpu_context``):
+    each chunk is ``[2, num_layers, chunk_size, hidden_dim]``,
     where ``hidden_dim = NH * HS``. Assumes a homogeneous group
-    (same NH/HS/dtype across all layers).
+    (same NH/HS/dtype across all layers); heterogeneous specs
+    fall outside the bench scope.
     """
     if chunk_size % block_size != 0:
         raise ValueError(
@@ -459,10 +507,14 @@ def _gather_paged_to_flat_chunks(
         start_b = block_offset + c * blocks_per_chunk
         per_layer: list[torch.Tensor] = []
         for t in tensors:
+            # paged: (2, NB, BS, NH, HS) -> slice block range ->
+            # (2, blocks_per_chunk, BS, NH, HS) -> flatten to
+            # (2, chunk_size, NH*HS).
             sliced = t.narrow(1, start_b, blocks_per_chunk)
             kv, _, bs, nh, hs = sliced.shape
             flat = sliced.contiguous().view(kv, blocks_per_chunk * bs, nh * hs)
             per_layer.append(flat)
+        # Stack along a new layer dim -> (2, NL, chunk_size, hidden).
         chunk = torch.stack(per_layer, dim=1).contiguous()
         if chunk.shape[1] != num_layers:
             raise RuntimeError(
@@ -497,9 +549,16 @@ def _scatter_flat_chunks_to_paged(
         for layer_idx, t in enumerate(tensors):
             kv, _, bs, nh, hs = t.shape
             target = t.narrow(1, start_b, blocks_per_chunk)
+            # chunk[:, layer_idx] is (chunk_size, hidden); reshape
+            # back to (2, blocks_per_chunk, BS, NH, HS).
             flat = chunk[:, layer_idx]
             reshaped = flat.reshape(kv, blocks_per_chunk, bs, nh, hs)
             target.copy_(reshaped)
+
+
+# ------------------------------------------------------------------ #
+#  Client-side checksum / zero-fill (data-mode self-check)             #
+# ------------------------------------------------------------------ #
 
 
 def _compute_client_checksums(
@@ -511,10 +570,13 @@ def _compute_client_checksums(
 ) -> list[str]:
     """Hash a paged block range from client-side KV tensors.
 
-    For each chunk, feed every layer's bytes for that block range
-    into a single MD5 digest. Used by the data-mode self-check:
-    cold-pass digest vs warm-pass digest verifies that RETRIEVE
-    actually wrote back the data we wrote during STORE.
+    For each chunk (``chunk_size // block_size`` consecutive blocks),
+    feed every layer's bytes for that block range into a single MD5
+    digest. The returned list maps 1:1 to the chunks the bench loop
+    expects, so a cold-pass digest can be compared with a warm-pass
+    digest to verify that ``RETRIEVE`` actually wrote back the data
+    we wrote during ``STORE`` -- without relying on a server-side
+    ``/kvcache/check`` endpoint (which only exists in handle mode).
     """
     if chunk_size % block_size != 0:
         raise ValueError(
@@ -529,6 +591,11 @@ def _compute_client_checksums(
         end_b = start_b + blocks_per_chunk
         h = hashlib.md5()
         for t in tensors:
+            # Paged layout: dim 1 is the block dim for both kv-major
+            # ``(kv, NB, BS, NH, HS)`` and MLA ``(NB, BS, NH, HS)``
+            # tensors. ``contiguous().numpy().tobytes()`` survives
+            # non-contiguous slices and dtype quirks (bfloat16 has no
+            # numpy view, but uint8 reinterpret works after slice).
             view = t.narrow(1, start_b, end_b - start_b).contiguous()
             h.update(view.view(torch.uint8).numpy().tobytes())
         checksums.append(h.hexdigest())
@@ -542,8 +609,11 @@ def _zero_fill_client_blocks(
 ) -> None:
     """Zero out a paged block range across all client tensors.
 
-    Used right before a warm-pass RETRIEVE so that any non-zero
+    Used right before a warm-pass ``RETRIEVE`` so that any non-zero
     bytes observed afterwards must have been written by the server.
+    Without this, a warm checksum equal to the cold checksum could
+    still happen even if ``RETRIEVE`` was a silent no-op (the SHM
+    pages were never overwritten in the first place).
     """
     for t in tensors:
         t.narrow(1, block_offset, num_blocks).zero_()
@@ -558,20 +628,20 @@ def _send_store(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
-    chunk_size: int = 256,
-    server_pool: "memoryview | None" = None,
+    chunk_size: int = 0,
+    server_pool: "mmap.mmap | None" = None,
 ) -> str:
     """Store KV cache blocks. Returns status string.
 
-    Handle mode uses the single-shot ``STORE`` RPC (GPU CUDA-IPC).
+    Handle mode uses the single-shot ``STORE`` RPC (GPU CUDA-IPC, or
+    CPU SHM with an empty event handle).
     Data mode uses the two-phase ``PREPARE_STORE`` + ``COMMIT_STORE``.
     When ``server_pool`` and ``client_tensors`` are both supplied the
     bench gathers the paged block range into flat per-chunk CPU
-    tensors and writes them into the server-owned SHM pool via the
-    slot descriptors returned by ``PREPARE_STORE``.
-
-    TODO(baoloongmao): CPU handle mode (zero-copy SHM IPC STORE path)
-    will be implemented in a separate PR.
+    tensors and writes them straight into the server-owned SHM pool
+    via the slot descriptors returned by ``PREPARE_STORE``, so the
+    follow-up ``COMMIT_STORE`` carries an empty payload and the
+    server stays on its zero-copy SHM path.
     """
     if use_handle is None:
         use_handle = use_gpu
@@ -583,22 +653,19 @@ def _send_store(
             key,
             _INSTANCE_ID,
             [block_ids] * num_engine_group_infos,
-            _make_event_handle(use_gpu),
+            _make_event_handle(),
         ]
         result = _call(client, RequestType.STORE, payloads)
         if result is _TIMEOUT:
             return "timeout"
         return "stored" if result[1] else "store_failed"
 
-    # Data mode: PREPARE_STORE -> COMMIT_STORE
+    # CPU mode: PREPARE_STORE -> COMMIT_STORE
     prep = _call(client, RequestType.PREPARE_STORE, [key, _INSTANCE_ID])
     if prep is _TIMEOUT:
         return "timeout"
-    if prep is None:
-        return "store_failed"
     if server_pool is not None and client_tensors is not None and chunk_size > 0:
-        raw_ctx = getattr(prep, "context", None)
-        ctx = raw_ctx if isinstance(raw_ctx, dict) else {}
+        ctx = prep.context if isinstance(prep.context, dict) else {}
         slots = ctx.get("slots", []) or []
         chunk_indices = ctx.get("chunk_indices", []) or []
         if slots and chunk_indices:
@@ -613,7 +680,7 @@ def _send_store(
             slot_views = _build_server_slot_views(server_pool, slots)
             for slot_view, chunk_idx in zip(slot_views, chunk_indices, strict=False):
                 if 0 <= chunk_idx < len(full_chunks):
-                    slot_view.copy_(full_chunks[chunk_idx].reshape(slot_view.shape))
+                    slot_view.copy_(full_chunks[chunk_idx].view(slot_view.shape))
     commit = _call(client, RequestType.COMMIT_STORE, [key, _INSTANCE_ID, b""])
     if commit is _TIMEOUT:
         return "timeout"
@@ -631,19 +698,19 @@ def _send_retrieve(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
-    server_pool: "memoryview | None" = None,
+    server_pool: "mmap.mmap | None" = None,
 ) -> str:
     """Retrieve KV cache blocks. Returns status.
 
-    Handle mode uses the single-shot ``RETRIEVE`` RPC (GPU CUDA-IPC).
+    Handle mode uses the single-shot ``RETRIEVE`` RPC (GPU CUDA-IPC, or
+    CPU SHM with an empty event handle).
     Data mode uses the two-phase ``PREPARE_RETRIEVE`` +
     ``COMMIT_RETRIEVE``. When ``server_pool`` and ``client_tensors``
     are both supplied the bench builds zero-copy tensor views over
     the slot descriptors returned by ``PREPARE_RETRIEVE`` and
-    scatters them back into the paged client SHM.
-
-    TODO(baoloongmao): CPU handle mode (zero-copy SHM IPC RETRIEVE
-    path) will be implemented in a separate PR.
+    scatters them back into the paged client SHM, so the round-trip
+    self-check can run without ``PREPARE_RETRIEVE`` having to ship a
+    pickled copy of the chunks.
     """
     if use_handle is None:
         use_handle = use_gpu
@@ -655,7 +722,7 @@ def _send_retrieve(
             key,
             _INSTANCE_ID,
             [block_ids] * num_engine_group_infos,
-            _make_event_handle(use_gpu),
+            _make_event_handle(),
             0,  # skip_first_n_tokens
         ]
         result = _call(client, RequestType.RETRIEVE, payloads)
@@ -663,15 +730,14 @@ def _send_retrieve(
             return "timeout"
         return "retrieved" if result[1] else "retrieve_failed"
 
-    # Data mode: PREPARE_RETRIEVE -> COMMIT_RETRIEVE
+    # CPU mode: PREPARE_RETRIEVE -> COMMIT_RETRIEVE
     prep = _call(client, RequestType.PREPARE_RETRIEVE, [key, _INSTANCE_ID])
     if prep is _TIMEOUT:
         return "timeout"
-    if prep is None or not getattr(prep, "success", False):
+    if not prep.success:
         return "retrieve_failed"
     if server_pool is not None and client_tensors is not None:
-        raw_ctx = getattr(prep, "context", None)
-        ctx = raw_ctx if isinstance(raw_ctx, dict) else {}
+        ctx = prep.context if isinstance(prep.context, dict) else {}
         slots = ctx.get("slots", []) or []
         if slots:
             try:
@@ -788,7 +854,7 @@ def _process_request(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     client_tensors: list["torch.Tensor"] | None = None,
-    server_pool: "memoryview | None" = None,
+    server_pool: "mmap.mmap | None" = None,
 ) -> list[str] | None:
     """Run the full lookup -> retrieve/store flow.
 
@@ -802,7 +868,9 @@ def _process_request(
       proves the server returned the exact bytes we sent.
 
     Handle mode keeps the historical server-side
-    ``/kvcache/check`` path; client tensors are not consulted.
+    ``/kvcache/check`` path; client tensors are not consulted (in
+    handle mode the client and server share the same SHM/IPC
+    pages, so a client-side hash equals itself by construction).
     """
     token_ids = _build_token_ids(seq_no, num_tokens)
     request_id = "req-%d-%s" % (seq_no, pass_label)
@@ -963,7 +1031,8 @@ def _process_request(
     #       cold -> ground truth captured pre-STORE
     #       warm -> hash post-RETRIEVE; cold == warm proves the
     #               server returned the exact bytes we wrote.
-    #   * handle mode: query /kvcache/check on the server.
+    #   * handle mode: query /kvcache/check on the server, which
+    #     reads the shared SHM/IPC pages directly.
     checksums: list[str] | None = None
     if client_tensors is not None and num_full_tokens > 0:
         if pass_label == "cold":

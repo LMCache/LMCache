@@ -123,10 +123,16 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         flat = torch.frombuffer(buf, dtype=torch.uint8)
         typed = flat.view(self.dtype)
         out = torch.as_strided(typed, self.shape, self.stride, self.storage_offset)
-        # Keep ``flat`` alive for the lifetime of ``out`` so its mmap
-        # is not released while still in use, then munmap on cleanup.
-        out._lmcache_shm_buf = flat  # type: ignore[attr-defined]
-        weakref.finalize(out, shm_munmap, addr, self.nbytes)
+        # Pin the mmap to the *storage*, not the outer tensor: views
+        # (reshape / slicing) create new tensor objects that share the
+        # storage but do not inherit Python attributes, so a finalizer
+        # attached to ``out`` would munmap as soon as ``out`` is GC'd
+        # even when a view is still reading the SHM segment.
+        # ``UntypedStorage`` is shared across views, so finalizing on it
+        # only fires once every view is also dropped.
+        storage = out.untyped_storage()
+        _CPU_SHM_KEEP_ALIVE[id(storage)] = flat
+        weakref.finalize(storage, _release_shm_segment, id(storage), addr, self.nbytes)
         return out
 
 
@@ -151,6 +157,25 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
 _CPU_SHM_NAMES: dict[int, tuple["weakref.ReferenceType[torch.Tensor]", str]] = {}
 _CPU_SHM_LOCK = threading.Lock()
 _CPU_SHM_COUNTER = itertools.count()
+
+
+# Process-level registry that pins the base ``flat`` buffer of every live
+# ``to_tensor()`` mmap until its storage is finalized. Keyed by ``id(storage)``,
+# which is stable across views because PyTorch caches the storage Python
+# wrapper (so reshape / slicing returns the same ``UntypedStorage`` object).
+_CPU_SHM_KEEP_ALIVE: dict[int, torch.Tensor] = {}
+
+
+def _release_shm_segment(storage_id: int, addr: int, nbytes: int) -> None:
+    """Drop the pinned base buffer and ``munmap`` the mapping.
+
+    Invoked by ``weakref.finalize`` on the tensor's ``UntypedStorage`` once
+    every view of the mapping is gone, so views (e.g. ``reshape`` returning
+    a new tensor without ``_lmcache_shm_buf``) cannot trigger a premature
+    unmap that would turn into a use-after-free in the next read.
+    """
+    _CPU_SHM_KEEP_ALIVE.pop(storage_id, None)
+    shm_munmap(addr, nbytes)
 
 
 def _cleanup_shm_segment(tid: int, shm_name: str, addr: int, nbytes: int) -> None:

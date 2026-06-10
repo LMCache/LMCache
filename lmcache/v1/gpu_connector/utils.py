@@ -1274,6 +1274,7 @@ def get_group_data_ptrs(
         F.NL_X_NB_TWO_NH_BS_HS,
         F.NL_X_NB_BS_HS,
         F.NL_X_NBBS_ONE_HS,
+        F.NL_X_NB_NH_BS_TWO_HS,
     ):
         layers = cast(list[torch.Tensor], kv_caches)
         return [layers[i].data_ptr() for i in layer_indices]

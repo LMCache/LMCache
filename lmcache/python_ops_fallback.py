@@ -775,7 +775,7 @@ def _is_hnd_format(gpu_kv_format: GPUKVFormat) -> bool:
     return int(gpu_kv_format) in (
         int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS),
         int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS),
-        int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS),  # format 10: blocks-first fused K/V
+        int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS),
     )
 
 
@@ -837,6 +837,10 @@ def _per_layer_paged_shape(
         return (2, nb, nh, bs, hs)
     if fmt == int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS):
         return (nb, 2, nh, bs, hs)
+    if fmt == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
+        # vLLM CPU blocks-first fused KV: K and V interleaved at the
+        # second-to-last dim so each layer is [NB, NH, BS, 2, HS].
+        return (nb, nh, bs, 2, hs)
     if fmt == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
         return (2, nb, bs, nh, hs)
     if fmt == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
@@ -1484,7 +1488,8 @@ def _transfer_per_layer_hnd(
         if int(gpu_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS):
             k_t, v_t = layer[0], layer[1]
         elif int(gpu_kv_format) == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
-            k_t, v_t = layer[:, :, :, 0, :], layer[:, :, :, 1, :]
+            # vLLM CPU blocks-first fused KV: [NB, NH, BS, 2, HS].
+            k_t, v_t = layer[:, :, :, 0], layer[:, :, :, 1]
         else:
             k_t, v_t = layer[:, 0], layer[:, 1]
         _nb, nh, _bs, hs = k_t.shape
