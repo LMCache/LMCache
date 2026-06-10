@@ -473,14 +473,24 @@ class RustRawBlockBackend(StoragePluginInterface):
                 memory_objs,
             )
             if len(put_result.results) != len(pending) or not all(put_result.results):
-                failed = [
-                    spec.encoded
-                    for spec, ok in zip(specs, put_result.results, strict=False)
-                    if not ok
-                ]
-                raise RuntimeError(
-                    "Failed to persist raw-block keys: " + ", ".join(failed)
-                )
+                failed = []
+
+                for key, spec, ok in zip(keys, specs, put_result.results, strict=False):
+                    if ok:
+                        if on_complete_callback is not None:
+                            try:
+                                on_complete_callback(key)
+                            except Exception as e:
+                                logger.warning(
+                                    "on_complete_callback failed for key %s: %s", key, e
+                                )
+                    else:
+                        failed.append(spec.encoded)
+
+                if failed:
+                    raise RuntimeError(
+                        "Failed to persist raw-block keys: " + ", ".join(failed)
+                    )
             if on_complete_callback is not None:
                 for key in keys:
                     try:
