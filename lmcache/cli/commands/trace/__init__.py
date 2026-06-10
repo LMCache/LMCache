@@ -102,7 +102,6 @@ class TraceCommand(BaseCommand):
         Overrides :meth:`BaseCommand.register` because ``trace`` has
         its own nested subparsers (``info`` and ``replay``).
         """
-        _require_full_install()
         parser = subparsers.add_parser(
             self.name(),
             help=self.help(),
@@ -122,6 +121,7 @@ class TraceCommand(BaseCommand):
         Args:
             args: Parsed CLI arguments containing ``trace_target``.
         """
+        _require_full_install()
         handlers: dict[str, Callable[[argparse.Namespace], None]] = {
             "info": lambda a: run_trace_info(self, a),
             "replay": lambda a: run_trace_replay(self, a),

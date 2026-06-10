@@ -93,12 +93,15 @@ def register_replay_parser(
         help="Suppress the terminal metrics table (files are still written).",
     )
 
-    # First Party
-    from lmcache.v1.distributed.config import add_storage_manager_args
-    from lmcache.v1.mp_observability.config import add_observability_args
+    try:
+        # First Party
+        from lmcache.v1.distributed.config import add_storage_manager_args
+        from lmcache.v1.mp_observability.config import add_observability_args
 
-    add_storage_manager_args(parser)
-    add_observability_args(parser)
+        add_storage_manager_args(parser)
+        add_observability_args(parser)
+    except ImportError as e:
+        logger.warning("lmcache trace replay import error, error is %s", e)
 
     parser.set_defaults(func=dispatch_func)
     return parser
