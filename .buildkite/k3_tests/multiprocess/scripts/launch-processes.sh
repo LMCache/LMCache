@@ -17,7 +17,7 @@ MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 
-# K8s assigns exactly 2 GPUs as devices 0 and 1 (overridable for local runs)
+# K8s assigns exactly 2 GPUs as devices 0 and 1 (overridable for local runs).
 GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
 GPU_FOR_BASELINE="${GPU_FOR_BASELINE:-1}"
 echo "Using GPU $GPU_FOR_VLLM for vLLM with LMCache"
@@ -84,11 +84,28 @@ fi
 # "--trust-remote-code --tokenizer-mode deepseek_v4".
 EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
 
-# Batch-invariant kernels make run1 == run2 bit-exact, which the determinism
-# (lm_eval) and HMA gemma-4 tests rely on. Models whose attention backend does
-# not implement batch invariance (e.g. DeepSeek-V4-Flash's FlashMLA-Sparse)
-# must set VLLM_BATCH_INVARIANT=0.
-VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-1}"
+# LMCache server chunk size in tokens. Empty -> server default.
+CHUNK_SIZE_ARG=""
+if [ -n "${CHUNK_SIZE:-}" ]; then
+    CHUNK_SIZE_ARG="--chunk-size ${CHUNK_SIZE}"
+fi
+
+# vLLM batch-invariant mode. On by default; backends without batch-invariant
+# kernels (GDN/Mamba, DeepSeek-V4-Flash's FlashMLA-Sparse) must set
+# BATCH_INVARIANT=0 and compare with a score tolerance.
+BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
+
+# Mamba KV cache mode + prefix caching, set only for hybrid Mamba models.
+MAMBA_ARGS=""
+if [ -n "${MAMBA_CACHE_MODE:-}" ]; then
+    MAMBA_ARGS="--mamba-cache-mode ${MAMBA_CACHE_MODE} --enable-prefix-caching"
+fi
+
+# Max tokens per scheduler step. Empty -> vLLM default.
+MAX_NUM_BATCHED_TOKENS_ARG=""
+if [ -n "${MAX_NUM_BATCHED_TOKENS:-}" ]; then
+    MAX_NUM_BATCHED_TOKENS_ARG="--max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS}"
+fi
 
 # Store PIDs in a file so cleanup.sh can find them
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
@@ -113,6 +130,7 @@ lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
+    $CHUNK_SIZE_ARG \
     --port "$LMCACHE_PORT" \
     --http-port "${LMCACHE_HTTP_PORT:-8080}" \
     ${GDS_L1_ARG} \
@@ -144,7 +162,7 @@ echo "Port: $vllm_port"
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
-VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT}" \
+VLLM_BATCH_INVARIANT=${BATCH_INVARIANT} \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
@@ -155,6 +173,8 @@ vllm serve "$MODEL" \
     $MAX_MODEL_LEN_ARG \
     $ENFORCE_EAGER_ARG \
     $GPU_MEMORY_UTIL_ARG \
+    $MAMBA_ARGS \
+    $MAX_NUM_BATCHED_TOKENS_ARG \
     $EXTRA_VLLM_ARGS \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 

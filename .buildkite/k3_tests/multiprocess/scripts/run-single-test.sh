@@ -2,8 +2,9 @@
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | hma_lm_eval_gemma4 | hma_dsv4_flash
-#              | hma_dsv4_roundtrip | vllm_bench | long_doc_qa | long_doc_qa_l2
-#              | fault_tolerance | deadlock | restart_recovery | gds_smoke_test
+#              | hma_dsv4_roundtrip | hma_lm_eval_qwen3_5 | vllm_bench
+#              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
+#              | restart_recovery | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -45,10 +46,28 @@ elif [ "$TEST_NAME" = "hma_dsv4_roundtrip" ]; then
     # DeepSeek-V4-Flash is a hybrid MLA model (full MLA + per-layer
     # sliding-window MLA + compressor-state groups) whose KV cache groups
     # declare per-group compress ratios of 4 and 128 -- the exact path this
-    # PR's tokens/slots-per-chunk handling drives. hma_dsv4_roundtrip loads it
+    # PR's tokens/slots-per-block handling drives. hma_dsv4_roundtrip loads it
     # with dummy weights (load_format=dummy) on a single GPU, so it needs only
     # the config/tokenizer and runs on stock vLLM (no fp4 weight loading).
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
+elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
+    # Qwen3.5-0.8B is a Mamba/GDN + full-attention hybrid (caches re-viewed at
+    # registration; see lmcache/integration/vllm/kv_cache_group_edits.py).
+    export MODEL="${MODEL:-Qwen/Qwen3.5-0.8B}"
+    export ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
+    # LMCache chunk size must be a multiple of the unified vLLM block size (544).
+    export CHUNK_SIZE="${CHUNK_SIZE:-544}"
+    # GDN supports only the 'align' Mamba cache mode.
+    export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
+    # 'align' snapshots the Mamba state only at scheduler-step boundaries; cap
+    # the step at the chunk size for one reusable snapshot per chunk.
+    export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-544}"
+    # GDN has no batch-invariant mode, so runs are not bit-exact; compare within
+    # a score tolerance and use enough samples to shrink run-to-run drift
+    # (~1/sqrt(LIMIT)) well inside it.
+    export BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
+    export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
+    export LIMIT="${LIMIT:-300}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi
@@ -138,6 +157,9 @@ case "$TEST_NAME" in
     hma_dsv4_roundtrip)
         exec_script="${SCRIPT_DIR}/hma-dsv4-roundtrip-check.py"
         ;;
+    hma_lm_eval_qwen3_5)
+        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
+        ;;
     vllm_bench)
         exec_script="${SCRIPT_DIR}/run-vllm-bench.sh"
         ;;
@@ -167,7 +189,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, hma_dsv4_flash, hma_dsv4_roundtrip, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test"
+        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, hma_dsv4_flash, hma_dsv4_roundtrip, hma_lm_eval_qwen3_5, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test"
         exit 1
         ;;
 esac
