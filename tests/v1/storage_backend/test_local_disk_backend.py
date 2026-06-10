@@ -262,6 +262,7 @@ class TestAsyncSaveBytesToDiskExceptionSafety:
             type(memory_obj),
             "byte_array",
             new_callable=PropertyMock,
+            create=True,
             side_effect=OSError("conversion failed"),
         ):
             with pytest.raises(OSError, match="conversion failed"):

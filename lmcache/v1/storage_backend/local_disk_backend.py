@@ -566,9 +566,7 @@ class LocalDiskBackend(StorageBackendInterface):
         except Exception:
             if reserved_new_key and size is not None:
                 with self.disk_lock:
-                    self.current_cache_size = max(
-                        0.0, self.current_cache_size - size
-                    )
+                    self.current_cache_size = max(0.0, self.current_cache_size - size)
                     self.cache_policy.update_on_force_evict(key)
             raise
         finally:
