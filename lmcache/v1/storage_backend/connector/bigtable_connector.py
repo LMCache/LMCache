@@ -791,14 +791,17 @@ class BigtableConnector(RemoteConnector):
             if self.cfg.app_profile_id:
                 kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-            table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
-            future = asyncio.run_coroutine_threadsafe(
-                table.mutate_row(
+            async def _do_remove():
+                table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+                await table.mutate_row(
                     row_key,
                     DeleteAllFromRow(),
                     operation_timeout=self.cfg.write_timeout_sec,
                     **kwargs,
-                ),
+                )
+
+            future = asyncio.run_coroutine_threadsafe(
+                _do_remove(),
                 self.loop,
             )
             future.result()

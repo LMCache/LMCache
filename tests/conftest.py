@@ -799,3 +799,38 @@ def lmcache_engine_metadata(role="worker"):
         use_mla=False,
         role=role,
     )
+
+
+@pytest.fixture(scope="session")
+def bigtable_emulator():
+    """Start the Bigtable emulator for integration testing."""
+    import os
+    import subprocess
+    import time
+    
+    port = "8899"
+    host_port = f"localhost:{port}"
+    
+    print(f"\n[Fixture] Starting Bigtable emulator on {host_port}...")
+    emulator_process = subprocess.Popen(
+        ["gcloud", "beta", "emulators", "bigtable", "start", f"--host-port={host_port}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    
+    os.environ["BIGTABLE_EMULATOR_HOST"] = host_port
+    
+    # Wait for the emulator to initialize
+    time.sleep(2.0)
+    
+    yield host_port
+    
+    print("\n[Fixture] Stopping Bigtable emulator...")
+    emulator_process.terminate()
+    try:
+        emulator_process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        emulator_process.kill()
+        
+    if "BIGTABLE_EMULATOR_HOST" in os.environ:
+        del os.environ["BIGTABLE_EMULATOR_HOST"]
