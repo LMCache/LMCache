@@ -120,7 +120,7 @@ msgstr ":ref:`压缩 <compress>`: 压缩 KV Cache。"
 
 #: ../../source/kv_cache_management/index.rst:41
 msgid ":ref:`Health <health>`: Check the health status of cache workers."
-msgstr "`:ref:`Health <health>`: 检查缓存工作线程的健康状态。`"
+msgstr ":ref:`Health <health>`: 检查缓存工作线程的健康状态。"
 
 #: ../../source/kv_cache_management/index.rst:42
 msgid ":ref:`Lookup <lookup>`: Lookup the KV cache for a given list of tokens."
@@ -138,7 +138,7 @@ msgstr ":ref:`Pin <pin>`: 持久化 KV Cache 以防止其被逐出。"
 msgid ""
 ":ref:`CheckFinish <check_finish>`: Check whether a (non-blocking) control"
 " event has finished or not."
-msgstr "`:ref:`CheckFinish <check_finish>`: 检查一个（非阻塞）控制事件是否已经完成。`"
+msgstr ":ref:`CheckFinish <check_finish>`: 检查一个（非阻塞）控制事件是否已经完成。"
 
 #: ../../source/kv_cache_management/index.rst:46
 msgid ":ref:`QueryWorkerInfo <query_worker_info>`: Query the worker info."

@@ -28,10 +28,9 @@ if [ "$TEST_NAME" = "hma_lm_eval_gemma4" ]; then
     # gemma-4-31B-it is public (no gating, so no HF token check) and has
     # heterogeneous head dims (head_dim 256 / global_head_dim 512), so vLLM
     # gives its KV cache groups different block sizes -- this is what exercises
-    # LMCache's per-group block-size handling. It forces TRITON_ATTN, which is
-    # not bit-exact under batch invariance, so the pipeline sets a small
-    # SCORE_TOLERANCE and ATTENTION_BACKEND=auto; its ~63GB of weights also need
-    # a higher GPU_MEMORY_UTILIZATION than the default (all set in pipeline.yml).
+    # LMCache's per-group block-size handling. It forces TRITON_ATTN, so the
+    # pipeline sets ATTENTION_BACKEND=auto; its ~63GB of weights also need a
+    # higher GPU_MEMORY_UTILIZATION than the default (all set in pipeline.yml).
     export MODEL="${MODEL:-google/gemma-4-31B-it}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
@@ -63,7 +62,7 @@ SELF_CONTAINED_TESTS=" deadlock "
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
-BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 hma_lm_eval_gemma4 "
+BASELINE_TESTS=" vllm_bench long_doc_qa long_doc_qa_l2 "
 if [[ "$BASELINE_TESTS" == *" $TEST_NAME "* ]]; then
     export LAUNCH_BASELINE=true
 else

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import math
 import os
+import sys
 
 # Third Party
 from vllm.config import (
@@ -28,6 +29,7 @@ import torch
 # Use LMCache's own math utilities instead of vllm's
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
+from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -455,6 +457,11 @@ class LMCacheConnectorV1Impl:
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
+        # Banner from the scheduler role only, so tensor-parallel
+        # deployments print it once rather than once per worker.
+        if role == KVConnectorRole.SCHEDULER:
+            print_banner_once(sys.stderr)
+
         self._parent = parent
         self._vllm_config = vllm_config
         self._role = role

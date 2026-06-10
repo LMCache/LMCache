@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend V3 protocol — paged-aware CB pipeline.
-
-RPCs:
-* ``CB_REGISTER_ROPE_V3`` / ``CB_UNREGISTER_ROPE_V3`` — share / release the rope
-  cos/sin cache onto a context already registered via ``REGISTER_KV_CACHE``.
-* ``CB_RETRIEVE_PRE_COMPUTED_V3`` — scatter all matched chunks (prefix- and
-  non-prefix-hit) into paged KV by per-token block ID; re-RoPE only the shifted
-  (``old_st != cur_st``) subset.
-* ``CB_UNIFIED_LOOKUP`` — the sole live lookup path: one RPC runs prefix +
-  non-prefix match, reconcile, one sparse-coalesced prefetch, and per-TP-rank
-  classify. ``(IPCCacheEngineKey, tp_size)`` → ``CBUnifiedLookupResult``.
-"""
+"""Blend V3 protocol definitions."""
 
 # First Party
 from lmcache.v1.multiprocess.custom_types import (

@@ -135,12 +135,12 @@ class LMCacheMPConnector:
 
         # Upstream's REGISTER_KV_CACHE protocol takes flat positional args:
         # (instance_id, kv_cache, model_name, world_size, engine_type,
-        # layout_hints, group_views). SGLang's natural KV layout is depth-2
+        # layout_hints, engine_group_infos). SGLang's natural KV layout is depth-2
         # ([K_layers, V_layers]); we flatten it on the wire to fit
         # ``KVCache = list[CudaIPCWrapper]``. The daemon recognizes the
         # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
         # ``tokens_per_block`` hint and un-flattens + reshapes per layer.
-        # SGLang is non-hybrid (a single KV cache group), so group_views is the
+        # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the
         # empty list -- which the server treats as one group spanning all layers
         # (matching the vLLM non-hybrid and TensorRT-LLM register paths).
         send_lmcache_request(
