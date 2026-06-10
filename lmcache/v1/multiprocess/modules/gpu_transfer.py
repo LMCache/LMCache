@@ -269,10 +269,14 @@ def gpu_kv_copy_helper(
     is_h2d = direction == lmc_ops.TransferDirection.H2D
 
     sw_size_chunks = kv_groups_manager.get_sw_size_chunks(object_group_id)
-    if sw_size_chunks == -1:
-        num_objects_to_skip = 0
-    else:
+    if sw_size_chunks >= 1 and is_h2d:
         num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
+        logger.debug(
+            "Detected sliding window for object group %d: "
+            "skipping the first %d objects in the batch",
+            object_group_id,
+            num_objects_to_skip,
+        )
 
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs, batch_size, skip_count=num_objects_to_skip
