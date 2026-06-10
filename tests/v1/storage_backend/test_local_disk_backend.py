@@ -14,7 +14,7 @@ import torch
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
@@ -194,6 +194,54 @@ class TestLocalDiskBackend:
 
         assert result is None
 
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+
+class TestAsyncSaveBytesToDiskExceptionSafety:
+    """Regression tests for LocalDiskBackend write failure cleanup."""
+
+    def test_write_failure_releases_memory_obj_and_put_task(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A failed disk write must not leak refcounts or in-flight put tasks."""
+        key = create_test_key(201)
+        physical_size = 4096
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = torch.empty(1)
+        memory_obj.byte_array = b"0" * 16
+        memory_obj.get_physical_size.return_value = physical_size
+        memory_obj.metadata = MemoryObjMetadata(
+            shape=torch.Size([1]),
+            dtype=torch.bfloat16,
+            address=0,
+            phy_size=physical_size,
+            fmt=MemoryFormat.KV_2LTD,
+            ref_count=1,
+        )
+        on_complete_callback = MagicMock()
+
+        local_disk_backend.disk_worker.insert_put_task(key)
+        local_disk_backend.current_cache_size = physical_size
+        local_disk_backend.cache_policy.update_on_put(key)
+
+        with patch.object(
+            local_disk_backend,
+            "write_file",
+            side_effect=OSError("disk full"),
+        ):
+            with pytest.raises(OSError, match="disk full"):
+                local_disk_backend.async_save_bytes_to_disk(
+                    key,
+                    memory_obj,
+                    on_complete_callback=on_complete_callback,
+                )
+
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        assert key not in local_disk_backend.dict
+        assert local_disk_backend.current_cache_size == 0.0
+        assert local_disk_backend.usage == 0
+        on_complete_callback.assert_not_called()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
 

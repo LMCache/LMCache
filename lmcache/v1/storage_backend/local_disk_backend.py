@@ -534,29 +534,44 @@ class LocalDiskBackend(StorageBackendInterface):
         buffer = memory_obj.byte_array
         path = self._key_to_path(key)
 
-        size = len(buffer)
-        self.usage += size
-        self.stats_monitor.update_local_storage_usage(self.usage)
-
-        # TODO(Jiayi): need to add ref count in disk memory object
-        self.write_file(buffer, path)
-
-        # ref count down here because there's a ref_count_up in
-        # `submit_put_task` above.
-        # Ref count down better be before `insert_key` for testing
-        # purposes (e.g., testing mem_leak).
-        # TODO(Jiayi): This could be problematic if the
-        # freed memory object is immediately reused.
         size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         cached_positions = memory_obj.metadata.cached_positions
-        memory_obj.ref_count_down()
 
-        self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
+        ref_count_released = False
+        try:
+            byte_size = len(buffer)
+            self.usage += byte_size
+            self.stats_monitor.update_local_storage_usage(self.usage)
 
-        self.disk_worker.remove_put_task(key)
+            # TODO(Jiayi): need to add ref count in disk memory object
+            self.write_file(buffer, path)
+
+            # ref count down here because there's a ref_count_up in
+            # `submit_put_task` above.
+            # Ref count down better be before `insert_key` for testing
+            # purposes (e.g., testing mem_leak).
+            # TODO(Jiayi): This could be problematic if the
+            # freed memory object is immediately reused.
+            memory_obj.ref_count_down()
+            ref_count_released = True
+
+            self.insert_key(
+                key, size, shape, dtype, fmt, cached_positions=cached_positions
+            )
+        except Exception:
+            with self.disk_lock:
+                self.current_cache_size = max(0.0, self.current_cache_size - size)
+                self.cache_policy.update_on_force_evict(key)
+            self.usage = max(0, self.usage - len(buffer))
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            if not ref_count_released:
+                memory_obj.ref_count_down()
+            raise
+        finally:
+            self.disk_worker.remove_put_task(key)
 
         # Call the completion callback if provided
         if on_complete_callback is not None:
