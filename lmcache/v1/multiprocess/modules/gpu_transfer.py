@@ -4,7 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from itertools import islice
-from typing import Generator
+from typing import Generator, Sequence
 import time
 
 # Third Party
@@ -104,7 +104,7 @@ def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None
 
 
 def batched_iteration_with_skip(
-    lst: list,
+    lst: Sequence,
     batch_size: int,
     skip_count: int,
 ) -> Generator[tuple[int, tuple], None, None]:
@@ -251,7 +251,7 @@ def _recalculate_blocks_to_skip(
 def gpu_kv_copy_helper(
     cache_context: GPUCacheContext,
     block_ids_gpu: list[torch.Tensor],
-    memory_objs: list[MemoryObj],
+    memory_objs: Sequence[MemoryObj | None],
     object_group_id: int,
     batch_size: int,
     skip_first_n_tokens: int,
@@ -265,7 +265,10 @@ def gpu_kv_copy_helper(
             index. It should satisfy `len(block_ids_gpu[i]) == len(memory_objs) *
             blocks_per_chunk[i]` for each group `i`.
             Note that the block IDs list are already on GPU.
-        memory_objs: The list of MemoryObj instances to copy from.
+        memory_objs: The list of MemoryObj instances to copy from. It could be
+            None when allocation or retrieval fails. For store (D2H), it should
+            ignore the None entry and continue copying the rest. For retrieve
+            (H2D), it should raise the error and stop copying.
         object_group_id: Index of the object group being copied.
         batch_size: The number of memory objects to perform batched copy
         skip_first_n_tokens: Number of tokens to skip writing at the start of
@@ -273,6 +276,8 @@ def gpu_kv_copy_helper(
             may be read concurrently by other requests.
         direction: The transfer direction, H2D (retrieve) or D2H (store).
 
+    Raises:
+        ValueError: If it founds None entry in memory_objs when direction is H2D.
     Note:
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
@@ -292,6 +297,16 @@ def gpu_kv_copy_helper(
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs, batch_size, skip_count=num_objects_to_skip
     ):
+        if any(mo is None for mo in memory_object_batch):
+            if is_h2d:
+                raise ValueError(
+                    "MemoryObj is None for some objects in the batch, cannot "
+                    "perform H2D copy. memory_object_batch: "
+                    f"{memory_object_batch}"
+                )
+            else:
+                continue
+
         batch_len = len(memory_object_batch)
         batch_start_token = start_object_idx * lmcache_chunk_size
         batch_end_token = batch_start_token + batch_len * lmcache_chunk_size
@@ -638,20 +653,17 @@ class GPUTransferModule:
             check_interprocess_event_support()
             event = torch_dev.Event(interprocess=True)
 
-            block_ids_per_group_gpu = cut_and_stage_block_ids(
-                cache_context, gpu_block_ids
-            )
-
             # Fail closed: every LMCache group must have block IDs covering all
             # chunks. A short list (e.g. a caller/protocol bug) would otherwise
             # drive the transfer kernel to read out-of-bounds GPU memory, so skip
             # the whole store and commit nothing rather than caching a partial or
             # garbage entry. A later request can store it once the block IDs are
-            # complete.
+            # complete. Checked on the raw block ids, before cutting drops the
+            # per-chunk blocks that sliding-window groups do not need.
             if any(
-                group_block_ids.shape[0] < len(obj_keys) * bpc
+                len(group_block_ids) < len(obj_keys) * bpc
                 for group_block_ids, bpc in zip(
-                    block_ids_per_group_gpu, blocks_per_chunk, strict=True
+                    gpu_block_ids, blocks_per_chunk, strict=True
                 )
             ):
                 logger.warning(
@@ -664,6 +676,10 @@ class GPUTransferModule:
                 )
                 event.record()
                 return event.ipc_handle(), False
+
+            block_ids_per_group_gpu = cut_and_stage_block_ids(
+                cache_context, gpu_block_ids
+            )
 
             if not hasattr(torch_dev.Event, "from_ipc_handle"):
                 raise RuntimeError(
@@ -710,36 +726,22 @@ class GPUTransferModule:
                     obj_keys, layout_desc, "new"
                 )
 
-                # NOTE: Store is not batched because some obj_keys may be
-                # skipped (not in reserved_dict), making block_ids
-                # non-contiguous. Batching would require torch.cat to
-                # reassemble block_ids, negating the benefit.
-                num_groups = cache_context.kv_layer_groups_manager.num_groups
-                for idx, obj_key in enumerate(obj_keys):
-                    if obj_key in reserved_dict:
-                        memory_obj = reserved_dict[obj_key]
-                    else:
-                        continue
+                # Keys not in reserved_dict (skipped by the storage manager)
+                # become None entries; the helper skips them for D2H.
+                memory_objs: list[MemoryObj | None] = [
+                    reserved_dict.get(obj_key) for obj_key in obj_keys
+                ]
 
-                    # Store is not batched (skipped keys make block_ids
-                    # non-contiguous), so transfer one chunk at a time by slicing
-                    # this chunk's block IDs out of each group's list.
-                    chunk_block_ids_gpu = [
-                        block_ids_per_group_gpu[group_idx][
-                            idx * blocks_per_chunk[group_idx] : (idx + 1)
-                            * blocks_per_chunk[group_idx]
-                        ]
-                        for group_idx in range(num_groups)
-                    ]
-                    gpu_kv_copy_helper(
-                        cache_context,
-                        chunk_block_ids_gpu,
-                        [memory_obj],
-                        object_group_id=0,
-                        batch_size=1,
-                        skip_first_n_tokens=0,
-                        direction=lmc_ops.TransferDirection.D2H,
-                    )
+                # NOTE: batch_size must stay 1 for store.
+                gpu_kv_copy_helper(
+                    cache_context,
+                    block_ids_per_group_gpu,
+                    memory_objs,
+                    object_group_id=0,
+                    batch_size=1,
+                    skip_first_n_tokens=0,
+                    direction=lmc_ops.TransferDirection.D2H,
+                )
                 store_succeeded = True
             except Exception:
                 logger.exception("Cannot store keys due to exception")
@@ -882,13 +884,35 @@ class GPUTransferModule:
             torch_dev.device(cache_context.device),
             torch_dev.stream(cache_context.stream),
         ):
+            check_interprocess_event_support()
+            event = torch_dev.Event(interprocess=True)
+
+            # Fail closed: a short block-id list would drive the transfer
+            # kernel to write out-of-bounds GPU memory. Checked on the raw
+            # block ids, before cutting drops the per-chunk blocks that
+            # sliding-window groups do not need.
+            if any(
+                len(group_block_ids) < len(obj_keys) * bpc
+                for group_block_ids, bpc in zip(
+                    gpu_block_ids, blocks_per_chunk, strict=True
+                )
+            ):
+                logger.error(
+                    "RETRIEVE block ID underflow for request_id=%s: each group "
+                    "needs len(obj_keys) * blocks_per_chunk block IDs for %d "
+                    "chunks (per-group blocks_per_chunk=%s); skipping the "
+                    "retrieve.",
+                    key.request_id,
+                    len(obj_keys),
+                    blocks_per_chunk,
+                )
+                event.record()
+                return event.ipc_handle(), False
+
             # Cut and stage all block_ids to GPU once before the transfer
             block_ids_per_group_gpu = cut_and_stage_block_ids(
                 cache_context, gpu_block_ids
             )
-
-            check_interprocess_event_support()
-            event = torch_dev.Event(interprocess=True)
 
             prefetched_keys: list[ObjectKey] = []
             retrieve_succeeded = False
@@ -903,21 +927,6 @@ class GPUTransferModule:
 
                     prefetched_keys = obj_keys[: len(memory_objs)]
                     total_bytes = sum(mo.get_size() for mo in memory_objs)
-
-                    # Fail closed: a short block-id list would drive the
-                    # transfer kernel to write out-of-bounds GPU memory.
-                    if any(
-                        group_block_ids.shape[0] < len(memory_objs) * bpc
-                        for group_block_ids, bpc in zip(
-                            block_ids_per_group_gpu, blocks_per_chunk, strict=True
-                        )
-                    ):
-                        raise ValueError(
-                            "RETRIEVE block ID underflow for request_id="
-                            f"{key.request_id}: each group needs len(memory_objs) "
-                            f"* blocks_per_chunk block IDs for {len(memory_objs)} "
-                            f"chunks (per-group blocks_per_chunk={blocks_per_chunk})"
-                        )
 
                     gpu_kv_copy_helper(
                         cache_context,
