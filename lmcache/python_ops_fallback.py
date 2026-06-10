@@ -1495,7 +1495,9 @@ def _transfer_per_layer_mla(
                     torch.index_select(layer, 0, eff_idx, out=dst)
             obj[:, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
         else:
-            chunk_gpu = obj[:, offset_in_object:token_end].to(target_device)
+            chunk_gpu = obj[:, offset_in_object:token_end].to(
+                target_device, non_blocking=True
+            )
             for layer_idx, layer in enumerate(layer_tensors):
                 src = chunk_gpu[layer_idx]
                 hidden_size = layer.shape[-1]
@@ -1583,7 +1585,9 @@ def _transfer_per_layer_hnd(
                 )
             obj[:, :, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
         else:
-            chunk_gpu = obj[:, :, offset_in_object:token_end].to(target_device)
+            chunk_gpu = obj[:, :, offset_in_object:token_end].to(
+                target_device, non_blocking=True
+            )
             for layer_idx, layer in enumerate(layer_tensors):
                 if int(gpu_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS):
                     k_t, v_t = layer[0], layer[1]
@@ -1674,7 +1678,9 @@ def _transfer_per_layer_nhd(
                 )
             obj[:, :, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
         else:
-            chunk_gpu = obj[:, :, offset_in_object:token_end].to(target_device)
+            chunk_gpu = obj[:, :, offset_in_object:token_end].to(
+                target_device, non_blocking=True
+            )
             for layer_idx, layer in enumerate(layer_tensors):
                 if int(gpu_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
                     k_t, v_t = layer[0], layer[1]
