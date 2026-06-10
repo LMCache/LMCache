@@ -173,10 +173,10 @@ class KernelGroupInfo:
     """Torch dtype of the KV cache tensors for this group. Used for
     kernel template instantiation; see class docstring for why we keep
     this alongside ``shape_desc.element_size``."""
-    tokens_per_chunk: int = 0
+    tokens_per_block: int = 0
     """Logical engine tokens covered by one paged chunk (one engine block
     ID) of this group, as declared by the engine's KV cache spec at
-    initialization time (carried in ``EngineGroupInfo.tokens_per_chunk``).
+    initialization time (carried in ``EngineGroupInfo.tokens_per_block``).
     ``0`` means the engine did not report it; the group is then treated as
     uncompressed (``compress_ratio == 1``)."""
     physical_chunk_size: int = 0
@@ -204,8 +204,8 @@ class KernelGroupInfo:
             f"element_size={sd.element_size}, "
             f"block_stride_elems={sd.block_stride_elems}), "
             f"dtype={self.dtype}, "
-            f"tokens_per_chunk={self.tokens_per_chunk}, "
-            f"slots_per_chunk={self.slots_per_chunk}, "
+            f"tokens_per_block={self.tokens_per_block}, "
+            f"slots_per_block={self.slots_per_block}, "
             f"compress_ratio={self.compress_ratio}, "
             f"physical_chunk_size={self.physical_chunk_size}, "
             f"engine_group_idx={self.engine_group_idx})"
@@ -222,7 +222,7 @@ class KernelGroupInfo:
         return self.shape_desc.nh * self.shape_desc.hs
 
     @property
-    def slots_per_chunk(self) -> int:
+    def slots_per_block(self) -> int:
         """Physical slots in one paged chunk of this group, detected from
         the registered KV tensors at registration time (the batch-size
         dimension, ``shape_desc.bs``)."""
@@ -231,14 +231,14 @@ class KernelGroupInfo:
     @property
     def compress_ratio(self) -> int:
         """Logical-tokens-per-physical-slot for this group, derived as
-        ``tokens_per_chunk // slots_per_chunk``. ``1`` for non-compressed
+        ``tokens_per_block // slots_per_block``. ``1`` for non-compressed
         groups (one logical token per physical slot, or no
-        ``tokens_per_chunk`` reported); greater than ``1`` for compressed
+        ``tokens_per_block`` reported); greater than ``1`` for compressed
         groups where each physical slot packs multiple logical tokens
         (e.g. DeepSeek V4 MLA / indexer caches)."""
-        if self.tokens_per_chunk == 0:
+        if self.tokens_per_block == 0:
             return 1
-        return self.tokens_per_chunk // self.slots_per_chunk
+        return self.tokens_per_block // self.slots_per_block
 
 
 KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
@@ -317,11 +317,11 @@ class KVLayerGroupsManager:
                 metadata. When present, it is used to keep layers from
                 different engine block-ID spaces in separate LMCache
                 transfer groups and to read each group's
-                ``tokens_per_chunk`` (logical tokens per paged chunk,
+                ``tokens_per_block`` (logical tokens per paged chunk,
                 from the engine's KV cache spec), which together with the
-                physical ``slots_per_chunk`` detected from the tensors
+                physical ``slots_per_block`` detected from the tensors
                 determines the group's ``compress_ratio``. Groups without
-                a reported ``tokens_per_chunk`` are treated as
+                a reported ``tokens_per_block`` are treated as
                 non-compressed (``compress_ratio == 1``).
             lmcache_logical_chunk_size: Logical tokens per LMCache chunk
                 (one logical token = one inference-engine token).
@@ -355,10 +355,10 @@ class KVLayerGroupsManager:
 
         # Engine-reported logical tokens per paged chunk, keyed by engine
         # group id. 0 / missing means the engine did not report it.
-        engine_tokens_per_chunk: dict[int, int] = {
-            info.engine_group_id: info.tokens_per_chunk
+        engine_tokens_per_block: dict[int, int] = {
+            info.engine_group_id: info.tokens_per_block
             for info in engine_group_infos
-            if info.tokens_per_chunk > 0
+            if info.tokens_per_block > 0
         }
 
         groups_by_identity = group_layers_by_identity(
@@ -386,18 +386,18 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
-            # tokens_per_chunk comes from the engine's KV cache spec; when
+            # tokens_per_block comes from the engine's KV cache spec; when
             # absent, fall back to the physical slot count so the group is
             # treated as non-compressed (compress_ratio == 1).
-            tokens_per_chunk = engine_tokens_per_chunk.get(engine_group_idx, bs)
+            tokens_per_block = engine_tokens_per_block.get(engine_group_idx, bs)
 
             # TODO (ApostaC): the code here is not very good.
             # Conceptually, KV Layer Group should not be aware of lmcache logical
             # chunk size at all.
             physical_chunk_size = self._derive_physical_chunk_size(
                 group_idx=group_idx,
-                slots_per_chunk=bs,
-                tokens_per_chunk=tokens_per_chunk,
+                slots_per_block=bs,
+                tokens_per_block=tokens_per_block,
                 lmcache_logical_chunk_size=lmcache_logical_chunk_size,
             )
 
@@ -406,7 +406,7 @@ class KVLayerGroupsManager:
                     layer_indices=indices,
                     shape_desc=shape_desc,
                     dtype=dt,
-                    tokens_per_chunk=tokens_per_chunk,
+                    tokens_per_block=tokens_per_block,
                     physical_chunk_size=physical_chunk_size,
                     engine_group_idx=engine_group_idx,
                 )
@@ -532,25 +532,25 @@ class KVLayerGroupsManager:
     @staticmethod
     def _derive_physical_chunk_size(
         group_idx: int,
-        slots_per_chunk: int,
-        tokens_per_chunk: int,
+        slots_per_block: int,
+        tokens_per_block: int,
         lmcache_logical_chunk_size: int,
     ) -> int:
         """Resolve ``physical_chunk_size`` for one group.
 
-        ``compress_ratio = tokens_per_chunk // slots_per_chunk`` after the
+        ``compress_ratio = tokens_per_block // slots_per_block`` after the
         divisibility invariants are enforced loudly;
         ``physical_chunk_size`` is then
         ``lmcache_logical_chunk_size // compress_ratio``, the per-chunk
         physical slot count fed to the block-level transfer kernel.
         """
-        if tokens_per_chunk % slots_per_chunk != 0:
+        if tokens_per_block % slots_per_block != 0:
             raise ValueError(
-                f"group {group_idx} tokens_per_chunk {tokens_per_chunk} "
+                f"group {group_idx} tokens_per_block {tokens_per_block} "
                 f"must be a multiple of its physical slot count "
-                f"(slots_per_chunk) {slots_per_chunk}"
+                f"(slots_per_block) {slots_per_block}"
             )
-        compress_ratio = tokens_per_chunk // slots_per_chunk
+        compress_ratio = tokens_per_block // slots_per_block
         if lmcache_logical_chunk_size % compress_ratio != 0:
             raise ValueError(
                 f"lmcache_logical_chunk_size {lmcache_logical_chunk_size} "
@@ -560,12 +560,12 @@ class KVLayerGroupsManager:
         physical_chunk_size = lmcache_logical_chunk_size // compress_ratio
         if compress_ratio != 1:
             logger.info(
-                "group %d: compressed (tokens_per_chunk=%d, "
-                "slots_per_chunk=%d -> compress_ratio=%d, "
+                "group %d: compressed (tokens_per_block=%d, "
+                "slots_per_block=%d -> compress_ratio=%d, "
                 "physical_chunk_size=%d)",
                 group_idx,
-                tokens_per_chunk,
-                slots_per_chunk,
+                tokens_per_block,
+                slots_per_block,
                 compress_ratio,
                 physical_chunk_size,
             )

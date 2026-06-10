@@ -41,7 +41,7 @@ Kernel group index:                      0
 Engine group index:                      0
 Object group index:                      0
 Num layers:                              80
-Physical block size:                     128
+Slots per block:                         128
 Compress ratio:                          1
 Dtype:                                   torch.float16
 MLA:                                     False
@@ -85,7 +85,7 @@ programmatic access:
         "engine_group_idx": 0,
         "object_group_idx": 0,
         "num_layers": 80,
-        "physical_block_size": 128,
+        "slots_per_block": 128,
         "compress_ratio": 1,
         "dtype": "torch.float16",
         "is_mla": false,
@@ -119,7 +119,7 @@ Each kernel group section includes:
   `kernel_group_idx` enumerates the manager's kernel groups, `engine_group_idx`
   is the paged-block address space (0 for non-hybrid), and `object_group_idx` is
   the owning object group.
-- **Num layers** and **Physical block size** — the group's layer count and
+- **Num layers** and **Slots per block** — the group's layer count and
   `shape_desc.bs`.
 - **Compress ratio** — logical tokens per physical slot (1 for non-compressed).
 - **Dtype** and **MLA** — the group's torch dtype and MLA flag.
@@ -310,8 +310,8 @@ live inside each group:
             "object_group_idx": 0,
             "num_layers": 80,
             "layer_indices": [0, 1, ...],
-            "tokens_per_chunk": 128,
-            "physical_block_size": 128,
+            "tokens_per_block": 128,
+            "slots_per_block": 128,
             "compress_ratio": 1,
             "dtype": "torch.float16",
             "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",

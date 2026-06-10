@@ -672,9 +672,9 @@ class GPUCacheContext:
               - ``object_group_idx`` (int): owning object group.
               - ``num_layers`` (int): layers in this group.
               - ``layer_indices`` (list[int]): the group's layer indices.
-              - ``tokens_per_chunk`` (int): logical tokens per paged chunk.
-              - ``physical_block_size`` (int): physical slots per paged
-                chunk (``slots_per_chunk``, i.e. ``shape_desc.bs``).
+              - ``tokens_per_block`` (int): logical tokens per paged chunk.
+              - ``slots_per_block`` (int): physical slots per paged
+                chunk (``slots_per_block``, i.e. ``shape_desc.bs``).
               - ``compress_ratio`` (int)
               - ``dtype`` (str): stringified torch dtype.
               - ``gpu_kv_concrete_shape`` (str): group-accurate numeric shape.
@@ -705,8 +705,8 @@ class GPUCacheContext:
                     ),
                     "num_layers": group.num_layers,
                     "layer_indices": list(group.layer_indices),
-                    "tokens_per_chunk": group.tokens_per_chunk,
-                    "physical_block_size": group.slots_per_chunk,
+                    "tokens_per_block": group.tokens_per_block,
+                    "slots_per_block": group.slots_per_block,
                     "compress_ratio": group.compress_ratio,
                     "dtype": str(group.dtype),
                     "gpu_kv_concrete_shape": get_concrete_gpu_kv_shape_from_shape_desc(

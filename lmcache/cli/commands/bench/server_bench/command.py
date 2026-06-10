@@ -384,7 +384,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             EngineGroupInfo(
                 engine_group_id=group_idx,
                 layer_indices=tuple(group.layer_indices),
-                tokens_per_chunk=block_size,
+                tokens_per_block=block_size,
             )
             for group_idx, group in enumerate(layer_groups)
         ]

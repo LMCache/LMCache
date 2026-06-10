@@ -37,7 +37,7 @@ store/retrieve address those infos directly.
 
 - **`EngineGroupInfo`** (`msgspec.Struct`): `engine_group_id` (which engine
   block group its layers live in; dense from 0) + `layer_indices` +
-  `tokens_per_chunk` (logical tokens covered by one of the group's paged
+  `tokens_per_block` (logical tokens covered by one of the group's paged
   chunks, from the engine's KV cache spec `block_size`; `0` = unreported).
   Several infos may share an `engine_group_id` when one engine group is split
   by physical transfer identity. The list order is the protocol-visible group
@@ -46,7 +46,7 @@ store/retrieve address those infos directly.
   `num_engine_groups`, `num_engine_group_infos`, `expand_engine_block_ids`,
   `get_engine_group_indices`.
 - **`KVLayerGroupInfo`** (runtime, server-only): layer indices,
-  `PageBufferShapeDesc`, dtype, `tokens_per_chunk` / `slots_per_chunk` (from
+  `PageBufferShapeDesc`, dtype, `tokens_per_block` / `slots_per_block` (from
   which `compress_ratio` is derived), physical chunk size,
   `engine_group_idx`. Derived from real tensors — never the API contract.
 
@@ -90,26 +90,26 @@ info `i`, use `gpu_block_ids[i]`.
 There is no single "engine block size". Each group has two per-group
 quantities, and everything else is derived from them:
 
-- **`tokens_per_chunk`** — logical tokens covered by one of the group's paged
+- **`tokens_per_block`** — logical tokens covered by one of the group's paged
   chunks (one block ID). Read from the group's KV cache spec `block_size` in
   `kv_cache_config` at initialization and carried in `EngineGroupInfo`.
   Hybrid models mix values freely (`google/gemma-4-E4B-it`: sliding-window
   groups 32, full-attention groups 16; DeepSeek-V4-Flash: 256/64/8/4).
-- **`slots_per_chunk`** — physical slots in one paged chunk, detected from the
+- **`slots_per_block`** — physical slots in one paged chunk, detected from the
   registered tensors at registration time (the batch-size dimension,
   `shape_desc.bs`). Only available per kernel group.
 
-The per-group `compress_ratio = tokens_per_chunk // slots_per_chunk`: `1` for
+The per-group `compress_ratio = tokens_per_block // slots_per_block`: `1` for
 ordinary attention (one token per slot), `>1` for compressed caches
 (DeepSeek-V4-Flash declares ratios 4 and 128, which this division reproduces
 exactly). The LMCache chunk size must be a multiple of every group's
-`tokens_per_chunk` (validated at connector init and registration).
+`tokens_per_block` (validated at connector init and registration).
 
 The scheduler-side connector does all accounting (hit counts, store/retrieve
 ranges) in *tokens* — the only unit shared by every group — and slices each
-group's block IDs by `token_range / tokens_per_chunk_g`
+group's block IDs by `token_range / tokens_per_block_g`
 (`slice_block_ids_per_group`). The server counts
-`blocks_per_chunk = (chunk // compress_ratio) // slots_per_chunk` per group.
+`blocks_per_chunk = (chunk // compress_ratio) // slots_per_block` per group.
 
 ### Cross-layer KV sharing
 

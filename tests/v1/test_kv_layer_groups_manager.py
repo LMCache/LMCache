@@ -280,17 +280,17 @@ class TestFormatKvcacheShapeSpec:
 
 class TestDerivePhysicalChunkSize:
     """``physical_chunk_size`` derivation from the two block-size sources:
-    ``tokens_per_chunk`` (engine KV cache spec, known at initialization) and
-    ``slots_per_chunk`` (registered tensor batch dimension), with
-    ``compress_ratio = tokens_per_chunk // slots_per_chunk`` (e.g. DeepSeek
+    ``tokens_per_block`` (engine KV cache spec, known at initialization) and
+    ``slots_per_block`` (registered tensor batch dimension), with
+    ``compress_ratio = tokens_per_block // slots_per_block`` (e.g. DeepSeek
     V4 compression where ``slots < tokens``) and divisibility enforced.
     """
 
     def _derive(self, slots: int, tokens: int, chunk: int = 256) -> int:
         return KVLayerGroupsManager._derive_physical_chunk_size(
             group_idx=0,
-            slots_per_chunk=slots,
-            tokens_per_chunk=tokens,
+            slots_per_block=slots,
+            tokens_per_block=tokens,
             lmcache_logical_chunk_size=chunk,
         )
 
@@ -420,9 +420,9 @@ class TestKernelAndObjectGroups:
             tensors,
             num_blocks=8,
             engine_group_infos=[
-                EngineGroupInfo(0, (0, 1), tokens_per_chunk=256),
-                EngineGroupInfo(1, (2,), tokens_per_chunk=64),
-                EngineGroupInfo(2, (3,), tokens_per_chunk=4),
+                EngineGroupInfo(0, (0, 1), tokens_per_block=256),
+                EngineGroupInfo(1, (2,), tokens_per_block=64),
+                EngineGroupInfo(2, (3,), tokens_per_block=4),
             ],
         )
         by_layer = {g.layer_indices[0]: g for g in manager.kernel_groups}
@@ -435,7 +435,7 @@ class TestKernelAndObjectGroups:
         assert by_layer[0].physical_chunk_size == 64
 
     def test_calculate_num_blocks_compressed(self):
-        # slots_per_chunk=8 (tensor), tokens_per_chunk=16 (engine spec) ->
+        # slots_per_block=8 (tensor), tokens_per_block=16 (engine spec) ->
         # compress_ratio=2; 256 logical tokens -> 128 physical slots ->
         # 128 // 8 = 16 blocks.
         tensors = [torch.randn(2, 32, 8, 8, 64, dtype=torch.float16) for _ in range(2)]
@@ -443,12 +443,12 @@ class TestKernelAndObjectGroups:
             tensors,
             num_blocks=32,
             engine_group_infos=[
-                EngineGroupInfo(0, (0, 1), tokens_per_chunk=16),
+                EngineGroupInfo(0, (0, 1), tokens_per_block=16),
             ],
         )
         group = manager.kernel_groups[0]
-        assert group.tokens_per_chunk == 16
-        assert group.slots_per_chunk == 8
+        assert group.tokens_per_block == 16
+        assert group.slots_per_block == 8
         assert group.compress_ratio == 2
         assert manager.calculate_num_blocks(0, 256) == 16
 

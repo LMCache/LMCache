@@ -280,7 +280,7 @@ class CpuCacheContext:
         return self.hidden_dim_sizes_
 
     @property
-    def group_physical_block_sizes(self) -> list[int]:
+    def group_slots_per_blocks(self) -> list[int]:
         """Per-group physical slot count (``shape_desc.bs``) in group
         order."""
         return [
@@ -602,8 +602,8 @@ class CpuCacheContext:
                     ),
                     "num_layers": group.num_layers,
                     "layer_indices": list(group.layer_indices),
-                    "tokens_per_chunk": group.tokens_per_chunk,
-                    "physical_block_size": group.slots_per_chunk,
+                    "tokens_per_block": group.tokens_per_block,
+                    "slots_per_block": group.slots_per_block,
                     "compress_ratio": group.compress_ratio,
                     "dtype": str(group.dtype),
                     "gpu_kv_concrete_shape": (

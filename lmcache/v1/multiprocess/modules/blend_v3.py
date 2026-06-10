@@ -944,13 +944,13 @@ class BlendV3Module:
         # CB v3 only supports uncompressed single-block-id-space layouts
         # (enforced per group in ``_apply_cb_rope_batched``), so the first
         # kernel group's chunk geometry is representative.
-        tokens_per_chunk = gpu_context.kv_layer_groups_manager.kernel_groups[
+        tokens_per_block = gpu_context.kv_layer_groups_manager.kernel_groups[
             0
-        ].tokens_per_chunk
-        if chunk_size % tokens_per_chunk != 0:
+        ].tokens_per_block
+        if chunk_size % tokens_per_block != 0:
             raise ValueError(
                 f"chunk_size {chunk_size} must be a multiple of "
-                f"tokens_per_chunk {tokens_per_chunk}"
+                f"tokens_per_block {tokens_per_block}"
             )
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
 
@@ -999,7 +999,7 @@ class BlendV3Module:
                     # Per-token scatter handles any cur_st; just bound the
                     # matched range to the allocated slots.
                     pairs: list[tuple[CBMatchResult, Any]] = []
-                    num_slots = int(all_block_ids_gpu.numel()) * tokens_per_chunk
+                    num_slots = int(all_block_ids_gpu.numel()) * tokens_per_block
                     for r, memory_obj in zip(cb_match_result, memory_objs, strict=True):
                         if r.cur_ed > num_slots:
                             logger.warning(
@@ -1048,7 +1048,7 @@ class BlendV3Module:
 
                             # (c) Per-token slot scatter: partial vLLM blocks
                             # shared with recomputed tokens stay disjoint.
-                            bs = tokens_per_chunk
+                            bs = tokens_per_block
                             pos = torch.cat(
                                 [
                                     torch.arange(

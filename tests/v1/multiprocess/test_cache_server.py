@@ -330,7 +330,7 @@ def registered_instance(
     instance_id = os.getpid()
 
     # Register KV cache. No engine group infos are sent, so the server
-    # detects ``slots_per_chunk`` from the tensors and treats every group
+    # detects ``slots_per_block`` from the tensors and treats every group
     # as uncompressed (``compress_ratio == 1``).
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,

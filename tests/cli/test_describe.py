@@ -44,8 +44,8 @@ SAMPLE_STATUS = {
                         "object_group_idx": 0,
                         "num_layers": 32,
                         "layer_indices": list(range(32)),
-                        "tokens_per_chunk": 16,
-                        "physical_block_size": 16,
+                        "tokens_per_block": 16,
+                        "slots_per_block": 16,
                         "compress_ratio": 1,
                         "dtype": "torch.float16",
                         "gpu_kv_concrete_shape": "32 x [2, 2048, 16, 8, 128]",
@@ -205,7 +205,7 @@ class TestDescribeKvcacheFields:
         assert kg["engine_group_idx"] == 0
         assert kg["object_group_idx"] == 0
         assert kg["num_layers"] == 32
-        assert kg["physical_block_size"] == 16
+        assert kg["slots_per_block"] == 16
         assert kg["compress_ratio"] == 1
         assert kg["dtype"] == "torch.float16"
         assert kg["is_mla"] is False

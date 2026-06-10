@@ -650,20 +650,6 @@ class GPUTransferModule:
                             f"expected={batch_len * bpc} "
                             f"got={chunk_block_ids_gpu.shape[0]}"
                         )
-                    # ``skip_tokens_in_chunk`` is rounded down to this
-                    # group's paged-chunk boundary; warn loudly when the
-                    # caller-provided skip is not aligned for this group.
-                    if skip_tokens_in_chunk % group.tokens_per_chunk != 0:
-                        logger.error(
-                            "skip_first_n_tokens (%d) is not aligned to "
-                            "group %d tokens_per_chunk (%d), rounding down "
-                            "from %d tokens to %d blocks",
-                            skip_first_n_tokens,
-                            group_idx,
-                            group.tokens_per_chunk,
-                            skip_tokens_in_chunk,
-                            skip_tokens_in_chunk // group.tokens_per_chunk,
-                        )
                     group_skip_blocks = cache_context.calculate_num_blocks(
                         skip_tokens_in_chunk, group_idx
                     )

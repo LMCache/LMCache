@@ -236,12 +236,12 @@ def _build_fake_gpu_context(batch_size: int, num_groups: int):
     gpu_context.kv_layer_groups_manager.kernel_groups = groups
 
     # Each per-(slot, group) buffer has shape
-    # (2 kv, num_layers, slots_per_chunk, hidden_dim).
-    num_layers, slots_per_chunk, hidden_dim = 2, 4, 64
+    # (2 kv, num_layers, slots_per_block, hidden_dim).
+    num_layers, slots_per_block, hidden_dim = 2, 4, 64
     head_size = 32
 
     def _get_temp_kernel_group_buffer(batch_idx, kernel_group_idx):
-        return _FakeTensor((2, num_layers, slots_per_chunk, hidden_dim))
+        return _FakeTensor((2, num_layers, slots_per_block, hidden_dim))
 
     gpu_context.get_temp_kernel_group_buffer.side_effect = _get_temp_kernel_group_buffer
     return gpu_context, head_size

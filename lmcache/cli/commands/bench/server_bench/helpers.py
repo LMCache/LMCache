@@ -338,7 +338,7 @@ def _send_register_kv_cache(
     GPU always goes through the handle path, CPU defaults to data.
 
     ``engine_group_infos`` (handle mode only) carries the per-group
-    metadata — including each group's true ``tokens_per_chunk`` — so the
+    metadata — including each group's true ``tokens_per_block`` — so the
     server does not have to trust the block size discovered from the
     tensors (which the HND layout can swap with ``num_heads``). ``None``
     sends an empty list (single non-hybrid group, geometry discovered

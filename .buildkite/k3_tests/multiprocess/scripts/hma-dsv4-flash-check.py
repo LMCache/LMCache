@@ -12,8 +12,8 @@ Dummy-loads a 4-layer DeepSeek-V4-Flash through vLLM with the
 geometry the vLLM specs declare:
 
 - the 256-token MLA / indexer-k group derives compress ratios 4, 4 and 128
-  from ``tokens_per_chunk`` (spec ``block_size``) over the physical
-  ``slots_per_chunk`` detected from the registered tensors;
+  from ``tokens_per_block`` (spec ``block_size``) over the physical
+  ``slots_per_block`` detected from the registered tensors;
 - the per-layer 64-token sliding-window-MLA groups and the 4-/8-token
   compressor state groups derive compress ratio 1.
 
@@ -148,14 +148,14 @@ print(f"Registered kernel groups: {len(groups)}")
 for g in groups:
     print(
         f"  kg{g['kernel_group_idx']}: engine_group={g['engine_group_idx']} "
-        f"layers={g['num_layers']} tokens_per_chunk={g['tokens_per_chunk']} "
-        f"slots_per_chunk={g['physical_block_size']} "
+        f"layers={g['num_layers']} tokens_per_block={g['tokens_per_block']} "
+        f"slots_per_block={g['slots_per_block']} "
         f"compress_ratio={g['compress_ratio']} dtype={g['dtype']}"
     )
 
 failures: list[str] = []
 
-# Per-group (tokens_per_chunk, compress_ratio) pairs the 4-layer
+# Per-group (tokens_per_block, compress_ratio) pairs the 4-layer
 # DeepSeek-V4-Flash kv_cache_config declares:
 # - MLA / indexer-k group (256-token blocks): ratios 4, 4, 128
 # - per-layer SWA groups (64-token blocks): ratio 1
@@ -174,20 +174,20 @@ expected_pairs = sorted(
         (8, 1),
     ]
 )
-actual_pairs = sorted((g["tokens_per_chunk"], g["compress_ratio"]) for g in groups)
+actual_pairs = sorted((g["tokens_per_block"], g["compress_ratio"]) for g in groups)
 if actual_pairs != expected_pairs:
     failures.append(
-        f"per-group (tokens_per_chunk, compress_ratio) mismatch:\n"
+        f"per-group (tokens_per_block, compress_ratio) mismatch:\n"
         f"  expected {expected_pairs}\n"
         f"  actual   {actual_pairs}"
     )
 
 for g in groups:
-    if g["tokens_per_chunk"] != g["physical_block_size"] * g["compress_ratio"]:
+    if g["tokens_per_block"] != g["slots_per_block"] * g["compress_ratio"]:
         failures.append(
-            f"kernel group {g['kernel_group_idx']}: tokens_per_chunk "
-            f"{g['tokens_per_chunk']} != slots_per_chunk "
-            f"{g['physical_block_size']} * compress_ratio {g['compress_ratio']}"
+            f"kernel group {g['kernel_group_idx']}: tokens_per_block "
+            f"{g['tokens_per_block']} != slots_per_block "
+            f"{g['slots_per_block']} * compress_ratio {g['compress_ratio']}"
         )
 
 if failures:

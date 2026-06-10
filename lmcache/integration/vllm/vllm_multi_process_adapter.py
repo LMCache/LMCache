@@ -1053,16 +1053,16 @@ class LMCacheMPWorkerAdapter:
             ConnectionError: if the server does not respond within
                 mq_timeout.
             ValueError: if the LMCache chunk size is not a multiple of an
-                engine group's ``tokens_per_chunk`` (chunk boundaries would
+                engine group's ``tokens_per_block`` (chunk boundaries would
                 not align with that group's paged-chunk boundaries).
         """
         logger.info("Registering kv caches")
         for info in engine_group_infos:
-            if info.tokens_per_chunk > 0 and self.chunk_size % info.tokens_per_chunk:
+            if info.tokens_per_block > 0 and self.chunk_size % info.tokens_per_block:
                 raise ValueError(
                     f"LMCache chunk size {self.chunk_size} must be a "
                     f"multiple of engine group {info.engine_group_id} "
-                    f"tokens_per_chunk {info.tokens_per_chunk}"
+                    f"tokens_per_block {info.tokens_per_block}"
                 )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)

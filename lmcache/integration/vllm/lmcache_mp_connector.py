@@ -254,7 +254,7 @@ class LMCacheMPRequestMetadata:
     def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
         chunk_size: int,
-        group_tokens_per_chunk: list[int],
+        group_tokens_per_block: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -262,12 +262,12 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             chunk_size: the number of tokens in a LMCache data chunk
-            group_tokens_per_chunk: per-engine-group tokens covered by one
+            group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
                 ``chunk_size`` (hybrid models can mix different values).
         """
-        num_engine_groups = len(group_tokens_per_chunk)
+        num_engine_groups = len(group_tokens_per_block)
         # NOTE: the invariant here is that `num_stored_tokens` should
         # always be a multiple of `chunk_size`
         # TODO: This should be checked every time we update the num_stored_tokens
@@ -292,7 +292,7 @@ class LMCacheMPRequestMetadata:
         computed_tokens = tracker.num_scheduled_tokens + max(
             tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens
         )
-        # Each group covers ``len(block_ids) * tokens_per_chunk`` tokens; the
+        # Each group covers ``len(block_ids) * tokens_per_block`` tokens; the
         # storable prefix is bounded by the least-covered group (e.g.
         # gemma-4 sliding: one 32-token ID covers 2x the tokens of a
         # 16-token full-attention ID).
@@ -300,7 +300,7 @@ class LMCacheMPRequestMetadata:
         allocated_tokens = (
             min(
                 allocated_lengths.get(engine_group_idx, 0)
-                * group_tokens_per_chunk[engine_group_idx]
+                * group_tokens_per_block[engine_group_idx]
                 for engine_group_idx in range(num_engine_groups)
             )
             if num_engine_groups > 0
@@ -319,7 +319,7 @@ class LMCacheMPRequestMetadata:
             end_token_idx = start_token_idx + num_chunks * chunk_size
             block_ids = slice_block_ids_per_group(
                 tracker.allocated_block_ids,
-                group_tokens_per_chunk,
+                group_tokens_per_block,
                 start_token_idx,
                 end_token_idx,
             )
@@ -348,7 +348,7 @@ class LMCacheMPRequestMetadata:
     def GetRetrieveMetadata(
         tracker: LMCacheMPRequestTracker,
         chunk_size: int,
-        group_tokens_per_chunk: list[int],
+        group_tokens_per_block: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
@@ -356,7 +356,7 @@ class LMCacheMPRequestMetadata:
         Args:
             tracker: The request tracker to generate the metadata from.
             chunk_size: the number of tokens in a LMCache data chunk
-            group_tokens_per_chunk: per-engine-group tokens covered by one
+            group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
                 ``chunk_size`` (hybrid models can mix different values).
@@ -382,7 +382,7 @@ class LMCacheMPRequestMetadata:
         if end_token_idx > start_token_idx:
             block_ids = slice_block_ids_per_group(
                 tracker.allocated_block_ids,
-                group_tokens_per_chunk,
+                group_tokens_per_block,
                 start_token_idx,
                 end_token_idx,
             )
@@ -510,32 +510,32 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # full-attention groups 16; DeepSeek V4: 256/64/8/4). Falls back to
         # the engine's base block size when no group metadata is available
         # (single non-hybrid group).
-        self._group_tokens_per_chunk: list[int] = [
+        self._group_tokens_per_block: list[int] = [
             group.kv_cache_spec.block_size for group in vllm_groups
         ] or [vllm_config.cache_config.block_size]
-        for engine_group_idx, tokens_per_chunk in enumerate(
-            self._group_tokens_per_chunk
+        for engine_group_idx, tokens_per_block in enumerate(
+            self._group_tokens_per_block
         ):
-            if tokens_per_chunk <= 0:
+            if tokens_per_block <= 0:
                 raise ValueError(
-                    f"group {engine_group_idx} tokens_per_chunk "
-                    f"{tokens_per_chunk} must be positive"
+                    f"group {engine_group_idx} tokens_per_block "
+                    f"{tokens_per_block} must be positive"
                 )
         # Smallest token count aligned to every group's paged-chunk
         # boundary; used to round down vLLM APC hit counts.
-        self._hit_alignment_tokens = math.lcm(*self._group_tokens_per_chunk)
+        self._hit_alignment_tokens = math.lcm(*self._group_tokens_per_block)
         if self.role == KVConnectorRole.SCHEDULER:
             # Chunk boundaries must land on every group's paged-chunk
             # boundary so per-group block-id slicing stays aligned.
             chunk_size = self.scheduler_adapter.chunk_size
-            for engine_group_idx, tokens_per_chunk in enumerate(
-                self._group_tokens_per_chunk
+            for engine_group_idx, tokens_per_block in enumerate(
+                self._group_tokens_per_block
             ):
-                if chunk_size % tokens_per_chunk != 0:
+                if chunk_size % tokens_per_block != 0:
                     raise ValueError(
                         f"LMCache chunk size {chunk_size} must be a multiple "
-                        f"of group {engine_group_idx} tokens_per_chunk "
-                        f"{tokens_per_chunk}"
+                        f"of group {engine_group_idx} tokens_per_block "
+                        f"{tokens_per_block}"
                     )
 
     @property
@@ -1069,7 +1069,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
                 request_tracker,
                 chunk_size,
-                group_tokens_per_chunk=self._group_tokens_per_chunk,
+                group_tokens_per_block=self._group_tokens_per_block,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -1091,7 +1091,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
                 chunk_size,
-                self._group_tokens_per_chunk,
+                self._group_tokens_per_block,
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -1120,7 +1120,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
                 chunk_size,
-                self._group_tokens_per_chunk,
+                self._group_tokens_per_block,
             )
 
             if r_meta is not None:
@@ -1147,7 +1147,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 continue
             primary_block_ids = tracker.allocated_block_ids.get(0, [])
             num_blocks = len(primary_block_ids)
-            total_tokens = num_blocks * self._group_tokens_per_chunk[0]
+            total_tokens = num_blocks * self._group_tokens_per_block[0]
             records.append(
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
@@ -1174,9 +1174,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Compute the token range they cover.
             total_blocks = len(tracker.allocated_block_ids.get(0, []))
             num_new_blocks = len(new_block_ids)
-            tokens_per_chunk = self._group_tokens_per_chunk[0]
-            start_token = (total_blocks - num_new_blocks) * tokens_per_chunk
-            end_token = total_blocks * tokens_per_chunk
+            tokens_per_block = self._group_tokens_per_block[0]
+            start_token = (total_blocks - num_new_blocks) * tokens_per_block
+            end_token = total_blocks * tokens_per_block
             new_token_ids = list(tracker.all_token_ids[start_token:end_token])
             records.append(
                 RequestAllocationRecord(

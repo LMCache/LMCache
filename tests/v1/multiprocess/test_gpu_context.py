@@ -366,7 +366,7 @@ class TestTempGPUBufferShapeDtype:
         tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
         manager = _build_manager(
             tensors,
-            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_chunk=16)],
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
         assert manager.kernel_groups[0].compress_ratio == 2
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
@@ -377,7 +377,7 @@ class TestTempGPUBufferShapeDtype:
         tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
         manager = _build_manager(
             tensors,
-            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_chunk=16)],
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
         with pytest.raises(ValueError, match="not a multiple of"):
@@ -405,7 +405,7 @@ class TestTempGPUBufferCacheSize:
         uncompressed = _make_temp_buffer([_GroupSpec(num_layers=2, block_size=16)])
         compressed = _make_temp_buffer(
             [_GroupSpec(num_layers=2, block_size=8)],
-            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_chunk=16)],
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
         assert (
             compressed.get_cache_size_per_token() * 2
@@ -490,8 +490,8 @@ class TestGPUCacheContextReportStatus:
         "object_group_idx",
         "num_layers",
         "layer_indices",
-        "tokens_per_chunk",
-        "physical_block_size",
+        "tokens_per_block",
+        "slots_per_block",
         "compress_ratio",
         "dtype",
         "gpu_kv_concrete_shape",
@@ -536,8 +536,8 @@ class TestGPUCacheContextReportStatus:
             assert group["kernel_group_idx"] == kg_idx
             assert group["engine_group_idx"] == kernel_group.engine_group_idx
             assert group["num_layers"] == kernel_group.num_layers
-            assert group["physical_block_size"] == kernel_group.slots_per_chunk
-            assert group["tokens_per_chunk"] == kernel_group.tokens_per_chunk
+            assert group["slots_per_block"] == kernel_group.slots_per_block
+            assert group["tokens_per_block"] == kernel_group.tokens_per_block
             assert group["compress_ratio"] == kernel_group.compress_ratio
             assert 0 <= group["object_group_idx"] < manager.num_object_groups
 
