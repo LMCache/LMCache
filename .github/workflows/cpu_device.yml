@@ -117,6 +117,8 @@ jobs:
         env:
           VLLM_TARGET_DEVICE: cpu
           VLLM_VERSION_TAG: v0.22.1
+          CC: gcc-12
+          CXX: g++-12
         run: |
           # The Linux x86_64 wheel on wheels.vllm.ai is published under a
           # clean "0.22.1" version (no "+cpu" PEP 440 local label), so
@@ -128,6 +130,11 @@ jobs:
           # The vLLM CPU requirements pin torch==2.11.0+cpu, which is only
           # published on download.pytorch.org/whl/cpu, so add that as an
           # extra index.
+          # vLLM's X86 CPU backend requires gcc/g++ >= 12.3, but the
+          # ubuntu-22.04 runner ships gcc 11.4 by default. Install gcc-12
+          # (12.3.x in jammy) and point CC/CXX at it.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-12 g++-12
           pip install "numpy<2"
           pip install \
             --extra-index-url https://download.pytorch.org/whl/cpu \
