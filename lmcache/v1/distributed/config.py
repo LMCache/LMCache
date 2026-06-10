@@ -86,6 +86,9 @@ class L1MemoryManagerConfig:
     use_lazy: bool
     """ Whether to use lazy initialization for L1 memory. """
 
+    use_shm: bool = True
+    """ Whether to advertise/use POSIX SHM for non-lazy L1 memory. """
+
     init_size_in_bytes: int = field(default=20 << 30)
     """ The initial size when using lazy allocation. Default is 20GB. """
 
@@ -112,9 +115,19 @@ class L1MemoryManagerConfig:
         if self.devdax_size_in_bytes and not self.devdax_path:
             raise ValueError("devdax_size_in_bytes requires devdax_path")
 
-        if self.devdax_path:
-            self.use_lazy = False
+        if not self.use_shm:
             self.shm_name = ""
+
+        if self.devdax_path and self.use_lazy:
+            raise ValueError(
+                "l1-devdax-path requires lazy allocation to be disabled. "
+                "Please set --no-l1-use-lazy."
+            )
+        if self.devdax_path and self.use_shm:
+            raise ValueError(
+                "l1-devdax-path requires SHM to be disabled. "
+                "Please set --no-l1-use-shm."
+            )
 
         # LazyMemoryAllocator requires cudart (CUDA host-pinned memory).
         # Auto-disable on non-CUDA backends to avoid a RuntimeError.
@@ -187,16 +200,35 @@ class StorageManagerConfig:
     periodic_notifier_interval_ms: int = 5
     """ Interval (ms) for the periodic event notifier heartbeat. """
 
+    def __post_init__(self) -> None:
+        normalize_storage_manager_config(self)
+        validate_storage_manager_config(self)
+
 
 def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
-    """Normalize and validate storage manager configuration.
+    """Normalize storage manager configuration.
 
     This consumes a matching DAX adapter as hybrid L1 Device-DAX overflow
-    capacity and rejects L2 adapters that require a single contiguous L1
-    memory descriptor when hybrid L1 is enabled.
+    capacity.
 
     Args:
         config: Storage manager configuration to normalize in place.
+
+    Returns:
+        None.
+    """
+    memory_config = config.l1_manager_config.memory_config
+    _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)
+
+
+def validate_storage_manager_config(config: StorageManagerConfig) -> None:
+    """Validate storage manager configuration.
+
+    This rejects L2 adapters that require a single contiguous L1 memory
+    descriptor when hybrid L1 Device-DAX overflow is enabled.
+
+    Args:
+        config: Storage manager configuration to validate.
 
     Returns:
         None.
@@ -205,7 +237,6 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
         ValueError: If hybrid L1 is paired with incompatible L2 adapters.
     """
     memory_config = config.l1_manager_config.memory_config
-    _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
         return
 
@@ -263,6 +294,12 @@ def add_storage_manager_args(
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Whether to use lazy loading for L1 memory. (Default is True)",
+    )
+    memory_group.add_argument(
+        "--l1-use-shm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to use POSIX SHM for non-lazy L1 memory. (Default is True)",
     )
     memory_group.add_argument(
         "--l1-init-size-gb",
@@ -419,6 +456,7 @@ def parse_args_to_config(
     memory_config = L1MemoryManagerConfig(
         size_in_bytes=int(args.l1_size_gb * (1 << 30)),
         use_lazy=args.l1_use_lazy,
+        use_shm=args.l1_use_shm,
         init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
         align_bytes=args.l1_align_bytes,
         devdax_path=args.l1_devdax_path,
@@ -447,7 +485,6 @@ def parse_args_to_config(
         prefetch_max_in_flight=args.l2_prefetch_max_in_flight,
         periodic_notifier_interval_ms=args.periodic_notifier_interval_ms,
     )
-    normalize_storage_manager_config(config)
     return config
 
 
