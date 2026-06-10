@@ -98,6 +98,16 @@ PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 echo "=== Launching LMCache MP server ==="
 echo "Port: $LMCACHE_PORT"
 
+# Optional GDS L1 slab tier (gds_* tests). When GDS_L1_PATH is set, the L1
+# medium becomes an NVMe slab accessed via cuFile DMA instead of pinned DRAM;
+# --l1-size-gb then sizes the slab. The path must be on a GDS-capable
+# filesystem (local NVMe), provided by the /scratch hostPath mount.
+GDS_L1_ARG=""
+if [ -n "${GDS_L1_PATH:-}" ]; then
+    echo "GDS L1 tier enabled; slab directory: $GDS_L1_PATH"
+    GDS_L1_ARG="--gds-l1-path ${GDS_L1_PATH}"
+fi
+
 CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
@@ -105,6 +115,7 @@ lmcache server \
     --max-workers "$MAX_WORKERS" \
     --port "$LMCACHE_PORT" \
     --http-port "${LMCACHE_HTTP_PORT:-8080}" \
+    ${GDS_L1_ARG} \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
 LMCACHE_PID=$!

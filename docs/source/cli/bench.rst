@@ -949,6 +949,12 @@ support a clean store -> load round-trip.
    ``"use_odirect": true``) or that talk to a remote service without
    a local cache, the default combined run is usually fine.
 
+   O_DIRECT adapters may also require the benchmark L1 buffer to
+   satisfy the adapter's block alignment. Use ``--l1-align-bytes`` to
+   set that alignment, commonly ``4096`` for local block devices. The
+   payload size (``--data-size-kb * 1024``) must be a multiple of the
+   selected alignment.
+
 
 Quick start
 ~~~~~~~~~~~
@@ -972,6 +978,15 @@ Stress the adapter with more in-flight submits and larger payloads:
        --num-keys 32 --in-flight 4 \
        --data-size-kb 512 \
        --rounds 5 --warmup-rounds 1
+
+Benchmark an O_DIRECT adapter with aligned L1 buffers:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"raw_block","device_path":"/dev/nvme0n1","slot_bytes":4194304,"use_odirect":true,"block_align":4096}' \
+       --data-size-kb 1024 \
+       --l1-align-bytes 4096
 
 Run only one operation (useful to isolate store vs. load throughput):
 
@@ -1039,6 +1054,13 @@ Options
    * - ``--data-size-kb N``
      - ``256``
      - Data size per key, in KiB.
+   * - ``--l1-align-bytes N``
+     - ``1``
+     - Alignment in bytes for benchmark L1 buffers. Use a value
+       at least as large as the adapter's block alignment when
+       benchmarking O_DIRECT backends, for example ``4096`` for local
+       block devices. ``--data-size-kb * 1024`` must be a multiple of
+       this value.
    * - ``--rounds N``
      - ``1``
      - Measurement rounds per operation.
@@ -1186,9 +1208,8 @@ round against the byte pattern that ``store`` wrote (see
    [Verify] OK
 
 Verification is **off** by default because the stricter byte pattern
-also forces every key to allocate its own ``data_size`` buffer
-(otherwise the runner is free to reuse a single shared buffer across
-keys to keep the memory footprint small).
+requires both the store and load object batches to stay resident so the
+loaded data can be compared against the original store pattern.
 
 
 Exit codes

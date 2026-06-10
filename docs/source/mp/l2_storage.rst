@@ -3,8 +3,10 @@ L2 Storage (Persistent Cache)
 
 LMCache multiprocess mode supports a two-tier storage architecture:
 
-- **L1 (in-memory)** -- Fast CPU memory managed by the L1 Manager.  All KV
-  cache chunks live here during active use.
+- **L1 (fast tier)** -- CPU memory by default, or an NVMe slab via GPUDirect
+  Storage (cuFile) when ``--gds-l1-path`` is set, managed by the L1 Manager.
+  All KV cache chunks live here during active use. (Byte-array L2 adapters are
+  unsupported under the GDS L1 tier, which exposes no L1 memory buffer.)
 - **L2 (persistent)** -- Durable storage backends (NIXL-based or plain
   file-system/raw-block).  The StoreController asynchronously pushes data from L1
   to L2, and the PrefetchController loads data from L2 back into L1 on
