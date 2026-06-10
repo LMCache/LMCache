@@ -416,7 +416,7 @@ def test_nixl_posix_backend_multipath():
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl_multipath.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"

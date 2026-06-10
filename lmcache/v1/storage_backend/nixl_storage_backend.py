@@ -1065,9 +1065,6 @@ class NixlStaticStorageBackend(NixlStorageBackend):
                 create_dirs=True,
             )
             return NixlFilePool(size, sharder, use_direct_io)
-        elif backend in ("OBJ", "AZURE_BLOB"):
-            return NixlObjectPool(size)
-            return NixlFilePool(size, path, use_direct_io)
         elif backend in ("OBJ", "AZURE_BLOB", "DOCA_MEMOS"):
             return NixlObjectPool(size, b128=(backend == "DOCA_MEMOS"))
         else:
@@ -1364,7 +1361,18 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         self.async_mode = nixl_config.enable_async_put
         self.enable_presence_cache = nixl_config.enable_presence_cache
-        self.path = nixl_config.path
+        # The dynamic backend uses ``self.path`` directly as a single directory
+        # (see ``_build_descs``/``key_exists``). Path sharding across multiple
+        # paths is only supported for static pools via ``PathSharder``, so reject
+        # a list here rather than silently mishandling it later.
+        if isinstance(nixl_config.path, list):
+            raise ValueError(
+                "NixlDynamicStorageBackend (nixl_pool_size=0) does not support "
+                "multiple nixl_path entries; provide a single path string. "
+                "Path sharding across multiple paths is only available for "
+                "static pools."
+            )
+        self.path: str = nixl_config.path
         self.direct_io_flag = 0
         if nixl_config.use_direct_io:
             if hasattr(os, "O_DIRECT"):
