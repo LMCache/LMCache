@@ -125,8 +125,12 @@ jobs:
           # UnspecifiedPlatform, raising "Failed to infer device type".
           # Build from the upstream git tag with VLLM_TARGET_DEVICE=cpu so
           # the resulting install advertises itself as a CPU build.
+          # The vLLM CPU requirements pin torch==2.11.0+cpu, which is only
+          # published on download.pytorch.org/whl/cpu, so add that as an
+          # extra index.
           pip install "numpy<2"
           pip install \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
             "vllm @ git+https://github.com/vllm-project/vllm@${VLLM_VERSION_TAG}"
           python -c "import vllm, torch; print('vllm:', vllm.__version__, 'torch:', torch.__version__, 'cuda:', torch.cuda.is_available())"
 
