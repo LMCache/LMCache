@@ -380,8 +380,8 @@ class BlendV3Module:
         ]
 
     def report_status(self) -> dict:
-        # Meta is derived live from gpu_transfer (the single source of truth)
-        # rather than a mirror kept in sync here.
+        # Meta is derived live from MP server gpu_transfe
+
         cache_contexts = self._gpu_transfer.cache_contexts
 
         def _meta(iid: int) -> "tuple[str, int] | None":
@@ -422,7 +422,7 @@ class BlendV3Module:
         # YaRN/longrope bake an mscale m into the rope cache (cos²+sin²=m²≠1).
         # vLLM already folds m into stored K, but CB re-RoPE assumes a pure
         # rotation, so an un-normalized m injects an m² error per K element
-        # (gpt-oss m≈1.347 → degenerate output). Strip m; m≈1 models untouched.
+
         _c32 = cos_sin_cache.to(torch.float32)
         _half = _c32.shape[1] // 2
         _m = float((_c32[:, :_half] ** 2 + _c32[:, _half:] ** 2).mean().sqrt())
