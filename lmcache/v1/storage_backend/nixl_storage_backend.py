@@ -199,7 +199,6 @@ class NixlStorageConfig:
         assert pool_size is not None
         assert backend is not None
         assert use_direct_io in [False, True]
-        assert path is not None, "nixl_path cannot be None"
 
         dynamic_storage = pool_size == 0
         if dynamic_storage:
