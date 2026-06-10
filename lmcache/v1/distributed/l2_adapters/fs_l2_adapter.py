@@ -80,6 +80,33 @@ def _readinto_full(
     return total
 
 
+def _write_full(
+    fd: int,
+    buf: Union[bytearray, memoryview, bytes],
+) -> int:
+    """Loop os.write() until *buf* is fully written.
+
+    A single ``os.write()`` can legally write fewer bytes than requested.
+    Treat a zero-byte write before completion as an error so callers do not
+    publish a truncated cache object.
+
+    Returns:
+        Total number of bytes written.
+
+    Raises:
+        OSError: If the file descriptor stops accepting bytes before *buf*
+            is fully written.
+    """
+    mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
+    total = 0
+    while total < len(mv):
+        n = os.write(fd, mv[total:])
+        if n == 0:
+            raise OSError("write returned 0 before buffer was complete")
+        total += n
+    return total
+
+
 async def _async_readinto_full(
     f,  # aiofiles async file handle
     buf: Union[bytearray, memoryview, bytes],
@@ -91,6 +118,21 @@ async def _async_readinto_full(
         n = await f.readinto(mv[total:])
         if n is None or n == 0:
             break
+        total += n
+    return total
+
+
+async def _async_write_full(
+    f,  # aiofiles async file handle
+    buf: Union[bytearray, memoryview, bytes],
+) -> int:
+    """Async version of :func:`_write_full`."""
+    mv = memoryview(buf) if not isinstance(buf, memoryview) else buf
+    total = 0
+    while total < len(mv):
+        n = await f.write(mv[total:])
+        if n is None or n == 0:
+            raise OSError("write returned no bytes before buffer was complete")
         total += n
     return total
 
@@ -557,7 +599,7 @@ class FSL2Adapter(L2AdapterInterface):
                 os.O_CREAT | os.O_WRONLY | getattr(os, "O_DIRECT", 0),
                 0o644,
             )
-            os.write(fd, buf)
+            _write_full(fd, buf)
         except Exception:
             logger.exception("Failed to O_DIRECT write %s", file_path)
             raise
@@ -578,6 +620,7 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> None:
         success = True
         bytes_written = 0
+        created_files: list[Path] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -613,9 +656,10 @@ class FSL2Adapter(L2AdapterInterface):
                         )
                     else:
                         async with aiofiles.open(tmp_path, "wb") as f:
-                            await f.write(buf)
+                            await _async_write_full(f, buf)
 
                     await aiofiles.os.replace(tmp_path, file_path)
+                    created_files.append(file_path)
                     bytes_written += size
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
@@ -627,15 +671,31 @@ class FSL2Adapter(L2AdapterInterface):
                         "FSL2Adapter failed to store %s",
                         file_path,
                     )
-                    if await aiofiles.os.path.exists(tmp_path):
+                    try:
                         await aiofiles.os.unlink(tmp_path)
+                    except FileNotFoundError:
+                        pass
                     success = False
+                    break
         except Exception:
             logger.exception(
                 "FSL2Adapter store task %s failed",
                 task_id,
             )
             success = False
+
+        if not success:
+            for file_path in created_files:
+                try:
+                    await aiofiles.os.unlink(file_path)
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    logger.exception(
+                        "FSL2Adapter failed to roll back stored file %s",
+                        file_path,
+                    )
+            bytes_written = 0
 
         with self._lock:
             self._completed_store_tasks[task_id] = L2StoreResult(success, bytes_written)
