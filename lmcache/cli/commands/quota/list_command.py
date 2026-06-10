@@ -71,8 +71,6 @@ def run_quota_list(cmd: "BaseCommand", args: argparse.Namespace) -> None:
         sec = metrics[section_key]
         sec.add("cache_salt", "Cache salt", salt)
         sec.add("limit_gb", "Limit (GB)", info.get("limit_gb"))
-        sec.add(
-            "current_usage_gb", "Current usage (GB)", info.get("current_usage_gb")
-        )
+        sec.add("current_usage_gb", "Current usage (GB)", info.get("current_usage_gb"))
 
     metrics.emit()

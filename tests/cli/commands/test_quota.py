@@ -4,7 +4,6 @@
 # Standard
 from unittest.mock import MagicMock, patch
 import argparse
-import json
 import sys
 
 # Inject a fake openai module so that the auto-discovery of
@@ -62,27 +61,41 @@ class TestQuotaCommandMetadata:
 class TestQuotaCommandExecute:
     @patch("lmcache.cli.commands.quota.set_command.http_request")
     def test_set(
-        self, mock_http, cmd, parser, capsys,
+        self,
+        mock_http,
+        cmd,
+        parser,
+        capsys,
     ) -> None:
         mock_http.return_value = {
-            "cache_salt": "tenant1", "limit_gb": 10.5, "status": "ok",
+            "cache_salt": "tenant1",
+            "limit_gb": 10.5,
+            "status": "ok",
         }
         args = parser.parse_args(["quota", "set", "tenant1", "--limit-gb", "10.5"])
         cmd.execute(args)
 
         mock_http.assert_called_once_with(
-            "PUT", "http://localhost:8080/quota/tenant1", data={"limit_gb": 10.5},
+            "PUT",
+            "http://localhost:8080/quota/tenant1",
+            data={"limit_gb": 10.5},
         )
         out = capsys.readouterr().out
         assert "Quota Set" in out and "tenant1" in out
 
     @patch("lmcache.cli.commands.quota.get_command.http_request")
     def test_get(
-        self, mock_http, cmd, parser, capsys,
+        self,
+        mock_http,
+        cmd,
+        parser,
+        capsys,
     ) -> None:
         mock_http.return_value = {
-            "cache_salt": "tenant1", "limit_gb": 10.5,
-            "current_usage_gb": 3.27, "exists": True,
+            "cache_salt": "tenant1",
+            "limit_gb": 10.5,
+            "current_usage_gb": 3.27,
+            "exists": True,
         }
         args = parser.parse_args(["quota", "get", "tenant1"])
         cmd.execute(args)
@@ -93,7 +106,11 @@ class TestQuotaCommandExecute:
 
     @patch("lmcache.cli.commands.quota.list_command.http_request")
     def test_list(
-        self, mock_http, cmd, parser, capsys,
+        self,
+        mock_http,
+        cmd,
+        parser,
+        capsys,
     ) -> None:
         mock_http.return_value = {
             "users": {
@@ -110,21 +127,30 @@ class TestQuotaCommandExecute:
 
     @patch("lmcache.cli.commands.quota.delete_command.http_request")
     def test_delete(
-        self, mock_http, cmd, parser, capsys,
+        self,
+        mock_http,
+        cmd,
+        parser,
+        capsys,
     ) -> None:
         mock_http.return_value = {"cache_salt": "tenant1", "status": "removed"}
         args = parser.parse_args(["quota", "delete", "tenant1"])
         cmd.execute(args)
 
         mock_http.assert_called_once_with(
-            "DELETE", "http://localhost:8080/quota/tenant1",
+            "DELETE",
+            "http://localhost:8080/quota/tenant1",
         )
         out = capsys.readouterr().out
         assert "Quota Delete" in out and "removed" in out
 
     @patch("lmcache.cli.commands.quota.set_command.http_request")
     def test_quiet_suppresses_output(
-        self, mock_http, cmd, parser, capsys,
+        self,
+        mock_http,
+        cmd,
+        parser,
+        capsys,
     ) -> None:
         mock_http.return_value = {"cache_salt": "t1", "limit_gb": 1.0, "status": "ok"}
         args = parser.parse_args(["quota", "set", "t1", "--limit-gb", "1", "-q"])

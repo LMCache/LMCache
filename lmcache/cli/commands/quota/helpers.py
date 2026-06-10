@@ -74,7 +74,5 @@ def http_request(
         logger.error("Server error: %s", msg)
         sys.exit(1)
     except urllib.error.URLError as e:
-        logger.error(
-            "Cannot reach %s — is the server running? (%s)", url, e.reason
-        )
+        logger.error("Cannot reach %s — is the server running? (%s)", url, e.reason)
         sys.exit(1)
