@@ -612,7 +612,7 @@ class GPUTransferModule:
             store completed without such a failure.
         """
         st = time.perf_counter()
-        obj_keys = self._ctx.resolve_obj_keys(key)
+        obj_keys = self._ctx.resolve_obj_keys(key, [0])[0]
 
         entry = self._cache_contexts.get(instance_id)
         if entry is None:
@@ -818,7 +818,7 @@ class GPUTransferModule:
             ValueError: If no GPU context is registered for the given instance ID.
         """
         st = time.perf_counter()
-        obj_keys = self._ctx.resolve_obj_keys(key)
+        obj_keys = self._ctx.resolve_obj_keys(key, [0])[0]
 
         entry = self._cache_contexts.get(instance_id)
         if entry is None:
