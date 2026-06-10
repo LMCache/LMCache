@@ -114,18 +114,20 @@ jobs:
           python -m pip install -e . --no-deps --no-build-isolation
 
       - name: Install vLLM CPU build
+        env:
+          VLLM_TARGET_DEVICE: cpu
+          VLLM_VERSION_TAG: v0.22.1
         run: |
-          # Use the vLLM nightly CPU index as the PRIMARY index so pip
-          # accepts wheels carrying a PEP 440 local version label such
-          # as 0.22.1+cpu. If we instead used --extra-index-url, pip 26
-          # would discard those tarballs as "inconsistent version" and
-          # silently fall back to the last clean release (0.19.1), which
-          # predates kv_connector_module_path and breaks LMCacheMPConnector.
+          # The Linux x86_64 wheel on wheels.vllm.ai is published under a
+          # clean "0.22.1" version (no "+cpu" PEP 440 local label), so
+          # vllm.platforms.cpu_platform_plugin's vllm_version_matches_substr
+          # ("cpu") check fails at runtime and the engine falls into
+          # UnspecifiedPlatform, raising "Failed to infer device type".
+          # Build from the upstream git tag with VLLM_TARGET_DEVICE=cpu so
+          # the resulting install advertises itself as a CPU build.
           pip install "numpy<2"
-          pip install vllm \
-            --pre \
-            --index-url https://wheels.vllm.ai/nightly/cpu \
-            --extra-index-url https://pypi.org/simple
+          pip install \
+            "vllm @ git+https://github.com/vllm-project/vllm@${VLLM_VERSION_TAG}"
           python -c "import vllm, torch; print('vllm:', vllm.__version__, 'torch:', torch.__version__, 'cuda:', torch.cuda.is_available())"
 
       - name: Download facebook/opt-125m
