@@ -387,20 +387,14 @@ class CBUnifiedLookupResult:
         non_prefix_segments: Fingerprint matches outside the prefix coverage
             (cur_st order), each carrying ``(old_st, old_ed, cur_st, cur_ed,
             hash)``. Already sparse-prefetched, so the retrieve set equals the
-            prefetched set.
-        global_segments: Chunk-granular matches found in the fleet coordinator
-            directory (shared-L2 reuse), empty when no coordinator is configured
-            or none matched. Same ``CBMatchResult`` shape as
-            ``non_prefix_segments`` -- each ``hash`` is the chunk's content hash,
-            which ``ipc_key_to_object_keys`` expands to per-rank shared-L2 keys
-            at retrieve. The consumer merges these into the single
-            ``cb_match_result`` list it sends to ``CB_RETRIEVE_PRE_COMPUTED_V3``,
-            reconciling any overlap with ``non_prefix_segments``.
+            prefetched set. Includes fleet-coordinator (shared-L2) matches:
+            those are merged in before the sparse prefetch -- prefix-covered and
+            locally-duplicated ones dropped -- so they ride the identical
+            prefetch + retrieve path and need no separate handling.
     """
 
     prefix_coverage_tokens: int
     non_prefix_segments: list[CBMatchResult]
-    global_segments: list[CBMatchResult] = field(default_factory=list)
 
 
 _CUSTOMERIZED_SERIALIZERS = {

@@ -416,3 +416,32 @@ def test_poll_coordinator_match_gives_up_past_deadline():
 
     assert eng._poll_coordinator_match(job, "rid") == []
     coordinator.take_match.assert_called_once_with("rid")
+
+
+def test_non_overlapping_after_prefix():
+    """Prefix filter + leftmost-greedy overlap dedup, filter applied first."""
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import CBMatchResult
+    from lmcache.v1.multiprocess.modules import blend_v3 as v3_mod
+
+    f = v3_mod.BlendV3Module._non_overlapping_after_prefix
+
+    def m(cur_st: int, cur_ed: int) -> CBMatchResult:
+        return CBMatchResult(
+            old_st=0, old_ed=cur_ed - cur_st, cur_st=cur_st, cur_ed=cur_ed, hash=b""
+        )
+
+    assert f([], 0) == []
+
+    # Overlap dedup + ascending cur_st: 10-20 overlaps the kept 5-15, dropped.
+    out = f([m(10, 20), m(5, 15), m(15, 25)], 0)
+    assert [(r.cur_st, r.cur_ed) for r in out] == [(5, 15), (15, 25)]
+
+    # Prefix filter drops matches starting before the coverage.
+    out = f([m(0, 10), m(10, 20)], 5)
+    assert [r.cur_st for r in out] == [10]
+
+    # Filter precedes dedup: a prefix-covered match (5-13) must NOT suppress the
+    # usable 10-18 in the greedy pass (dedup-first would drop both -> []).
+    out = f([m(5, 13), m(10, 18)], 8)
+    assert [r.cur_st for r in out] == [10]

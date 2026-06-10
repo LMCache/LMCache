@@ -40,12 +40,13 @@ STORE (blend server, worker-0)
                                           chunk tokens, hash each → (poly→object_key,old_st)
 
 LOOKUP (blend server, cb_unified_lookup)
-  local match (unchanged, additive)
+  coordinator present? fleet match only (local matcher skipped); else local only
   request tokens
         ── POST /blend/match ──▶ coordinator.match():
                                    roll hash over tokens, probe every probe_stride
         ◀── matches: [(object_key, old_st, cur_st)] ──
-  → global_segments → sparse prefetch from shared L2 → retrieve + re-RoPE
+  → non-prefix set (drop prefix-covered, leftmost-greedy overlap dedup)
+  → one sparse prefetch from shared L2 → retrieve + re-RoPE
 ```
 
 The coordinator owns `chunk_size` (`blend_chunk_size`, fleet config, must equal
@@ -137,25 +138,34 @@ every publish/query path is skipped (behavior unchanged).
 
 ## Lookup flow in `cb_unified_lookup`
 
-The coordinator leg is additive around the existing prefix + sparse legs:
+Local and coordinator matching are **mutually exclusive**, chosen by coordinator
+presence: with a coordinator configured the fleet directory (a superset of the
+local table) is the *only* match source and the local matcher is skipped
+entirely; with none, matching is purely local as before. There is no merge.
 
-1. First call: submit the local fingerprint match (unchanged) **and** the
-   coordinator match (request tokens). A per-lookup wall-clock deadline is armed
+With a coordinator:
+
+1. First call: skip the local fingerprint match; submit only the coordinator
+   match (request tokens). A per-lookup wall-clock deadline is armed
    (`match_budget_s`, from `LMCACHE_COORDINATOR_BLEND_TIMEOUT`).
-2. Local legs complete once (classify side effects run once).
-3. Poll the coordinator: defer while pending, but give up at the deadline and
-   proceed local-only. The deadline (not just the per-request HTTP timeout)
-   bounds total wait, since the coordinator daemon services match queries
-   serially and a query can sit queued behind others. When ready, the matches
-   become `global_segments` on `CBUnifiedLookupResult`.
+2. After the prefix resolves, poll the coordinator **before** the sparse
+   prefetch: defer while pending, give up at the deadline (then no fleet matches
+   that lookup). The deadline (not just the per-request HTTP timeout) bounds
+   total wait, since the coordinator daemon services match queries serially.
+3. Keep matches outside the prefix coverage and apply **leftmost-greedy overlap
+   dedup** — the coordinator dedups only by `object_key`, so its matches can
+   still overlap, and two matches over the same request range can't both scatter.
+4. Submit **one** sparse prefetch over that set, classify, retrieve.
 
-`CBUnifiedLookupResult.global_segments` is `list[CBMatchResult]`, the same shape
-as the local `non_prefix_segments`: each `hash` is the chunk's content hash
-(the coordinator's `object_key` hex), which `ipc_key_to_object_keys` expands to
-per-rank shared-L2 keys at retrieve. The consumer merges these into the single
-`cb_match_result` list it sends to `CB_RETRIEVE_PRE_COMPUTED_V3` (reconciling any
-overlap with the local segments — not merged here), so the existing retrieve /
-re-RoPE path fetches and scatters them with no protocol change.
+Without a coordinator, step 1 instead runs the local matcher and steps 3–4 use
+its matches (already non-overlapping, so the dedup is a no-op).
+
+Fleet matches are `CBMatchResult` (each `hash` is the chunk content hash — the
+coordinator's `object_key` hex — which `ipc_key_to_object_keys` expands to
+per-rank shared-L2 keys), so they ride the **identical** sparse prefetch +
+classify + retrieve + re-RoPE path as local matches and surface in
+`CBUnifiedLookupResult.non_prefix_segments`. There is no separate
+`global_segments` field and no protocol change.
 
 ## Eviction & staleness
 

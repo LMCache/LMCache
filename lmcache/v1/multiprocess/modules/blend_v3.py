@@ -536,30 +536,45 @@ class BlendV3Module:
                 logger.exception("CB fingerprint registration failed (sync drain)")
 
     def _match_fingerprints(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
-        """Match the query's reusable chunks, leftmost-greedy deduped.
+        """Drain pending registrations and fingerprint-match sub-sequences.
 
-        Drains pending fingerprint registrations, probes the matcher, then keeps
-        a non-overlapping leftmost-greedy subset.
-
-        Args:
-            key (IPCCacheEngineKey): The query request key.
-
-        Returns:
-            list[CBMatchResult]: Non-overlapping matches sorted by cur_st
-            (empty if none).
+        Returns the raw matches (any order, possibly overlapping); the caller
+        applies the prefix filter + overlap dedup once via
+        :meth:`_non_overlapping_after_prefix`.
         """
         self._drain_fingerprints_sync()
-        matches = self._token_range_matcher.match_sub_sequence(list(key.token_ids))
-        if not matches:
-            return []
-        matches.sort(key=lambda r: r.cur_st)
-        deduped: list[CBMatchResult] = []
+        return self._token_range_matcher.match_sub_sequence(list(key.token_ids))
+
+    @staticmethod
+    def _non_overlapping_after_prefix(
+        matches: list[CBMatchResult], prefix_tokens: int
+    ) -> list[CBMatchResult]:
+        """Matches outside the prefix coverage, leftmost-greedy overlap-deduped.
+
+        Drops matches the prefix leg already covers (``cur_st < prefix_tokens``),
+        then keeps a left-to-right non-overlapping subset -- two matches over the
+        same request range can't both scatter. Filtering precedes the dedup so a
+        prefix-covered match cannot suppress a usable one in the greedy pass.
+
+        Args:
+            matches: Candidate matches in any order; ``cur_st``/``cur_ed`` are
+                request token positions.
+            prefix_tokens: Contiguous prefix coverage in tokens; matches starting
+                before it are dropped. Pass ``0`` to keep all (dedup only).
+
+        Returns:
+            Non-overlapping matches in ascending ``cur_st`` order.
+        """
+        kept: list[CBMatchResult] = []
         covered_end = -1
-        for r in matches:
+        for r in sorted(
+            (r for r in matches if r.cur_st >= prefix_tokens),
+            key=lambda r: r.cur_st,
+        ):
             if r.cur_st >= covered_end:
-                deduped.append(r)
+                kept.append(r)
                 covered_end = r.cur_ed
-        return deduped
+        return kept
 
     def _resolve_cb_layout_desc(
         self, model_name: str, world_size: int
@@ -750,18 +765,29 @@ class BlendV3Module:
             # mp.lookup_prefetch (LookupModule self-instruments); prefix_chunks
             # lands on cb.lookup via CB_LOOKUP_END below.
             self._lookup_module.lookup(key, tp_size)
-            # Fingerprint match: CPU-bound, tight span.
-            self._event_bus.publish(
-                Event(event_type=EventType.CB_FINGERPRINT_MATCH_START, session_id=rid)
-            )
-            matches = self._match_fingerprints(key)
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_FINGERPRINT_MATCH_END,
-                    session_id=rid,
-                    metadata={"matches": len(matches)},
+            # Local and coordinator matching are mutually exclusive: with a
+            # coordinator the fleet directory is the only source, so skip the
+            # local matcher (and its span). The coordinator leg is async
+            # (submitted below, resolved at poll) and is timed by cb.lookup.
+            matches: list[CBMatchResult]
+            if self._coordinator is not None:
+                matches = []
+            else:
+                # Local fingerprint match: CPU-bound, tight span.
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_FINGERPRINT_MATCH_START,
+                        session_id=rid,
+                    )
                 )
-            )
+                matches = self._match_fingerprints(key)
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_FINGERPRINT_MATCH_END,
+                        session_id=rid,
+                        metadata={"matches": len(matches)},
+                    )
+                )
             job = _CBUnifiedJob(matches=matches, num_tokens=len(key.token_ids))
             job.coord_submitted = self._submit_coordinator_match(key)
             if job.coord_submitted and self._coordinator is not None:
@@ -781,9 +807,16 @@ class BlendV3Module:
         # enter the sparse prefetch, so they cannot leak a read lock.
         if not job.sparse_started:
             prefix_tokens = job.prefix_chunks * chunk_size
-            # Any offset is fine: the per-token slot scatter writes
-            # non-block-aligned matches.
-            job.non_prefix = [r for r in job.matches if r.cur_st >= prefix_tokens]
+            if self._coordinator is not None:
+                candidates = self._poll_coordinator_match(job, rid)
+                if candidates is None:
+                    return None  # coordinator still in flight (bounded by deadline)
+            else:
+                candidates = job.matches
+            # Single prefix-filter + overlap dedup over the raw matches
+            job.non_prefix = self._non_overlapping_after_prefix(
+                candidates, prefix_tokens
+            )
             if job.non_prefix:
                 layout_desc = self._resolve_cb_layout_desc(
                     key.model_name, key.world_size
@@ -850,29 +883,7 @@ class BlendV3Module:
             else:
                 found = []
             job.found_result = found
-            num_tokens = job.num_tokens
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_LOOKUP_END,
-                    session_id=rid,
-                    metadata={
-                        "num_tokens": num_tokens,
-                        "fingerprint_hits": len(found),
-                        "prefix_hits": job.prefix_chunks,
-                        "storage_hits": len(found),
-                        "stale_chunks": len(job.non_prefix or []) - len(found),
-                        "no_gpu_context": False,
-                        "hit_tokens": _unique_token_coverage(found),
-                        "requested_tokens": (num_tokens // chunk_size) * chunk_size,
-                    },
-                )
-            )
         found = job.found_result
-
-        # --- Global leg: poll the coordinator (bounded defer), best-effort. ---
-        global_segments = self._poll_coordinator_match(job, rid)
-        if global_segments is None:
-            return None  # coordinator still in flight, within the defer budget
 
         prefix_tokens = job.prefix_chunks * chunk_size
         num_tokens = job.num_tokens
@@ -904,7 +915,6 @@ class BlendV3Module:
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
-            global_segments=global_segments,
         )
 
     def store(
