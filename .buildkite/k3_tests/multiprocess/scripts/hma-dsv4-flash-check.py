@@ -1,5 +1,10 @@
+#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """DeepSeek-V4-Flash HMA registration check against a live LMCache MP server.
+
+Run via ``run-single-test.sh hma_dsv4_flash``, which starts the LMCache MP
+server through the standard ``launch-processes.sh`` flow (with
+``LAUNCH_VLLM=false``); this script drives its own in-process vLLM engine.
 
 Dummy-loads a 4-layer DeepSeek-V4-Flash through vLLM with the
 ``LMCacheMPConnector``, then asserts (via the LMCache server's HTTP
@@ -24,8 +29,14 @@ import os
 import sys
 import urllib.request
 
-LMCACHE_PORT = int(os.environ.get("LMCACHE_PORT", "6701"))
-LMCACHE_HTTP_PORT = int(os.environ.get("LMCACHE_HTTP_PORT", "8701"))
+# Must be set before vLLM/torch are imported: the hardware-independence
+# patches below only apply in-process, and the engine must share the test's
+# GPU selection (the same GPU launch-processes.sh gave the LMCache server).
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", os.environ.get("GPU_FOR_VLLM", "0"))
+
+LMCACHE_PORT = int(os.environ.get("LMCACHE_PORT", "6555"))
+LMCACHE_HTTP_PORT = int(os.environ.get("LMCACHE_HTTP_PORT", "8080"))
 
 GiB = 1024**3
 

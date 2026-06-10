@@ -58,7 +58,17 @@ echo "Results dir: $RESULTS_DIR"
 echo ""
 
 # Tests that handle their own server lifecycle (different GPU/model config)
-SELF_CONTAINED_TESTS=" deadlock hma_dsv4_flash "
+SELF_CONTAINED_TESTS=" deadlock "
+
+# Tests that need only the LMCache server from launch-processes.sh: they
+# drive vLLM themselves (e.g. an in-process dummy-load engine), so the
+# shared vLLM API server (and the readiness wait for it) is skipped.
+SERVER_ONLY_TESTS=" hma_dsv4_flash "
+if [[ "$SERVER_ONLY_TESTS" == *" $TEST_NAME "* ]]; then
+    export LAUNCH_VLLM=false
+else
+    export LAUNCH_VLLM=true
+fi
 
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
@@ -82,14 +92,16 @@ if [[ "$SELF_CONTAINED_TESTS" != *" $TEST_NAME "* ]]; then
     echo ""
 
     # ── Step 2: Wait for vLLM to be ready ───────────────────────
-    echo "============================================"
-    echo "=== Waiting for vLLM to be ready ==="
-    echo "============================================"
-    if ! "${SCRIPT_DIR}/wait-for-servers.sh"; then
-        echo "vLLM failed to become ready"
-        exit 1
+    if [[ "$LAUNCH_VLLM" == "true" ]]; then
+        echo "============================================"
+        echo "=== Waiting for vLLM to be ready ==="
+        echo "============================================"
+        if ! "${SCRIPT_DIR}/wait-for-servers.sh"; then
+            echo "vLLM failed to become ready"
+            exit 1
+        fi
+        echo ""
     fi
-    echo ""
 fi
 
 # ── Step 3: Run the requested test ──────────────────────────
@@ -105,7 +117,7 @@ case "$TEST_NAME" in
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
     hma_dsv4_flash)
-        exec_script="${SCRIPT_DIR}/run-hma-dsv4-flash.sh"
+        exec_script="${SCRIPT_DIR}/hma-dsv4-flash-check.py"
         ;;
     vllm_bench)
         exec_script="${SCRIPT_DIR}/run-vllm-bench.sh"

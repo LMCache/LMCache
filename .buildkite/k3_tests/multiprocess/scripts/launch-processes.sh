@@ -17,9 +17,9 @@ MAX_WORKERS="${MAX_WORKERS:-4}"
 MODEL="${MODEL:-Qwen/Qwen3-14B}"
 BUILD_ID="${BUILD_ID:-local_$$}"
 
-# K8s assigns exactly 2 GPUs as devices 0 and 1
-GPU_FOR_VLLM=0
-GPU_FOR_BASELINE=1
+# K8s assigns exactly 2 GPUs as devices 0 and 1 (overridable for local runs)
+GPU_FOR_VLLM="${GPU_FOR_VLLM:-0}"
+GPU_FOR_BASELINE="${GPU_FOR_BASELINE:-1}"
 echo "Using GPU $GPU_FOR_VLLM for vLLM with LMCache"
 echo "Using GPU $GPU_FOR_BASELINE for vLLM baseline"
 
@@ -82,6 +82,7 @@ lmcache server \
     --eviction-policy LRU \
     --max-workers "$MAX_WORKERS" \
     --port "$LMCACHE_PORT" \
+    --http-port "${LMCACHE_HTTP_PORT:-8080}" \
     > "/tmp/build_${BUILD_ID}_lmcache.log" 2>&1 &
 
 LMCACHE_PID=$!
@@ -98,6 +99,11 @@ sleep 10
 unset VLLM_PORT
 
 # ── 2. vLLM with LMCache ────────────────────────────────────
+# Tests that drive vLLM themselves (e.g. hma_dsv4_flash, which dummy-loads
+# its own in-process engine) set LAUNCH_VLLM=false and only get the LMCache
+# server from this script.
+if [[ "${LAUNCH_VLLM:-true}" == "true" ]]; then
+
 echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
 echo "Port: $vllm_port"
@@ -120,6 +126,10 @@ vllm serve "$MODEL" \
 VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
 echo "vLLM with LMCache started (PID=$VLLM_PID)"
+
+else
+    echo "=== Skipping vLLM with LMCache (LAUNCH_VLLM=false) ==="
+fi
 
 # ── 3. vLLM Baseline (without LMCache) ──────────────────────
 # Only launched for tests that compare against a baseline (2-GPU pods).
