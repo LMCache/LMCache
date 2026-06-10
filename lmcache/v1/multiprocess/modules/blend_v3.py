@@ -312,10 +312,6 @@ class BlendV3Module:
         # path depends on) inside the single unified RPC.
         self._lookup_module = lookup_module
 
-        # Populated by cb_register_rope; mirrors gpu_transfer.gpu_contexts.
-        self._cb_gpu_contexts: dict[int, GPUCacheContext] = {}
-        self._cb_gpu_context_meta: dict[int, tuple[str, int]] = {}
-
         self._token_range_matcher = BlendTokenRangeMatcherV3(ctx.chunk_size)
         self._event_bus = ctx.event_bus
         self._cb_rope_state: dict[int, _CBRopeState] = {}
@@ -384,19 +380,23 @@ class BlendV3Module:
         ]
 
     def report_status(self) -> dict:
+        # Meta is derived live from gpu_transfer (the single source of truth)
+        # rather than a mirror kept in sync here.
+        cache_contexts = self._gpu_transfer.cache_contexts
+
+        def _meta(iid: int) -> "tuple[str, int] | None":
+            entry = cache_contexts.get(iid)
+            return (entry.model_name, entry.world_size) if entry is not None else None
+
         return {
             "registered_cb_rope_instances": list(self._cb_rope_state.keys()),
-            "cb_rope_meta": {
-                str(instance_id): self._cb_gpu_context_meta.get(instance_id)
-                for instance_id in self._cb_rope_state.keys()
-            },
+            "cb_rope_meta": {str(iid): _meta(iid) for iid in self._cb_rope_state},
+            "active_cb_lookups": len(self._cb_jobs),
         }
 
     def close(self) -> None:
         self._fingerprint_stop.set()
         self._cb_rope_state.clear()
-        self._cb_gpu_contexts.clear()
-        self._cb_gpu_context_meta.clear()
 
     # ------------------------------------------------------------------
     # V3 RPCs
@@ -417,8 +417,6 @@ class BlendV3Module:
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
             )
-        entry = cache_contexts[instance_id]
-        gpu_context = entry.cache_context
 
         cos_sin_cache = cos_sin_cache_ipc.to_tensor()
         # YaRN/longrope bake an mscale m into the rope cache (cos²+sin²=m²≠1).
@@ -448,10 +446,6 @@ class BlendV3Module:
             cos_sin_cache=cos_sin_cache,
         )
 
-        # cb_unified_lookup resolves (model, ws) → ctx via this mirror.
-        self._cb_gpu_contexts[instance_id] = gpu_context
-        self._cb_gpu_context_meta[instance_id] = (entry.model_name, entry.world_size)
-
         logger.info(
             "Registered CB rope state for instance %d "
             "(cos_sin_cache shape=%s dtype=%s, head_size=%d, is_neox=%s)",
@@ -465,8 +459,6 @@ class BlendV3Module:
     def cb_unregister_rope(self, instance_id: int) -> None:
         """Drop rope state. Paged KV cache stays (use UNREGISTER_KV_CACHE)."""
         self._cb_rope_state.pop(instance_id, None)
-        self._cb_gpu_contexts.pop(instance_id, None)
-        self._cb_gpu_context_meta.pop(instance_id, None)
         if instance_id not in self._gpu_transfer.cache_contexts:
             logger.warning(
                 "cb_unregister_rope: instance %d not registered", instance_id
@@ -518,9 +510,9 @@ class BlendV3Module:
         self, model_name: str, world_size: int
     ) -> "MemoryLayoutDesc | None":
         """Find the CB KV buffer layout for (model, world_size), or None."""
-        for gpu_id, (m_name, w_size) in self._cb_gpu_context_meta.items():
-            if m_name == model_name and w_size == world_size:
-                cb_ctx = self._cb_gpu_contexts[gpu_id]
+        for entry in self._gpu_transfer.cache_contexts.values():
+            if entry.model_name == model_name and entry.world_size == world_size:
+                cb_ctx = entry.cache_context
                 return MemoryLayoutDesc(
                     shapes=[cb_ctx.get_kv_buffer_shape(self._ctx.chunk_size)],
                     dtypes=[cb_ctx.dtype],
