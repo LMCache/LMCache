@@ -26,8 +26,8 @@ Each recipe page is intentionally minimal:
 - **Caveats** -- known limitations, if any.
 
 For the generic LMCache + engine wiring (ports, remote hosts, in-process mode,
-sending a first request), see :doc:`../getting_started/quickstart` and
-:doc:`../mp/quickstart`. Recipes assume those pages as a prerequisite.
+sending a first request), see :doc:`../mp/quickstart`. Recipes assume that
+page as a prerequisite.
 
 Supported architectures
 -----------------------
@@ -93,6 +93,13 @@ Supported architectures
      - —
      - :doc:`qwen3`
 
+   * - ``Qwen3_5ForConditionalGeneration``
+     - ``Qwen/Qwen3.5-0.8B``
+     - ✓
+     - —
+     - —
+     - :doc:`qwen3_5`
+
    * - ``LlamaForCausalLM``
      - ``meta-llama/Meta-Llama-3.1-70B-Instruct``
      - ✓
@@ -138,6 +145,7 @@ To add a new architecture:
    devstral
    gpt_oss
    qwen3
+   qwen3_5
    llama
    phi3
    mixtral

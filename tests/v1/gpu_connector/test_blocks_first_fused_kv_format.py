@@ -16,6 +16,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
 from lmcache.python_ops_fallback import (
     multi_layer_block_kv_transfer as fallback_multi_layer_block_kv_transfer,
 )
@@ -29,6 +30,11 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 import lmcache.c_ops as lmc_ops
+
+pytestmark = pytest.mark.skipif(
+    torch_device_type != "cpu",
+    reason="vLLM blocks-first fused format (Format 10) is strictly CPU-only.",
+)
 
 NB, NH, BS, HS, NL = 16, 4, 128, 64, 3
 HINTS = {"kv_layout": "HND"}

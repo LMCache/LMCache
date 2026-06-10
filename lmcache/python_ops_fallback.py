@@ -843,6 +843,8 @@ def _per_layer_paged_shape(
         return (nb, nh, bs, 2, hs)
     if fmt == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
         return (2, nb, bs, nh, hs)
+    if fmt == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
+        return (nb, nh, bs, 2, hs)
     # Covers NL_X_NB_TWO_BS_NH_HS and any future NHD variants.
     return (nb, 2, bs, nh, hs)
 
