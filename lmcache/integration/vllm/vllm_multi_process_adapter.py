@@ -19,6 +19,7 @@ from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
+    CudaIPCWrapper,
     IPCCacheServerKey,
     KVCache,
 )
@@ -542,6 +543,7 @@ class LoadStoreOp:
 StoreResult = bool
 RetrieveResult = bool
 LookupResult = int
+QueryResult = bool
 
 
 class LMCacheMPSchedulerAdapter:
@@ -993,10 +995,14 @@ class LMCacheMPWorkerAdapter:
         self.retrieve_futures: dict[
             str, tuple[MessagingFuture[RetrieveResult], list[int]]
         ] = {}
+        self.query_futures: dict[
+            tuple[str, str, int], MessagingFuture[QueryResult] # (request_id, layer_name, pos_start)
+        ] = {}
         # The IPC handle is not enough by itself; CUDA needs the exporting
         # event object to stay alive until the consumer is done with it.
         self.store_events: dict[str, _IpcEvent] = {}
         self.retrieve_events: dict[str, _IpcEvent] = {}
+        self.query_events: dict[tuple[str, str, int], _IpcEvent] = {}
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
@@ -1296,6 +1302,79 @@ class LMCacheMPWorkerAdapter:
         self.store_futures[request_id] = future
         self.store_events[request_id] = event
 
+    def cleanup_query_futures(self) -> list[tuple[str, str, int]]:
+        """
+        Clean up finished query futures and events.
+        Called by get_finished.
+
+        Returns:
+            A list of tags for the finished query futures to be sent
+            to vLLM scheduler for cleanup. Each tag is a tuple of
+            (request_id, layer_name, pos_start).
+        """
+        done = []
+        for key, future in self.query_futures.items():
+            if future.query():
+                # result = future.result()
+                done.append(key)
+        for key in done:
+            self.query_futures.pop(key, None)
+            self.query_events.pop(key, None)
+        return done
+
+    @_lmcache_nvtx_annotate
+    def submit_query_request(
+        self,
+        request_id: str,
+        op: LoadStoreOp,
+        layer_name: str,
+        query: torch.Tensor,
+        event: _IpcEvent,
+        cache_salt: str = "",
+    ):
+        """
+        Submit a Query cache request to LMCache
+
+        Args:
+            request_id: The ID of the request
+            op: The LoadStoreOp describing the store operation.
+            layer_name: The name of the layer for which to query.
+            query: The query tensor.
+            event: The CUDA event that is recorded after the current
+                model inference step
+            cache_salt: Per-user isolation salt.
+        """
+        self._ensure_heartbeat_started()
+
+        if not self.is_healthy:
+            return
+
+        assert op.token_ids is not None
+        key = self._create_key(
+            op.token_ids,
+            op.start,
+            op.end,
+            request_id=request_id,
+            cache_salt=cache_salt,
+        )
+        if self.transfer_ctx is None:
+            raise RuntimeError(
+                "Transfer context is not initialized. "
+                "Call register_kv_caches() before submitting store requests."
+            )
+        q_cache = [CudaIPCWrapper(query)]
+        future = self.transfer_ctx.submit_query(
+            request_id,
+            key,
+            self.instance_id,
+            layer_name,
+            q_cache,
+            event,
+        )
+        tag = (request_id, layer_name, op.start)
+        self.query_futures[tag] = future
+        self.query_events[tag] = event
+
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
         self,
@@ -1303,7 +1382,7 @@ class LMCacheMPWorkerAdapter:
         op: LoadStoreOp,
         event: _IpcEvent,
         cache_salt: str = "",
-    ) -> None:
+    ):
         """
         Submit a KV cache retrieve request to LMCache
 
@@ -1425,7 +1504,7 @@ class LMCacheMPWorkerAdapter:
     @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids_from_engine: set[str]
-    ) -> tuple[set[str] | None, set[str] | None]:
+    ) -> tuple[set[str] | None, set[str] | None, list]:
         """
         Check and get the finished store and retrieve requests.
 
@@ -1471,6 +1550,7 @@ class LMCacheMPWorkerAdapter:
             dropped = self._dropped_retrieves
             self._dropped_retrieves = set()
             finished_retrieves.update(dropped)
+            q_keys = self.cleanup_query_futures()
 
             ret_stores = self._process_finished_stores(
                 finished_stores, finished_req_ids_from_engine
@@ -1481,7 +1561,7 @@ class LMCacheMPWorkerAdapter:
             # first and deletes the request, so we must not also report it
             # in finished_sending.
             ret_stores -= finished_retrieves
-            return ret_stores, finished_retrieves
+            return ret_stores, finished_retrieves, q_keys
 
         finished_stores = set()
         finished_retrieves = set()
@@ -1521,6 +1601,18 @@ class LMCacheMPWorkerAdapter:
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
             self.retrieve_events.pop(request_id, None)
+        q_keys = self.cleanup_query_futures()
+        
+
+        # Retrieves dropped while unhealthy still must be reported,
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
+        # finished_sending dedup is needed (unlike the unhealthy branch): a
+        # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
+        # this report, so it cannot also be engine-finished in the same call.
+        # Swap-drain so a concurrent submit_retrieve_request add is never lost.
+        dropped = self._dropped_retrieves
+        self._dropped_retrieves = set()
+        finished_retrieves.update(dropped)
 
         # Retrieves dropped while unhealthy still must be reported,
         # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
@@ -1548,7 +1640,7 @@ class LMCacheMPWorkerAdapter:
                 kv_rank=self.worker_id,
             )
 
-        return ret_stores, finished_retrieves
+        return ret_stores, finished_retrieves, q_keys
 
     def num_blocks_per_chunk(self) -> int:
         """

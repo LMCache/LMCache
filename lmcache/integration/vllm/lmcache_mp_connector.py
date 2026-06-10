@@ -485,6 +485,15 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __repr__(self):
         return self.__str__()
 
+def get_tensor(
+    args: dict[str, Any],
+    arg_names: list[str],
+) -> torch.Tensor | None:
+    """Return the first matching tensor argument, or None."""
+    for name in arg_names:
+        if name in args:
+            return args[name]
+    return None
 
 class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     """
@@ -586,6 +595,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                         f"a multiple of group {engine_group_idx} "
                         f"tokens_per_block {tokens_per_block}"
                     )
+
+        self.q_caches : dict[tuple[str, str, int], torch.Tensor] = {}
+
+    @property
+    def transfer_intermediate_tensors(self) -> bool:
+        return self._vllm_config.kv_transfer_config.get_from_extra_config(
+            "transfer_intermediate_tensors", False
+        )
+
 
     @property
     def role(self) -> KVConnectorRole:
@@ -703,6 +721,40 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        intermediate_tensors = kwargs.get("intermediate_tensors", None)
+        if intermediate_tensors is None:
+            return
+        query = get_tensor(intermediate_tensors, ["q", "query"])
+        if query is None:
+            return
+
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, LMCacheMPConnectorMetadata)
+
+        query_row_start = 0
+
+        for meta in metadata.requests:
+            if meta.direction != "STORE":
+                continue
+
+            query_num_tokens = meta.op.end - meta.op.start
+            query_row_end = query_row_start + query_num_tokens
+            q_slice = query[query_row_start:query_row_end]
+
+            with torch.cuda.stream(torch.cuda.current_stream()):
+                event = torch.cuda.Event(interprocess=True)
+                event.record()
+
+            self.q_caches[(meta.request_id, layer_name, meta.op.start)] = q_slice
+            
+            self.worker_adapter.submit_query_request(
+                meta.request_id,
+                meta.op,
+                layer_name,
+                q_slice,
+                event
+            )
+            query_row_start += query_num_tokens
         return
 
     def wait_for_save(self):
@@ -758,8 +810,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        val = self.worker_adapter.get_finished(finished_req_ids)
+        (ret_stores, finished_retrieves, q_keys) = self.worker_adapter.get_finished(finished_req_ids)
+        for key in q_keys:
+            self.q_caches.pop(key, None)
         # logger.error("Finished req ids: %s, %s", val[0], val[1])
+        val = ret_stores, finished_retrieves
         return val
 
     def get_block_ids_with_load_errors(self) -> set[int]:

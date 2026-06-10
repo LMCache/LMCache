@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from typing import TypedDict
 import threading
+import hashlib
 
 # First Party
 from lmcache.logging import init_logger
@@ -226,6 +227,37 @@ class MPCacheServerContext:
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
         return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
+
+    def resolve_q_obj_keys(self, key: IPCCacheEngineKey, layer_name: str) -> list[ObjectKey]:
+        """Resolve object keys from an IPC cache key.
+
+        Uses the session manager to track token state and the token hasher
+        to compute chunk hashes for the requested range.
+
+        Args:
+            key: IPC cache key describing model/session/token range.
+            layer_name: The name of the layer for which to resolve keys.
+
+        Returns:
+            Resolved object keys for the requested token range.
+
+        Raises:
+            ValueError: If ``key.worker_id`` is ``None``.
+        """
+        session = self.session_manager.get_or_create(key.request_id)
+        session.set_tokens(list(key.token_ids))
+        chunk_hashes = [
+            TokenHasher.hash_to_bytes(h) for h in session.get_hashes(key.start, key.end)
+        ]
+        if key.worker_id is None:
+            raise ValueError("Must resolve keys with worker_id != None")
+        layer_prefix = hashlib.blake2b(
+            layer_name.encode("utf-8"),
+            digest_size=8,
+        ).digest()
+        q_chunk_hashes = [b"Q" + layer_prefix + h for h in chunk_hashes]
+        q_obj_keys = ipc_key_to_object_keys(key, q_chunk_hashes)
+        return q_obj_keys
 
     @staticmethod
     def _compute_shm_pool_info(
