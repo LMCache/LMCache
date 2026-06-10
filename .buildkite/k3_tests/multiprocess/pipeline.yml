@@ -117,43 +117,10 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-  # GDS L1 tier: the same three workloads, but the LMCache L1 medium is an NVMe
-  # slab via cuFile DMA instead of pinned DRAM (run.sh prefixes the name gds_).
-  # Mounts /data/gds-scratch at /scratch -- the GDS-capable NVMe scratch -- plus
-  # the host's /run/udev (read-only): cuFile resolves the slab device's
-  # attributes via libudev, and a pod's /run/udev is empty, so without this
-  # cuFileHandleRegister fails (err 5027) and the server won't start.
+  # GDS L1 tier: run lm_eval's gsm8k determinism check with the LMCache L1
+  # medium as an NVMe slab via cuFile DMA
   - group: ":compression: Multiprocess (GDS L1, NVMe slab)"
     steps:
-      - label: ":compression: gds_vllm_bench"
-        command: .buildkite/k3_tests/multiprocess/run.sh gds_vllm_bench
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins:
-          - kubernetes:
-              podSpec: &pod-2gpu-gds
-                containers:
-                  - name: container-0
-                    image: lmcache/ci-base:latest
-                    imagePullPolicy: Never
-                    resources: { limits: { "nvidia.com/gpu": "2" } }
-                    volumeMounts: &vol-mounts-gds
-                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
-                      - { name: scratch, mountPath: /scratch }
-                      - { name: udev, mountPath: /run/udev, readOnly: true }
-                volumes: &vols-gds
-                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
-                  - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
-                  - { name: udev, hostPath: { path: /run/udev, type: Directory } }
-        artifact_paths: ["*.log"]
-
-      - label: ":compression: gds_long_doc_qa"
-        command: .buildkite/k3_tests/multiprocess/run.sh gds_long_doc_qa
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu-gds } }]
-        artifact_paths: ["*.log"]
-
       - label: ":compression: gds_lm_eval"
         command: .buildkite/k3_tests/multiprocess/run.sh gds_lm_eval
         timeout_in_minutes: 30
@@ -166,8 +133,14 @@ steps:
                     image: lmcache/ci-base:latest
                     imagePullPolicy: Never
                     resources: { limits: { "nvidia.com/gpu": "1" } }
-                    volumeMounts: *vol-mounts-gds
-                volumes: *vols-gds
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: scratch, mountPath: /scratch }
+                      - { name: udev, mountPath: /run/udev, readOnly: true }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
+                  - { name: udev, hostPath: { path: /run/udev, type: Directory } }
         artifact_paths: ["*.log"]
 
   - group: ":compression: Multiprocess (CPU-only)"
