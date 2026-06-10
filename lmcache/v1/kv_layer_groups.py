@@ -291,27 +291,16 @@ class KVLayerGroupsManager:
                 :func:`normalize_kv_and_discover_format`.
             gpu_kv_format: Format returned by
                 :func:`normalize_kv_and_discover_format`.
-            num_blocks: Number of paged blocks. Stamped into every
-                ``shape_desc.nb``. Each group's ``shape_desc.bs`` is
-                discovered per-layer via :func:`get_block_size`, so
-                compressed and non-compressed groups can coexist.
+            num_blocks: Number of paged blocks in the device KV cache.
             layout_hints: Engine-provided hints. The manager only reads
                 ``inference_engine_logical_block_size`` (logical tokens
                 per inference-engine block) from it to derive each
                 group's ``compress_ratio`` and ``physical_chunk_size``.
                 ``None`` means every group is treated as non-compressed
                 (``compress_ratio == 1``).
-            engine_group_infos: LMCache-owned engine KV cache group
-                metadata. When present, it is used to keep layers from
-                different engine block-ID spaces in separate LMCache
-                transfer groups.
-            lmcache_logical_chunk_size: Logical tokens per LMCache chunk
-                (one logical token = one inference-engine token).
-                Together with ``compress_ratio`` it determines each
-                group's ``physical_chunk_size =
-                lmcache_logical_chunk_size // compress_ratio``, the
-                number of *physical* slots per chunk fed to the
-                block-level transfer kernel.
+            engine_group_infos: Engine KV cache group metadata, including
+                the engine group ids, and the sliding window information.
+            lmcache_logical_chunk_size: Tokens per LMCache chunk
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -455,6 +444,7 @@ class KVLayerGroupsManager:
         return len(self._kernel_groups)
 
     @property
+    @lmcache_deprecate("This function will be removed soon")
     def inference_engine_logical_block_size(self) -> int:
         """Inference-engine-side logical block size.
 
@@ -471,8 +461,6 @@ class KVLayerGroupsManager:
     def get_shape_desc(self, kernel_group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Return the :class:`PageBufferShapeDesc` for *kernel_group_idx*.
 
-        Equivalent to ``self._kernel_groups[kernel_group_idx].shape_desc``.
-
         Args:
             kernel_group_idx: 0-based kernel group index.
 
@@ -481,16 +469,9 @@ class KVLayerGroupsManager:
         """
         return self._kernel_groups[kernel_group_idx].shape_desc
 
+    @lmcache_deprecate("This function will be renamed to get_num_slots_per_chunk")
     def get_physical_chunk_size(self, kernel_group_idx: int) -> int:
         """Return the per-chunk *physical* slot count for *kernel_group_idx*.
-
-        Equivalent to
-        ``self._kernel_groups[kernel_group_idx].physical_chunk_size``.
-        For non-compressed groups this equals
-        ``lmcache_logical_chunk_size``; for compressed groups it equals
-        ``lmcache_logical_chunk_size // compress_ratio`` and is what the
-        block-level transfer kernel must be told (the logical chunk size
-        in *vLLM tokens* is not what the kernel addresses).
 
         Args:
             kernel_group_idx: 0-based kernel group index.

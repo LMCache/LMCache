@@ -467,6 +467,7 @@ class GPUCacheContext:
         """Returns the PageBufferShapeDesc for the given KV layer group."""
         return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
 
+    @lmcache_deprecate("this function will be renamed to get_num_slots_per_chunk")
     def get_physical_chunk_size(self, group_idx: int) -> int:
         """Returns the per-chunk physical slot count for the given group.
 
