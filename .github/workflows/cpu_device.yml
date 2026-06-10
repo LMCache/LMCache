@@ -261,18 +261,22 @@ jobs:
           python -m pip install -e . --no-deps --no-build-isolation
 
       - name: Install vLLM CPU build
+        env:
+          VLLM_TARGET_DEVICE: cpu
+          VLLM_VERSION_TAG: v0.22.1
         run: |
-          # Use the vLLM nightly CPU index as the PRIMARY index so pip
-          # accepts wheels/sdists carrying a PEP 440 local version label
-          # such as 0.22.1+cpu. With --extra-index-url, pip 26 discards
-          # them as "inconsistent version" and silently falls back to
-          # 0.19.1, which predates kv_connector_module_path and breaks
-          # LMCacheMPConnector.
+          # macOS has no prebuilt CPU wheel on wheels.vllm.ai, and the
+          # PyPI sdist for vLLM carries a "+cpu" PEP 440 local label that
+          # pip 26 rejects as "inconsistent version", forcing a silent
+          # fallback to 0.19.1 (which predates kv_connector_module_path
+          # and breaks LMCacheMPConnector). Build from the upstream git
+          # tag instead so the source-tree version stays clean. Build
+          # isolation is left on so vLLM's pyproject build-system pulls
+          # in cmake / setuptools-rust / torch on its own.
           pip install "numpy<2"
-          pip install vllm \
-            --pre \
-            --index-url https://wheels.vllm.ai/nightly/cpu \
-            --extra-index-url https://pypi.org/simple
+          pip install \
+            "vllm @ git+https://github.com/vllm-project/vllm@${VLLM_VERSION_TAG}"
+          python -c "import vllm; print('vllm:', vllm.__version__)"
 
       - name: Download facebook/opt-125m
         run: |
