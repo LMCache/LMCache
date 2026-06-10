@@ -7,6 +7,7 @@ from typing import Any, Callable, NoReturn, Protocol
 import enum
 import os
 import threading
+import uuid
 
 # Third Party
 import torch
@@ -67,6 +68,11 @@ DEFAULT_MQ_TIMEOUT: float = ExtraConfigDefault.mq_timeout.value
 DEFAULT_HEARTBEAT_INTERVAL: float = ExtraConfigDefault.heartbeat_interval.value
 
 _EXTRA_CONFIG_KEY_PREFIX = "lmcache.mp."
+
+# Floor (seconds) of the MP server's worker reap timeout. It only covers the
+# default 10 s heartbeat interval (3 x 10 s); the adapter warns at startup
+# when 3 x heartbeat_interval exceeds it (server timeout must be raised too).
+_SERVER_REAP_TIMEOUT_FLOOR_SECONDS: float = 30.0
 
 
 def _resolve_extra_config(
@@ -280,6 +286,11 @@ def send_ping(
         return False
 
 
+def _never_abort_registration() -> bool:
+    """Default abort predicate for KV cache registration: never abort."""
+    return False
+
+
 @dataclass
 class ParallelStrategy:
     use_mla: bool
@@ -431,8 +442,21 @@ class HeartbeatThread(PeriodicThread):
         self._recover_callback = callback
 
     def _execute(self) -> ThreadRunSummary:
+        """Run one heartbeat cycle: ping, recover callback, event update.
+
+        A cycle that observes a stop request returns without firing the
+        callback or touching the event — a straggler success after
+        UNREGISTER must not re-register a ghost context.
+        """
         was_healthy = self._health_event.is_set()
         healthy = send_ping(self._mq_client, timeout=self._interval)
+
+        if self.stop_requested:
+            return ThreadRunSummary(
+                success=True,
+                message="stop requested; skipping health update",
+            )
+
         need_trigger_recover = (
             healthy and not was_healthy and self._recover_callback is not None
         )
@@ -937,8 +961,14 @@ class LMCacheMPWorkerAdapter:
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
-        # Instance id for GPU worker
-        self.instance_id = os.getpid()
+        # Instance id for GPU worker. uuid4-derived (OS entropy) rather
+        # than os.getpid() to avoid collision in containerized deployments.
+        # Masked to 63 bits to stay signed-int64-safe for any msgpack peer.
+        self.instance_id: int = uuid.uuid4().int & ((1 << 63) - 1)
+        logger.info(
+            "LMCache MP worker adapter created with instance_id=%d",
+            self.instance_id,
+        )
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -960,6 +990,11 @@ class LMCacheMPWorkerAdapter:
 
         # Block IDs that failed due to retrieve timeout
         self.error_block_ids: set[int] = set()
+
+        # Retrieve request ids dropped by the unhealthy early-return of
+        # submit_retrieve_request. get_finished must still report each id
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
+        self._dropped_retrieves: set[str] = set()
 
         # The store requests that have finished execution in LMCache
         self.finished_stores: set[str] = set()
@@ -998,6 +1033,18 @@ class LMCacheMPWorkerAdapter:
         self._heartbeat_interval = heartbeat_interval
         self._heartbeat: HeartbeatThread | None = None
         self._heartbeat_lock = threading.Lock()
+        if 3 * heartbeat_interval > _SERVER_REAP_TIMEOUT_FLOOR_SECONDS:
+            logger.warning(
+                "lmcache.mp.heartbeat_interval is %.1fs, so 3 x "
+                "heartbeat_interval (%.1fs) exceeds the MP server's "
+                "default worker reap timeout floor (%.1fs). Raise the "
+                "server's worker reap timeout to at least 3 x the "
+                "heartbeat interval, or the server may reap this "
+                "worker between heartbeats.",
+                heartbeat_interval,
+                3 * heartbeat_interval,
+                _SERVER_REAP_TIMEOUT_FLOOR_SECONDS,
+            )
 
         # request telemetry, used for prefill-decode disagg
         # TODO: pass down the configuration via vLLM connector config
@@ -1077,25 +1124,37 @@ class LMCacheMPWorkerAdapter:
         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
     def _send_register_kv_caches_request(
-        self, kv_caches: dict[str, torch.Tensor]
-    ) -> None:
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        abort_predicate: Callable[[], bool] = _never_abort_registration,
+    ) -> bool:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 
         Shared by the public ``register_kv_caches`` entry point and the
-        recovery path inside ``is_healthy``.
+        heartbeat recovery path (``_reregister_kv_caches_callback``).
 
         Args:
             kv_caches: The KV cache dict to register.
+            abort_predicate: Consulted after the transfer context is built,
+                right before the REGISTER is submitted. ``True`` closes and
+                discards the new context (``self.transfer_ctx`` untouched)
+                and sends nothing.
+
+        Returns:
+            ``True`` if the REGISTER was submitted and acknowledged;
+            ``False`` if ``abort_predicate`` aborted the submission.
 
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        self.transfer_ctx = create_transfer_context(
-            kv_caches, mode=self._mp_transfer_mode
-        )
+        transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = vllm_layout_hints()
+        if abort_predicate():
+            transfer_ctx.close()
+            return False
+        self.transfer_ctx = transfer_ctx
         try:
             self.transfer_ctx.register(
                 self.instance_id,
@@ -1115,23 +1174,39 @@ class LMCacheMPWorkerAdapter:
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+        return True
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first use."""
+        """Lazily start the heartbeat thread on first use (pessimistic).
+
+        Order is normative: clear event -> construct -> wire callback ->
+        start -> assign ``self._heartbeat`` last. Starting unhealthy makes
+        the first ping take the recovery edge (re-register; server noops if
+        server not reaped yet).
+        """
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
             if self._heartbeat is not None:
                 return
-            self._heartbeat = HeartbeatThread(
+            self._health_event.clear()
+            heartbeat = HeartbeatThread(
                 mq_client=self.mq_client,
                 health_event=self._health_event,
                 interval=self._heartbeat_interval,
             )
-            self._heartbeat.register_recover_callback(
-                self._reregister_kv_caches_callback
-            )
-            self._heartbeat.start()
+            heartbeat.register_recover_callback(self._reregister_kv_caches_callback)
+            heartbeat.start()
+            self._heartbeat = heartbeat
+
+    def _heartbeat_stop_requested(self) -> bool:
+        """Whether a created heartbeat thread has a stop requested.
+
+        Returns:
+            ``True`` only if a heartbeat exists and its stop was requested.
+        """
+        heartbeat = self._heartbeat
+        return heartbeat is not None and heartbeat.stop_requested
 
     def _reregister_kv_caches_callback(self) -> bool:
         """Heartbeat recover callback: re-register KV caches after the
@@ -1139,10 +1214,9 @@ class LMCacheMPWorkerAdapter:
         event is set.
 
         Returns:
-            ``True`` if there is nothing to re-register or registration
-            succeeds; ``False`` on registration failure (the heartbeat
-            will keep the health event cleared and retry on the next
-            successful PING).
+            ``True`` if nothing needs re-registering or registration
+            succeeds; ``False`` on failure or a requested heartbeat stop
+            (event stays cleared; retried on the next successful PING).
         """
         if not self.kv_caches:
             # Nothing was registered yet (server flapped before the
@@ -1150,9 +1224,17 @@ class LMCacheMPWorkerAdapter:
             # health event can be set.
             return True
 
+        # A REGISTER submitted after UNREGISTER would ghost a server-side
+        # context. Early check skips the rebuild; the abort_predicate below
+        # re-checks right before submission (stop can land mid-rebuild).
+        if self._heartbeat_stop_requested():
+            logger.info("Heartbeat stop requested; skipping KV cache re-registration")
+            return False
+
         try:
-            self._send_register_kv_caches_request(self.kv_caches)
-            logger.warning("Finished re-registering KV caches after server recovery")
+            registered = self._send_register_kv_caches_request(
+                self.kv_caches, abort_predicate=self._heartbeat_stop_requested
+            )
         except ConnectionError:
             logger.exception(
                 "Failed to re-register KV caches after server recovery; "
@@ -1165,6 +1247,10 @@ class LMCacheMPWorkerAdapter:
                 "will retry on next heartbeat"
             )
             return False
+        if not registered:
+            logger.info("Heartbeat stop requested; skipping KV cache re-registration")
+            return False
+        logger.warning("Finished re-registering KV caches after server recovery")
         return True
 
     @_lmcache_nvtx_annotate
@@ -1226,6 +1312,10 @@ class LMCacheMPWorkerAdapter:
         """
         Submit a KV cache retrieve request to LMCache
 
+        When the server is unhealthy the request is not submitted: blocks
+        are flagged via ``error_block_ids`` (vLLM recomputes) and the id is
+        recorded so ``get_finished`` still reports it exactly once.
+
         Args:
             request_id: The ID of the request
             op: The LoadStoreOp describing the retrieve operation.
@@ -1237,6 +1327,7 @@ class LMCacheMPWorkerAdapter:
 
         if not self.is_healthy:
             self.error_block_ids.update(op.flat_block_ids)
+            self._dropped_retrieves.add(request_id)
             return
 
         assert op.token_ids is not None
@@ -1352,7 +1443,9 @@ class LMCacheMPWorkerAdapter:
             - The first set contains the finished store request ids. The returned
                 store request ids MUST be seen before in the
                 `finished_req_ids_from_engine`.
-            - The second set contains the finished retrieve request ids.
+            - The second set contains the finished retrieve request ids,
+                including retrieves dropped at submit time while unhealthy
+                (reported exactly once; blocks already in error_block_ids).
 
         Notes:
             When enabling async scheduling in vLLM, the same request ID may appear
@@ -1374,6 +1467,11 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_futures.clear()
             self.store_events.clear()
             self.retrieve_events.clear()
+
+            # Retrieves dropped at submit time still must be reported,
+            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
+            finished_retrieves.update(self._dropped_retrieves)
+            self._dropped_retrieves.clear()
 
             ret_stores = self._process_finished_stores(
                 finished_stores, finished_req_ids_from_engine
@@ -1425,10 +1523,20 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_futures.pop(request_id, None)
             self.retrieve_events.pop(request_id, None)
 
+        # Retrieves dropped while unhealthy still must be reported,
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
+        dropped_retrieves = set(self._dropped_retrieves)
+        finished_retrieves.update(dropped_retrieves)
+        self._dropped_retrieves.clear()
+
         # Update the internal states
         ret_stores = self._process_finished_stores(
             finished_stores, finished_req_ids_from_engine
         )
+        # A dropped retrieve may already be engine-finished in this same
+        # call; it must not appear in both finished_recving and
+        # finished_sending (mirrors the unhealthy branch's guard).
+        ret_stores -= dropped_retrieves
 
         # the invocation of `get_finished` means that
         # these requests' KV caches are already fully stored.
@@ -1461,8 +1569,16 @@ class LMCacheMPWorkerAdapter:
 
     def shutdown(self):
         """
-        Shutdown the LMCache MP worker adapter
+        Shutdown the LMCache MP worker adapter.
+
+        Stops the heartbeat (if started) before UNREGISTER: no new ping
+        on the closing mq_client, and a straggler in-flight cycle cannot
+        re-register or flip the health event after unregistration.
         """
+        with self._heartbeat_lock:
+            if self._heartbeat is not None:
+                self._heartbeat.stop()
+
         logger.info("Unregistering kv caches")
         try:
             unregister_type = (

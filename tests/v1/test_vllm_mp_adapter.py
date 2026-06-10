@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Public-API unit tests for ``LMCacheMPWorkerAdapter.register_kv_caches``.
-
-Behavioural coverage of the heartbeat-driven recovery path
-(``HeartbeatThread.register_recover_callback`` →
-worker re-registration) lives in the buildkite end-to-end test
-``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``.
-That path requires driving the periodic-thread tick loop, which is
-deliberately not reachable through any public interface.
-"""
+"""Public-API unit tests for ``LMCacheMPWorkerAdapter``. The MQ boundary is
+stubbed (see ``fake_adapter``); no GPU or live server needed. End-to-end
+recovery: ``.buildkite/k3_tests/multiprocess/scripts/run-restart-recovery.sh``."""
 
 # Standard
+from typing import Callable, ClassVar
 from unittest.mock import MagicMock
 import gc
+import os
+import threading
+import time
 import weakref
 
 # Third Party
@@ -21,6 +19,7 @@ import torch
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
+    HeartbeatThread,
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
     ParallelStrategy,
@@ -34,14 +33,118 @@ class FakeCudaEvent:
         return b"fake-ipc-handle"
 
 
+class FakeHeartbeatThread:
+    """Test double mirroring ``HeartbeatThread``'s public surface.
+    ``start()`` invokes class-level ``start_hook`` when set, otherwise
+    simulates a successful first ping. Class state reset per test."""
+
+    instances: ClassVar[list["FakeHeartbeatThread"]] = []
+    start_hook: ClassVar[Callable[["FakeHeartbeatThread"], None] | None] = None
+
+    def __init__(
+        self,
+        mq_client: object = None,
+        health_event: threading.Event | None = None,
+        interval: float = 0.0,
+    ) -> None:
+        self.mq_client = mq_client
+        self.health_event = (
+            health_event if health_event is not None else threading.Event()
+        )
+        self.interval = interval
+        # Snapshot of the health event at construction time: lets tests
+        # assert the adapter cleared the event *before* building the
+        # thread (pessimistic start).
+        self.health_event_set_at_init = self.health_event.is_set()
+        self.recover_callback: Callable[[], bool] | None = None
+        # Ordered record of public calls ("register_recover_callback",
+        # "start", "stop") for call-order assertions.
+        self.calls: list[str] = []
+        self.stop_requested = False
+        FakeHeartbeatThread.instances.append(self)
+
+    def register_recover_callback(self, callback: Callable[[], bool]) -> None:
+        self.calls.append("register_recover_callback")
+        self.recover_callback = callback
+
+    def start(self) -> None:
+        self.calls.append("start")
+        hook = FakeHeartbeatThread.start_hook
+        if hook is not None:
+            hook(self)
+        else:
+            self.simulate_successful_ping()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self.calls.append("stop")
+        self.stop_requested = True
+
+    def simulate_successful_ping(self) -> None:
+        """Mimic one successful heartbeat cycle: on the unhealthy->healthy
+        edge the recover callback runs first, and the event is set only
+        when the callback returns ``True``."""
+        was_healthy = self.health_event.is_set()
+        ok = True
+        if not was_healthy and self.recover_callback is not None:
+            ok = self.recover_callback()
+        if ok:
+            self.health_event.set()
+
+
+def _make_worker_adapter(
+    extra_config: dict[str, object] | None = None,
+) -> LMCacheMPWorkerAdapter:
+    """Construct a worker adapter with the standard test arguments; the
+    network boundary must already be patched (see ``fake_adapter``).
+    ``extra_config`` forwards ``lmcache.mp.*`` overrides."""
+    parallel_strategy = ParallelStrategy(
+        use_mla=False,
+        vllm_world_size=1,
+        vllm_worker_id=0,
+        tp_size=1,
+        pp_size=1,
+    )
+    return LMCacheMPWorkerAdapter(
+        server_url="tcp://127.0.0.1:0",
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=parallel_strategy,
+        mq_timeout=5.0,
+        extra_config=extra_config,
+    )
+
+
+def _op(block_ids: list[list[int]]) -> LoadStoreOp:
+    """Build a minimal four-token ``LoadStoreOp`` over *block_ids*."""
+    return LoadStoreOp(token_ids=[1, 2, 3, 4], block_ids=block_ids, start=0, end=4)
+
+
+def _patch_transfer_context_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[MagicMock]:
+    """Patch ``create_transfer_context`` to mint recorded MagicMocks,
+    returning the list every created context is appended to."""
+    contexts: list[MagicMock] = []
+
+    def fake_create_transfer_context(
+        kv_caches: dict[str, torch.Tensor], mode: str
+    ) -> MagicMock:
+        ctx = MagicMock(name=f"transfer_ctx_{len(contexts)}")
+        contexts.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", fake_create_transfer_context
+    )
+    return contexts
+
+
 @pytest.fixture
 def fake_adapter(monkeypatch):
-    """Build an adapter through its real ``__init__`` with the network
-    boundary stubbed out. Returns ``(adapter, send_mock, future)`` where
-    ``send_mock`` is the patched ``send_lmcache_request`` and ``future``
-    is its return value (a ``MagicMock`` whose ``result()`` defaults to
-    succeed; tests can attach ``side_effect`` to simulate failures).
-    """
+    """Build an adapter with the network boundary stubbed. Returns
+    ``(adapter, send_mock, future)``; ``future.result()`` defaults to succeed.
+    ``HeartbeatThread`` is replaced by ``FakeHeartbeatThread``."""
     # Stub the MQ boundary so __init__'s chunk-size query and any later
     # send_lmcache_request call don't touch a real socket.
     fake_client = MagicMock(name="mq_client")
@@ -53,16 +156,8 @@ def fake_adapter(monkeypatch):
     send_mock = MagicMock(name="send_lmcache_request", return_value=future)
     monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_mock)
 
-    class FakeHeartbeatThread:
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            self.recover_callback: object | None = None
-
-        def register_recover_callback(self, callback: object) -> None:
-            self.recover_callback = callback
-
-        def start(self) -> None:
-            return None
-
+    FakeHeartbeatThread.instances.clear()
+    FakeHeartbeatThread.start_hook = None
     monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
 
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
@@ -74,21 +169,7 @@ def fake_adapter(monkeypatch):
         lambda: {},
     )
 
-    parallel_strategy = ParallelStrategy(
-        use_mla=False,
-        vllm_world_size=1,
-        vllm_worker_id=0,
-        tp_size=1,
-        pp_size=1,
-    )
-    adapter = LMCacheMPWorkerAdapter(
-        server_url="tcp://127.0.0.1:0",
-        context=MagicMock(name="zmq_context"),
-        model_name="test-model",
-        vllm_block_size=16,
-        parallel_strategy=parallel_strategy,
-        mq_timeout=5.0,
-    )
+    adapter = _make_worker_adapter()
     # __init__ issues exactly one MQ call (the chunk-size query). Reset
     # so individual tests start with a clean call count.
     send_mock.reset_mock()
@@ -291,3 +372,455 @@ def test_retrieve_keeps_event_until_future_finishes(fake_adapter):
     transfer_ctx.reset_mock()
     gc.collect()
     assert event_ref() is None
+
+
+def test_instance_id_is_uuid_derived_63_bit_int(fake_adapter) -> None:
+    """instance_id is a 63-bit int, not the PID, and unique per adapter."""
+    adapter, _send_mock, _ = fake_adapter
+
+    assert isinstance(adapter.instance_id, int)
+    assert not isinstance(adapter.instance_id, bool)
+    assert 0 <= adapter.instance_id < 2**63
+    assert adapter.instance_id != os.getpid()
+
+    other = _make_worker_adapter()
+    assert other.instance_id != adapter.instance_id
+
+
+def test_instance_id_logged_at_info_on_construction(fake_adapter, monkeypatch) -> None:
+    """The constructor logs instance_id at INFO for correlating server-side
+    reap warnings. The module logger does not propagate (``propagate=False``),
+    so the test spies on it directly instead of using ``caplog``."""
+    _adapter, _send_mock, _ = fake_adapter
+    messages: list[str] = []
+
+    def spy_info(msg: object, *args: object, **kwargs: object) -> None:
+        messages.append(str(msg) % args if args else str(msg))
+
+    monkeypatch.setattr(adapter_mod.logger, "info", spy_info)
+
+    adapter = _make_worker_adapter()
+
+    assert any(str(adapter.instance_id) in msg for msg in messages)
+
+
+def test_pessimistic_start_clears_event_once_and_wires_callback_first(
+    fake_adapter,
+) -> None:
+    """The lazy create path clears the health event before constructing
+    the heartbeat, wires the recover callback before ``start()``, and is
+    idempotent on re-entry (no second thread, no re-clear)."""
+    adapter, _send_mock, _ = fake_adapter
+    adapter.transfer_ctx = MagicMock()
+    assert adapter.is_healthy  # the constructor leaves the event set
+
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+
+    assert len(FakeHeartbeatThread.instances) == 1
+    heartbeat = FakeHeartbeatThread.instances[0]
+    # The event was cleared before the thread was constructed...
+    assert heartbeat.health_event_set_at_init is False
+    # ...the recover callback was wired before start()...
+    assert heartbeat.calls == ["register_recover_callback", "start"]
+    # ...and the simulated first ping took the edge and set the event.
+    assert adapter.is_healthy
+
+    # Re-entry is idempotent: no new thread, and the event is NOT
+    # re-cleared (the second submission goes through healthy).
+    adapter.submit_store_request("req-2", _op([[1]]), MagicMock())
+    assert len(FakeHeartbeatThread.instances) == 1
+    assert adapter.is_healthy
+    assert adapter.transfer_ctx.submit_store.call_count == 2
+
+
+def test_create_race_no_submission_passes_gate_before_first_ping(
+    fake_adapter,
+) -> None:
+    """Two threads racing the lazy heartbeat create: no submission may pass
+    the ``is_healthy`` gate while the first ping is in flight. Both racing
+    retrieves must be dropped (blocks flagged, ids via ``get_finished``)."""
+    adapter, _send_mock, _ = fake_adapter
+    transfer_ctx = MagicMock()
+    adapter.transfer_ctx = transfer_ctx
+
+    start_entered = threading.Event()
+    release_start = threading.Event()
+
+    def blocked_first_ping(heartbeat: FakeHeartbeatThread) -> None:
+        start_entered.set()
+        release_start.wait(timeout=10.0)
+        # Do not simulate a ping: the first ping never completes, so
+        # the health event stays cleared.
+
+    FakeHeartbeatThread.start_hook = blocked_first_ping
+
+    thread_a = threading.Thread(
+        target=adapter.submit_retrieve_request,
+        args=("req-a", _op([[0, 1]]), MagicMock()),
+    )
+    thread_a.start()
+    assert start_entered.wait(timeout=10.0)
+
+    thread_b = threading.Thread(
+        target=adapter.submit_retrieve_request,
+        args=("req-b", _op([[2, 3]]), MagicMock()),
+    )
+    thread_b.start()
+    time.sleep(0.2)  # give thread B a window to (incorrectly) submit
+    assert not transfer_ctx.submit_retrieve.called
+    # Under correct assign-last ordering B is still blocked on the
+    # heartbeat lock; if self._heartbeat were published before start()
+    # returned, B would have completed via the unhealthy drop path.
+    assert thread_b.is_alive()
+
+    release_start.set()
+    thread_a.join(timeout=10.0)
+    thread_b.join(timeout=10.0)
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+
+    assert not transfer_ctx.submit_retrieve.called
+    _ret_stores, finished_retrieves = adapter.get_finished(set())
+    assert finished_retrieves == {"req-a", "req-b"}
+    assert adapter.get_block_ids_with_load_errors() == {0, 1, 2, 3}
+
+
+def test_first_ping_edge_fires_reregister_then_sets_event(
+    fake_adapter, monkeypatch
+) -> None:
+    """With the event cleared at heartbeat start, the first successful
+    ping fires the recover callback (observed as a fresh transfer
+    context plus a REGISTER submission) before traffic flows."""
+    adapter, _send_mock, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+    assert len(contexts) == 1
+    assert contexts[0].register.called
+
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+
+    # The first ping took the unhealthy->healthy edge: re-register
+    # (fresh context + REGISTER) ran before the event was set, and only
+    # then did the gated store proceed.
+    assert len(contexts) == 2
+    assert contexts[1].register.called
+    assert adapter.is_healthy
+    assert contexts[1].submit_store.called
+
+
+def test_heartbeat_first_ping_runs_callback_before_setting_event(
+    monkeypatch,
+) -> None:
+    """Real HeartbeatThread: started with the health event cleared, the
+    first successful ping invokes the recover callback while the event
+    is still cleared, then sets the event."""
+    monkeypatch.setattr(adapter_mod, "send_ping", lambda mq_client, timeout: True)
+    health_event = threading.Event()  # cleared: pessimistic start state
+    heartbeat = HeartbeatThread(
+        mq_client=MagicMock(name="mq_client"),
+        health_event=health_event,
+        interval=60.0,
+    )
+    event_state_during_callback: list[bool] = []
+
+    def recover() -> bool:
+        event_state_during_callback.append(health_event.is_set())
+        return True
+
+    heartbeat.register_recover_callback(recover)
+    try:
+        heartbeat.start()
+        assert health_event.wait(timeout=10.0)
+    finally:
+        heartbeat.stop(timeout=10.0)
+
+    assert event_state_during_callback == [False]
+
+
+def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
+    fake_adapter,
+) -> None:
+    """A retrieve submitted while unhealthy is dropped (blocks flagged,
+    nothing sent) and reported exactly once by the unhealthy branch of
+    ``get_finished``."""
+    adapter, _send_mock, _ = fake_adapter
+    transfer_ctx = MagicMock()
+    adapter.transfer_ctx = transfer_ctx
+    FakeHeartbeatThread.start_hook = lambda heartbeat: None  # ping never succeeds
+
+    adapter.submit_retrieve_request("req-1", _op([[3, 4]]), MagicMock())
+
+    assert not adapter.is_healthy
+    assert not transfer_ctx.submit_retrieve.called
+
+    ret_stores, finished_retrieves = adapter.get_finished(set())
+    assert ret_stores == set()
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == {3, 4}
+
+    # Exactly once: a second poll must not re-report the request.
+    _ret_stores, finished_retrieves = adapter.get_finished(set())
+    assert finished_retrieves == set()
+
+
+def test_dropped_retrieve_reported_once_via_healthy_get_finished(
+    fake_adapter,
+) -> None:
+    """A retrieve dropped while unhealthy is still reported exactly once
+    by the healthy branch of ``get_finished`` after the server
+    recovers."""
+    adapter, _send_mock, _ = fake_adapter
+    adapter.transfer_ctx = MagicMock()
+    FakeHeartbeatThread.start_hook = lambda heartbeat: None  # ping never succeeds
+
+    adapter.submit_retrieve_request("req-1", _op([[5]]), MagicMock())
+    assert not adapter.is_healthy
+
+    # Server recovers: the next heartbeat cycle takes the edge.
+    FakeHeartbeatThread.instances[0].simulate_successful_ping()
+    assert adapter.is_healthy
+
+    _ret_stores, finished_retrieves = adapter.get_finished(set())
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == {5}
+
+    _ret_stores, finished_retrieves = adapter.get_finished(set())
+    assert finished_retrieves == set()
+
+
+def test_dropped_retrieve_engine_finished_same_healthy_call_reported_once(
+    fake_adapter,
+) -> None:
+    """A dropped retrieve whose request is also engine-finished in the same
+    healthy ``get_finished`` call is reported only in finished_retrieves,
+    never also in finished_sending."""
+    adapter, _send_mock, _ = fake_adapter
+    adapter.transfer_ctx = MagicMock()
+    FakeHeartbeatThread.start_hook = lambda heartbeat: None  # ping never succeeds
+
+    adapter.submit_retrieve_request("req-1", _op([[5]]), MagicMock())
+    assert not adapter.is_healthy
+
+    # Server recovers between the drop and the next get_finished poll.
+    FakeHeartbeatThread.instances[0].simulate_successful_ping()
+    assert adapter.is_healthy
+
+    ret_stores, finished_retrieves = adapter.get_finished({"req-1"})
+    assert finished_retrieves == {"req-1"}
+    assert ret_stores == set()
+
+
+def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
+    """shutdown() stops the heartbeat before sending UNREGISTER, so no
+    stray heartbeat ping can race the closing mq_client."""
+    adapter, send_mock, future = fake_adapter
+    adapter.transfer_ctx = MagicMock()
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    heartbeat = FakeHeartbeatThread.instances[0]
+
+    stop_state_at_unregister: list[bool] = []
+
+    def record_send(
+        mq_client: object, request_type: RequestType, payloads: list[object]
+    ) -> MagicMock:
+        if request_type == RequestType.UNREGISTER_KV_CACHE:
+            stop_state_at_unregister.append(heartbeat.stop_requested)
+        return future
+
+    send_mock.side_effect = record_send
+
+    adapter.shutdown()
+
+    assert "stop" in heartbeat.calls
+    assert stop_state_at_unregister == [True]
+
+
+def test_shutdown_without_heartbeat_sends_unregister(fake_adapter) -> None:
+    """shutdown() on an adapter whose heartbeat was never lazily started
+    (cold shutdown before any traffic) still sends UNREGISTER and does
+    not raise."""
+    adapter, send_mock, _future = fake_adapter
+
+    adapter.shutdown()
+
+    assert FakeHeartbeatThread.instances == []
+    assert send_mock.call_count == 1
+    args, _kwargs = send_mock.call_args
+    assert args[1] == RequestType.UNREGISTER_KV_CACHE
+    assert args[2] == [adapter.instance_id]
+
+
+def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> None:
+    """Real HeartbeatThread: a ping still in flight when ``stop()`` returns
+    completes without firing the recover callback or setting the health
+    event — a straggler success must not re-register a ghost context."""
+    ping_entered = threading.Event()
+    release_ping = threading.Event()
+
+    def slow_ping(mq_client: object, timeout: float) -> bool:
+        ping_entered.set()
+        release_ping.wait(timeout=10.0)
+        return True
+
+    monkeypatch.setattr(adapter_mod, "send_ping", slow_ping)
+    health_event = threading.Event()  # cleared: a success would take the edge
+    heartbeat = HeartbeatThread(
+        mq_client=MagicMock(name="mq_client"),
+        health_event=health_event,
+        interval=60.0,
+    )
+    callback = MagicMock(name="recover_callback", return_value=True)
+    heartbeat.register_recover_callback(callback)
+
+    heartbeat.start()
+    assert ping_entered.wait(timeout=10.0)
+    # The join times out while the ping is still in flight.
+    heartbeat.stop(timeout=0.05)
+    release_ping.set()
+
+    # Wait for the straggler cycle to complete.
+    deadline = time.time() + 10.0
+    while heartbeat.total_runs == 0 and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert heartbeat.total_runs == 1
+    callback.assert_not_called()
+    assert not health_event.is_set()
+
+
+def test_recover_callback_skips_register_after_stop_requested(
+    fake_adapter, monkeypatch
+) -> None:
+    """A recover callback that observes a requested stop bails out before
+    submitting REGISTER: a REGISTER submitted after UNREGISTER would
+    re-create a ghost server-side context."""
+    adapter, _send_mock, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.recover_callback is not None
+    rebuilds_before = len(contexts)
+
+    # Simulate a stop landing while a recovery cycle is in flight: the
+    # pre-submission re-check must refuse to re-register.
+    heartbeat.stop()
+    assert heartbeat.recover_callback() is False
+
+    assert len(contexts) == rebuilds_before  # no new transfer context
+    assert contexts[-1].register.call_count == 1  # no second REGISTER
+
+
+def test_recover_callback_aborts_register_when_stop_lands_mid_rebuild(
+    fake_adapter, monkeypatch
+) -> None:
+    """A stop landing mid-rebuild is still honored before the REGISTER
+    submission: no REGISTER is submitted, the rebuilt context is closed,
+    and the previously registered context stays in place."""
+    adapter, _send_mock, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[0]
+    # First store lazily starts the heartbeat; the simulated first ping
+    # fires the recover callback, which rebuilds the context.
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())  # contexts[1]
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.recover_callback is not None
+    registered_ctx = adapter.transfer_ctx
+
+    rebuilt: list[MagicMock] = []
+
+    def create_and_stop(kv_caches: dict[str, torch.Tensor], mode: object) -> MagicMock:
+        # The stop lands mid-rebuild, after the callback already began.
+        heartbeat.stop()
+        ctx = MagicMock(name="rebuilt_ctx")
+        rebuilt.append(ctx)
+        return ctx
+
+    monkeypatch.setattr(adapter_mod, "create_transfer_context", create_and_stop)
+
+    assert heartbeat.recover_callback() is False
+
+    assert len(rebuilt) == 1
+    rebuilt[0].register.assert_not_called()  # no REGISTER after the stop
+    rebuilt[0].close.assert_called_once()  # discarded context is released
+    assert adapter.transfer_ctx is registered_ctx  # not republished
+    assert registered_ctx is contexts[-1]  # still the pre-stop context
+
+
+def test_startup_warns_when_heartbeat_interval_exceeds_reap_floor(
+    fake_adapter, monkeypatch
+) -> None:
+    """3 x heartbeat_interval > 30 s emits a startup WARNING to raise the
+    server's worker reap timeout. The module logger does not propagate
+    (``propagate=False``), so the test spies on it instead of ``caplog``."""
+    _adapter, _send_mock, _ = fake_adapter
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        adapter_mod.logger,
+        "warning",
+        lambda msg, *args, **kwargs: warnings.append(str(msg)),
+    )
+
+    _make_worker_adapter(extra_config={"lmcache.mp.heartbeat_interval": 15})
+
+    assert any("reap" in msg for msg in warnings)
+
+
+def test_startup_does_not_warn_for_default_heartbeat_interval(
+    fake_adapter, monkeypatch
+) -> None:
+    """The default 10 s heartbeat interval (3 x 10 s == 30 s floor) must
+    not emit the reap-timeout startup WARNING."""
+    _adapter, _send_mock, _ = fake_adapter
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        adapter_mod.logger,
+        "warning",
+        lambda msg, *args, **kwargs: warnings.append(str(msg)),
+    )
+
+    _make_worker_adapter()
+
+    assert not any("reap" in msg for msg in warnings)
+
+
+def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
+    fake_adapter, monkeypatch
+) -> None:
+    """Pin current behavior: every recover-callback invocation rebuilds
+    ``transfer_ctx`` without closing the previous context (known IPC leak;
+    in-flight submissions may still hold a reference to the old context)."""
+    adapter, _send_mock, _ = fake_adapter
+    contexts = _patch_transfer_context_factory(monkeypatch)
+
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[0]
+    # First store lazily starts the heartbeat; the simulated first ping
+    # fires the recover callback, which rebuilds the context.
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())  # contexts[1]
+    heartbeat = FakeHeartbeatThread.instances[0]
+    assert heartbeat.recover_callback is not None
+
+    assert len(contexts) == 2
+    assert adapter.transfer_ctx is contexts[1]
+    contexts[0].close.assert_not_called()
+
+    assert heartbeat.recover_callback() is True
+    assert len(contexts) == 3
+    assert adapter.transfer_ctx is contexts[2]
+    contexts[1].close.assert_not_called()
+
+    assert heartbeat.recover_callback() is True
+    assert len(contexts) == 4
+    assert adapter.transfer_ctx is contexts[3]
+    contexts[2].close.assert_not_called()
