@@ -9,6 +9,7 @@ manager wiring while keeping CI portable.
 # Standard
 from typing import cast
 import gc
+import json
 import os
 
 # Third Party
@@ -30,6 +31,7 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.config import (
     L2AdapterConfigBase,
     L2AdaptersConfig,
+    get_type_name_for_config,
 )
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
 from lmcache.v1.memory_management import DevDaxMemoryAllocator, MixedMemoryAllocator
@@ -427,6 +429,69 @@ def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
     assert mem_cfg.use_lazy is False
     assert mem_cfg.shm_name == ""
     assert config.l2_adapter_config.adapters == []
+
+
+@pytest.mark.parametrize(
+    ("adapter_spec", "expected_adapter_type"),
+    [
+        (
+            {"type": "fs", "base_path": "fs-l2"},
+            "fs",
+        ),
+        (
+            {
+                "type": "raw_block",
+                "device_path": "rawblock-l2.bin",
+                "slot_bytes": 8192,
+                "capacity_bytes": 16384,
+                "meta_total_bytes": 4096,
+                "use_odirect": False,
+                "meta_enable_periodic": False,
+                "load_checkpoint_on_init": False,
+                "meta_verify_on_load": False,
+            },
+            "raw_block",
+        ),
+    ],
+)
+def test_cli_hybrid_l1_keeps_ordinary_l2_adapters(
+    tmp_path, adapter_spec, expected_adapter_type
+):
+    path = _make_mmap_file(tmp_path)
+    adapter_spec = {
+        key: str(tmp_path / value) if key in ("base_path", "device_path") else value
+        for key, value in adapter_spec.items()
+    }
+
+    config = parse_args(
+        [
+            "--l1-size-gb",
+            "1",
+            "--eviction-policy",
+            "LRU",
+            "--l1-devdax-path",
+            path,
+            "--l2-adapter",
+            json.dumps(
+                {
+                    "type": "dax",
+                    "device_path": path,
+                    "max_dax_size_gb": 2,
+                    "slot_bytes": 4096,
+                }
+            ),
+            "--l2-adapter",
+            json.dumps(adapter_spec),
+        ]
+    )
+
+    mem_cfg = config.l1_manager_config.memory_config
+    assert mem_cfg.devdax_size_in_bytes == 2 << 30
+    assert len(config.l2_adapter_config.adapters) == 1
+    assert (
+        get_type_name_for_config(config.l2_adapter_config.adapters[0])
+        == expected_adapter_type
+    )
 
 
 def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):
