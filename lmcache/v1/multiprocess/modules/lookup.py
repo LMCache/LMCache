@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from functools import partial
+import itertools
 import threading
 import time
 
@@ -266,7 +267,8 @@ class LookupModule:
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
+        obj_keys_per_group = ipc_key_to_object_keys(key, chunk_hashes, [0])
+        obj_keys = list(itertools.chain.from_iterable(obj_keys_per_group))
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,

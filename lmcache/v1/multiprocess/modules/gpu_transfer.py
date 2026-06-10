@@ -792,6 +792,8 @@ class GPUTransferModule:
                 num_chunks * self._ctx.chunk_size,
                 ed - st,
             )
+            # ------------------------------------------------------------------------ THIS NEEDS TO BE REMOVED
+            logger.warning("DEBUG: stored bytes: %d", total_bytes)
         return event.ipc_handle(), True
 
     @_lmcache_nvtx_annotate
@@ -964,5 +966,7 @@ class GPUTransferModule:
             tokens_retrieved,
             ed - st,
         )
+        # ------------------------------------------------------------------------ THIS NEEDS TO BE REMOVED
+        logger.warning("DEBUG: retrieved bytes: %d", total_bytes)
 
         return event.ipc_handle(), True

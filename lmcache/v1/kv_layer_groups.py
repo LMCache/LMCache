@@ -191,6 +191,9 @@ class KernelGroupInfo:
     is known."""
     engine_group_idx: int = 0
     """Engine group index (paged-block address space). 0 for non-hybrid."""
+    sw_size_tokens: int = -1
+    """Sliding window size in logical tokens for this group's layers.
+    ``-1`` means the layers are not sliding-window attention."""
 
     def __repr__(self) -> str:
         if not self.layer_indices:
@@ -208,7 +211,8 @@ class KernelGroupInfo:
             f"dtype={self.dtype}, "
             f"compress_ratio={self.compress_ratio}, "
             f"physical_chunk_size={self.physical_chunk_size}, "
-            f"engine_group_idx={self.engine_group_idx})"
+            f"engine_group_idx={self.engine_group_idx}, "
+            f"sw_size_tokens={self.sw_size_tokens})"
         )
 
     @property
@@ -241,8 +245,10 @@ class ObjectGroupInfo:
     """Indices of the kernel groups belonging to this object group, in the
     order they should be laid out in memory."""
 
-    # NOTE: will add fields to indicate the "kv cache type" of this
-    # object group in the follow-up PRs
+    sw_size_chunks: int = -1
+    """Cross-chunk sliding window size in LMCache chunks shared by every
+    kernel group in this object group. ``-1`` means the kernel groups are
+    not sliding-window attention (all chunks are needed)."""
 
 
 class KVLayerGroupsManager:
@@ -310,7 +316,10 @@ class KVLayerGroupsManager:
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
-        from lmcache.v1.multiprocess.group_view import get_engine_group_indices
+        from lmcache.v1.multiprocess.group_view import (
+            get_engine_group_indices,
+            get_layer_sw_sizes,
+        )
 
         # Pull the inference-engine logical block size out of
         # ``layout_hints`` once; ``None`` means no compression info
@@ -334,6 +343,7 @@ class KVLayerGroupsManager:
         per_layer_engine_group_idx = get_engine_group_indices(
             engine_group_infos, num_layers
         )
+        per_layer_sw_size = get_layer_sw_sizes(engine_group_infos, num_layers)
 
         groups_by_identity = group_layers_by_identity(
             kv_caches, gpu_kv_format, num_layers, per_layer_engine_group_idx
@@ -387,6 +397,9 @@ class KVLayerGroupsManager:
                     compress_ratio=compress_ratio,
                     physical_chunk_size=physical_chunk_size,
                     engine_group_idx=engine_group_idx,
+                    sw_size_tokens=self._merge_layer_sw_sizes(
+                        per_layer_sw_size, indices
+                    ),
                 )
             )
 
@@ -496,9 +509,10 @@ class KVLayerGroupsManager:
             chunk size for non-slding-window models or big-sliding-
             window models.
         """
-        # TODO(ApostaC): now here's the 'dummy' implementation.
-        # Need to wire the real sw size from the kernel group info once it's available
-        return self._lmcache_chunk_size
+        sw_size_tokens = self._kernel_groups[kernel_group_idx].sw_size_tokens
+        if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_chunk_size:
+            return self._lmcache_chunk_size
+        return sw_size_tokens
 
     def get_sw_size_chunks(self, object_group_idx: int) -> int:
         """Return the sliding window size of a given kernel group,
@@ -519,9 +533,7 @@ class KVLayerGroupsManager:
             they can be retrieved at the same time from the same object.
             For small sliding window (subchunk window) models, it will return 1.
         """
-        # TODO(ApostaC): now here's the 'dummy' implementation.
-        # Need to wire the real sw size from the object group info once it's available
-        return -1
+        return self._object_groups[object_group_idx].sw_size_chunks
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a
@@ -547,20 +559,65 @@ class KVLayerGroupsManager:
     ) -> list[ObjectGroupInfo]:
         """Detect object groups based on the provided engine group infos.
 
+        Kernel groups sharing the same cross-chunk sliding window size (in
+        LMCache chunks) are bucketed into one object group, so every object
+        group's chunks can be retrieved together from the same memory object.
+        Non-sliding-window kernel groups share the ``-1`` bucket. Object
+        groups are emitted in order of their first member kernel group, so
+        object group indices are deterministic across runs.
+
         Args:
             engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Returns:
             A list of ObjectGroupInfo instances representing the detected object groups.
         """
-        # TODO: add the real object group detection logic based on
-        # the attention type metadata in the engine group infos once it's
-        # available.
-        # Now, we are using a single object group, which means
-        # all kernel groups' KV caches will be stored in the same memory object.
+        chunk_size = self._lmcache_chunk_size
+        groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
+        for kernel_group_idx, group in enumerate(self._kernel_groups):
+            if group.sw_size_tokens == -1:
+                sw_size_chunks = -1
+            else:
+                sw_size_chunks = (group.sw_size_tokens + chunk_size - 1) // chunk_size
+            groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
         return [
-            ObjectGroupInfo(kernel_group_indices=list(range(len(self._kernel_groups))))
+            ObjectGroupInfo(
+                kernel_group_indices=kernel_group_indices,
+                sw_size_chunks=sw_size_chunks,
+            )
+            for sw_size_chunks, kernel_group_indices in sorted(
+                groups_by_sw_size.items(), key=lambda kv: kv[1][0]
+            )
         ]
+
+    @staticmethod
+    def _merge_layer_sw_sizes(
+        per_layer_sw_size: "list[int] | None", layer_indices: list[int]
+    ) -> int:
+        """Merge the per-layer sliding window sizes of one kernel group.
+
+        Args:
+            per_layer_sw_size: Sliding window size per registered tensor
+                index, or ``None`` when no engine group metadata exists.
+            layer_indices: Registered tensor indices of the group's layers.
+
+        Returns:
+            The group's common sliding window size in tokens, or ``-1`` when
+            the layers are not sliding-window attention or mix different
+            window sizes.
+        """
+        if per_layer_sw_size is None:
+            return -1
+        sw_sizes = {per_layer_sw_size[idx] for idx in layer_indices}
+        if len(sw_sizes) == 1:
+            return sw_sizes.pop()
+        logger.warning(
+            "Kernel group layers %s mix different sliding window sizes %s; "
+            "treating the group as full attention",
+            layer_indices,
+            sorted(sw_sizes),
+        )
+        return -1
 
     @staticmethod
     def _derive_compression_metadata(
