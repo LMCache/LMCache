@@ -31,6 +31,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Sequence
 from typing import Any, Optional, Set
+import errno
 import os
 import struct
 import threading
@@ -489,10 +490,13 @@ class PeriodicEventNotifier:
             for fd in fds_snapshot:
                 try:
                     os.write(fd, payload)
-                except OSError:
-                    # The fd may have been closed externally; silently ignore.
-                    # The user is expected to call unregister_fd() on close.
-                    pass
+                except OSError as e:
+                    # The fd may have been closed externally.
+                    # Automatically unregister it on EBADF/EPIPE to avoid
+                    # repeated write attempts on every tick (CPU overhead).
+                    if e.errno in (errno.EBADF, errno.EPIPE):
+                        self.unregister_fd(fd)
+                    # Other errors are silently ignored.
 
             # Wait for next tick or early shutdown. Using wait_for(predicate)
             # avoids the lost-wakeup race where shutdown() fires while we're
