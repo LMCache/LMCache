@@ -4,8 +4,7 @@ Verify that every public class/method in the Python fallback
 ``lmcache.native_storage_ops`` matches the C++ extension
 ``native_storage_ops.cpython-*.so``.
 
-Mirrors the structure of ``test_c_ops_fallback_parity.py`` but adapted to a
-class-based API.  Three parity dimensions only — purely structural, no
+Three parity dimensions only — purely structural, no
 behavior testing:
 
 1. Class existence    - every class in the .so has a fallback class.
@@ -19,9 +18,6 @@ behavior testing:
 Requires the compiled extension (``.so``) to be importable.  Automatically
 skipped on CPU-only / non-CUDA CI where only the Python fallback is present.
 
-Helper functions are intentionally duplicated from
-``test_c_ops_fallback_parity.py`` rather than extracted into a shared module
-to keep each parity suite self-contained.
 """
 
 # Standard
@@ -110,7 +106,7 @@ TESTED_DUNDERS: frozenset[str] = frozenset(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers (duplicated from test_c_ops_fallback_parity.py with overload support)
+# Helpers for parsing docstrings
 # ─────────────────────────────────────────────────────────────────────────────
 def _normalize_default(value_str: str) -> Any:
     """Normalize a default-value string for comparison.
