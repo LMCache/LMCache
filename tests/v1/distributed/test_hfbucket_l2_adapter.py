@@ -212,7 +212,16 @@ class TestObjectKeySerialization:
             model_name="llama",
             kv_rank=255,
         )
-        assert _object_key_to_string(key) == "llama@000000ff@00010203"
+        assert _object_key_to_string(key) == "llama@000000ff@0@00010203"
+
+    def test_object_group_id_embedded(self) -> None:
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            object_group_id=5,
+        )
+        assert _object_key_to_string(key) == "llama@000000ff@5@00010203"
 
     def test_cache_salt_appended(self) -> None:
         base_key = ObjectKey(
@@ -226,8 +235,8 @@ class TestObjectKeySerialization:
             kv_rank=255,
             cache_salt="user-42",
         )
-        assert _object_key_to_string(base_key) == "llama@000000ff@00010203"
-        assert _object_key_to_string(salted) == "llama@000000ff@00010203@user-42"
+        assert _object_key_to_string(base_key) == "llama@000000ff@0@00010203"
+        assert _object_key_to_string(salted) == "llama@000000ff@0@00010203@user-42"
         assert _object_key_to_string(base_key) != _object_key_to_string(salted)
 
     def test_bucket_path_uses_prefix_and_encoding(self) -> None:
