@@ -889,3 +889,33 @@ class TestBigtableConnector:
                 in mock_warning.call_args[0][0]
             )
             assert client == mock_client_cls.return_value
+
+    def test_bigtable_config_defaults(self):
+        """Verify that Bigtable configuration defaults are consistent."""
+        # First Party
+        from lmcache.v1.storage_backend.connector.bigtable_config import (
+            BigtablePluginConfig,
+        )
+
+        # Test defaults directly from class instantiation
+        config = BigtablePluginConfig(
+            project_id="test-project",
+            instance_id="test-instance",
+            table_name="test-table",
+        )
+        assert config.max_chunk_size_mb == 90.0
+        assert config.read_timeout_sec == 0.2
+        assert config.write_timeout_sec == 0.5
+        assert config.max_retries == 3
+
+        # Test defaults loaded via from_extra_config (no explicit overrides)
+        extra_config = {
+            "bigtable_project_id": "test-project",
+            "bigtable_instance_id": "test-instance",
+            "bigtable_table_name": "test-table",
+        }
+        loaded_config = BigtablePluginConfig.from_extra_config(extra_config)
+        assert loaded_config.max_chunk_size_mb == 90.0
+        assert loaded_config.read_timeout_sec == 0.2
+        assert loaded_config.write_timeout_sec == 0.5
+        assert loaded_config.max_retries == 3

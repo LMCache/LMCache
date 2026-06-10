@@ -19,7 +19,7 @@ class BigtablePluginConfig:
     row_key_template: str = "hash#model"
     credentials_path: Optional[str] = None
     max_retries: int = 3
-    max_chunk_size_mb: float = 20.0
+    max_chunk_size_mb: float = 90.0
     family_name: str = "cf"
     column_name: str = "data"
 

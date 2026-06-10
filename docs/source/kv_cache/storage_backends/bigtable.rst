@@ -14,7 +14,7 @@ Architecture & Payload Limits
 -----------------------------
 
 - **Chunk Size Optimization**: Set LMCache's logical ``chunk_size`` to **256 tokens**. This groups payloads to minimize sequential Point-Read gRPC calls, preventing Python event-loop (GIL) bottlenecks.
-- **MutateRow Limit**: Enforces a strict **20.0 MB request limit** for a single ``MutateRow`` gRPC request.
+- **MutateRow Limit**: Enforces a strict **90.0 MB request limit** for a single ``MutateRow`` gRPC request.
 - **Storage Tier Row Limits**: The **SSD Tier** ceiling is **100 MiB per cell/row**. The **Enterprise Plus In-Memory Tier** is limited to **1.0 MiB per row**.
 - **TTLCache Shielding**: Embeds a thread-safe ``TTLCache`` (10-second TTL default) to shield Bigtable nodes from concurrent prefetch lookup spikes.
 
@@ -104,7 +104,7 @@ extra_config:
   
   remote_storage_plugin.bigtable.credentials_path: "/etc/gcp/key.json"
   
-  remote_storage_plugin.bigtable.bigtable_max_chunk_size_mb: 20.0
+  remote_storage_plugin.bigtable.bigtable_max_chunk_size_mb: 90.0
   remote_storage_plugin.bigtable.exists_cache_ttl_seconds: 10.0
   remote_storage_plugin.bigtable.exists_cache_size: 10000
   
@@ -131,3 +131,17 @@ Run the unit tests:
 .. code-block:: bash
 
 pytest tests/v1/storage_backend/test_bigtable_connector.py
+
+Troubleshooting Large Payload Warnings
+--------------------------------------
+
+If you see a warning in the logs indicating that a chunk size exceeds the limit and is skipped (e.g. ``Bigtable chunk size ... MB exceeds threshold ... MB. Skipping write to prevent hard failures``), choose one of the following approaches:
+
+1. **Reduce the LMCache Chunk Size (Recommended)**:
+   The serialized chunk size depends on LMCache's logical ``chunk_size`` (number of tokens per chunk) and model shape. You can reduce ``chunk_size`` (e.g., from ``256`` to ``128``) in your configuration file to shrink individual chunk payloads.
+   
+2. **Increase the Max Chunk Size**:
+   If your Bigtable instance uses the SSD storage tier (which supports up to 100 MB per cell/row), you can raise the maximum allowed write threshold in the configuration up to ``99.0`` MB using the ``bigtable_max_chunk_size_mb`` config key (or the ``BT_MAX_CHUNK_SIZE_MB`` environment variable).
+   
+   .. warning::
+      Do not set ``bigtable_max_chunk_size_mb`` higher than ``100.0`` MB. While Cloud Bigtable supports up to ``256.0`` MB for a single row, a single cell value (which LMCache uses to store the chunk payload) has a hard limit of ``100.0`` MB. Exceeding this will trigger hard gRPC exceptions.
