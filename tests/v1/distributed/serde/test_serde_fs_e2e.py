@@ -150,14 +150,30 @@ class TestFp8SerdeFsRoundTrip:
         sm.finish_write(keys)
 
         # ---- Step 2: wait for L2 store to disk ----
-        ok = wait_for_condition(
-            lambda: any(e.is_file() for e in os.scandir(disk_path)),
-            timeout=10.0,
-        )
-        assert ok, f"No files appeared under {disk_path}"
+        # The FS adapter writes one file per key (staged as "*.tmp" in the
+        # same directory), so wait for all final files rather than the
+        # first: the controller's queue counters can both read zero in the
+        # window between popping pending keys and submitting the store
+        # tasks, so they only confirm settling after the files prove the
+        # store actually happened.
+        def count_stored_files() -> int:
+            return sum(
+                1
+                for e in os.scandir(disk_path)
+                if e.is_file() and not e.name.endswith(".tmp")
+            )
 
         ok = wait_for_condition(
-            lambda: sm.report_status()["store_controller"]["in_flight_task_count"] == 0,
+            lambda: count_stored_files() >= len(keys),
+            timeout=10.0,
+        )
+        assert ok, f"Expected {len(keys)} files under {disk_path}"
+
+        ok = wait_for_condition(
+            lambda: (
+                sm.report_status()["store_controller"]["in_flight_task_count"] == 0
+                and sm.report_status()["store_controller"]["pending_keys_count"] == 0
+            ),
             timeout=10.0,
         )
         assert ok, "Store controller did not finish in time"

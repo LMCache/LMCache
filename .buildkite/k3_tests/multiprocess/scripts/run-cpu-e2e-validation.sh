@@ -13,13 +13,22 @@ LMCACHE_PID=""
 VLLM_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
 VLLM_PORT="${VLLM_PORT:-8000}"
-LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-2}"
+LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-1}"
 LMCACHE_EVICTION_POLICY="${LMCACHE_EVICTION_POLICY:-LRU}"
 LMCACHE_CHUNK_SIZE="${LMCACHE_CHUNK_SIZE:-128}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.1}"
+# CPU-only KV cache pool size in GiB. vLLM defaults to 4 GiB when unset;
+# 1 GiB is plenty for opt-125m e2e validation.
+VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE:-1}"
+# Cap context length and concurrent sequences to shrink scheduler buffers.
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-2048}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
 LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-30}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
 # Set LMCACHE_SHM_NAME="" to use pickle transport; unset/default uses shm transport
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
+# Set LMCACHE_MP_TRANSFER_MODE=handle for server-side copy (POSIX SHM IPC)
+LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-auto}"
 
 # Directory to collect artifacts before workspace is deleted
 ARTIFACT_DIR="/tmp/build_${BUILD_ID}_artifacts"
@@ -141,6 +150,36 @@ print(int(total))
 EOF
 }
 
+# Wait for a metric to change from its previous value
+wait_for_metric_change() {
+  local metric_name="$1"
+  local previous_value="$2"
+  local timeout_seconds="${3:-5}"
+  
+  echo "Waiting for metric '${metric_name}' to change from ${previous_value} (timeout: ${timeout_seconds}s)"
+  
+  local start_time current_time
+  start_time=$(date +%s)
+  
+  while true; do
+    current_time=$(date +%s)
+    if [ $((current_time - start_time)) -ge "${timeout_seconds}" ]; then
+      echo "Timeout: Metric '${metric_name}' did not change within ${timeout_seconds}s"
+      return 1
+    fi
+    
+    local current_value
+    current_value="$(scrape_metric "${metric_name}")"
+    
+    if [ "${current_value}" -gt "${previous_value}" ]; then
+      echo "Metric '${metric_name}' changed from ${previous_value} to ${current_value}"
+      return 0
+    fi
+    
+    sleep 1
+  done
+}
+
 # Send a completion request and print the text output
 send_completion() {
   local prompt_file="$1"
@@ -165,12 +204,24 @@ print(json.dumps({
 
 start_vllm() {
   echo "Starting vLLM server..."
-  VLLM_TARGET_DEVICE=cpu vllm serve facebook/opt-125m \
+  # Export so multiproc_executor worker children inherit these. Without
+  # VLLM_CPU_KVCACHE_SPACE, CPU backend falls back to
+  # `total_memory * gpu_memory_utilization`, which can request 100s of GiB
+  # on big hosts and OOM (see vllm/v1/worker/cpu_worker.py:determine_available_memory).
+  export VLLM_TARGET_DEVICE=cpu
+  export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
+  export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
+  local kv_cache_bytes
+  kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
+  vllm serve facebook/opt-125m \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
     --disable-hybrid-kv-cache-manager \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.3 \
+    --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}" \
+    --kv-cache-memory-bytes "${kv_cache_bytes}" \
+    --max-model-len "${VLLM_MAX_MODEL_LEN}" \
+    --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
     --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}' \
     >"${VLLM_LOG}" 2>&1 &
   VLLM_PID=$!
@@ -273,7 +324,10 @@ LMCACHE_ARGS=(
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
   --chunk-size "${LMCACHE_CHUNK_SIZE}"
 )
-if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
+if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ]; then
+  echo "Transport mode: server-side copy (handle via POSIX SHM IPC)"
+  EXPECTED_TRANSPORT="handle"
+elif [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
   echo "Transport mode: shared memory (shm)"
   EXPECTED_TRANSPORT="shm"
 else
@@ -320,7 +374,14 @@ echo "✅ E2E request validation passed"
 
 # Verify transport mode (logged after vLLM connects to LMCache server)
 echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANSPORT}'"
-if [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
+if [ "${EXPECTED_TRANSPORT}" = "handle" ]; then
+  if ! grep -q "CpuCacheContext" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected server-side copy but 'CpuCacheContext' not found in log"
+    tail -50 "${LMCACHE_LOG}"
+    false
+  fi
+  echo "✅ Transport mode confirmed: handle (server-side copy)"
+elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
   if ! grep -q "Using shm" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but 'Using shm' not found in log"
     tail -50 "${LMCACHE_LOG}"
@@ -377,7 +438,7 @@ start_vllm
 # Request A (first time) → should trigger store
 echo "[Phase 3 / Step 3] Request A (first) — expecting LMCache store"
 L1_WRITE_BEFORE=$(scrape_metric "lmcache_mp_l1_write_chunks_total")
-OUTPUT_1=$(send_completion "${PROMPT_FILE}" 200)
+OUTPUT_1=$(send_completion "${PROMPT_FILE}" 50)
 echo "Output 1: ${OUTPUT_1}"
 sleep 2  # allow async store to complete
 L1_WRITE_AFTER=$(scrape_metric "lmcache_mp_l1_write_chunks_total")
@@ -392,7 +453,7 @@ echo "✅ LMCache store verified (${STORE_DELTA} chunks written)"
 # Request A (second time, same vLLM instance) → should trigger read/hit
 echo "[Phase 3 / Step 4] Request A (second) — expecting LMCache hit"
 L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
-OUTPUT_2=$(send_completion "${PROMPT_FILE}" 200)
+OUTPUT_2=$(send_completion "${PROMPT_FILE}" 50)
 echo "Output 2: ${OUTPUT_2}"
 sleep 2
 L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
@@ -413,7 +474,7 @@ start_vllm
 # Request A (third time, new vLLM instance) → should trigger read/hit from LMCache
 echo "[Phase 3 / Step 6] Request A (third) — expecting LMCache hit after vLLM restart"
 L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
-OUTPUT_3=$(send_completion "${PROMPT_FILE}" 200)
+OUTPUT_3=$(send_completion "${PROMPT_FILE}" 50)
 echo "Output 3: ${OUTPUT_3}"
 sleep 2
 L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
@@ -450,7 +511,7 @@ story_b = '''In the year 2147, humanity established its first permanent colony o
 print(story_b, end='')
 " > "${PROMPT_FILE_B}"
 L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
-OUTPUT_B=$(send_completion "${PROMPT_FILE_B}" 200)
+OUTPUT_B=$(send_completion "${PROMPT_FILE_B}" 50)
 echo "Output B: ${OUTPUT_B}"
 wait_for_metric_change "lmcache_mp_l1_read_chunks_total" "${L1_READ_BEFORE}" 5 || true
 L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")

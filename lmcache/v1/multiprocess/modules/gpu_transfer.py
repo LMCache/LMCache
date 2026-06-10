@@ -104,12 +104,16 @@ def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
 
-    The actual concrete type is whatever :func:`create_cache_context`
-    returned -- currently always a :class:`GPUCacheContext`.
+    The concrete type is whatever :func:`create_cache_context` returned
+    for the wrapper list at registration time -- a
+    :class:`GPUCacheContext` for CUDA-IPC wrappers, a
+    :class:`CpuCacheContext` for POSIX-SHM wrappers. Both expose
+    the same ``kv_tensors`` / ``gpu_kv_format_`` / ``num_layers`` / ...
+    duck-typed surface, so downstream consumers stay agnostic.
 
     Args:
-        cache_context: Platform cache context managing shape and pointers
-            to the registered KV cache tensors.
+        cache_context: Platform cache context (GPU or CPU) managing
+            shape and pointers to the registered KV cache tensors.
         model_name: The name of the model associated with this KV cache.
         world_size: The world size associated with this KV cache.
     """
