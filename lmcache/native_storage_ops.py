@@ -22,16 +22,6 @@ are NOT a replacement for the C++ implementation on performance-critical paths
 (e.g. :class:`TTLLock` is backed by ``std::atomic`` in C++ but uses
 ``threading.Lock`` here). Use them only when the native extension is
 unavailable.
-
-Originally inspired by PR #2784 (by @darsh7807). This module supersedes that
-PR by:
-
-* Adding the missing :class:`PeriodicEventNotifier` class (now used by
-  ``v1.distributed.storage_manager``).
-* Filling in :meth:`Bitmap.batched_set` and :meth:`Bitmap.__repr__` which were
-  absent from the original draft.
-* Tightening :class:`RangePatternMatcher` validation to reject patterns
-  longer than 5 elements, matching the C++ contract.
 """
 
 # Future
