@@ -23,7 +23,6 @@ from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
-    normalize_storage_manager_config,
     parse_args,
 )
 from lmcache.v1.distributed.error import L1Error
@@ -96,6 +95,7 @@ def _hybrid_storage_config(path: str, adapter_config: object) -> StorageManagerC
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=1024 * 1024,
                 use_lazy=False,
+                use_shm=False,
                 devdax_path=path,
                 devdax_size_in_bytes=1024 * 1024,
             )
@@ -105,39 +105,50 @@ def _hybrid_storage_config(path: str, adapter_config: object) -> StorageManagerC
             adapters=[cast(L2AdapterConfigBase, adapter_config)]
         ),
     )
-    normalize_storage_manager_config(config)
     return config
 
 
-def test_devdax_config_disables_lazy_and_shm(tmp_path):
+def test_devdax_config_rejects_lazy_allocation(tmp_path):
+    path = _make_mmap_file(tmp_path)
+
+    with pytest.raises(ValueError, match="--no-l1-use-lazy"):
+        L1MemoryManagerConfig(
+            size_in_bytes=1024 * 1024,
+            use_lazy=True,
+            use_shm=False,
+            shm_name="",
+            devdax_path=path,
+        )
+
+
+def test_devdax_config_rejects_shm(tmp_path):
+    path = _make_mmap_file(tmp_path)
+
+    with pytest.raises(ValueError, match="--no-l1-use-shm"):
+        L1MemoryManagerConfig(
+            size_in_bytes=1024 * 1024,
+            use_lazy=False,
+            use_shm=True,
+            shm_name="lmcache_l1_pool_test",
+            devdax_path=path,
+            devdax_size_in_bytes=2 * 1024 * 1024,
+        )
+
+
+def test_devdax_config_accepts_explicit_lazy_and_shm_disable(tmp_path):
     path = _make_mmap_file(tmp_path)
 
     cfg = L1MemoryManagerConfig(
         size_in_bytes=1024 * 1024,
-        use_lazy=True,
+        use_lazy=False,
+        use_shm=False,
         shm_name="lmcache_l1_pool_test",
         devdax_path=path,
     )
 
     assert cfg.devdax_path == path
     assert cfg.use_lazy is False
-    assert cfg.shm_name == ""
-
-
-def test_devdax_overflow_config_disables_lazy_and_shm(tmp_path):
-    path = _make_mmap_file(tmp_path)
-
-    cfg = L1MemoryManagerConfig(
-        size_in_bytes=1024 * 1024,
-        use_lazy=True,
-        shm_name="lmcache_l1_pool_test",
-        devdax_path=path,
-        devdax_size_in_bytes=2 * 1024 * 1024,
-    )
-
-    assert cfg.devdax_path == path
-    assert cfg.devdax_size_in_bytes == 2 * 1024 * 1024
-    assert cfg.use_lazy is False
+    assert cfg.use_shm is False
     assert cfg.shm_name == ""
 
 
@@ -244,14 +255,11 @@ def test_devdax_allocator_falls_back_when_cuda_host_register_fails(
     assert cuda_runtime.unregister_calls == []
 
 
-def test_mixed_allocator_forwards_update_stats_to_primary_free(tmp_path, monkeypatch):
-    path = _make_mmap_file(tmp_path, size=8192)
+def test_mixed_allocator_forwards_update_stats_to_primary_free(monkeypatch):
     allocator = MixedMemoryAllocator(
         8192,
         use_lazy=False,
         align_bytes=4096,
-        devdax_path=path,
-        devdax_size=8192,
     )
     original_batched_free = allocator.pin_allocator.batched_free
     update_stats_values: list[bool] = []
@@ -286,8 +294,8 @@ def test_devdax_close_failure_preserves_allocator_state(tmp_path):
     with pytest.raises(BufferError):
         allocator.close()
 
-    assert allocator.pin_allocator is not None
-    assert allocator.buffer.numel() == 1024 * 1024
+    assert allocator.devdax_allocator is not None
+    assert allocator.devdax_buffer.numel() == 1024 * 1024
 
     allocator.free(obj)
     del obj
@@ -300,7 +308,8 @@ def test_l1_manager_round_trip_on_devdax_mapping(tmp_path):
     cfg = L1ManagerConfig(
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=1024 * 1024,
-            use_lazy=True,
+            use_lazy=False,
+            use_shm=False,
             devdax_path=path,
         )
     )
@@ -338,6 +347,7 @@ def test_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
         L1MemoryManagerConfig(
             size_in_bytes=8192,
             use_lazy=False,
+            use_shm=False,
             align_bytes=4096,
             devdax_path=path,
             devdax_size_in_bytes=8192,
@@ -348,9 +358,16 @@ def test_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
 
     assert error == L1Error.SUCCESS
     assert len(objs) == 3
-    assert objs[0].data_ptr == manager._allocator.buffer.data_ptr()
-    assert objs[1].data_ptr == manager._allocator.buffer.data_ptr() + 4096
-    assert objs[2].data_ptr == manager._allocator.devdax_allocator.buffer.data_ptr()
+    assert isinstance(manager._allocator, DevDaxMemoryAllocator)
+    assert manager._allocator.local_allocator is not None
+    assert objs[0].parent() is manager._allocator.local_allocator
+    assert objs[1].parent() is manager._allocator.local_allocator
+    assert objs[2].parent() is manager._allocator
+    assert objs[0].data_ptr == manager._allocator.local_allocator.buffer.data_ptr()
+    assert (
+        objs[1].data_ptr == manager._allocator.local_allocator.buffer.data_ptr() + 4096
+    )
+    assert objs[2].data_ptr == manager._allocator.devdax_buffer.data_ptr()
     used, total = manager.get_memory_usage()
     assert used == 3 * 4096
     assert total == 4 * 4096
@@ -372,6 +389,7 @@ def test_l1_memory_manager_reports_devdax_desc(tmp_path):
         L1MemoryManagerConfig(
             size_in_bytes=1024 * 1024,
             use_lazy=False,
+            use_shm=False,
             devdax_path=path,
         )
     )
@@ -395,6 +413,8 @@ def test_cli_parses_l1_devdax_path(tmp_path):
             "1",
             "--eviction-policy",
             "LRU",
+            "--no-l1-use-lazy",
+            "--no-l1-use-shm",
             "--l1-devdax-path",
             path,
         ]
@@ -403,6 +423,7 @@ def test_cli_parses_l1_devdax_path(tmp_path):
     mem_cfg = config.l1_manager_config.memory_config
     assert mem_cfg.devdax_path == path
     assert mem_cfg.use_lazy is False
+    assert mem_cfg.use_shm is False
     assert mem_cfg.shm_name == ""
 
 
@@ -414,6 +435,8 @@ def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
             "1",
             "--eviction-policy",
             "LRU",
+            "--no-l1-use-lazy",
+            "--no-l1-use-shm",
             "--l1-devdax-path",
             path,
             "--l2-adapter",
@@ -427,6 +450,7 @@ def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
     assert mem_cfg.devdax_path == path
     assert mem_cfg.devdax_size_in_bytes == 2 << 30
     assert mem_cfg.use_lazy is False
+    assert mem_cfg.use_shm is False
     assert mem_cfg.shm_name == ""
     assert config.l2_adapter_config.adapters == []
 
@@ -469,6 +493,8 @@ def test_cli_hybrid_l1_keeps_ordinary_l2_adapters(
             "1",
             "--eviction-policy",
             "LRU",
+            "--no-l1-use-lazy",
+            "--no-l1-use-shm",
             "--l1-devdax-path",
             path,
             "--l2-adapter",
@@ -501,6 +527,7 @@ def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=1024 * 1024,
                 use_lazy=False,
+                use_shm=False,
                 devdax_path=path,
             )
         ),

@@ -53,7 +53,7 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     """
     if config.devdax_path and config.devdax_size_in_bytes:
         logger.debug(
-            "use mixed memory allocator with devdax overflow, "
+            "use devdax memory allocator with local DRAM overflow source, "
             "dram size is %d bytes, devdax path is %s, "
             "devdax size is %d bytes, align bytes is %d bytes",
             config.size_in_bytes,
@@ -61,12 +61,16 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
             config.devdax_size_in_bytes,
             config.align_bytes,
         )
-        return MixedMemoryAllocator(
+        local_allocator = MixedMemoryAllocator(
             config.size_in_bytes,
             align_bytes=config.align_bytes,
-            shm_name=config.shm_name,
-            devdax_path=config.devdax_path,
-            devdax_size=config.devdax_size_in_bytes,
+            shm_name=config.shm_name or None,
+        )
+        return DevDaxMemoryAllocator(
+            config.devdax_size_in_bytes,
+            config.devdax_path,
+            local_allocator=local_allocator,
+            align_bytes=config.align_bytes,
         )
     elif config.devdax_path:
         logger.debug(
@@ -189,20 +193,15 @@ class L1MemoryManager:
             trigger eviction when the memory usage reaches a watermark.
         """
 
-        # HACK: now trying to read this from the address manager in a ad-hoc
-        # manner
-        def get_address_manager(allocator: MemoryAllocatorInterface):
-            if isinstance(allocator, DevDaxMemoryAllocator):
-                return allocator.address_manager
-            elif isinstance(allocator, LazyMemoryAllocator):
-                return allocator.get_address_manager()
-            else:
-                raise NotImplementedError(
-                    "get_memory_usage is not implemented for this allocator type."
-                )
-
-        if isinstance(self._allocator, MixedMemoryAllocator):
+        if hasattr(self._allocator, "get_memory_usage"):
             return self._allocator.get_memory_usage()
+
+        def get_address_manager(allocator: MemoryAllocatorInterface):
+            if isinstance(allocator, LazyMemoryAllocator):
+                return allocator.get_address_manager()
+            raise NotImplementedError(
+                "get_memory_usage is not implemented for this allocator type."
+            )
 
         address_manager = get_address_manager(self._allocator)
         free_size = address_manager.get_free_size()

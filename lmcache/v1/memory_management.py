@@ -2220,38 +2220,6 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 
         self.buffer_allocator = BufferAllocator("cpu")
-        self.devdax_allocator: "DevDaxMemoryAllocator | None" = None
-        devdax_path = kwargs.get("devdax_path", None)
-        devdax_size = kwargs.get("devdax_size", 0)
-        if devdax_path:
-            if use_paging:
-                raise ValueError("devdax overflow is not supported with paging")
-            if devdax_size <= 0:
-                raise ValueError("devdax_size must be > 0 when devdax_path is set")
-            self.devdax_allocator = DevDaxMemoryAllocator(
-                devdax_size,
-                devdax_path,
-                align_bytes=self.align_bytes,
-            )
-
-    def _is_devdax_obj(self, memory_obj: MemoryObj) -> bool:
-        return (
-            self.devdax_allocator is not None
-            and memory_obj.parent() is self.devdax_allocator
-        )
-
-    def _primary_available_count(
-        self,
-        shapes: Union[torch.Size, list[torch.Size]],
-        dtypes: Union[torch.dtype, list[torch.dtype]],
-    ) -> int:
-        assert isinstance(self.pin_allocator, TensorMemoryAllocator)
-        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
-        unit_raw_size = get_size_bytes(shapes, dtypes)
-        unit_aligned_size = self.pin_allocator.address_manager.compute_aligned_size(
-            unit_raw_size
-        )
-        return self.pin_allocator.address_manager.get_free_size() // unit_aligned_size
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -2271,18 +2239,10 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.EC_TD,
         ]:
             with self.host_mem_lock:
-                if (
-                    self.devdax_allocator is None
-                    or self._primary_available_count(shapes, dtypes) > 0
-                ):
-                    obj = self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
-                    if isinstance(obj, TensorMemoryObj):
-                        obj.parent_allocator = self
-                    if obj is not None:
-                        return obj
-            if self.devdax_allocator is not None:
-                return self.devdax_allocator.allocate(shapes, dtypes, fmt, str(self))
-            return None
+                obj = self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
+                if isinstance(obj, TensorMemoryObj):
+                    obj.parent_allocator = self
+                return obj
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -2306,46 +2266,15 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            if self.devdax_allocator is None:
-                with self.host_mem_lock:
-                    objs = self.pin_allocator.batched_allocate(
-                        shapes, dtypes, batch_size, fmt, str(self)
-                    )
-                    if objs is not None:
-                        for obj in objs:
-                            if isinstance(obj, TensorMemoryObj):
-                                obj.parent_allocator = self
-                    return objs
-
             with self.host_mem_lock:
-                objs = []
-                primary_count = min(
-                    batch_size, self._primary_available_count(shapes, dtypes)
+                objs = self.pin_allocator.batched_allocate(
+                    shapes, dtypes, batch_size, fmt, str(self)
                 )
-                if primary_count:
-                    primary_objs = self.pin_allocator.batched_allocate(
-                        shapes, dtypes, primary_count, fmt, str(self)
-                    )
-                    if primary_objs is not None:
-                        objs = primary_objs
-                        for obj in objs:
-                            if isinstance(obj, TensorMemoryObj):
-                                obj.parent_allocator = self
-
-            remaining = batch_size - len(objs)
-            if remaining == 0:
+                if objs is not None:
+                    for obj in objs:
+                        if isinstance(obj, TensorMemoryObj):
+                            obj.parent_allocator = self
                 return objs
-
-            assert self.devdax_allocator is not None
-            devdax_objs = self.devdax_allocator.batched_allocate(
-                shapes, dtypes, remaining, fmt, str(self)
-            )
-            if devdax_objs is None:
-                if objs:
-                    with self.host_mem_lock:
-                        self.pin_allocator.batched_free(objs)
-                return None
-            return objs + devdax_objs
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -2361,10 +2290,6 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            if self._is_devdax_obj(memory_obj):
-                assert self.devdax_allocator is not None
-                self.devdax_allocator.free(memory_obj)
-                return
             with self.host_mem_lock:
                 self.pin_allocator.free(memory_obj)
         else:
@@ -2391,51 +2316,22 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            devdax_objs = [
-                memory_obj
-                for memory_obj in memory_objs
-                if self._is_devdax_obj(memory_obj)
-            ]
-            primary_objs = [
-                memory_obj
-                for memory_obj in memory_objs
-                if not self._is_devdax_obj(memory_obj)
-            ]
-            if primary_objs:
-                with self.host_mem_lock:
-                    self.pin_allocator.batched_free(
-                        primary_objs, update_stats=update_stats
-                    )
-            if devdax_objs:
-                assert self.devdax_allocator is not None
-                self.devdax_allocator.batched_free(
-                    devdax_objs, update_stats=update_stats
-                )
+            with self.host_mem_lock:
+                self.pin_allocator.batched_free(memory_objs, update_stats=update_stats)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     def memcheck(self) -> bool:
         with self.host_mem_lock:
-            primary_ok = self.pin_allocator.memcheck()
-        if self.devdax_allocator is None:
-            return primary_ok
-        return primary_ok and self.devdax_allocator.memcheck()
+            return self.pin_allocator.memcheck()
 
     def get_memory_usage(self) -> tuple[int, int]:
         primary_manager = self.pin_allocator.address_manager
         primary_total = primary_manager.get_heap_size()
         primary_used = primary_total - primary_manager.get_free_size()
-        if self.devdax_allocator is None:
-            return primary_used, primary_total
-
-        devdax_manager = self.devdax_allocator.address_manager
-        devdax_total = devdax_manager.get_heap_size()
-        devdax_used = devdax_total - devdax_manager.get_free_size()
-        return primary_used + devdax_used, primary_total + devdax_total
+        return primary_used, primary_total
 
     def close(self) -> None:
-        if self.devdax_allocator is not None:
-            self.devdax_allocator.close()
         if not self._unregistered:
             if torch_dev.is_available():
                 torch_dev.synchronize()
@@ -2467,19 +2363,21 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
 
 class DevDaxMemoryAllocator(MemoryAllocatorInterface):
-    """Allocates L1 objects from an mmap-backed Device-DAX arena.
+    """Allocates L1 objects from DRAM and/or an mmap-backed Device-DAX arena.
 
     The mapped bytes are exposed as a flat CPU ``torch.uint8`` tensor so the
     existing L1 state machine and tensor slicing logic can run unchanged while
-    the backing storage is the configured Device-DAX device rather than DRAM or
-    SHM. This is a direct mapped arena: it does not register shadow pages in
-    L1Manager.
+    the overflow backing storage is the configured Device-DAX device. When a
+    local allocator is provided, local DRAM is tried first and Device-DAX is
+    used as overflow.
     """
 
     def __init__(
         self,
         size: int,
         device_path: str,
+        *,
+        local_allocator: MixedMemoryAllocator | None = None,
         align_bytes: int = AddressManager.ALIGN_BYTES,
     ) -> None:
         if not device_path:
@@ -2492,9 +2390,10 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self.size = size
         self.device_path = device_path
         self.align_bytes = align_bytes
+        self.local_allocator = local_allocator
         self.host_mem_lock = threading.Lock()
         self.buffer_allocator = BufferAllocator("cpu")
-        self.pin_allocator: TensorMemoryAllocator | None = None
+        self.devdax_allocator: TensorMemoryAllocator | None = None
         self._fd: int | None = None
         self._mmap_obj: mmap.mmap | None = None
         self._mmap_buffer: Any | None = None
@@ -2502,12 +2401,18 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self._cuda_runtime: Any | None = None
         self._unregistered = False
 
-        self.buffer = self._map_devdax()
-        self.pin_allocator = TensorMemoryAllocator(
-            self.buffer, align_bytes=self.align_bytes
+        self.devdax_buffer = self._map_devdax()
+        self.devdax_allocator = TensorMemoryAllocator(
+            self.devdax_buffer, align_bytes=self.align_bytes
         )
-        self.address_manager = self.pin_allocator.address_manager
+        self.address_manager = self.devdax_allocator.address_manager
         self._register_cuda_host_memory()
+
+    @property
+    def buffer(self) -> torch.Tensor:
+        if self.local_allocator is not None:
+            return self.local_allocator.buffer
+        return self.devdax_buffer
 
     def _map_devdax(self) -> torch.Tensor:
         fd: int | None = None
@@ -2552,7 +2457,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             )
             return
 
-        ptr = self.buffer.data_ptr()
+        ptr = self.devdax_buffer.data_ptr()
         runtime = torch_dev.cudart()
         try:
             err = runtime.cudaHostRegister(ptr, self.size, 0)
@@ -2598,6 +2503,85 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             self._cuda_registered_ptr = None
             self._cuda_runtime = None
 
+    def _is_local_obj(self, memory_obj: MemoryObj) -> bool:
+        return (
+            self.local_allocator is not None
+            and memory_obj.parent() is self.local_allocator
+        )
+
+    def _is_devdax_obj(self, memory_obj: MemoryObj) -> bool:
+        return memory_obj.parent() is self
+
+    def _local_available_count(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+    ) -> int:
+        if self.local_allocator is None:
+            return 0
+        assert isinstance(self.local_allocator.pin_allocator, TensorMemoryAllocator)
+        shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
+        unit_raw_size = get_size_bytes(shapes, dtypes)
+        unit_aligned_size = (
+            self.local_allocator.pin_allocator.address_manager.compute_aligned_size(
+                unit_raw_size
+            )
+        )
+        return (
+            self.local_allocator.pin_allocator.address_manager.get_free_size()
+            // unit_aligned_size
+        )
+
+    def _allocate_from_devdax(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat,
+    ) -> Optional[MemoryObj]:
+        with self.host_mem_lock:
+            assert self.devdax_allocator is not None
+            obj = self.devdax_allocator.allocate(shapes, dtypes, fmt, str(self))
+            if isinstance(obj, TensorMemoryObj):
+                obj.parent_allocator = self
+            return obj
+
+    def _batched_allocate_from_devdax(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        batch_size: int,
+        fmt: MemoryFormat,
+    ) -> Optional[List[MemoryObj]]:
+        with self.host_mem_lock:
+            assert self.devdax_allocator is not None
+            objs = self.devdax_allocator.batched_allocate(
+                shapes, dtypes, batch_size, fmt, str(self)
+            )
+            if objs is not None:
+                for obj in objs:
+                    if isinstance(obj, TensorMemoryObj):
+                        obj.parent_allocator = self
+            return objs
+
+    def _free_devdax_obj(self, memory_obj: MemoryObj) -> None:
+        with self.host_mem_lock:
+            assert self.devdax_allocator is not None
+            self.devdax_allocator.free(memory_obj)
+            if isinstance(memory_obj, TensorMemoryObj):
+                memory_obj.raw_data = torch.empty(0, dtype=torch.uint8)
+
+    def _batched_free_devdax_objs(
+        self,
+        memory_objs: List[MemoryObj],
+        update_stats: bool,
+    ) -> None:
+        with self.host_mem_lock:
+            assert self.devdax_allocator is not None
+            self.devdax_allocator.batched_free(memory_objs, update_stats=update_stats)
+            for memory_obj in memory_objs:
+                if isinstance(memory_obj, TensorMemoryObj):
+                    memory_obj.raw_data = torch.empty(0, dtype=torch.uint8)
+
     @_lmcache_nvtx_annotate
     def allocate(
         self,
@@ -2615,12 +2599,11 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            with self.host_mem_lock:
-                assert self.pin_allocator is not None
-                obj = self.pin_allocator.allocate(shapes, dtypes, fmt, str(self))
-                if isinstance(obj, TensorMemoryObj):
-                    obj.parent_allocator = self
-                return obj
+            if self.local_allocator is not None:
+                obj = self.local_allocator.allocate(shapes, dtypes, fmt, str(self))
+                if obj is not None:
+                    return obj
+            return self._allocate_from_devdax(shapes, dtypes, fmt)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -2644,16 +2627,31 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            with self.host_mem_lock:
-                assert self.pin_allocator is not None
-                objs = self.pin_allocator.batched_allocate(
-                    shapes, dtypes, batch_size, fmt, str(self)
+            local_objs: list[MemoryObj] = []
+            if self.local_allocator is not None:
+                local_count = min(
+                    batch_size, self._local_available_count(shapes, dtypes)
                 )
-                if objs is not None:
-                    for obj in objs:
-                        if isinstance(obj, TensorMemoryObj):
-                            obj.parent_allocator = self
-                return objs
+                if local_count:
+                    local_objs = (
+                        self.local_allocator.batched_allocate(
+                            shapes, dtypes, local_count, fmt, str(self)
+                        )
+                        or []
+                    )
+
+            remaining = batch_size - len(local_objs)
+            if remaining == 0:
+                return local_objs
+
+            dax_objs = self._batched_allocate_from_devdax(
+                shapes, dtypes, remaining, fmt
+            )
+            if dax_objs is None:
+                if local_objs and self.local_allocator is not None:
+                    self.local_allocator.batched_free(local_objs, update_stats=False)
+                return None
+            return local_objs + dax_objs
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -2669,11 +2667,14 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            with self.host_mem_lock:
-                assert self.pin_allocator is not None
-                self.pin_allocator.free(memory_obj)
-                if isinstance(memory_obj, TensorMemoryObj):
-                    memory_obj.raw_data = torch.empty(0, dtype=torch.uint8)
+            if self._is_local_obj(memory_obj):
+                assert self.local_allocator is not None
+                self.local_allocator.free(memory_obj)
+                return
+            if self._is_devdax_obj(memory_obj):
+                self._free_devdax_obj(memory_obj)
+                return
+            raise ValueError("Memory object does not belong to DevDaxMemoryAllocator")
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
@@ -2697,19 +2698,44 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.KV_MLA_FMT,
             MemoryFormat.EC_TD,
         ]:
-            with self.host_mem_lock:
-                assert self.pin_allocator is not None
-                self.pin_allocator.batched_free(memory_objs, update_stats=update_stats)
-                for memory_obj in memory_objs:
-                    if isinstance(memory_obj, TensorMemoryObj):
-                        memory_obj.raw_data = torch.empty(0, dtype=torch.uint8)
+            local_objs = [
+                memory_obj
+                for memory_obj in memory_objs
+                if self._is_local_obj(memory_obj)
+            ]
+            devdax_objs = [
+                memory_obj
+                for memory_obj in memory_objs
+                if self._is_devdax_obj(memory_obj)
+            ]
+            if len(local_objs) + len(devdax_objs) != len(memory_objs):
+                raise ValueError(
+                    "One or more memory objects do not belong to DevDaxMemoryAllocator"
+                )
+            if local_objs:
+                assert self.local_allocator is not None
+                self.local_allocator.batched_free(local_objs, update_stats=update_stats)
+            if devdax_objs:
+                self._batched_free_devdax_objs(devdax_objs, update_stats=update_stats)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     def memcheck(self) -> bool:
+        local_ok = True
+        if self.local_allocator is not None:
+            local_ok = self.local_allocator.memcheck()
         with self.host_mem_lock:
-            assert self.pin_allocator is not None
-            return self.pin_allocator.memcheck()
+            assert self.devdax_allocator is not None
+            return local_ok and self.devdax_allocator.memcheck()
+
+    def get_memory_usage(self) -> tuple[int, int]:
+        local_used = local_total = 0
+        if self.local_allocator is not None:
+            local_used, local_total = self.local_allocator.get_memory_usage()
+
+        dax_total = self.address_manager.get_heap_size()
+        dax_used = dax_total - self.address_manager.get_free_size()
+        return local_used + dax_used, local_total + dax_total
 
     def close(self) -> None:
         if self._unregistered:
@@ -2719,16 +2745,20 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
 
         with self.host_mem_lock:
             if (
-                self.pin_allocator is not None
-                and self.pin_allocator.num_active_allocations > 0
+                self.devdax_allocator is not None
+                and self.devdax_allocator.num_active_allocations > 0
             ):
                 raise BufferError(
                     "cannot close DevDaxMemoryAllocator with active allocations"
                 )
             self._unregister_cuda_host_memory()
-            self.pin_allocator = None
-            self.buffer = torch.empty(0, dtype=torch.uint8)
+            self.devdax_allocator = None
+            self.devdax_buffer = torch.empty(0, dtype=torch.uint8)
             self._mmap_buffer = None
+
+        if self.local_allocator is not None:
+            self.local_allocator.close()
+            self.local_allocator = None
 
         if self._mmap_obj is not None:
             self._mmap_obj.close()
