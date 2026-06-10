@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
+import sys
 
 # Third Party
 from vllm.config import VllmConfig
@@ -36,11 +37,13 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
+from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.kv_cache_groups import (
-    create_group_views_from_vllm,
+    create_engine_group_infos_from_vllm,
 )
 from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 try:
     # First Party
@@ -94,89 +97,26 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def extract_world_size_and_kv_rank(
-    world_size: int,
-    rank: int,
-    vllm_config: VllmConfig,
-) -> tuple[int, int]:
+def build_parallel_strategy_from_vllm_config(
+    vllm_config: "VllmConfig",
+) -> ParallelStrategy:
+    """Build a ParallelStrategy from a vLLM config.
+
+    Centralises the (vllm_config -> KV parallel geometry) mapping.
+
+    Args:
+        vllm_config: The vLLM configuration object.
+
+    Returns:
+        The constructed ParallelStrategy.
     """
-    Convert the rank for the MLA.
-    """
-    use_mla = mla_enabled(vllm_config.model_config)
-    if not use_mla:
-        return world_size, rank
-    else:
-        # Tensor parallel does not change the KV caches for MLA models.
-        # So we need to "exclude" the effect of TP on rank and world size
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        # vLLM constructs TP groups first, and then construct other
-        # parallel groups on top of TP groups.
-        # for example, TP=4, PP=2,
-        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
-        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
-        # So we can "exclude" the effect of TP by rank // tp_size.
-        return world_size // tp_size, rank // tp_size
-
-
-def create_scheduler_adapter(
-    server_url: str,
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
-) -> LMCacheMPSchedulerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config,
-    )
-    parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-    )
-
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return LMCacheMPSchedulerAdapter(
-        server_url=server_url,
-        context=zmq_context,
-        model_name=vllm_config.model_config.model,
-        vllm_block_size=vllm_config.cache_config.block_size,
-        parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
-    )
-
-
-def create_worker_adapter(
-    server_url: str,
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
-) -> LMCacheMPWorkerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config,
-    )
-    parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-    )
-
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return LMCacheMPWorkerAdapter(
-        server_url=server_url,
-        context=zmq_context,
-        model_name=vllm_config.model_config.model,
-        vllm_block_size=vllm_config.cache_config.block_size,
-        parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
+    pc = vllm_config.parallel_config
+    return ParallelStrategy(
+        use_mla=mla_enabled(vllm_config.model_config),
+        vllm_world_size=pc.world_size,
+        vllm_worker_id=pc.rank,
+        tp_size=pc.tensor_parallel_size,
+        pp_size=pc.pipeline_parallel_size,
     )
 
 
@@ -314,52 +254,26 @@ class LMCacheMPRequestMetadata:
     cache_salt: str = ""
 
     @staticmethod
-    def _slice_block_ids(
-        tracker: LMCacheMPRequestTracker,
-        num_engine_groups: int,
-        start: int,
-        end: int,
-    ) -> list[list[int]]:
-        """Slice every engine group's block IDs for the block range.
-
-        Args:
-            tracker: Request tracker holding the per-engine-group block IDs.
-            num_engine_groups: Number of engine KV cache groups; the result
-                has one inner list per group, in engine-group order.
-            start: Start **block** index (inclusive), not a token index.
-            end: End **block** index (exclusive), not a token index.
-
-        Returns:
-            One ``list[int]`` of block IDs per engine group, each sliced to
-            ``[start, end)``.
-
-        Notes:
-            Minimal HMA support assumes all groups share vLLM's scheduler
-            block size. DeepSeek-V4's per-group logical/physical block-size
-            mapping is intentionally left for a follow-up.
-        """
-        return [
-            tracker.allocated_block_ids.get(engine_group_idx, [])[start:end]
-            for engine_group_idx in range(num_engine_groups)
-        ]
-
-    @staticmethod
     def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
         vllm_block_size: int,
-        num_engine_groups: int,
+        group_block_sizes: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            blocks_in_chunk: the number of blocks in a LMCache data chunk
-            vllm_block_size: the block size used in vLLM
-            num_engine_groups: number of engine KV cache groups; the op's
-                block IDs carry one inner list per group, in engine order.
+            blocks_in_chunk: the number of ``vllm_block_size`` blocks in a
+                LMCache data chunk
+            vllm_block_size: the vLLM block size (= ``cache_config.block_size``);
+                block IDs and ranges are counted in this unit
+            group_block_sizes: per-engine-group vLLM block size. A group's own
+                block size may be a larger multiple of ``vllm_block_size``
+                (hybrid models).
         """
+        num_engine_groups = len(group_block_sizes)
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
@@ -385,10 +299,15 @@ class LMCacheMPRequestMetadata:
         computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
             tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
+        # Normalize each group's count to ``vllm_block_size`` units before the
+        # min: a group with block size ``k * vllm_block_size`` holds ``k`` such
+        # blocks per stored block ID (e.g. gemma-4 sliding: 32-token IDs = 2 of
+        # the 16-token blocks).
         allocated_lengths = tracker.num_allocated_blocks()
         allocated_blocks = (
             min(
                 allocated_lengths.get(engine_group_idx, 0)
+                * (group_block_sizes[engine_group_idx] // vllm_block_size)
                 for engine_group_idx in range(num_engine_groups)
             )
             if num_engine_groups > 0
@@ -405,8 +324,12 @@ class LMCacheMPRequestMetadata:
         if num_chunks >= 1:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
-            block_ids = LMCacheMPRequestMetadata._slice_block_ids(
-                tracker, num_engine_groups, start, end
+            block_ids = slice_block_ids_per_group(
+                tracker.allocated_block_ids,
+                group_block_sizes,
+                vllm_block_size,
+                start,
+                end,
             )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
@@ -436,17 +359,20 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
         vllm_block_size: int,
-        num_engine_groups: int,
+        group_block_sizes: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            blocks_in_chunk: the number of blocks in a LMCache data chunk
-            vllm_block_size: the block size used in vLLM
-            num_engine_groups: number of engine KV cache groups; the op's
-                block IDs carry one inner list per group, in engine order.
+            blocks_in_chunk: the number of ``vllm_block_size`` blocks in a
+                LMCache data chunk
+            vllm_block_size: the vLLM block size (= ``cache_config.block_size``);
+                block IDs and ranges are counted in this unit
+            group_block_sizes: per-engine-group vLLM block size. A group's own
+                block size may be a larger multiple of ``vllm_block_size``
+                (hybrid models).
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -467,8 +393,12 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit blocks. "
         )
         if end > start:
-            block_ids = LMCacheMPRequestMetadata._slice_block_ids(
-                tracker, num_engine_groups, start, end
+            block_ids = slice_block_ids_per_group(
+                tracker.allocated_block_ids,
+                group_block_sizes,
+                vllm_block_size,
+                start,
+                end,
             )
             start_token_idx = start * vllm_block_size
             end_token_idx = end * vllm_block_size
@@ -519,7 +449,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
                 f"direction={req_meta.direction}, "
-                f"num_blocks={len(req_meta.op.block_ids[0])}, "
+                f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
         return "[" + "\n".join(request_strs) + "]"
@@ -558,35 +488,55 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
+        parallel_strategy = build_parallel_strategy_from_vllm_config(vllm_config)
+
         if self.role == KVConnectorRole.SCHEDULER:
-            self.scheduler_adapter = create_scheduler_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
+            # Banner from the scheduler role only, so tensor-parallel
+            # deployments print it once rather than once per worker.
+            print_banner_once(sys.stderr)
+            self.scheduler_adapter = LMCacheMPSchedulerAdapter(
+                server_url=server_url,
+                context=zmq_context,
+                model_name=vllm_config.model_config.model,
+                vllm_block_size=vllm_config.cache_config.block_size,
+                parallel_strategy=parallel_strategy,
+                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
-            self.worker_adapter = create_worker_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
+            self.worker_adapter = LMCacheMPWorkerAdapter(
+                server_url=server_url,
+                context=zmq_context,
+                model_name=vllm_config.model_config.model,
+                vllm_block_size=vllm_config.cache_config.block_size,
+                parallel_strategy=parallel_strategy,
+                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
         self.vllm_block_size = vllm_config.cache_config.block_size
-        # The scheduler side only needs the number of engine KV cache groups
-        # (to slice per-engine-group block IDs); the full list[LMCacheGroupView] is
-        # built worker-side in register_kv_caches where the tensors are available.
-        # Engine group ids are dense (0..N-1), so the count is just the number
-        # of vLLM KV cache groups (>=1).
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         vllm_groups = (
             getattr(kv_cache_config, "kv_cache_groups", ()) or ()
             if kv_cache_config is not None
             else ()
         )
-        self._num_engine_groups = len(vllm_groups) or 1
+        # NOTE: Hybrid models can give each group its own block size that is
+        # different from ``vllm_block_size`` (e.g. gemma-4: sliding-window
+        # groups 32, full-attention groups 16, vllm_block_size 16).
+        self._group_block_sizes: list[int] = [
+            group.kv_cache_spec.block_size for group in vllm_groups
+        ] or [self.vllm_block_size]
+        # Validate that the block size for each group can be divided by
+        # ``self.vllm_block_size`` (per-group slicing relies on it).
+        for engine_group_idx, block_size in enumerate(self._group_block_sizes):
+            if block_size <= 0 or block_size % self.vllm_block_size != 0:
+                raise ValueError(
+                    f"group {engine_group_idx} block size {block_size} must be "
+                    f"a positive multiple of vllm_block_size "
+                    f"{self.vllm_block_size}"
+                )
 
     @property
     def role(self) -> KVConnectorRole:
@@ -619,12 +569,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        group_views = create_group_views_from_vllm(
+        engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,
             layout_hints=vllm_layout_hints(),
         )
-        self.worker_adapter.register_kv_caches(kv_caches, group_views=group_views)
+        self.worker_adapter.register_kv_caches(
+            kv_caches, engine_group_infos=engine_group_infos
+        )
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -711,10 +663,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         # In MLA scenario, only the first rank of the pipeline group
         # needs to save the KV cache.
-        if (
-            self.worker_adapter.use_mla
-            and not self.worker_adapter.is_first_rank_of_pp_group
-        ):
+        if not self.worker_adapter.is_kv_writer:
             return
 
         metadata = self._get_connector_metadata()
@@ -1119,7 +1068,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 blocks_per_chunk,
                 vllm_block_size=self.vllm_block_size,
-                num_engine_groups=self._num_engine_groups,
+                group_block_sizes=self._group_block_sizes,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -1142,7 +1091,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 blocks_per_chunk,
                 self.vllm_block_size,
-                self._num_engine_groups,
+                self._group_block_sizes,
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -1172,7 +1121,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 request_tracker,
                 blocks_per_chunk,
                 self.vllm_block_size,
-                self._num_engine_groups,
+                self._group_block_sizes,
             )
 
             if r_meta is not None:

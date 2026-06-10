@@ -777,6 +777,32 @@ Options
      - KV cache shape spec (see below).
 
 
+CPU mode (no GPU)
+~~~~~~~~~~~~~~~~~
+
+``--mode cpu`` runs the same end-to-end path without a GPU. The server
+runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
+POSIX-SHM-backed KV tensors and exercises the full RPC path.
+
+By default ``--mode cpu`` uses the data-transfer path (``auto`` →
+``cpu→data``). To use the zero-copy SHM handle path instead, pass
+``--transfer-mode handle``:
+
+.. code-block:: bash
+
+   # Terminal 1 -- start the LMCache server (no GPU required)
+   lmcache server \
+       --host localhost --port 5555 \
+       --l1-size-gb 2 --eviction-policy LRU
+
+   # Terminal 2 -- run bench in CPU + handle mode
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 \
+       --url http://localhost:8080 \
+       --mode cpu --transfer-mode handle \
+       --start 0 --end 2
+
+
 KV cache shape spec
 ~~~~~~~~~~~~~~~~~~~
 
@@ -850,12 +876,6 @@ Exit codes
    * - ``1``
      - Fatal error (for example, CUDA unavailable in ``--mode gpu``,
        server unreachable, or a checksum mismatch).
-
-.. note::
-
-   ``--transfer-mode handle`` on CPU mode is not yet implemented and
-   will be added in a future release.
-
 
 .. _lmcache-bench-l2:
 

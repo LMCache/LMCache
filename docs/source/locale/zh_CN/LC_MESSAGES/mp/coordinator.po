@@ -1,0 +1,222 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-08 10:45+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/coordinator.rst:2
+msgid "Multi-Server Coordination"
+msgstr "多服务器协调"
+
+#: ../../source/mp/coordinator.rst:4
+msgid ""
+"When you run more than one LMCache multiprocess (MP) server, the **MP "
+"Coordinator** is a standalone service they register with, giving you a "
+"single, fleet-wide view of every running server. Each MP server caches "
+"independently; the coordinator ties them together into one coordinated "
+"fleet."
+msgstr "当您运行多个 LMCache 多进程 (MP) 服务器时，**MP 协调器**是一个独立的服务，它们会向其注册，从而为您提供每个运行中的服务器的单一、全队视图。每个 MP 服务器独立缓存；协调器将它们结合成一个协调的队列。"
+
+#: ../../source/mp/coordinator.rst:10
+msgid "Running the coordinator"
+msgstr "运行协调器"
+
+#: ../../source/mp/coordinator.rst:12
+msgid "The coordinator is a FastAPI service. Start it with:"
+msgstr "协调器是一个 FastAPI 服务。使用以下命令启动它："
+
+#: ../../source/mp/coordinator.rst:18
+msgid "Expected log output:"
+msgstr "预期的日志输出："
+
+#: ../../source/mp/coordinator.rst:24
+msgid ""
+"The CLI accepts ``--host``, ``--port``, ``--instance-timeout``, and "
+"``--health-check-interval``; any flag overrides the matching environment "
+"variable below. See :doc:`/cli/coordinator` for details. Equivalently, "
+"the coordinator can still be launched as a module with ``python3 -m "
+"lmcache.v1.mp_coordinator``."
+msgstr "CLI 接受 ``--host``、``--port``、``--instance-timeout`` 和 ``--health-check-interval``；任何标志都会覆盖下面匹配的环境变量。有关详细信息，请参见 :doc:`/cli/coordinator`。同样，协调器仍然可以通过 ``python3 -m lmcache.v1.mp_coordinator`` 作为模块启动。"
+
+#: ../../source/mp/coordinator.rst:31
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/mp/coordinator.rst:33
+msgid ""
+"The coordinator is configured through ``LMCACHE_MP_COORDINATOR_*`` "
+"environment variables:"
+msgstr "协调器通过 ``LMCACHE_MP_COORDINATOR_*`` 环境变量进行配置："
+
+#: ../../source/mp/coordinator.rst:40
+msgid "Environment variable"
+msgstr "环境变量"
+
+#: ../../source/mp/coordinator.rst:41
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/mp/coordinator.rst:42 ../../source/mp/coordinator.rst:73
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/mp/coordinator.rst:43
+msgid "``LMCACHE_MP_COORDINATOR_HOST``"
+msgstr "``LMCACHE_MP_COORDINATOR_HOST``"
+
+#: ../../source/mp/coordinator.rst:44
+msgid "``0.0.0.0``"
+msgstr "``0.0.0.0``"
+
+#: ../../source/mp/coordinator.rst:45
+msgid "Host the HTTP server binds to."
+msgstr "HTTP服务器绑定的主机。"
+
+#: ../../source/mp/coordinator.rst:46
+msgid "``LMCACHE_MP_COORDINATOR_PORT``"
+msgstr "``LMCACHE_MP_COORDINATOR_PORT``"
+
+#: ../../source/mp/coordinator.rst:47
+msgid "``9300``"
+msgstr "``9300``"
+
+#: ../../source/mp/coordinator.rst:48
+msgid "Port the HTTP server binds to."
+msgstr "HTTP服务器绑定的端口。"
+
+#: ../../source/mp/coordinator.rst:49
+msgid "``LMCACHE_MP_COORDINATOR_INSTANCE_TIMEOUT``"
+msgstr "``LMCACHE_MP_COORDINATOR_INSTANCE_TIMEOUT``"
+
+#: ../../source/mp/coordinator.rst:50
+msgid "``30``"
+msgstr "``30``"
+
+#: ../../source/mp/coordinator.rst:51
+msgid ""
+"Seconds without a heartbeat after which a server is dropped from the "
+"fleet."
+msgstr "在没有心跳的情况下经过的秒数，之后服务器将从集群中移除。"
+
+#: ../../source/mp/coordinator.rst:53
+msgid "``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``"
+msgstr "``LMCACHE_MP_COORDINATOR_HEALTH_CHECK_INTERVAL``"
+
+#: ../../source/mp/coordinator.rst:54
+msgid "``10``"
+msgstr "``10``"
+
+#: ../../source/mp/coordinator.rst:55
+msgid "Seconds between health-check sweeps. ``0`` disables eviction."
+msgstr "健康检查扫描之间的秒数。``0`` 禁用逐出。"
+
+#: ../../source/mp/coordinator.rst:58
+msgid "Connecting MP servers"
+msgstr "连接 MP 服务器"
+
+#: ../../source/mp/coordinator.rst:60
+msgid ""
+"An MP server (``lmcache server``) joins the coordinator when you point it"
+" at one with ``--coordinator-url``. It registers on startup, heartbeats "
+"while running, and deregisters on shutdown -- all on the server's own "
+"event loop. This is opt-in: with no URL set, the server runs exactly as "
+"before. Each flag falls back to a matching ``LMCACHE_COORDINATOR_*`` "
+"environment variable (handy for the Kubernetes downward API); an explicit"
+" flag wins over the env var."
+msgstr "当您使用 ``--coordinator-url`` 指向一个协调器时，MP 服务器（``lmcache server``）会加入协调器。它在启动时注册，运行时进行心跳，关闭时注销——所有这些都在服务器自己的事件循环中。这是可选的：如果未设置 URL，服务器将按以前的方式运行。每个标志都可以回退到匹配的 ``LMCACHE_COORDINATOR_*`` 环境变量（对于 Kubernetes 向下 API 很方便）；显式标志优先于环境变量。"
+
+#: ../../source/mp/coordinator.rst:71
+msgid "Flag (on the MP server)"
+msgstr "标志（在 MP 服务器上）"
+
+#: ../../source/mp/coordinator.rst:72
+msgid "Env fallback"
+msgstr "环境回退"
+
+#: ../../source/mp/coordinator.rst:74
+msgid "``--coordinator-url``"
+msgstr "``--coordinator-url``"
+
+#: ../../source/mp/coordinator.rst:75
+msgid "``LMCACHE_COORDINATOR_URL``"
+msgstr "``LMCACHE_COORDINATOR_URL``"
+
+#: ../../source/mp/coordinator.rst:76
+msgid ""
+"Coordinator base URL, e.g. ``http://coordinator:9300``. Enables "
+"registration when set."
+msgstr "协调器基础 URL，例如 ``http://coordinator:9300``。设置后启用注册。"
+
+#: ../../source/mp/coordinator.rst:78
+msgid "``--coordinator-advertise-ip``"
+msgstr "``--coordinator-advertise-ip``"
+
+#: ../../source/mp/coordinator.rst:79
+msgid "``LMCACHE_COORDINATOR_ADVERTISE_IP``"
+msgstr "``LMCACHE_COORDINATOR_ADVERTISE_IP``"
+
+#: ../../source/mp/coordinator.rst:80
+msgid ""
+"IP the coordinator should reach this server at (defaults to the server's "
+"outbound IP)."
+msgstr "协调器应通过此服务器访问的 IP（默认为服务器的外部 IP）。"
+
+#: ../../source/mp/coordinator.rst:82
+msgid "``--coordinator-heartbeat-interval``"
+msgstr "``--coordinator-heartbeat-interval``"
+
+#: ../../source/mp/coordinator.rst:83
+msgid "``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``"
+msgstr "``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``"
+
+#: ../../source/mp/coordinator.rst:84
+msgid ""
+"Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well"
+" below the coordinator's ``INSTANCE_TIMEOUT``."
+msgstr "心跳之间的秒数（必须为 ``> 0``，默认值为 ``5``）。保持远低于协调器的 ``INSTANCE_TIMEOUT``。"
+
+#: ../../source/mp/coordinator.rst:87
+msgid ""
+"The server registers under its telemetry identity (``--service-instance-"
+"id`` / OTel ``service.instance.id``); if that is unset, the coordinator "
+"assigns an id."
+msgstr "服务器在其遥测身份下注册 (``--service-instance-id`` / OTel ``service.instance.id``)；如果未设置，则协调器会分配一个 ID。"
+
+#: ../../source/mp/coordinator.rst:90
+msgid ""
+"Registration is best-effort: if the coordinator is unreachable, the MP "
+"server logs a warning, keeps retrying, and continues serving. A malformed"
+" heartbeat-interval value is rejected at startup."
+msgstr "注册是尽力而为的：如果协调器无法访问，MP 服务器会记录警告，持续重试，并继续提供服务。启动时会拒绝格式错误的心跳间隔值。"
+
+#: ../../source/mp/coordinator.rst:95
+msgid "Inspecting the fleet"
+msgstr "检查集群"
+
+#: ../../source/mp/coordinator.rst:97
+msgid "Two read-only endpoints let you observe the coordinator:"
+msgstr "两个只读端点让您观察协调器："
+
+#: ../../source/mp/coordinator.rst:99
+msgid "``GET /instances`` -- list every registered MP server."
+msgstr "``GET /instances`` -- 列出每个注册的 MP 服务器。"
+
+#: ../../source/mp/coordinator.rst:100
+msgid "``GET /healthz`` -- coordinator liveness probe (for Kubernetes)."
+msgstr "``GET /healthz`` -- 协调器存活探测（用于 Kubernetes）。"
+
