@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, lmcache_deprecate
+from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
@@ -177,6 +178,11 @@ class _TempGPUBuffer:
     def max_batch_size(self) -> int:
         """Maximum number of chunks (batch slots) the buffer holds."""
         return self._max_batch_size
+
+    @property
+    def buffer(self) -> torch.Tensor:
+        """The flat staging tensor (for GDS cuFile registration)."""
+        return self._temp_buffer
 
     def get_temp_kernel_group_buffer(
         self, batch_idx: int, kernel_group_idx: int
@@ -391,6 +397,12 @@ class GPUCacheContext:
 
         # GPU streams
         self.cuda_stream_ = torch_dev.Stream(device=self.device_)
+
+        # Register the staging buffer with the GDS cuFile context on the
+        # context's CUDA stream.
+        with torch_dev.stream(self.cuda_stream_):
+            get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
+
         # Third Party
         import cupy
 
@@ -405,6 +417,13 @@ class GPUCacheContext:
             ),
             logger,
         )
+
+    def close(self) -> None:
+        """
+        Deregister this context's GDS staging buffer (reverse of __init__).
+        """
+        with torch_dev.stream(self.cuda_stream_):
+            get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
 
     @property
     def dtype(self) -> torch.dtype:

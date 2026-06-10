@@ -3,6 +3,7 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | hma_lm_eval_gemma4 | vllm_bench | long_doc_qa
 #              | long_doc_qa_l2 | fault_tolerance | deadlock | restart_recovery
+#              | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -21,6 +22,14 @@ export VLLM_PORT="${VLLM_PORT:-8000}"
 export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
+
+# gds_smoke_test enables the GDS L1 NVMe-slab tier
+GDS_SCRATCH="${GDS_SCRATCH:-/scratch}"
+if [ "$TEST_NAME" = "gds_smoke_test" ]; then
+    export GDS_L1_PATH="${GDS_SCRATCH}/lmcache-gds-${BUILD_ID}-${TEST_NAME}"
+    echo "GDS L1 tier enabled (slab dir: $GDS_L1_PATH)"
+fi
+
 # Per-test default model (overridable via the MODEL env var). The HMA test needs
 # a hybrid model whose KV cache groups have different block sizes, so the
 # connector exercises the per-group hybrid-memory-allocator path.
@@ -127,9 +136,12 @@ case "$TEST_NAME" in
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
         ;;
+    gds_smoke_test)
+        exec_script="${SCRIPT_DIR}/run-gds-smoke.sh"
+        ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api"
+        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test"
         exit 1
         ;;
 esac
