@@ -117,12 +117,8 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
-  # GDS L1 tier: run lm_eval's gsm8k determinism check with the LMCache L1
-  # medium as an NVMe slab via cuFile DMA
-  - group: ":compression: Multiprocess (GDS L1, NVMe slab)"
-    steps:
-      - label: ":compression: gds_lm_eval"
-        command: .buildkite/k3_tests/multiprocess/run.sh gds_lm_eval
+      - label: ":compression: gds_smoke_test"
+        command: .buildkite/k3_tests/multiprocess/run.sh gds_smoke_test
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:

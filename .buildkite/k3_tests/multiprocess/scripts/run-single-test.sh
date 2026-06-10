@@ -3,7 +3,7 @@
 # Usage: run-single-test.sh <test_name>
 #   test_name: lm_eval | hma_lm_eval_gemma4 | vllm_bench | long_doc_qa
 #              | long_doc_qa_l2 | fault_tolerance | deadlock | restart_recovery
-#              | gds_lm_eval | gds_long_doc_qa | gds_vllm_bench
+#              | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -23,17 +23,11 @@ export VLLM_BASELINE_PORT="${VLLM_BASELINE_PORT:-9000}"
 export MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-300}"
 export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 
-# ── GDS variant ──────────────────────────────────────────────
-# "gds_<base>" runs <base>'s workload with the GDS L1 NVMe-slab tier on. We strip
-# the prefix and run <base> as usual; GDS_L1_PATH (the slab dir, on the /scratch
-# GDS-capable mount) is the signal launch-processes.sh keys off to enable GDS.
-# The slab dir is keyed by build id + test name so concurrent gds_* steps
-# co-scheduled on one node don't share (and clobber) a slab.
+# gds_smoke_test enables the GDS L1 NVMe-slab tier
 GDS_SCRATCH="${GDS_SCRATCH:-/scratch}"
-if [[ "$TEST_NAME" == gds_* ]]; then
+if [ "$TEST_NAME" = "gds_smoke_test" ]; then
     export GDS_L1_PATH="${GDS_SCRATCH}/lmcache-gds-${BUILD_ID}-${TEST_NAME}"
-    echo "GDS L1 tier enabled (slab dir: $GDS_L1_PATH); running base test: ${TEST_NAME#gds_}"
-    TEST_NAME="${TEST_NAME#gds_}"
+    echo "GDS L1 tier enabled (slab dir: $GDS_L1_PATH)"
 fi
 
 # Per-test default model (overridable via the MODEL env var). The HMA test needs
@@ -142,9 +136,12 @@ case "$TEST_NAME" in
     http_api)
         exec_script="${SCRIPT_DIR}/run-http-api.sh"
         ;;
+    gds_smoke_test)
+        exec_script="${SCRIPT_DIR}/run-gds-smoke.sh"
+        ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_lm_eval, gds_long_doc_qa, gds_vllm_bench"
+        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test"
         exit 1
         ;;
 esac
