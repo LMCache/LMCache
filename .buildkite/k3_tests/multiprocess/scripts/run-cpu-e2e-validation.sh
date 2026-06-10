@@ -166,21 +166,30 @@ EOF
 send_completion() {
   local prompt_file="$1"
   local max_tokens="${2:-50}"
-  local prompt
-  prompt="$(cat "${prompt_file}")"
-  local response
-  response="$(curl -fsS "http://localhost:${VLLM_PORT}/v1/completions" \
-    -H "Content-Type: application/json" \
-    -d "$(python3 -c "
-import json, sys
-prompt = open('${prompt_file}').read()
+  local body_file
+  body_file="$(mktemp)"
+  # Build the JSON body in a separate process to avoid nested-quote
+  # quoting nightmares with -d "$(python3 -c "...")". Pass the prompt
+  # file path and max_tokens via argv so the python snippet itself
+  # does not need any shell interpolation inside its string body.
+  PROMPT_FILE="${prompt_file}" MAX_TOKENS="${max_tokens}" \
+    python3 - >"${body_file}" <<'PYEOF'
+import json
+import os
+
+prompt = open(os.environ['PROMPT_FILE']).read()
 print(json.dumps({
     'model': 'facebook/opt-125m',
     'prompt': prompt,
-    'max_tokens': ${max_tokens},
-    'temperature': 0
+    'max_tokens': int(os.environ['MAX_TOKENS']),
+    'temperature': 0,
 }))
-")")"
+PYEOF
+  local response
+  response="$(curl -fsS "http://localhost:${VLLM_PORT}/v1/completions" \
+    -H "Content-Type: application/json" \
+    --data-binary "@${body_file}")"
+  rm -f "${body_file}"
   echo "${response}" | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['text'])"
 }
 
