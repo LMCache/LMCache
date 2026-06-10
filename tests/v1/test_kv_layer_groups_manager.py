@@ -406,6 +406,34 @@ class TestKernelAndObjectGroups:
         manager = _build_manager(tensors, num_blocks=32)
         assert manager.calculate_num_blocks(0, 256) == 16
 
+    def test_dsv4_flash_style_mixed_compression(self):
+        # Mirrors DeepSeek-V4-Flash: one 256-token engine group whose layers
+        # have 64- and 2-slot pages (declared compress ratios 4 and 128), one
+        # 64-token SWA group and one 4-token compressor-state group (ratio 1).
+        tensors = [
+            torch.randn(2, 8, 64, 1, 64, dtype=torch.float16),
+            torch.randn(2, 8, 2, 1, 64, dtype=torch.float16),
+            torch.randn(2, 8, 64, 1, 32, dtype=torch.float16),
+            torch.randn(2, 8, 4, 1, 128, dtype=torch.float32),
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=8,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0, 1), tokens_per_chunk=256),
+                EngineGroupInfo(1, (2,), tokens_per_chunk=64),
+                EngineGroupInfo(2, (3,), tokens_per_chunk=4),
+            ],
+        )
+        by_layer = {g.layer_indices[0]: g for g in manager.kernel_groups}
+        assert by_layer[0].compress_ratio == 4
+        assert by_layer[1].compress_ratio == 128
+        assert by_layer[2].compress_ratio == 1
+        assert by_layer[3].compress_ratio == 1
+        # 256-token LMCache chunk -> 2 physical slots in the ratio-128 group.
+        assert by_layer[1].physical_chunk_size == 2
+        assert by_layer[0].physical_chunk_size == 64
+
     def test_calculate_num_blocks_compressed(self):
         # slots_per_chunk=8 (tensor), tokens_per_chunk=16 (engine spec) ->
         # compress_ratio=2; 256 logical tokens -> 128 physical slots ->
