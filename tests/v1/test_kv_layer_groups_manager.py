@@ -426,10 +426,10 @@ class TestKernelAndObjectGroups:
             ],
         )
         by_layer = {g.layer_indices[0]: g for g in manager.kernel_groups}
-        assert by_layer[0].compress_ratio == 4
-        assert by_layer[1].compress_ratio == 128
-        assert by_layer[2].compress_ratio == 1
-        assert by_layer[3].compress_ratio == 1
+        assert by_layer[0].tokens_per_block // by_layer[0].slots_per_block == 4
+        assert by_layer[1].tokens_per_block // by_layer[1].slots_per_block == 128
+        assert by_layer[2].tokens_per_block // by_layer[2].slots_per_block == 1
+        assert by_layer[3].tokens_per_block // by_layer[3].slots_per_block == 1
         # 256-token LMCache chunk -> 2 physical slots in the ratio-128 group.
         assert by_layer[1].slots_per_chunk == 2
         assert by_layer[0].slots_per_chunk == 64
@@ -449,7 +449,7 @@ class TestKernelAndObjectGroups:
         group = manager.kernel_groups[0]
         assert group.tokens_per_block == 16
         assert group.slots_per_block == 8
-        assert group.compress_ratio == 2
+        assert group.tokens_per_block // group.slots_per_block == 2
         assert manager.calculate_num_blocks(0, 256) == 16
 
 

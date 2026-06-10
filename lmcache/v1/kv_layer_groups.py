@@ -206,7 +206,6 @@ class KernelGroupInfo:
             f"dtype={self.dtype}, "
             f"tokens_per_block={self.tokens_per_block}, "
             f"slots_per_block={self.slots_per_block}, "
-            f"compress_ratio={self.compress_ratio}, "
             f"slots_per_chunk={self.slots_per_chunk}, "
             f"engine_group_idx={self.engine_group_idx})"
         )
@@ -227,18 +226,6 @@ class KernelGroupInfo:
         the registered KV tensors at registration time (the batch-size
         dimension, ``shape_desc.bs``)."""
         return self.shape_desc.bs
-
-    @property
-    def compress_ratio(self) -> int:
-        """Logical-tokens-per-physical-slot for this group, derived as
-        ``tokens_per_block // slots_per_block``. ``1`` for non-compressed
-        groups (one logical token per physical slot, or no
-        ``tokens_per_block`` reported); greater than ``1`` for compressed
-        groups where each physical slot packs multiple logical tokens
-        (e.g. DeepSeek V4 MLA / indexer caches)."""
-        if self.tokens_per_block == 0:
-            return 1
-        return self.tokens_per_block // self.slots_per_block
 
 
 KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
@@ -505,7 +492,9 @@ class KVLayerGroupsManager:
             IndexError: If *kernel_group_idx* is out of range.
         """
         group = self._kernel_groups[kernel_group_idx]
-        num_physical_slots = num_tokens // group.compress_ratio
+        # Physical slots for num_tokens, derived from the per-block geometry
+        # (slots_per_block / tokens_per_block) rather than a compress ratio.
+        num_physical_slots = num_tokens * group.slots_per_block // group.tokens_per_block
         return num_physical_slots // group.shape_desc.bs
 
     ### Helper methods

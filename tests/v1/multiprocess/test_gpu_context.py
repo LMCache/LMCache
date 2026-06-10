@@ -128,7 +128,7 @@ def _expected_kernel_group_shape(
     """Compute the expected kernel-group buffer shape from the manager's
     public metadata (kv_size, num_layers, slots, hidden_dim)."""
     group = manager.kernel_groups[kernel_group_idx]
-    num_slots = num_tokens // group.compress_ratio
+    num_slots = num_tokens * group.slots_per_block // group.tokens_per_block
     return torch.Size(
         (
             group.shape_desc.kv_size,
@@ -368,7 +368,8 @@ class TestTempGPUBufferShapeDtype:
             tensors,
             engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
-        assert manager.kernel_groups[0].compress_ratio == 2
+        kg = manager.kernel_groups[0]
+        assert kg.tokens_per_block // kg.slots_per_block == 2
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
         shape, _ = buf.get_kernel_group_shape_dtype(256, 0)
         assert shape[2] == 256 // 2
@@ -492,7 +493,6 @@ class TestGPUCacheContextReportStatus:
         "layer_indices",
         "tokens_per_block",
         "slots_per_block",
-        "compress_ratio",
         "dtype",
         "gpu_kv_concrete_shape",
         "is_mla",
@@ -516,7 +516,6 @@ class TestGPUCacheContextReportStatus:
         assert group["num_layers"] == 4
         assert group["layer_indices"] == [0, 1, 2, 3]
         assert group["is_mla"] is False
-        assert group["compress_ratio"] == 1
         assert group["gpu_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
         assert group["dtype"] == str(ctx.dtype)
 
@@ -538,7 +537,6 @@ class TestGPUCacheContextReportStatus:
             assert group["num_layers"] == kernel_group.num_layers
             assert group["slots_per_block"] == kernel_group.slots_per_block
             assert group["tokens_per_block"] == kernel_group.tokens_per_block
-            assert group["compress_ratio"] == kernel_group.compress_ratio
             assert 0 <= group["object_group_idx"] < manager.num_object_groups
 
 

@@ -282,7 +282,7 @@ class _TempGPUBuffer:
             The shape of the temp GPU buffer for the given kernel group index.
         """
         group = self._kv_groups_manager.kernel_groups[kernel_group_idx]
-        compress_ratio = group.compress_ratio
+        compress_ratio = group.tokens_per_block // group.slots_per_block
         sd = group.shape_desc
 
         if num_tokens % compress_ratio != 0:
@@ -611,7 +611,7 @@ class GPUCacheContext:
         """
         # TODO: remove this!
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        compress_ratio = group.compress_ratio
+        compress_ratio = group.tokens_per_block // group.slots_per_block
         if logical_num_tokens % compress_ratio != 0:
             raise ValueError(
                 f"logical_num_tokens ({logical_num_tokens}) is not a multiple of "
@@ -707,7 +707,6 @@ class GPUCacheContext:
                     "layer_indices": list(group.layer_indices),
                     "tokens_per_block": group.tokens_per_block,
                     "slots_per_block": group.slots_per_block,
-                    "compress_ratio": group.compress_ratio,
                     "dtype": str(group.dtype),
                     "gpu_kv_concrete_shape": get_concrete_gpu_kv_shape_from_shape_desc(
                         group.shape_desc, gpu_kv_format

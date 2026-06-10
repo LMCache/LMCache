@@ -46,9 +46,9 @@ store/retrieve address those infos directly.
   `num_engine_groups`, `num_engine_group_infos`, `expand_engine_block_ids`,
   `get_engine_group_indices`.
 - **`KVLayerGroupInfo`** (runtime, server-only): layer indices,
-  `PageBufferShapeDesc`, dtype, `tokens_per_block` / `slots_per_block` (from
-  which `compress_ratio` is derived), physical chunk size,
-  `engine_group_idx`. Derived from real tensors — never the API contract.
+  `PageBufferShapeDesc`, dtype, `tokens_per_block` / `slots_per_block`,
+  `slots_per_chunk`, `engine_group_idx`. Derived from real tensors — never the
+  API contract.
 
 ## Data flow
 
@@ -99,17 +99,19 @@ quantities, and everything else is derived from them:
   registered tensors at registration time (the batch-size dimension,
   `shape_desc.bs`). Only available per kernel group.
 
-The per-group `compress_ratio = tokens_per_block // slots_per_block`: `1` for
-ordinary attention (one token per slot), `>1` for compressed caches
-(DeepSeek-V4-Flash declares ratios 4 and 128, which this division reproduces
-exactly). The LMCache chunk size must be a multiple of every group's
-`tokens_per_block` (validated at connector init and registration).
+A group is compressed when `tokens_per_block > slots_per_block` (each physical
+slot packs `tokens_per_block // slots_per_block` logical tokens): ordinary
+attention has one token per slot, while DeepSeek-V4-Flash's MLA / indexer
+caches pack 4 and 128. No `compress_ratio` is stored — wherever a ratio is
+needed it is computed inline from these two ground-truth quantities. The
+LMCache chunk size must be a multiple of every group's `tokens_per_block`
+(validated at connector init and registration).
 
 The scheduler-side connector does all accounting (hit counts, store/retrieve
 ranges) in *tokens* — the only unit shared by every group — and slices each
 group's block IDs by `token_range / tokens_per_block_g`
 (`slice_block_ids_per_group`). The server counts
-`blocks_per_chunk = (chunk // compress_ratio) // slots_per_block` per group.
+`blocks_per_chunk = lmcache_tokens_per_chunk // tokens_per_block` per group.
 
 ### Cross-layer KV sharing
 

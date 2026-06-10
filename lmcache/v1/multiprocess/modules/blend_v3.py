@@ -826,10 +826,12 @@ class BlendV3Module:
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
         for group_idx in range(num_groups):
             group = gpu_context.kv_layer_groups_manager.kernel_groups[group_idx]
-            if group.compress_ratio != 1:
+            if group.tokens_per_block != group.slots_per_block:
                 raise RuntimeError(
-                    f"CB v3: group {group_idx} has compress_ratio="
-                    f"{group.compress_ratio}; compressed layouts unsupported."
+                    f"CB v3: group {group_idx} is compressed "
+                    f"(tokens_per_block={group.tokens_per_block}, "
+                    f"slots_per_block={group.slots_per_block}); "
+                    f"compressed layouts unsupported."
                 )
             all_slots = [
                 gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)

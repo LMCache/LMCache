@@ -42,7 +42,6 @@ Engine group index:                      0
 Object group index:                      0
 Num layers:                              80
 Slots per block:                         128
-Compress ratio:                          1
 Dtype:                                   torch.float16
 MLA:                                     False
 Attention backend:         vLLM non-MLA flash attention
@@ -86,7 +85,6 @@ programmatic access:
         "object_group_idx": 0,
         "num_layers": 80,
         "slots_per_block": 128,
-        "compress_ratio": 1,
         "dtype": "torch.float16",
         "is_mla": false,
         "attention_backend": "vLLM non-MLA flash attention",
@@ -121,7 +119,6 @@ Each kernel group section includes:
   the owning object group.
 - **Num layers** and **Slots per block** — the group's layer count and
   `shape_desc.bs`.
-- **Compress ratio** — logical tokens per physical slot (1 for non-compressed).
 - **Dtype** and **MLA** — the group's torch dtype and MLA flag.
 - **Attention backend** — which attention implementation is active (e.g.,
   `vLLM non-MLA flash attention`, `vLLM MLA`, `SGLang MHA`), derived from the
@@ -312,7 +309,6 @@ live inside each group:
             "layer_indices": [0, 1, ...],
             "tokens_per_block": 128,
             "slots_per_block": 128,
-            "compress_ratio": 1,
             "dtype": "torch.float16",
             "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
             "is_mla": false,

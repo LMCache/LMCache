@@ -144,13 +144,20 @@ if len(unique_lists) != 1:
     sys.exit(1)
 groups = group_lists[0]
 
+def compress_ratio(g: dict) -> int:
+    """Logical-tokens-per-physical-slot for a /status kernel group, derived
+    from the reported ``tokens_per_block`` and ``slots_per_block`` (the server
+    no longer exposes a ``compress_ratio`` field)."""
+    return g["tokens_per_block"] // g["slots_per_block"]
+
+
 print(f"Registered kernel groups: {len(groups)}")
 for g in groups:
     print(
         f"  kg{g['kernel_group_idx']}: engine_group={g['engine_group_idx']} "
         f"layers={g['num_layers']} tokens_per_block={g['tokens_per_block']} "
         f"slots_per_block={g['slots_per_block']} "
-        f"compress_ratio={g['compress_ratio']} dtype={g['dtype']}"
+        f"compress_ratio={compress_ratio(g)} dtype={g['dtype']}"
     )
 
 failures: list[str] = []
@@ -174,7 +181,7 @@ expected_pairs = sorted(
         (8, 1),
     ]
 )
-actual_pairs = sorted((g["tokens_per_block"], g["compress_ratio"]) for g in groups)
+actual_pairs = sorted((g["tokens_per_block"], compress_ratio(g)) for g in groups)
 if actual_pairs != expected_pairs:
     failures.append(
         f"per-group (tokens_per_block, compress_ratio) mismatch:\n"
@@ -183,11 +190,11 @@ if actual_pairs != expected_pairs:
     )
 
 for g in groups:
-    if g["tokens_per_block"] != g["slots_per_block"] * g["compress_ratio"]:
+    if g["tokens_per_block"] % g["slots_per_block"] != 0:
         failures.append(
             f"kernel group {g['kernel_group_idx']}: tokens_per_block "
-            f"{g['tokens_per_block']} != slots_per_block "
-            f"{g['slots_per_block']} * compress_ratio {g['compress_ratio']}"
+            f"{g['tokens_per_block']} is not a multiple of slots_per_block "
+            f"{g['slots_per_block']}"
         )
 
 if failures:

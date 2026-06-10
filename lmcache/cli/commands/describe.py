@@ -243,7 +243,6 @@ class KVCacheDescriber:
                 ("num_layers", "Num layers"),
                 ("tokens_per_block", "Tokens per block"),
                 ("slots_per_block", "Slots per block"),
-                ("compress_ratio", "Compress ratio"),
                 ("dtype", "Dtype"),
                 ("is_mla", "MLA"),
                 ("attention_backend", "Attention backend"),
