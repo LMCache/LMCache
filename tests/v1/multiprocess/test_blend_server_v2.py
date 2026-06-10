@@ -833,7 +833,7 @@ def registered_instance(
             "testmodel",
             1,
             EngineType.VLLM,
-            {"inference_engine_logical_block_size": 16},
+            {},
             [],
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),

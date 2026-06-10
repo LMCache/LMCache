@@ -241,6 +241,7 @@ class KVCacheDescriber:
                 ("engine_group_idx", "Engine group index"),
                 ("object_group_idx", "Object group index"),
                 ("num_layers", "Num layers"),
+                ("tokens_per_chunk", "Tokens per chunk"),
                 ("physical_block_size", "Physical block size"),
                 ("compress_ratio", "Compress ratio"),
                 ("dtype", "Dtype"),

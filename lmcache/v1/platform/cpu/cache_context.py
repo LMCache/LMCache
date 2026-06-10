@@ -112,7 +112,6 @@ class CpuCacheContext:
             self.kv_caches_,
             gpu_kv_format=self._gpu_kv_format,
             num_blocks=self.num_blocks_,
-            layout_hints=layout_hints,
             engine_group_infos=engine_group_infos,
             lmcache_logical_chunk_size=lmcache_logical_chunk_size,
         )
@@ -603,7 +602,8 @@ class CpuCacheContext:
                     ),
                     "num_layers": group.num_layers,
                     "layer_indices": list(group.layer_indices),
-                    "physical_block_size": group.shape_desc.bs,
+                    "tokens_per_chunk": group.tokens_per_chunk,
+                    "physical_block_size": group.slots_per_chunk,
                     "compress_ratio": group.compress_ratio,
                     "dtype": str(group.dtype),
                     "gpu_kv_concrete_shape": (
@@ -620,9 +620,6 @@ class CpuCacheContext:
 
         return {
             "num_layers": self.num_layers_,
-            "inference_engine_logical_block_size": (
-                manager.inference_engine_logical_block_size
-            ),
             "num_blocks": self.num_blocks_,
             "cache_size_per_token": self.cache_size_per_token(),
             "kernel_groups": group_reports,

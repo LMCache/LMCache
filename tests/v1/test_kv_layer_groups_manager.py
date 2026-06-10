@@ -7,7 +7,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     EXCLUDED_ENGINE_GROUP,
     KernelGroupIdentity,
@@ -30,7 +29,6 @@ def _build_manager(
     tensors: list[torch.Tensor],
     *,
     num_blocks: int,
-    layout_hints: LayoutHints | None = None,
     engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
@@ -47,7 +45,6 @@ def _build_manager(
         tensors,
         gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
-        layout_hints=layout_hints,
         engine_group_infos=engine_group_infos,
     )
 
@@ -281,34 +278,43 @@ class TestFormatKvcacheShapeSpec:
             format_kvcache_shape_spec([])
 
 
-class TestDeriveCompressionMetadata:
-    """``(compress_ratio, physical_chunk_size)`` derivation: ``1`` when there is
-    no engine block size, else ``ie_logical_block_size // bs`` (e.g. DeepSeek V4
-    compression where ``bs < logical``), with divisibility enforced.
+class TestDerivePhysicalChunkSize:
+    """``physical_chunk_size`` derivation from the two block-size sources:
+    ``tokens_per_chunk`` (engine KV cache spec, known at initialization) and
+    ``slots_per_chunk`` (registered tensor batch dimension), with
+    ``compress_ratio = tokens_per_chunk // slots_per_chunk`` (e.g. DeepSeek
+    V4 compression where ``slots < tokens``) and divisibility enforced.
     """
 
-    def _derive(self, bs: int, logical: "int | None", chunk: int = 256):
-        return KVLayerGroupsManager._derive_compression_metadata(
+    def _derive(self, slots: int, tokens: int, chunk: int = 256) -> int:
+        return KVLayerGroupsManager._derive_physical_chunk_size(
             group_idx=0,
-            bs=bs,
-            ie_logical_block_size=logical,
+            slots_per_chunk=slots,
+            tokens_per_chunk=tokens,
             lmcache_logical_chunk_size=chunk,
         )
 
     def test_one_to_one(self):
-        assert self._derive(bs=16, logical=16) == (1, 256)
+        assert self._derive(slots=16, tokens=16) == 256
 
-    def test_no_block_size_info(self):
-        assert self._derive(bs=16, logical=None) == (1, 256)
+    def test_compression_slots_lt_tokens(self):
+        # slots=8 packs 2 logical tokens per physical slot (DeepSeek V4 style).
+        assert self._derive(slots=8, tokens=16) == 128
 
-    def test_compression_bs_lt_logical(self):
-        # bs=8 packs 2 logical tokens per physical slot (DeepSeek V4 style).
-        assert self._derive(bs=8, logical=16) == (2, 128)
+    def test_dsv4_declared_ratios(self):
+        # DeepSeek-V4-Flash MLA groups declare 256 tokens per paged chunk
+        # over 64 (compress_ratio 4) or 2 (compress_ratio 128) slots.
+        assert self._derive(slots=64, tokens=256) == 64
+        assert self._derive(slots=2, tokens=256) == 2
 
     def test_not_divisible_raises(self):
-        # Divisibility is enforced loudly (e.g. bs=6 does not divide 16).
+        # Divisibility is enforced loudly (e.g. slots=6 does not divide 16).
         with pytest.raises(ValueError, match="must be a multiple of"):
-            self._derive(bs=6, logical=16)
+            self._derive(slots=6, tokens=16)
+
+    def test_chunk_not_divisible_by_ratio_raises(self):
+        with pytest.raises(ValueError, match="lmcache_logical_chunk_size"):
+            self._derive(slots=1, tokens=96, chunk=256)
 
 
 class TestKernelGroupIdentity:
@@ -401,14 +407,21 @@ class TestKernelAndObjectGroups:
         assert manager.calculate_num_blocks(0, 256) == 16
 
     def test_calculate_num_blocks_compressed(self):
-        # bs=8, ie_logical_block_size=16 -> compress_ratio=2;
-        # 256 logical tokens -> 128 physical slots -> 128 // 8 = 16 blocks.
+        # slots_per_chunk=8 (tensor), tokens_per_chunk=16 (engine spec) ->
+        # compress_ratio=2; 256 logical tokens -> 128 physical slots ->
+        # 128 // 8 = 16 blocks.
         tensors = [torch.randn(2, 32, 8, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
             num_blocks=32,
-            layout_hints={"inference_engine_logical_block_size": 16},
+            engine_group_infos=[
+                EngineGroupInfo(0, (0, 1), tokens_per_chunk=16),
+            ],
         )
+        group = manager.kernel_groups[0]
+        assert group.tokens_per_chunk == 16
+        assert group.slots_per_chunk == 8
+        assert group.compress_ratio == 2
         assert manager.calculate_num_blocks(0, 256) == 16
 
 

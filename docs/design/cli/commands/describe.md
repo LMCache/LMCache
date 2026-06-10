@@ -301,7 +301,6 @@ live inside each group:
 ```python
 "kv_cache_layout": {
     "num_layers": 80,
-    "inference_engine_logical_block_size": 128,
     "num_blocks": 2048,
     "cache_size_per_token": 327680,
     "kernel_groups": [
@@ -311,6 +310,7 @@ live inside each group:
             "object_group_idx": 0,
             "num_layers": 80,
             "layer_indices": [0, 1, ...],
+            "tokens_per_chunk": 128,
             "physical_block_size": 128,
             "compress_ratio": 1,
             "dtype": "torch.float16",

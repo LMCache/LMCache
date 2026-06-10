@@ -597,14 +597,6 @@ class GPUTransferModule:
             ),
         )
 
-        # ``skip_*_in_chunk`` is expressed in engine-block units
-        # (logical tokens), which is what the kernel's
-        # ``skip_blocks_in_chunk`` argument expects regardless
-        # of per-group compression.
-        ie_logical_block_size = (
-            cache_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
-
         def _retrieve_loop(keys: list[ObjectKey], memory_objs: list[MemoryObj]) -> None:
             _BATCH_SIZE = cache_context.max_batch_size
             groups = cache_context.kv_layer_groups_manager.kv_layer_groups
@@ -627,16 +619,6 @@ class GPUTransferModule:
                         self._ctx.chunk_size * batch_len - 1,
                     ),
                 )
-                if skip_tokens_in_chunk % ie_logical_block_size != 0:
-                    logger.error(
-                        "skip_first_n_tokens (%d) is not aligned to "
-                        "inference_engine_logical_block_size (%d), "
-                        "rounding down from %d tokens to %d blocks",
-                        skip_first_n_tokens,
-                        ie_logical_block_size,
-                        skip_tokens_in_chunk,
-                        skip_tokens_in_chunk // ie_logical_block_size,
-                    )
                 start_chunk_id = batch_idx * _BATCH_SIZE
                 end_chunk_id = start_chunk_id + batch_len
                 # Copy from CPU to GPU tmp buffers, then scatter to paged KV — per group
@@ -664,6 +646,20 @@ class GPUTransferModule:
                             f"batch={batch_idx} "
                             f"expected={batch_len * bpc} "
                             f"got={chunk_block_ids_gpu.shape[0]}"
+                        )
+                    # ``skip_tokens_in_chunk`` is rounded down to this
+                    # group's paged-chunk boundary; warn loudly when the
+                    # caller-provided skip is not aligned for this group.
+                    if skip_tokens_in_chunk % group.tokens_per_chunk != 0:
+                        logger.error(
+                            "skip_first_n_tokens (%d) is not aligned to "
+                            "group %d tokens_per_chunk (%d), rounding down "
+                            "from %d tokens to %d blocks",
+                            skip_first_n_tokens,
+                            group_idx,
+                            group.tokens_per_chunk,
+                            skip_tokens_in_chunk,
+                            skip_tokens_in_chunk // group.tokens_per_chunk,
                         )
                     group_skip_blocks = cache_context.calculate_num_blocks(
                         skip_tokens_in_chunk, group_idx

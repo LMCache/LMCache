@@ -35,7 +35,6 @@ SAMPLE_STATUS = {
             "world_size": 1,
             "kv_cache_layout": {
                 "num_layers": 32,
-                "inference_engine_logical_block_size": 16,
                 "num_blocks": 2048,
                 "cache_size_per_token": 163840,
                 "kernel_groups": [
@@ -45,6 +44,7 @@ SAMPLE_STATUS = {
                         "object_group_idx": 0,
                         "num_layers": 32,
                         "layer_indices": list(range(32)),
+                        "tokens_per_chunk": 16,
                         "physical_block_size": 16,
                         "compress_ratio": 1,
                         "dtype": "torch.float16",

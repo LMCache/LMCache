@@ -979,18 +979,11 @@ class LMCacheMPWorkerAdapter:
         except TimeoutError:
             self.mq_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
+        self.chunk_size = chunk_size
         assert chunk_size % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
-        # Retain the vLLM logical block size so we can ship it to the
-        # LMCache server in ``register_kv_caches`` — the server uses it
-        # (as ``layout_hints["inference_engine_logical_block_size"]``)
-        # to derive per-group compression ratios when some KV layer
-        # groups compress multiple logical tokens into a single physical
-        # slot (``shape_desc.bs <
-        # inference_engine_logical_block_size``).
-        self.vllm_logical_block_size = vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -1059,8 +1052,18 @@ class LMCacheMPWorkerAdapter:
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
+            ValueError: if the LMCache chunk size is not a multiple of an
+                engine group's ``tokens_per_chunk`` (chunk boundaries would
+                not align with that group's paged-chunk boundaries).
         """
         logger.info("Registering kv caches")
+        for info in engine_group_infos:
+            if info.tokens_per_chunk > 0 and self.chunk_size % info.tokens_per_chunk:
+                raise ValueError(
+                    f"LMCache chunk size {self.chunk_size} must be a "
+                    f"multiple of engine group {info.engine_group_id} "
+                    f"tokens_per_chunk {info.tokens_per_chunk}"
+                )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
         self._send_register_kv_caches_request(kv_caches)
@@ -1088,9 +1091,6 @@ class LMCacheMPWorkerAdapter:
             kv_caches, mode=self._mp_transfer_mode
         )
         layout_hints = vllm_layout_hints()
-        layout_hints["inference_engine_logical_block_size"] = (
-            self.vllm_logical_block_size
-        )
         try:
             self.transfer_ctx.register(
                 self.instance_id,

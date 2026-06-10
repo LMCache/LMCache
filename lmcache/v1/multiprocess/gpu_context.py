@@ -361,7 +361,6 @@ class GPUCacheContext:
             self.kv_caches_,
             gpu_kv_format=self.gpu_kv_format_,
             num_blocks=self.num_blocks_,
-            layout_hints=layout_hints,
             engine_group_infos=engine_group_infos,
             lmcache_logical_chunk_size=lmcache_logical_chunk_size,
         )
@@ -643,7 +642,6 @@ class GPUCacheContext:
             A dict with these top-level fields:
 
             - ``num_layers`` (int): total layers in the model.
-            - ``inference_engine_logical_block_size`` (int)
             - ``num_blocks`` (int)
             - ``cache_size_per_token`` (int): bytes per logical token,
               summed across groups.
@@ -655,7 +653,9 @@ class GPUCacheContext:
               - ``object_group_idx`` (int): owning object group.
               - ``num_layers`` (int): layers in this group.
               - ``layer_indices`` (list[int]): the group's layer indices.
-              - ``physical_block_size`` (int): ``shape_desc.bs``.
+              - ``tokens_per_chunk`` (int): logical tokens per paged chunk.
+              - ``physical_block_size`` (int): physical slots per paged
+                chunk (``slots_per_chunk``, i.e. ``shape_desc.bs``).
               - ``compress_ratio`` (int)
               - ``dtype`` (str): stringified torch dtype.
               - ``gpu_kv_concrete_shape`` (str): group-accurate numeric shape.
@@ -686,7 +686,8 @@ class GPUCacheContext:
                     ),
                     "num_layers": group.num_layers,
                     "layer_indices": list(group.layer_indices),
-                    "physical_block_size": group.shape_desc.bs,
+                    "tokens_per_chunk": group.tokens_per_chunk,
+                    "physical_block_size": group.slots_per_chunk,
                     "compress_ratio": group.compress_ratio,
                     "dtype": str(group.dtype),
                     "gpu_kv_concrete_shape": get_concrete_gpu_kv_shape_from_shape_desc(
@@ -701,9 +702,6 @@ class GPUCacheContext:
 
         return {
             "num_layers": self.num_layers,
-            "inference_engine_logical_block_size": (
-                manager.inference_engine_logical_block_size
-            ),
             "num_blocks": self.num_blocks,
             "cache_size_per_token": self.cache_size_per_token(),
             "kernel_groups": group_reports,
