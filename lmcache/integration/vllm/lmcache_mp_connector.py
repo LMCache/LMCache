@@ -5,6 +5,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
+import sys
 
 # Third Party
 from vllm.config import VllmConfig
@@ -36,8 +37,13 @@ import zmq
 
 # First Party
 from lmcache import torch_dev
+from lmcache.banner import print_banner_once
+from lmcache.integration.vllm.kv_cache_group_edits import (
+    apply_kv_cache_group_edits,
+    validate_kv_cache_groups,
+)
 from lmcache.integration.vllm.kv_cache_groups import (
-    create_group_views_from_vllm,
+    create_engine_group_infos_from_vllm,
 )
 from lmcache.integration.vllm.utils import mla_enabled, vllm_layout_hints
 from lmcache.utils import init_logger as lmcache_init_logger
@@ -95,89 +101,63 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
-def extract_world_size_and_kv_rank(
-    world_size: int,
-    rank: int,
-    vllm_config: VllmConfig,
-) -> tuple[int, int]:
+def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
+    """Reject scheduler configs that can skip Mamba state snapshots.
+
+    In ``mamba_cache_mode="align"`` vLLM snapshots the recurrent state only at
+    the end of each scheduler step, and a step that advances more than one
+    block fills the skipped block-table positions with the null block
+    (``MambaManager.allocate_new_blocks``). LMCache keys chunks by token hash,
+    so a skipped boundary would be stored as null-block garbage under a valid
+    key and silently corrupt any request that later resumes from that prefix.
+    Requiring ``block_size <= max_num_batched_tokens < 2 * block_size`` makes
+    vLLM's block-aligned splitting (``Scheduler._mamba_block_aligned_split``)
+    advance every mid-prefill step by exactly one block, so every chunk
+    boundary holds a real snapshot.
+
+    Args:
+        vllm_config: The vLLM config; only Mamba-hybrid models in ``align``
+            cache mode are constrained, others pass.
+
+    Raises:
+        ValueError: If ``max_num_batched_tokens`` is not in
+            ``[block_size, 2 * block_size)``.
     """
-    Convert the rank for the MLA.
+    if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
+        return
+    block_size = vllm_config.cache_config.block_size
+    max_batched = vllm_config.scheduler_config.max_num_batched_tokens
+    if not (block_size <= max_batched < 2 * block_size):
+        raise ValueError(
+            f"Mamba-hybrid models with LMCache require "
+            f"block_size <= max_num_batched_tokens < 2 * block_size so every "
+            f"prefill step advances exactly one block and every block boundary "
+            f"gets a state snapshot; got max_num_batched_tokens={max_batched}, "
+            f"block_size={block_size}. Set --max-num-batched-tokens "
+            f"{block_size}."
+        )
+
+
+def build_parallel_strategy_from_vllm_config(
+    vllm_config: "VllmConfig",
+) -> ParallelStrategy:
+    """Build a ParallelStrategy from a vLLM config.
+
+    Centralises the (vllm_config -> KV parallel geometry) mapping.
+
+    Args:
+        vllm_config: The vLLM configuration object.
+
+    Returns:
+        The constructed ParallelStrategy.
     """
-    use_mla = mla_enabled(vllm_config.model_config)
-    if not use_mla:
-        return world_size, rank
-    else:
-        # Tensor parallel does not change the KV caches for MLA models.
-        # So we need to "exclude" the effect of TP on rank and world size
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        # vLLM constructs TP groups first, and then construct other
-        # parallel groups on top of TP groups.
-        # for example, TP=4, PP=2,
-        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
-        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
-        # So we can "exclude" the effect of TP by rank // tp_size.
-        return world_size // tp_size, rank // tp_size
-
-
-def create_scheduler_adapter(
-    server_url: str,
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
-) -> LMCacheMPSchedulerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config,
-    )
-    parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-    )
-
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return LMCacheMPSchedulerAdapter(
-        server_url=server_url,
-        context=zmq_context,
-        model_name=vllm_config.model_config.model,
-        vllm_block_size=vllm_config.cache_config.block_size,
-        parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
-    )
-
-
-def create_worker_adapter(
-    server_url: str,
-    zmq_context: zmq.Context,
-    vllm_config: VllmConfig,
-) -> LMCacheMPWorkerAdapter:
-    world_size, kv_rank = extract_world_size_and_kv_rank(
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config,
-    )
-    parallel_strategy = ParallelStrategy(
-        mla_enabled(vllm_config.model_config),
-        world_size,
-        kv_rank,
-        vllm_config.parallel_config.world_size,
-        vllm_config.parallel_config.rank,
-        vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size,
-    )
-
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-    return LMCacheMPWorkerAdapter(
-        server_url=server_url,
-        context=zmq_context,
-        model_name=vllm_config.model_config.model,
-        vllm_block_size=vllm_config.cache_config.block_size,
-        parallel_strategy=parallel_strategy,
-        extra_config=extra_config,
+    pc = vllm_config.parallel_config
+    return ParallelStrategy(
+        use_mla=mla_enabled(vllm_config.model_config),
+        vllm_world_size=pc.world_size,
+        vllm_worker_id=pc.rank,
+        tp_size=pc.tensor_parallel_size,
+        pp_size=pc.pipeline_parallel_size,
     )
 
 
@@ -510,7 +490,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
                 f"direction={req_meta.direction}, "
-                f"num_blocks={len(req_meta.op.block_ids[0])}, "
+                f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
         return "[" + "\n".join(request_strs) + "]"
@@ -539,6 +519,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
+        # Fail fast, before the server handshake below.
+        validate_mamba_step_alignment(vllm_config)
+        validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
+
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.host", "tcp://localhost"
@@ -549,18 +533,29 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
+        parallel_strategy = build_parallel_strategy_from_vllm_config(vllm_config)
+
         if self.role == KVConnectorRole.SCHEDULER:
-            self.scheduler_adapter = create_scheduler_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
+            # Banner from the scheduler role only, so tensor-parallel
+            # deployments print it once rather than once per worker.
+            print_banner_once(sys.stderr)
+            self.scheduler_adapter = LMCacheMPSchedulerAdapter(
+                server_url=server_url,
+                context=zmq_context,
+                model_name=vllm_config.model_config.model,
+                vllm_block_size=vllm_config.cache_config.block_size,
+                parallel_strategy=parallel_strategy,
+                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
-            self.worker_adapter = create_worker_adapter(
-                server_url,
-                zmq_context,
-                vllm_config,
+            self.worker_adapter = LMCacheMPWorkerAdapter(
+                server_url=server_url,
+                context=zmq_context,
+                model_name=vllm_config.model_config.model,
+                vllm_block_size=vllm_config.cache_config.block_size,
+                parallel_strategy=parallel_strategy,
+                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
@@ -619,12 +614,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
-        group_views = create_group_views_from_vllm(
+        # Must precede both group-info creation and transfer registration so
+        # they see the same edited views.
+        kv_caches = apply_kv_cache_group_edits(kv_cache_config, kv_caches)
+        engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,
             layout_hints=vllm_layout_hints(),
         )
-        self.worker_adapter.register_kv_caches(kv_caches, group_views=group_views)
+        self.worker_adapter.register_kv_caches(
+            kv_caches, engine_group_infos=engine_group_infos
+        )
         return
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
@@ -711,10 +711,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         # In MLA scenario, only the first rank of the pipeline group
         # needs to save the KV cache.
-        if (
-            self.worker_adapter.use_mla
-            and not self.worker_adapter.is_first_rank_of_pp_group
-        ):
+        if not self.worker_adapter.is_kv_writer:
             return
 
         metadata = self._get_connector_metadata()

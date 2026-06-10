@@ -168,7 +168,7 @@ def test_adapter_free_lookup_locks_sends_request():
     adapter.model_name = "test_model"
     adapter.chunk_size = 256
     adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
     adapter._health_event.set()
     adapter._mq_timeout = 30.0
@@ -218,7 +218,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter.model_name = "test_model"
     adapter.chunk_size = 256
     adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
     adapter._health_event.set()
     adapter._mq_timeout = 30.0

@@ -171,11 +171,13 @@ class KVCacheDescriber:
         )
 
     def add_models(self) -> None:
-        """Per-model KV cache layout sections."""
+        """Per-model KV cache layout sections.
+
+        Each model gets one section with context-wide fields, followed by
+        one ``kernel_groups`` list entry per kernel group carrying that
+        group's identity and geometry.
+        """
         gpu_meta = self.data.get("cache_context_meta", {})
-        if not gpu_meta:
-            # CB-only deployments populate cb_gpu_context_meta instead.
-            gpu_meta = self.data.get("cb_gpu_context_meta", {})
         if not gpu_meta:
             return
 
@@ -202,32 +204,53 @@ class KVCacheDescriber:
             layout = info.get("layout")
             if not layout:
                 continue
-            sec.add(
-                "attention_backend",
-                "Attention backend",
-                layout.get("attention_backend"),
-            )
-            sec.add("gpu_kv_shape", "GPU KV shape", layout.get("gpu_kv_shape"))
-            sec.add(
-                "gpu_kv_concrete_shape",
-                "GPU KV tensor shape",
-                layout.get("gpu_kv_concrete_shape"),
-            )
-            # CB-only contexts ship a singular ``hidden_dim_size``; wrap to
-            # match the plural list-shape used by the regular path.
-            if "hidden_dim_sizes" not in layout and "hidden_dim_size" in layout:
-                layout = dict(layout, hidden_dim_sizes=[layout["hidden_dim_size"]])
             for _key, _label in (
                 ("num_layers", "Num layers"),
-                ("block_size", "Block size"),
-                ("hidden_dim_sizes", "Hidden dim sizes"),
-                ("dtype", "Dtype"),
-                ("is_mla", "MLA"),
                 ("num_blocks", "Num blocks"),
                 ("cache_size_per_token", "Cache size per token (bytes)"),
             ):
                 if _key in layout:
                     sec.add(_key, _label, layout[_key])
+
+            self._add_kernel_groups(idx, model_name, layout.get("kernel_groups", []))
+
+    def _add_kernel_groups(
+        self, model_idx: int, model_name: str, kernel_groups: list
+    ) -> None:
+        """Emit one ``kernel_groups`` list section per kernel group.
+
+        Args:
+            model_idx: Index of the owning model section (keeps section keys
+                unique across models).
+            model_name: Human-readable model name, shown in each group header.
+            kernel_groups: The model layout's ``kernel_groups`` list (each a
+                dict produced by ``GPUCacheContext.report_status``).
+        """
+        for group in kernel_groups:
+            kg_idx = group.get("kernel_group_idx")
+            section_key = f"model_{model_idx}_kg_{kg_idx}"
+            self.metrics.add_list_section(
+                "kernel_groups",
+                section_key,
+                f"Kernel group {kg_idx} ({model_name})",
+            )
+            sec = self.metrics[section_key]
+            sec.add("model", "Model", model_name)
+            for _key, _label in (
+                ("kernel_group_idx", "Kernel group index"),
+                ("engine_group_idx", "Engine group index"),
+                ("object_group_idx", "Object group index"),
+                ("num_layers", "Num layers"),
+                ("physical_block_size", "Physical block size"),
+                ("compress_ratio", "Compress ratio"),
+                ("dtype", "Dtype"),
+                ("is_mla", "MLA"),
+                ("attention_backend", "Attention backend"),
+                ("gpu_kv_shape", "GPU KV shape"),
+                ("gpu_kv_concrete_shape", "GPU KV tensor shape"),
+            ):
+                if _key in group:
+                    sec.add(_key, _label, group[_key])
 
     def add_l2_adapters(self) -> None:
         """L2 adapter sections."""

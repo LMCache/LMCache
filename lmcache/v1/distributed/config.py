@@ -140,6 +140,31 @@ class L1MemoryManagerConfig:
 
 
 @dataclass
+class GdsL1Config:
+    """Configuration for the GDS slab-file L1 tier.
+
+    When present on :class:`L1ManagerConfig`, the L1 medium becomes an NVMe
+    slab file accessed via cuFile DMA instead of pinned DRAM (mutually
+    exclusive with the pinned-DRAM tier in ``memory_config``). Carries the
+    slab location, capacity, and DMA mode.
+    """
+
+    file_location: str
+    """Directory for the slab file (one shared slab per process, used by all
+    GPU instances)."""
+
+    size_in_bytes: int
+    """Slab capacity in bytes (from ``--l1-size-gb``). Sizes both the
+    preallocated slab file and the GDS tier's address space."""
+
+    use_direct_io: bool = True
+    """Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path)."""
+
+    align_bytes: int = 4096
+    """Allocation alignment; cuFile/O_DIRECT require 4 KiB."""
+
+
+@dataclass
 class L1ManagerConfig:
     """
     Special config for the L1 Object/Key manager
@@ -147,6 +172,10 @@ class L1ManagerConfig:
 
     memory_config: L1MemoryManagerConfig
     """ The memory manager configuration for L1 cache. """
+
+    gds_l1_config: "GdsL1Config | None" = None
+    """ Optional GDS L1 tier. When set, the GDS slab is the L1 medium
+    (mutually exclusive with the pinned-DRAM tier in ``memory_config``). """
 
     write_ttl_seconds: int = field(default=600)
     """ Time to live for each object's write lock. Default is 600s (10 minutes). """
@@ -234,8 +263,15 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         None.
 
     Raises:
-        ValueError: If hybrid L1 is paired with incompatible L2 adapters.
+        ValueError: If mutually exclusive L1 tiers are both configured, or
+            hybrid L1 is paired with incompatible L2 adapters.
     """
+    if (
+        config.l1_manager_config.gds_l1_config is not None
+        and config.l1_manager_config.memory_config.devdax_path
+    ):
+        raise ValueError("gds-l1-path cannot be used with l1-devdax-path")
+
     memory_config = config.l1_manager_config.memory_config
     if not (memory_config.devdax_path and memory_config.devdax_size_in_bytes):
         return
@@ -324,6 +360,28 @@ def add_storage_manager_args(
             "If a DAX L2 adapter with the same device_path is registered, "
             "that adapter's max_dax_size_gb is used as L1 overflow size."
         ),
+    )
+
+    # GDS L1 tier (optional, opt-in via --gds-l1-path)
+    gds_group = parser.add_argument_group(
+        "GDS L1 tier",
+        "Configuration for the GDS slab-file L1 tier. Setting --gds-l1-path "
+        "makes the L1 medium an NVMe slab accessed via cuFile DMA instead of "
+        "pinned DRAM; --l1-size-gb then sizes the slab. Disable byte-array L2 "
+        "adapters when this is on.",
+    )
+    gds_group.add_argument(
+        "--gds-l1-path",
+        type=str,
+        default=None,
+        help="NVMe directory path for the GDS L1 slab. Setting this enables GDS L1.",
+    )
+    gds_group.add_argument(
+        "--gds-l1-use-direct-io",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Open the slab file with O_DIRECT (required for the GDS DMA fast "
+        "path on ext4). Default True.",
     )
     # L1 Manager Config (TTL settings)
     ttl_group = parser.add_argument_group(
@@ -462,8 +520,18 @@ def parse_args_to_config(
         devdax_path=args.l1_devdax_path,
     )
 
+    gds_l1_config: GdsL1Config | None = None
+    if getattr(args, "gds_l1_path", None):
+        # --l1-size-gb is the single L1 size flag; under GDS it sizes the slab.
+        gds_l1_config = GdsL1Config(
+            file_location=args.gds_l1_path,
+            size_in_bytes=int(args.l1_size_gb * (1 << 30)),
+            use_direct_io=args.gds_l1_use_direct_io,
+        )
+
     l1_manager_config = L1ManagerConfig(
         memory_config=memory_config,
+        gds_l1_config=gds_l1_config,
         write_ttl_seconds=args.l1_write_ttl_seconds,
         read_ttl_seconds=args.l1_read_ttl_seconds,
     )

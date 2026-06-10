@@ -427,6 +427,26 @@ def test_cli_parses_l1_devdax_path(tmp_path):
     assert mem_cfg.shm_name == ""
 
 
+def test_cli_rejects_devdax_l1_with_gds_l1(tmp_path):
+    path = _make_mmap_file(tmp_path)
+
+    with pytest.raises(ValueError, match="gds-l1-path"):
+        parse_args(
+            [
+                "--l1-size-gb",
+                "1",
+                "--eviction-policy",
+                "LRU",
+                "--no-l1-use-lazy",
+                "--no-l1-use-shm",
+                "--l1-devdax-path",
+                path,
+                "--gds-l1-path",
+                str(tmp_path),
+            ]
+        )
+
+
 def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
     path = _make_mmap_file(tmp_path)
     config = parse_args(

@@ -15,6 +15,10 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.gpu_connector.gds_context import (
+    get_gds_context,
+    initialize_gds_context,
+)
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
 from lmcache.v1.multiprocess.session import SessionManager
@@ -141,6 +145,11 @@ class MPCacheEngineContext:
         hash_algorithm: str = "blake3",
     ) -> None:
         self._chunk_size = chunk_size
+
+        # Initialize the process-global GDS context.
+        # No-op when GDS L1 is disabled (config is None).
+        initialize_gds_context(storage_manager_config.l1_manager_config.gds_l1_config)
+
         self.shm_pool_info: ShmPoolInfo = self._compute_shm_pool_info(
             storage_manager_config
         )
@@ -151,6 +160,14 @@ class MPCacheEngineContext:
         self._session_manager = SessionManager(self._token_hasher)
         self._event_bus = get_event_bus()
         self._layout_desc_registry = LayoutDescRegistry()
+
+    def close(self) -> None:
+        """
+        Tear down the storage manager and the process-global GDS context.
+        """
+        self._storage_manager.close()
+        # Tear down the GDS cuFile context (the shared slab + its handle).
+        get_gds_context().close()
 
     @property
     def chunk_size(self) -> int:

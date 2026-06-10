@@ -3,6 +3,7 @@
 # Usage: run.sh <test_name>
 #   test_name: lm_eval | hma_lm_eval_gemma4 | vllm_bench | long_doc_qa
 #              | long_doc_qa_l2 | fault_tolerance | deadlock | restart_recovery
+#              | gds_smoke_test
 # Thin wrapper: sets up environment, then delegates to scripts/.
 # No Docker -- all processes run natively in the pod.
 set -euo pipefail

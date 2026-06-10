@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Build LMCache group views from vLLM KV cache group metadata."""
+"""Build LMCache engine group infos from vLLM KV cache group metadata."""
 
 # Future
 from __future__ import annotations
@@ -13,15 +13,15 @@ if TYPE_CHECKING:
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
 # First Party
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 
-def create_group_views_from_vllm(
+def create_engine_group_infos_from_vllm(
     kv_cache_config: Any,
     kv_caches: Mapping[str, Any],
     layout_hints: "LayoutHints | None" = None,
-) -> list[LMCacheGroupView]:
-    """Build the LMCache group views from vLLM metadata and registered tensors.
+) -> list[EngineGroupInfo]:
+    """Build the LMCache engine group infos from vLLM metadata and registered tensors.
 
     This is the single entry point for the vLLM -> LMCache conversion. It reads
     the vLLM-specific fields (``KVCacheConfig.kv_cache_groups`` and
@@ -41,7 +41,7 @@ def create_group_views_from_vllm(
             detection (e.g. ``NHD``/``HND`` and compression metadata).
 
     Returns:
-        The list of ``LMCacheGroupView`` in protocol order, i.e. the LMCache group
+        The list of ``EngineGroupInfo`` in protocol order, i.e. the LMCache group
         order used by store/retrieve block IDs.
     """
     # First Party
@@ -95,7 +95,7 @@ def create_group_views_from_vllm(
     # the shared, engine-neutral primitive the server reuses to reproduce the
     # same grouping from the registered tensors.
     return [
-        LMCacheGroupView(
+        EngineGroupInfo(
             engine_group_id=identity[4],
             layer_indices=tuple(indices),
         )

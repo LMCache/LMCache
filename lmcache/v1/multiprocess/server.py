@@ -101,7 +101,7 @@ class MPCacheEngine:
         """Close all modules and release shared resources."""
         for module in self._modules:
             module.close()
-        self._context.storage_manager.close()
+        self._context.close()
         logger.info("MPCacheEngine closed")
 
     # HTTP-layer passthroughs lost in the engine refactor.
@@ -113,7 +113,7 @@ class MPCacheEngine:
 
     @property
     def gpu_contexts(self) -> dict[int, GPUCacheContext] | None:
-        """Used by ``/kvcache/check``; unwraps :class:`GPUContextEntry`."""
+        """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
             if isinstance(module, GPUTransferModule):
                 return {i: e.cache_context for i, e in module.cache_contexts.items()}
