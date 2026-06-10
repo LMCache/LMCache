@@ -23,34 +23,6 @@ GPU_FOR_BASELINE="${GPU_FOR_BASELINE:-1}"
 echo "Using GPU $GPU_FOR_VLLM for vLLM with LMCache"
 echo "Using GPU $GPU_FOR_BASELINE for vLLM baseline"
 
-# Tensor parallelism for the LMCache vLLM server. Models too large for one GPU
-# (e.g. DeepSeek-V4-Flash, a ~256B fp8 MoE) set TENSOR_PARALLEL_SIZE>1; the
-# server (and the LMCache MP server, for the per-worker KV transfer handles)
-# then spans GPUs 0..TP-1. Override the exact device set via GPUS_FOR_VLLM.
-TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-if [ -n "${GPUS_FOR_VLLM:-}" ]; then
-    VLLM_GPUS="$GPUS_FOR_VLLM"
-elif [ "$TENSOR_PARALLEL_SIZE" -gt 1 ]; then
-    VLLM_GPUS=$(seq -s, 0 $((TENSOR_PARALLEL_SIZE - 1)))
-else
-    VLLM_GPUS="$GPU_FOR_VLLM"
-fi
-TP_ARG=""
-if [ "$TENSOR_PARALLEL_SIZE" -gt 1 ]; then
-    TP_ARG="--tensor-parallel-size $TENSOR_PARALLEL_SIZE"
-fi
-
-# Expert parallelism for MoE models. DeepSeek-V4-Flash's fp8 fused-expert
-# weights only register their per-expert weight-scale params under expert
-# parallelism; loading with tensor parallelism alone KeyErrors on
-# routed_experts.w13_weight_scale. Set ENABLE_EXPERT_PARALLEL=true for it.
-ENABLE_EXPERT_PARALLEL="${ENABLE_EXPERT_PARALLEL:-false}"
-EP_ARG=""
-if [ "$ENABLE_EXPERT_PARALLEL" = "true" ] || [ "$ENABLE_EXPERT_PARALLEL" = "1" ]; then
-    EP_ARG="--enable-expert-parallel"
-fi
-echo "vLLM GPUs: $VLLM_GPUS (tensor-parallel-size=$TENSOR_PARALLEL_SIZE, expert-parallel=$ENABLE_EXPERT_PARALLEL)"
-
 # Check GPU memory and set gpu-memory-utilization for very large GPUs.
 # Without this, vLLM allocates so much KV cache that APC covers all prefixes
 # and LMCache's cache path is never exercised, making the test pass vacuously.
@@ -96,8 +68,8 @@ fi
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
 MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
 
-# KV cache dtype for both servers. Defaults to "auto" (the model default).
-# DeepSeek-V4-Flash's sparse-MLA backend needs its fp8 MLA layout
+# KV cache dtype for the LMCache vLLM server. Defaults to "auto" (the model
+# default). DeepSeek-V4-Flash's sparse-MLA backend needs its fp8 MLA layout
 # (fp8_ds_mla), which also drives the 4/128 per-group compress ratios LMCache
 # must transfer -- set KV_CACHE_DTYPE=fp8_ds_mla for it.
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
@@ -113,17 +85,10 @@ fi
 EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
 
 # Batch-invariant kernels make run1 == run2 bit-exact, which the determinism
-# (lm_eval) and HMA gemma-4 tests rely on for an exact score match. Models
-# whose attention backend does not implement batch invariance (e.g.
-# DeepSeek-V4-Flash's FlashMLA-Sparse) must set VLLM_BATCH_INVARIANT=0 and
-# compare with a SCORE_TOLERANCE instead.
+# (lm_eval) and HMA gemma-4 tests rely on. Models whose attention backend does
+# not implement batch invariance (e.g. DeepSeek-V4-Flash's FlashMLA-Sparse)
+# must set VLLM_BATCH_INVARIANT=0.
 VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT:-1}"
-
-# Timeout (seconds) for the connector's blocking RPCs to the LMCache MP server,
-# notably register_kv_caches at startup. Large tensor-parallel models register
-# many KV tensors across all workers at once, so the 10s default can be too
-# short (e.g. DeepSeek-V4-Flash at TP=8); raise MQ_TIMEOUT for those.
-MQ_TIMEOUT="${MQ_TIMEOUT:-10}"
 
 # Store PIDs in a file so cleanup.sh can find them
 PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
@@ -133,7 +98,7 @@ PID_FILE="/tmp/lmcache_mp_pids_${BUILD_ID}"
 echo "=== Launching LMCache MP server ==="
 echo "Port: $LMCACHE_PORT"
 
-CUDA_VISIBLE_DEVICES="${VLLM_GPUS}" \
+CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 lmcache server \
     --l1-size-gb "$CPU_BUFFER_SIZE" \
     --eviction-policy LRU \
@@ -165,16 +130,14 @@ echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
 echo "Port: $vllm_port"
 
-CUDA_VISIBLE_DEVICES="${VLLM_GPUS}" \
+CUDA_VISIBLE_DEVICES="${GPU_FOR_VLLM}" \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
 VLLM_SERVER_DEV_MODE=1 \
 VLLM_BATCH_INVARIANT="${VLLM_BATCH_INVARIANT}" \
 PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
-    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": $MQ_TIMEOUT}}" \
+    --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     $ATTENTION_BACKEND_ARG \
-    $TP_ARG \
-    $EP_ARG \
     $KV_CACHE_DTYPE_ARG \
     --port "$vllm_port" \
     --no-async-scheduling \

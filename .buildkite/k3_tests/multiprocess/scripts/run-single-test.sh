@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | hma_lm_eval_gemma4 | hma_lm_eval_dsv4_flash
-#              | hma_dsv4_flash | vllm_bench | long_doc_qa | long_doc_qa_l2
+#   test_name: lm_eval | hma_lm_eval_gemma4 | hma_dsv4_flash
+#              | hma_dsv4_roundtrip | vllm_bench | long_doc_qa | long_doc_qa_l2
 #              | fault_tolerance | deadlock | restart_recovery
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
@@ -33,15 +33,13 @@ if [ "$TEST_NAME" = "hma_lm_eval_gemma4" ]; then
     # pipeline sets ATTENTION_BACKEND=auto; its ~63GB of weights also need a
     # higher GPU_MEMORY_UTILIZATION than the default (all set in pipeline.yml).
     export MODEL="${MODEL:-google/gemma-4-31B-it}"
-elif [ "$TEST_NAME" = "hma_lm_eval_dsv4_flash" ] || \
-     [ "$TEST_NAME" = "hma_dsv4_roundtrip" ]; then
+elif [ "$TEST_NAME" = "hma_dsv4_roundtrip" ]; then
     # DeepSeek-V4-Flash is a hybrid MLA model (full MLA + per-layer
     # sliding-window MLA + compressor-state groups) whose KV cache groups
     # declare per-group compress ratios of 4 and 128 -- the exact path this
-    # PR's tokens/slots-per-chunk handling drives. It is a ~256B fp8 MoE, far
-    # too large for one GPU, so the pipeline runs it tensor-parallel with
-    # kv_cache_dtype=fp8_ds_mla and batch invariance off (all set in
-    # pipeline.yml; the run-hma-lm-eval.sh score comparison uses a tolerance).
+    # PR's tokens/slots-per-chunk handling drives. hma_dsv4_roundtrip loads it
+    # with dummy weights (load_format=dummy) on a single GPU, so it needs only
+    # the config/tokenizer and runs on stock vLLM (no fp4 weight loading).
     export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
@@ -126,9 +124,6 @@ case "$TEST_NAME" in
     hma_lm_eval_gemma4)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
-    hma_lm_eval_dsv4_flash)
-        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
-        ;;
     hma_dsv4_flash)
         exec_script="${SCRIPT_DIR}/hma-dsv4-flash-check.py"
         ;;
@@ -161,7 +156,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, hma_lm_eval_dsv4_flash, hma_dsv4_flash, hma_dsv4_roundtrip, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api"
+        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, hma_dsv4_flash, hma_dsv4_roundtrip, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api"
         exit 1
         ;;
 esac
