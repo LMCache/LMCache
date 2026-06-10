@@ -372,10 +372,10 @@ def compute_dp_device_offset(parallel_config: "ParallelConfig") -> int:
     index by ``dp_local_rank * tp_size * pp_size`` so that DP replica ``k``
     on a single node binds to GPUs ``[k*W, (k+1)*W)`` where
     ``W = tp_size * pp_size``. LMCache must apply the **same** offset when
-    it calls ``torch.cuda.set_device`` so its buffers / events / streams
-    live on the same physical GPU as the corresponding vLLM worker —
-    otherwise CUDA operations fail with ``Event device index does not
-    match recording stream's device index``.
+    it sets the active device so its buffers / events / streams live on
+    the same physical GPU as the corresponding vLLM worker — otherwise
+    CUDA operations fail with ``Event device index does not match
+    recording stream's device index``.
 
     However, vLLM only performs this shift in a specific configuration:
 
@@ -409,9 +409,12 @@ def compute_dp_device_offset(parallel_config: "ParallelConfig") -> int:
         or dp_backend == "ray"
     ):
         return 0
+    dp_local_rank = get_dp_local_rank(parallel_config)
+    if dp_local_rank == 0:
+        return 0
     tp_size = parallel_config.tensor_parallel_size
     pp_size = parallel_config.pipeline_parallel_size
-    return get_dp_local_rank(parallel_config) * tp_size * pp_size
+    return dp_local_rank * tp_size * pp_size
 
 
 def calculate_local_rank_and_world_size(vllm_config: "VllmConfig") -> Tuple[int, int]:
