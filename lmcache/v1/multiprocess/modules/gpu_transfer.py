@@ -54,7 +54,7 @@ logger = init_logger(__name__)
 def get_layout_desc(
     gpu_context: GPUCacheContext,
     num_tokens: int,
-    object_group_id: int = 0,
+    object_group_id: int,
 ) -> MemoryLayoutDesc:
     """Get the memory layout description for a specific object group.
 
@@ -67,8 +67,6 @@ def get_layout_desc(
         cache_context: The GPU cache context containing the KV cache information.
         num_tokens: The number of tokens to determine the layout for.
         object_group_id: Index of the object group whose layout to build.
-            Defaults to 0; under the current single-object-group assumption this
-            covers every kernel group.
 
     Returns:
         MemoryLayoutDesc: The memory layout description containing shapes and
@@ -81,26 +79,6 @@ def get_layout_desc(
     ]
     shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
     return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
-
-
-def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None]:
-    """Utility function to iterate over a list in batches.
-
-    Args:
-        lst: The list to iterate over.
-        batch_size: The size of each batch.
-
-    Yields:
-        Batches of the list as tuples.
-
-    Raises:
-        ValueError: If batch_size is less than 1.
-    """
-    if batch_size < 1:
-        raise ValueError("batch size must be at least one")
-    it = iter(lst)
-    while batch := tuple(islice(it, batch_size)):
-        yield batch
 
 
 def batched_iteration_with_skip(
@@ -184,13 +162,15 @@ def cut_and_stage_block_ids(
           [13, 14, 17, 18], # swa attention group only needs the last 2 block per chunk
         ]
     """
-    num_kernel_groups = cache_context.kv_layer_groups_manager.num_groups
+    num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
     for kernel_group_id in range(num_kernel_groups):
-        # TODO: we need to get the actual sliding window size from the kernel
-        # group
-        placeholder_sliding_window_size = cache_context.lmcache_logical_chunk_size
+        subchunk_sw_size_tokens = (
+            cache_context.kv_layer_groups_manager.get_subchunk_sw_size_tokens(
+                kernel_group_id
+            )
+        )
         tokens_per_chunk = min(
-            cache_context.lmcache_logical_chunk_size, placeholder_sliding_window_size
+            cache_context.lmcache_logical_chunk_size, subchunk_sw_size_tokens
         )
         keep_blocks_per_chunk = cache_context.calculate_num_blocks(
             tokens_per_chunk, kernel_group_id
@@ -282,17 +262,17 @@ def gpu_kv_copy_helper(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
-    # TODO(ApostaC): this is for the sliding window optimization. We will have
-    # num_objects_to_skip calculated based on the sliding window size.
-    # In most of cases, it will be:
-    # - `len(memory_objs) - chunks_in_sliding_window`
-    # where the `chunks_in_sliding_window` is calculated as:
-    # - `cdiv(sliding_window_size_in_token, chunk_size)`
-    num_objects_to_skip = 0
     lmcache_chunk_size = cache_context.lmcache_logical_chunk_size
-    object_group = cache_context.kv_layer_groups_manager.object_groups[object_group_id]
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    object_group = kv_groups_manager.object_groups[object_group_id]
     kernel_group_ids = object_group.kernel_group_indices
     is_h2d = direction == lmc_ops.TransferDirection.H2D
+
+    sw_size_chunks = kv_groups_manager.get_sw_size_chunks(object_group_id)
+    if sw_size_chunks == -1:
+        num_objects_to_skip = 0
+    else:
+        num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
 
     for start_object_idx, memory_object_batch in batched_iteration_with_skip(
         memory_objs, batch_size, skip_count=num_objects_to_skip
@@ -332,15 +312,17 @@ def gpu_kv_copy_helper(
             blocks_per_chunk = cache_context.calculate_num_blocks(
                 lmcache_chunk_size, kernel_group_id
             )
-            # TODO(ApostaC): we need to get the sliding window information
-            # from the kernel group
-            placeholder_blocks_per_window = blocks_per_chunk
+            tokens_per_window = min(
+                lmcache_chunk_size,
+                kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+            )
+            blocks_per_window = cache_context.calculate_num_blocks(
+                tokens_per_window, kernel_group_id
+            )
 
             # Get the block ids for this chunk
-            start_block_pos = start_object_idx * placeholder_blocks_per_window
-            end_block_pos = (
-                start_object_idx + batch_len
-            ) * placeholder_blocks_per_window
+            start_block_pos = start_object_idx * blocks_per_window
+            end_block_pos = (start_object_idx + batch_len) * blocks_per_window
 
             block_ids_curr_batch = block_ids_gpu[kernel_group_id][
                 start_block_pos:end_block_pos
@@ -352,7 +334,7 @@ def gpu_kv_copy_helper(
             )
             recalculated_skip_blocks = _recalculate_blocks_to_skip(
                 blocks_per_chunk,
-                placeholder_blocks_per_window,
+                blocks_per_window,
                 orig_skip_blocks,
             )
 
@@ -645,7 +627,9 @@ class GPUTransferModule:
         # group ``i``.
         blocks_per_chunk = [
             cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(cache_context.kv_layer_groups_manager.num_groups)
+            for group_idx in range(
+                cache_context.kv_layer_groups_manager.num_kernel_groups
+            )
         ]
 
         with (
@@ -866,10 +850,6 @@ class GPUTransferModule:
             ),
         )
 
-        # ``skip_*_in_chunk`` is expressed in engine-block units
-        # (logical tokens), which is what the kernel's
-        # ``skip_blocks_in_chunk`` argument expects regardless
-        # of per-group compression.
         ie_logical_block_size = (
             cache_context.kv_layer_groups_manager.inference_engine_logical_block_size
         )
@@ -888,7 +868,9 @@ class GPUTransferModule:
 
         blocks_per_chunk = [
             cache_context.calculate_num_blocks(self._ctx.chunk_size, group_idx)
-            for group_idx in range(cache_context.kv_layer_groups_manager.num_groups)
+            for group_idx in range(
+                cache_context.kv_layer_groups_manager.num_kernel_groups
+            )
         ]
 
         with (

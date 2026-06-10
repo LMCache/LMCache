@@ -406,6 +406,8 @@ class KVLayerGroupsManager:
             or self._kernel_groups[0].shape_desc.bs
         )
 
+        self._lmcache_chunk_size = lmcache_logical_chunk_size
+
         logger.info(
             "KV layer groups: ---\n%s\n---",
             "\n".join(repr(g) for g in self._kernel_groups),
@@ -497,6 +499,48 @@ class KVLayerGroupsManager:
             IndexError: If *kernel_group_idx* is out of range.
         """
         return self._kernel_groups[kernel_group_idx].physical_chunk_size
+
+    def get_subchunk_sw_size_tokens(self, kernel_group_idx: int) -> int:
+        """Return the sub-chunk sliding window size of a given kernel group.
+        The size is measured in the number of tokens.
+
+        This is for the models like DSV4 where the sliding window size is
+        smaller than the tokens in a single lmcache chunk.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+
+        Returns:
+            The sub-chunk sliding window size. Will be the same as the
+            chunk size for non-slding-window models or big-sliding-
+            window models.
+        """
+        # TODO(ApostaC): now here's the 'dummy' implementation.
+        # Need to wire the real sw size from the kernel group info once it's available
+        return self._lmcache_chunk_size
+
+    def get_sw_size_chunks(self, object_group_idx: int) -> int:
+        """Return the sliding window size of a given kernel group,
+        The size is measured in lmcache chunks.
+
+        If the kernel group is non-sliding window, return -1
+
+        Args:
+            object_group_idx: 0-based kernel group index.
+
+        Returns:
+            The sliding window size rounded up to chunks for sliding
+            window models. -1 otherwise.
+
+        Note:
+            It uses object_group_idx, because the kernel groups in the same
+            object group must share the same "big-sliding-window" size -- so that
+            they can be retrieved at the same time from the same object.
+            For small sliding window (subchunk window) models, it will return 1.
+        """
+        # TODO(ApostaC): now here's the 'dummy' implementation.
+        # Need to wire the real sw size from the object group info once it's available
+        return -1
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a
