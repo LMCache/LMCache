@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 import asyncio
 import os
 import shutil
@@ -242,6 +242,85 @@ class TestAsyncSaveBytesToDiskExceptionSafety:
         assert local_disk_backend.current_cache_size == 0.0
         assert local_disk_backend.usage == 0
         on_complete_callback.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_pre_write_failure_releases_memory_obj_and_put_task(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """Cleanup must run even when byte-array conversion fails before I/O."""
+        key = create_test_key(202)
+        physical_size = 4096
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = torch.empty(1)
+        memory_obj.get_physical_size.return_value = physical_size
+
+        local_disk_backend.disk_worker.insert_put_task(key)
+        local_disk_backend.current_cache_size = physical_size
+        local_disk_backend.cache_policy.update_on_put(key)
+
+        with patch.object(
+            type(memory_obj),
+            "byte_array",
+            new_callable=PropertyMock,
+            side_effect=OSError("conversion failed"),
+        ):
+            with pytest.raises(OSError, match="conversion failed"):
+                local_disk_backend.async_save_bytes_to_disk(key, memory_obj)
+
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        assert key not in local_disk_backend.dict
+        assert local_disk_backend.current_cache_size == 0.0
+        assert local_disk_backend.usage == 0
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_existing_key_write_failure_keeps_old_cache_state(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """A failed rewrite must not evict bookkeeping for an existing key."""
+        key = create_test_key(203)
+        physical_size = 4096
+        shape = torch.Size([28, 2, 256, 8, 128])
+        metadata = DiskCacheMetadata(
+            path="/old/path.pt",
+            size=physical_size,
+            shape=shape,
+            dtype=torch.bfloat16,
+            cached_positions=None,
+            fmt=MemoryFormat.KV_2LTD,
+            pin_count=0,
+        )
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = torch.empty(1)
+        memory_obj.byte_array = b"0" * 16
+        memory_obj.get_physical_size.return_value = physical_size
+
+        local_disk_backend.dict[key] = metadata
+        local_disk_backend.current_cache_size = physical_size
+        local_disk_backend.usage = physical_size
+        local_disk_backend.disk_worker.insert_put_task(key)
+
+        with patch.object(
+            local_disk_backend,
+            "write_file",
+            side_effect=OSError("disk full"),
+        ):
+            with patch.object(
+                local_disk_backend.cache_policy, "update_on_force_evict"
+            ) as mock_force_evict:
+                with pytest.raises(OSError, match="disk full"):
+                    local_disk_backend.async_save_bytes_to_disk(
+                        key,
+                        memory_obj,
+                        reserved_new_key=False,
+                    )
+
+        memory_obj.ref_count_down.assert_called_once_with()
+        assert not local_disk_backend.exists_in_put_tasks(key)
+        assert local_disk_backend.dict[key] is metadata
+        assert local_disk_backend.current_cache_size == physical_size
+        assert local_disk_backend.usage == physical_size
+        mock_force_evict.assert_not_called()
         local_disk_backend.local_cpu_backend.memory_allocator.close()
 
 
