@@ -84,6 +84,7 @@ class BigtableConnector(RemoteConnector):
 
         # Independent gRPC client pool initialized lazily on first operation
         self._client = None
+        self._table = None
 
         # Use native AsyncPQExecutor to run pure coroutines directly on the event loop
         self.pq_executor = AsyncPQExecutor(loop, max_workers=self.cfg.thread_pool_size)
@@ -154,6 +155,22 @@ class BigtableConnector(RemoteConnector):
             logger.error(f"Failed to initialize Bigtable async client: {e}")
             raise
 
+    def _get_table(self):
+        """Lazy initialization and caching of TableAsync instance."""
+        if self._table is not None:
+            return self._table
+
+        client = self._get_client()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError as e:
+            raise RuntimeError(
+                "TableAsync must be retrieved within an async event loop context."
+            ) from e
+
+        self._table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+        return self._table
+
     def _get_row_filters_module(self):
         try:
             # Third Party
@@ -189,7 +206,7 @@ class BigtableConnector(RemoteConnector):
                 if self.cfg.app_profile_id:
                     kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-                table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+                table = self._get_table()
                 row = await table.read_row(
                     row_key,
                     operation_timeout=self.cfg.read_timeout_sec,
@@ -255,7 +272,7 @@ class BigtableConnector(RemoteConnector):
                 if self.cfg.app_profile_id:
                     kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-                table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+                table = self._get_table()
                 row = await table.read_row(
                     row_key,
                     operation_timeout=self.cfg.read_timeout_sec,
@@ -366,7 +383,7 @@ class BigtableConnector(RemoteConnector):
                     if self.cfg.app_profile_id:
                         kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-                    table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+                    table = self._get_table()
                     await table.mutate_row(
                         row_key,
                         mutation,
@@ -445,7 +462,7 @@ class BigtableConnector(RemoteConnector):
                 if self.cfg.app_profile_id:
                     kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-                table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+                table = self._get_table()
                 rows_gen = await table.read_rows(
                     query=query,
                     operation_timeout=self.cfg.read_timeout_sec,
@@ -562,7 +579,7 @@ class BigtableConnector(RemoteConnector):
             current_batch_size = 0
             MAX_BATCH_SIZE_BYTES = 30 * 1024 * 1024  # 30MB safety limit
 
-            table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+            table = self._get_table()
             kwargs = {}
             if self.cfg.app_profile_id:
                 kwargs["app_profile_id"] = self.cfg.app_profile_id
@@ -716,7 +733,7 @@ class BigtableConnector(RemoteConnector):
                 if self.cfg.app_profile_id:
                     kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-                table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+                table = self._get_table()
                 rows_gen = await table.read_rows(
                     query=query,
                     operation_timeout=self.cfg.read_timeout_sec,
@@ -792,22 +809,26 @@ class BigtableConnector(RemoteConnector):
                 kwargs["app_profile_id"] = self.cfg.app_profile_id
 
             async def _do_remove():
-                table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
-                await table.mutate_row(
-                    row_key,
-                    DeleteAllFromRow(),
-                    operation_timeout=self.cfg.write_timeout_sec,
-                    **kwargs,
-                )
+                try:
+                    table = self._get_table()
+                    await table.mutate_row(
+                        row_key,
+                        DeleteAllFromRow(),
+                        operation_timeout=self.cfg.write_timeout_sec,
+                        **kwargs,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to remove key {key} from Bigtable in background: {e}"
+                    )
 
-            future = asyncio.run_coroutine_threadsafe(
+            asyncio.run_coroutine_threadsafe(
                 _do_remove(),
                 self.loop,
             )
-            future.result()
             return True
         except Exception as e:
-            logger.warning(f"Failed to remove key {key} from Bigtable: {e}")
+            logger.warning(f"Failed to schedule removal of key {key} from Bigtable: {e}")
             return False
 
     async def _list_internal(self) -> List[str]:
@@ -826,7 +847,7 @@ class BigtableConnector(RemoteConnector):
         if self.cfg.app_profile_id:
             kwargs["app_profile_id"] = self.cfg.app_profile_id
 
-        table = client.get_table(self.cfg.instance_id, self.cfg.table_name)
+        table = self._get_table()
         rows_gen = await table.read_rows(
             query=query,
             operation_timeout=self.cfg.read_timeout_sec,
@@ -867,6 +888,14 @@ class BigtableConnector(RemoteConnector):
 
     async def close(self):
         await self.pq_executor.shutdown_async(wait=False)
+        if getattr(self, "_table", None) is not None:
+            try:
+                res = self._table.close()
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as e:
+                logger.warning(f"Failed to close Bigtable table cleanly: {e}")
+            self._table = None
         if getattr(self, "_client", None) is not None:
             try:
                 res = self._client.close()

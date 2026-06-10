@@ -687,6 +687,12 @@ class TestBigtableConnector:
         res = backend.connection.remove_sync(key)
 
         assert res is True
+        # Wait up to 1 second for background deletion task to execute
+        import time
+        for _ in range(100):
+            if mock_client_instance.mutate_row.call_count == 1:
+                break
+            time.sleep(0.01)
         mock_client_instance.mutate_row.assert_called_once()
 
         backend.close()
