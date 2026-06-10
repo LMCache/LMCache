@@ -184,11 +184,6 @@ class _TempGPUBuffer:
         """The flat staging tensor (for GDS cuFile registration)."""
         return self._temp_buffer
 
-    @property
-    def single_batch_bytes(self) -> int:
-        """Byte size of one batch slot -- the GDS registration slot size."""
-        return self._get_size_for_single_batch()
-
     def get_temp_kernel_group_buffer(
         self, batch_idx: int, kernel_group_idx: int
     ) -> torch.Tensor:
@@ -406,9 +401,7 @@ class GPUCacheContext:
         # Register the staging buffer with the GDS cuFile context on the
         # context's CUDA stream.
         with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().register_gpu_buffer(
-                self._temp_buffer.buffer, self._temp_buffer.single_batch_bytes
-            )
+            get_gds_context().register_gpu_buffer(self._temp_buffer.buffer)
 
         # Third Party
         import cupy
@@ -430,9 +423,7 @@ class GPUCacheContext:
         Deregister this context's GDS staging buffer (reverse of __init__).
         """
         with torch_dev.stream(self.cuda_stream_):
-            get_gds_context().deregister_gpu_buffer(
-                self._temp_buffer.buffer, self._temp_buffer.single_batch_bytes
-            )
+            get_gds_context().deregister_gpu_buffer(self._temp_buffer.buffer)
 
     @property
     def dtype(self) -> torch.dtype:

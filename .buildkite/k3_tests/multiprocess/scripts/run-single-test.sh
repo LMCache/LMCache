@@ -27,9 +27,11 @@ export BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 # "gds_<base>" runs <base>'s workload with the GDS L1 NVMe-slab tier on. We strip
 # the prefix and run <base> as usual; GDS_L1_PATH (the slab dir, on the /scratch
 # GDS-capable mount) is the signal launch-processes.sh keys off to enable GDS.
+# The slab dir is keyed by build id + test name so concurrent gds_* steps
+# co-scheduled on one node don't share (and clobber) a slab.
 GDS_SCRATCH="${GDS_SCRATCH:-/scratch}"
 if [[ "$TEST_NAME" == gds_* ]]; then
-    export GDS_L1_PATH="${GDS_SCRATCH}/lmcache-gds-${BUILD_ID}"
+    export GDS_L1_PATH="${GDS_SCRATCH}/lmcache-gds-${BUILD_ID}-${TEST_NAME}"
     echo "GDS L1 tier enabled (slab dir: $GDS_L1_PATH); running base test: ${TEST_NAME#gds_}"
     TEST_NAME="${TEST_NAME#gds_}"
 fi

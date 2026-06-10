@@ -3,7 +3,7 @@
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.gds_context import get_gds_context
+from lmcache.v1.gpu_connector.gds_context import SlabDirection, get_gds_context
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 import lmcache.c_ops as lmc_ops
@@ -23,7 +23,7 @@ def lmcache_memcpy_async_h2d(
     :param torch.Tensor gpu_buffer: The GPU buffer to copy the data to.
     """
     if isinstance(memory_obj, GDSMemoryObject):
-        get_gds_context().read_async(memory_obj, gpu_buffer)
+        get_gds_context().transfer_async(memory_obj, gpu_buffer, SlabDirection.READ)
         return
     src_tensor = memory_obj.raw_tensor
     if src_tensor is None:
@@ -64,7 +64,7 @@ def lmcache_memcpy_async_d2h(
     :param MemoryObj memory_obj: The memory object to be copied to.
     """
     if isinstance(memory_obj, GDSMemoryObject):
-        get_gds_context().write_async(memory_obj, gpu_buffer)
+        get_gds_context().transfer_async(memory_obj, gpu_buffer, SlabDirection.WRITE)
         return
     dst_tensor = memory_obj.raw_tensor
     if dst_tensor is None:
