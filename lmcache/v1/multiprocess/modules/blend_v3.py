@@ -509,15 +509,15 @@ class BlendV3Module:
     def _resolve_cb_layout_desc(
         self, model_name: str, world_size: int
     ) -> "MemoryLayoutDesc | None":
-        """Find the CB KV buffer layout for (model, world_size), or None."""
-        for entry in self._gpu_transfer.cache_contexts.values():
-            if entry.model_name == model_name and entry.world_size == world_size:
-                cb_ctx = entry.cache_context
-                return MemoryLayoutDesc(
-                    shapes=[cb_ctx.get_kv_buffer_shape(self._ctx.chunk_size)],
-                    dtypes=[cb_ctx.dtype],
-                )
-        return None
+        """Find the CB KV buffer layout for (model, world_size), or None.
+
+        Reads from the thread-safe ``layout_desc_registry`` (populated by
+        ``gpu_transfer`` on KV-cache registration) rather than iterating
+        ``cache_contexts`` directly: iteration is not safe against concurrent
+        register/unregister, and the registry holds the complete multi-group
+        descriptor instead of a single-group manual reconstruction.
+        """
+        return self._ctx.layout_desc_registry.find(model_name, world_size)
 
     def _sparse_prefetch_submit(
         self,
