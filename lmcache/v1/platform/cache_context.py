@@ -5,10 +5,13 @@ The concrete implementations live in their respective sub-packages:
 
 * :class:`~lmcache.v1.multiprocess.gpu_context.GPUCacheContext` --
   CUDA-backed.
+* :class:`~lmcache.v1.platform.cpu.cache_context.CpuCacheContext` --
+  CPU-only fallback (POSIX-SHM-backed KV tensors).
 
 :func:`create_cache_context` keeps the dispatch out of the call site
 in :mod:`lmcache.v1.multiprocess.server` so adding a new accelerator
-only requires shipping a new sub-package + extending the factory below.
+only requires shipping a new sub-package + extending the wrapper
+isinstance check below.
 """
 
 # Future
@@ -22,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.platform.cpu.cache_context import CpuCacheContext
 
 if TYPE_CHECKING:
     # First Party
@@ -41,6 +45,7 @@ def create_cache_context(
     forward their kwargs verbatim and stay agnostic of the active
     backend.
 
+    Selection is driven by the wrapper type of *kv_caches*:
     Currently only :class:`GPUCacheContext` is supported.  CPU and
     other accelerator backends will be added in follow-up PRs.
 
@@ -54,19 +59,24 @@ def create_cache_context(
         engine_type: Which serving engine produced the caches.
 
     Returns:
-        A concrete cache context instance (currently always
-        :class:`~lmcache.v1.multiprocess.gpu_context.GPUCacheContext`).
+        A concrete cache context instance.
 
     Raises:
         ValueError: If *kv_caches* is empty.
     """
     # First Party
     from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
+    from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
 
     if not kv_caches:
         raise ValueError("create_cache_context requires a non-empty kv_caches list")
 
-    return GPUCacheContext(
+    cls: type = (
+        CpuCacheContext
+        if any(isinstance(w, CpuShmTensorWrapper) for w in kv_caches)
+        else GPUCacheContext
+    )
+    return cls(
         kv_caches,
         lmcache_logical_chunk_size,
         layout_hints,

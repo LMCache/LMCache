@@ -131,6 +131,13 @@ def make_storage_manager_config(
     )
 
 
+def get_l2_stored_object_count(sm: StorageManager) -> int:
+    """Return the total stored object count across all L2 adapters."""
+    return sum(
+        adapter["stored_object_count"] for adapter in sm.report_status()["l2_adapters"]
+    )
+
+
 def write_and_wait_for_l2(
     sm: StorageManager,
     keys: list[ObjectKey],
@@ -141,6 +148,8 @@ def write_and_wait_for_l2(
 
     Fills each chunk with deterministic data so round-trip can be verified.
     """
+    stored_before = get_l2_stored_object_count(sm)
+
     ret = sm.reserve_write(keys, layout, mode="new")
     assert len(ret) == len(keys), f"reserve_write: {len(ret)}/{len(keys)} succeeded"
 
@@ -153,15 +162,26 @@ def write_and_wait_for_l2(
 
     sm.finish_write(list(ret.keys()))
 
-    # Wait for StoreController to flush to L2.
-    # We poll the store_controller status for in_flight==0 and pending==0.
-    ok = wait_for_condition(
-        lambda: (
-            sm.report_status()["store_controller"]["in_flight_task_count"] == 0
-            and sm.report_status()["store_controller"]["pending_keys_count"] == 0
-        ),
-        timeout=timeout,
-    )
+    # Wait for StoreController to flush to L2. Polling the controller's queue
+    # counters alone is racy: the background loop pops the pending keys
+    # (pending_keys_count -> 0) before it submits the store tasks
+    # (in_flight_task_count is still 0 in between), so a poll landing in that
+    # window declares the store complete before anything reached L2. Anchor
+    # the wait on the adapters' stored object counts, then use the queue
+    # counters only to confirm the controller has settled.
+    def flushed_to_l2() -> bool:
+        status = sm.report_status()
+        stored_total = sum(
+            adapter["stored_object_count"] for adapter in status["l2_adapters"]
+        )
+        store_controller = status["store_controller"]
+        return (
+            stored_total >= stored_before + len(keys)
+            and store_controller["in_flight_task_count"] == 0
+            and store_controller["pending_keys_count"] == 0
+        )
+
+    ok = wait_for_condition(flushed_to_l2, timeout=timeout)
     assert ok, "Store to L2 did not complete within timeout"
 
 

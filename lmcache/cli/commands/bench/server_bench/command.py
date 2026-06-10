@@ -33,11 +33,11 @@ Usage examples::
 from __future__ import annotations
 
 # Standard
-from multiprocessing import shared_memory
-from multiprocessing.resource_tracker import unregister
 from typing import TYPE_CHECKING
 import argparse
 import itertools
+import mmap
+import os
 import sys
 import time
 
@@ -53,11 +53,13 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
     _IMPORT_ERROR,
     DTYPE_MAP,
-    _allocate_kv_cache,
+    _allocate_cpu_shm_kv_cache,
+    _allocate_gpu_kv_cache,
     _get_chunk_size,
     _process_request,
     _require_full_install,
     _send_register_kv_cache,
+    shm_open_pool_as_mmap,
 )
 
 if TYPE_CHECKING:
@@ -134,10 +136,9 @@ def register_server_parser(
         choices=["cpu", "gpu"],
         default="gpu",
         help=(
-            "Run mode (default: gpu). In cpu mode the bench drives "
-            "the data-transfer path: the server allocates a SHM pool "
-            "and the client gathers/scatters chunks via slot "
-            "descriptors. CPU handle mode is not yet supported."
+            "Run mode (default: gpu). In cpu mode the client allocates "
+            "POSIX-SHM-backed KV cache tensors and the server maps the "
+            "same physical pages."
         ),
     )
     parser.add_argument(
@@ -147,7 +148,8 @@ def register_server_parser(
         help=(
             "Transport routing for STORE/RETRIEVE (default: auto). "
             "`handle` forces the GPU-style single-shot path "
-            "(REGISTER_KV_CACHE + STORE/RETRIEVE). "
+            "(REGISTER_KV_CACHE + STORE/RETRIEVE), which on CPU mode "
+            "uses POSIX SHM to back zero-copy server-side mappings. "
             "`data` forces the worker-side gather/scatter path "
             "(REGISTER_KV_CACHE_NON_GPU_CONTEXT + PREPARE/COMMIT). "
             "`auto` keeps the historical mapping: gpu->handle, cpu->data."
@@ -265,25 +267,29 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         sys.exit(1)
 
     # Resolve transfer mode. ``auto`` reproduces the historical
-    # behaviour: gpu -> handle path, cpu -> data path.
-    transfer_mode = args.transfer_mode
+    # behaviour: gpu -> handle path, cpu -> data path. ``handle``
+    # / ``data`` are explicit overrides; ``handle`` on CPU mode is
+    # the SHM-backed zero-copy path (server-side copy).
+    transfer_mode = getattr(args, "transfer_mode", "auto")
     if transfer_mode == "auto":
         use_handle = use_gpu
     elif transfer_mode == "handle":
         use_handle = True
     else:
         use_handle = False
+    if use_handle and not use_gpu:
+        print(
+            "  [info] --transfer-mode=handle on cpu mode: using "
+            "REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
+        )
 
     url = args.rpc_url
     print(
-        "Connecting to LMCache MP Server at %s (mode=%s, transfer=%s) ..."
-        % (url, args.mode, transfer_mode),
+        "Connecting to LMCache MP Server at %s (mode=%s) ..." % (url, args.mode),
     )
 
     ctx = zmq.Context()
     client = MessageQueueClient(url, ctx)
-    server_shm: "shared_memory.SharedMemory | None" = None
-    server_pool: "memoryview | None" = None
 
     try:
         # Query chunk size from server
@@ -303,7 +309,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         )
         # Paged KV demands identical ``NB`` / ``BS`` across all groups
         # (block_id -> slot maths is shared), but ``kv_size`` / ``NH`` /
-        # ``HS`` / ``dtype`` may vary per group. ``_allocate_kv_cache(
+        # ``HS`` / ``dtype`` may vary per group. ``_allocate_gpu_kv_cache(
         # groups=...)`` honours each group's own shape; ``_process_request``
         # only needs a single ``block_size`` / ``total_blocks``.
         first = layer_groups[0]
@@ -364,6 +370,14 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             "head_size": head_size_disp,
             "num_blocks": num_blocks,
             "block_size": block_size,
+            # Tell the server the inference-engine-side logical block
+            # size explicitly. Otherwise ``KVLayerGroupsManager`` falls
+            # back to ``shape_desc.bs``, which on the CPU/HND path can
+            # be the per-block ``num_heads`` value instead of the real
+            # ``block_size`` (HND swaps NH and BS in the tensor shape),
+            # and STORE/RETRIEVE would then expect twice as many block
+            # IDs as the bench client actually sends.
+            "inference_engine_logical_block_size": block_size,
             "dtype": dtype_str,
         }
 
@@ -390,63 +404,65 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         )
 
         # Allocate KV tensors. GPU mode wraps real CUDA tensors
-        # via CUDA IPC; CPU mode (data transfer mode) allocates
-        # plain CPU tensors used for client-side checksum self-check.
-        # TODO(baoloongmao): CPU handle mode (zero-copy SHM IPC with
-        # the server) will be implemented in a separate PR.
+        # via CUDA IPC; CPU mode allocates POSIX-SHM-backed
+        # tensors so the server can map the same physical pages.
+        # shm_names tracks per-layer SHM segment names allocated
+        # on demand (one per layer) so we can shm_unlink on exit.
+        shm_names: list[str] = []
         if use_gpu:
             # First Party
             from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
 
-            allocated = _allocate_kv_cache(groups=layer_groups, use_gpu=True)
+            allocated = _allocate_gpu_kv_cache(groups=layer_groups)
             print(
                 "Allocated %d GPU tensors on %s" % (len(allocated), allocated[0].device)
             )
-            kv_wrappers: list = [CudaIPCWrapper(t) for t in allocated]
+            kv_wrappers = [CudaIPCWrapper(t) for t in allocated]
+            # Keep the CUDA tensors alive for the lifetime of the
+            # bench process -- storage may be reclaimed otherwise --
+            # and reuse the same list as the client-side data-mode
+            # source/sink for the round-trip self-check.
             client_kv_tensors = allocated
         else:
-            if use_handle:
-                print(
-                    "ERROR: --mode cpu --transfer-mode handle is not yet "
-                    "supported in this PR (TODO: separate PR)."
-                )
-                sys.exit(1)
-            cpu_tensors = _allocate_kv_cache(groups=layer_groups, use_gpu=False)
-            print("Allocated %d CPU tensors" % len(cpu_tensors))
-            kv_wrappers = []
+            # First Party
+            from lmcache.v1.platform.cpu.shm import CpuShmTensorWrapper
+
+            shm_prefix = CpuShmTensorWrapper.SHM_NAME_PREFIX + str(os.getpid())
+            cpu_tensors, cpu_wrappers, shm_names = _allocate_cpu_shm_kv_cache(
+                groups=layer_groups, shm_prefix=shm_prefix
+            )
+            print(
+                "Allocated %d CPU SHM tensors (prefix=%s)"
+                % (len(cpu_tensors), shm_prefix)
+            )
+            kv_wrappers = list(cpu_wrappers)
             client_kv_tensors = cpu_tensors
 
-        # Register KV cache before any store/retrieve.
-        register_ok, register_response = _send_register_kv_cache(
+        # Register KV cache before any store/retrieve. In handle mode
+        # both GPU (CUDA-IPC) and CPU (POSIX-SHM) paths share the same
+        # ``REGISTER_KV_CACHE`` protocol since ``CpuShmTensorWrapper``
+        # is a ``CudaIPCWrapper`` subclass on the wire. In data mode
+        # we fall through to the non-GPU registration protocol.
+        register_result = _send_register_kv_cache(
             client,
             layout_hints=layout_hints,
             kv_caches=kv_wrappers if use_handle else None,
             use_gpu=use_gpu,
             use_handle=use_handle,
         )
-        print("REGISTER_KV_CACHE: %s" % ("OK" if register_ok else "FAIL"))
+        print("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
         print()
 
         # In data mode the server reply carries the SHM pool name
-        # and size; the bench attaches to the same pool so
-        # STORE/RETRIEVE can exchange tensor data via slot
-        # descriptors. We open via :class:`SharedMemory` (matching
-        # the server-side allocator in ``transfer_context/shm.py``)
-        # and unregister from the worker's resource tracker so the
-        # segment is not unlinked when the bench exits -- the server
-        # owns its lifetime.
-        if not use_handle and register_ok and register_response is not None:
-            shm_name = register_response.shm_name
-            pool_size = register_response.pool_size
+        # and size; the bench mmaps the same pool so STORE/RETRIEVE
+        # can exchange tensor data via slot descriptors instead of
+        # round-tripping pickle through the RPC layer.
+        server_pool: "mmap.mmap | None" = None
+        if not use_handle and not isinstance(register_result, bool):
+            shm_name = getattr(register_result, "shm_name", "")
+            pool_size = getattr(register_result, "pool_size", 0)
             if shm_name and pool_size > 0:
-                server_shm = shared_memory.SharedMemory(
-                    name=shm_name.lstrip("/"), create=False
-                )
-                try:
-                    unregister("/%s" % server_shm.name, "shared_memory")
-                except KeyError:
-                    pass
-                server_pool = server_shm.buf
+                server_pool = shm_open_pool_as_mmap(shm_name, pool_size)
 
         if args.end is not None:
             seq_iter: itertools.count | range = range(args.start, args.end)
@@ -455,9 +471,11 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
 
         http_base = args.url.rstrip("/")
 
-        # In data mode the server has no paged kv_tensors view to
-        # hash, so we self-check on the client. Handle mode keeps
-        # the legacy server-side /kvcache/check path.
+        # In data mode the server has no paged ``kv_tensors`` view to
+        # hash, so we self-check on the client: cold pass captures
+        # ground truth, warm pass zero-fills + re-hashes after
+        # RETRIEVE. Handle mode keeps the legacy server-side
+        # ``/kvcache/check`` path.
         client_tensors = None if use_handle else client_kv_tensors
 
         for seq_no in seq_iter:
@@ -527,21 +545,22 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
-        # Release the bench-side view of the server SHM pool first
-        # (data mode only; server_shm stays None otherwise). The
-        # ``memoryview`` returned by ``SharedMemory.buf`` must be
-        # released before ``SharedMemory.close``, otherwise CPython
-        # raises ``BufferError`` on shutdown.
-        if server_pool is not None:
+        # Release the bench-side mmap of the server SHM pool first
+        # (data mode only; ``server_pool`` stays ``None`` otherwise).
+        if "server_pool" in locals() and server_pool is not None:
             try:
-                server_pool.release()
-            except (BufferError, ValueError):
-                pass
-        if server_shm is not None:
-            try:
-                server_shm.close()
+                server_pool.close()
             except (BufferError, ValueError):
                 pass
         client.close()
         ctx.term()
+        # Best-effort SHM cleanup so segments don't linger.
+        for _name in shm_names if "shm_names" in locals() else []:
+            try:
+                # First Party
+                from lmcache.v1.platform.cpu.shm import shm_unlink
+
+                shm_unlink(_name)
+            except OSError:
+                pass
     print("Done.")

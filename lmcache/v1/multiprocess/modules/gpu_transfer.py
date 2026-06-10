@@ -104,12 +104,16 @@ def batched_iteration(lst: list, batch_size: int) -> Generator[tuple, None, None
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
 
-    The actual concrete type is whatever :func:`create_cache_context`
-    returned -- currently always a :class:`GPUCacheContext`.
+    The concrete type is whatever :func:`create_cache_context` returned
+    for the wrapper list at registration time -- a
+    :class:`GPUCacheContext` for CUDA-IPC wrappers, a
+    :class:`CpuCacheContext` for POSIX-SHM wrappers. Both expose
+    the same ``kv_tensors`` / ``gpu_kv_format_`` / ``num_layers`` / ...
+    duck-typed surface, so downstream consumers stay agnostic.
 
     Args:
-        cache_context: Platform cache context managing shape and pointers
-            to the registered KV cache tensors.
+        cache_context: Platform cache context (GPU or CPU) managing
+            shape and pointers to the registered KV cache tensors.
         model_name: The name of the model associated with this KV cache.
         world_size: The world size associated with this KV cache.
     """
@@ -219,6 +223,8 @@ class GPUTransferModule:
         self._device_host_func_dispatcher.stop()
 
         had_contexts = len(self._cache_contexts) > 0
+        for entry in self._cache_contexts.values():
+            entry.cache_context.close()
         self._cache_contexts.clear()
         if had_contexts:
             torch_dev.empty_cache()
@@ -293,6 +299,7 @@ class GPUTransferModule:
             )
             return
 
+        entry.cache_context.close()
         self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
         torch_dev.empty_cache()

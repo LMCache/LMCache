@@ -24,6 +24,38 @@ from lmcache.v1.platform import consume_fd
 _KB = 1024
 
 
+def make_aligned_tensor(num_bytes: int, align_bytes: int = 1) -> torch.Tensor:
+    """Create a 1-D uint8 tensor whose data pointer is aligned.
+
+    Args:
+        num_bytes: Number of bytes in the returned tensor.
+        align_bytes: Required data pointer alignment in bytes.
+
+    Returns:
+        A 1-D ``torch.uint8`` tensor with ``num_bytes`` elements.
+
+    Raises:
+        ValueError: If ``num_bytes`` is negative or ``align_bytes`` is
+            not positive.
+        RuntimeError: If the allocated tensor cannot be aligned.
+    """
+    if num_bytes < 0:
+        raise ValueError("num_bytes must be non-negative")
+    if align_bytes <= 0:
+        raise ValueError("align_bytes must be positive")
+    if align_bytes == 1:
+        return torch.empty(num_bytes, dtype=torch.uint8)
+
+    backing = torch.empty(num_bytes + align_bytes - 1, dtype=torch.uint8)
+    offset = (-backing.data_ptr()) % align_bytes
+    aligned = backing[offset : offset + num_bytes]
+    if aligned.data_ptr() % align_bytes != 0:
+        raise RuntimeError(
+            f"failed to allocate {align_bytes}-byte aligned benchmark buffer"
+        )
+    return aligned
+
+
 def make_object_keys(
     num_keys: int, model_name: str = "bench-model", key_offset: int = 0
 ) -> list[ObjectKey]:
@@ -53,23 +85,46 @@ def make_object_keys(
 
 
 def make_memory_objects(
+    buffer: torch.Tensor,
     num_keys: int,
     data_size: int,
+    base_offset: int,
+    fill_offset: int = 0,
 ) -> list[MemoryObj]:
-    """Create *num_keys* ``TensorMemoryObj`` instances of *data_size* bytes.
+    """Create MemoryObj views backed by a shared L1 benchmark buffer.
 
-    Each returned object owns an independent ``data_size``-byte tensor
-    pre-filled with a distinguishing byte pattern (key index mod 256)
-    so that ``verify_round_trip`` can detect cross-key corruption after
-    a store -> load cycle.
+    Each returned object is a ``data_size``-byte slice of ``buffer``,
+    pre-filled with a distinguishing byte pattern
+    ``(key_index + fill_offset) mod 256`` so that ``verify_round_trip``
+    can detect cross-key corruption after a store -> load cycle.
 
-    Per-call memory: ``num_keys * data_size``.
+    Args:
+        buffer: Contiguous benchmark L1 buffer that backs all objects.
+        num_keys: Number of memory objects to create.
+        data_size: Size of each memory object in bytes.
+        base_offset: Byte offset of the first object within ``buffer``.
+        fill_offset: Offset added to each key index before generating the
+            byte fill pattern.
+
+    Returns:
+        ``TensorMemoryObj`` instances whose ``raw_data`` tensors are views
+        into ``buffer``.
+
+    Raises:
+        ValueError: If the requested object range falls outside ``buffer``.
     """
-    # Independent buffers with distinguishing fill patterns for verify.
+    flat_buffer = buffer.view(-1)
     objects: list[MemoryObj] = []
     for i in range(num_keys):
-        raw_tensor = torch.empty(data_size, dtype=torch.uint8)
-        raw_tensor.fill_(i & 0xFF)
+        start = base_offset + i * data_size
+        end = start + data_size
+        if start < 0 or end > flat_buffer.numel():
+            raise ValueError(
+                f"L1 benchmark buffer too small for object {i}: "
+                f"[{start}, {end}) > {flat_buffer.numel()}"
+            )
+        raw_tensor = flat_buffer[start:end]
+        raw_tensor.fill_((i + fill_offset) & 0xFF)
         metadata = MemoryObjMetadata(
             shape=torch.Size([data_size]),
             dtype=torch.uint8,
@@ -88,13 +143,16 @@ def make_memory_objects(
     return objects
 
 
-def create_l1_memory_desc(buffer: torch.Tensor) -> L1MemoryDesc:
+def create_l1_memory_desc(
+    buffer: torch.Tensor,
+    align_bytes: int = 1,
+) -> L1MemoryDesc:
     """Create an L1 memory descriptor for a contiguous test buffer."""
     flat_buffer = buffer.view(-1)
     return L1MemoryDesc(
         ptr=flat_buffer.data_ptr(),
         size=flat_buffer.numel() * flat_buffer.element_size(),
-        align_bytes=flat_buffer.element_size(),
+        align_bytes=align_bytes,
     )
 
 
