@@ -38,6 +38,10 @@ import zmq
 # First Party
 from lmcache import torch_dev
 from lmcache.banner import print_banner_once
+from lmcache.integration.vllm.kv_cache_group_edits import (
+    apply_kv_cache_group_edits,
+    validate_kv_cache_groups,
+)
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
 )
@@ -97,6 +101,43 @@ logger = lmcache_init_logger(__name__)
 
 
 # Helper functions
+def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
+    """Reject scheduler configs that can skip Mamba state snapshots.
+
+    In ``mamba_cache_mode="align"`` vLLM snapshots the recurrent state only at
+    the end of each scheduler step, and a step that advances more than one
+    block fills the skipped block-table positions with the null block
+    (``MambaManager.allocate_new_blocks``). LMCache keys chunks by token hash,
+    so a skipped boundary would be stored as null-block garbage under a valid
+    key and silently corrupt any request that later resumes from that prefix.
+    Requiring ``block_size <= max_num_batched_tokens < 2 * block_size`` makes
+    vLLM's block-aligned splitting (``Scheduler._mamba_block_aligned_split``)
+    advance every mid-prefill step by exactly one block, so every chunk
+    boundary holds a real snapshot.
+
+    Args:
+        vllm_config: The vLLM config; only Mamba-hybrid models in ``align``
+            cache mode are constrained, others pass.
+
+    Raises:
+        ValueError: If ``max_num_batched_tokens`` is not in
+            ``[block_size, 2 * block_size)``.
+    """
+    if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
+        return
+    block_size = vllm_config.cache_config.block_size
+    max_batched = vllm_config.scheduler_config.max_num_batched_tokens
+    if not (block_size <= max_batched < 2 * block_size):
+        raise ValueError(
+            f"Mamba-hybrid models with LMCache require "
+            f"block_size <= max_num_batched_tokens < 2 * block_size so every "
+            f"prefill step advances exactly one block and every block boundary "
+            f"gets a state snapshot; got max_num_batched_tokens={max_batched}, "
+            f"block_size={block_size}. Set --max-num-batched-tokens "
+            f"{block_size}."
+        )
+
+
 def build_parallel_strategy_from_vllm_config(
     vllm_config: "VllmConfig",
 ) -> ParallelStrategy:
@@ -478,6 +519,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
+        # Fail fast, before the server handshake below.
+        validate_mamba_step_alignment(vllm_config)
+        validate_kv_cache_groups(getattr(self, "_kv_cache_config", None))
+
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.host", "tcp://localhost"
@@ -569,6 +614,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         """
         logger.info("Registering kv caches!")
         kv_cache_config = getattr(self, "_kv_cache_config", None)
+        # Must precede both group-info creation and transfer registration so
+        # they see the same edited views.
+        kv_caches = apply_kv_cache_group_edits(kv_cache_config, kv_caches)
         engine_group_infos = create_engine_group_infos_from_vllm(
             kv_cache_config,
             kv_caches,
