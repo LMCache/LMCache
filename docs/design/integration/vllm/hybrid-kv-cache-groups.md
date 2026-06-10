@@ -103,12 +103,15 @@ The per-group `compress_ratio = tokens_per_chunk // slots_per_chunk`: `1` for
 ordinary attention (one token per slot), `>1` for compressed caches
 (DeepSeek-V4-Flash declares ratios 4 and 128, which this division reproduces
 exactly). The LMCache chunk size must be a multiple of every group's
-`tokens_per_chunk` (validated at connector init and registration).
+`tokens_per_chunk` (validated at registration).
 
-The scheduler-side connector does all accounting (hit counts, store/retrieve
-ranges) in *tokens* — the only unit shared by every group — and slices each
-group's block IDs by `token_range / tokens_per_chunk_g`
-(`slice_block_ids_per_group`). The server counts
+The scheduler-side connector's block accounting (hit counts,
+`blocks_in_chunk`, the `start`/`end` range) stays in the *canonical* unit —
+`cache_config.block_size`, which vLLM keeps as a divisor of every group's
+block size (e.g. the GCD, 4, for DeepSeek-V4-Flash's 256/64/8/4 groups) —
+while each group's block IDs are in its own block size. The scheduler-side
+slice divides the canonical range by `k_g = group_block_size / canonical`
+per group (`slice_block_ids_per_group`), and the server counts
 `blocks_per_chunk = (chunk // compress_ratio) // slots_per_chunk` per group.
 
 ### Cross-layer KV sharing

@@ -5,7 +5,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import enum
-import math
 
 # Third Party
 from vllm.config import VllmConfig
@@ -88,6 +87,7 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import BlockHash
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -137,25 +137,26 @@ class LMCacheMPRequestTracker:
 
     request_id: str
 
-    # Read-only list to track the token ids
+    # Read-only lists to track the token ids and block hashes
     all_token_ids: ConstantList[int]
+    block_hashes: ConstantList["BlockHash"]
 
-    # Block ids will be updated at update_states_after_alloc and
+    # Block ids and hashes will be updated at update_states_after_alloc and
     # during generation. Keyed by engine_group_idx; non-HMA models use 0.
     allocated_block_ids: dict[int, list[int]] = field(default_factory=dict)
 
     # Number of scheduled tokens in this request. We keep tracking this to
-    # avoid saving tokens whose KV has not been computed yet.
+    # avoid saving half-full blocks.
     num_scheduled_tokens: int = 0
 
-    # Number of tokens stored will be initialized when lookup the external
+    # Number of blocks stored will be initialized when lookup the external
     # hit tokens and will be updated when processing new requests and cached
     # requests.
-    num_stored_tokens: int = 0
+    num_stored_blocks: int = 0
 
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
-    num_vllm_hit_tokens: int = 0
-    num_lmcache_hit_tokens: int = 0
+    num_vllm_hit_blocks: int = 0
+    num_lmcache_hit_blocks: int = 0
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
@@ -166,10 +167,11 @@ class LMCacheMPRequestTracker:
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
         self.all_token_ids = request.all_token_ids
+        self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = {}
-        self.num_stored_tokens = 0
-        self.num_vllm_hit_tokens = 0
-        self.num_lmcache_hit_tokens = 0
+        self.num_stored_blocks = 0
+        self.num_vllm_hit_blocks = 0
+        self.num_lmcache_hit_blocks = 0
         self.state = LMCacheMPRequestState.PREFETCHING
 
     ####
@@ -179,7 +181,7 @@ class LMCacheMPRequestTracker:
         """Check whether the current request needs retrieve, will be used
         update_stage_after_alloc"""
         return (
-            self.num_lmcache_hit_tokens > self.num_vllm_hit_tokens
+            self.num_lmcache_hit_blocks > self.num_vllm_hit_blocks
             and self.state != LMCacheMPRequestState.READY
         )
 
@@ -197,11 +199,11 @@ class LMCacheMPRequestTracker:
     def increase_num_scheduled_tokens(self, num_new_tokens: int):
         self.num_scheduled_tokens += num_new_tokens
 
-    def increase_num_stored_tokens(self, num_new_tokens: int):
-        """Increase the number of stored tokens for the current request
+    def increase_num_stored_blocks(self, num_new_blocks: int):
+        """Increase the number of stored blocks for the current request
         This function will be called when processing the cached requests.
         """
-        self.num_stored_tokens += num_new_tokens
+        self.num_stored_blocks += num_new_blocks
 
     def append_block_ids(
         self,
@@ -229,11 +231,12 @@ class LMCacheMPRequestTracker:
         return (
             f"LMCacheMPRequestTracker(request_id={self.request_id}, "
             f"num_tokens={len(self.all_token_ids)}, "
+            f"num_block_hashes={len(self.block_hashes)}, "
             f"num_allocated_blocks="
             f"{self.num_allocated_blocks()}, "
-            f"num_stored_tokens={self.num_stored_tokens}, "
-            f"vllm_hit_tokens={self.num_vllm_hit_tokens}, "
-            f"lmcache_hit_tokens={self.num_lmcache_hit_tokens}, "
+            f"num_stored_blocks={self.num_stored_blocks}, "
+            f"vllm_hit_blocks={self.num_vllm_hit_blocks}, "
+            f"lmcache_hit_blocks={self.num_lmcache_hit_blocks}, "
             f"state={self.state})"
         )
 
@@ -251,76 +254,83 @@ class LMCacheMPRequestMetadata:
     @staticmethod
     def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
-        chunk_size: int,
-        group_tokens_per_chunk: list[int],
+        blocks_in_chunk: int,
+        vllm_block_size: int,
+        group_block_sizes: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            chunk_size: the number of tokens in a LMCache data chunk
-            group_tokens_per_chunk: per-engine-group tokens covered by one
-                paged chunk (one block ID) of that group, i.e. the group's
-                KV cache spec ``block_size``. Must each divide
-                ``chunk_size`` (hybrid models can mix different values).
+            blocks_in_chunk: the number of ``vllm_block_size`` blocks in a
+                LMCache data chunk
+            vllm_block_size: the vLLM block size (= ``cache_config.block_size``);
+                block IDs and ranges are counted in this unit
+            group_block_sizes: per-engine-group vLLM block size. A group's own
+                block size may be a larger multiple of ``vllm_block_size``
+                (hybrid models).
         """
-        num_engine_groups = len(group_tokens_per_chunk)
-        # NOTE: the invariant here is that `num_stored_tokens` should
-        # always be a multiple of `chunk_size`
-        # TODO: This should be checked every time we update the num_stored_tokens
+        num_engine_groups = len(group_block_sizes)
+        # Store the blocks that has block hashes
+        # NOTE: the invariant here is that `num_stored_blocks` should
+        # always be a multiple of `blocks_in_chunk`
+        # TODO: This should be checked every time we update the num_stored_blocks
         #
-        # Why computed_tokens uses max(num_vllm_hit_tokens, num_lmcache_hit_tokens):
+        # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
         #
-        # Both values represent a prefix of tokens whose KV data is already
+        # Both values represent a prefix of blocks whose KV data is already
         # available (either from vLLM APC or from LMCache), so they must NOT
         # be summed (that would double-count the overlapping prefix).
         #
-        # * num_lmcache_hit_tokens: LMCache-hit tokens are already counted in
-        #   num_stored_tokens (set during lookup), so they must be included
+        # * num_lmcache_hit_blocks: LMCache-hit blocks are already counted in
+        #   num_stored_blocks (set during lookup), so they must be included
         #   here to keep the upper bound consistent.  They are NOT re-stored.
-        # * num_vllm_hit_tokens: LMCache stores in units of chunks, so
-        #   num_lmcache_hit_tokens is rounded DOWN to the nearest chunk
-        #   boundary.  When vLLM APC hits more tokens than that rounded value
-        #   (e.g. APC=704 tokens, LMCache=512 tokens after chunk alignment),
-        #   using only num_lmcache_hit_tokens would set the upper bound too
-        #   low and silently skip the APC-hit tokens that fall between the
+        # * num_vllm_hit_blocks: LMCache stores in units of chunks (N blocks),
+        #   so num_lmcache_hit_blocks is rounded DOWN to the nearest chunk
+        #   boundary.  When vLLM APC hits more blocks than that rounded value
+        #   (e.g. APC=44 blocks, LMCache=32 blocks after chunk alignment),
+        #   using only num_lmcache_hit_blocks would set the upper bound too
+        #   low and silently skip the APC-hit blocks that fall between the
         #   two values, causing under-storing.  Taking the max ensures we
         #   always use the tighter (larger) of the two hit counts.
-        computed_tokens = tracker.num_scheduled_tokens + max(
-            tracker.num_vllm_hit_tokens, tracker.num_lmcache_hit_tokens
+        computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
+            tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
-        # Each group covers ``len(block_ids) * tokens_per_chunk`` tokens; the
-        # storable prefix is bounded by the least-covered group (e.g.
-        # gemma-4 sliding: one 32-token ID covers 2x the tokens of a
-        # 16-token full-attention ID).
+        # Normalize each group's count to ``vllm_block_size`` units before the
+        # min: a group with block size ``k * vllm_block_size`` holds ``k`` such
+        # blocks per stored block ID (e.g. gemma-4 sliding: 32-token IDs = 2 of
+        # the 16-token blocks).
         allocated_lengths = tracker.num_allocated_blocks()
-        allocated_tokens = (
+        allocated_blocks = (
             min(
                 allocated_lengths.get(engine_group_idx, 0)
-                * group_tokens_per_chunk[engine_group_idx]
+                * (group_block_sizes[engine_group_idx] // vllm_block_size)
                 for engine_group_idx in range(num_engine_groups)
             )
             if num_engine_groups > 0
             else 0
         )
-        min_available_tokens = min(
-            len(tracker.all_token_ids),
-            allocated_tokens,
-            computed_tokens,
+        min_available_blocks = min(
+            len(tracker.block_hashes),
+            allocated_blocks,
+            computed_blocks,
         )
-        num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
-        num_chunks = num_staging_tokens // chunk_size
+        num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
+        num_chunks = num_staging_blocks // blocks_in_chunk
 
         if num_chunks >= 1:
-            start_token_idx = tracker.num_stored_tokens
-            end_token_idx = start_token_idx + num_chunks * chunk_size
+            start = tracker.num_stored_blocks
+            end = start + num_chunks * blocks_in_chunk
             block_ids = slice_block_ids_per_group(
                 tracker.allocated_block_ids,
-                group_tokens_per_chunk,
-                start_token_idx,
-                end_token_idx,
+                group_block_sizes,
+                vllm_block_size,
+                start,
+                end,
             )
+            start_token_idx = start * vllm_block_size
+            end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
             op = LoadStoreOp(
                 token_ids=token_ids,
@@ -337,7 +347,7 @@ class LMCacheMPRequestMetadata:
             )
 
             # Update the request tracker
-            tracker.increase_num_stored_tokens(end_token_idx - start_token_idx)
+            tracker.increase_num_stored_blocks(end - start)
             return ret
 
         return None
@@ -345,45 +355,51 @@ class LMCacheMPRequestMetadata:
     @staticmethod
     def GetRetrieveMetadata(
         tracker: LMCacheMPRequestTracker,
-        chunk_size: int,
-        group_tokens_per_chunk: list[int],
+        blocks_in_chunk: int,
+        vllm_block_size: int,
+        group_block_sizes: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the retrieve metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            chunk_size: the number of tokens in a LMCache data chunk
-            group_tokens_per_chunk: per-engine-group tokens covered by one
-                paged chunk (one block ID) of that group, i.e. the group's
-                KV cache spec ``block_size``. Must each divide
-                ``chunk_size`` (hybrid models can mix different values).
+            blocks_in_chunk: the number of ``vllm_block_size`` blocks in a
+                LMCache data chunk
+            vllm_block_size: the vLLM block size (= ``cache_config.block_size``);
+                block IDs and ranges are counted in this unit
+            group_block_sizes: per-engine-group vLLM block size. A group's own
+                block size may be a larger multiple of ``vllm_block_size``
+                (hybrid models).
         """
         if not tracker.is_ready_for_retrieving():
             return None
 
         # |---------------------|-----------------|----------------|
-        # | num_vllm_hit_tokens |
+        # | num_vllm_hit_blocks |
         # | lmcache chunk 1   | lmcache chunk 2   |
         #                     |  need to retrieve |
 
-        start_token_idx = tracker.num_vllm_hit_tokens // chunk_size * chunk_size
-        end_token_idx = tracker.num_lmcache_hit_tokens
-        assert end_token_idx % chunk_size == 0, (
-            "The number of LMCache hit tokens should be a multiple of the "
-            "LMCache chunk size. "
+        start = tracker.num_vllm_hit_blocks // blocks_in_chunk * blocks_in_chunk
+        end = tracker.num_lmcache_hit_blocks
+        assert end % blocks_in_chunk == 0, (
+            "The number of LMCache hit blocks should be a multiple of the "
+            "number of blocks in a lmcache chunk. "
         )
-        assert len(tracker.all_token_ids) >= end_token_idx, (
-            "The number of tokens should be greater than or equal to the "
-            "number of LMCache hit tokens. "
+        assert len(tracker.block_hashes) >= end, (
+            "The number of block hashes should be greater than or equal to the "
+            "number of LMCache hit blocks. "
         )
-        if end_token_idx > start_token_idx:
+        if end > start:
             block_ids = slice_block_ids_per_group(
                 tracker.allocated_block_ids,
-                group_tokens_per_chunk,
-                start_token_idx,
-                end_token_idx,
+                group_block_sizes,
+                vllm_block_size,
+                start,
+                end,
             )
+            start_token_idx = start * vllm_block_size
+            end_token_idx = end * vllm_block_size
             token_ids = list(tracker.all_token_ids)
 
             # Compute how many tokens at the start of the retrieve range
@@ -391,7 +407,8 @@ class LMCacheMPRequestMetadata:
             # to these positions to avoid a cross-stream data race: the
             # retrieve writes on the LMCache CUDA stream while concurrent
             # requests may read these APC-shared blocks on the vLLM stream.
-            skip_first_n_tokens = tracker.num_vllm_hit_tokens - start_token_idx
+            apc_overlap_blocks = tracker.num_vllm_hit_blocks - start
+            skip_first_n_tokens = apc_overlap_blocks * vllm_block_size
 
             op = LoadStoreOp(
                 token_ids=token_ids,
@@ -493,45 +510,28 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
+        self.vllm_block_size = vllm_config.cache_config.block_size
         kv_cache_config = getattr(self, "_kv_cache_config", None)
         vllm_groups = (
             getattr(kv_cache_config, "kv_cache_groups", ()) or ()
             if kv_cache_config is not None
             else ()
         )
-        # Tokens covered by one paged chunk (one block ID) of each engine
-        # group, from the group's KV cache spec. Hybrid models can mix
-        # different values (e.g. gemma-4: sliding-window groups 32,
-        # full-attention groups 16; DeepSeek V4: 256/64/8/4). Falls back to
-        # the engine's base block size when no group metadata is available
-        # (single non-hybrid group).
-        self._group_tokens_per_chunk: list[int] = [
+        # NOTE: Hybrid models can give each group its own block size that is
+        # different from ``vllm_block_size`` (e.g. gemma-4: sliding-window
+        # groups 32, full-attention groups 16, vllm_block_size 16).
+        self._group_block_sizes: list[int] = [
             group.kv_cache_spec.block_size for group in vllm_groups
-        ] or [vllm_config.cache_config.block_size]
-        for engine_group_idx, tokens_per_chunk in enumerate(
-            self._group_tokens_per_chunk
-        ):
-            if tokens_per_chunk <= 0:
+        ] or [self.vllm_block_size]
+        # Validate that the block size for each group can be divided by
+        # ``self.vllm_block_size`` (per-group slicing relies on it).
+        for engine_group_idx, block_size in enumerate(self._group_block_sizes):
+            if block_size <= 0 or block_size % self.vllm_block_size != 0:
                 raise ValueError(
-                    f"group {engine_group_idx} tokens_per_chunk "
-                    f"{tokens_per_chunk} must be positive"
+                    f"group {engine_group_idx} block size {block_size} must be "
+                    f"a positive multiple of vllm_block_size "
+                    f"{self.vllm_block_size}"
                 )
-        # Smallest token count aligned to every group's paged-chunk
-        # boundary; used to round down vLLM APC hit counts.
-        self._hit_alignment_tokens = math.lcm(*self._group_tokens_per_chunk)
-        if self.role == KVConnectorRole.SCHEDULER:
-            # Chunk boundaries must land on every group's paged-chunk
-            # boundary so per-group block-id slicing stays aligned.
-            chunk_size = self.scheduler_adapter.chunk_size
-            for engine_group_idx, tokens_per_chunk in enumerate(
-                self._group_tokens_per_chunk
-            ):
-                if chunk_size % tokens_per_chunk != 0:
-                    raise ValueError(
-                        f"LMCache chunk size {chunk_size} must be a multiple "
-                        f"of group {engine_group_idx} tokens_per_chunk "
-                        f"{tokens_per_chunk}"
-                    )
 
     @property
     def role(self) -> KVConnectorRole:
@@ -795,21 +795,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if ret == 0:
             return 0, False
 
-        assert ret % self.scheduler_adapter.chunk_size == 0
-
-        # Update num stored tokens for the tracker
-        tracker.increase_num_stored_tokens(ret)
-
-        # Save the vllm and lmcache hit tokens. The vLLM hit count is
-        # rounded down to a boundary aligned for every engine group (e.g.
-        # a full-prompt APC hit reports ``num_prompt_tokens - 1``), so the
-        # retrieve-skip range stays paged-chunk-aligned in all groups.
-        tracker.num_vllm_hit_tokens = (
-            num_computed_tokens
-            // self._hit_alignment_tokens
-            * self._hit_alignment_tokens
+        assert (
+            ret % (self.scheduler_adapter.num_blocks_per_chunk() * self.vllm_block_size)
+            == 0
         )
-        tracker.num_lmcache_hit_tokens = ret
+
+        # Update num stored blocks for the tracker
+        num_vllm_blocks = num_computed_tokens // self.vllm_block_size
+        num_lmcache_blocks = ret // self.vllm_block_size
+        tracker.increase_num_stored_blocks(num_lmcache_blocks)
+
+        # Save the vllm and lmcache hit tokens
+        tracker.num_vllm_hit_blocks = num_vllm_blocks
+        tracker.num_lmcache_hit_blocks = num_lmcache_blocks
 
         need_to_load = max(0, ret - num_computed_tokens)
         logger.debug(
@@ -870,10 +868,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             # Free locks on chunks that vLLM already computed and won't
             # retrieve from LMCache.
-            if tracker.num_lmcache_hit_tokens > 0:
+            if tracker.num_lmcache_hit_blocks > 0:
                 if not condition:
                     # No retrieve needed — free ALL locked chunks
-                    free_end = tracker.num_lmcache_hit_tokens
+                    free_end = tracker.num_lmcache_hit_blocks * self.vllm_block_size
                 else:
                     # Note(Roy): Boundary misalignment between vLLM blocks and LMCache
                     # blocks is handled in free_lookup_locks. It makes sure that if
@@ -881,7 +879,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                     # block, the end LMCache block is not freed (i.e., floor division)
                     # since it will still be needed by vLLM and such block's lock will
                     # be freed by vLLM's retrieve.
-                    free_end = tracker.num_vllm_hit_tokens
+                    free_end = tracker.num_vllm_hit_blocks * self.vllm_block_size
 
                 if free_end > 0:
                     self.scheduler_adapter.free_lookup_locks(
@@ -961,8 +959,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             and "cached_token_stats" in params
         ):
             request_tracker = self._get_request_tracker(request.request_id)
-            num_vllm = request_tracker.num_vllm_hit_tokens
-            num_lmcache = request_tracker.num_lmcache_hit_tokens
+            num_vllm = request_tracker.num_vllm_hit_blocks * self.vllm_block_size
+            num_lmcache = request_tracker.num_lmcache_hit_blocks * self.vllm_block_size
             return_params["cached_token_stats"] = {
                 "num_vllm_cached_tokens": num_vllm,
                 "num_lmcache_cached_tokens": num_lmcache,
@@ -1056,15 +1054,16 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
-        chunk_size = self.scheduler_adapter.chunk_size
+        blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
         for request_tracker in self.request_trackers.values():
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
                 request_tracker,
-                chunk_size,
-                group_tokens_per_chunk=self._group_tokens_per_chunk,
+                blocks_per_chunk,
+                vllm_block_size=self.vllm_block_size,
+                group_block_sizes=self._group_block_sizes,
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -1075,7 +1074,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
-        chunk_size = self.scheduler_adapter.chunk_size
+        blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
         for new_request in scheduler_output.scheduled_new_reqs:
             request_tracker = self._get_request_tracker(new_request.req_id)
@@ -1085,8 +1084,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
-                chunk_size,
-                self._group_tokens_per_chunk,
+                blocks_per_chunk,
+                self.vllm_block_size,
+                self._group_block_sizes,
             )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
@@ -1096,7 +1096,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
-        chunk_size = self.scheduler_adapter.chunk_size
+        blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
@@ -1114,8 +1114,9 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
-                chunk_size,
-                self._group_tokens_per_chunk,
+                blocks_per_chunk,
+                self.vllm_block_size,
+                self._group_block_sizes,
             )
 
             if r_meta is not None:
@@ -1142,7 +1143,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 continue
             primary_block_ids = tracker.allocated_block_ids.get(0, [])
             num_blocks = len(primary_block_ids)
-            total_tokens = num_blocks * self._group_tokens_per_chunk[0]
+            total_tokens = num_blocks * self.vllm_block_size
             records.append(
                 RequestAllocationRecord(
                     req_id=new_request.req_id,
@@ -1169,9 +1170,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Compute the token range they cover.
             total_blocks = len(tracker.allocated_block_ids.get(0, []))
             num_new_blocks = len(new_block_ids)
-            tokens_per_chunk = self._group_tokens_per_chunk[0]
-            start_token = (total_blocks - num_new_blocks) * tokens_per_chunk
-            end_token = total_blocks * tokens_per_chunk
+            start_token = (total_blocks - num_new_blocks) * self.vllm_block_size
+            end_token = total_blocks * self.vllm_block_size
             new_token_ids = list(tracker.all_token_ids[start_token:end_token])
             records.append(
                 RequestAllocationRecord(
