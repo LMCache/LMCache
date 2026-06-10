@@ -211,7 +211,8 @@ start_vllm() {
   export VLLM_TARGET_DEVICE=cpu
   export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
   export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
-  local kv_cache_bytes=$((VLLM_CPU_KVCACHE_SPACE * 1024 * 1024 * 1024))
+  local kv_cache_bytes
+  kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
   vllm serve facebook/opt-125m \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
