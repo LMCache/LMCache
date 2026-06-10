@@ -278,8 +278,8 @@ class TestFormatKvcacheShapeSpec:
             format_kvcache_shape_spec([])
 
 
-class TestDerivePhysicalChunkSize:
-    """``physical_chunk_size`` derivation from the two block-size sources:
+class TestDeriveSlotsPerChunk:
+    """``slots_per_chunk`` derivation from the two block-size sources:
     ``tokens_per_block`` (engine KV cache spec, known at initialization) and
     ``slots_per_block`` (registered tensor batch dimension), with
     ``compress_ratio = tokens_per_block // slots_per_block`` (e.g. DeepSeek
@@ -287,11 +287,11 @@ class TestDerivePhysicalChunkSize:
     """
 
     def _derive(self, slots: int, tokens: int, chunk: int = 256) -> int:
-        return KVLayerGroupsManager._derive_physical_chunk_size(
+        return KVLayerGroupsManager._derive_slots_per_chunk(
             group_idx=0,
             slots_per_block=slots,
             tokens_per_block=tokens,
-            lmcache_logical_chunk_size=chunk,
+            lmcache_tokens_per_chunk=chunk,
         )
 
     def test_one_to_one(self):
@@ -313,7 +313,7 @@ class TestDerivePhysicalChunkSize:
             self._derive(slots=6, tokens=16)
 
     def test_chunk_not_divisible_by_ratio_raises(self):
-        with pytest.raises(ValueError, match="lmcache_logical_chunk_size"):
+        with pytest.raises(ValueError, match="lmcache_tokens_per_chunk"):
             self._derive(slots=1, tokens=96, chunk=256)
 
 
@@ -431,8 +431,8 @@ class TestKernelAndObjectGroups:
         assert by_layer[2].compress_ratio == 1
         assert by_layer[3].compress_ratio == 1
         # 256-token LMCache chunk -> 2 physical slots in the ratio-128 group.
-        assert by_layer[1].physical_chunk_size == 2
-        assert by_layer[0].physical_chunk_size == 64
+        assert by_layer[1].slots_per_chunk == 2
+        assert by_layer[0].slots_per_chunk == 64
 
     def test_calculate_num_blocks_compressed(self):
         # slots_per_block=8 (tensor), tokens_per_block=16 (engine spec) ->

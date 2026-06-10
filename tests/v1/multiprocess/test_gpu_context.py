@@ -116,7 +116,7 @@ def _make_temp_buffer(
     )
     return _TempGPUBuffer(
         kv_layer_groups_manager=manager,
-        lmcache_logical_chunk_size=chunk_size,
+        lmcache_tokens_per_chunk=chunk_size,
         device=_DEVICE,
         max_batch_size=max_batch_size,
     )
@@ -191,7 +191,7 @@ def _make_context(
     kv_caches = [_FakeIPCWrapper(t) for t in tensors]
     return GPUCacheContext(
         kv_caches,  # type: ignore
-        lmcache_logical_chunk_size=chunk_size,
+        lmcache_tokens_per_chunk=chunk_size,
         engine_group_infos=engine_group_infos,
     )
 

@@ -112,12 +112,12 @@ class _TempGPUBuffer:
     def __init__(
         self,
         kv_layer_groups_manager: KVLayerGroupsManager,
-        lmcache_logical_chunk_size: int,
+        lmcache_tokens_per_chunk: int,
         device: torch.device,
         max_batch_size: int = 4,
     ) -> None:
         self._kv_groups_manager = kv_layer_groups_manager
-        self._lmcache_chunk_size = lmcache_logical_chunk_size
+        self._lmcache_chunk_size = lmcache_tokens_per_chunk
         self._max_batch_size = max_batch_size
 
         self._temp_buffer = torch.empty(
@@ -346,7 +346,7 @@ class GPUCacheContext:
     def __init__(
         self,
         kv_caches: KVCache,
-        lmcache_logical_chunk_size: int = 256,
+        lmcache_tokens_per_chunk: int = 256,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
@@ -361,14 +361,14 @@ class GPUCacheContext:
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
-        self.lmcache_logical_chunk_size = lmcache_logical_chunk_size
+        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
 
         self.kv_layer_groups_manager_ = KVLayerGroupsManager(
             self.kv_caches_,
             gpu_kv_format=self.gpu_kv_format_,
             num_blocks=self.num_blocks_,
             engine_group_infos=engine_group_infos,
-            lmcache_logical_chunk_size=lmcache_logical_chunk_size,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
@@ -389,7 +389,7 @@ class GPUCacheContext:
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
         self._temp_buffer = _TempGPUBuffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
-            lmcache_logical_chunk_size=lmcache_logical_chunk_size,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
             max_batch_size=4,
         )
@@ -485,14 +485,14 @@ class GPUCacheContext:
         """Returns the PageBufferShapeDesc for the given KV layer group."""
         return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
 
-    def get_physical_chunk_size(self, group_idx: int) -> int:
+    def get_slots_per_chunk(self, group_idx: int) -> int:
         """Returns the per-chunk physical slot count for the given group.
 
-        Equal to ``lmcache_logical_chunk_size // compress_ratio``; for
-        non-compressed groups this is just ``lmcache_logical_chunk_size``.
+        Equal to ``lmcache_tokens_per_chunk // compress_ratio``; for
+        non-compressed groups this is just ``lmcache_tokens_per_chunk``.
         This is the value the block-level transfer kernel must be told.
         """
-        return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
+        return self.kv_layer_groups_manager_.get_slots_per_chunk(group_idx)
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the

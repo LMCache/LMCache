@@ -179,13 +179,13 @@ class KernelGroupInfo:
     initialization time (carried in ``EngineGroupInfo.tokens_per_block``).
     ``0`` means the engine did not report it; the group is then treated as
     uncompressed (``compress_ratio == 1``)."""
-    physical_chunk_size: int = 0
+    slots_per_chunk: int = 0
     """Number of *physical* slots in one LMCache chunk for this group
-    (= ``lmcache_logical_chunk_size // compress_ratio``). This is what
-    the block-level transfer kernel must be told, not the logical
-    ``lmcache_logical_chunk_size`` which counts vLLM tokens. ``0``
+    (= ``lmcache_tokens_per_chunk // tokens_per_block * slots_per_block``).
+    This is what the block-level transfer kernel must be told, not the
+    logical ``lmcache_tokens_per_chunk`` which counts vLLM tokens. ``0``
     means the field has not been populated yet; ``GPUCacheContext``
-    fills it in after construction once ``lmcache_logical_chunk_size``
+    fills it in after construction once ``lmcache_tokens_per_chunk``
     is known."""
     engine_group_idx: int = 0
     """Engine group index (paged-block address space). 0 for non-hybrid."""
@@ -207,7 +207,7 @@ class KernelGroupInfo:
             f"tokens_per_block={self.tokens_per_block}, "
             f"slots_per_block={self.slots_per_block}, "
             f"compress_ratio={self.compress_ratio}, "
-            f"physical_chunk_size={self.physical_chunk_size}, "
+            f"slots_per_chunk={self.slots_per_chunk}, "
             f"engine_group_idx={self.engine_group_idx})"
         )
 
@@ -290,7 +290,7 @@ class KVLayerGroupsManager:
         gpu_kv_format: "lmc_ops.GPUKVFormat",
         num_blocks: int,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
-        lmcache_logical_chunk_size: int = 256,
+        lmcache_tokens_per_chunk: int = 256,
     ) -> None:
         """Partition layers into groups keyed by
         :data:`LayerGroupIdentity`.
@@ -323,11 +323,11 @@ class KVLayerGroupsManager:
                 determines the group's ``compress_ratio``. Groups without
                 a reported ``tokens_per_block`` are treated as
                 non-compressed (``compress_ratio == 1``).
-            lmcache_logical_chunk_size: Logical tokens per LMCache chunk
+            lmcache_tokens_per_chunk: Logical tokens per LMCache chunk
                 (one logical token = one inference-engine token).
                 Together with ``compress_ratio`` it determines each
-                group's ``physical_chunk_size =
-                lmcache_logical_chunk_size // compress_ratio``, the
+                group's ``slots_per_chunk =
+                lmcache_tokens_per_chunk // compress_ratio``, the
                 number of *physical* slots per chunk fed to the
                 block-level transfer kernel.
         """
@@ -394,11 +394,11 @@ class KVLayerGroupsManager:
             # TODO (ApostaC): the code here is not very good.
             # Conceptually, KV Layer Group should not be aware of lmcache logical
             # chunk size at all.
-            physical_chunk_size = self._derive_physical_chunk_size(
+            slots_per_chunk = self._derive_slots_per_chunk(
                 group_idx=group_idx,
                 slots_per_block=bs,
                 tokens_per_block=tokens_per_block,
-                lmcache_logical_chunk_size=lmcache_logical_chunk_size,
+                lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             )
 
             self._kernel_groups.append(
@@ -407,7 +407,7 @@ class KVLayerGroupsManager:
                     shape_desc=shape_desc,
                     dtype=dt,
                     tokens_per_block=tokens_per_block,
-                    physical_chunk_size=physical_chunk_size,
+                    slots_per_chunk=slots_per_chunk,
                     engine_group_idx=engine_group_idx,
                 )
             )
@@ -471,14 +471,14 @@ class KVLayerGroupsManager:
         """
         return self._kernel_groups[kernel_group_idx].shape_desc
 
-    def get_physical_chunk_size(self, kernel_group_idx: int) -> int:
+    def get_slots_per_chunk(self, kernel_group_idx: int) -> int:
         """Return the per-chunk *physical* slot count for *kernel_group_idx*.
 
         Equivalent to
-        ``self._kernel_groups[kernel_group_idx].physical_chunk_size``.
+        ``self._kernel_groups[kernel_group_idx].slots_per_chunk``.
         For non-compressed groups this equals
-        ``lmcache_logical_chunk_size``; for compressed groups it equals
-        ``lmcache_logical_chunk_size // compress_ratio`` and is what the
+        ``lmcache_tokens_per_chunk``; for compressed groups it equals
+        ``lmcache_tokens_per_chunk // compress_ratio`` and is what the
         block-level transfer kernel must be told (the logical chunk size
         in *vLLM tokens* is not what the kernel addresses).
 
@@ -488,7 +488,7 @@ class KVLayerGroupsManager:
         Raises:
             IndexError: If *kernel_group_idx* is out of range.
         """
-        return self._kernel_groups[kernel_group_idx].physical_chunk_size
+        return self._kernel_groups[kernel_group_idx].slots_per_chunk
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a
@@ -530,46 +530,53 @@ class KVLayerGroupsManager:
         ]
 
     @staticmethod
-    def _derive_physical_chunk_size(
+    def _derive_slots_per_chunk(
         group_idx: int,
         slots_per_block: int,
         tokens_per_block: int,
-        lmcache_logical_chunk_size: int,
+        lmcache_tokens_per_chunk: int,
     ) -> int:
-        """Resolve ``physical_chunk_size`` for one group.
+        """Resolve ``slots_per_chunk`` (physical slots per LMCache chunk).
 
-        ``compress_ratio = tokens_per_block // slots_per_block`` after the
-        divisibility invariants are enforced loudly;
-        ``physical_chunk_size`` is then
-        ``lmcache_logical_chunk_size // compress_ratio``, the per-chunk
-        physical slot count fed to the block-level transfer kernel.
+        Derived directly from the three ground-truth quantities: the LMCache
+        chunk size ``lmcache_tokens_per_chunk`` (logical tokens), the group's
+        logical ``tokens_per_block`` and its physical ``slots_per_block``. One
+        LMCache chunk spans ``lmcache_tokens_per_chunk // tokens_per_block``
+        paged blocks, each holding ``slots_per_block`` physical slots, so
+        ``slots_per_chunk = lmcache_tokens_per_chunk // tokens_per_block
+        * slots_per_block``. This is the per-chunk physical slot count fed to
+        the block-level transfer kernel.
+
+        Raises:
+            ValueError: If ``tokens_per_block`` is not a whole multiple of
+                ``slots_per_block`` (each physical slot must pack a whole number
+                of logical tokens), or if ``lmcache_tokens_per_chunk`` is not a
+                whole multiple of ``tokens_per_block`` (an LMCache chunk must
+                align to a whole number of the group's paged blocks).
         """
         if tokens_per_block % slots_per_block != 0:
             raise ValueError(
-                f"group {group_idx} tokens_per_block {tokens_per_block} "
-                f"must be a multiple of its physical slot count "
-                f"(slots_per_block) {slots_per_block}"
+                f"group {group_idx}: tokens_per_block {tokens_per_block} "
+                f"must be a multiple of slots_per_block {slots_per_block}"
             )
-        compress_ratio = tokens_per_block // slots_per_block
-        if lmcache_logical_chunk_size % compress_ratio != 0:
+        if lmcache_tokens_per_chunk % tokens_per_block != 0:
             raise ValueError(
-                f"lmcache_logical_chunk_size {lmcache_logical_chunk_size} "
-                f"must be a multiple of compress_ratio {compress_ratio} "
-                f"(group {group_idx})"
+                f"group {group_idx}: lmcache_tokens_per_chunk "
+                f"{lmcache_tokens_per_chunk} must be a multiple of "
+                f"tokens_per_block {tokens_per_block}"
             )
-        physical_chunk_size = lmcache_logical_chunk_size // compress_ratio
-        if compress_ratio != 1:
+        blocks_per_chunk = lmcache_tokens_per_chunk // tokens_per_block
+        slots_per_chunk = blocks_per_chunk * slots_per_block
+        if slots_per_block != tokens_per_block:
             logger.info(
-                "group %d: compressed (tokens_per_block=%d, "
-                "slots_per_block=%d -> compress_ratio=%d, "
-                "physical_chunk_size=%d)",
+                "group %d: compressed (tokens_per_block=%d, slots_per_block=%d "
+                "-> slots_per_chunk=%d)",
                 group_idx,
                 tokens_per_block,
                 slots_per_block,
-                compress_ratio,
-                physical_chunk_size,
+                slots_per_chunk,
             )
-        return physical_chunk_size
+        return slots_per_chunk
 
 
 # ------------------------------------------------------------------ #
