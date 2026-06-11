@@ -462,6 +462,63 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     assert event_state_during_callback == [False]
 
 
+def test_freeze_gap_forces_one_unhealthy_cycle(monkeypatch) -> None:
+    """A successful ping after a > 3x-interval gap while still healthy forces
+    one unhealthy cycle (no inline callback); the next success re-registers
+    via the normal recovery edge."""
+    monkeypatch.setattr(
+        adapter_mod, "send_ping", lambda mq_client, timeout, instance_id=None: True
+    )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(MagicMock(), health_event, interval=10.0)
+    calls: list[str] = []
+
+    def recover() -> bool:
+        calls.append("recover")
+        return True
+
+    heartbeat.register_recover_callback(recover)
+
+    heartbeat._last_success = time.monotonic() - 100.0  # gap > 3 x interval
+    summary = heartbeat._execute()
+    assert summary.message == "freeze-gap"
+    assert not health_event.is_set()  # forced unhealthy
+    assert calls == []  # callback NOT fired inline
+
+    # Next cycle: was_healthy is now False, so a successful ping takes the
+    # recovery edge and re-registers.
+    summary2 = heartbeat._execute()
+    assert calls == ["recover"]
+    assert health_event.is_set()
+    assert summary2.message == "healthy"
+
+
+def test_freeze_gap_not_tripped_under_normal_cadence(monkeypatch) -> None:
+    """A recent last success keeps a healthy ping healthy (no false trip)."""
+    monkeypatch.setattr(
+        adapter_mod, "send_ping", lambda mq_client, timeout, instance_id=None: True
+    )
+    health_event = threading.Event()
+    health_event.set()
+    heartbeat = HeartbeatThread(MagicMock(), health_event, interval=10.0)
+
+    heartbeat._last_success = time.monotonic()
+    summary = heartbeat._execute()
+    assert summary.message == "healthy"
+    assert health_event.is_set()
+
+
+def test_start_baselines_last_success(monkeypatch) -> None:
+    """start() baselines _last_success so a late lazy start cannot misfire the
+    freeze-gap detector on the first cycle."""
+    monkeypatch.setattr(adapter_mod.PeriodicThread, "start", lambda self: None)
+    heartbeat = HeartbeatThread(MagicMock(), threading.Event(), interval=10.0)
+    heartbeat._last_success = 0.0  # as if constructed long before start
+    heartbeat.start()
+    assert heartbeat._last_success > 0.0
+
+
 def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     fake_adapter,
 ) -> None:
