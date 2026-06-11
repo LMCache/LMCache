@@ -16,6 +16,7 @@ import sys
 
 # First Party
 from setup_extensions.common_cpp import build_common_cpp
+from setup_extensions.storage_backends import StorageBackendStrategy  # noqa: E402
 from setup_extensions.strategies import BuildStrategy
 
 # ---------------------------------------------------------------------------
@@ -94,6 +95,22 @@ def _discover_strategies() -> list[BuildStrategy]:
     for cls in discover_subclasses(
         "setup_extensions.strategies",
         BuildStrategy,  # type: ignore[type-abstract]
+    ):
+        strategies.append(cls())
+    return strategies
+
+
+def _discover_storage_backends() -> list[StorageBackendStrategy]:
+    """Auto-discover all optional L2 storage backend strategies.
+
+    Walks ``setup_extensions.storage_backends`` via ``discover_subclasses``.
+    Adding a new ``.py`` file under that package with a concrete
+    ``StorageBackendStrategy`` subclass is all that is needed.
+    """
+    strategies: list[StorageBackendStrategy] = []
+    for cls in discover_subclasses(
+        "setup_extensions.storage_backends",
+        StorageBackendStrategy,  # type: ignore[type-abstract]
     ):
         strategies.append(cls())
     return strategies
@@ -206,7 +223,30 @@ class BuildPolicy:
             ext_modules.extend(em)
             cmdclass.update(cc)
 
+        # ---- build optional storage backends ----
+        ext_modules.extend(BuildPolicy.collect_storage_backends(cpp_flags))
+
         # ---- requirements ----
         req_file = strategy.requirements_file() if strategy else None
 
         return ext_modules, cmdclass, req_file
+
+    @staticmethod
+    def collect_storage_backends(
+        extra_cxx_flags: list[str],
+    ) -> list:
+        """Discover and build optional L2 storage backend extensions.
+
+        Each storage backend can be enabled via its ``BUILD_WITH_*``
+        env var or auto-detected through its SDK presence.
+        """
+        storage_strategies = _discover_storage_backends()
+        ext_modules = []
+        for s in storage_strategies:
+            if s.is_explicitly_requested():
+                print("Using explicitly requested storage backend: %s" % s.name)
+                ext_modules.extend(s.build(extra_cxx_flags))
+            elif s.detect():
+                print("Auto-detected storage backend: %s" % s.name)
+                ext_modules.extend(s.build(extra_cxx_flags))
+        return ext_modules
