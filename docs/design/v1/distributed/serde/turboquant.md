@@ -86,6 +86,28 @@ Other config fields:
 
 * `head_dim`: per-head hidden dimension.
 * `block_size`: token block size used by the compressed layout.
+* `skip_first_layers`: number of leading layers stored in the original raw KV
+  format instead of the TurboQuant compressed format. The default is `2`.
+* `skip_last_layers`: number of trailing layers stored in the original raw KV
+  format instead of the TurboQuant compressed format. The default is `2`.
+
+The skipped layer settings implement boundary-layer protection. By default,
+TurboQuant serde stores the first two and last two layers without quantization
+and only compresses the middle layers. This matches the default vLLM
+TurboQuant behavior, where the first and last two attention layers are skipped
+from TurboQuant KV-cache compression because they are more sensitive to
+quantization error.
+
+For a model with `num_layers` layers, the compressed range is:
+
+```text
+quant_start = min(skip_first_layers, num_layers)
+quant_end = max(quant_start, num_layers - skip_last_layers)
+```
+
+Layers `[0, quant_start)` and `[quant_end, num_layers)` are serialized as raw
+KV bytes. Layers `[quant_start, quant_end)` are serialized with the TurboQuant
+packed layout.
 
 Invalid presets are rejected with `ValueError`.
 
@@ -102,13 +124,19 @@ The first dimension separates key and value tensors:
 * `src[0]`: key cache
 * `src[1]`: value cache
 
-The compressed byte layout is:
+The serialized byte layout is:
 
 ```text
-[num_layers, num_blocks, block_size, num_heads, slot_size]
+raw first layers | compressed middle layers | raw last layers
 ```
 
 where:
+
+* raw layer groups use the original `[2, num_layers, num_tokens, hidden_dim]`
+  KV byte layout.
+
+* compressed middle layers use
+  `[num_compressed_layers, num_blocks, block_size, num_heads, slot_size]`.
 
 * `num_blocks = ceil(num_tokens / block_size)`
 * `num_heads = hidden_dim / head_dim`
