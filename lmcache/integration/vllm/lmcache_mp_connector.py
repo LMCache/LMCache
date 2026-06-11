@@ -464,18 +464,18 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     The connector for LMCache multi-process mode.
 
     Extra configs (kv_transfer_config.kv_connector_extra_config):
-    - lmcache.mp.server_urls: comma-separated list of LMCache server URLs,
-      e.g. "tcp://host1:6667,tcp://host2:6667". Takes priority over
-      lmcache.mp.host / lmcache.mp.port when set.
-    - lmcache.mp.n_servers: explicit server count for validation. Must match
-      the length of lmcache.mp.server_urls when both are provided.
-    - lmcache.mp.host: host of a single LMCache server (legacy, single-server
-      deployments only). Ignored when lmcache.mp.server_urls is set.
-    - lmcache.mp.port: port of a single LMCache server (legacy). Ignored when
-      lmcache.mp.server_urls is set.
+
+    Multi-server deployment:
+    - lmcache.mp.server_urls: server URL list or comma-separated string,
+      e.g. "tcp://host1:6667,tcp://host2:6667".
+    - lmcache.mp.n_servers: server count for validation. Optional.
+
+    Single-server deployment:
+    - lmcache.mp.host: the host of the LMCache server.
+    - lmcache.mp.port: the port of the LMCache server.
+
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
-    - lmcache.mp.heartbeat_interval: interval (seconds) between server
-      heartbeat pings.
+    - lmcache.mp.heartbeat_interval: interval (seconds) between heartbeat pings.
     """
 
     def __init__(
@@ -489,7 +489,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config is not None
 
         # Multi-server: prefer lmcache.mp.server_urls (list or comma-separated
-        # string) over the legacy single-server lmcache.mp.host / lmcache.mp.port.
+        # string) over the single-server lmcache.mp.host / lmcache.mp.port.
         server_urls_cfg = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.server_urls", None
         )
@@ -528,27 +528,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             f"divisible by n_servers ({n_servers})"
         )
 
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        if tp_size % n_servers != 0:
-            raise ValueError(
-                f"tp_size ({tp_size}) must be divisible by n_servers ({n_servers})"
-            )
-
-        # Multi-server is currently TP-only. DP/PP support requires a custom
-        # rank-to-group mapping API and will land in a follow-up PR.
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        # Multi-server + DP is not supported yet.
         dp_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
-        if n_servers > 1 and (pp_size > 1 or dp_size > 1):
+        if n_servers > 1 and dp_size > 1:
             raise ValueError(
-                "LMCacheMPConnector multi-server mode (n_servers > 1) currently "
-                f"only supports tensor parallelism; got pp_size={pp_size}, "
-                f"dp_size={dp_size}. PP/DP across multiple LMCache servers will "
-                "be supported in a follow-up PR with a custom rank-grouping API."
-            )
-        if n_servers > 1:
-            logger.warning(
-                "LMCacheMPConnector multi-server mode is TP-only for now; "
-                "PP/DP support is tracked for a follow-up PR."
+                "LMCacheMPConnector multi-server mode (n_servers > 1) does not "
+                f"support data parallelism yet; got dp_size={dp_size}. "
+                "DP across multiple LMCache servers will be "
+                "supported in a follow-up PR."
             )
 
         zmq_context = zmq.Context.instance()
@@ -556,7 +543,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         parallel_strategy = build_parallel_strategy_from_vllm_config(
             vllm_config, n_servers
         )
-        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
 
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = LMCacheMPSchedulerAdapter(
@@ -565,7 +551,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 model_name=vllm_config.model_config.model,
                 vllm_block_size=vllm_config.cache_config.block_size,
                 parallel_strategy=parallel_strategy,
-                extra_config=extra_config,
+                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
@@ -583,7 +569,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 model_name=vllm_config.model_config.model,
                 vllm_block_size=vllm_config.cache_config.block_size,
                 parallel_strategy=parallel_strategy,
-                extra_config=extra_config,
+                extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
@@ -734,10 +720,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        # Only the KV writer rank needs to STORE to the LMCache server.
-        # For non-MLA models, every rank writes its own KV shard.
-        # For MLA models, only the first rank of each TP group writes.
-        # In multi-server deployments, only the first rank on each node writes.
+        # In MLA scenario, only the first rank of the pipeline group
+        # needs to save the KV cache.
         if not self.worker_adapter.is_kv_writer:
             return
 

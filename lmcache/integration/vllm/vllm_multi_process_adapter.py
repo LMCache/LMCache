@@ -282,8 +282,6 @@ def send_ping(
 
 @dataclass
 class ParallelStrategy:
-    """vLLM parallelism layout snapshot consumed by the LMCache adapters."""
-
     use_mla: bool
     """Whether to use the MLA."""
 
