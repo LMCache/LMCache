@@ -84,8 +84,9 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well
        below the coordinator's ``INSTANCE_TIMEOUT``.
 
-The server registers under its telemetry identity (``--service-instance-id`` /
-OTel ``service.instance.id``); if that is unset, the coordinator assigns an id.
+The server registers under its stable identity (``--instance-id`` / OTel
+``service.instance.id``); if the flag is not passed, the server mints a
+random UUID v4 at startup and registers under that.
 
 Registration is best-effort: if the coordinator is unreachable, the MP server
 logs a warning, keeps retrying, and continues serving. A malformed

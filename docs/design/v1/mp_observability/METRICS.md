@@ -28,7 +28,7 @@ attributes built at startup:
 
 | Attribute | CLI flag | Source | Applies to |
 |---|---|---|---|
-| `service.instance.id` | `--service-instance-id` | `ObservabilityConfig.service_instance_id` (`None` defaults to a random UUID v4; explicit `""` preserved) | All metrics + spans |
+| `service.instance.id` | `--instance-id` | `MPServerConfig.instance_id` (defaults to a random UUID v4 at startup; projected onto `ObservabilityConfig.service_instance_id` by `run_cache_server` so telemetry and coordinator membership share one id) | All metrics + spans |
 
 Resource attributes are attached to the `MeterProvider` / `TracerProvider`
 in `otel_init.py` and therefore appear on every datapoint exported via

@@ -20,6 +20,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - Argument
      - Default
      - Description
+   * - ``--instance-id``
+     - *(unset, default UUID v4)*
+     - Stable identity of this MP server. Used as the coordinator
+       membership key and projected onto the OTel
+       ``service.instance.id`` resource attribute on every metric and
+       span (so telemetry and coordinator membership share one id).
+       When the flag is not passed, defaults to a random UUID v4
+       minted at startup.
    * - ``--host``
      - ``localhost``
      - Host address to bind the ZMQ server.
@@ -452,12 +460,6 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
-   * - ``--service-instance-id``
-     - *(unset, default UUID v4)*
-     - Identifier for this MP server instance, attached as the OTel
-       Resource attribute ``service.instance.id`` on every metric and
-       span. When the flag is not passed, defaults to a random UUID v4.
-       Pass ``--service-instance-id=""`` to force an empty value.
 
 vLLM Client Configuration
 --------------------------
