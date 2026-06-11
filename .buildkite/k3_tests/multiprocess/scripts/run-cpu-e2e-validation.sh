@@ -317,8 +317,19 @@ else
   # and is ABI-compatible with this runner. `--extra-index-url` is
   # required because the wheel pins torch==2.11.0 which only lives on
   # the pytorch CPU index.
+  #
+  # `--index-strategy unsafe-best-match` is required because uv's
+  # default `first-index` strategy locks each package to the first
+  # index that lists it. The pytorch CPU index ships its own (older)
+  # mirror of `setuptools` (≤70.2.0), so uv would refuse to upgrade
+  # setuptools to the 80.10.2 that vllm-cpu-nightly's metadata pins,
+  # producing "No solution found when resolving dependencies".
+  # `unsafe-best-match` tells uv to consider every index's full
+  # version pool and pick the best version overall, which is the
+  # behaviour pip already uses by default.
   uv pip install vllm-cpu-nightly \
-    --extra-index-url https://download.pytorch.org/whl/cpu
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    --index-strategy unsafe-best-match
   echo "✅ vLLM CPU install completed"
 
   # Debug: check if vLLM is actually CPU version
