@@ -14,6 +14,22 @@ import pytest
 from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
 from lmcache.v1.multiprocess.http_apis.reconfigure_api import router
 
+_DAX_OPS = ["status", "add", "remove", "resize"]
+
+
+def _adapter_status(
+    backend: str,
+    adapter_index: int,
+    status: Optional[dict[str, object]] = None,
+    supported_operations: Optional[list[str]] = None,
+) -> dict[str, object]:
+    return {
+        "backend": backend,
+        "supported_operations": supported_operations or [],
+        "status": status or {},
+        "adapter_index": adapter_index,
+    }
+
 
 @dataclass
 class _FakeStorageManager:
@@ -29,12 +45,12 @@ class _FakeStorageManager:
             "enabled": True,
             "num_adapters": 1,
             "adapters": [
-                {
-                    "type": "dax",
-                    "hotplug_enabled": True,
-                    "devices": [],
-                    "adapter_index": 0,
-                }
+                _adapter_status(
+                    "dax",
+                    0,
+                    {"hotplug_enabled": True, "devices": []},
+                    _DAX_OPS,
+                )
             ],
         }
 
@@ -140,13 +156,13 @@ def test_status_filters_non_dax_reconfigurable_adapters():
             "enabled": True,
             "num_adapters": 2,
             "adapters": [
-                {"type": "fake", "ready": True, "adapter_index": 0},
-                {
-                    "type": "dax",
-                    "hotplug_enabled": True,
-                    "devices": [],
-                    "adapter_index": 1,
-                },
+                _adapter_status("fake", 0, {"ready": True}, ["flip"]),
+                _adapter_status(
+                    "dax",
+                    1,
+                    {"hotplug_enabled": True, "devices": []},
+                    _DAX_OPS,
+                ),
             ],
         }
     )
@@ -160,9 +176,9 @@ def test_status_filters_non_dax_reconfigurable_adapters():
         "num_adapters": 1,
         "adapters": [
             {
-                "type": "dax",
-                "hotplug_enabled": True,
-                "devices": [],
+                "backend": "dax",
+                "supported_operations": _DAX_OPS,
+                "status": {"hotplug_enabled": True, "devices": []},
                 "adapter_index": 0,
             }
         ],
@@ -175,19 +191,19 @@ def test_lists_available_reconfigure_backends():
             "enabled": True,
             "num_adapters": 3,
             "adapters": [
-                {"type": "fake", "ready": True, "adapter_index": 0},
-                {
-                    "type": "dax",
-                    "hotplug_enabled": True,
-                    "devices": [],
-                    "adapter_index": 1,
-                },
-                {
-                    "type": "dax",
-                    "hotplug_enabled": True,
-                    "devices": [],
-                    "adapter_index": 2,
-                },
+                _adapter_status("fake", 0, {"ready": True}, ["flip"]),
+                _adapter_status(
+                    "dax",
+                    1,
+                    {"hotplug_enabled": True, "devices": []},
+                    _DAX_OPS,
+                ),
+                _adapter_status(
+                    "dax",
+                    2,
+                    {"hotplug_enabled": True, "devices": []},
+                    _DAX_OPS,
+                ),
             ],
         }
     )
@@ -208,13 +224,13 @@ def test_add_resolves_public_dax_index_to_generic_reconfigure_index():
             "enabled": True,
             "num_adapters": 2,
             "adapters": [
-                {"type": "fake", "ready": True, "adapter_index": 0},
-                {
-                    "type": "dax",
-                    "hotplug_enabled": True,
-                    "devices": [],
-                    "adapter_index": 1,
-                },
+                _adapter_status("fake", 0, {"ready": True}, ["flip"]),
+                _adapter_status(
+                    "dax",
+                    1,
+                    {"hotplug_enabled": True, "devices": []},
+                    _DAX_OPS,
+                ),
             ],
         }
     )
@@ -313,8 +329,8 @@ def test_generic_backend_routes_payload_to_matching_reconfigurable_adapter():
             "enabled": True,
             "num_adapters": 2,
             "adapters": [
-                {"type": "fake", "ready": True, "adapter_index": 0},
-                {"type": "dax", "hotplug_enabled": True, "adapter_index": 1},
+                _adapter_status("fake", 0, {"ready": True}, ["flip"]),
+                _adapter_status("dax", 1, {"hotplug_enabled": True}, _DAX_OPS),
             ],
         }
     )
@@ -336,7 +352,9 @@ def test_reconfigure_post_rejects_missing_backend_adapter():
         status={
             "enabled": True,
             "num_adapters": 1,
-            "adapters": [{"type": "dax", "hotplug_enabled": True, "adapter_index": 0}],
+            "adapters": [
+                _adapter_status("dax", 0, {"hotplug_enabled": True}, _DAX_OPS)
+            ],
         }
     )
 

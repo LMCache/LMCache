@@ -249,8 +249,11 @@ def test_dax_adapter_implements_generic_reconfigure_status(tmp_path):
     try:
         assert isinstance(adapter, L2ReconfigurableAdapter)
         status = adapter.reconfigure("status", {})
-        assert status.pop("type") == "dax"
-        assert status == adapter.hotplug_status()
+        assert status == {
+            "backend": "dax",
+            "supported_operations": ["status", "add", "remove", "resize"],
+            "status": adapter.hotplug_status(),
+        }
     finally:
         adapter.close()
 
@@ -414,7 +417,11 @@ class _FakeReconfigurableAdapter:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     def reconfigure_status(self) -> dict:
-        return {"type": "fake", "ready": True}
+        return {
+            "backend": "fake",
+            "supported_operations": ["flip"],
+            "status": {"ready": True},
+        }
 
     def reconfigure(self, operation: str, payload: dict[str, object]) -> dict:
         self.calls.append((operation, payload))

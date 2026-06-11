@@ -161,6 +161,13 @@ def _normalize_operation(operation: str) -> str:
     return normalized
 
 
+def _adapter_backend_name(adapter: dict) -> str | None:
+    backend = adapter.get("backend", adapter.get("type"))
+    if isinstance(backend, str) and backend:
+        return backend
+    return None
+
+
 def _backend_adapter_entries(status: dict, backend: str) -> list[tuple[int, dict]]:
     raw_adapters = status.get("adapters", [])
     if not isinstance(raw_adapters, list):
@@ -168,7 +175,7 @@ def _backend_adapter_entries(status: dict, backend: str) -> list[tuple[int, dict
 
     backend_adapters = []
     for raw_index, adapter in enumerate(raw_adapters):
-        if not isinstance(adapter, dict) or adapter.get("type") != backend:
+        if not isinstance(adapter, dict) or _adapter_backend_name(adapter) != backend:
             continue
         generic_index = adapter.get("adapter_index", raw_index)
         if not isinstance(generic_index, int):
@@ -186,8 +193,8 @@ def _available_backend_names(status: dict) -> list[str]:
     for adapter in raw_adapters:
         if not isinstance(adapter, dict):
             continue
-        backend = adapter.get("type")
-        if isinstance(backend, str) and backend:
+        backend = _adapter_backend_name(adapter)
+        if backend is not None:
             backends.add(backend)
     return sorted(backends)
 

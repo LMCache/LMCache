@@ -33,6 +33,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigureError,
+    L2ReconfigureStatus,
 )
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
@@ -57,6 +58,7 @@ DaxDeviceState = Literal[
 HotplugRemoveMode = Literal["migrate", "evict", "drain"]
 HotplugResizeMode = Literal["migrate", "evict"]
 DaxHotplugError = L2ReconfigureError
+_DAX_RECONFIGURE_OPERATIONS = ["status", "add", "remove", "resize"]
 
 _READABLE_STATES: set[DaxDeviceState] = {
     "active",
@@ -687,15 +689,18 @@ class DaxL2Adapter(L2AdapterInterface):
                 "devices": devices,
             }
 
-    def reconfigure_status(self) -> dict:
+    def reconfigure_status(self) -> L2ReconfigureStatus:
         """Return generic runtime reconfiguration status for this adapter.
 
         Returns:
-            JSON-serializable DAX hotplug status.
+            Standard reconfiguration status with DAX hotplug details nested
+            under ``status``.
         """
-        status = self.hotplug_status()
-        status["type"] = "dax"
-        return status
+        return {
+            "backend": "dax",
+            "supported_operations": list(_DAX_RECONFIGURE_OPERATIONS),
+            "status": self.hotplug_status(),
+        }
 
     def reconfigure(
         self,

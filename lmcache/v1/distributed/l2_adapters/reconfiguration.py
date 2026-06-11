@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional, Protocol, TypedDict, runtime_checkable
 
 
 class L2ReconfigureError(RuntimeError):
@@ -31,11 +31,19 @@ class L2ReconfigureError(RuntimeError):
         self.payload = payload if payload is not None else {"error": message}
 
 
+class L2ReconfigureStatus(TypedDict):
+    """Standard status envelope for runtime-reconfigurable L2 adapters."""
+
+    backend: str
+    supported_operations: list[str]
+    status: dict[str, object]
+
+
 @runtime_checkable
 class L2ReconfigurableAdapter(Protocol):
     """Protocol implemented by L2 adapters with runtime reconfiguration."""
 
-    def reconfigure_status(self) -> dict:
+    def reconfigure_status(self) -> L2ReconfigureStatus:
         """Return JSON-serializable runtime reconfiguration status."""
         ...
 
