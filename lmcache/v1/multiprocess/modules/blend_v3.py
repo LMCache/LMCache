@@ -539,7 +539,7 @@ class BlendV3Module:
         world_size = key.world_size
         per_hash_obj_keys: dict[bytes, list] = {}
         all_hashes = [r.hash for r in matches]
-        all_obj_keys = ipc_key_to_object_keys(key, all_hashes)
+        all_obj_keys = ipc_key_to_object_keys(key, all_hashes, [0])[0]
         for i, h in enumerate(all_hashes):
             per_hash_obj_keys[h] = all_obj_keys[i * world_size : (i + 1) * world_size]
 
@@ -906,8 +906,8 @@ class BlendV3Module:
                 all_obj_keys = [k for r in cb_match_result for k in cached[r.hash]]
         else:
             all_obj_keys = ipc_key_to_object_keys(
-                key, [r.hash for r in cb_match_result]
-            )
+                key, [r.hash for r in cb_match_result], [0]
+            )[0]
 
         # Lookup read-locked the full found set, but the connector may have
         # dropped some matches (parent-covered / misaligned) before retrieve,

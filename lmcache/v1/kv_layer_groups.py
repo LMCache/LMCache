@@ -291,27 +291,16 @@ class KVLayerGroupsManager:
                 :func:`normalize_kv_and_discover_format`.
             gpu_kv_format: Format returned by
                 :func:`normalize_kv_and_discover_format`.
-            num_blocks: Number of paged blocks. Stamped into every
-                ``shape_desc.nb``. Each group's ``shape_desc.bs`` is
-                discovered per-layer via :func:`get_block_size`, so
-                compressed and non-compressed groups can coexist.
+            num_blocks: Number of paged blocks in the device KV cache.
             layout_hints: Engine-provided hints. The manager only reads
                 ``inference_engine_logical_block_size`` (logical tokens
                 per inference-engine block) from it to derive each
                 group's ``compress_ratio`` and ``physical_chunk_size``.
                 ``None`` means every group is treated as non-compressed
                 (``compress_ratio == 1``).
-            engine_group_infos: LMCache-owned engine KV cache group
-                metadata. When present, it is used to keep layers from
-                different engine block-ID spaces in separate LMCache
-                transfer groups.
-            lmcache_logical_chunk_size: Logical tokens per LMCache chunk
-                (one logical token = one inference-engine token).
-                Together with ``compress_ratio`` it determines each
-                group's ``physical_chunk_size =
-                lmcache_logical_chunk_size // compress_ratio``, the
-                number of *physical* slots per chunk fed to the
-                block-level transfer kernel.
+            engine_group_infos: Engine KV cache group metadata, including
+                the engine group ids, and the sliding window information.
+            lmcache_logical_chunk_size: Tokens per LMCache chunk
         """
         # Import here to break a circular import via
         # lmcache.v1.gpu_connector.__init__ → metadata → kv_layer_groups.
@@ -406,6 +395,8 @@ class KVLayerGroupsManager:
             or self._kernel_groups[0].shape_desc.bs
         )
 
+        self._lmcache_chunk_size = lmcache_logical_chunk_size
+
         logger.info(
             "KV layer groups: ---\n%s\n---",
             "\n".join(repr(g) for g in self._kernel_groups),
@@ -453,6 +444,7 @@ class KVLayerGroupsManager:
         return len(self._kernel_groups)
 
     @property
+    @lmcache_deprecate("This function will be removed soon")
     def inference_engine_logical_block_size(self) -> int:
         """Inference-engine-side logical block size.
 
@@ -469,8 +461,6 @@ class KVLayerGroupsManager:
     def get_shape_desc(self, kernel_group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Return the :class:`PageBufferShapeDesc` for *kernel_group_idx*.
 
-        Equivalent to ``self._kernel_groups[kernel_group_idx].shape_desc``.
-
         Args:
             kernel_group_idx: 0-based kernel group index.
 
@@ -479,16 +469,9 @@ class KVLayerGroupsManager:
         """
         return self._kernel_groups[kernel_group_idx].shape_desc
 
+    @lmcache_deprecate("This function will be renamed to get_num_slots_per_chunk")
     def get_physical_chunk_size(self, kernel_group_idx: int) -> int:
         """Return the per-chunk *physical* slot count for *kernel_group_idx*.
-
-        Equivalent to
-        ``self._kernel_groups[kernel_group_idx].physical_chunk_size``.
-        For non-compressed groups this equals
-        ``lmcache_logical_chunk_size``; for compressed groups it equals
-        ``lmcache_logical_chunk_size // compress_ratio`` and is what the
-        block-level transfer kernel must be told (the logical chunk size
-        in *vLLM tokens* is not what the kernel addresses).
 
         Args:
             kernel_group_idx: 0-based kernel group index.
@@ -497,6 +480,48 @@ class KVLayerGroupsManager:
             IndexError: If *kernel_group_idx* is out of range.
         """
         return self._kernel_groups[kernel_group_idx].physical_chunk_size
+
+    def get_subchunk_sw_size_tokens(self, kernel_group_idx: int) -> int:
+        """Return the sub-chunk sliding window size of a given kernel group.
+        The size is measured in the number of tokens.
+
+        This is for the models like DSV4 where the sliding window size is
+        smaller than the tokens in a single lmcache chunk.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+
+        Returns:
+            The sub-chunk sliding window size. Will be the same as the
+            chunk size for non-slding-window models or big-sliding-
+            window models.
+        """
+        # TODO(ApostaC): now here's the 'dummy' implementation.
+        # Need to wire the real sw size from the kernel group info once it's available
+        return self._lmcache_chunk_size
+
+    def get_sw_size_chunks(self, object_group_idx: int) -> int:
+        """Return the sliding window size of a given kernel group,
+        The size is measured in lmcache chunks.
+
+        If the kernel group is non-sliding window, return -1
+
+        Args:
+            object_group_idx: 0-based kernel group index.
+
+        Returns:
+            The sliding window size rounded up to chunks for sliding
+            window models. -1 otherwise.
+
+        Note:
+            It uses object_group_idx, because the kernel groups in the same
+            object group must share the same "big-sliding-window" size -- so that
+            they can be retrieved at the same time from the same object.
+            For small sliding window (subchunk window) models, it will return 1.
+        """
+        # TODO(ApostaC): now here's the 'dummy' implementation.
+        # Need to wire the real sw size from the object group info once it's available
+        return -1
 
     def calculate_num_blocks(self, kernel_group_idx: int, num_tokens: int) -> int:
         """Calculate the number of blocks for a given number of tokens in a

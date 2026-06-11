@@ -105,7 +105,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     sentinel_obj_keys = [MagicMock()]
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        return_value=sentinel_obj_keys,
+        return_value=[sentinel_obj_keys],
     ):
         module.free_lookup_locks(key, 1)
 

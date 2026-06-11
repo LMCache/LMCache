@@ -132,7 +132,7 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2, 3],
             cache_salt="alice",
         )
-        out = ipc_key_to_object_keys(k, [b"h1", b"h2"])
+        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
         assert len(out) == 2
         assert all(o.cache_salt == "alice" for o in out)
 
@@ -149,7 +149,7 @@ class TestIpcKeyToObjectKeys:
             token_ids=[1, 2, 3],
             cache_salt="alice",
         )
-        out = ipc_key_to_object_keys(k, [b"h1"])
+        out = ipc_key_to_object_keys(k, [b"h1"], [0])[0]
         assert len(out) == 4
         assert all(o.cache_salt == "alice" for o in out)
 
@@ -164,10 +164,10 @@ class TestIpcKeyToObjectKeys:
             worker_id=0,
             token_ids=[1],
         )
-        out = ipc_key_to_object_keys(k, [b"h1"])
+        out = ipc_key_to_object_keys(k, [b"h1"], [0])[0]
         assert all(o.cache_salt == "" for o in out)
 
-    def test_object_group_id_defaults_to_zero(self):
+    def test_object_group_id_zero(self):
         # First Party
         from lmcache.v1.distributed.api import ipc_key_to_object_keys
         from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
@@ -178,7 +178,7 @@ class TestIpcKeyToObjectKeys:
             worker_id=0,
             token_ids=[1, 2],
         )
-        out = ipc_key_to_object_keys(k, [b"h1", b"h2"])
+        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0])[0]
         assert all(o.object_group_id == 0 for o in out)
 
     def test_object_group_id_propagates_to_all_keys(self):
@@ -194,9 +194,34 @@ class TestIpcKeyToObjectKeys:
             worker_id=None,
             token_ids=[1, 2, 3],
         )
-        out = ipc_key_to_object_keys(k, [b"h1"], object_group_id=3)
+        out = ipc_key_to_object_keys(k, [b"h1"], [3])[0]
         assert len(out) == 4
         assert all(o.object_group_id == 3 for o in out)
+
+    def test_multiple_object_groups(self):
+        """Each requested object group gets its own positional key list."""
+        # First Party
+        from lmcache.v1.distributed.api import ipc_key_to_object_keys
+        from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+
+        k = IPCCacheEngineKey.from_token_ids(
+            model_name="m",
+            world_size=2,
+            worker_id=None,
+            token_ids=[1, 2, 3],
+            cache_salt="alice",
+        )
+        out = ipc_key_to_object_keys(k, [b"h1", b"h2"], [0, 3])
+        assert len(out) == 2
+        # 2 chunks * 2 workers = 4 keys per group.
+        assert all(len(group_keys) == 4 for group_keys in out)
+        assert all(o.object_group_id == 0 for o in out[0])
+        assert all(o.object_group_id == 3 for o in out[1])
+        # The groups differ only in object_group_id.
+        for first, second in zip(out[0], out[1], strict=True):
+            assert first.chunk_hash == second.chunk_hash
+            assert first.kv_rank == second.kv_rank
+            assert first.cache_salt == second.cache_salt
 
 
 class TestObjectKeyValidation:
