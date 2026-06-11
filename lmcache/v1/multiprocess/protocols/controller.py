@@ -43,11 +43,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             handler_type=HandlerType.SYNC,
         ),
         # Ping
-        # Payload: None
+        # Payload: [instance_id] -- the sender's worker instance ID, or None
+        #   for an untracked prober (the scheduler adapter).
         # Returns: bool - Always True
+        # SYNC: the handler is an O(1) liveness touch, run on the MQ main loop.
         "PING": ProtocolDefinition(
-            payload_classes=[],
+            payload_classes=[int | None],
             response_class=bool,
-            handler_type=HandlerType.BLOCKING,
+            handler_type=HandlerType.SYNC,
         ),
     }

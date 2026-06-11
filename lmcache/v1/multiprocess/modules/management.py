@@ -72,8 +72,13 @@ class ManagementModule:
         """Release resources owned by this module."""
         pass
 
-    def ping(self) -> bool:
+    def ping(self, instance_id: int | None) -> bool:
         """Respond to a ping request.
+
+        Args:
+            instance_id: The sender's worker instance ID, or None for an
+                untracked prober (the scheduler adapter). Reserved for worker
+                liveness refresh, wired with the reaper; ignored here.
 
         Returns:
             Always True.

@@ -69,6 +69,39 @@ class MPServerConfig:
     ``run_cache_server``) so metrics, traces, and coordinator state all key on
     the same id. Set via ``--instance-id``; defaults to a random UUID v4."""
 
+    worker_reap_timeout_seconds: float = 120.0
+    """Silence budget (seconds) after which a ping-proven worker's KV cache
+    registration is reaped. 0 disables worker reaping. Keep it >= 3 x the vLLM
+    adapter's heartbeat interval so a few missed pings never reap a live
+    worker."""
+
+    worker_registration_grace_seconds: float = 3600.0
+    """Silence budget (seconds) for a worker that registered but has never
+    sent a PING (model warmup, or death before its first request). Must be
+    >= worker_reap_timeout_seconds."""
+
+    def __post_init__(self) -> None:
+        """Validate the worker-reaping timeouts.
+
+        Raises:
+            ValueError: If a timeout is non-finite, the reap timeout is
+                negative or a non-zero value below the 30 s floor, or the
+                registration grace is below the reap timeout.
+        """
+        reap = self.worker_reap_timeout_seconds
+        grace = self.worker_registration_grace_seconds
+        if not math.isfinite(reap) or reap < 0 or (reap != 0 and reap < 30.0):
+            raise ValueError(
+                "worker reap timeout must be 0 (disabled) or >= 30s; keep it "
+                ">= 3 x your configured lmcache.mp.heartbeat_interval "
+                f"(default 10s); got {reap}"
+            )
+        if not math.isfinite(grace) or grace < reap:
+            raise ValueError(
+                "worker registration grace must be >= the worker reap timeout "
+                f"({reap}s); got {grace}"
+            )
+
 
 @dataclass
 class RuntimePluginConfig:
@@ -257,6 +290,22 @@ def add_mp_server_args(
         help="Python modules that the /run_script endpoint is allowed to "
         "import. Example: --script-allowed-imports numpy pandas",
     )
+    mp_group.add_argument(
+        "--worker-reap-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Silence budget (s) before a ping-proven worker's KV cache "
+        "registration is reaped. 0 disables reaping. Must be >= 3 x the "
+        "vLLM adapter's heartbeat interval. Default is 120.",
+    )
+    mp_group.add_argument(
+        "--worker-registration-grace-seconds",
+        type=float,
+        default=3600.0,
+        help="Silence budget (s) for a worker that registered but never "
+        "pinged (model warmup or early death). Must be >= the worker reap "
+        "timeout. Default is 3600.",
+    )
     return parser
 
 
@@ -296,6 +345,8 @@ def parse_args_to_mp_server_config(
         ),
         shm_name=args.shm_name,
         script_allowed_imports=args.script_allowed_imports or [],
+        worker_reap_timeout_seconds=args.worker_reap_timeout_seconds,
+        worker_registration_grace_seconds=args.worker_registration_grace_seconds,
     )
 
 
