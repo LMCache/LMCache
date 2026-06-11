@@ -171,7 +171,7 @@ jobs:
                       print('NOTE: The test may fail if the model is not available locally')
           EOF
 
-      - name: Server bench (data mode)
+      - name: Server bench — Data
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_BENCH_TRANSFER_MODE=data \
@@ -179,7 +179,7 @@ jobs:
           LMCACHE_ZMQ_PORT_BENCH=15555 \
             .github/scripts/cpu_device_test.sh server_bench
 
-      - name: Server bench (handle mode)
+      - name: Server bench — Handle
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_BENCH_TRANSFER_MODE=handle \
@@ -187,7 +187,7 @@ jobs:
           LMCACHE_ZMQ_PORT_BENCH=15556 \
             .github/scripts/cpu_device_test.sh server_bench
 
-      - name: vLLM e2e (pickle mode)
+      - name: vLLM e2e — Data (pickle)
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_E2E_TRANSPORT_MODE=pickle \
@@ -196,7 +196,7 @@ jobs:
           VLLM_PORT_E2E=18000 \
             .github/scripts/cpu_device_test.sh vllm_e2e
 
-      - name: vLLM e2e (shm mode)
+      - name: vLLM e2e — Data (shm)
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_E2E_TRANSPORT_MODE=shm \
@@ -205,7 +205,7 @@ jobs:
           VLLM_PORT_E2E=18001 \
             .github/scripts/cpu_device_test.sh vllm_e2e
 
-      - name: vLLM e2e (handle mode)
+      - name: vLLM e2e — Handle
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_E2E_TRANSPORT_MODE=handle \
@@ -321,7 +321,7 @@ jobs:
                       print('NOTE: The test may fail if the model is not available locally')
           EOF
 
-      - name: Server bench (data mode)
+      - name: Server bench — Data
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_BENCH_TRANSFER_MODE=data \
@@ -329,7 +329,7 @@ jobs:
           LMCACHE_ZMQ_PORT_BENCH=15555 \
             .github/scripts/cpu_device_test.sh server_bench
 
-      - name: Server bench (handle mode)
+      - name: Server bench — Handle
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_BENCH_TRANSFER_MODE=handle \
@@ -337,7 +337,7 @@ jobs:
           LMCACHE_ZMQ_PORT_BENCH=15556 \
             .github/scripts/cpu_device_test.sh server_bench
 
-      - name: vLLM e2e (pickle mode)
+      - name: vLLM e2e — Data (pickle)
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_E2E_TRANSPORT_MODE=pickle \
@@ -346,7 +346,7 @@ jobs:
           VLLM_PORT_E2E=18000 \
             .github/scripts/cpu_device_test.sh vllm_e2e
 
-      - name: vLLM e2e (handle mode)
+      - name: vLLM e2e — Handle
         run: |
           chmod +x .github/scripts/cpu_device_test.sh
           LMCACHE_E2E_TRANSPORT_MODE=handle \
