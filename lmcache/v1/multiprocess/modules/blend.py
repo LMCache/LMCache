@@ -597,7 +597,7 @@ class BlendModule:
         # time, so ipc_key_to_object_keys resolves correctly.
         for group in groups:
             chunk_hashes = [r.hash for r in group]
-            obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+            obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
             handle = self._ctx.storage_manager.submit_prefetch_task(
                 obj_keys,
                 layout_desc,
@@ -827,7 +827,7 @@ class BlendModule:
         # the CB lookup path and via the standard lookup/retrieve path.
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         # convert to object key
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         reserved_dict: dict = {}
         try:
@@ -937,7 +937,7 @@ class BlendModule:
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
         num_chunks = len(cb_match_result)
         chunk_hashes = [r.hash for r in cb_match_result]
-        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         # CPU-synchronous sentinel: GPU retrieve is about to be enqueued.
         self._ctx.event_bus.publish(
@@ -1110,7 +1110,7 @@ class BlendModule:
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
 
         # convert to object key
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         reserved_dict: dict = {}
         try:

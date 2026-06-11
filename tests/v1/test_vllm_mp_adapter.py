@@ -25,7 +25,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
 
 
@@ -79,10 +79,8 @@ def fake_adapter(monkeypatch):
 
     parallel_strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=1,
-        kv_worker_id=0,
-        actual_world_size=1,
-        actual_worker_id=0,
+        vllm_world_size=1,
+        vllm_worker_id=0,
         tp_size=1,
         pp_size=1,
     )
@@ -174,10 +172,10 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     adapter.kv_caches = {"layer.0": fake_tensor}
-    adapter.group_views = [
-        LMCacheGroupView(0, (0, 2)),
-        LMCacheGroupView(0, (4,)),
-        LMCacheGroupView(1, (1, 3)),
+    adapter.engine_group_infos = [
+        EngineGroupInfo(0, (0, 2)),
+        EngineGroupInfo(0, (4,)),
+        EngineGroupInfo(1, (1, 3)),
     ]
     transfer_ctx = MagicMock()
     fake_future = MagicMock()

@@ -24,7 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
     RegisterNonGpuContextPayload,
 )
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 
@@ -96,7 +96,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - engine_type: EngineType - Which serving engine produced the
         #     caches (vLLM, SGLang, ...). Drives format detection.
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
-        #   - group_views: list[LMCacheGroupView] - Engine-neutral KV cache
+        #   - engine_group_infos: list[EngineGroupInfo] - Engine-neutral KV cache
         #     group metadata (msgspec-encoded by the message queue).
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
@@ -107,7 +107,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
                 int,
                 EngineType,
                 LayoutHints,
-                list[LMCacheGroupView],
+                list[EngineGroupInfo],
             ],
             response_class=None,
             handler_type=HandlerType.SYNC,
