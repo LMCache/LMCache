@@ -10,12 +10,12 @@
 #   SKIP_CACHE_HIT_VALIDATION=1 (skip Phase 3 to keep CI time reasonable)
 #
 # Transport mode is selected via LMCACHE_TRANSPORT_MODE:
-#   pickle  -> LMCACHE_SHM_NAME=""  (pickle transport)
-#   shm     -> LMCACHE_SHM_NAME=__default__  (shared memory, Linux only)
-#   handle  -> LMCACHE_MP_TRANSFER_MODE=handle (POSIX SHM server-side copy)
+#   handle -> LMCACHE_MP_TRANSFER_MODE=handle (POSIX SHM server-side copy)
+#   data   -> LMCACHE_DATA_MODE selects shm (default) or pickle
 #
 # Environment variables (all optional, defaults shown):
-#   LMCACHE_TRANSPORT_MODE   Transport mode: pickle|shm|handle (default: handle)
+#   LMCACHE_TRANSPORT_MODE   Transport mode: handle|data (default: handle)
+#   LMCACHE_DATA_MODE        Data transfer mode: shm|pickle (default: shm)
 #   LMCACHE_HTTP_PORT        HTTP port for LMCache server  (default: 8080)
 #   VLLM_PORT                HTTP port for vLLM server     (default: 8000)
 #   LMCACHE_L1_SIZE_GB       LMCache L1 cache size in GB   (default: 2)
@@ -43,26 +43,34 @@ fi
 
 LMCACHE_TRANSPORT_MODE="${LMCACHE_TRANSPORT_MODE:-handle}"
 
+# When LMCACHE_TRANSPORT_MODE=data, LMCACHE_DATA_MODE selects the
+# specific data transfer mechanism: shm (default) or pickle.
+LMCACHE_DATA_MODE="${LMCACHE_DATA_MODE:-shm}"
+
 # Map LMCACHE_TRANSPORT_MODE to the vars expected by the shared script.
-# pickle/shm explicitly set LMCACHE_MP_TRANSFER_MODE=data because
-# leaving it at the script default (`auto`) would make Step 5.5's
-# transport-mode verification expect ``auto`` instead of pickle/shm.
 case "${LMCACHE_TRANSPORT_MODE}" in
-  pickle)
-    export LMCACHE_SHM_NAME=""
-    export LMCACHE_MP_TRANSFER_MODE="data"
-    ;;
-  shm)
-    export LMCACHE_SHM_NAME="__default__"
+  data)
+    case "${LMCACHE_DATA_MODE}" in
+      shm)
+        export LMCACHE_SHM_NAME="__default__"
+        ;;
+      pickle)
+        export LMCACHE_SHM_NAME=""
+        ;;
+      *)
+        echo "!! Unknown LMCACHE_DATA_MODE='${LMCACHE_DATA_MODE}'"
+        echo "   Valid values: shm, pickle"
+        exit 1
+        ;;
+    esac
     export LMCACHE_MP_TRANSFER_MODE="data"
     ;;
   handle)
     export LMCACHE_MP_TRANSFER_MODE="handle"
-    # LMCACHE_SHM_NAME is not used in handle mode; leave at default
     ;;
   *)
     echo "!! Unknown LMCACHE_TRANSPORT_MODE='${LMCACHE_TRANSPORT_MODE}'"
-    echo "   Valid values: pickle, shm, handle"
+    echo "   Valid values: handle, data"
     exit 1
     ;;
 esac
@@ -75,6 +83,7 @@ export LMCACHE_LOG_FILE="${LMCACHE_LOG_FILE:-/tmp/cpu_e2e_lmcache.log}"
 export VLLM_LOG_FILE="${VLLM_LOG_FILE:-/tmp/cpu_e2e_vllm.log}"
 
 echo "    LMCACHE_TRANSPORT_MODE=${LMCACHE_TRANSPORT_MODE}"
+echo "    LMCACHE_DATA_MODE=${LMCACHE_DATA_MODE}"
 echo "    SKIP_INSTALL=${SKIP_INSTALL}"
 echo "    SKIP_CACHE_HIT_VALIDATION=${SKIP_CACHE_HIT_VALIDATION}"
 echo "    Delegating to: ${SHARED_SCRIPT}"

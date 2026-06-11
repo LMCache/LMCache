@@ -9,7 +9,8 @@
 #
 # Environment variables:
 #   LMCACHE_BENCH_TRANSFER_MODE  data|handle (default: handle)
-#   LMCACHE_E2E_TRANSPORT_MODE  pickle|shm|handle (default: handle)
+#   LMCACHE_E2E_TRANSPORT_MODE  data|handle (default: handle)
+#   LMCACHE_E2E_DATA_MODE       shm|pickle (default: shm, data transport sub-mode)
 #   LMCACHE_HTTP_PORT_BENCH     HTTP port for bench (default: 18080)
 #   LMCACHE_ZMQ_PORT_BENCH      ZMQ port for bench (default: 15555)
 #   LMCACHE_HTTP_PORT_E2E       HTTP port for e2e (default: 18081)
@@ -28,6 +29,7 @@ echo "    Python: $(python3 --version 2>&1 || true)"
 # Configuration
 BENCH_TRANSFER_MODE="${LMCACHE_BENCH_TRANSFER_MODE:-handle}"
 E2E_TRANSPORT_MODE="${LMCACHE_E2E_TRANSPORT_MODE:-handle}"
+E2E_DATA_MODE="${LMCACHE_E2E_DATA_MODE:-shm}"
 HTTP_PORT_BENCH="${LMCACHE_HTTP_PORT_BENCH:-18080}"
 ZMQ_PORT_BENCH="${LMCACHE_ZMQ_PORT_BENCH:-15555}"
 HTTP_PORT_E2E="${LMCACHE_HTTP_PORT_E2E:-18081}"
