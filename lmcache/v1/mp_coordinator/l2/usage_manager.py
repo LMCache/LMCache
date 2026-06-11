@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Per-``cache_salt`` L2 usage tracker for the MP coordinator.
+"""Per-``cache_salt`` L2 usage manager for the MP coordinator.
 
 Maintains running byte totals per tenant, updated by store events
 reported by MP servers. Eviction (byte subtraction) is driven by
@@ -19,8 +19,8 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
-class UsageTracker:
-    """Thread-safe in-memory tracker of L2 byte usage per ``cache_salt``.
+class CoordinatorUsageManager:
+    """Thread-safe in-memory manager of L2 byte usage per ``cache_salt``.
 
     MP servers report ``store`` events. The coordinator calls
     ``record_evicted`` when it decides to evict data. Byte counters

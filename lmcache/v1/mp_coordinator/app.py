@@ -4,7 +4,7 @@
 The coordinator is a FastAPI app. Endpoints are auto-discovered from the
 ``http_apis`` package (the same convention as the mp server's HTTP API) and stay
 thin, operating on the shared collaborators carried on ``app.state``: ``config``,
-``registry``, ``quota_store``, ``usage_tracker``, and ``eviction_controller``.
+``registry``, ``quota_manager``, ``usage_manager``, and ``eviction_manager``.
 The lifespan runs background tasks for health-checking (eviction of instances
 whose heartbeats have lapsed) and L2 eviction (quota enforcement).
 
@@ -29,11 +29,11 @@ from fastapi import FastAPI
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
-from lmcache.v1.mp_coordinator.l2.eviction_controller import (
-    CoordinatorEvictionController,
+from lmcache.v1.mp_coordinator.l2.eviction_manager import (
+    CoordinatorEvictionManager,
 )
-from lmcache.v1.mp_coordinator.l2.quota_store import QuotaStore
-from lmcache.v1.mp_coordinator.l2.usage_tracker import UsageTracker
+from lmcache.v1.mp_coordinator.l2.quota_manager import CoordinatorQuotaManager
+from lmcache.v1.mp_coordinator.l2.usage_manager import CoordinatorUsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -66,15 +66,15 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
-        collaborators (``config``, ``registry``, ``quota_store``,
-        ``usage_tracker``); all ``http_apis`` routers are registered.
+        collaborators (``config``, ``registry``, ``quota_manager``,
+        ``usage_manager``); all ``http_apis`` routers are registered.
     """
     registry = InstanceRegistry()
-    quota_store = QuotaStore()
-    usage_tracker = UsageTracker()
-    eviction_controller = CoordinatorEvictionController(
-        quota_store=quota_store,
-        usage_tracker=usage_tracker,
+    quota_manager = CoordinatorQuotaManager()
+    usage_manager = CoordinatorUsageManager()
+    eviction_manager = CoordinatorEvictionManager(
+        quota_manager=quota_manager,
+        usage_manager=usage_manager,
         eviction_ratio=config.eviction_ratio,
     )
 
@@ -88,7 +88,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         """Periodically check usage against quotas and log eviction plans."""
         while True:
             await asyncio.sleep(config.eviction_check_interval)
-            eviction_controller.execute_evictions()
+            eviction_manager.execute_evictions()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -115,9 +115,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     # Shared collaborators on app.state so routers compose from them.
     app.state.config = config
     app.state.registry = registry
-    app.state.quota_store = quota_store
-    app.state.usage_tracker = usage_tracker
-    app.state.eviction_controller = eviction_controller
+    app.state.quota_manager = quota_manager
+    app.state.usage_manager = usage_manager
+    app.state.eviction_manager = eviction_manager
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"

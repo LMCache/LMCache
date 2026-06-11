@@ -35,9 +35,9 @@ MP server (store/lookup)
         │
         ▼
   POST /l2/events ──▶ Coordinator
-                        ├─ UsageTracker: per-salt byte accounting
-                        ├─ CoordinatorEvictionController: per-salt LRU
-                        └─ QuotaStore: per-salt byte limits
+                        ├─ CoordinatorUsageManager: per-salt byte accounting
+                        ├─ CoordinatorEvictionManager: per-salt LRU
+                        └─ CoordinatorQuotaManager: per-salt byte limits
 
   Coordinator background loop (every eviction_check_interval, default 5s)
         │
@@ -63,7 +63,7 @@ never imports ``torch``.
 
 ## Coordinator components (`l2/`)
 
-### UsageTracker (`usage_tracker.py`)
+### CoordinatorUsageManager (`usage_manager.py`)
 
 Thread-safe per-salt byte counter. Two operations:
 
@@ -72,13 +72,13 @@ Thread-safe per-salt byte counter. Two operations:
 
 Exposes ``get(salt)``, ``get_all()``, ``get_total()`` for the status endpoints.
 
-### QuotaStore (`quota_store.py`)
+### CoordinatorQuotaManager (`quota_manager.py`)
 
 Thread-safe in-memory quota registry (``dict[str, int]`` + lock). CRUD via
 ``set``, ``get``, ``delete``, ``list_all``. Quotas are set in GiB at the API
 and stored as bytes internally.
 
-### CoordinatorEvictionController (`eviction_controller.py`)
+### CoordinatorEvictionManager (`eviction_manager.py`)
 
 Per-``cache_salt`` LRU, mirroring ``IsolatedLRUEvictionPolicy`` but using
 ``CacheKey`` and running in the coordinator process.
@@ -94,7 +94,7 @@ _key_sizes      : dict[CacheKey, int]                       # byte size per key
 - ``on_lookup(key)`` — touch (move to MRU end).
 - ``on_remove(keys)`` — remove from LRU tracking after confirmed deletion.
 - ``execute_evictions()`` — for each tracked salt, compare usage (from
-  ``UsageTracker``) against quota (from ``QuotaStore``, default 0). If over
+  ``CoordinatorUsageManager``) against quota (from ``CoordinatorQuotaManager``, default 0). If over
   quota, select LRU keys targeting ``eviction_ratio`` of the overage. No quota
   or zero quota means evict all keys for that salt.
 

@@ -10,11 +10,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache.v1.mp_coordinator.l2.eviction_controller import (
-    CoordinatorEvictionController,
+from lmcache.v1.mp_coordinator.l2.eviction_manager import (
+    CoordinatorEvictionManager,
 )
-from lmcache.v1.mp_coordinator.l2.quota_store import QuotaStore
-from lmcache.v1.mp_coordinator.l2.usage_tracker import UsageTracker
+from lmcache.v1.mp_coordinator.l2.quota_manager import CoordinatorQuotaManager
+from lmcache.v1.mp_coordinator.l2.usage_manager import CoordinatorUsageManager
 from lmcache.v1.mp_coordinator.schemas import (
     EventType,
     L2StatusListResponse,
@@ -35,58 +35,58 @@ def _gb(n_bytes: int) -> float:
     return n_bytes / _GB
 
 
-def _quota_store(request: Request) -> QuotaStore:
-    """Return the shared quota store from app state.
+def _quota_manager(request: Request) -> CoordinatorQuotaManager:
+    """Return the shared quota manager from app state.
 
     Args:
         request: The incoming request.
 
     Returns:
-        The shared :class:`QuotaStore`.
+        The shared :class:`CoordinatorQuotaManager`.
 
     Raises:
-        RuntimeError: If the store is not initialized.
+        RuntimeError: If the manager is not initialized.
     """
-    store = getattr(request.app.state, "quota_store", None)
-    if store is None:
-        raise RuntimeError("quota store not initialized")
-    return store
+    mgr = getattr(request.app.state, "quota_manager", None)
+    if mgr is None:
+        raise RuntimeError("quota manager not initialized")
+    return mgr
 
 
-def _tracker(request: Request) -> UsageTracker:
-    """Return the shared usage tracker from app state.
+def _usage_manager(request: Request) -> CoordinatorUsageManager:
+    """Return the shared usage manager from app state.
 
     Args:
         request: The incoming request.
 
     Returns:
-        The shared :class:`UsageTracker`.
+        The shared :class:`CoordinatorUsageManager`.
 
     Raises:
-        RuntimeError: If the tracker is not initialized.
+        RuntimeError: If the manager is not initialized.
     """
-    tracker = getattr(request.app.state, "usage_tracker", None)
-    if tracker is None:
-        raise RuntimeError("usage tracker not initialized")
-    return tracker
+    mgr = getattr(request.app.state, "usage_manager", None)
+    if mgr is None:
+        raise RuntimeError("usage manager not initialized")
+    return mgr
 
 
-def _eviction_controller(request: Request) -> CoordinatorEvictionController:
-    """Return the shared eviction controller from app state.
+def _eviction_manager(request: Request) -> CoordinatorEvictionManager:
+    """Return the shared eviction manager from app state.
 
     Args:
         request: The incoming request.
 
     Returns:
-        The shared :class:`CoordinatorEvictionController`.
+        The shared :class:`CoordinatorEvictionManager`.
 
     Raises:
-        RuntimeError: If the controller is not initialized.
+        RuntimeError: If the manager is not initialized.
     """
-    ctrl = getattr(request.app.state, "eviction_controller", None)
-    if ctrl is None:
-        raise RuntimeError("eviction controller not initialized")
-    return ctrl
+    mgr = getattr(request.app.state, "eviction_manager", None)
+    if mgr is None:
+        raise RuntimeError("eviction manager not initialized")
+    return mgr
 
 
 # -- Quota writes ------------------------------------------------------------
@@ -103,7 +103,7 @@ async def set_quota(
     """
     limit_bytes = int(body.limit_gb * _GB)
     try:
-        _quota_store(request).set(cache_salt, limit_bytes)
+        _quota_manager(request).set(cache_salt, limit_bytes)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": str(exc)})
     return QuotaResponse(
@@ -120,7 +120,7 @@ async def delete_quota(cache_salt: str, request: Request) -> QuotaResponse:
     Returns:
         Whether the entry was found and removed.
     """
-    removed = _quota_store(request).delete(cache_salt)
+    removed = _quota_manager(request).delete(cache_salt)
     return QuotaResponse(
         cache_salt=cache_salt,
         limit_gb=0.0,
@@ -140,8 +140,8 @@ async def report_events(
     Returns:
         Number of events processed.
     """
-    tracker = _tracker(request)
-    ctrl = _eviction_controller(request)
+    tracker = _usage_manager(request)
+    ctrl = _eviction_manager(request)
     for event in body.events:
         if event.type == EventType.STORE:
             tracker.record_stored(event.key.cache_salt, event.bytes)
@@ -161,8 +161,8 @@ async def get_status(cache_salt: str, request: Request) -> L2StatusResponse:
     Returns:
         Combined quota and usage detail.
     """
-    tracker = _tracker(request)
-    store = _quota_store(request)
+    tracker = _usage_manager(request)
+    store = _quota_manager(request)
     usage = tracker.get(cache_salt)
     limit = store.get(cache_salt)
     return L2StatusResponse(
@@ -180,8 +180,8 @@ async def list_status(request: Request) -> L2StatusListResponse:
     Returns:
         Total usage and per-salt breakdown with quota info.
     """
-    tracker = _tracker(request)
-    store = _quota_store(request)
+    tracker = _usage_manager(request)
+    store = _quota_manager(request)
     by_salt = tracker.get_all()
     total = tracker.get_total()
     quota_entries = {e.cache_salt: e.limit_bytes for e in store.list_all()}

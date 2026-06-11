@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the coordinator eviction controller."""
+"""Tests for the coordinator eviction manager."""
 
 # First Party
-from lmcache.v1.mp_coordinator.l2.eviction_controller import (
-    CoordinatorEvictionController,
+from lmcache.v1.mp_coordinator.l2.eviction_manager import (
+    CoordinatorEvictionManager,
 )
-from lmcache.v1.mp_coordinator.l2.quota_store import QuotaStore
-from lmcache.v1.mp_coordinator.l2.usage_tracker import UsageTracker
+from lmcache.v1.mp_coordinator.l2.quota_manager import CoordinatorQuotaManager
+from lmcache.v1.mp_coordinator.l2.usage_manager import CoordinatorUsageManager
 from lmcache.v1.mp_coordinator.schemas import CacheKey
 
 
@@ -16,10 +16,12 @@ def _make_key(salt: str, model: str = "m", rank: int = 0, h: str = "aa") -> Cach
 
 def _setup(
     eviction_ratio: float = 0.5,
-) -> tuple[CoordinatorEvictionController, QuotaStore, UsageTracker]:
-    qs = QuotaStore()
-    ut = UsageTracker()
-    ctrl = CoordinatorEvictionController(qs, ut, eviction_ratio=eviction_ratio)
+) -> tuple[
+    CoordinatorEvictionManager, CoordinatorQuotaManager, CoordinatorUsageManager
+]:
+    qs = CoordinatorQuotaManager()
+    ut = CoordinatorUsageManager()
+    ctrl = CoordinatorEvictionManager(qs, ut, eviction_ratio=eviction_ratio)
     return ctrl, qs, ut
 
 

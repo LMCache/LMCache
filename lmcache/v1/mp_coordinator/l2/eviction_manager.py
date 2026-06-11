@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Coordinator-side eviction controller with per-``cache_salt`` LRU.
+"""Coordinator-side eviction manager with per-``cache_salt`` LRU.
 
 Mirrors the structure of
 :class:`~lmcache.v1.distributed.eviction_policy.isolated_lru.IsolatedLRUEvictionPolicy`
@@ -7,8 +7,9 @@ but runs inside the coordinator process and uses a lightweight
 :class:`CacheKey` instead of :class:`ObjectKey` (which pulls in
 ``torch``).
 
-The controller periodically checks per-salt usage (from
-:class:`UsageTracker`) against limits (from :class:`QuotaStore`).
+The manager periodically checks per-salt usage
+(from :class:`CoordinatorUsageManager`) against limits
+(from :class:`CoordinatorQuotaManager`).
 When a salt exceeds its quota, it selects LRU victims and **logs**
 them — actual deletion is not implemented yet.
 """
@@ -22,15 +23,15 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.l2.quota_store import QuotaStore
-from lmcache.v1.mp_coordinator.l2.usage_tracker import UsageTracker
+from lmcache.v1.mp_coordinator.l2.quota_manager import CoordinatorQuotaManager
+from lmcache.v1.mp_coordinator.l2.usage_manager import CoordinatorUsageManager
 from lmcache.v1.mp_coordinator.schemas import CacheKey
 
 logger = init_logger(__name__)
 
 
-class CoordinatorEvictionController:
-    """Per-``cache_salt`` LRU eviction controller for the coordinator.
+class CoordinatorEvictionManager:
+    """Per-``cache_salt`` LRU eviction manager for the coordinator.
 
     Maintains one ``OrderedDict`` per ``cache_salt``, ordered from
     least-recently-used (front) to most-recently-used (end). Also
@@ -39,21 +40,21 @@ class CoordinatorEvictionController:
     Thread-safety: every public method acquires ``_lock``.
 
     Args:
-        quota_store: The shared quota registry.
-        usage_tracker: The shared usage tracker.
+        quota_manager: The shared quota registry.
+        usage_manager: The shared usage manager.
         eviction_ratio: Fraction of over-quota bytes to target for
             eviction each cycle.
     """
 
     def __init__(
         self,
-        quota_store: QuotaStore,
-        usage_tracker: UsageTracker,
+        quota_manager: CoordinatorQuotaManager,
+        usage_manager: CoordinatorUsageManager,
         eviction_ratio: float = 0.5,
     ) -> None:
         self._lock = threading.Lock()
-        self._quota_store = quota_store
-        self._usage_tracker = usage_tracker
+        self._quota_manager = quota_manager
+        self._usage_manager = usage_manager
         self._eviction_ratio = max(0.0, min(1.0, eviction_ratio))
         self._per_salt_order: dict[str, OrderedDict[CacheKey, None]] = {}
         self._key_sizes: dict[CacheKey, int] = {}
@@ -120,7 +121,7 @@ class CoordinatorEvictionController:
             A mapping of ``cache_salt`` to the list of keys selected
             for eviction.
         """
-        quotas = {e.cache_salt: e.limit_bytes for e in self._quota_store.list_all()}
+        quotas = {e.cache_salt: e.limit_bytes for e in self._quota_manager.list_all()}
         with self._lock:
             tracked_salts = list(self._per_salt_order.keys())
 
@@ -128,7 +129,7 @@ class CoordinatorEvictionController:
 
         for cache_salt in tracked_salts:
             limit_bytes = quotas.get(cache_salt, 0)
-            current_bytes = self._usage_tracker.get(cache_salt)
+            current_bytes = self._usage_manager.get(cache_salt)
             if current_bytes <= limit_bytes:
                 continue
 
