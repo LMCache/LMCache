@@ -11,6 +11,7 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     PrefetchHandle,
+    TrimPolicy,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -163,6 +164,7 @@ class LookupModule:
         self,
         key: IPCCacheEngineKey,
         tp_size: int,
+        policy: TrimPolicy = TrimPolicy.PREFIX,
     ) -> None:
         """Submit a prefix lookup.
 
@@ -173,6 +175,10 @@ class LookupModule:
         Args:
             key: Cache key with request_id embedded.
             tp_size: Tensor-parallel size for MLA multi-reader locking.
+            policy: Trim policy for the prefetch. ``PREFIX`` (default) truncates
+                at the first gap; ``SEGMENTED_PREFIX`` retains a gapped contiguous
+                request (e.g. a mid-prefix L2 retrieve failure) so the hole is
+                recomputed instead of discarding everything after it.
         """
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
@@ -273,6 +279,7 @@ class LookupModule:
             layout_desc,
             extra_count=extra_count,
             external_request_id=key.request_id,
+            policy=policy,
         )
         self._register_prefetch_job(
             _PrefetchJob(

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
 from typing import Any
+import os
 import threading
 import time
 
@@ -653,7 +654,18 @@ class BlendV3Module:
                     metadata={"num_tokens": len(key.token_ids)},
                 )
             )
-            self._lookup_module.lookup(key, tp_size)  # submit prefix (non-blocking)
+            # CB_SEGMENTED_PREFIX: request the contiguous prefix with gap-tolerant
+            # retention so a mid-prefix L2 retrieve failure leaves the post-gap
+            # chunks L1-resident (picked up by the sparse leg as L1 hits, hole
+            # recomputed) instead of truncating the prefix at the gap.
+            prefix_policy = (
+                TrimPolicy.SEGMENTED_PREFIX
+                if os.environ.get("CB_SEGMENTED_PREFIX") == "1"
+                else TrimPolicy.PREFIX
+            )
+            self._lookup_module.lookup(
+                key, tp_size, policy=prefix_policy
+            )  # submit prefix (non-blocking)
             job = _CBUnifiedJob(
                 matches=self._match_fingerprints(key),
                 num_tokens=len(key.token_ids),
