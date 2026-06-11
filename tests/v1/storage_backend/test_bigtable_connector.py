@@ -1,8 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
+# Backup original state of sys.modules and google package attributes
+
 # Standard
+from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import asyncio
 import sys
+
+_original_sys_modules: dict[str, Any] = {}
+_original_google_attrs: dict[str, Any] = {}
+_mocked_modules = [
+    "google.api_core",
+    "google.api_core.exceptions",
+    "google.api_core.gapic_v1",
+    "google.api_core.gapic_v1.client_info",
+    "google.cloud",
+    "google.cloud.bigtable",
+    "google.cloud.bigtable.row_filters",
+    "google.cloud.bigtable.data",
+    "google.cloud.bigtable.data.row_filters",
+    "google.oauth2",
+    "google.oauth2.service_account",
+]
 
 
 class MockDeadlineExceeded(Exception):
@@ -56,42 +75,8 @@ mock_service_account = MagicMock()
 mock_oauth2 = MagicMock(service_account=mock_service_account)
 
 mock_api_core = MagicMock(exceptions=mock_exceptions)
-sys.modules["google.api_core"] = mock_api_core
-sys.modules["google.api_core.exceptions"] = mock_exceptions
 mock_gapic = MagicMock()
-sys.modules["google.api_core.gapic_v1"] = mock_gapic
-sys.modules["google.api_core.gapic_v1.client_info"] = MagicMock()
-
 mock_cloud = MagicMock(bigtable=mock_bigtable)
-sys.modules["google.cloud"] = mock_cloud
-sys.modules["google.cloud.bigtable"] = mock_bigtable
-sys.modules["google.cloud.bigtable.row_filters"] = mock_row_filters
-sys.modules["google.cloud.bigtable.data"] = mock_data
-sys.modules["google.cloud.bigtable.data.row_filters"] = mock_row_filters
-
-sys.modules["google.oauth2"] = mock_oauth2
-sys.modules["google.oauth2.service_account"] = mock_service_account
-
-# Attach mocks to pre-existing modules in sys.modules to prevent
-# AttributeError in full test suite runs.
-# Note: We must use `# type: ignore[attr-defined]` here because `google`
-# is a namespace package and does not statically define submodules
-# like `oauth2` or `cloud`, which causes mypy to fail.
-if "google" in sys.modules:
-    google_mod = sys.modules["google"]
-    google_mod.oauth2 = mock_oauth2  # type: ignore[attr-defined]
-    google_mod.cloud = mock_cloud  # type: ignore[attr-defined]
-    google_mod.api_core = mock_api_core  # type: ignore[attr-defined]
-
-if "google.cloud" in sys.modules:
-    sys.modules["google.cloud"].bigtable = mock_bigtable  # type: ignore[attr-defined]
-
-if "google.oauth2" in sys.modules:
-    sys.modules["google.oauth2"].service_account = mock_service_account  # type: ignore[attr-defined]
-
-if "google.api_core" in sys.modules:
-    sys.modules["google.api_core"].exceptions = mock_exceptions  # type: ignore[attr-defined]
-    sys.modules["google.api_core"].gapic_v1 = mock_gapic  # type: ignore[attr-defined]
 
 # Third Party
 import pytest  # noqa: E402
@@ -108,6 +93,73 @@ from lmcache.v1.storage_backend.connector.bigtable_connector import (  # noqa: E
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend  # noqa: E402
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend  # noqa: E402
 from tests.v1.utils import create_test_memory_obj  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def cleanup_google_mocks():
+    print("\n[Fixture] cleanup_google_mocks: running setup...")
+    # 1. Backup original state
+    for name in _mocked_modules:
+        if name in sys.modules:
+            _original_sys_modules[name] = sys.modules[name]
+    if "google" in sys.modules:
+        google_mod = sys.modules["google"]
+        for attr in ["oauth2", "cloud", "api_core"]:
+            if hasattr(google_mod, attr):
+                _original_google_attrs[attr] = getattr(google_mod, attr)
+
+    # 2. Inject mocks
+    sys.modules["google.api_core"] = mock_api_core
+    sys.modules["google.api_core.exceptions"] = mock_exceptions
+    sys.modules["google.api_core.gapic_v1"] = mock_gapic
+    sys.modules["google.api_core.gapic_v1.client_info"] = MagicMock()
+
+    sys.modules["google.cloud"] = mock_cloud
+    sys.modules["google.cloud.bigtable"] = mock_bigtable
+    sys.modules["google.cloud.bigtable.row_filters"] = mock_row_filters
+    sys.modules["google.cloud.bigtable.data"] = mock_data
+    sys.modules["google.cloud.bigtable.data.row_filters"] = mock_row_filters
+
+    sys.modules["google.oauth2"] = mock_oauth2
+    sys.modules["google.oauth2.service_account"] = mock_service_account
+
+    if "google" in sys.modules:
+        google_mod = sys.modules["google"]
+        google_mod.oauth2 = mock_oauth2  # type: ignore[attr-defined]
+        google_mod.cloud = mock_cloud  # type: ignore[attr-defined]
+        google_mod.api_core = mock_api_core  # type: ignore[attr-defined]
+
+    if "google.cloud" in sys.modules:
+        sys.modules["google.cloud"].bigtable = mock_bigtable  # type: ignore[attr-defined]
+
+    if "google.oauth2" in sys.modules:
+        sys.modules["google.oauth2"].service_account = mock_service_account  # type: ignore[attr-defined]
+
+    if "google.api_core" in sys.modules:
+        sys.modules["google.api_core"].exceptions = mock_exceptions  # type: ignore[attr-defined]
+        sys.modules["google.api_core"].gapic_v1 = mock_gapic  # type: ignore[attr-defined]
+
+    yield
+    print("\n[Fixture] cleanup_google_mocks: running teardown/cleanup...")
+    # 1. Restore sys.modules
+    for name in _mocked_modules:
+        if name in _original_sys_modules:
+            print(f"  Restoring sys.modules[{name}]")
+            sys.modules[name] = _original_sys_modules[name]
+        elif name in sys.modules:
+            print(f"  Deleting sys.modules[{name}]")
+            del sys.modules[name]
+
+    # 2. Restore google module attributes
+    if "google" in sys.modules:
+        google_mod = sys.modules["google"]
+        for attr in ["oauth2", "cloud", "api_core"]:
+            if attr in _original_google_attrs:
+                print(f"  Restoring google.{attr}")
+                setattr(google_mod, attr, _original_google_attrs[attr])
+            elif hasattr(google_mod, attr):
+                print(f"  Deleting google.{attr}")
+                delattr(google_mod, attr)
 
 
 async def mock_async_gen(items):
@@ -688,7 +740,9 @@ class TestBigtableConnector:
 
         assert res is True
         # Wait up to 1 second for background deletion task to execute
+        # Standard
         import time
+
         for _ in range(100):
             if mock_client_instance.mutate_row.call_count == 1:
                 break

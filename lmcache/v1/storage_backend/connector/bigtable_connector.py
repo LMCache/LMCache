@@ -37,7 +37,7 @@ class TTLCache:
     """Thread-safe wrapper around cachetools.TTLCache for existence checks."""
 
     def __init__(self, max_size: int, ttl_seconds: float):
-        self.cache = _TTLCache(maxsize=max_size, ttl=ttl_seconds)
+        self.cache: _TTLCache = _TTLCache(maxsize=max_size, ttl=ttl_seconds)
         self.lock = threading.RLock()
 
     def get(self, key: str) -> Optional[bool]:
@@ -189,7 +189,6 @@ class BigtableConnector(RemoteConnector):
         if cached_val is not None:
             return cached_val
 
-        client = self._get_client()
         row_key = self.schema.get_row_key(key)
 
         row_filters = self._get_row_filters_module()
@@ -257,7 +256,6 @@ class BigtableConnector(RemoteConnector):
 
     async def _get_internal(self, key: CacheEngineKey) -> Optional[MemoryObj]:
         key_str = key.to_string()
-        client = self._get_client()
         row_key = self.schema.get_row_key(key)
 
         row_filters = self._get_row_filters_module()
@@ -365,7 +363,6 @@ class BigtableConnector(RemoteConnector):
                 )
                 return
 
-            client = self._get_client()
             row_key = self.schema.get_row_key(key)
             data_bytes = (
                 bytes(blob) if not isinstance(blob, (bytes, bytearray)) else blob
@@ -444,12 +441,10 @@ class BigtableConnector(RemoteConnector):
     async def _batched_get_internal(
         self, keys: List[CacheEngineKey]
     ) -> List[Optional[MemoryObj]]:
-        client = self._get_client()
-
         # Third Party
         from google.cloud.bigtable.data import ReadRowsQuery
 
-        row_keys = [self.schema.get_row_key(k) for k in keys]
+        row_keys: List[str | bytes] = [self.schema.get_row_key(k) for k in keys]
         row_filters = self._get_row_filters_module()
         row_filter = getattr(row_filters, "CellsColumnLimitFilter", lambda n: None)(1)
 
@@ -569,8 +564,6 @@ class BigtableConnector(RemoteConnector):
         self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
     ):
         try:
-            client = self._get_client()
-
             # Third Party
             from google.cloud.bigtable.data import RowMutationEntry, SetCell
 
@@ -713,12 +706,12 @@ class BigtableConnector(RemoteConnector):
         if not missing_keys:
             return count
 
-        client = self._get_client()
-
         # Third Party
         from google.cloud.bigtable.data import ReadRowsQuery
 
-        row_keys_missing = [self.schema.get_row_key(k) for k in missing_keys]
+        row_keys_missing: List[str | bytes] = [
+            self.schema.get_row_key(k) for k in missing_keys
+        ]
         row_filters = self._get_row_filters_module()
         row_filter = getattr(
             row_filters, "StripValueTransformerFilter", lambda flag: None
@@ -801,7 +794,6 @@ class BigtableConnector(RemoteConnector):
             # Third Party
             from google.cloud.bigtable.data import DeleteAllFromRow
 
-            client = self._get_client()
             row_key = self.schema.get_row_key(key)
 
             kwargs = {}
@@ -828,12 +820,12 @@ class BigtableConnector(RemoteConnector):
             )
             return True
         except Exception as e:
-            logger.warning(f"Failed to schedule removal of key {key} from Bigtable: {e}")
+            logger.warning(
+                f"Failed to schedule removal of key {key} from Bigtable: {e}"
+            )
             return False
 
     async def _list_internal(self) -> List[str]:
-        client = self._get_client()
-
         # Third Party
         from google.cloud.bigtable.data import ReadRowsQuery
 
