@@ -112,12 +112,12 @@ class _TempGPUBuffer:
     def __init__(
         self,
         kv_layer_groups_manager: KVLayerGroupsManager,
-        lmcache_logical_chunk_size: int,
+        lmcache_tokens_per_chunk: int,
         device: torch.device,
         max_batch_size: int = 4,
     ) -> None:
         self._kv_groups_manager = kv_layer_groups_manager
-        self._lmcache_chunk_size = lmcache_logical_chunk_size
+        self._lmcache_chunk_size = lmcache_tokens_per_chunk
         self._max_batch_size = max_batch_size
 
         self._temp_buffer = torch.empty(
@@ -282,7 +282,7 @@ class _TempGPUBuffer:
             The shape of the temp GPU buffer for the given kernel group index.
         """
         group = self._kv_groups_manager.kernel_groups[kernel_group_idx]
-        compress_ratio = group.compress_ratio
+        compress_ratio = group.tokens_per_block // group.slots_per_block
         sd = group.shape_desc
 
         if num_tokens % compress_ratio != 0:
@@ -346,7 +346,7 @@ class GPUCacheContext:
     def __init__(
         self,
         kv_caches: KVCache,
-        lmcache_logical_chunk_size: int = 256,
+        lmcache_tokens_per_chunk: int = 256,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
@@ -361,15 +361,14 @@ class GPUCacheContext:
         self.is_mla_ = is_mla(self.gpu_kv_format_)
         self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
         self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
-        self.lmcache_logical_chunk_size = lmcache_logical_chunk_size
+        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
 
         self.kv_layer_groups_manager_ = KVLayerGroupsManager(
             self.kv_caches_,
             gpu_kv_format=self.gpu_kv_format_,
             num_blocks=self.num_blocks_,
-            layout_hints=layout_hints,
             engine_group_infos=engine_group_infos,
-            lmcache_logical_chunk_size=lmcache_logical_chunk_size,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
@@ -390,7 +389,7 @@ class GPUCacheContext:
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
         self._temp_buffer = _TempGPUBuffer(
             kv_layer_groups_manager=self.kv_layer_groups_manager_,
-            lmcache_logical_chunk_size=lmcache_logical_chunk_size,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
             device=self.device_,
             max_batch_size=4,
         )
@@ -482,19 +481,15 @@ class GPUCacheContext:
         """Returns the KV layer groups manager."""
         return self.kv_layer_groups_manager_
 
-    def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+    def get_shape_desc(self, kernel_group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given KV layer group."""
-        return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
+        return self.kv_layer_groups_manager_.get_shape_desc(kernel_group_idx)
 
-    @lmcache_deprecate("this function will be renamed to get_num_slots_per_chunk")
-    def get_physical_chunk_size(self, group_idx: int) -> int:
-        """Returns the per-chunk physical slot count for the given group.
-
-        Equal to ``lmcache_logical_chunk_size // compress_ratio``; for
-        non-compressed groups this is just ``lmcache_logical_chunk_size``.
-        This is the value the block-level transfer kernel must be told.
+    def get_slots_per_chunk(self, kernel_group_idx: int) -> int:
+        """Returns the per-chunk physical slot count for the given kernel
+        group.
         """
-        return self.kv_layer_groups_manager_.get_physical_chunk_size(group_idx)
+        return self.kv_layer_groups_manager_.get_slots_per_chunk(kernel_group_idx)
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the
@@ -613,7 +608,7 @@ class GPUCacheContext:
         """
         # TODO: remove this!
         group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        compress_ratio = group.compress_ratio
+        compress_ratio = group.tokens_per_block // group.slots_per_block
         if logical_num_tokens % compress_ratio != 0:
             raise ValueError(
                 f"logical_num_tokens ({logical_num_tokens}) is not a multiple of "
@@ -663,7 +658,6 @@ class GPUCacheContext:
             A dict with these top-level fields:
 
             - ``num_layers`` (int): total layers in the model.
-            - ``inference_engine_logical_block_size`` (int)
             - ``num_blocks`` (int)
             - ``cache_size_per_token`` (int): bytes per logical token,
               summed across groups.
@@ -675,7 +669,9 @@ class GPUCacheContext:
               - ``object_group_idx`` (int): owning object group.
               - ``num_layers`` (int): layers in this group.
               - ``layer_indices`` (list[int]): the group's layer indices.
-              - ``physical_block_size`` (int): ``shape_desc.bs``.
+              - ``tokens_per_block`` (int): logical tokens per paged chunk.
+              - ``slots_per_block`` (int): physical slots per paged
+                chunk (``slots_per_block``, i.e. ``shape_desc.bs``).
               - ``compress_ratio`` (int)
               - ``dtype`` (str): stringified torch dtype.
               - ``gpu_kv_concrete_shape`` (str): group-accurate numeric shape.
@@ -706,8 +702,8 @@ class GPUCacheContext:
                     ),
                     "num_layers": group.num_layers,
                     "layer_indices": list(group.layer_indices),
-                    "physical_block_size": group.shape_desc.bs,
-                    "compress_ratio": group.compress_ratio,
+                    "tokens_per_block": group.tokens_per_block,
+                    "slots_per_block": group.slots_per_block,
                     "dtype": str(group.dtype),
                     "gpu_kv_concrete_shape": get_concrete_gpu_kv_shape_from_shape_desc(
                         group.shape_desc, gpu_kv_format
@@ -721,9 +717,6 @@ class GPUCacheContext:
 
         return {
             "num_layers": self.num_layers,
-            "inference_engine_logical_block_size": (
-                manager.inference_engine_logical_block_size
-            ),
             "num_blocks": self.num_blocks,
             "cache_size_per_token": self.cache_size_per_token(),
             "kernel_groups": group_reports,

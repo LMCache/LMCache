@@ -89,44 +89,55 @@ def test_engine_group_infos_reject_out_of_range_layer():
 
 
 def test_slice_block_ids_uniform_block_sizes():
-    """Groups sharing the base block size slice to equal counts."""
+    """Groups sharing one tokens_per_block slice to equal counts."""
     allocated = {0: list(range(16)), 1: list(range(100, 116))}
     sliced = slice_block_ids_per_group(
         allocated,
-        group_block_sizes=[16, 16],
-        base_block_size=16,
-        start_block_idx=0,
-        end_block_idx=16,
+        group_tokens_per_block=[16, 16],
+        start_token_idx=0,
+        end_token_idx=256,
     )
     assert sliced == [list(range(16)), list(range(100, 116))]
 
 
 def test_slice_block_ids_heterogeneous_block_sizes():
-    """A block_size-32 group gets half the IDs of a block_size-16 group.
+    """A tokens_per_block-32 group gets half the IDs of a 16 group.
 
-    The range [0, 16) spans 256 tokens: the block_size-16 group needs
-    16 block IDs, the block_size-32 group 8, for the same token span.
+    The range [0, 256) spans 256 tokens: the tokens_per_block-16 group
+    needs 16 block IDs, the tokens_per_block-32 group 8, for the same
+    token span.
     """
     allocated = {0: list(range(16)), 1: list(range(8))}
     sliced = slice_block_ids_per_group(
         allocated,
-        group_block_sizes=[16, 32],
-        base_block_size=16,
-        start_block_idx=0,
-        end_block_idx=16,
+        group_tokens_per_block=[16, 32],
+        start_token_idx=0,
+        end_token_idx=256,
     )
     assert sliced == [list(range(16)), list(range(8))]
 
 
+def test_slice_block_ids_smaller_than_base_block_sizes():
+    """Groups with tiny paged chunks (e.g. DeepSeek V4 compressor state,
+    tokens_per_block 4/8) get proportionally more IDs over one token span."""
+    allocated = {0: [0], 1: list(range(64)), 2: list(range(32))}
+    sliced = slice_block_ids_per_group(
+        allocated,
+        group_tokens_per_block=[256, 4, 8],
+        start_token_idx=0,
+        end_token_idx=256,
+    )
+    assert sliced == [[0], list(range(64)), list(range(32))]
+
+
 def test_slice_block_ids_nonzero_start_offset():
-    """Start/end offsets are divided per group by the block factor."""
+    """Start/end token offsets are divided per group by tokens_per_block."""
     allocated = {0: list(range(32)), 1: list(range(16))}
     sliced = slice_block_ids_per_group(
         allocated,
-        group_block_sizes=[16, 32],
-        base_block_size=16,
-        start_block_idx=16,
-        end_block_idx=32,
+        group_tokens_per_block=[16, 32],
+        start_token_idx=256,
+        end_token_idx=512,
     )
     assert sliced == [list(range(16, 32)), list(range(8, 16))]
 
@@ -136,25 +147,23 @@ def test_slice_block_ids_missing_group_yields_empty():
     allocated = {0: list(range(16))}  # group 1 absent
     sliced = slice_block_ids_per_group(
         allocated,
-        group_block_sizes=[16, 16],
-        base_block_size=16,
-        start_block_idx=0,
-        end_block_idx=16,
+        group_tokens_per_block=[16, 16],
+        start_token_idx=0,
+        end_token_idx=256,
     )
     assert sliced == [list(range(16)), []]
 
 
 def test_slice_block_ids_misaligned_range_raises():
-    """A range that is not a whole number of a group's blocks is rejected."""
+    """A range that is not a whole number of a group's chunks is rejected."""
     allocated = {0: list(range(8)), 1: list(range(8))}
-    # group 1 block_size 48 -> factor 3; end=8 is not a multiple of 3.
+    # group 1 tokens_per_block 48; end=128 is not a multiple of 48.
     try:
         slice_block_ids_per_group(
             allocated,
-            group_block_sizes=[16, 48],
-            base_block_size=16,
-            start_block_idx=0,
-            end_block_idx=8,
+            group_tokens_per_block=[16, 48],
+            start_token_idx=0,
+            end_token_idx=128,
         )
     except ValueError as exc:
         assert "does not align" in str(exc)

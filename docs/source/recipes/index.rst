@@ -43,6 +43,13 @@ Supported architectures
      - TRT-LLM
      - Recipe
 
+   * - ``DeepseekV4ForCausalLM``
+     - ``deepseek-ai/DeepSeek-V4-Flash``
+     - ✓
+     - —
+     - —
+     - :doc:`deepseek_v4_flash`
+
    * - ``MiniMaxM2ForCausalLM``
      - ``MiniMaxAI/MiniMax-M2``
      - ✓
@@ -139,6 +146,7 @@ To add a new architecture:
    :hidden:
    :maxdepth: 1
 
+   deepseek_v4_flash
    minimax_m2
    gemma4
    gemma3

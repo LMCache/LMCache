@@ -81,9 +81,14 @@ def create_engine_group_infos_from_vllm(
     # them EXCLUDED_ENGINE_GROUP so they form no group of their own (a
     # wrong-block-size group would corrupt the per-group block-id counts).
     per_layer_group_idx: list[int] | None = None
+    group_tokens_per_block: dict[int, int] = {}
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
+            # The spec's block_size is the logical tokens covered by one of
+            # this group's paged chunks (block IDs); the physical slot count
+            # per chunk is discovered later from the registered tensors.
+            group_tokens_per_block[engine_group_id] = group.kv_cache_spec.block_size
             for name in group.layer_names:
                 per_layer_group_idx[layer_to_idx[name]] = engine_group_id
 
@@ -98,6 +103,7 @@ def create_engine_group_infos_from_vllm(
         EngineGroupInfo(
             engine_group_id=identity[4],
             layer_indices=tuple(indices),
+            tokens_per_block=group_tokens_per_block.get(identity[4], 0),
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,

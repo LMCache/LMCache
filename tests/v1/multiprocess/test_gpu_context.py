@@ -30,12 +30,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 # First Party
-from lmcache.v1.gpu_connector.utils import LayoutHints  # noqa: E402
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
 from lmcache.v1.multiprocess.gpu_context import (  # noqa: E402
     GPUCacheContext,
     _TempGPUBuffer,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
 _DEVICE = torch.device("cuda")
@@ -91,14 +91,14 @@ def _build_manager(
     tensors: list[torch.Tensor],
     num_blocks: int = 4,
     gpu_kv_format: "lmc_ops.GPUKVFormat" = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-    layout_hints: LayoutHints | None = None,
+    engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> KVLayerGroupsManager:
     """Build a real :class:`KVLayerGroupsManager` from synthetic tensors."""
     return KVLayerGroupsManager(
         tensors,
         gpu_kv_format=gpu_kv_format,
         num_blocks=num_blocks,
-        layout_hints=layout_hints,
+        engine_group_infos=engine_group_infos,
     )
 
 
@@ -107,14 +107,16 @@ def _make_temp_buffer(
     chunk_size: int = 256,
     max_batch_size: int = 4,
     num_blocks: int = 4,
-    layout_hints: LayoutHints | None = None,
+    engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> _TempGPUBuffer:
     """Build a ``_TempGPUBuffer`` backed by a real manager."""
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
-    manager = _build_manager(tensors, num_blocks=num_blocks, layout_hints=layout_hints)
+    manager = _build_manager(
+        tensors, num_blocks=num_blocks, engine_group_infos=engine_group_infos
+    )
     return _TempGPUBuffer(
         kv_layer_groups_manager=manager,
-        lmcache_logical_chunk_size=chunk_size,
+        lmcache_tokens_per_chunk=chunk_size,
         device=_DEVICE,
         max_batch_size=max_batch_size,
     )
@@ -126,7 +128,7 @@ def _expected_kernel_group_shape(
     """Compute the expected kernel-group buffer shape from the manager's
     public metadata (kv_size, num_layers, slots, hidden_dim)."""
     group = manager.kernel_groups[kernel_group_idx]
-    num_slots = num_tokens // group.compress_ratio
+    num_slots = num_tokens * group.slots_per_block // group.tokens_per_block
     return torch.Size(
         (
             group.shape_desc.kv_size,
@@ -182,15 +184,15 @@ def _make_context(
     specs: Sequence[_GroupSpec],
     chunk_size: int = 256,
     num_blocks: int = 4,
-    layout_hints: LayoutHints | None = None,
+    engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> GPUCacheContext:
     """Build a real ``GPUCacheContext`` via its public constructor."""
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
     kv_caches = [_FakeIPCWrapper(t) for t in tensors]
     return GPUCacheContext(
         kv_caches,  # type: ignore
-        lmcache_logical_chunk_size=chunk_size,
-        layout_hints=layout_hints,
+        lmcache_tokens_per_chunk=chunk_size,
+        engine_group_infos=engine_group_infos,
     )
 
 
@@ -363,9 +365,11 @@ class TestTempGPUBufferShapeDtype:
         """For a compressed group, the token dim is divided by compress_ratio."""
         tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
         manager = _build_manager(
-            tensors, layout_hints={"inference_engine_logical_block_size": 16}
+            tensors,
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
-        assert manager.kernel_groups[0].compress_ratio == 2
+        kg = manager.kernel_groups[0]
+        assert kg.tokens_per_block // kg.slots_per_block == 2
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
         shape, _ = buf.get_kernel_group_shape_dtype(256, 0)
         assert shape[2] == 256 // 2
@@ -373,7 +377,8 @@ class TestTempGPUBufferShapeDtype:
     def test_not_divisible_by_compress_ratio_raises(self) -> None:
         tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
         manager = _build_manager(
-            tensors, layout_hints={"inference_engine_logical_block_size": 16}
+            tensors,
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
         with pytest.raises(ValueError, match="not a multiple of"):
@@ -401,7 +406,7 @@ class TestTempGPUBufferCacheSize:
         uncompressed = _make_temp_buffer([_GroupSpec(num_layers=2, block_size=16)])
         compressed = _make_temp_buffer(
             [_GroupSpec(num_layers=2, block_size=8)],
-            layout_hints={"inference_engine_logical_block_size": 16},
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
         assert (
             compressed.get_cache_size_per_token() * 2
@@ -476,7 +481,6 @@ class TestGPUCacheContextBlocks:
 class TestGPUCacheContextReportStatus:
     _TOP_LEVEL_KEYS = {
         "num_layers",
-        "inference_engine_logical_block_size",
         "num_blocks",
         "cache_size_per_token",
         "kernel_groups",
@@ -487,8 +491,8 @@ class TestGPUCacheContextReportStatus:
         "object_group_idx",
         "num_layers",
         "layer_indices",
-        "physical_block_size",
-        "compress_ratio",
+        "tokens_per_block",
+        "slots_per_block",
         "dtype",
         "gpu_kv_concrete_shape",
         "is_mla",
@@ -512,7 +516,6 @@ class TestGPUCacheContextReportStatus:
         assert group["num_layers"] == 4
         assert group["layer_indices"] == [0, 1, 2, 3]
         assert group["is_mla"] is False
-        assert group["compress_ratio"] == 1
         assert group["gpu_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
         assert group["dtype"] == str(ctx.dtype)
 
@@ -532,8 +535,8 @@ class TestGPUCacheContextReportStatus:
             assert group["kernel_group_idx"] == kg_idx
             assert group["engine_group_idx"] == kernel_group.engine_group_idx
             assert group["num_layers"] == kernel_group.num_layers
-            assert group["physical_block_size"] == kernel_group.shape_desc.bs
-            assert group["compress_ratio"] == kernel_group.compress_ratio
+            assert group["slots_per_block"] == kernel_group.slots_per_block
+            assert group["tokens_per_block"] == kernel_group.tokens_per_block
             assert 0 <= group["object_group_idx"] < manager.num_object_groups
 
 

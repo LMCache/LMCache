@@ -68,10 +68,7 @@ def fake_adapter(monkeypatch):
     # KV-cache wrapping pulls in CUDA IPC; bypass for unit tests.
     monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
     # ``vllm_layout_hints`` returns a ``LayoutHints`` (TypedDict / dict at
-    # runtime); the production path performs item assignment on it
-    # (``layout_hints["inference_engine_logical_block_size"] = ...``), so
-    # the stub must also be a real dict — a string would raise
-    # ``TypeError: 'str' object does not support item assignment``.
+    # runtime); stub it with an empty dict.
     monkeypatch.setattr(
         "lmcache.integration.vllm.utils.vllm_layout_hints",
         lambda: {},

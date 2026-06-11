@@ -17,8 +17,14 @@ from lmcache.v1.multiprocess.group_view import (
 
 
 @dataclass
+class MockKVCacheSpec:
+    block_size: int
+
+
+@dataclass
 class MockKVCacheGroup:
     layer_names: list[str]
+    kv_cache_spec: MockKVCacheSpec
 
 
 @dataclass
@@ -46,8 +52,12 @@ def test_conversion_preserves_engine_group_layers():
     spec = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
-                MockKVCacheGroup(["layer.0", "layer.2"]),
-                MockKVCacheGroup(["layer.1", "layer.3"]),
+                MockKVCacheGroup(
+                    ["layer.0", "layer.2"], MockKVCacheSpec(block_size=16)
+                ),
+                MockKVCacheGroup(
+                    ["layer.1", "layer.3"], MockKVCacheSpec(block_size=16)
+                ),
             ]
         ),
         _same_shape_caches(["layer.0", "layer.1", "layer.2", "layer.3"]),
@@ -55,6 +65,7 @@ def test_conversion_preserves_engine_group_layers():
 
     assert num_engine_groups(spec) == 2
     assert get_engine_group_indices(spec, 4) == [0, 1, 0, 1]
+    assert [group.tokens_per_block for group in spec] == [16, 16]
 
 
 def test_conversion_splits_by_lmcache_layer_identity():
@@ -65,8 +76,12 @@ def test_conversion_splits_by_lmcache_layer_identity():
     spec = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
-                MockKVCacheGroup(["layer.0", "layer.2", "layer.4"]),
-                MockKVCacheGroup(["layer.1", "layer.3"]),
+                MockKVCacheGroup(
+                    ["layer.0", "layer.2", "layer.4"], MockKVCacheSpec(block_size=16)
+                ),
+                MockKVCacheGroup(
+                    ["layer.1", "layer.3"], MockKVCacheSpec(block_size=16)
+                ),
             ]
         ),
         caches,

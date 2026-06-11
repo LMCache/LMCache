@@ -170,13 +170,13 @@ def downsample_and_stage_block_ids(
             )
         )
         tokens_per_chunk = min(
-            cache_context.lmcache_logical_chunk_size, subchunk_sw_size_tokens
+            cache_context.lmcache_tokens_per_chunk, subchunk_sw_size_tokens
         )
         keep_blocks_per_chunk = cache_context.calculate_num_blocks(
             tokens_per_chunk, kernel_group_id
         )
         total_blocks_per_chunk = cache_context.calculate_num_blocks(
-            cache_context.lmcache_logical_chunk_size, kernel_group_id
+            cache_context.lmcache_tokens_per_chunk, kernel_group_id
         )
 
         new_block_ids = []
@@ -263,7 +263,7 @@ def transfer_kv_per_object_group(
         This function expects the caller to stage the block ids (list[list[int]])
         into GPU tensors and pass them in as `block_ids_gpu`.
     """
-    lmcache_chunk_size = cache_context.lmcache_logical_chunk_size
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
     object_group = kv_groups_manager.object_groups[object_group_id]
     kernel_group_ids = object_group.kernel_group_indices
@@ -348,7 +348,7 @@ def transfer_kv_per_object_group(
             group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                 kernel_group_id
             )
-            group_lmcache_chunk_size = cache_context.get_physical_chunk_size(
+            group_lmcache_chunk_size = cache_context.get_slots_per_chunk(
                 kernel_group_id
             )
             tmp_gpu_buffers_batched = [
