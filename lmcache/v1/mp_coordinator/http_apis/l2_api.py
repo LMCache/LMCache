@@ -109,8 +109,8 @@ async def set_quota(
     limit_bytes = int(body.limit_gb * _GB)
     try:
         _quota_manager(request).set(cache_salt, limit_bytes)
-    except ValueError as exc:
-        return JSONResponse(status_code=400, content={"error": str(exc)})
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "invalid quota limit"})
     return QuotaResponse(
         cache_salt=cache_salt,
         limit_gb=body.limit_gb,
