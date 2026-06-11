@@ -141,7 +141,9 @@ class L2EvictionManager:
             keys_to_evict = self._select_keys_to_evict(cache_salt, target_bytes)
             if keys_to_evict:
                 eviction_plan[cache_salt] = keys_to_evict
-                evict_bytes = sum(self._key_sizes.get(k, 0) for k in keys_to_evict)
+                with self._lock:
+                    sizes = [self._key_sizes.get(k, 0) for k in keys_to_evict]
+                evict_bytes = sum(sizes)
                 logger.info(
                     "Eviction plan for cache_salt=%r: %d keys "
                     "(%d bytes) to free; usage=%d, quota=%d, "
@@ -153,13 +155,13 @@ class L2EvictionManager:
                     limit_bytes,
                     over_bytes,
                 )
-                for k in keys_to_evict:
+                for k, size in zip(keys_to_evict, sizes, strict=True):
                     logger.info(
                         "  -> evict key: model=%s, kv_rank=%d, hash=%s, size=%d",
                         k.model_name,
                         k.kv_rank,
                         k.chunk_hash_hex,
-                        self._key_sizes.get(k, 0),
+                        size,
                     )
 
         # TODO: once eviction is wired end-to-end, call on_remove()
