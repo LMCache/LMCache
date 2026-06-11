@@ -542,7 +542,9 @@ class LocalDiskBackend(StorageBackendInterface):
         try:
             self.write_file(buffer, path)
         except Exception:
-            self.usage -= size
+            with self.disk_lock:
+                self.usage -= size
+                self.current_cache_size -= memory_obj.get_physical_size()
             self.stats_monitor.update_local_storage_usage(self.usage)
             raise
         finally:
