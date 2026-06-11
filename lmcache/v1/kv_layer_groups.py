@@ -494,7 +494,9 @@ class KVLayerGroupsManager:
         group = self._kernel_groups[kernel_group_idx]
         # Physical slots for num_tokens, derived from the per-block geometry
         # (slots_per_block / tokens_per_block) rather than a compress ratio.
-        num_physical_slots = num_tokens * group.slots_per_block // group.tokens_per_block
+        num_physical_slots = (
+            num_tokens * group.slots_per_block // group.tokens_per_block
+        )
         return num_physical_slots // group.shape_desc.bs
 
     ### Helper methods

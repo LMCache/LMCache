@@ -144,6 +144,7 @@ if len(unique_lists) != 1:
     sys.exit(1)
 groups = group_lists[0]
 
+
 def compress_ratio(g: dict) -> int:
     """Logical-tokens-per-physical-slot for a /status kernel group, derived
     from the reported ``tokens_per_block`` and ``slots_per_block`` (the server

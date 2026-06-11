@@ -468,8 +468,8 @@ class GPUTransferModule:
                         # Kernel contract: ``group_lmcache_chunk_size`` here is the
                         # number of *physical* slots per chunk for this group
                         # (= logical chunk_size // compress_ratio).
-                        group_lmcache_chunk_size = (
-                            cache_context.get_slots_per_chunk(group_idx)
+                        group_lmcache_chunk_size = cache_context.get_slots_per_chunk(
+                            group_idx
                         )
                         lmc_ops.multi_layer_block_kv_transfer(
                             group_kv_pointers,

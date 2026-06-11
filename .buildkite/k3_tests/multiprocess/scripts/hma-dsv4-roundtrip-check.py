@@ -156,8 +156,9 @@ def main() -> int:
     retrieves_after = count_retrieves()
 
     print("============================================")
-    print(f"LMCache retrieves logged: before={retrieves_before}, "
-          f"after={retrieves_after}")
+    print(
+        f"LMCache retrieves logged: before={retrieves_before}, after={retrieves_after}"
+    )
 
     failures = []
     if text_compute != text_retrieve:
