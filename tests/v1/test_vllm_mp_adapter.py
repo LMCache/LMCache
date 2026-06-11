@@ -756,6 +756,63 @@ def test_recover_callback_aborts_register_when_stop_lands_mid_rebuild(
     assert registered_ctx is contexts[-1]  # still the pre-stop context
 
 
+def test_register_uses_local_context_when_self_transfer_ctx_nulled(
+    monkeypatch,
+) -> None:
+    """register must call register() on the local context, not re-read
+    self.transfer_ctx: a concurrent shutdown() can null the attribute
+    between publish and the call, which previously raised AttributeError."""
+
+    class _NullingTransferCtxAdapter(LMCacheMPWorkerAdapter):
+        # Models self.transfer_ctx already nulled by a racing shutdown():
+        # the getter always reports None, so any code re-reading the
+        # attribute (rather than the local) hits None.register.
+        @property
+        def transfer_ctx(self):
+            return None
+
+        @transfer_ctx.setter
+        def transfer_ctx(self, value):
+            pass
+
+    fake_client = MagicMock(name="mq_client")
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+    future = MagicMock(name="future")
+    future.result.return_value = None
+    monkeypatch.setattr(adapter_mod, "send_lmcache_request", lambda *a, **kw: future)
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+    monkeypatch.setattr(adapter_mod, "wrap_kv_caches", lambda kv: list(kv.values()))
+    monkeypatch.setattr("lmcache.integration.vllm.utils.vllm_layout_hints", lambda: {})
+    local_ctx = MagicMock(name="local_transfer_ctx")
+    monkeypatch.setattr(
+        adapter_mod, "create_transfer_context", lambda kv, mode: local_ctx
+    )
+
+    parallel_strategy = ParallelStrategy(
+        use_mla=False,
+        vllm_world_size=1,
+        vllm_worker_id=0,
+        tp_size=1,
+        pp_size=1,
+    )
+    adapter = _NullingTransferCtxAdapter(
+        server_url="tcp://127.0.0.1:0",
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=parallel_strategy,
+        mq_timeout=5.0,
+    )
+
+    fake_tensor = MagicMock()
+    fake_tensor.device.type = "cuda"
+    # Under the bug this raises AttributeError (None.register).
+    adapter.register_kv_caches({"layer.0": fake_tensor})
+
+    local_ctx.register.assert_called_once()
+
+
 def test_startup_warns_when_heartbeat_interval_exceeds_reap_floor(
     fake_adapter, monkeypatch
 ) -> None:

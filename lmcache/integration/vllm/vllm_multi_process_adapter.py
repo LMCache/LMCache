@@ -1156,7 +1156,10 @@ class LMCacheMPWorkerAdapter:
             return False
         self.transfer_ctx = transfer_ctx
         try:
-            self.transfer_ctx.register(
+            # Register on the local, not self.transfer_ctx: a concurrent
+            # shutdown() may null self.transfer_ctx between publish and this
+            # call. The local is always non-None.
+            transfer_ctx.register(
                 self.instance_id,
                 kv_caches,
                 self.model_name,
@@ -1308,7 +1311,7 @@ class LMCacheMPWorkerAdapter:
         op: LoadStoreOp,
         event: _IpcEvent,
         cache_salt: str = "",
-    ):
+    ) -> None:
         """
         Submit a KV cache retrieve request to LMCache
 
@@ -1567,7 +1570,7 @@ class LMCacheMPWorkerAdapter:
         self.error_block_ids.clear()
         return errors
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         """
         Shutdown the LMCache MP worker adapter.
 
