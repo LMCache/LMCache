@@ -733,9 +733,17 @@ class StorageManager:
             ``enabled`` is ``False`` and the adapter list is empty.
         """
         adapters = []
-        for adapter_index, adapter in enumerate(self._reconfigurable_l2_adapters()):
-            status = adapter.reconfigure_status()
+        for adapter_index, (
+            l2_adapter_index,
+            adapter,
+        ) in enumerate(self._reconfigurable_l2_adapters()):
+            status = dict(adapter.reconfigure_status())
+            if l2_adapter_index < len(getattr(self, "_adapter_descriptors", [])):
+                status["backend"] = self._adapter_descriptors[
+                    l2_adapter_index
+                ].type_name
             status["adapter_index"] = adapter_index
+            status["l2_adapter_index"] = l2_adapter_index
             adapters.append(status)
 
         return {
@@ -836,12 +844,12 @@ class StorageManager:
 
         return None
 
-    def _reconfigurable_l2_adapters(self) -> list[L2ReconfigurableAdapter]:
-        adapters: list[L2ReconfigurableAdapter] = []
-        for adapter in self._l2_adapters:
+    def _reconfigurable_l2_adapters(self) -> list[tuple[int, L2ReconfigurableAdapter]]:
+        adapters: list[tuple[int, L2ReconfigurableAdapter]] = []
+        for l2_adapter_index, adapter in enumerate(self._l2_adapters):
             reconfigurable_adapter = self._unwrap_reconfigurable_l2_adapter(adapter)
             if reconfigurable_adapter is not None:
-                adapters.append(reconfigurable_adapter)
+                adapters.append((l2_adapter_index, reconfigurable_adapter))
         return adapters
 
     def _get_reconfigurable_l2_adapter(
@@ -851,4 +859,4 @@ class StorageManager:
         adapters = self._reconfigurable_l2_adapters()
         if adapter_index < 0 or adapter_index >= len(adapters):
             raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
-        return adapters[adapter_index]
+        return adapters[adapter_index][1]

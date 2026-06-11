@@ -342,6 +342,8 @@ backend-specific validation and migration semantics stay inside the adapter.
 Use ``GET /reconfigure/backends`` to list the backend strings that can be used
 in ``/reconfigure/{backend}/status`` and
 ``/reconfigure/{backend}/{operation}``.
+If an L2 adapter is wrapped by serde, the backend string is still the configured
+L2 adapter type, not the serde wrapper type.
 
 For Device-DAX, use ``backend=dax``. DAX operations use JSON request bodies
 because DAX paths contain slashes. ``add`` and ``resize`` accept ``size`` as an

@@ -433,6 +433,11 @@ class _SerdeLikeWrapper:
         self.inner_adapter = inner_adapter
 
 
+class _FakeAdapterDescriptor:
+    def __init__(self, type_name: str) -> None:
+        self.type_name = type_name
+
+
 def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
     sm = StorageManager.__new__(StorageManager)
     adapter = _FakeReconfigurableAdapter()
@@ -454,12 +459,15 @@ def test_storage_manager_finds_serde_wrapped_reconfigurable_adapter():
     sm._l2_adapters = [
         cast(L2AdapterInterface, _SerdeLikeWrapper(_FakeReconfigurableAdapter()))
     ]
+    sm._adapter_descriptors = [_FakeAdapterDescriptor("configured_fake")]
 
     status = sm.get_l2_adapter_reconfigure_status()
 
     assert status["enabled"] is True
     assert status["num_adapters"] == 1
+    assert status["adapters"][0]["backend"] == "configured_fake"
     assert status["adapters"][0]["adapter_index"] == 0
+    assert status["adapters"][0]["l2_adapter_index"] == 0
 
 
 def test_dax_adapter_store_lookup_load_and_one_shot_results(tmp_path):
