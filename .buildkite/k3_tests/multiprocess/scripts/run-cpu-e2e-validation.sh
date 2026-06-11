@@ -437,10 +437,19 @@ LMCACHE_ARGS=(
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
   --chunk-size "${LMCACHE_CHUNK_SIZE}"
 )
-if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ] || \
-   [ "${LMCACHE_MP_TRANSFER_MODE}" = "auto" ]; then
+# `auto` and `handle` look identical to this script (both leave SHM_NAME
+# at default and don't pass --shm-name) but inside lmcache they take
+# different worker-side paths: `handle` -> HandleTransferContext (true
+# zero-copy server-side copy via POSIX SHM IPC), `auto` -> falls back to
+# DataTransferContext on non-CUDA devices. Treat them as separate cases
+# so Step 5.5 can verify the worker actually entered the expected
+# TransferContext.
+if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ]; then
   echo "Transport mode: server-side copy (handle via POSIX SHM IPC)"
   EXPECTED_TRANSPORT="handle"
+elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "auto" ]; then
+  echo "Transport mode: auto (resolves to DataTransferContext on CPU)"
+  EXPECTED_TRANSPORT="auto"
 elif [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
   echo "Transport mode: shared memory (shm)"
   EXPECTED_TRANSPORT="shm"
@@ -511,29 +520,37 @@ echo "✅ E2E request validation passed"
 
 # Verify transport mode (logged after vLLM connects to LMCache server)
 echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANSPORT}'"
+# Worker logs `Creating transfer context (device_type=<dev>, mode=<m>)`
+# from worker_transfer.py:create_transfer_context, where <m> is the
+# resolved MPTransferMode after env-var lookup. This is the single source
+# of truth for which TransferContext the worker actually entered, so the
+# verification reduces to grepping for `mode=<expected>`. We additionally
+# confirm the server-side strategy line for shm/pickle to catch
+# misconfigurations on the server end.
 if [ "${EXPECTED_TRANSPORT}" = "handle" ]; then
-  # `handle` (server-side copy) is implemented today by the SHM-based
-  # `ShmTransferStrategy` registered via `create_transfer_strategy()`,
-  # which logs "Using shm non-GPU transfer strategy" exactly once at
-  # context registration time. The older `CpuCacheContext` path got
-  # removed during the non_gpu_transfer refactor, so don't grep for
-  # that string anymore.
-  if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected server-side copy but 'Using shm non-GPU transfer strategy' not found in log"
+  if ! grep -q "Creating transfer context.*mode=handle" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected handle worker context but 'mode=handle' not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
-  echo "✅ Transport mode confirmed: handle (server-side copy via shm)"
+  echo "✅ Transport mode confirmed: handle (server-side copy)"
+elif [ "${EXPECTED_TRANSPORT}" = "auto" ]; then
+  if ! grep -q "Creating transfer context.*mode=auto" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected auto worker context but 'mode=auto' not found in log"
+    tail -50 "${LMCACHE_LOG}"
+    false
+  fi
+  echo "✅ Transport mode confirmed: auto"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
-  if ! grep -q "Using shm" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected shm transport but 'Using shm' not found in log"
+  if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected shm transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
   echo "✅ Transport mode confirmed: shm"
 elif [ "${EXPECTED_TRANSPORT}" = "pickle" ]; then
-  if ! grep -q "Using pickle" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected pickle transport but 'Using pickle' not found in log"
+  if ! grep -q "Using pickle non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected pickle transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
