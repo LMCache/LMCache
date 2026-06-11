@@ -14,13 +14,15 @@ if TYPE_CHECKING:
 
 
 def _mooncake_extension(
-    cpp_extension,
     mooncake_sources: list[str],
     extra_cxx_flags: list[str],
 ) -> list["Extension"]:
     """Build mooncake CppExtension if enabled via env vars."""
     # Standard
     import os
+
+    # Third Party
+    from torch.utils import cpp_extension
 
     mc_env = os.environ.get("BUILD_MOONCAKE")
     if mc_env is not None:
@@ -133,8 +135,6 @@ def build_common_cpp(
         ),
     ]
     # Mooncake extension is optional.
-    ext_modules.extend(
-        _mooncake_extension(cpp_extension, mooncake_sources, extra_cxx_flags)
-    )
+    ext_modules.extend(_mooncake_extension(mooncake_sources, extra_cxx_flags))
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass

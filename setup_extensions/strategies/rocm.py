@@ -56,7 +56,11 @@ def _hipify_wrapper() -> list[str]:
         )
         hipified_sources.append(hipified_s_abs)
 
-    assert len(hipified_sources) == len(extra_files)
+    if len(hipified_sources) != len(extra_files):
+        raise RuntimeError(
+            "Hipify failed: expected %d sources, got %d"
+            % (len(extra_files), len(hipified_sources))
+        )
     return hipified_sources
 
 

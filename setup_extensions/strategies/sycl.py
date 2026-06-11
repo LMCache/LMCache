@@ -9,7 +9,6 @@ Requires Intel oneAPI environment to be sourced before building.
 from typing import TYPE_CHECKING, Optional
 import os
 import shutil
-import sys
 
 if TYPE_CHECKING:
     # Third Party
@@ -36,7 +35,7 @@ class SyclStrategy(BuildStrategy):
 
         print("Building SYCL/XPU extensions")
         if shutil.which("icpx") is None:
-            sys.exit("icpx not found. Please source oneAPI setvars.sh first")
+            raise RuntimeError("icpx not found. Please source oneAPI setvars.sh first")
         os.environ["CXX"] = "icpx"
         oneapi_root = os.environ.get("ONEAPI_ROOT", "/opt/intel/oneapi")
         include_dirs = ["%s/include" % oneapi_root]
