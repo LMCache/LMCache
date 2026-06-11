@@ -83,6 +83,9 @@ compatibility with the vLLM-embedded API server.
      - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
+     - ``/reconfigure/backends``
+     - List backend strings accepted by runtime reconfiguration routes.
+   * - GET
      - ``/reconfigure/{backend}/status``
      - Report runtime-manageable L2 adapters for one backend type.
    * - POST
@@ -335,6 +338,10 @@ resources such as DAX device paths must already exist and be readable and
 writable by the server. The endpoint routes ``backend``, ``operation``, and the
 JSON request body into the generic L2 adapter reconfiguration API, while
 backend-specific validation and migration semantics stay inside the adapter.
+
+Use ``GET /reconfigure/backends`` to list the backend strings that can be used
+in ``/reconfigure/{backend}/status`` and
+``/reconfigure/{backend}/{operation}``.
 
 For Device-DAX, use ``backend=dax``. DAX operations use JSON request bodies
 because DAX paths contain slashes. ``add`` and ``resize`` accept ``size`` as an
