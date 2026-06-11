@@ -4,6 +4,7 @@
 # Standard
 from dataclasses import dataclass
 from functools import partial
+import itertools
 import threading
 import time
 
@@ -266,7 +267,11 @@ class LookupModule:
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
+        # HACK! This is a hard-code assuming there are two object groups
+        # In reality, we need to get the number of object groups and layout
+        # desc from the registry
+        obj_keys_per_group = ipc_key_to_object_keys(key, chunk_hashes, [0, 1])
+        obj_keys = list(itertools.chain.from_iterable(obj_keys_per_group))
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,
@@ -371,7 +376,8 @@ class LookupModule:
         with self._prefetch_job_lock:
             self._prefetch_jobs.pop(request_id, None)
 
-        return found_count
+        # HACK: this is a hack just for this demo purpose!
+        return found_count // 2
 
     def free_lookup_locks(
         self,

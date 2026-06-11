@@ -5,15 +5,85 @@
 from __future__ import annotations
 
 # Standard
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
+
+# Third Party
+from vllm.v1.kv_cache_interface import (
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+
+logger = init_logger(__name__)
+
+
+def _resolve_per_layer_sw_sizes(
+    vllm_groups: Sequence[Any],
+    layer_to_idx: Mapping[str, int],
+    num_layers: int,
+) -> list[int]:
+    """Resolve the sliding window size in tokens for each registered KV tensor.
+
+    Only true sliding-window specs (``SlidingWindowSpec`` and subclasses such
+    as ``SlidingWindowMLASpec``) count. ``FullAttentionSpec.sliding_window``
+    is deliberately ignored: it marks SWA layers managed as full attention
+    (hybrid allocator disabled), where vLLM allocates blocks for all tokens so
+    storing and retrieving everything is correct.
+
+    Args:
+        vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
+        layer_to_idx: Layer name to registered tensor index mapping.
+        num_layers: Number of registered KV tensors.
+
+    Returns:
+        A list of length ``num_layers`` mapping each registered tensor index
+        to its sliding window size in tokens, or ``-1`` for
+        non-sliding-window layers.
+    """
+    per_layer_sw_size = [-1] * num_layers
+    for group in vllm_groups:
+        spec = getattr(group, "kv_cache_spec", None)
+        if spec is None:
+            continue
+        for name in group.layer_names:
+            layer_spec = spec
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                layer_spec = spec.kv_cache_specs[name]
+            if isinstance(layer_spec, SlidingWindowSpec):
+                per_layer_sw_size[layer_to_idx[name]] = layer_spec.sliding_window
+    return per_layer_sw_size
+
+
+def _merge_layer_sw_sizes(per_layer_sw_size: list[int], indices: list[int]) -> int:
+    """Merge the per-layer sliding window sizes of one LMCache group.
+
+    Args:
+        per_layer_sw_size: Sliding window size per registered tensor index.
+        indices: Registered tensor indices of the group's layers.
+
+    Returns:
+        The group's common sliding window size in tokens, or ``-1`` when the
+        layers are not sliding-window attention or mix different window sizes
+        (mixed groups conservatively fall back to full attention).
+    """
+    sw_sizes = {per_layer_sw_size[idx] for idx in indices}
+    if len(sw_sizes) == 1:
+        return sw_sizes.pop()
+    logger.warning(
+        "Layers %s mix different sliding window sizes %s; "
+        "treating the group as full attention",
+        indices,
+        sorted(sw_sizes),
+    )
+    return -1
 
 
 def create_engine_group_infos_from_vllm(
@@ -81,11 +151,15 @@ def create_engine_group_infos_from_vllm(
     # them EXCLUDED_ENGINE_GROUP so they form no group of their own (a
     # wrong-block-size group would corrupt the per-group block-id counts).
     per_layer_group_idx: list[int] | None = None
+    per_layer_sw_size = [-1] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
             for name in group.layer_names:
                 per_layer_group_idx[layer_to_idx[name]] = engine_group_id
+        per_layer_sw_size = _resolve_per_layer_sw_sizes(
+            vllm_groups, layer_to_idx, num_layers
+        )
 
     # Within one vLLM engine group, layers can have different hidden dimensions
     # (e.g. a different head count), which require different GPU copy kernels.
@@ -98,6 +172,7 @@ def create_engine_group_infos_from_vllm(
         EngineGroupInfo(
             engine_group_id=identity[4],
             layer_indices=tuple(indices),
+            sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,

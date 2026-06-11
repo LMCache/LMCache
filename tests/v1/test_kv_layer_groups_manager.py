@@ -357,8 +357,8 @@ class TestKernelAndObjectGroups:
         assert all(isinstance(g, KernelGroupInfo) for g in manager.kernel_groups)
 
     def test_single_object_group_covers_all_kernel_groups(self):
-        # Two distinct kernel groups (different num_heads) still share one
-        # object group under the current single-object-group assumption.
+        # Two distinct kernel groups (different num_heads), both non-sliding-
+        # window, share the single -1 object group bucket.
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
             torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
@@ -369,6 +369,75 @@ class TestKernelAndObjectGroups:
         obj = manager.object_groups[0]
         assert isinstance(obj, ObjectGroupInfo)
         assert obj.kernel_group_indices == list(range(manager.num_kernel_groups))
+        assert obj.sw_size_chunks == -1
+        assert manager.get_sw_size_chunks(0) == -1
+
+    def test_kernel_groups_carry_sw_size_tokens(self):
+        # Same-shape layers split by engine group; the sliding-window group's
+        # window size lands on its kernel group, the other stays -1.
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16) for _ in range(2)
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=64),
+            ],
+        )
+        assert [g.sw_size_tokens for g in manager.kernel_groups] == [-1, 64]
+
+    def test_subchunk_sw_size_tokens(self):
+        # lmcache chunk size is 256 (default). Sub-chunk window (64) is
+        # returned as-is; non-SW (-1) and big-SW (512) return the chunk size.
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 32, 64, dtype=torch.float16),
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(0, (1,), sw_size_tokens=64),
+                EngineGroupInfo(0, (2,), sw_size_tokens=512),
+            ],
+        )
+        assert manager.get_subchunk_sw_size_tokens(0) == 256
+        assert manager.get_subchunk_sw_size_tokens(1) == 64
+        assert manager.get_subchunk_sw_size_tokens(2) == 256
+
+    def test_object_groups_split_by_sw_size_chunks(self):
+        # Four kernel groups: non-SW, sub-chunk window (64 -> 1 chunk),
+        # another window rounding to 1 chunk (100), and a big window
+        # (512 -> 2 chunks). Buckets: -1 -> [0], 1 -> [1, 2], 2 -> [3],
+        # ordered by first member kernel group.
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 32, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 4, 64, dtype=torch.float16),
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(0, (1,), sw_size_tokens=64),
+                EngineGroupInfo(0, (2,), sw_size_tokens=100),
+                EngineGroupInfo(0, (3,), sw_size_tokens=512),
+            ],
+        )
+        assert manager.num_object_groups == 3
+        assert [obj.kernel_group_indices for obj in manager.object_groups] == [
+            [0],
+            [1, 2],
+            [3],
+        ]
+        assert [obj.sw_size_chunks for obj in manager.object_groups] == [-1, 1, 2]
+        assert [manager.get_sw_size_chunks(i) for i in range(3)] == [-1, 1, 2]
 
     def test_empty_manager_has_no_groups(self):
         # Empty registration returns early in __init__; both group lists must

@@ -567,6 +567,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             if kv_cache_config is not None
             else ()
         )
+
+        if kv_cache_config:
+            logger.warning(
+                "KV cache config has %d groups", len(kv_cache_config.kv_cache_groups)
+            )
+            for idx, group in enumerate(kv_cache_config.kv_cache_groups):
+                logger.warning(
+                    "Group %d has the spec: %s",
+                    idx,
+                    group.kv_cache_spec,
+                )
         # NOTE: Hybrid models can give each group its own block size that is
         # different from ``vllm_block_size`` (e.g. gemma-4: sliding-window
         # groups 32, full-attention groups 16, vllm_block_size 16).
