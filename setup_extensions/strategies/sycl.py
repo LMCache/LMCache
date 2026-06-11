@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: Apache-2.0
+"""SYCL / Intel XPU GPU backend strategy.
+
+Builds ``lmcache.xpu_ops`` using the DPC++ compiler (icpx).
+Requires Intel oneAPI environment to be sourced before building.
+"""
+
+# Standard
+from typing import TYPE_CHECKING, Optional
+import os
+import shutil
+import sys
+
+if TYPE_CHECKING:
+    # Third Party
+    from setuptools.extension import Extension
+
+# First Party
+from setup_extensions.strategies import BuildStrategy
+
+
+class SyclStrategy(BuildStrategy):
+    """SYCL / Intel XPU GPU extension build strategy."""
+
+    name = "sycl"
+    env_var = "BUILD_WITH_SYCL"
+
+    def detect(self) -> bool:
+        """Detect SYCL by checking for the icpx compiler."""
+        return shutil.which("icpx") is not None
+
+    def build(self) -> tuple[list["Extension"], dict]:
+        """Build SYCL/XPU extensions via DPC++."""
+        # Third Party
+        from torch.utils import cpp_extension
+
+        print("Building SYCL/XPU extensions")
+        if shutil.which("icpx") is None:
+            sys.exit("icpx not found. Please source oneAPI setvars.sh first")
+        os.environ["CXX"] = "icpx"
+        oneapi_root = os.environ.get("ONEAPI_ROOT", "/opt/intel/oneapi")
+        include_dirs = ["%s/include" % oneapi_root]
+        library_dirs = ["%s/lib" % oneapi_root]
+
+        sycl_sources = [
+            "csrc/sycl/pybind_sycl.cpp",
+            "csrc/sycl/mem_kernels_sycl.cpp",
+            "csrc/sycl/cal_cdf_sycl.cpp",
+            "csrc/sycl/pos_kernels_sycl.cpp",
+            "csrc/sycl/ac_enc_sycl.cpp",
+            "csrc/sycl/ac_dec_sycl.cpp",
+        ]
+        ext_modules = [
+            cpp_extension.SyclExtension(
+                "lmcache.xpu_ops",
+                sources=sycl_sources,
+                include_dirs=include_dirs,
+                library_dirs=library_dirs,
+                extra_compile_args={
+                    "cxx": [
+                        "-std=c++17",
+                        "-D_GLIBCXX_USE_CXX11_ABI=1",
+                        "-O3",
+                        "-fsycl",
+                        "-fno-sycl-id-queries-fit-in-int",
+                        "-ffast-math",
+                        "-funroll-loops",
+                        "-Wno-deprecated-declarations",
+                        "-Wno-nan-infinity-disabled",
+                    ],
+                },
+                extra_link_args=["-fsycl"],
+            ),
+        ]
+        cmdclass = {"build_ext": cpp_extension.BuildExtension}
+        return ext_modules, cmdclass
+
+    def common_cpp_flags(self) -> list[str]:
+        """SYCL always uses the CXX11 ABI."""
+        return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
+
+    def fs_cpp_flags(self) -> list[str]:
+        """Preserve pre-refactor behaviour: lmcache_fs omits ABI flags."""
+        return []
+
+    def requirements_file(self) -> Optional[str]:
+        """SYCL core requirements file."""
+        return "xpu_core.txt"
