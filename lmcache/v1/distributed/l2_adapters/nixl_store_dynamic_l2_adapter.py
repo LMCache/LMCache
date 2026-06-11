@@ -73,7 +73,9 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     """
     safe_model_name = key.model_name.replace("/", "--")
     chunk_hex = key.chunk_hash.hex()
-    return f"{safe_model_name}_{key.kv_rank:08x}_{chunk_hex}.bin"
+    return (
+        f"{safe_model_name}_{key.kv_rank:08x}_{key.object_group_id:x}_{chunk_hex}.bin"
+    )
 
 
 # ---------------------------------------------------------------

@@ -415,6 +415,43 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             return paged_mem_allocator
         else:
+            extra_config = config.extra_config
+            nixl_cpu_enabled = (
+                extra_config is not None
+                and extra_config.get("enable_nixl_storage")
+                and config.nixl_buffer_device == "cpu"
+            )
+
+            if nixl_cpu_enabled:
+                if metadata is None:
+                    raise ValueError("metadata required for NIXL CPU mode")
+                chunk_bytes = get_size_bytes(
+                    metadata.get_shapes(), metadata.get_dtypes()
+                )
+                aligned_size = (cpu_size_bytes // chunk_bytes) * chunk_bytes
+                if aligned_size == 0:
+                    raise ValueError(
+                        f"max_local_cpu_size ({cpu_size_bytes} bytes) is smaller than "
+                        f"one chunk ({chunk_bytes} bytes); cannot initialize NIXL CPU "
+                        f"shared pool"
+                    )
+                if aligned_size != cpu_size_bytes:
+                    logger.warning(
+                        "max_local_cpu_size not a multiple of chunk size; "
+                        "rounding down from %d to %d bytes for NIXL shared pool",
+                        cpu_size_bytes,
+                        aligned_size,
+                    )
+                return MixedMemoryAllocator(
+                    aligned_size,
+                    use_paging=True,
+                    use_hugepages=use_hugepages,
+                    numa_mapping=numa_mapping,
+                    shapes=metadata.get_shapes(),
+                    dtypes=metadata.get_dtypes(),
+                    fmt=MemoryFormat.KV_2LTD,
+                )
+
             # Check if io_uring is enabled for fixed buffer support
             io_engine = str(
                 config.get_extra_config_value("rust_raw_block.io_engine", "") or ""

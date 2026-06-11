@@ -105,6 +105,22 @@ class EventType(Enum):
     CB_FINGERPRINTS_REGISTERED = "cb.fingerprints.registered"
     CB_CHUNKS_EVICTED = "cb.chunks.evicted"
 
+    # CB V3 lookup sub-spans (CPU) — nest under cb.lookup. Submitted-once but
+    # END may fire on a later poll (the non-blocking lookup re-issues), so the
+    # span captures submit→resident incl. poll-wait.
+    CB_FINGERPRINT_MATCH_START = "cb.fingerprint_match.start"
+    CB_FINGERPRINT_MATCH_END = "cb.fingerprint_match.end"
+    # No cb.prefix_lookup span: the prefix lookup is already traced by
+    # mp.lookup_prefetch (CB reuses LookupModule). prefix_chunks rides on
+    # cb.lookup via CB_LOOKUP_END instead.
+    CB_SPARSE_PREFETCH_START = "cb.sparse_prefetch.start"
+    CB_SPARSE_PREFETCH_END = "cb.sparse_prefetch.end"
+
+    # CB V3 retrieve sub-span (GPU) — nest under cb.retrieve. Emitted via
+    # publish_on_stream for GPU-accurate timing of the L1->paged scatter.
+    CB_SCATTER_START = "cb.scatter.start"
+    CB_SCATTER_END = "cb.scatter.end"
+
     # Cache Blending (CB) events — lifecycle sentinels (CPU-synchronous)
     CB_REQUEST_START = "cb.request.start"
     CB_STORE_PRE_COMPUTED_SUBMITTED = "cb.store_pre_computed.submitted"

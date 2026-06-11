@@ -867,3 +867,173 @@ class TestCBHitRateAttributes:
         root = self._root_span(exporter, sid)
         assert root is not None
         assert root.attributes["prefix_hits"] == 0
+
+    def test_hit_rate_includes_prefix_and_non_prefix(self, exporter):
+        """V3 hit_rate numerator = prefix_hit_tokens + non_prefix_hit_tokens;
+        both are also recorded as separate attributes on the root span."""
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        bus.register_subscriber(BlendTracingSubscriber(SpanRegistry()))
+        bus.start()
+        now = time.time()
+        sid = "cb-hr-split"
+        bus.publish(
+            Event(event_type=EventType.CB_REQUEST_START, session_id=sid, timestamp=now)
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_START,
+                session_id=sid,
+                timestamp=now + 0.001,
+                metadata={"num_tokens": 1024},
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_LOOKUP_END,
+                session_id=sid,
+                timestamp=now + 0.010,
+                metadata={
+                    "prefix_hit_tokens": 256,
+                    "non_prefix_hit_tokens": 256,
+                    "hit_tokens": 512,  # = prefix + non_prefix (set by blend_v3)
+                    "requested_tokens": 1024,
+                },
+            )
+        )
+        bus.publish(
+            Event(
+                event_type=EventType.CB_REQUEST_END,
+                session_id=sid,
+                timestamp=now + 0.011,
+            )
+        )
+        time.sleep(0.2)
+        bus.stop()
+
+        root = self._root_span(exporter, sid)
+        assert root is not None
+        assert root.attributes["prefix_hit_tokens"] == 256
+        assert root.attributes["non_prefix_hit_tokens"] == 256
+        assert root.attributes["hit_tokens"] == 512
+        assert root.attributes["hit_rate"] == 0.5
+
+
+class TestCBLookupSubspans:
+    """V3 lookup sub-spans (cb.fingerprint_match / cb.sparse_prefetch) nest under
+    cb.lookup, not the cb.request root. The prefix lookup has no cb.* span (it is
+    traced by mp.lookup_prefetch); prefix_chunks rides on cb.lookup."""
+
+    @pytest.fixture
+    def exporter(self):
+        exp = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exp))
+        real_tracer = provider.get_tracer("lmcache_mp.blend")
+        with (
+            patch.object(cb_server_module, "_tracer", real_tracer),
+            patch.object(cb_server_module, "_HAS_OTEL", True),
+        ):
+            yield exp
+        exp.shutdown()
+
+    def _spans_by_name(self, exporter: InMemorySpanExporter, sid: str):
+        return {
+            s.name: s
+            for s in exporter.get_finished_spans()
+            if s.attributes.get("session_id") == sid
+        }
+
+    def test_lookup_subspans_nest_under_cb_lookup(self, exporter):
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        bus.register_subscriber(BlendTracingSubscriber(SpanRegistry()))
+        bus.start()
+        now = time.time()
+        sid = "cb-subspans"
+        seq = [
+            (EventType.CB_REQUEST_START, {}),
+            (EventType.CB_LOOKUP_START, {"num_tokens": 1024}),
+            (EventType.CB_FINGERPRINT_MATCH_START, {}),
+            (EventType.CB_FINGERPRINT_MATCH_END, {"matches": 7}),
+            (EventType.CB_SPARSE_PREFETCH_START, {"n_chunks": 5}),
+            (EventType.CB_SPARSE_PREFETCH_END, {"found_keys": 5}),
+            (EventType.CB_LOOKUP_END, {"num_tokens": 1024, "prefix_chunks": 2}),
+            (EventType.CB_REQUEST_END, {}),
+        ]
+        for i, (et, md) in enumerate(seq):
+            bus.publish(
+                Event(
+                    event_type=et,
+                    session_id=sid,
+                    timestamp=now + i * 0.001,
+                    metadata=md,
+                )
+            )
+        time.sleep(0.3)
+        bus.stop()
+
+        spans = self._spans_by_name(exporter, sid)
+        for name in (
+            "cb.lookup",
+            "cb.fingerprint_match",
+            "cb.sparse_prefetch",
+        ):
+            assert name in spans, f"missing span {name}; have {sorted(spans)}"
+        # No cb.prefix_lookup span (traced by mp.lookup_prefetch instead).
+        assert "cb.prefix_lookup" not in spans
+        lookup_id = spans["cb.lookup"].context.span_id
+        for name in ("cb.fingerprint_match", "cb.sparse_prefetch"):
+            assert spans[name].parent is not None, f"{name} has no parent span"
+            assert spans[name].parent.span_id == lookup_id, (
+                f"{name} should nest under cb.lookup"
+            )
+        # cb.lookup itself nests under the cb.request root (unchanged behavior).
+        assert spans["cb.lookup"].parent.span_id == spans["cb.request"].context.span_id
+        # sub-span metadata propagates as attributes.
+        assert spans["cb.fingerprint_match"].attributes.get("matches") == "7"
+        # prefix coverage rides on cb.lookup (no dedicated prefix span).
+        assert spans["cb.lookup"].attributes.get("prefix_chunks") == "2"
+        assert spans["cb.sparse_prefetch"].attributes.get("found_keys") == "5"
+
+    def test_scatter_span_nests_under_cb_retrieve(self, exporter):
+        bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+        bus.register_subscriber(BlendTracingSubscriber(SpanRegistry()))
+        bus.start()
+        now = time.time()
+        sid = "cb-scatter"
+        seq = [
+            (EventType.CB_REQUEST_START, {}),
+            (EventType.CB_RETRIEVE_START, {"num_chunks": 5}),
+            (
+                EventType.CB_SCATTER_START,
+                {
+                    "scattered_tokens": 1280,
+                    "n_prefix": 1,
+                    "n_shifted": 4,
+                    "dropped": 0,
+                },
+            ),
+            (EventType.CB_SCATTER_END, {}),
+            (EventType.CB_RETRIEVE_END, {}),
+            (EventType.CB_REQUEST_END, {}),
+        ]
+        for i, (et, md) in enumerate(seq):
+            bus.publish(
+                Event(
+                    event_type=et,
+                    session_id=sid,
+                    timestamp=now + i * 0.001,
+                    metadata=md,
+                )
+            )
+        time.sleep(0.3)
+        bus.stop()
+
+        spans = self._spans_by_name(exporter, sid)
+        assert "cb.scatter" in spans, f"missing cb.scatter; have {sorted(spans)}"
+        assert "cb.retrieve" in spans
+        assert (
+            spans["cb.scatter"].parent.span_id == spans["cb.retrieve"].context.span_id
+        ), "cb.scatter should nest under cb.retrieve"
+        assert spans["cb.scatter"].attributes.get("scattered_tokens") == "1280"
+        assert spans["cb.scatter"].attributes.get("n_shifted") == "4"
+        assert spans["cb.scatter"].attributes.get("dropped") == "0"
