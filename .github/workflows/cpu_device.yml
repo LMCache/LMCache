@@ -114,12 +114,24 @@ jobs:
           # vLLM server fails to start. Synthesize a `vllm-<ver>.dist-info`
           # alias that points at the same RECORD so the metadata lookup
           # succeeds. Idempotent: re-running just rewrites the alias.
+          #
+          # We also tag the aliased Version with a `+cpu` PEP 440 local
+          # label. vLLM's `cpu_platform_plugin()` decides whether to
+          # activate the CPU platform via `"cpu" in version("vllm")`,
+          # i.e. it greps the dist metadata for the substring "cpu".
+          # Our build script strips the `+cpu` label before upload (PyPI
+          # rejects local versions), so without this re-tagging the CPU
+          # platform plugin returns None and `vllm serve` dies with
+          # "Failed to infer device type". Adding the label only on the
+          # alias is enough -- the original `vllm-cpu-nightly` dist-info
+          # is left untouched so `pip uninstall` keeps working.
           python - <<'PY'
           import importlib.metadata as md
           import pathlib
           import shutil
           dist = md.distribution("vllm-cpu-nightly")
           ver = dist.version
+          fake_ver = f"{ver}+cpu"
           # Locate the *.dist-info dir without poking private attributes:
           # dist.files lists every installed file relative to site-packages,
           # and the first entry under a `*.dist-info/` dir gives us its name.
@@ -129,15 +141,16 @@ jobs:
               if p.parts and p.parts[0].endswith(".dist-info")
           )
           src = site_root / info_name
-          dst = src.with_name(f"vllm-{ver}.dist-info")
+          dst = src.with_name(f"vllm-{fake_ver}.dist-info")
           if dst.exists():
               shutil.rmtree(dst)
           shutil.copytree(src, dst)
           meta = dst / "METADATA"
           txt = meta.read_text()
-          # Only the very first `Name:` header (case-sensitive, line-start).
-          new = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
-          meta.write_text(new)
+          # Only the very first `Name:` / `Version:` header (start of line).
+          txt = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
+          txt = txt.replace(f"Version: {ver}", f"Version: {fake_ver}", 1)
+          meta.write_text(txt)
           print(f"Aliased {src.name} -> {dst.name}")
           print("vllm version (via importlib.metadata):", md.version("vllm"))
           PY
@@ -286,27 +299,34 @@ jobs:
           # entrypoint does `importlib.metadata.version("vllm")`, which
           # looks up the *distribution* name. Our nightly wheel ships as
           # `vllm-cpu-nightly`, so we synthesize a `vllm-<ver>.dist-info`
-          # alias to make the lookup succeed. Idempotent.
+          # alias to make the lookup succeed. We also tag the alias
+          # Version with `+cpu` so `cpu_platform_plugin()` activates the
+          # CPU platform; macOS has a `sys.platform.startswith("darwin")`
+          # fallback that would also work, but we keep the two jobs
+          # symmetric so the snippet stays trivially reviewable.
+          # Idempotent.
           python - <<'PY'
           import importlib.metadata as md
           import pathlib
           import shutil
           dist = md.distribution("vllm-cpu-nightly")
           ver = dist.version
+          fake_ver = f"{ver}+cpu"
           site_root = pathlib.Path(dist.locate_file(""))
           info_name = next(
               p.parts[0] for p in (dist.files or [])
               if p.parts and p.parts[0].endswith(".dist-info")
           )
           src = site_root / info_name
-          dst = src.with_name(f"vllm-{ver}.dist-info")
+          dst = src.with_name(f"vllm-{fake_ver}.dist-info")
           if dst.exists():
               shutil.rmtree(dst)
           shutil.copytree(src, dst)
           meta = dst / "METADATA"
           txt = meta.read_text()
-          new = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
-          meta.write_text(new)
+          txt = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
+          txt = txt.replace(f"Version: {ver}", f"Version: {fake_ver}", 1)
+          meta.write_text(txt)
           print(f"Aliased {src.name} -> {dst.name}")
           print("vllm version (via importlib.metadata):", md.version("vllm"))
           PY
