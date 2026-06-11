@@ -523,21 +523,22 @@ echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANS
 # Worker logs `Creating transfer context (device_type=<dev>, mode=<m>)`
 # from worker_transfer.py:create_transfer_context, where <m> is the
 # resolved MPTransferMode after env-var lookup. This is the single source
-# of truth for which TransferContext the worker actually entered, so the
-# verification reduces to grepping for `mode=<expected>`. We additionally
-# confirm the server-side strategy line for shm/pickle to catch
-# misconfigurations on the server end.
+# of truth for which TransferContext the worker actually entered. Note:
+# the worker is a child of `vllm serve`, so its LMCache log lines land in
+# VLLM_LOG (vllm's stdout), not in LMCACHE_LOG (lmcache server's stdout).
+# The shm/pickle branches still grep LMCACHE_LOG because the strategy
+# line is emitted by the lmcache server itself.
 if [ "${EXPECTED_TRANSPORT}" = "handle" ]; then
-  if ! grep -q "Creating transfer context.*mode=handle" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected handle worker context but 'mode=handle' not found in log"
-    tail -50 "${LMCACHE_LOG}"
+  if ! grep -q "Creating transfer context.*mode=handle" "${VLLM_LOG}" 2>/dev/null; then
+    echo "❌ Expected handle worker context but 'mode=handle' not found in vLLM log"
+    tail -50 "${VLLM_LOG}"
     false
   fi
   echo "✅ Transport mode confirmed: handle (server-side copy)"
 elif [ "${EXPECTED_TRANSPORT}" = "auto" ]; then
-  if ! grep -q "Creating transfer context.*mode=auto" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected auto worker context but 'mode=auto' not found in log"
-    tail -50 "${LMCACHE_LOG}"
+  if ! grep -q "Creating transfer context.*mode=auto" "${VLLM_LOG}" 2>/dev/null; then
+    echo "❌ Expected auto worker context but 'mode=auto' not found in vLLM log"
+    tail -50 "${VLLM_LOG}"
     false
   fi
   echo "✅ Transport mode confirmed: auto"
