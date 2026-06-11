@@ -197,10 +197,6 @@ class NixlStorageConfig:
             sync_mode = getattr(nixl_thread_sync_t, attr_name)
         presence_cache_only = extra_config.get("nixl_presence_cache_only", False)
 
-        if presence_cache_only and not enable_presence_cache:
-            raise ValueError(
-                "nixl_presence_cache must be true when nixl_presence_cache_only is true"
-            )
         path_sharding = extra_config.get("nixl_path_sharding", "by_gpu")
 
         assert pool_size is not None
