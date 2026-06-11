@@ -68,19 +68,35 @@ def _dcp_group() -> "tuple[Any, int, int]":
 
 
 def _interleave_size() -> int:
-    """vLLM's cp_kv_cache_interleave_size (the per-rank block size); cached."""
+    """vLLM's ``cp_kv_cache_interleave_size`` (the per-rank block size); cached.
+
+    This connector's gather / (de)interleave is only correct for the STRIDED
+    layout (``cp_kv_cache_interleave_size == 1``). A block-granular layout (e.g.
+    vLLM's default of 64) maps a different set of tokens to each rank, so the
+    interleave would store and scatter WRONG KV with no crash. Reject any value
+    other than 1 here (fail fast) rather than silently feeding it through.
+    """
     global _blk_size
     if _blk_size is None:
-        blk = 64
+        blk = 1
         try:
             # Third Party
             from vllm.config import get_current_vllm_config
 
             cfg = get_current_vllm_config().parallel_config
-            blk = cfg.cp_kv_cache_interleave_size or 64
+            if cfg.cp_kv_cache_interleave_size is not None:
+                blk = int(cfg.cp_kv_cache_interleave_size)
         except Exception:
-            blk = 64
-        _blk_size = int(blk)
+            blk = 1
+        if blk != 1:
+            raise ValueError(
+                "LMCache DCP CPU offload supports only the strided KV layout "
+                "(cp_kv_cache_interleave_size == 1); got "
+                f"cp_kv_cache_interleave_size={blk}. A block-granular layout would "
+                "store WRONG KV with no crash. Launch vLLM with "
+                "--cp-kv-cache-interleave-size 1, or disable the LMCache connector."
+            )
+        _blk_size = blk
     return _blk_size
 
 
