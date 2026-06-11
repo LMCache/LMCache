@@ -59,7 +59,7 @@ jobs:
               - '.github/scripts/cpu_vllm_e2e_test.sh'
               - '.github/scripts/install_vllm_cpu.sh'
               - '.github/scripts/install_lmcache_cpu.sh'
-              - '.github/scripts/download_opt125m.sh'
+              - '.github/scripts/download_model.sh'
               - '.buildkite/k3_tests/multiprocess/scripts/run-cpu-e2e-validation.sh'
               - '!operator/**'
 
@@ -107,7 +107,7 @@ jobs:
         run: bash .github/scripts/install_lmcache_cpu.sh
 
       - name: Download facebook/opt-125m
-        run: bash .github/scripts/download_opt125m.sh
+        run: bash .github/scripts/download_model.sh facebook/opt-125m
 
       - name: Server bench — Data
         run: |

@@ -163,6 +163,25 @@ print(int(total))
 EOF
 }
 
+# Poll a Prometheus counter until its value differs from `baseline`,
+# or until `timeout` seconds elapse. Returns 0 on change, 1 on timeout
+# (callers typically `|| true` it because not every probe expects a
+# change to actually happen).
+wait_for_metric_change() {
+  local metric_name="$1"
+  local baseline="$2"
+  local timeout="${3:-10}"
+  local current
+  for _ in $(seq 1 "${timeout}"); do
+    current="$(scrape_metric "${metric_name}")"
+    if [ "${current}" != "${baseline}" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 # Send a completion request and print the text output
 send_completion() {
   local prompt_file="$1"
@@ -328,7 +347,7 @@ fi
 
 echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (cache-aware)"
 HF_DOWNLOAD_FAIL_ON_ERROR=1 \
-  bash "${SHARED_SCRIPTS_DIR}/download_opt125m.sh"
+  bash "${SHARED_SCRIPTS_DIR}/download_model.sh" facebook/opt-125m
 echo "✅ Model download/check complete"
 
 echo "[Phase 2 / Step 3] Starting LMCache server"
