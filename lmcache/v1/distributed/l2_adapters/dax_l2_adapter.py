@@ -721,7 +721,7 @@ class DaxL2Adapter(L2AdapterInterface):
                 underlying DAX hotplug operation fails.
         """
         if operation == "status":
-            return self.reconfigure_status()
+            return dict(self.reconfigure_status())
 
         if operation == "add":
             device_path = _reconfigure_device_path(payload)
