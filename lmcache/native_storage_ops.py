@@ -34,7 +34,31 @@ import os
 import struct
 import threading
 import time
+import warnings
 
+# -- Priority guarantee ----------------------------------------------------
+# Python 3's import system (via importlib.machinery.FileFinder) uses a fixed
+# suffix search order where compiled extension suffixes (.so, .pyd, .dylib)
+# are ALWAYS checked before source suffixes (.py).  This means that when both
+# ``native_storage_ops.cpython-*.so`` and ``native_storage_ops.py`` co-exist
+# in the same directory, the C++ compiled extension is loaded unconditionally
+# and this pure-Python fallback module is NEVER executed.
+#
+# The only situation where this fallback runs despite a .so being present is
+# when the compiled extension fails to load (e.g. ABI incompatibility with
+# the current Python interpreter).  The warning below alerts users to this
+# fallback path so they can verify whether it is intentional.
+
+warnings.warn(
+    "lmcache.native_storage_ops: Using pure-Python fallback implementation. "
+    "The compiled C++ extension (native_storage_ops.cpython-*.so) was not "
+    "found or could not be loaded.  Performance-critical code paths (e.g. "
+    "TTLLock, Bitmap, pattern matchers) will be significantly slower than "
+    "the native C++ backend.  If this is unexpected, please rebuild the "
+    "LMCache C++ extension and verify it is installed correctly.",
+    RuntimeWarning,
+    stacklevel=2,
+)
 __all__ = [
     "TTLLock",
     "Bitmap",
