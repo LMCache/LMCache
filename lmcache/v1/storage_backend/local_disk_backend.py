@@ -549,7 +549,7 @@ class LocalDiskBackend(StorageBackendInterface):
             memory_obj.ref_count_down()
             self.disk_worker.remove_put_task(key)
 
-        # 只有 write_file 成功才会走到这里
+        # Only reached if write_file succeeds
         size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
