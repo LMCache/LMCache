@@ -1055,10 +1055,59 @@ class DaxL2Adapter(L2AdapterInterface):
         bitmap = Bitmap(len(keys))
         try:
             with self._device_lock:
+                remaining_indices: list[int] = []
+                skip_device_by_index: dict[int, int] = {}
+                mapped_indices_by_device: dict[int, list[int]] = {}
+
                 for i, key in enumerate(keys):
-                    entry = self._find_device_for_key_locked(key, lock=True)
-                    if entry is not None:
-                        bitmap.set(i)
+                    mapped_entry = self._get_mapped_device_locked(key)
+                    if (
+                        mapped_entry is not None
+                        and mapped_entry.state in _READABLE_STATES
+                    ):
+                        mapped_indices_by_device.setdefault(
+                            mapped_entry.device_id,
+                            [],
+                        ).append(i)
+                    else:
+                        remaining_indices.append(i)
+
+                readable_entries = [
+                    entry for entry in self._devices if entry.state in _READABLE_STATES
+                ]
+                entry_by_id = {entry.device_id: entry for entry in readable_entries}
+
+                for device_id, indices in mapped_indices_by_device.items():
+                    entry = entry_by_id.get(device_id)
+                    if entry is None:
+                        remaining_indices.extend(indices)
+                        continue
+
+                    hits = entry.core.exists_many([keys[i] for i in indices], lock=True)
+                    for i, hit in zip(indices, hits, strict=True):
+                        if hit:
+                            bitmap.set(i)
+                            self._key_to_device[keys[i]] = entry.device_id
+                        else:
+                            self._key_to_device.pop(keys[i], None)
+                            skip_device_by_index[i] = entry.device_id
+                            remaining_indices.append(i)
+
+                for entry in readable_entries:
+                    indices = [
+                        i
+                        for i in remaining_indices
+                        if not bitmap.test(i)
+                        and skip_device_by_index.get(i) != entry.device_id
+                    ]
+                    if not indices:
+                        continue
+
+                    hits = entry.core.exists_many([keys[i] for i in indices], lock=True)
+                    for i, hit in zip(indices, hits, strict=True):
+                        if hit:
+                            bitmap.set(i)
+                            self._key_to_device[keys[i]] = entry.device_id
         except Exception:
             logger.exception("DAX L2 lookup failed")
         finally:

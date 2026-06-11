@@ -371,6 +371,44 @@ def test_dax_hotplug_add_sanitizes_mapping_errors(tmp_path):
         adapter.close()
 
 
+def test_dax_lookup_batches_unmapped_keys_by_device(tmp_path, monkeypatch):
+    adapter = make_hotplug_adapter(tmp_path)
+    objs = [create_memory_obj(fill_value=i) for i in range(4)]
+    keys = [create_object_key(500 + i) for i in range(4)]
+    calls: list[tuple[int, int, bool]] = []
+
+    try:
+        task_id = adapter.submit_store_task(keys, objs)
+        assert wait_for_event_fd(adapter.get_store_event_fd())
+        completed = adapter.pop_completed_store_tasks()
+        assert completed[task_id].is_successful()
+
+        with adapter._device_lock:
+            adapter._key_to_device.clear()
+            for entry in adapter._devices:
+                original = entry.core.exists_many
+
+                def wrapped_exists_many(
+                    lookup_keys,
+                    lock=False,
+                    *,
+                    device_id=entry.device_id,
+                    original=original,
+                ):
+                    calls.append((device_id, len(lookup_keys), lock))
+                    return original(lookup_keys, lock=lock)
+
+                monkeypatch.setattr(entry.core, "exists_many", wrapped_exists_many)
+
+        assert lookup_and_wait(adapter, keys) == [True, True, True, True]
+
+        assert [count for _, count, _ in calls] == [4, 2]
+        assert all(lock for _, _, lock in calls)
+    finally:
+        adapter.submit_unlock(keys)
+        adapter.close()
+
+
 class _FakeReconfigurableAdapter:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
