@@ -68,22 +68,6 @@ fi
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-auto}"
 MAX_MODEL_LEN_ARG="--max-model-len ${MAX_MODEL_LEN}"
 
-# KV cache dtype for the LMCache vLLM server. Defaults to "auto" (the model
-# default). DeepSeek-V4-Flash's sparse-MLA backend needs its fp8 MLA layout
-# (fp8_ds_mla), which also drives the 4/128 per-group compress ratios LMCache
-# must transfer -- set KV_CACHE_DTYPE=fp8_ds_mla for it.
-KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
-KV_CACHE_DTYPE_ARG=""
-if [ "$KV_CACHE_DTYPE" != "auto" ]; then
-    KV_CACHE_DTYPE_ARG="--kv-cache-dtype $KV_CACHE_DTYPE"
-fi
-
-# Extra raw flags appended verbatim to the LMCache vLLM ``vllm serve`` command
-# (space-separated, word-split intentionally). Used for model-specific flags
-# that have no dedicated knob -- e.g. DeepSeek-V4-Flash needs
-# "--trust-remote-code --tokenizer-mode deepseek_v4".
-EXTRA_VLLM_ARGS="${EXTRA_VLLM_ARGS:-}"
-
 # LMCache server chunk size in tokens. Empty -> server default.
 CHUNK_SIZE_ARG=""
 if [ -n "${CHUNK_SIZE:-}" ]; then
@@ -147,11 +131,6 @@ sleep 10
 unset VLLM_PORT
 
 # ── 2. vLLM with LMCache ────────────────────────────────────
-# Tests that drive vLLM themselves (e.g. hma_dsv4_flash, which dummy-loads
-# its own in-process engine) set LAUNCH_VLLM=false and only get the LMCache
-# server from this script.
-if [[ "${LAUNCH_VLLM:-true}" == "true" ]]; then
-
 echo "=== Launching vLLM with LMCache ==="
 echo "Model: $MODEL"
 echo "Port: $vllm_port"
@@ -164,7 +143,6 @@ PYTHONHASHSEED=0 \
 vllm serve "$MODEL" \
     --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\", \"kv_role\":\"kv_both\", \"kv_load_failure_policy\": \"recompute\", \"kv_connector_extra_config\": {\"lmcache.mp.port\": $LMCACHE_PORT, \"lmcache.mp.mq_timeout\": 10}}" \
     $ATTENTION_BACKEND_ARG \
-    $KV_CACHE_DTYPE_ARG \
     --port "$vllm_port" \
     --no-async-scheduling \
     $MAX_MODEL_LEN_ARG \
@@ -172,16 +150,11 @@ vllm serve "$MODEL" \
     $GPU_MEMORY_UTIL_ARG \
     $MAMBA_ARGS \
     $MAX_NUM_BATCHED_TOKENS_ARG \
-    $EXTRA_VLLM_ARGS \
     > "/tmp/build_${BUILD_ID}_vllm.log" 2>&1 &
 
 VLLM_PID=$!
 echo "$VLLM_PID" >> "$PID_FILE"
 echo "vLLM with LMCache started (PID=$VLLM_PID)"
-
-else
-    echo "=== Skipping vLLM with LMCache (LAUNCH_VLLM=false) ==="
-fi
 
 # ── 3. vLLM Baseline (without LMCache) ──────────────────────
 # Only launched for tests that compare against a baseline (2-GPU pods).

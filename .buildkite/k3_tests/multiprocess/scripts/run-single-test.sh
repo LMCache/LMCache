@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Orchestrator for a single multiprocessing test (native, no Docker).
 # Usage: run-single-test.sh <test_name>
-#   test_name: lm_eval | hma_lm_eval_gemma4 | hma_dsv4_flash
-#              | hma_dsv4_roundtrip | hma_lm_eval_qwen3_5 | vllm_bench
-#              | long_doc_qa | long_doc_qa_l2 | fault_tolerance | deadlock
-#              | restart_recovery | gds_smoke_test
+#   test_name: lm_eval | hma_lm_eval_gemma4 | vllm_bench | long_doc_qa
+#              | long_doc_qa_l2 | fault_tolerance | deadlock | restart_recovery
+#              | gds_smoke_test
 #
 # Each invocation is self-contained: launches servers, runs one test, cleans up.
 # This mirrors the comprehensive tests' run-single-config.sh pattern.
@@ -42,14 +41,6 @@ if [ "$TEST_NAME" = "hma_lm_eval_gemma4" ]; then
     # pipeline sets ATTENTION_BACKEND=auto; its ~63GB of weights also need a
     # higher GPU_MEMORY_UTILIZATION than the default (all set in pipeline.yml).
     export MODEL="${MODEL:-google/gemma-4-31B-it}"
-elif [ "$TEST_NAME" = "hma_dsv4_roundtrip" ]; then
-    # DeepSeek-V4-Flash is a hybrid MLA model (full MLA + per-layer
-    # sliding-window MLA + compressor-state groups) whose KV cache groups
-    # declare per-group compress ratios of 4 and 128 -- the exact path this
-    # PR's tokens/slots-per-block handling drives. hma_dsv4_roundtrip loads it
-    # with dummy weights (load_format=dummy) on a single GPU, so it needs only
-    # the config/tokenizer and runs on stock vLLM (no fp4 weight loading).
-    export MODEL="${MODEL:-deepseek-ai/DeepSeek-V4-Flash}"
 elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
     # Qwen3.5-0.8B is a Mamba/GDN + full-attention hybrid (caches re-viewed at
     # registration; see lmcache/integration/vllm/kv_cache_group_edits.py).
@@ -95,16 +86,6 @@ echo ""
 # Tests that handle their own server lifecycle (different GPU/model config)
 SELF_CONTAINED_TESTS=" deadlock "
 
-# Tests that need only the LMCache server from launch-processes.sh: they
-# drive vLLM themselves (e.g. an in-process dummy-load engine), so the
-# shared vLLM API server (and the readiness wait for it) is skipped.
-SERVER_ONLY_TESTS=" hma_dsv4_flash "
-if [[ "$SERVER_ONLY_TESTS" == *" $TEST_NAME "* ]]; then
-    export LAUNCH_VLLM=false
-else
-    export LAUNCH_VLLM=true
-fi
-
 # Tests that compare against a baseline vLLM (no LMCache) on a second GPU.
 # Only these need the baseline server (and thus a 2-GPU pod); everything
 # else runs on GPU 0 alone, so launch-processes.sh skips the baseline.
@@ -127,16 +108,14 @@ if [[ "$SELF_CONTAINED_TESTS" != *" $TEST_NAME "* ]]; then
     echo ""
 
     # ── Step 2: Wait for vLLM to be ready ───────────────────────
-    if [[ "$LAUNCH_VLLM" == "true" ]]; then
-        echo "============================================"
-        echo "=== Waiting for vLLM to be ready ==="
-        echo "============================================"
-        if ! "${SCRIPT_DIR}/wait-for-servers.sh"; then
-            echo "vLLM failed to become ready"
-            exit 1
-        fi
-        echo ""
+    echo "============================================"
+    echo "=== Waiting for vLLM to be ready ==="
+    echo "============================================"
+    if ! "${SCRIPT_DIR}/wait-for-servers.sh"; then
+        echo "vLLM failed to become ready"
+        exit 1
     fi
+    echo ""
 fi
 
 # ── Step 3: Run the requested test ──────────────────────────
@@ -150,12 +129,6 @@ case "$TEST_NAME" in
         ;;
     hma_lm_eval_gemma4)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
-        ;;
-    hma_dsv4_flash)
-        exec_script="${SCRIPT_DIR}/hma-dsv4-flash-check.py"
-        ;;
-    hma_dsv4_roundtrip)
-        exec_script="${SCRIPT_DIR}/hma-dsv4-roundtrip-check.py"
         ;;
     hma_lm_eval_qwen3_5)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
@@ -189,7 +162,7 @@ case "$TEST_NAME" in
         ;;
     *)
         echo "Unknown test: $TEST_NAME"
-        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, hma_dsv4_flash, hma_dsv4_roundtrip, hma_lm_eval_qwen3_5, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test"
+        echo "Valid tests: lm_eval, hma_lm_eval_gemma4, vllm_bench, long_doc_qa, long_doc_qa_l2, fault_tolerance, deadlock, restart_recovery, cache_stats, http_api, gds_smoke_test"
         exit 1
         ;;
 esac
