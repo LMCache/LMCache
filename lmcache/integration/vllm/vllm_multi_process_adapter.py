@@ -758,6 +758,33 @@ class LMCacheMPSchedulerAdapter:
         self._pending_lookups.discard(request_id)
         self._finished_lookup_results.pop(request_id, None)
 
+    def reset_cache(self) -> bool:
+        """Clear server-side cache and scheduler-side lookup bookkeeping.
+
+        Returns:
+            True if the server acknowledged the clear request, False if the
+            request timed out.
+        """
+        self._pending_lookups.clear()
+        self._finished_lookup_results.clear()
+
+        try:
+            send_lmcache_request(
+                self.mq_client,
+                RequestType.CLEAR,
+                [],
+            ).result(timeout=self._mq_timeout)
+        except TimeoutError:
+            logger.warning(
+                "CLEAR request timed out after %ss. Marking server as unhealthy.",
+                self._mq_timeout,
+            )
+            self._health_event.clear()
+            return False
+
+        self._health_event.set()
+        return True
+
     def free_lookup_locks(
         self,
         token_ids: list[int],

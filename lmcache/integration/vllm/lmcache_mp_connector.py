@@ -802,6 +802,20 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler-side methods
     # ==============================
 
+    def reset_cache(self) -> bool | None:
+        """Reset LMCache MP cache state from the scheduler role.
+
+        Returns:
+            True when the MP server clears successfully, False on failure, and
+            None for worker-role connectors.
+        """
+        if self.role != KVConnectorRole.SCHEDULER:
+            return None
+
+        success = self.scheduler_adapter.reset_cache()
+        self.request_trackers.clear()
+        return success
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
