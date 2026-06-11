@@ -11,6 +11,7 @@ See [DESIGN.md](DESIGN.md) for architecture details, reconciliation logic, and C
 - For NVIDIA GPUs (default): NVIDIA GPU Operator with the `nvidia` RuntimeClass available on GPU nodes
 - For AMD GPUs: set `spec.gpuVendor: amd` in your `LMCacheEngine` (see [AMD GPUs (ROCm)](#amd-gpus-rocm) below)
 - (Optional) [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator) for ServiceMonitor support
+- (CacheBlend only) [cert-manager](https://cert-manager.io) for the injection webhook's serving cert — see [CacheBlend](#cacheblend) below
 
 > [!IMPORTANT]
 > By default the operator runs LMCache pods with `runtimeClassName: nvidia` and `privileged: true` to gain GPU visibility without consuming GPU resources via the device plugin. This allows the serving engine (e.g., vLLM) to claim all GPUs on the node. Clusters using Pod Security Standards must allow the `privileged` profile for the LMCache namespace.
@@ -46,72 +47,17 @@ make deploy IMG=<your-registry>/lmcache-operator:latest
 
 ### 2. Deploy an LMCacheEngine
 
-A minimal CR deploys a DaemonSet with 60 GB L1 cache on every node:
-
-```yaml
-# lmcache-engine.yaml
-apiVersion: lmcache.lmcache.ai/v1alpha1
-kind: LMCacheEngine
-metadata:
-  name: my-cache
-spec:
-  l1:
-    sizeGB: 60
-```
+The minimal CR just needs `l1.sizeGB`. Apply the sample (a fully-commented field reference covering every option):
 
 ```bash
-kubectl apply -f lmcache-engine.yaml
+kubectl apply -f config/samples/lmcache_v1alpha1_lmcacheengine.yaml
 ```
 
 The operator automatically handles `hostIPC`, GPU visibility (`runtimeClassName: nvidia`, `privileged: true`), node-local service routing, resource sizing, and Prometheus metrics — see [DESIGN.md](DESIGN.md) for details.
 
 ### 3. Connect vLLM to LMCache
 
-The operator creates a ConfigMap named `<engine-name>-connection` containing the `kv-transfer-config` JSON that vLLM needs. Use it in your vLLM Deployment:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: vllm
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: vllm
-  template:
-    metadata:
-      labels:
-        app: vllm
-    spec:
-      # Required for CUDA IPC between vLLM and LMCache
-      hostIPC: true
-      containers:
-        - name: vllm
-          image: lmcache/vllm-openai:<pinned-tag>
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              exec python3 -m vllm.entrypoints.openai.api_server \
-                --model <your-model> \
-                --port 8000 \
-                --gpu-memory-utilization 0.8 \
-                --kv-transfer-config "$(cat /etc/lmcache/kv-transfer-config.json)"
-          ports:
-            - name: http
-              containerPort: 8000
-          volumeMounts:
-            - name: kv-transfer-config
-              mountPath: /etc/lmcache
-              readOnly: true
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-      volumes:
-        - name: kv-transfer-config
-          configMap:
-            name: my-cache-connection  # Must match your LMCacheEngine name + "-connection"
-```
+The operator creates a ConfigMap named `<engine-name>-connection` with the `kv-transfer-config` JSON vLLM needs. The vLLM pod mounts it and passes it to `--kv-transfer-config` — see the sample [`config/samples/vllm_deployment.yaml`](config/samples/vllm_deployment.yaml).
 
 Key points for vLLM pods:
 
@@ -151,187 +97,60 @@ kubectl describe lmc my-cache
 
 ## Examples
 
-### Target Only GPU Nodes
+Every scenario has a ready-to-edit manifest under [`config/samples/`](config/samples/) (`kubectl apply -f config/samples/<file>`):
 
-Use `nodeSelector` to run LMCache only on GPU nodes. New GPU nodes automatically get an LMCache pod:
+| Scenario | Sample |
+|---|---|
+| Minimal + **full commented field reference** (GPU `nodeSelector`, custom `server.port`, L2 `raw`/`raw_block`, `resourceOverrides`, …) | [`lmcache_v1alpha1_lmcacheengine.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine.yaml) |
+| Production: Prometheus `ServiceMonitor`, custom port, `priorityClassName` | [`lmcache_v1alpha1_lmcacheengine_production.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine_production.yaml) |
+| L2 storage: Redis/Valkey (optional Secret auth) | [`lmcache_v1alpha1_lmcacheengine_l2_redis.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine_l2_redis.yaml) |
+| AMD GPUs (ROCm) | [`lmcache_v1alpha1_lmcacheengine_amd.yaml`](config/samples/lmcache_v1alpha1_lmcacheengine_amd.yaml) |
+| vLLM Deployment wired to an LMCacheEngine | [`vllm_deployment.yaml`](config/samples/vllm_deployment.yaml) |
+| CacheBlend engine + opted-in vLLM (see [CacheBlend](#cacheblend)) | [`lmcache_v1alpha1_cacheblendengine.yaml`](config/samples/lmcache_v1alpha1_cacheblendengine.yaml), [`vllm_cacheblend_deployment.yaml`](config/samples/vllm_cacheblend_deployment.yaml) |
 
-```yaml
-apiVersion: lmcache.lmcache.ai/v1alpha1
-kind: LMCacheEngine
-metadata:
-  name: my-cache
-spec:
-  nodeSelector:
-    nvidia.com/gpu.present: "true"
-  l1:
-    sizeGB: 60
-```
+Notes:
 
-### AMD GPUs (ROCm)
+- **GPU targeting** — `nodeSelector: {nvidia.com/gpu.present: "true"}` runs LMCache only on GPU nodes; new GPU nodes auto-get a pod.
+- **AMD (ROCm)** — `spec.gpuVendor: amd` omits `runtimeClassName` and the NVIDIA env vars; vLLM connects via HIP IPC over `hostIPC` the same way (`PYTHONHASHSEED=0` still required). Supply a `nodeSelector` matching your platform's AMD label and a ROCm-built `spec.image`.
+- **Custom port** — set `server.port`; the connection ConfigMap updates automatically and vLLM picks it up on restart.
+- **L2 adapters** — only one at a time today. Redis/Valkey is natively typed; cross-namespace auth Secrets are copied automatically and injected via env (never in args or `kubectl describe`). Other types (`nixl_store`, `fs`, `mock`, `raw_block`) use the `raw` escape hatch — see the commented blocks in the minimal sample. For `raw_block` with `use_odirect: true`, `--l1-align-bytes` must be ≥ `block_align`.
+- **Resources** auto-compute from `l1.sizeGB`; override with `resourceOverrides`.
 
-Set `spec.gpuVendor: amd` to run on AMD GPU nodes. The operator omits `runtimeClassName` from the pod spec and skips the NVIDIA env vars. AMD GPU nodes don't have a universal label equivalent to `nvidia.com/gpu.present`, so supply a `nodeSelector` that matches the label your platform exposes (e.g. `feature.node.kubernetes.io/amd-gpu: "true"` when using the [ROCm/gpu-operator](https://github.com/ROCm/gpu-operator)):
+## CacheBlend
 
-```yaml
-apiVersion: lmcache.lmcache.ai/v1alpha1
-kind: LMCacheEngine
-metadata:
-  name: amd-cache
-spec:
-  gpuVendor: amd
-  nodeSelector:
-    feature.node.kubernetes.io/amd-gpu: "true"
-  l1:
-    sizeGB: 60
-```
+CacheBlend reuses cached KV at shifted positions. The operator manages it as a
+second CRD (`CacheBlendEngine`) plus a **mutating webhook** that injects the
+`lmcache-cacheblend` plugin into your vLLM pods — no vLLM image rebuild. See
+[DESIGN.md](DESIGN.md#cacheblend-cacheblendengine-crd--injection-webhook) for the
+architecture and the full field reference.
 
-vLLM connects to LMCache via HIP IPC over `hostIPC` exactly the same way as CUDA IPC on NVIDIA — the `hostIPC: true` and `PYTHONHASHSEED=0` requirements above apply unchanged. Use a ROCm-built LMCache image for `spec.image`.
+Quick start: deploy an engine, then opt a vLLM pod in with the label
+`lmcache.ai/cacheblend-inject: "true"` and the annotation
+`lmcache.ai/cacheblend-engine: "<engine>"` on its pod template (launch vLLM via the
+image ENTRYPOINT — a `sh -c` wrapper is skipped). Editable samples:
 
-### Custom Server Port
+- [`config/samples/lmcache_v1alpha1_cacheblendengine.yaml`](config/samples/lmcache_v1alpha1_cacheblendengine.yaml) — the `CacheBlendEngine`
+- [`config/samples/vllm_cacheblend_deployment.yaml`](config/samples/vllm_cacheblend_deployment.yaml) — an opted-in vLLM Deployment
 
-If the default port (5555) conflicts with other services:
+> [!IMPORTANT]
+> CacheBlend needs the **webhook**, so deploy with `make deploy` (not `make run`,
+> which is controller-only) and install **cert-manager** first
+> (`kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml`).
+> If Pod Security Standards are enforced, label the engine's and the vLLM pod's
+> namespaces `pod-security.kubernetes.io/enforce=privileged` — the webhook injects
+> `hostIPC`/`privileged`, which `baseline`/`restricted` reject.
 
-```yaml
-apiVersion: lmcache.lmcache.ai/v1alpha1
-kind: LMCacheEngine
-metadata:
-  name: my-cache
-spec:
-  server:
-    port: 6555
-  l1:
-    sizeGB: 60
-```
+> [!IMPORTANT]
+> CacheBlend is still in early stage development and under heavy testing. Its
+> docker image will not be publicly released until we are confident that it is
+> ready to be shipped for general use cases. If you would like to try it first,
+> please contact us in Slack Channel.
 
-The connection ConfigMap updates automatically — vLLM pods pick up the new port on restart.
-
-### Production with Prometheus Monitoring
-
-```yaml
-apiVersion: lmcache.lmcache.ai/v1alpha1
-kind: LMCacheEngine
-metadata:
-  name: production-cache
-  namespace: llm-serving
-spec:
-  nodeSelector:
-    nvidia.com/gpu.present: "true"
-  image:
-    repository: lmcache/standalone
-    tag: v0.1.0
-  server:
-    port: 6555
-    chunkSize: 256
-    maxWorkers: 4
-  l1:
-    sizeGB: 60
-  eviction:
-    triggerWatermark: 0.8
-    evictionRatio: 0.2
-  prometheus:
-    enabled: true
-    port: 9090
-    serviceMonitor:
-      enabled: true
-      labels:
-        release: kube-prometheus-stack
-  podAnnotations:
-    prometheus.io/scrape: "true"
-    prometheus.io/port: "9090"
-  priorityClassName: system-node-critical
-```
-
-### L2 Storage: Redis/Valkey
-
-Add a Redis L2 adapter for persistent KV cache storage beyond L1 memory:
-
-```yaml
-apiVersion: lmcache.lmcache.ai/v1alpha1
-kind: LMCacheEngine
-metadata:
-  name: cache-with-redis
-spec:
-  l1:
-    sizeGB: 60
-  l2Backend:
-    resp:
-      host: redis.default.svc.cluster.local
-      port: 6379
-      numWorkers: 8
-```
-
-For Redis authentication, create a Secret with `username` and `password` keys and reference it. Credentials are injected as environment variables and never appear in pod args or `kubectl describe` output. The Secret can live in a different namespace — the operator creates a managed copy automatically:
-
-```yaml
-# Create the secret (or reference an existing one in another namespace):
-# kubectl create secret generic redis-auth \
-#   --from-literal=username=myuser \
-#   --from-literal=password=mypassword
-spec:
-  l2Backend:
-    resp:
-      host: redis.default.svc.cluster.local
-      port: 6379
-      authSecretRef:
-        name: redis-auth
-        namespace: redis    # omit if the Secret is in the same namespace
-```
-
-### L2 Storage: Other Adapters (Raw Escape Hatch)
-
-For adapter types not yet natively supported by the operator (e.g. `nixl_store`, `fs`, `mock`, `raw_block`), use the `raw` escape hatch. The JSON is passed through to `--l2-adapter` as-is:
-
-```yaml
-spec:
-  l2Backend:
-    raw:
-      type: nixl_store
-      config:
-        backend: "POSIX"
-        backend_params:
-          file_path: "/data/lmcache/l2"
-          use_direct_io: "false"
-        pool_size: 64
-```
-
-Example `raw_block` configuration via the same escape hatch:
-
-```yaml
-spec:
-  l2Backend:
-    raw:
-      type: raw_block
-      config:
-        device_path: "/dev/nvme0n1"
-        slot_bytes: 1048576
-        block_align: 4096
-        header_bytes: 4096
-        meta_total_bytes: 268435456
-        use_odirect: true
-        num_store_workers: 2
-        num_lookup_workers: 1
-        num_load_workers: 4
-```
-
-Use an unmounted raw block device or a dedicated file path reserved for LMCache. With `use_odirect: true`, the LMCache server's `--l1-align-bytes` setting must be at least `block_align`.
-
-> [!NOTE]
-> Currently only a single L2 adapter is supported at a time. While LMCache multiprocess mode is designed to support multiple L2 adapters in cascade, this functionality is not yet fully tested. Once the multi-adapter pipeline is validated and performance is confirmed, the operator will be updated to support multiple adapters.
-
-### Override Auto-Computed Resources
-
-By default, the operator derives memory requests/limits from `l1.sizeGB`. To override:
-
-```yaml
-spec:
-  l1:
-    sizeGB: 60
-  resourceOverrides:
-    requests:
-      memory: "70Gi"
-      cpu: "8"
-    limits:
-      memory: "100Gi"
-```
+The webhook mutates **Pods**, not the Deployment, so verify on a pod
+(`kubectl get pod -l app=vllm-cacheblend -o yaml | grep -E "cb-plugin|cacheblend-injected|skip-reason"`).
+If nothing was injected, check the pod's `lmcache.ai/cacheblend-skip-reason`
+annotation (`command-override`, `kv-transfer-config-present`, `engine-not-found`,
+`payload-image-unset`, or `target-container-not-found`).
 
 ## Development
 

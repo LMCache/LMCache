@@ -433,7 +433,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
                 f"direction={req_meta.direction}, "
-                f"num_blocks={len(req_meta.op)}, "
+                f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
         return "[" + "\n".join(request_strs) + "]"

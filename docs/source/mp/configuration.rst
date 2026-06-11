@@ -156,7 +156,8 @@ Source: ``lmcache/v1/distributed/config.py``
      - Description
    * - ``--l1-size-gb``
      - *required*
-     - Size of L1 memory in GB.
+     - Size of the L1 tier in GB. Sizes the pinned-DRAM L1 by default, or the
+       GDS slab file when ``--gds-l1-path`` is set (see *GDS L1 Tier* below).
    * - ``--l1-use-lazy`` / ``--no-l1-use-lazy``
      - ``True``
      - Enable or disable lazy allocation for L1 memory.
@@ -172,6 +173,34 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).
+
+GDS L1 Tier
+-----------
+
+Source: ``lmcache/v1/distributed/config.py``
+
+Opt-in. Setting ``--gds-l1-path`` switches the L1 medium from pinned DRAM to
+an NVMe slab file accessed via GPUDirect Storage (cuFile DMA). The CPU
+pinned-DRAM tier is then disabled, and ``--l1-size-gb`` sizes the slab.
+Disable byte-array L2 adapters when this is on (the GDS tier exposes no L1
+memory buffer for them to register).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--gds-l1-path``
+     - Not set
+     - NVMe directory for the GDS L1 slab. Setting this enables the GDS L1
+       tier; one shared slab per process lives at
+       ``<path>/lmcache_gds_slab.bin``.
+   * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
+     - ``True``
+     - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
+       ext4).
 
 L1 Manager TTLs
 ----------------

@@ -180,3 +180,65 @@ Examples:
 
 The ZMQ server runs on the same default port (5555) and accepts vLLM
 connections exactly as in the local quick start.
+
+CPU-Only Quick Start
+--------------------
+
+LMCache MP mode works on hosts without a GPU. The server runs with a
+``StubCPUDevice`` and vLLM uses its CPU backend. KV tensors are shared
+between vLLM and the LMCache server via POSIX shared memory (zero-copy,
+no GPU required).
+
+**Step 1: Start the LMCache server (no GPU needed)**
+
+.. code-block:: bash
+
+    lmcache server \
+        --l1-size-gb 2 --eviction-policy LRU --port 5555
+
+Expected log output:
+
+.. code-block:: text
+
+    LMCache INFO: torch_dev=StubCPUDevice(device_type=cpu), ...
+    LMCache INFO: LMCache cache server is running...
+
+**Step 2: Start vLLM with the handle transfer mode**
+
+Pass ``lmcache.mp.mp_transfer_mode=handle`` in
+``kv_connector_extra_config`` to enable the POSIX-SHM zero-copy path.
+At startup the vLLM worker migrates each KV cache tensor to a shared
+memory segment (``/lmcache_kv_<pid>_<idx>``) so the LMCache server can
+map the same physical pages directly.
+
+.. code-block:: bash
+
+    vllm serve <model> --dtype bfloat16 \
+        --disable-hybrid-kv-cache-manager \
+        --no-enable-prefix-caching \
+        --kv-transfer-config \
+        '{"kv_connector": "LMCacheMPConnector",
+          "kv_role": "kv_both",
+          "kv_connector_module_path":
+            "lmcache.integration.vllm.lmcache_mp_connector",
+          "kv_connector_extra_config": {
+            "lmcache.mp.host": "tcp://localhost",
+            "lmcache.mp.port": 5555,
+            "lmcache.mp.mp_transfer_mode": "handle"
+          }}'
+
+Expected log output on the vLLM side:
+
+.. code-block:: text
+
+    LMCache INFO: lmcache.mp.mp_transfer_mode = handle (overridden, ...)
+    LMCache INFO: Creating transfer context (device_type=cpu, mode=handle)
+    LMCache INFO: Migrated CPU KV cache tensor (nbytes=...) to SHM /lmcache_kv_...
+
+**Step 3: Send requests** the same way as in the local quick start.
+
+.. note::
+   The default ``auto`` transfer mode routes CPU tensors to the
+   ``data`` path (worker-side gather/scatter). Use
+   ``mp_transfer_mode=handle`` explicitly to get the zero-copy SHM
+   path described above.

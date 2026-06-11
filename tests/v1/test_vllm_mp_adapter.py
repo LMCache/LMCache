@@ -26,7 +26,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
-from lmcache.v1.multiprocess.group_view import LMCacheGroupView
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import RequestType
 
 
@@ -43,17 +43,26 @@ class FakeMQClient:
 
 def _parallel_strategy(
     *,
-    kv_worker_id: int = 0,
-    actual_worker_id: int = 0,
+    vllm_worker_id: int = 0,
+    tp_size: int = 1,
+    use_mla: bool = False,
 ) -> ParallelStrategy:
-    world_size = max(kv_worker_id, actual_worker_id) + 1
+    """Build a ``ParallelStrategy`` for a single-scheduler test setup.
+
+    Args:
+        vllm_worker_id: The worker's rank within its scheduler group.
+        tp_size: The tensor parallel size.
+        use_mla: Whether MLA is enabled; under MLA the derived
+            ``kv_worker_id`` collapses to ``vllm_worker_id // tp_size``.
+
+    Returns:
+        A ``ParallelStrategy`` whose world size covers ``vllm_worker_id``.
+    """
     return ParallelStrategy(
-        use_mla=False,
-        kv_world_size=world_size,
-        kv_worker_id=kv_worker_id,
-        actual_world_size=world_size,
-        actual_worker_id=actual_worker_id,
-        tp_size=1,
+        use_mla=use_mla,
+        vllm_world_size=max(vllm_worker_id + 1, tp_size),
+        vllm_worker_id=vllm_worker_id,
+        tp_size=tp_size,
         pp_size=1,
     )
 
@@ -108,10 +117,8 @@ def fake_adapter(monkeypatch):
 
     parallel_strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=1,
-        kv_worker_id=0,
-        actual_world_size=1,
-        actual_worker_id=0,
+        vllm_world_size=1,
+        vllm_worker_id=0,
         tp_size=1,
         pp_size=1,
     )
@@ -178,7 +185,7 @@ def test_worker_zero_autostarts_before_mq_client(monkeypatch) -> None:
         context=MagicMock(name="zmq_context"),
         model_name="test-model",
         vllm_block_size=16,
-        parallel_strategy=_parallel_strategy(actual_worker_id=0),
+        parallel_strategy=_parallel_strategy(vllm_worker_id=0),
         extra_config={"lmcache.mp.autostart": True},
     )
 
@@ -188,7 +195,7 @@ def test_worker_zero_autostarts_before_mq_client(monkeypatch) -> None:
 
 
 def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
-    """Nonzero actual workers wait even when ``kv_worker_id`` is zero."""
+    """Nonzero vLLM worker ranks wait even when ``kv_worker_id`` is zero."""
     events: list[str] = []
 
     def fake_wait_for_server(**kwargs):
@@ -213,7 +220,9 @@ def test_nonzero_worker_waits_before_mq_client(monkeypatch) -> None:
         context=MagicMock(name="zmq_context"),
         model_name="test-model",
         vllm_block_size=16,
-        parallel_strategy=_parallel_strategy(kv_worker_id=0, actual_worker_id=1),
+        # MLA with tp_size=2: rank 1 derives kv_worker_id == 0 yet must
+        # still wait rather than race rank 0 for server ownership.
+        parallel_strategy=_parallel_strategy(vllm_worker_id=1, tp_size=2, use_mla=True),
         extra_config={"lmcache.mp.autostart": True},
     )
 
@@ -357,10 +366,10 @@ def test_submit_store_request_expands_block_ids_to_views(fake_adapter, monkeypat
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     adapter.kv_caches = {"layer.0": fake_tensor}
-    adapter.group_views = [
-        LMCacheGroupView(0, (0, 2)),
-        LMCacheGroupView(0, (4,)),
-        LMCacheGroupView(1, (1, 3)),
+    adapter.engine_group_infos = [
+        EngineGroupInfo(0, (0, 2)),
+        EngineGroupInfo(0, (4,)),
+        EngineGroupInfo(1, (1, 3)),
     ]
     transfer_ctx = MagicMock()
     fake_future = MagicMock()
