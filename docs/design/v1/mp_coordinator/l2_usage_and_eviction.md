@@ -37,7 +37,7 @@ MP server (store/lookup)
   POST /l2/events ──▶ Coordinator
                         ├─ L2UsageManager: per-salt byte accounting
                         ├─ L2EvictionManager: per-salt LRU
-                        └─ L2QuotaManager: per-salt byte limits
+                        └─ QuotaManager: per-salt byte limits
 
   Coordinator background loop (every eviction_check_interval, default 5s)
         │
@@ -72,11 +72,12 @@ Thread-safe per-salt byte counter. Two operations:
 
 Exposes ``get(salt)``, ``get_all()``, ``get_total()`` for the status endpoints.
 
-### L2QuotaManager (`quota_manager.py`)
+### QuotaManager (reused from ``lmcache.v1.distributed.quota_manager``)
 
 Thread-safe in-memory quota registry (``dict[str, int]`` + lock). CRUD via
-``set``, ``get``, ``delete``, ``list_all``. Quotas are set in GiB at the API
-and stored as bytes internally.
+``set_quota``, ``get_limit_bytes``, ``delete_quota``, ``list_quotas``.
+Quotas are set in GiB at the API and stored as bytes internally.
+Unregistered salts default to a 0-byte limit (allowlist semantics).
 
 ### L2EvictionManager (`eviction_manager.py`)
 
@@ -94,7 +95,7 @@ _key_sizes      : dict[CacheKey, int]                       # byte size per key
 - ``on_lookup(key)`` — touch (move to MRU end).
 - ``on_remove(keys)`` — remove from LRU tracking after confirmed deletion.
 - ``execute_evictions()`` — for each tracked salt, compare usage (from
-  ``L2UsageManager``) against quota (from ``L2QuotaManager``, default 0). If over
+  ``L2UsageManager``) against quota (from ``QuotaManager``, default 0). If over
   quota, select LRU keys targeting ``eviction_ratio`` of the overage. No quota
   or zero quota means evict all keys for that salt.
 

@@ -216,14 +216,15 @@ def test_status_list_includes_quota_only_salt():
 
 
 def test_default_salt_sentinel():
+    """``_default`` in path maps to the empty-string salt."""
     with _client() as client:
         client.put("/l2/quota/_default", json={"limit_gb": 3.0})
         client.post(
             "/l2/events",
-            json={"events": [_store("_default", 500)]},
+            json={"events": [_store("", 500)]},
         )
         data = client.get("/l2/status/_default").json()
-        assert data["cache_salt"] == "_default"
+        assert data["cache_salt"] == ""
         assert data["quota_exists"] is True
         assert abs(data["quota_limit_gb"] - 3.0) < 1e-6
         assert abs(data["usage_gb"] - 500 / 1024**3) < 1e-12
