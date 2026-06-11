@@ -539,24 +539,24 @@ class LocalDiskBackend(StorageBackendInterface):
         self.stats_monitor.update_local_storage_usage(self.usage)
 
         # TODO(Jiayi): need to add ref count in disk memory object
-        self.write_file(buffer, path)
+        try:
+            self.write_file(buffer, path)
+        except Exception:
+            self.usage -= size
+            self.stats_monitor.update_local_storage_usage(self.usage)
+            raise
+        finally:
+            memory_obj.ref_count_down()
+            self.disk_worker.remove_put_task(key)
 
-        # ref count down here because there's a ref_count_up in
-        # `submit_put_task` above.
-        # Ref count down better be before `insert_key` for testing
-        # purposes (e.g., testing mem_leak).
-        # TODO(Jiayi): This could be problematic if the
-        # freed memory object is immediately reused.
+        # 只有 write_file 成功才会走到这里
         size = memory_obj.get_physical_size()
         shape = memory_obj.metadata.shape
         dtype = memory_obj.metadata.dtype
         fmt = memory_obj.metadata.fmt
         cached_positions = memory_obj.metadata.cached_positions
-        memory_obj.ref_count_down()
 
         self.insert_key(key, size, shape, dtype, fmt, cached_positions=cached_positions)
-
-        self.disk_worker.remove_put_task(key)
 
         # Call the completion callback if provided
         if on_complete_callback is not None:
