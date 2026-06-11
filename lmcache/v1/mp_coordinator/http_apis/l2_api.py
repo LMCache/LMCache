@@ -92,7 +92,7 @@ def _eviction_manager(request: Request) -> L2EvictionManager:
 # -- Quota writes ------------------------------------------------------------
 
 
-@router.put("/l2/quota/{cache_salt}")
+@router.put("/l2/quota/{cache_salt}", response_model=None)
 async def set_quota(
     cache_salt: str, body: SetQuotaRequest, request: Request
 ) -> QuotaResponse | JSONResponse:
