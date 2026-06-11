@@ -654,13 +654,13 @@ class BlendV3Module:
                     metadata={"num_tokens": len(key.token_ids)},
                 )
             )
-            # CB_SEGMENTED_PREFIX: request the contiguous prefix with gap-tolerant
+            # SEGMENTED_PREFIX: request the contiguous prefix with gap-tolerant
             # retention so a mid-prefix L2 retrieve failure leaves the post-gap
             # chunks L1-resident (picked up by the sparse leg as L1 hits, hole
             # recomputed) instead of truncating the prefix at the gap.
             prefix_policy = (
                 TrimPolicy.SEGMENTED_PREFIX
-                if os.environ.get("CB_SEGMENTED_PREFIX") == "1"
+                if os.environ.get("SEGMENTED_PREFIX") == "1"
                 else TrimPolicy.PREFIX
             )
             self._lookup_module.lookup(
