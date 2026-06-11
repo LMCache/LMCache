@@ -120,7 +120,10 @@ class MPCacheServer:
         """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
             if isinstance(module, LMCacheDrivenTransferModule):
-                return {i: e.cache_context for i, e in module.cache_contexts.items()}
+                return {
+                    i: e.cache_context
+                    for i, e in module.context_entries_snapshot().items()
+                }
         return None
 
     def clear(self) -> None:

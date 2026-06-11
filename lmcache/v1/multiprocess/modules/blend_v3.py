@@ -406,7 +406,7 @@ class BlendV3Module:
     def report_status(self) -> dict:
         # Meta is derived live from MP server gpu_transfe
 
-        cache_contexts = self._transfer_module.cache_contexts
+        cache_contexts = self._transfer_module.context_entries_snapshot()
 
         def _meta(iid: int) -> "tuple[str, int] | None":
             entry = cache_contexts.get(iid)
@@ -453,8 +453,7 @@ class BlendV3Module:
         Raises:
             ValueError: If ``instance_id`` has no registered KV cache.
         """
-        cache_contexts = self._transfer_module.cache_contexts
-        if instance_id not in cache_contexts:
+        if self._transfer_module.get_context_entry(instance_id) is None:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
@@ -506,12 +505,25 @@ class BlendV3Module:
                 ``UNREGISTER_KV_CACHE`` to free the KV cache itself).
         """
         self._cb_rope_state.pop(instance_id, None)
-        if instance_id not in self._transfer_module.cache_contexts:
+        if self._transfer_module.get_context_entry(instance_id) is None:
             logger.warning(
                 "cb_unregister_rope: instance %d not registered", instance_id
             )
             return
         logger.info("Unregistered CB rope state for instance %d", instance_id)
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        """Drop blend state for a reaped instance (InstanceReapListener).
+
+        Only the CB rope state is held per instance; the GPU cache context is
+        owned by ``LMCacheDrivenTransferModule`` (no mirror here), so reaping
+        the GPU entry frees it directly. A no-op if no rope state is held.
+
+        Args:
+            instance_id: The reaped worker's instance ID.
+        """
+        if self._cb_rope_state.pop(instance_id, None) is not None:
+            logger.info("Dropped CB rope state for reaped instance %d", instance_id)
 
     # ------------------------------------------------------------------
     # Unified lookup (CB_UNIFIED_LOOKUP) + shared helpers
@@ -964,7 +976,7 @@ class BlendV3Module:
             job = (tokens_in_range, chunk_hashes, start_chunk_idx, key.start)
             with self._pending_fp_lock:
                 self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
-            entry = self._transfer_module.cache_contexts.get(instance_id)
+            entry = self._transfer_module.get_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
             if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
                 gpu_ctx.cupy_stream.launch_host_func(
@@ -1237,8 +1249,8 @@ class BlendV3Module:
             ValueError: If the instance has no registered KV cache or rope
                 state. MLA layouts are unsupported (raised during re-RoPE).
         """
-        cache_contexts = self._transfer_module.cache_contexts
-        if instance_id not in cache_contexts:
+        entry = self._transfer_module.get_context_entry(instance_id)
+        if entry is None:
             raise ValueError(
                 f"Instance {instance_id} not registered for paged KV cache"
             )
@@ -1247,7 +1259,7 @@ class BlendV3Module:
                 f"Instance {instance_id} has no CB rope state; "
                 "send CB_REGISTER_ROPE_V3 before CB_RETRIEVE_PRE_COMPUTED_V3."
             )
-        gpu_context = cache_contexts[instance_id].cache_context
+        gpu_context = entry.cache_context
         rope_state = self._cb_rope_state[instance_id]
         chunk_size = self._ctx.chunk_size
 

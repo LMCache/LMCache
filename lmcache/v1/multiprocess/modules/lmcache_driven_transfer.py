@@ -451,11 +451,6 @@ class LMCacheDrivenTransferModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    @property
-    def cache_contexts(self) -> dict[int, ContextEntry]:
-        """Per-instance GPU context registry."""
-        return self._cache_contexts
-
     def get_context_entry(self, instance_id: int) -> ContextEntry | None:
         """Return the entry for ``instance_id``, refreshing its last-seen time.
 
