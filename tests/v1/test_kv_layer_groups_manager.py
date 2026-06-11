@@ -116,6 +116,21 @@ class TestKVLayerGroupsManager:
                 engine_group_infos=[EngineGroupInfo(0, (2,))],
             )
 
+    def test_build_rejects_coarse_engine_group_infos(self):
+        # One info covering two layers that split into two kernel groups
+        # (different num_heads) violates the one-info-per-kernel-group
+        # contract.
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
+        ]
+        with pytest.raises(ValueError, match="engine group info"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                engine_group_infos=[EngineGroupInfo(0, (0, 1))],
+            )
+
     def test_build_different_shapes(self):
         tensors = [
             torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
@@ -503,7 +518,8 @@ class TestKernelAndObjectGroups:
             tensors,
             num_blocks=8,
             engine_group_infos=[
-                EngineGroupInfo(0, (0, 1), tokens_per_block=256),
+                EngineGroupInfo(0, (0,), tokens_per_block=256),
+                EngineGroupInfo(0, (1,), tokens_per_block=256),
                 EngineGroupInfo(1, (2,), tokens_per_block=64),
                 EngineGroupInfo(2, (3,), tokens_per_block=4),
             ],

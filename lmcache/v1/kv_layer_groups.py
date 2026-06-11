@@ -300,8 +300,8 @@ class KVLayerGroupsManager:
             gpu_kv_format: Format returned by
                 :func:`normalize_kv_and_discover_format`.
             num_blocks: Number of paged blocks in the device KV cache.
-            engine_group_infos: Engine KV cache group metadata, including
-                the engine group ids, and the sliding window information.
+            engine_group_infos: Engine KV cache group metadata, one info per
+                kernel group in kernel-group order, or empty.
             lmcache_logical_chunk_size: Tokens per LMCache chunk
         """
         # Import here to break a circular import via
@@ -312,10 +312,7 @@ class KVLayerGroupsManager:
             make_page_buffer_shape_desc,
             resolve_block_stride_and_log_layout,
         )
-        from lmcache.v1.multiprocess.group_view import (
-            get_engine_group_indices,
-            get_layer_sw_sizes,
-        )
+        from lmcache.v1.multiprocess.group_view import get_engine_group_indices
 
         self._kernel_groups: list[KernelGroupInfo] = []
         self._object_groups: list[ObjectGroupInfo] = []
@@ -328,19 +325,20 @@ class KVLayerGroupsManager:
         per_layer_engine_group_idx = get_engine_group_indices(
             engine_group_infos, num_layers
         )
-        per_layer_sw_size = get_layer_sw_sizes(engine_group_infos, num_layers)
-
-        # Engine-reported logical tokens per paged chunk, keyed by engine
-        # group id. 0 / missing means the engine did not report it.
-        engine_tokens_per_block: dict[int, int] = {
-            info.engine_group_id: info.tokens_per_block
-            for info in engine_group_infos
-            if info.tokens_per_block > 0
-        }
 
         groups_by_identity = group_layers_by_identity(
             kv_caches, gpu_kv_format, num_layers, per_layer_engine_group_idx
         )
+
+        # Engine group infos are produced by the same group_layers_by_identity
+        # bucketing on the engine side, so they correspond 1:1, in order, to
+        # the kernel groups built below.
+        if engine_group_infos and len(engine_group_infos) != len(groups_by_identity):
+            raise ValueError(
+                f"Got {len(engine_group_infos)} engine group infos for "
+                f"{len(groups_by_identity)} kernel groups; expecting one "
+                "engine group info per kernel group"
+            )
 
         # Emit groups in order of their first-appearing layer so that group
         # indices remain deterministic across runs.
@@ -363,11 +361,23 @@ class KVLayerGroupsManager:
                 block_stride_elems=block_stride_elems,
             )
 
+            info = engine_group_infos[group_idx] if engine_group_infos else None
+            if info is not None and tuple(indices) != tuple(info.layer_indices):
+                raise ValueError(
+                    f"group {group_idx}: engine group info covers layers "
+                    f"{info.layer_indices}, but the kernel group covers "
+                    f"layers {indices}"
+                )
+
             # tokens_per_block comes from the engine's KV cache spec; when
             # absent, fall back to the physical slot count so the group is
             # treated as non-compressed (compress_ratio == 1).
-            tokens_per_block = engine_tokens_per_block.get(engine_group_idx, bs)
-            sw_size_tokens = self._merge_layer_sw_sizes(per_layer_sw_size, indices)
+            tokens_per_block = (
+                info.tokens_per_block
+                if info is not None and info.tokens_per_block > 0
+                else bs
+            )
+            sw_size_tokens = info.sw_size_tokens if info is not None else -1
 
             self._validate_block_chunk_size_config(
                 group_idx,
@@ -554,63 +564,33 @@ class KVLayerGroupsManager:
         Returns:
             A list of ObjectGroupInfo instances representing the detected object groups.
         """
-        # TODO(ApostaC): enable the real object group detection below (bucket
-        # kernel groups by their cross-chunk sliding window size in LMCache
-        # chunks) once the lookup/registry side supports multiple object
-        # groups. Until then, we use a single object group, which means all
-        # kernel groups' KV caches will be stored in the same memory object.
-        #
+        # TODO(ApostaC): The following commented code groups the object groups based
+        # on the sliding window information. We need to re-enable this after the lookup
+        # logic for sliding window has been implemented.
+        # For now, we put all the kernel groups into one object group.
+
         # chunk_size = self._lmcache_chunk_size
         # groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
         # for kernel_group_idx, group in enumerate(self._kernel_groups):
-        #     if group.sw_size_tokens == -1:
-        #         sw_size_chunks = -1
-        #     else:
-        #         sw_size_chunks = (
-        #             group.sw_size_tokens + chunk_size - 1
-        #         ) // chunk_size
-        #     groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
+        #    if group.sw_size_tokens == -1:
+        #        sw_size_chunks = -1
+        #    else:
+        #        sw_size_chunks = (
+        #            group.sw_size_tokens + chunk_size - 1
+        #        ) // chunk_size
+        #    groups_by_sw_size[sw_size_chunks].append(kernel_group_idx)
         # return [
-        #     ObjectGroupInfo(
-        #         kernel_group_indices=kernel_group_indices,
-        #         sw_size_chunks=sw_size_chunks,
-        #     )
-        #     for sw_size_chunks, kernel_group_indices in sorted(
-        #         groups_by_sw_size.items(), key=lambda kv: kv[1][0]
-        #     )
+        #    ObjectGroupInfo(
+        #        kernel_group_indices=kernel_group_indices,
+        #        sw_size_chunks=sw_size_chunks,
+        #    )
+        #    for sw_size_chunks, kernel_group_indices in sorted(
+        #        groups_by_sw_size.items(), key=lambda kv: kv[1][0]
+        #    )
         # ]
         return [
             ObjectGroupInfo(kernel_group_indices=list(range(len(self._kernel_groups))))
         ]
-
-    @staticmethod
-    def _merge_layer_sw_sizes(
-        per_layer_sw_size: "list[int] | None", layer_indices: list[int]
-    ) -> int:
-        """Merge the per-layer sliding window sizes of one kernel group.
-
-        Args:
-            per_layer_sw_size: Sliding window size per registered tensor
-                index, or ``None`` when no engine group metadata exists.
-            layer_indices: Registered tensor indices of the group's layers.
-
-        Returns:
-            The group's common sliding window size in tokens, or ``-1`` when
-            the layers are not sliding-window attention or mix different
-            window sizes.
-        """
-        if per_layer_sw_size is None:
-            return -1
-        sw_sizes = {per_layer_sw_size[idx] for idx in layer_indices}
-        if len(sw_sizes) == 1:
-            return sw_sizes.pop()
-        logger.warning(
-            "Kernel group layers %s mix different sliding window sizes %s; "
-            "treating the group as full attention",
-            layer_indices,
-            sorted(sw_sizes),
-        )
-        return -1
 
     @staticmethod
     def _validate_block_chunk_size_config(

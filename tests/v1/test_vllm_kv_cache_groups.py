@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # Third Party
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
+import pytest
 import torch
 
 # First Party
@@ -20,6 +16,10 @@ from lmcache.v1.multiprocess.group_view import (
     num_engine_groups,
 )
 
+# Test doubles for the vLLM KV cache spec classes. Unit tests must run
+# without vLLM installed; sliding-window specs are detected by class name,
+# so the doubles share the vLLM class names.
+
 
 @dataclass
 class MockKVCacheSpec:
@@ -27,34 +27,37 @@ class MockKVCacheSpec:
 
 
 @dataclass
+class SlidingWindowSpec:
+    block_size: int
+    sliding_window: int
+
+
+@dataclass
+class SlidingWindowMLASpec(SlidingWindowSpec):
+    pass
+
+
+@dataclass
+class FullAttentionSpec:
+    block_size: int
+    sliding_window: "int | None" = None
+
+
+@dataclass
+class UniformTypeKVCacheSpecs:
+    block_size: int
+    kv_cache_specs: "dict[str, object]" = field(default_factory=dict)
+
+
+@dataclass
 class MockKVCacheGroup:
     layer_names: list[str]
-    kv_cache_spec: MockKVCacheSpec
+    kv_cache_spec: object
 
 
 @dataclass
 class MockKVCacheConfig:
     kv_cache_groups: list[MockKVCacheGroup]
-
-
-def _full_attention_spec(sliding_window: "int | None" = None) -> FullAttentionSpec:
-    return FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=torch.float16,
-        sliding_window=sliding_window,
-    )
-
-
-def _sliding_window_spec(sliding_window: int) -> SlidingWindowSpec:
-    return SlidingWindowSpec(
-        block_size=16,
-        num_kv_heads=8,
-        head_size=64,
-        dtype=torch.float16,
-        sliding_window=sliding_window,
-    )
 
 
 def _same_shape_caches(names: list[str]) -> dict[str, torch.Tensor]:
@@ -122,18 +125,25 @@ def test_conversion_splits_by_lmcache_layer_identity():
 
 
 def test_conversion_resolves_sliding_window_size():
-    """A SlidingWindowSpec group carries its window size in tokens."""
+    """A SlidingWindowSpec group carries its window size in tokens;
+    subclasses count too."""
     spec = create_engine_group_infos_from_vllm(
         MockKVCacheConfig(
             kv_cache_groups=[
-                MockKVCacheGroup(["layer.0"], _full_attention_spec()),
-                MockKVCacheGroup(["layer.1"], _sliding_window_spec(64)),
+                MockKVCacheGroup(["layer.0"], FullAttentionSpec(block_size=16)),
+                MockKVCacheGroup(
+                    ["layer.1"], SlidingWindowSpec(block_size=16, sliding_window=64)
+                ),
+                MockKVCacheGroup(
+                    ["layer.2"],
+                    SlidingWindowMLASpec(block_size=16, sliding_window=128),
+                ),
             ]
         ),
-        _same_shape_caches(["layer.0", "layer.1"]),
+        _same_shape_caches(["layer.0", "layer.1", "layer.2"]),
     )
 
-    assert [group.sw_size_tokens for group in spec] == [-1, 64]
+    assert [group.sw_size_tokens for group in spec] == [-1, 64, 128]
 
 
 def test_conversion_ignores_full_attention_sliding_window():
@@ -143,7 +153,8 @@ def test_conversion_ignores_full_attention_sliding_window():
         MockKVCacheConfig(
             kv_cache_groups=[
                 MockKVCacheGroup(
-                    ["layer.0", "layer.1"], _full_attention_spec(sliding_window=1024)
+                    ["layer.0", "layer.1"],
+                    FullAttentionSpec(block_size=16, sliding_window=1024),
                 ),
             ]
         ),
@@ -178,14 +189,8 @@ def test_conversion_uniform_type_specs_resolve_per_layer():
     uniform_spec = UniformTypeKVCacheSpecs(
         block_size=16,
         kv_cache_specs={
-            "layer.0": _full_attention_spec(),
-            "layer.1": SlidingWindowSpec(
-                block_size=16,
-                num_kv_heads=16,
-                head_size=64,
-                dtype=torch.float16,
-                sliding_window=512,
-            ),
+            "layer.0": FullAttentionSpec(block_size=16),
+            "layer.1": SlidingWindowSpec(block_size=16, sliding_window=512),
         },
     )
     spec = create_engine_group_infos_from_vllm(
@@ -199,22 +204,20 @@ def test_conversion_uniform_type_specs_resolve_per_layer():
     assert [group.sw_size_tokens for group in spec] == [-1, 512]
 
 
-def test_conversion_mixed_window_layers_fall_back_to_full_attention():
-    """Same-identity layers mixing different windows conservatively resolve
-    to non-sliding-window for the merged group."""
+def test_conversion_mixed_window_layers_in_one_group_rejected():
+    """Same-identity layers mixing different windows are inconsistent vLLM
+    metadata and fail loudly."""
     uniform_spec = UniformTypeKVCacheSpecs(
         block_size=16,
         kv_cache_specs={
-            "layer.0": _full_attention_spec(),
-            "layer.1": _sliding_window_spec(64),
+            "layer.0": FullAttentionSpec(block_size=16),
+            "layer.1": SlidingWindowSpec(block_size=16, sliding_window=64),
         },
     )
-    spec = create_engine_group_infos_from_vllm(
-        MockKVCacheConfig(
-            kv_cache_groups=[MockKVCacheGroup(["layer.0", "layer.1"], uniform_spec)]
-        ),
-        _same_shape_caches(["layer.0", "layer.1"]),
-    )
-
-    assert [group.layer_indices for group in spec] == [(0, 1)]
-    assert [group.sw_size_tokens for group in spec] == [-1]
+    with pytest.raises(ValueError, match="different sliding window sizes"):
+        create_engine_group_infos_from_vllm(
+            MockKVCacheConfig(
+                kv_cache_groups=[MockKVCacheGroup(["layer.0", "layer.1"], uniform_spec)]
+            ),
+            _same_shape_caches(["layer.0", "layer.1"]),
+        )

@@ -8,12 +8,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-# Third Party
-from vllm.v1.kv_cache_interface import (
-    SlidingWindowSpec,
-    UniformTypeKVCacheSpecs,
-)
-
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.gpu_connector.utils import LayoutHints
@@ -25,6 +19,15 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 logger = init_logger(__name__)
 
 
+def _is_sliding_window_spec(spec: Any) -> bool:
+    """Return whether the KV cache spec is a vLLM sliding-window spec.
+
+    Checked by class name so this module stays importable without vLLM.
+    Subclasses such as ``SlidingWindowMLASpec`` count.
+    """
+    return any(cls.__name__ == "SlidingWindowSpec" for cls in type(spec).__mro__)
+
+
 def _resolve_per_layer_sw_sizes(
     vllm_groups: Sequence[Any],
     layer_to_idx: Mapping[str, int],
@@ -32,11 +35,7 @@ def _resolve_per_layer_sw_sizes(
 ) -> list[int]:
     """Resolve the sliding window size in tokens for each registered KV tensor.
 
-    Only true sliding-window specs (``SlidingWindowSpec`` and subclasses such
-    as ``SlidingWindowMLASpec``) count. ``FullAttentionSpec.sliding_window``
-    is deliberately ignored: it marks SWA layers managed as full attention
-    (hybrid allocator disabled), where vLLM allocates blocks for all tokens so
-    storing and retrieving everything is correct.
+    Will resolve -1 for non-sliding-window layers.
 
     Args:
         vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
@@ -53,11 +52,12 @@ def _resolve_per_layer_sw_sizes(
         spec = getattr(group, "kv_cache_spec", None)
         if spec is None:
             continue
+        # ``UniformTypeKVCacheSpecs`` carries per-layer specs in
+        # ``kv_cache_specs``; other specs apply to all of the group's layers.
+        per_layer_specs = getattr(spec, "kv_cache_specs", None)
         for name in group.layer_names:
-            layer_spec = spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                layer_spec = spec.kv_cache_specs[name]
-            if isinstance(layer_spec, SlidingWindowSpec):
+            layer_spec = per_layer_specs[name] if per_layer_specs else spec
+            if _is_sliding_window_spec(layer_spec):
                 per_layer_sw_size[layer_to_idx[name]] = layer_spec.sliding_window
     return per_layer_sw_size
 
@@ -71,19 +71,20 @@ def _merge_layer_sw_sizes(per_layer_sw_size: list[int], indices: list[int]) -> i
 
     Returns:
         The group's common sliding window size in tokens, or ``-1`` when the
-        layers are not sliding-window attention or mix different window sizes
-        (mixed groups conservatively fall back to full attention).
+        layers are not sliding-window attention.
+
+    Raises:
+        ValueError: If the layers have different non-negative sliding window sizes.
     """
     sw_sizes = {per_layer_sw_size[idx] for idx in indices}
-    if len(sw_sizes) == 1:
-        return sw_sizes.pop()
-    logger.warning(
-        "Layers %s mix different sliding window sizes %s; "
-        "treating the group as full attention",
-        indices,
-        sorted(sw_sizes),
-    )
-    return -1
+    if len(sw_sizes) != 1:
+        raise ValueError(
+            f"Layers with indices {indices} have different sliding window sizes "
+            f"{sw_sizes}, but they are in the same group. This should "
+            "not happen because vLLM should only group layers with the same "
+            "KV cache spec, but got inconsistent metadata or registered tensors."
+        )
+    return sw_sizes.pop()
 
 
 def create_engine_group_infos_from_vllm(

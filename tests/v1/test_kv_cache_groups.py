@@ -7,7 +7,6 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
     get_engine_group_indices,
-    get_layer_sw_sizes,
     num_engine_group_infos,
     num_engine_groups,
     slice_block_ids_per_group,
@@ -43,32 +42,6 @@ def test_engine_group_infos_expand_engine_block_ids():
         [10, 11],
         [20, 21],
     ]
-
-
-def test_layer_sw_sizes_default_to_none():
-    assert get_layer_sw_sizes([], 1) is None
-    assert get_layer_sw_sizes([EngineGroupInfo(0, (0,))], 0) is None
-
-
-def test_layer_sw_sizes_build_per_layer_mapping():
-    """Each layer maps to its group's sw_size_tokens; uncovered layers get -1."""
-    groups = [
-        EngineGroupInfo(0, (0, 2), sw_size_tokens=64),
-        EngineGroupInfo(1, (1,)),
-    ]
-
-    assert get_layer_sw_sizes(groups, 4) == [64, -1, 64, -1]
-
-
-def test_layer_sw_sizes_reject_out_of_range_layer():
-    groups = [EngineGroupInfo(0, (0, 5), sw_size_tokens=64)]
-
-    try:
-        get_layer_sw_sizes(groups, 3)
-    except ValueError as exc:
-        assert "outside registered layer range" in str(exc)
-    else:
-        raise AssertionError("Expected out-of-range layer index to fail")
 
 
 def test_engine_group_info_old_payload_defaults_sw_size():
