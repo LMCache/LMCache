@@ -93,56 +93,33 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-opt-125m-v1
 
-      - name: Cache vLLM pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: vllm-cpu-ubuntu-22.04-py3.12-nightly
-          restore-keys: |
-            vllm-cpu-ubuntu-22.04-py3.12-
+      - name: Install vLLM CPU (prebuilt nightly from PyPI)
+        run: |
+          # Pre-built CPU-only vLLM wheel published as `vllm-cpu-nightly`
+          # on PyPI by .github/workflows/build_and_publish_vllm_cpu_nightly.sh
+          # (runs on devcloud). Avoids the ~30-40 min in-CI compile.
+          # The wheel is built on ubuntu-22.04 + py3.12 with the same gcc-12
+          # toolchain, so it is ABI-compatible with this runner.
+          # `--extra-index-url` is needed because the wheel depends on
+          # torch==2.11.0 which is only published on the pytorch CPU index.
+          pip install "numpy<2"
+          pip install vllm-cpu-nightly \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+          python -c "import vllm, torch; print('vllm:', vllm.__version__, 'torch:', torch.__version__, 'cuda:', torch.cuda.is_available())"
 
       - name: Install lmcache (CPU-only, no vLLM)
         env:
           NO_GPU_EXT: "1"
           SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0.dev0"
         run: |
+          # vLLM is already installed above (along with torch==2.11.0+cpu),
+          # so we deliberately skip `pip install torch` here to avoid pip
+          # pulling a newer torch and then having to downgrade it back.
           python -m pip install --upgrade pip
           python -m pip install -r requirements/build.txt
-          python -m pip install torch
           python -m pip install -r requirements/common.txt
           python -m pip install -r requirements/cli.txt
           python -m pip install -e . --no-deps --no-build-isolation
-
-      - name: Install vLLM CPU build
-        env:
-          VLLM_TARGET_DEVICE: cpu
-          VLLM_VERSION_TAG: v0.22.1
-          CC: gcc-12
-          CXX: g++-12
-        run: |
-          # The Linux x86_64 wheel on wheels.vllm.ai is published under a
-          # clean "0.22.1" version (no "+cpu" PEP 440 local label), so
-          # vllm.platforms.cpu_platform_plugin's vllm_version_matches_substr
-          # ("cpu") check fails at runtime and the engine falls into
-          # UnspecifiedPlatform, raising "Failed to infer device type".
-          # Build from the upstream git tag with VLLM_TARGET_DEVICE=cpu so
-          # the resulting install advertises itself as a CPU build.
-          # The vLLM CPU requirements pin torch==2.11.0+cpu, which is only
-          # published on download.pytorch.org/whl/cpu, so add that as an
-          # extra index.
-          # vLLM's X86 CPU backend requires gcc/g++ >= 12.3, but the
-          # ubuntu-22.04 runner ships gcc 11.4 by default. Install gcc-12
-          # (12.3.x in jammy) and point CC/CXX at it.
-          # Also install libnuma-dev: vLLM's csrc/cpu/utils.cpp #includes
-          # <numa.h>, so the header must be present at build time.
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-12 g++-12 libnuma-dev
-          pip install "numpy<2"
-          pip install \
-            --extra-index-url https://download.pytorch.org/whl/cpu \
-            "vllm @ git+https://github.com/vllm-project/vllm@${VLLM_VERSION_TAG}"
-          python -c "import vllm, torch; print('vllm:', vllm.__version__, 'torch:', torch.__version__, 'cuda:', torch.cuda.is_available())"
 
       - name: Download facebook/opt-125m
         run: |
@@ -264,18 +241,6 @@ jobs:
           restore-keys: |
             vllm-cpu-macos-latest-py3.12-
 
-      - name: Install lmcache (CPU-only, no vLLM)
-        env:
-          NO_GPU_EXT: "1"
-          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0.dev0"
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements/build.txt
-          python -m pip install torch
-          python -m pip install -r requirements/common.txt
-          python -m pip install -r requirements/cli.txt
-          python -m pip install -e . --no-deps --no-build-isolation
-
       - name: Install vLLM CPU build
         env:
           VLLM_TARGET_DEVICE: cpu
@@ -289,10 +254,27 @@ jobs:
           # tag instead so the source-tree version stays clean. Build
           # isolation is left on so vLLM's pyproject build-system pulls
           # in cmake / setuptools-rust / torch on its own.
+          # TODO: replace with a prebuilt `vllm-cpu-nightly` macOS wheel
+          # once the devcloud build script learns to cross-build for mac.
           pip install "numpy<2"
           pip install \
             "vllm @ git+https://github.com/vllm-project/vllm@${VLLM_VERSION_TAG}"
           python -c "import vllm; print('vllm:', vllm.__version__)"
+
+      - name: Install lmcache (CPU-only, no vLLM)
+        env:
+          NO_GPU_EXT: "1"
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0.dev0"
+        run: |
+          # vLLM is already installed above (along with the torch version
+          # it pins), so we deliberately skip `pip install torch` here to
+          # avoid pip pulling a newer torch and then having to downgrade
+          # it back.
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/build.txt
+          python -m pip install -r requirements/common.txt
+          python -m pip install -r requirements/cli.txt
+          python -m pip install -e . --no-deps --no-build-isolation
 
       - name: Download facebook/opt-125m
         run: |
