@@ -30,6 +30,7 @@ import aiofiles.os
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -99,22 +100,21 @@ def _object_key_to_filename(key: ObjectKey) -> str:
 
     Unsalted::
 
-        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+        <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>.data
 
     Salted (trailing ``cache_salt``)::
 
-        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>.data
-
-    The 3-field unsalted shape is bit-identical to the pre-cache_salt
-    format, so existing un-salted cache directories remain valid and
-    no migration is needed.
+        <safe_model>@0x<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>.data
 
     ``kv_rank`` is written in ``0x`` prefixed hex so each byte
     of the bitmap ``(ws<<24)|(rank<<16)|(local_ws<<8)|local``
-    is directly readable.
+    is directly readable. ``object_group_id`` is written in plain hex.
     """
     safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
-    base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    base = (
+        f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}"
+        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    )
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
     return f"{base}{_FILE_EXT}"
@@ -125,7 +125,7 @@ def _filename_to_object_key(
 ) -> Optional[ObjectKey]:
     """Reverse ``_object_key_to_filename``.
 
-    Accepts both the 3-field unsalted shape and the 4-field salted
+    Accepts both the 4-field unsalted shape and the 5-field salted
     shape (trailing ``cache_salt``). Returns ``None`` for anything
     else. Since ``model_name`` is guaranteed not to contain ``@``,
     plain ``split`` suffices — no marker, no rsplit.
@@ -134,11 +134,11 @@ def _filename_to_object_key(
         return None
     stem = filename[: -len(_FILE_EXT)]
     parts = stem.split(_KEY_SEP)
-    if len(parts) == 3:
-        safe_model, kv_rank_str, chunk_hash_hex = parts
+    if len(parts) == 4:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
         cache_salt = ""
-    elif len(parts) == 4:
-        safe_model, kv_rank_str, chunk_hash_hex, cache_salt = parts
+    elif len(parts) == 5:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
     else:
         return None
 
@@ -146,6 +146,7 @@ def _filename_to_object_key(
     try:
         chunk_hash = bytes.fromhex(chunk_hash_hex)
         kv_rank = int(kv_rank_str, 16)
+        object_group_id = int(object_group_str, 16)
         # ObjectKey.__post_init__ raises ValueError when the decoded
         # model_name / cache_salt violate the forbidden-char or length
         # invariants (e.g. a stray file from another tool on disk).
@@ -155,6 +156,7 @@ def _filename_to_object_key(
             chunk_hash=chunk_hash,
             model_name=model_name,
             kv_rank=kv_rank,
+            object_group_id=object_group_id,
             cache_salt=cache_salt,
         )
     except ValueError:
@@ -286,7 +288,7 @@ class FSL2Adapter(L2AdapterInterface):
 
         # Task bookkeeping
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -339,7 +341,14 @@ class FSL2Adapter(L2AdapterInterface):
 
     def pop_completed_store_tasks(
         self,
-    ) -> dict[L2TaskId, bool]:
+    ) -> dict[L2TaskId, L2StoreResult]:
+        """Pop all completed store tasks.
+
+        Returns:
+            dict[L2TaskId, L2StoreResult]: a dictionary mapping the task
+            id to an ``L2StoreResult`` that encodes both the success flag
+            and the bytes actually transferred.
+        """
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
@@ -568,6 +577,7 @@ class FSL2Adapter(L2AdapterInterface):
         task_id: L2TaskId,
     ) -> None:
         success = True
+        bytes_written = 0
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
@@ -606,6 +616,7 @@ class FSL2Adapter(L2AdapterInterface):
                             await f.write(buf)
 
                     await aiofiles.os.replace(tmp_path, file_path)
+                    bytes_written += size
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -627,7 +638,7 @@ class FSL2Adapter(L2AdapterInterface):
             success = False
 
         with self._lock:
-            self._completed_store_tasks[task_id] = success
+            self._completed_store_tasks[task_id] = L2StoreResult(success, bytes_written)
         self._store_efd.notify()
 
     # ---- lookup ---------------------------------------------------------

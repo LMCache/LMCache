@@ -1,0 +1,147 @@
+name: macOS Compat
+
+# Smoke test that verifies the lmcache multiprocess server can be
+# installed and launched on macOS (GPU backend skipped via NO_GPU_EXT=1;
+# common C++ extensions — native_storage_ops / lmcache_redis /
+# lmcache_fs — are still built so the cross-platform PipeNotifier
+# fallback in csrc/storage_backends/event_notifier.h is exercised),
+# and that both the HTTP endpoint and the `lmcache` CLI are usable.
+# This is a "best-effort basic compatibility" check — it does not
+# cover GPU / CUDA / vLLM code paths.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "dev"
+      - "release-**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# Single source of truth for the smoke-script contract. The script
+# (.github/scripts/macos_smoke_test.sh) reads these from the env, and
+# the failure-artifact upload step below references LMCACHE_LOG_FILE.
+env:
+  LMCACHE_HTTP_PORT: "18080"
+  LMCACHE_ZMQ_PORT: "15555"
+  LMCACHE_LOG_FILE: "/tmp/lmcache_server.log"
+  LMCACHE_STARTUP_TIMEOUT: "180"
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      # workflow_call / workflow_dispatch bypass the paths-filter (which
+      # only runs for push / pull_request). Treat both as "always run"
+      # so callers don't get a silently-skipped job.
+      lmcache: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || steps.filter.outputs.lmcache == 'true' }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            lmcache:
+              - 'lmcache/**'
+              - 'pyproject.toml'
+              - 'setup.py'
+              - 'requirements/**.txt'
+              - '.github/workflows/macos_compat.yml'
+              - '.github/scripts/macos_smoke_test.sh'
+              - '!operator/**'
+
+  macos-smoke:
+    needs: changes
+    if: needs.changes.outputs.lmcache == 'true'
+    name: "macOS smoke: py${{ matrix.python }} on ${{ matrix.platform }}"
+    runs-on: "${{ matrix.platform }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        python:
+          - "3.11"
+          - "3.12"
+        platform:
+          # macos-latest is Apple Silicon (arm64);
+          - "macos-latest"
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          # Shallow clone is enough; SETUPTOOLS_SCM_PRETEND_VERSION
+          # below avoids any git-tag resolution by setuptools-scm.
+          fetch-depth: 1
+
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/*.txt
+
+      - name: Install lmcache (CPU-only, common C++ ext, no vLLM)
+        env:
+          # NO_GPU_EXT=1: build common C++ extensions (native_storage_ops,
+          # lmcache_redis, lmcache_fs) but skip the CUDA / ROCm / SYCL
+          # backend. Mirrors build_cpu_artifacts.yml on the macOS axis.
+          NO_GPU_EXT: "1"
+          # Pin a synthetic version so setuptools-scm never inspects
+          # git tags. Defense-in-depth on top of pyproject.toml's
+          # tag_regex; harmless if tag_regex already filters tags.
+          SETUPTOOLS_SCM_PRETEND_VERSION: "0.0.0.dev0"
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements/build.txt
+          # Pure-Python deps. macOS wheels exist for everything in
+          # common.txt; we explicitly skip requirements/cuda13_core.txt
+          # (the default core file picked by setup.py) since cupy and
+          # nixl are CUDA/Linux-only.
+          python -m pip install torch
+          python -m pip install -r requirements/common.txt
+          # CLI entry points eagerly import openai / matplotlib (e.g.
+          # lmcache.cli.commands.bench), so cli.txt is needed for the
+          # `lmcache --help` step inside the smoke script.
+          python -m pip install -r requirements/cli.txt
+          # Install lmcache itself with --no-deps so setup.py's
+          # install_requires (which appends cuda13_core.txt by default)
+          # cannot drag CUDA-only wheels onto macOS.
+          python -m pip install -e . --no-deps --no-build-isolation
+
+      - name: Run macOS smoke test
+        run: |
+          chmod +x .github/scripts/macos_smoke_test.sh
+          .github/scripts/macos_smoke_test.sh
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lmcache-server-log-${{ matrix.platform }}-py${{ matrix.python }}
+          path: ${{ env.LMCACHE_LOG_FILE }}
+          if-no-files-found: ignore

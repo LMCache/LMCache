@@ -9,6 +9,9 @@ import threading
 import msgspec
 import torch
 
+# First Party
+from lmcache import torch_dev, torch_device_type
+
 """
 Defines the types and the customized encoder/decoders for inter-process
 communications.
@@ -27,17 +30,17 @@ class CudaIPCWrapper:
     @staticmethod
     def _get_device_uuid(device_index: int) -> str:
         """Get the UUID of a GPU device given its index."""
-        return str(torch.cuda.get_device_properties(device_index).uuid)
+        return str(torch_dev.get_device_properties(device_index).uuid)
 
     @staticmethod
     def _discover_gpu_devices():
         """Discover all available GPU devices and map their UUIDs to
         the physical device ordinals.
         """
-        if not torch.cuda.is_available():
+        if not torch_dev.is_available():
             return
 
-        num_devices = torch.cuda.device_count()
+        num_devices = torch_dev.device_count()
         with CudaIPCWrapper._device_mapping_lock:
             if CudaIPCWrapper._discovered_device_mapping:
                 return  # Already discovered
@@ -87,8 +90,9 @@ class CudaIPCWrapper:
     def to_tensor(self) -> torch.Tensor:
         """
         Note:
-            This function may break if torch cuda is not initialized.
-            We should call `torch.cuda.init()` before using this function.
+            This function may break if the accelerator is not initialized.
+            We should call `torch_dev.init()` before using this function
+            (guarded by hasattr since not all backends expose init()).
         """
         device_index = CudaIPCWrapper._get_device_index_from_uuid(self.device_uuid)
 
@@ -96,7 +100,9 @@ class CudaIPCWrapper:
             device_index, *self.handle[1:]
         )
 
-        t = torch.empty((), device=f"cuda:{device_index}", dtype=self.dtype)
+        t = torch.empty(
+            (), device=f"{torch_device_type}:{device_index}", dtype=self.dtype
+        )
         t.set_(storage, self.storage_offset, self.shape, self.stride)
         return t
 
@@ -309,11 +315,84 @@ class IPCCacheEngineKey:
 KVCache = list[CudaIPCWrapper]
 
 
+class RegisterNonGpuContextPayload(msgspec.Struct):
+    """Payload for the REGISTER_KV_CACHE_NON_GPU_CONTEXT protocol message.
+
+    Attributes:
+        instance_id: Worker instance identifier (typically PID).
+        model_name: Model name associated with this worker.
+        world_size: Worker world size used in cache keys.
+        block_size: Tokens per paged block.
+        num_layers: Number of model layers.
+        hidden_dim_size: Flattened hidden dimension per token.
+        dtype_str: Torch dtype name (e.g. ``"float16"``).
+        use_mla: Whether the worker KV format is MLA.
+    """
+
+    instance_id: int
+    model_name: str
+    world_size: int
+    block_size: int
+    num_layers: int
+    hidden_dim_size: int
+    dtype_str: str
+    use_mla: bool
+
+
 @dataclass
 class CustomizedSerdeConfig:
     serializer: Callable[[Any], bytes]
     deserializer: Callable[[bytes], Any]
     code: int
+
+
+@dataclass
+class BlockAllocationRecord:
+    """A single per-request GPU block allocation delta from vLLM."""
+
+    req_id: str
+    new_block_ids: list[int]
+    new_token_ids: list[int]
+
+
+@dataclass
+class CBMatchResult:
+    """Result of a sub-sequence match from BlendTokenRangeMatcher.
+
+    Attributes:
+        old_st: Start position in the originally registered (stored) sequence.
+        old_ed: End position in the originally registered (stored) sequence.
+        cur_st: Start position in the query sequence where the match was found.
+        cur_ed: End position in the query sequence where the match was found.
+        hash: Token hash bytes (from registration) used as the storage key.
+    """
+
+    old_st: int
+    old_ed: int
+    cur_st: int
+    cur_ed: int
+    hash: bytes
+
+
+@dataclass
+class CBUnifiedLookupResult:
+    """Resolved payload of ``CB_UNIFIED_LOOKUP``: prefix lookup + non-prefix
+    fingerprint match, reconciled in one RPC. The RPC returns ``None`` (not this)
+    while either leg's KV is still loading into L1; this type is sent only once
+    both are resident.
+
+    Attributes:
+        prefix_coverage_tokens: Contiguous prefix-cache coverage (L1+L2) in
+            tokens — what the standard LOOKUP would report.
+        non_prefix_segments: Fingerprint matches outside the prefix coverage
+            (cur_st order), each carrying ``(old_st, old_ed, cur_st, cur_ed,
+            hash)``. Token-aligned (any offset, not block-aligned): the per-token
+            slot scatter handles them. Already resident in L1, so the retrieve
+            set equals the prefetched set.
+    """
+
+    prefix_coverage_tokens: int
+    non_prefix_segments: list[CBMatchResult]
 
 
 _CUSTOMERIZED_SERIALIZERS = {
@@ -345,31 +424,3 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
-
-
-@dataclass
-class BlockAllocationRecord:
-    """A single per-request GPU block allocation delta from vLLM."""
-
-    req_id: str
-    new_block_ids: list[int]
-    new_token_ids: list[int]
-
-
-@dataclass
-class CBMatchResult:
-    """Result of a sub-sequence match from BlendTokenRangeMatcher.
-
-    Attributes:
-        old_st: Start position in the originally registered (stored) sequence.
-        old_ed: End position in the originally registered (stored) sequence.
-        cur_st: Start position in the query sequence where the match was found.
-        cur_ed: End position in the query sequence where the match was found.
-        hash: Token hash bytes (from registration) used as the storage key.
-    """
-
-    old_st: int
-    old_ed: int
-    cur_st: int
-    cur_ed: int
-    hash: bytes

@@ -30,6 +30,7 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -52,18 +53,15 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
     Unsalted::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
 
     Salted (trailing ``cache_salt``)::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
-
-    Keys with ``cache_salt=""`` produce the 3-field shape, which is
-    bit-identical to the format used before ``cache_salt`` existed —
-    so existing un-salted caches remain valid with no migration.
+        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
     """
     base = (
-        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}{_KEY_SEP}{key.chunk_hash.hex()}"
+        f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
+        f"{_KEY_SEP}{key.object_group_id:x}{_KEY_SEP}{key.chunk_hash.hex()}"
     )
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"
@@ -104,10 +102,18 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     _OP_LOAD = "load"
     _OP_DELETE = "delete"
 
-    def __init__(self, native_client: Any, max_capacity_gb: float = 0) -> None:
+    def __init__(
+        self,
+        native_client: Any,
+        max_capacity_gb: float = 0,
+        type_name: str = "",
+        extra_status: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(max_capacity_bytes=int(max_capacity_gb * (1024**3)))
         self._client = native_client
         self._client_fd: int = int(native_client.event_fd())
+        self._type_name: str = type_name or type(native_client).__name__
+        self._extra_status: dict[str, Any] = dict(extra_status or {})
 
         # 3 distinct cross-platform notifiers for the L2 adapter
         # interface
@@ -125,7 +131,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         ] = {}
 
         # Completed results (same pattern as MockL2Adapter)
-        self._completed_stores: dict[L2TaskId, bool] = {}
+        self._completed_stores: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookups: dict[L2TaskId, Bitmap] = {}
         self._completed_loads: dict[L2TaskId, Bitmap] = {}
 
@@ -207,7 +213,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
     def pop_completed_store_tasks(
         self,
-    ) -> dict[L2TaskId, bool]:
+    ) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             completed = self._completed_stores
             self._completed_stores = {}
@@ -335,6 +341,29 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # we feed it the byte sizes from each store/delete completion.
 
     # ---------------------------------------------------------------
+    # Status Interface
+    # ---------------------------------------------------------------
+
+    def report_status(self) -> dict[str, Any]:
+        """Return a status dict for this native-connector L2 adapter.
+
+        Returns:
+            A dict with at minimum:
+              * ``is_healthy`` (bool): ``True`` while the background demux
+                thread is alive and not stopping.
+              * ``type`` (str): Stable adapter type label, supplied by the
+                factory or derived from the native client class name.
+            Plus any caller-supplied ``extra_status`` fields (e.g. backend
+            configuration like ``base_path``, ``num_workers``).
+        """
+        status: dict[str, Any] = {
+            "is_healthy": (self._demux_thread.is_alive() and not self._stop.is_set()),
+            "type": self._type_name,
+        }
+        status.update(self._extra_status)
+        return status
+
+    # ---------------------------------------------------------------
     # Cleanup
     # ---------------------------------------------------------------
 
@@ -420,8 +449,8 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                     ) = entry
 
                     if op_type == self._OP_STORE:
-                        self._completed_stores[task_id] = ok
                         store_info = self._pending_store_sizes.pop(fid, None)
+                        task_bytes = 0
                         if ok and store_info is not None:
                             store_keys, sizes = store_info
                             for key, size in zip(store_keys, sizes, strict=True):
@@ -436,9 +465,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                     self._key_sizes[key] = size
                                     keys_stored.append(key)
                                     sizes_stored.append(size)
+                                    task_bytes += size
                                 else:
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
+                        self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
                         self._store_efd.notify()
 
                     elif op_type == self._OP_LOOKUP:

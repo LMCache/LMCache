@@ -2,19 +2,23 @@
 # Standard
 from contextlib import asynccontextmanager
 import argparse
+import asyncio
+import contextlib
 
 # Third Party
 from fastapi import FastAPI
-import torch
+import httpx
 import uvicorn
 
 # First Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
     parse_args_to_config,
 )
+from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -22,10 +26,13 @@ from lmcache.v1.mp_observability.config import (
 )
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 from lmcache.v1.multiprocess.config import (
+    CoordinatorConfig,
     HTTPFrontendConfig,
     MPServerConfig,
+    add_coordinator_args,
     add_http_frontend_args,
     add_mp_server_args,
+    parse_args_to_coordinator_config,
     parse_args_to_http_frontend_config,
     parse_args_to_mp_server_config,
 )
@@ -35,6 +42,7 @@ from lmcache.v1.multiprocess.http_api_registry import (
 from lmcache.v1.multiprocess.mp_runtime_plugin_launcher import (
     MPRuntimePluginLauncher,
 )
+from lmcache.v1.multiprocess.server import run_cache_server
 
 logger = init_logger(__name__)
 
@@ -57,16 +65,10 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info(
-        "Starting LMCache HTTP server... (CUDA available: %s)",
-        torch.cuda.is_available(),
+        "Starting LMCache HTTP server... (accelerator available: %s)",
+        torch_dev.is_available(),
     )
     mp_config = _configs["mp"]
-    if mp_config.engine_type == "blend":
-        # First Party
-        from lmcache.v1.multiprocess.blend_server_v2 import run_cache_server
-    else:
-        # First Party
-        from lmcache.v1.multiprocess.server import run_cache_server
 
     result = run_cache_server(
         mp_config=mp_config,
@@ -99,12 +101,52 @@ async def lifespan(app: FastAPI):
     app.state.zmq_server = zmq_server
     app.state.engine = engine
     app.state.plugin_launcher = plugin_launcher
+
+    # Optionally register this server with an MP coordinator (enabled when
+    # coordinator config has a URL). A generic HTTP client sends the requests;
+    # the keep_registered task registers, heartbeats, and deregisters on
+    # shutdown. Best-effort: failures are logged and retried, never fatal.
+    http_config = _configs.get("http")
+    coordinator_config = _configs.get("coordinator")
+    coordinator_client = None
+    coordinator_registration_task = None
+    if (
+        coordinator_config is not None
+        and coordinator_config.url
+        and http_config is not None
+    ):
+        coordinator_client = httpx.AsyncClient(timeout=10.0)
+        # Canonical id resolved by run_cache_server above; shared with
+        # the OTel service.instance.id so membership matches metrics/traces.
+        coordinator_registration_task = asyncio.create_task(
+            keep_registered(
+                coordinator_client,
+                coordinator_config.url,
+                http_port=http_config.http_port,
+                instance_id=mp_config.instance_id,
+                advertise_ip=coordinator_config.advertise_ip,
+                heartbeat_interval=coordinator_config.heartbeat_interval,
+            )
+        )
+    app.state.coordinator_client = coordinator_client
+    app.state.coordinator_registration_task = coordinator_registration_task
+
     logger.info("LMCache HTTP server initialized")
 
     yield
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
+    coordinator_registration_task = getattr(
+        app.state, "coordinator_registration_task", None
+    )
+    if coordinator_registration_task is not None:
+        coordinator_registration_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await coordinator_registration_task
+    coordinator_client = getattr(app.state, "coordinator_client", None)
+    if coordinator_client is not None:
+        await coordinator_client.aclose()
     launcher = getattr(app.state, "plugin_launcher", None)
     if launcher is not None:
         launcher.stop_plugins()
@@ -126,6 +168,7 @@ def run_http_server(
     mp_config: MPServerConfig,
     storage_manager_config: StorageManagerConfig,
     obs_config: ObservabilityConfig,
+    coordinator_config: CoordinatorConfig,
 ) -> None:
     """
     Run the LMCache HTTP server with integrated MP (ZMQ) server.
@@ -135,11 +178,14 @@ def run_http_server(
         mp_config: Configuration for the ZMQ multiprocess server
         storage_manager_config: Configuration for the storage manager
         obs_config: Configuration for the observability stack
+        coordinator_config: Configuration for MP coordinator registration
+            (an empty URL disables registration)
     """
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config
     _configs["http"] = http_config
+    _configs["coordinator"] = coordinator_config
     app.state.configs = _configs
 
     config = uvicorn.Config(
@@ -167,6 +213,7 @@ def parse_args():
     add_mp_server_args(parser)
     add_storage_manager_args(parser)
     add_observability_args(parser)
+    add_coordinator_args(parser)
     return parser.parse_args()
 
 
@@ -176,9 +223,11 @@ if __name__ == "__main__":
     mp_config = parse_args_to_mp_server_config(args)
     storage_manager_config = parse_args_to_config(args)
     obs_config = parse_args_to_observability_config(args)
+    coordinator_config = parse_args_to_coordinator_config(args)
     run_http_server(
         http_config=http_config,
         mp_config=mp_config,
         storage_manager_config=storage_manager_config,
         obs_config=obs_config,
+        coordinator_config=coordinator_config,
     )

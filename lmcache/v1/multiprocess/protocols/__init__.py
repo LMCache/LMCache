@@ -12,6 +12,7 @@ This module provides the initialize_protocols() function that:
 from lmcache.v1.multiprocess.protocols import (
     blend,
     blend_v2,
+    blend_v3,
     controller,
     debug,
     engine,
@@ -36,6 +37,7 @@ _PROTOCOL_MODULES = [
     ("debug", debug),
     ("blend", blend),
     ("blend_v2", blend_v2),
+    ("blend_v3", blend_v3),
     ("observability", observability),
 ]
 

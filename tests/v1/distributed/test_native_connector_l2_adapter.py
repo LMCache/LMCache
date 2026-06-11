@@ -219,19 +219,28 @@ class TestObjectKeySerialization:
         assert _object_key_to_string(k1) != _object_key_to_string(k2)
 
     def test_serialization_format(self):
-        """Unsalted keys use the 3-field shape — identical to the
-        pre-cache_salt wire format, so existing remote storage
-        stays valid."""
+        """Unsalted keys use the 4-field shape with object_group_id
+        embedded right after kv_rank."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
             kv_rank=255,
         )
         s = _object_key_to_string(key)
-        assert s == "llama@000000ff@00010203"
+        assert s == "llama@000000ff@0@00010203"
+
+    def test_object_group_id_embedded(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            object_group_id=5,
+        )
+        s = _object_key_to_string(key)
+        assert s == "llama@000000ff@5@00010203"
 
     def test_salted_serialization_format(self):
-        """Salted keys append ``@<cache_salt>`` as a 4th field."""
+        """Salted keys append ``@<cache_salt>`` as a 5th field."""
         key = ObjectKey(
             chunk_hash=b"\x00\x01\x02\x03",
             model_name="llama",
@@ -239,7 +248,7 @@ class TestObjectKeySerialization:
             cache_salt="alice",
         )
         s = _object_key_to_string(key)
-        assert s == "llama@000000ff@00010203@alice"
+        assert s == "llama@000000ff@0@00010203@alice"
 
     def test_different_salts_produce_different_strings(self):
         base = {
@@ -256,7 +265,7 @@ class TestObjectKeySerialization:
         assert s_empty != s_alice
         assert s_alice != s_bob
         # Empty salt has no trailing "@salt", salted keys do.
-        assert s_empty.count("@") == 2  # 3 fields
+        assert s_empty.count("@") == 3  # 4 fields (model, kv_rank, group, hash)
         assert s_alice.endswith("@alice")
         assert s_bob.endswith("@bob")
 
@@ -432,7 +441,7 @@ class TestStoreInterface:
 
         completed = adapter.pop_completed_store_tasks()
         assert task_id in completed
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
     def test_pop_clears_completed_tasks(self, adapter):
         key = create_object_key(1)
@@ -465,7 +474,7 @@ class TestStoreInterface:
             completed.update(adapter.pop_completed_store_tasks())
 
         for tid in task_ids:
-            assert completed[tid] is True
+            assert completed[tid].is_successful()
 
     def test_batch_store(self, adapter):
         keys = [create_object_key(i) for i in range(3)]
@@ -476,7 +485,7 @@ class TestStoreInterface:
         assert wait_for_event_fd(store_fd, timeout=5.0)
 
         completed = adapter.pop_completed_store_tasks()
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
 
 # =============================================================================
@@ -670,7 +679,7 @@ class TestEndToEndWorkflow:
         # Store
         store_tid = adapter.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd, timeout=5.0)
-        assert adapter.pop_completed_store_tasks()[store_tid] is True
+        assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup
         lookup_tid = adapter.submit_lookup_and_lock_task([key])
@@ -703,7 +712,7 @@ class TestEndToEndWorkflow:
         # Store all
         store_tid = adapter.submit_store_task(keys, store_objs)
         assert wait_for_event_fd(store_fd, timeout=5.0)
-        assert adapter.pop_completed_store_tasks()[store_tid] is True
+        assert adapter.pop_completed_store_tasks()[store_tid].is_successful()
 
         # Lookup all
         lookup_tid = adapter.submit_lookup_and_lock_task(keys)

@@ -41,6 +41,10 @@ void Bitmap::set(size_t index) {
   data_[byte_index(index)] |= static_cast<uint8_t>(1u << bit_offset(index));
 }
 
+void Bitmap::batched_set(const std::vector<size_t>& indices) {
+  for (size_t idx : indices) set(idx);
+}
+
 void Bitmap::clear(size_t index) {
   if (index >= size_) return;
   data_[byte_index(index)] &= static_cast<uint8_t>(~(1u << bit_offset(index)));

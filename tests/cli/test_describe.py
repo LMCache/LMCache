@@ -20,7 +20,7 @@ from lmcache.cli.commands.describe import (
 )
 
 # ---------------------------------------------------------------------------
-# Sample /api/status payload
+# Sample /status payload
 # ---------------------------------------------------------------------------
 
 SAMPLE_STATUS = {
@@ -29,18 +29,31 @@ SAMPLE_STATUS = {
     "chunk_size": 256,
     "hash_algorithm": "sha256",
     "registered_gpu_ids": [0],
-    "gpu_context_meta": {
+    "cache_context_meta": {
         "0": {
             "model_name": "llama",
             "world_size": 1,
             "kv_cache_layout": {
                 "num_layers": 32,
-                "block_size": 16,
-                "hidden_dim_sizes": 128,
-                "dtype": "torch.float16",
-                "is_mla": False,
                 "num_blocks": 2048,
                 "cache_size_per_token": 163840,
+                "kernel_groups": [
+                    {
+                        "kernel_group_idx": 0,
+                        "engine_group_idx": 0,
+                        "object_group_idx": 0,
+                        "num_layers": 32,
+                        "layer_indices": list(range(32)),
+                        "tokens_per_block": 16,
+                        "slots_per_block": 16,
+                        "dtype": "torch.float16",
+                        "gpu_kv_concrete_shape": "32 x [2, 2048, 16, 8, 128]",
+                        "is_mla": False,
+                        "gpu_kv_format": "NL_X_TWO_NB_BS_NH_HS",
+                        "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+                        "attention_backend": "vLLM non-MLA flash attention",
+                    },
+                ],
             },
         },
     },
@@ -132,7 +145,7 @@ class TestSafeGet:
 
 class TestDescribeKvcacheFields:
     """Test that ``_describe_kvcache`` extracts fields correctly from a
-    sample ``/api/status`` response."""
+    sample ``/status`` response."""
 
     def test_field_extraction(self):
         """Verify metrics are populated from the sample status dict."""
@@ -180,11 +193,23 @@ class TestDescribeKvcacheFields:
         assert model["world_size"] == 1
         assert model["gpu_ids"] == "0"
         assert model["num_layers"] == 32
-        assert model["block_size"] == 16
-        assert model["hidden_dim_sizes"] == 128
-        assert model["dtype"] == "torch.float16"
-        assert model["is_mla"] is False
         assert model["num_blocks"] == 2048
+        assert model["cache_size_per_token"] == 163840
+
+        # Per-kernel-group section (list)
+        assert "kernel_groups" in m
+        kg = m["kernel_groups"][0]
+        assert kg["model"] == "llama"
+        assert kg["kernel_group_idx"] == 0
+        assert kg["engine_group_idx"] == 0
+        assert kg["object_group_idx"] == 0
+        assert kg["num_layers"] == 32
+        assert kg["slots_per_block"] == 16
+        assert kg["dtype"] == "torch.float16"
+        assert kg["is_mla"] is False
+        assert kg["attention_backend"] == "vLLM non-MLA flash attention"
+        assert kg["gpu_kv_shape"] == "NL x [2, NB, BS, NH, HS]"
+        assert kg["gpu_kv_concrete_shape"] == "32 x [2, 2048, 16, 8, 128]"
 
     def test_unhealthy(self):
         """Verify health shows UNHEALTHY when is_healthy is False."""
@@ -333,7 +358,7 @@ class TestFetchJson:
         t = Thread(target=server.handle_request, daemon=True)
         t.start()
         try:
-            result = fetch_json(f"http://127.0.0.1:{port}/api/status")
+            result = fetch_json(f"http://127.0.0.1:{port}/status")
             assert result == {"ok": True}
         finally:
             server.server_close()
@@ -355,6 +380,6 @@ class TestFetchJson:
         t.start()
         try:
             with pytest.raises(DescribeError, match="Server unhealthy"):
-                fetch_json(f"http://127.0.0.1:{port}/api/status")
+                fetch_json(f"http://127.0.0.1:{port}/status")
         finally:
             server.server_close()

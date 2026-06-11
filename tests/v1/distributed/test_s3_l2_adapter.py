@@ -330,7 +330,16 @@ class TestObjectKeySerialization:
             model_name="llama",
             kv_rank=255,
         )
-        assert _object_key_to_string(key) == "llama@000000ff@00010203"
+        assert _object_key_to_string(key) == "llama@000000ff@0@00010203"
+
+    def test_object_group_id_embedded(self):
+        key = ObjectKey(
+            chunk_hash=b"\x00\x01\x02\x03",
+            model_name="llama",
+            kv_rank=255,
+            object_group_id=5,
+        )
+        assert _object_key_to_string(key) == "llama@000000ff@5@00010203"
 
     def test_cache_salt_appended(self):
         """A non-empty cache_salt must be included in the S3 object name so
@@ -347,8 +356,8 @@ class TestObjectKeySerialization:
             kv_rank=255,
             cache_salt="user-42",
         )
-        assert _object_key_to_string(base_key) == "llama@000000ff@00010203"
-        assert _object_key_to_string(salted) == "llama@000000ff@00010203@user-42"
+        assert _object_key_to_string(base_key) == "llama@000000ff@0@00010203"
+        assert _object_key_to_string(salted) == "llama@000000ff@0@00010203@user-42"
         assert _object_key_to_string(base_key) != _object_key_to_string(salted)
 
 
@@ -380,7 +389,7 @@ class TestStoreLookupLoad:
         tid = adapter.submit_store_task([key], [obj])
         assert wait_for_event_fd(adapter.get_store_event_fd())
         completed = adapter.pop_completed_store_tasks()
-        assert completed == {tid: True}
+        assert completed[tid].is_successful()
 
         # Lookup
         tid = adapter.submit_lookup_and_lock_task([key])
@@ -564,7 +573,7 @@ class TestCircuitBreaker:
         )
         wait_for_event_fd(adapter.get_store_event_fd(), timeout=2.0)
         completed = adapter.pop_completed_store_tasks()
-        assert completed[disabled_tid] is False
+        assert not completed[disabled_tid].is_successful()
         assert _BACKEND.counts()["put"] == put_before  # never reached the backend
 
         # Lookup and load also short-circuit to all-zero bitmaps.

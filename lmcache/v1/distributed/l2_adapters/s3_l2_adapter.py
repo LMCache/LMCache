@@ -34,6 +34,7 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -61,19 +62,19 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
     Unsalted::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>
+        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>
 
     Salted (trailing ``cache_salt``)::
 
-        <model_name>@<kv_rank_hex>@<chunk_hash_hex>@<cache_salt>
+        <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
 
-    Keys with ``cache_salt=""`` produce the 3-field shape (bit-identical
-    to the pre-``cache_salt`` format), so existing un-salted caches
-    remain valid with no migration. ``@`` in ``model_name`` and
-    ``cache_salt`` is rejected by ``ObjectKey.__post_init__``, so the
-    format is unambiguous.
+    ``@`` in ``model_name`` and ``cache_salt`` is rejected by
+    ``ObjectKey.__post_init__``, so the format is unambiguous.
     """
-    base = f"{key.model_name}@{key.kv_rank:08x}@{key.chunk_hash.hex()}"
+    base = (
+        f"{key.model_name}@{key.kv_rank:08x}"
+        f"@{key.object_group_id:x}@{key.chunk_hash.hex()}"
+    )
     if key.cache_salt:
         return f"{base}@{key.cache_salt}"
     return base
@@ -391,7 +392,7 @@ class S3L2Adapter(L2AdapterInterface):
         self._load_efd = create_event_notifier()
 
         self._next_task_id: L2TaskId = 0
-        self._completed_store_tasks: dict[L2TaskId, bool] = {}
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
         self._completed_lookup_tasks: dict[L2TaskId, Bitmap] = {}
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
 
@@ -462,7 +463,7 @@ class S3L2Adapter(L2AdapterInterface):
             task_id = self._next_task_id
             self._next_task_id += 1
             if self._connection_disabled:
-                self._completed_store_tasks[task_id] = False
+                self._completed_store_tasks[task_id] = L2StoreResult(False, 0)
                 disabled = True
             else:
                 disabled = False
@@ -477,7 +478,7 @@ class S3L2Adapter(L2AdapterInterface):
         )
         return task_id
 
-    def pop_completed_store_tasks(self) -> dict[L2TaskId, bool]:
+    def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             completed = self._completed_store_tasks
             self._completed_store_tasks = {}
@@ -876,12 +877,15 @@ class S3L2Adapter(L2AdapterInterface):
 
         self._record_connection_outcome(last_error if not success else None)
 
+        bytes_transferred = sum(newly_stored_sizes)
         with self._lock:
-            self._completed_store_tasks[task_id] = success
-        self._store_efd.notify()
+            self._completed_store_tasks[task_id] = L2StoreResult(
+                success, bytes_transferred
+            )
 
         if newly_stored_keys:
             self._notify_keys_stored(newly_stored_keys, newly_stored_sizes)
+        self._store_efd.notify()
 
     async def _execute_lookup(
         self,

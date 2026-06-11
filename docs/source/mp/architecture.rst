@@ -29,7 +29,8 @@ High-Level Architecture
     StorageManager (distributed/storage_manager.py)
          |
          |--- L1Manager (l1_manager.py)
-         |       |--- L1MemoryManager (memory allocator)
+         |       |--- L1MemoryManager (CPU DRAM) or
+         |       |    GDSL1MemoryManager (NVMe slab via cuFile)
          |       |--- TTLLock per object (read/write)
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
@@ -42,24 +43,37 @@ High-Level Architecture
 Server Variants
 ---------------
 
-All three server entry points share the same ``MPCacheEngine`` and
-``StorageManager`` core.
+All server entry points share the same ``MPCacheEngine`` and
+``StorageManager`` core. ``MPCacheEngine`` is now a thin compositor:
+it holds an ``MPCacheEngineContext`` and a list of ``EngineModule``
+instances assembled by ``build_engine_modules()`` (in ``server.py``)
+based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The default ZMQ-only server.  Creates an ``MPCacheEngine``
-and a ``MessageQueueServer``, registers handlers for all core
-``RequestType`` values, and blocks in a keep-alive loop.
+**``server.py``** -- The default ZMQ-only server.  Creates an
+``MPCacheEngine``, assembles the engine modules
+(``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule``
+and/or ``NonGPUTransferModule`` depending on
+``--supported-transfer-mode`` — ``gpu`` or ``non_gpu`` loads just one,
+``auto`` (default) loads both — plus ``BlendModule`` when
+``--engine-type blend``), starts a ``MessageQueueServer``, registers
+handlers for every ``RequestType`` exposed by the loaded modules, and
+blocks in a keep-alive loop.
 
-**``blend_server_v2.py``** -- Extends ``MPCacheEngine`` with ``BlendEngineV2``,
-which adds CacheBlend operations (``CB_REGISTER_KV_CACHE``,
+**``modules/blend.py``** -- Defines ``BlendModule`` and ``BlendEngineV2``,
+which add CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 ``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
-``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL``).  Enables non-prefix KV
-cache reuse across document paragraphs.
+``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL`` and their V2
+variants). Enables non-prefix KV cache reuse across document
+paragraphs. Selected by passing ``--engine-type blend`` to
+``lmcache server``; ``BlendModule`` requires
+``--supported-transfer-mode`` to be ``gpu`` or ``auto`` and will refuse
+to load when it is ``non_gpu``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
 ``http_apis/`` and auto-registered via ``HTTPAPIRegistry``: ``GET /`` (basic
-liveness), ``GET /api/healthcheck`` for Kubernetes probes, ``POST /api/clear-cache``
-for clearing all KV cache data in L1 (CPU) memory, and ``GET /api/status``
+liveness), ``GET /healthcheck`` for Kubernetes probes, ``POST /clear-cache``
+for clearing all KV cache data in L1 (CPU) memory, and ``GET /status``
 for inspecting detailed internal state.  The ZMQ server runs as part of the
 same process, and any configured runtime plugins are spawned by
 ``MPRuntimePluginLauncher`` during FastAPI startup.
@@ -92,22 +106,40 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - Copy KV cache chunks from L1 (CPU) back to GPU.
    * - ``LOOKUP``
      - BLOCKING
-     - Check prefix cache hits and submit prefetch tasks.
+     - Submit a prefix lookup; the prefetch job is tracked server-side by
+       request_id.
+   * - ``QUERY_PREFETCH_STATUS``
+     - BLOCKING
+     - Poll a prefetch job by request_id. Returns the loaded chunk count
+       when done, or ``None`` while the prefetch is still in progress.
+   * - ``QUERY_PREFETCH_LOOKUP_HITS``
+     - BLOCKING
+     - Query the lookup-phase hit chunk count by request_id, before the
+       prefetch finishes. Returns ``None`` while the lookup is still
+       running.
    * - ``FREE_LOOKUP_LOCKS``
-     - SYNC
-     - Release read locks from a cancelled lookup.
+     - BLOCKING
+     - Release read locks from a cancelled lookup without doing a full
+       RETRIEVE.
    * - ``END_SESSION``
-     - SYNC
+     - BLOCKING
      - Remove session state for a finished request.
    * - ``CLEAR``
-     - SYNC
+     - BLOCKING
      - Clear all cached data.
    * - ``GET_CHUNK_SIZE``
      - SYNC
      - Return the server's chunk size.
+   * - ``PING``
+     - BLOCKING
+     - Liveness ping; the handler always returns ``True``.
+   * - ``REPORT_BLOCK_ALLOCATION``
+     - BLOCKING
+     - Fire-and-forget channel for the vLLM scheduler to report GPU block
+       allocation events to the observability subsystem.
    * - ``NOOP``
      - SYNC
-     - Debug ping -- returns "OK".
+     - Debug heartbeat -- returns a confirmation string.
    * - ``CB_REGISTER_KV_CACHE``
      - SYNC
      - (Blend) Register CacheBlend KV buffer.
@@ -126,6 +158,15 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``CB_STORE_FINAL``
      - BLOCKING
      - (Blend) Store final blended chunks.
+   * - ``CB_LOOKUP_PRE_COMPUTED_V2``
+     - BLOCKING
+     - (Blend V2) Lookup pre-computed chunks; returns
+       ``CBMatchResult`` entries (with old/cur ranges and per-chunk hashes)
+       so the retrieve step can skip re-hashing.
+   * - ``CB_RETRIEVE_PRE_COMPUTED_V2``
+     - BLOCKING
+     - (Blend V2) Retrieve pre-computed chunks using the
+       ``CBMatchResult`` list returned by ``CB_LOOKUP_PRE_COMPUTED_V2``.
 
 **Handler types:**
 
@@ -154,8 +195,11 @@ Each config module exposes a composable triple:
       # which internally calls add_l2_adapters_args(parser)
     add_observability_args(parser)    # from mp_observability/config.py
 
-Both ``blend_server_v2.py`` and ``http_server.py`` reuse this pattern, adding
-``add_http_frontend_args()`` for the HTTP variant.
+``http_server.py`` reuses this pattern, adding
+``add_http_frontend_args()`` for the HTTP variant. CacheBlend is no
+longer a separate entry point — it is opted into at runtime by passing
+``--engine-type blend`` to ``server.py`` (or ``lmcache server``), which
+appends ``BlendModule`` to the engine module list.
 
 Distributed Storage
 -------------------
@@ -192,8 +236,16 @@ Manages objects in CPU memory with a state machine:
 Each object has two ``TTLLock`` instances (read and write) with configurable
 timeouts to prevent deadlocks from crashed clients.
 
-The ``L1MemoryManager`` handles the underlying memory allocation (lazy growth
-up to ``--l1-size-gb``).
+The underlying memory allocation is handled by one of two interchangeable
+tiers selected at startup (both satisfy ``L1ManagerProtocol``):
+
+- ``L1MemoryManager`` (default) -- pinned CPU DRAM, with lazy growth up to
+  ``--l1-size-gb``.
+- ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
+  The bytes live on disk; reads/writes DMA directly between the GPU staging
+  buffer and the slab via cuFile, driven by the process-global ``GDSContext``
+  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
+  tier is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
@@ -223,8 +275,10 @@ the ``StorePolicy``.
 
 **EvictionController** (``storage_controllers/eviction_controller.py``):
 Periodically checks L1 memory usage against the watermark threshold.  When
-triggered, evicts objects using the configured policy (LRU) until usage drops
-below the target.
+triggered, evicts objects using the configured policy (``LRU``,
+``IsolatedLRU``, or ``noop``) until usage drops below the target.
+``IsolatedLRU`` evicts per ``cache_salt`` against limits registered through
+the ``/quota`` HTTP endpoints; see :ref:`mp-http-quota-api`.
 
 **PrefetchController** (``storage_controllers/prefetch_controller.py``):
 Handles L2 lookup and load requests submitted by ``StorageManager`` during
@@ -359,8 +413,9 @@ Adding a new request type
 
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (engine, controller, or debug).
-3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngine``).
+   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``, or
+   ``blend_v2``) and add the request name to that module's ``REQUEST_NAMES``.
+3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``).
 4. Register the handler in ``run_cache_server()`` via ``add_handler_helper()``.
 
 Key Source Files
@@ -376,15 +431,24 @@ Key Source Files
      - MPCacheEngine + ZMQ server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
-   * - ``lmcache/v1/multiprocess/blend_server_v2.py``
-     - BlendEngineV2 (extends MPCacheEngine)
+   * - ``lmcache/v1/multiprocess/engine_context.py``
+     - MPCacheEngineContext (shared state passed to every EngineModule)
+   * - ``lmcache/v1/multiprocess/engine_module.py``
+     - ``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType``
+       (per-module handler registration)
+   * - ``lmcache/v1/multiprocess/modules/``
+     - Engine module implementations: ``lookup.py`` (``LookupModule``),
+       ``management.py`` (``ManagementModule``), ``gpu_transfer.py``
+       (``GPUTransferModule``), ``non_gpu_transfer.py``
+       (``NonGPUTransferModule``), and ``blend.py``
+       (``BlendModule`` / ``BlendEngineV2``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``
      - ``HTTPAPIRegistry`` that auto-discovers routers in ``http_apis/``
    * - ``lmcache/v1/multiprocess/http_apis/``
-     - Extensible HTTP endpoints (``/``, ``/api/healthcheck``,
-       ``/api/clear-cache``, ``/api/status``)
+     - Extensible HTTP endpoints (``/``, ``/healthcheck``,
+       ``/clear-cache``, ``/status``)
    * - ``lmcache/v1/multiprocess/mp_runtime_plugin_launcher.py``
      - ``MPRuntimePluginLauncher`` that spawns runtime plugins with the
        full server config serialized into environment variables

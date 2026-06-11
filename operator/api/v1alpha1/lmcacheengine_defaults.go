@@ -16,20 +16,32 @@ limitations under the License.
 
 package v1alpha1
 
+// defaultLogLevel is the log level applied when spec.logLevel is unset (it
+// mirrors the kubebuilder default on both engine kinds).
+const defaultLogLevel = "INFO"
+
+// labelValueTrue is the string value of boolean-style node-selector labels
+// (e.g. nvidia.com/gpu.present: "true").
+const labelValueTrue = "true"
+
 // SetDefaults applies defaults that cannot be expressed purely via kubebuilder markers.
 func (e *LMCacheEngine) SetDefaults() {
 	spec := &e.Spec
 
 	// Default logLevel to INFO if unset (belt-and-suspenders with kubebuilder default).
 	if spec.LogLevel == nil {
-		info := "INFO"
+		info := defaultLogLevel
 		spec.LogLevel = &info
 	}
 
-	// Default nodeSelector to GPU nodes if unset.
-	if spec.NodeSelector == nil {
+	if spec.GPUVendor == nil {
+		v := GPUVendorNvidia
+		spec.GPUVendor = &v
+	}
+
+	if spec.NodeSelector == nil && *spec.GPUVendor == GPUVendorNvidia {
 		spec.NodeSelector = map[string]string{
-			"nvidia.com/gpu.present": "true",
+			"nvidia.com/gpu.present": labelValueTrue,
 		}
 	}
 }

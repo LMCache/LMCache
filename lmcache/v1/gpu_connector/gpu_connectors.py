@@ -8,6 +8,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.utils import (
@@ -473,9 +474,33 @@ class VLLMPagedMemGPUConnectorV3(GPUConnectorInterface):
                 self.kvcaches,
                 gpu_kv_format=self.gpu_kv_format,
                 num_blocks=self.num_blocks,
-                block_size=self.block_size,
             )
         klg_manager = self.metadata.kv_layer_groups_manager
+
+        # Heterogeneous-block_size sanity check.
+        #
+        # ``self.block_size`` is a single scalar sampled from the first
+        # layer's ``bs`` and is forwarded to ``multi_layer_kv_transfer``
+        # as a *global* kernel parameter below (see ``to_gpu`` /
+        # ``from_gpu`` / layerwise paths). That works only when every
+        # group shares the same ``shape_desc.bs``. Mixed-compression
+        # deployments (e.g. DeepSeek V4 with compressed + dense groups
+        # in the same model) violate this assumption and will silently
+        # corrupt transfers on this non-MP path. Log loudly so the
+        # mismatch surfaces before it turns into a data-corruption bug;
+        # the MP path (see ``GPUCacheContext`` / mp server) handles
+        # per-group ``bs`` correctly and should be used instead.
+        heterogeneous_bs = {g.shape_desc.bs for g in klg_manager.kv_layer_groups}
+        if len(heterogeneous_bs) > 1:
+            logger.warning(
+                "VLLMPagedMemGPUConnectorV3 detected heterogeneous per-group "
+                "block_size %s but forwards a single scalar block_size=%d to "
+                "multi_layer_kv_transfer. This non-MP path is NOT adapted for "
+                "mixed-compression KV layouts and may corrupt transfers. Use "
+                "the multi-process connector path for such models.",
+                sorted(heterogeneous_bs),
+                self.block_size,
+            )
 
         if self.use_gpu:
             tmp_buf_shapes = self.metadata.get_shapes(self.chunk_size)
@@ -2034,6 +2059,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         shape_desc.nh = self.num_kv_heads
         shape_desc.hs = self.head_dim
         shape_desc.element_size = normalized.element_size()
+        set_shape_desc_dtype(shape_desc, self.dtype)
         self.shape_desc = shape_desc
 
         self.paged_buffer_ptrs = torch.tensor(

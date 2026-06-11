@@ -9,7 +9,11 @@ and passed between processes during multiprocessing tests.
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord, KVCache
+from lmcache.v1.multiprocess.custom_types import (
+    BlockAllocationRecord,
+    KVCache,
+)
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import KeyType
 
 # ==============================================================================
@@ -37,6 +41,7 @@ def register_kv_cache_handler(
     world_size: int,
     engine_type: EngineType,
     layout_hints: LayoutHints,
+    engine_group_infos: list[EngineGroupInfo],
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -47,7 +52,9 @@ def register_kv_cache_handler(
         model_name: Name of the model associated with this KV cache
         world_size: World size associated with this KV cache
         engine_type: Which serving engine produced the caches
-        layout_hints: Engine-provided hints dict
+        layout_hints: Engine-provided hints dict.
+        engine_group_infos: Engine-neutral KV cache group metadata,
+            msgspec-decoded from the request payload.
 
     Returns:
         None
@@ -69,6 +76,9 @@ def register_kv_cache_handler(
     )
     assert isinstance(layout_hints, dict), (
         f"Expected layout_hints to be dict, got {type(layout_hints)}"
+    )
+    assert isinstance(engine_group_infos, list), (
+        f"Expected engine_group_infos to be a list, got {type(engine_group_infos)}"
     )
     # No return value (returns None implicitly)
 
@@ -100,7 +110,7 @@ def unregister_kv_cache_handler(gpu_id: int) -> None:
 
 
 def store_handler(
-    key: KeyType, gpu_id: int, gpu_block_ids: list[int], ipc_handle: bytes
+    key: KeyType, gpu_id: int, gpu_block_ids: list[list[int]], ipc_handle: bytes
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for STORE requests.
@@ -108,7 +118,7 @@ def store_handler(
     Args:
         key: Cache key to store
         gpu_id: GPU device ID
-        gpu_block_ids: List of GPU block IDs
+        gpu_block_ids: GPU block IDs per KV cache group
         ipc_handle: CUDA event IPC handle
 
     Returns:
@@ -118,6 +128,9 @@ def store_handler(
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
     assert isinstance(gpu_block_ids, list), (
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
+    )
+    assert all(isinstance(block_ids, list) for block_ids in gpu_block_ids), (
+        "Expected gpu_block_ids to be list[list[int]]"
     )
     assert isinstance(ipc_handle, bytes), (
         f"Expected ipc_handle to be bytes, got {type(ipc_handle)}"
@@ -133,7 +146,7 @@ def store_handler(
 def retrieve_handler(
     key: KeyType,
     gpu_id: int,
-    gpu_block_ids: list[int],
+    gpu_block_ids: list[list[int]],
     event_handler: bytes,
     skip_first_n_tokens: int = 0,
 ) -> tuple[bytes, bool]:
@@ -143,7 +156,7 @@ def retrieve_handler(
     Args:
         key: Cache key to retrieve
         gpu_id: GPU device ID
-        gpu_block_ids: List of GPU block IDs
+        gpu_block_ids: GPU block IDs per KV cache group
         event_handler: CUDA event IPC handle
         skip_first_n_tokens: Number of tokens to skip at retrieve start
 
@@ -154,6 +167,9 @@ def retrieve_handler(
     assert isinstance(gpu_id, int), f"Expected gpu_id to be int, got {type(gpu_id)}"
     assert isinstance(gpu_block_ids, list), (
         f"Expected gpu_block_ids to be list, got {type(gpu_block_ids)}"
+    )
+    assert all(isinstance(block_ids, list) for block_ids in gpu_block_ids), (
+        "Expected gpu_block_ids to be list[list[int]]"
     )
     assert isinstance(event_handler, bytes), (
         f"Expected event_handler to be bytes, got {type(event_handler)}"
