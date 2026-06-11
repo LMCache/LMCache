@@ -9,7 +9,7 @@
 # No Docker -- all processes run natively in the pod.
 set -euo pipefail
 
-TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|long_doc_qa_l2|fault_tolerance|deadlock|mp_autostart_tp2|restart_recovery|cache_stats|http_api)}"
+TEST_NAME="${1:?Usage: $0 <test_name>  (lm_eval|hma_lm_eval_gemma4|vllm_bench|long_doc_qa|long_doc_qa_l2|fault_tolerance|deadlock|mp_autostart_tp2|restart_recovery|cache_stats|http_api|gds_smoke_test)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
