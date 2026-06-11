@@ -512,12 +512,18 @@ echo "✅ E2E request validation passed"
 # Verify transport mode (logged after vLLM connects to LMCache server)
 echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANSPORT}'"
 if [ "${EXPECTED_TRANSPORT}" = "handle" ]; then
-  if ! grep -q "CpuCacheContext" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected server-side copy but 'CpuCacheContext' not found in log"
+  # `handle` (server-side copy) is implemented today by the SHM-based
+  # `ShmTransferStrategy` registered via `create_transfer_strategy()`,
+  # which logs "Using shm non-GPU transfer strategy" exactly once at
+  # context registration time. The older `CpuCacheContext` path got
+  # removed during the non_gpu_transfer refactor, so don't grep for
+  # that string anymore.
+  if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected server-side copy but 'Using shm non-GPU transfer strategy' not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
-  echo "✅ Transport mode confirmed: handle (server-side copy)"
+  echo "✅ Transport mode confirmed: handle (server-side copy via shm)"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
   if ! grep -q "Using shm" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but 'Using shm' not found in log"
