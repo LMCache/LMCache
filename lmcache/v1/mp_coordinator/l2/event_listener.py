@@ -51,7 +51,7 @@ def _object_key_to_cache_key(obj: ObjectKey) -> CacheKey:
     )
 
 
-class CoordinatorL2EventListener(L2AdapterListener):
+class L2EventListener(L2AdapterListener):
     """L2 adapter listener that batches events and flushes to the coordinator.
 
     Register as a listener on the L2 adapter via

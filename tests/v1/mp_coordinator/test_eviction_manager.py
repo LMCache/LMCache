@@ -3,10 +3,10 @@
 
 # First Party
 from lmcache.v1.mp_coordinator.l2.eviction_manager import (
-    CoordinatorEvictionManager,
+    L2EvictionManager,
 )
-from lmcache.v1.mp_coordinator.l2.quota_manager import CoordinatorQuotaManager
-from lmcache.v1.mp_coordinator.l2.usage_manager import CoordinatorUsageManager
+from lmcache.v1.mp_coordinator.l2.quota_manager import L2QuotaManager
+from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.schemas import CacheKey
 
 
@@ -16,12 +16,10 @@ def _make_key(salt: str, model: str = "m", rank: int = 0, h: str = "aa") -> Cach
 
 def _setup(
     eviction_ratio: float = 0.5,
-) -> tuple[
-    CoordinatorEvictionManager, CoordinatorQuotaManager, CoordinatorUsageManager
-]:
-    qs = CoordinatorQuotaManager()
-    ut = CoordinatorUsageManager()
-    ctrl = CoordinatorEvictionManager(qs, ut, eviction_ratio=eviction_ratio)
+) -> tuple[L2EvictionManager, L2QuotaManager, L2UsageManager]:
+    qs = L2QuotaManager()
+    ut = L2UsageManager()
+    ctrl = L2EvictionManager(qs, ut, eviction_ratio=eviction_ratio)
     return ctrl, qs, ut
 
 

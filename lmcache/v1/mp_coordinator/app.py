@@ -30,10 +30,10 @@ from fastapi import FastAPI
 from lmcache.logging import init_logger
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.l2.eviction_manager import (
-    CoordinatorEvictionManager,
+    L2EvictionManager,
 )
-from lmcache.v1.mp_coordinator.l2.quota_manager import CoordinatorQuotaManager
-from lmcache.v1.mp_coordinator.l2.usage_manager import CoordinatorUsageManager
+from lmcache.v1.mp_coordinator.l2.quota_manager import L2QuotaManager
+from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -70,9 +70,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         ``usage_manager``); all ``http_apis`` routers are registered.
     """
     registry = InstanceRegistry()
-    quota_manager = CoordinatorQuotaManager()
-    usage_manager = CoordinatorUsageManager()
-    eviction_manager = CoordinatorEvictionManager(
+    quota_manager = L2QuotaManager()
+    usage_manager = L2UsageManager()
+    eviction_manager = L2EvictionManager(
         quota_manager=quota_manager,
         usage_manager=usage_manager,
         eviction_ratio=config.eviction_ratio,

@@ -8,8 +8,8 @@ but runs inside the coordinator process and uses a lightweight
 ``torch``).
 
 The manager periodically checks per-salt usage
-(from :class:`CoordinatorUsageManager`) against limits
-(from :class:`CoordinatorQuotaManager`).
+(from :class:`L2UsageManager`) against limits
+(from :class:`L2QuotaManager`).
 When a salt exceeds its quota, it selects LRU victims and **logs**
 them — actual deletion is not implemented yet.
 """
@@ -23,14 +23,14 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.mp_coordinator.l2.quota_manager import CoordinatorQuotaManager
-from lmcache.v1.mp_coordinator.l2.usage_manager import CoordinatorUsageManager
+from lmcache.v1.mp_coordinator.l2.quota_manager import L2QuotaManager
+from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.schemas import CacheKey
 
 logger = init_logger(__name__)
 
 
-class CoordinatorEvictionManager:
+class L2EvictionManager:
     """Per-``cache_salt`` LRU eviction manager for the coordinator.
 
     Maintains one ``OrderedDict`` per ``cache_salt``, ordered from
@@ -48,8 +48,8 @@ class CoordinatorEvictionManager:
 
     def __init__(
         self,
-        quota_manager: CoordinatorQuotaManager,
-        usage_manager: CoordinatorUsageManager,
+        quota_manager: L2QuotaManager,
+        usage_manager: L2UsageManager,
         eviction_ratio: float = 0.5,
     ) -> None:
         self._lock = threading.Lock()

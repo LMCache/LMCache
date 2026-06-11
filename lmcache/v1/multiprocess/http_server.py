@@ -18,7 +18,7 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
-from lmcache.v1.mp_coordinator.l2.event_listener import CoordinatorL2EventListener
+from lmcache.v1.mp_coordinator.l2.event_listener import L2EventListener
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
@@ -143,7 +143,7 @@ async def lifespan(app: FastAPI):
         and coordinator_config.url
         and coordinator_config.l2_event_reporting
     ):
-        coordinator_l2_event_client = CoordinatorL2EventListener(
+        coordinator_l2_event_client = L2EventListener(
             coordinator_client,
             coordinator_config.url,
             flush_interval=coordinator_config.l2_event_flush_interval,

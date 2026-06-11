@@ -29,15 +29,15 @@ MP server (store/lookup)
   L2 adapter fires on_l2_keys_stored / on_l2_keys_accessed
         │
         ▼
-  CoordinatorL2EventListener (L2AdapterListener)
+  L2EventListener (L2AdapterListener)
     converts ObjectKey → CacheKey, buffers UsageEvents
         │  flush every l2_event_flush_interval (default 1s)
         │
         ▼
   POST /l2/events ──▶ Coordinator
-                        ├─ CoordinatorUsageManager: per-salt byte accounting
-                        ├─ CoordinatorEvictionManager: per-salt LRU
-                        └─ CoordinatorQuotaManager: per-salt byte limits
+                        ├─ L2UsageManager: per-salt byte accounting
+                        ├─ L2EvictionManager: per-salt LRU
+                        └─ L2QuotaManager: per-salt byte limits
 
   Coordinator background loop (every eviction_check_interval, default 5s)
         │
@@ -63,7 +63,7 @@ never imports ``torch``.
 
 ## Coordinator components (`l2/`)
 
-### CoordinatorUsageManager (`usage_manager.py`)
+### L2UsageManager (`usage_manager.py`)
 
 Thread-safe per-salt byte counter. Two operations:
 
@@ -72,13 +72,13 @@ Thread-safe per-salt byte counter. Two operations:
 
 Exposes ``get(salt)``, ``get_all()``, ``get_total()`` for the status endpoints.
 
-### CoordinatorQuotaManager (`quota_manager.py`)
+### L2QuotaManager (`quota_manager.py`)
 
 Thread-safe in-memory quota registry (``dict[str, int]`` + lock). CRUD via
 ``set``, ``get``, ``delete``, ``list_all``. Quotas are set in GiB at the API
 and stored as bytes internally.
 
-### CoordinatorEvictionManager (`eviction_manager.py`)
+### L2EvictionManager (`eviction_manager.py`)
 
 Per-``cache_salt`` LRU, mirroring ``IsolatedLRUEvictionPolicy`` but using
 ``CacheKey`` and running in the coordinator process.
@@ -94,7 +94,7 @@ _key_sizes      : dict[CacheKey, int]                       # byte size per key
 - ``on_lookup(key)`` — touch (move to MRU end).
 - ``on_remove(keys)`` — remove from LRU tracking after confirmed deletion.
 - ``execute_evictions()`` — for each tracked salt, compare usage (from
-  ``CoordinatorUsageManager``) against quota (from ``CoordinatorQuotaManager``, default 0). If over
+  ``L2UsageManager``) against quota (from ``L2QuotaManager``, default 0). If over
   quota, select LRU keys targeting ``eviction_ratio`` of the overage. No quota
   or zero quota means evict all keys for that salt.
 
@@ -116,7 +116,7 @@ Status responses report usage in GiB only (no raw bytes in the API).
 
 ## MP-server event listener (`event_listener.py`)
 
-``CoordinatorL2EventListener`` implements ``L2AdapterListener`` and is registered
+``L2EventListener`` implements ``L2AdapterListener`` and is registered
 on all L2 adapters via ``StorageManager.register_l2_listener()``. It:
 
 1. Receives ``on_l2_keys_stored(keys, sizes)`` and ``on_l2_keys_accessed(keys)``

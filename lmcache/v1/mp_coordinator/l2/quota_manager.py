@@ -29,7 +29,7 @@ class QuotaEntry:
     limit_bytes: int
 
 
-class CoordinatorQuotaManager:
+class L2QuotaManager:
     """Thread-safe in-memory registry of byte quotas keyed by ``cache_salt``.
 
     All public methods acquire an internal lock so the store stays

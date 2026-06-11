@@ -11,10 +11,10 @@ from fastapi.responses import JSONResponse
 
 # First Party
 from lmcache.v1.mp_coordinator.l2.eviction_manager import (
-    CoordinatorEvictionManager,
+    L2EvictionManager,
 )
-from lmcache.v1.mp_coordinator.l2.quota_manager import CoordinatorQuotaManager
-from lmcache.v1.mp_coordinator.l2.usage_manager import CoordinatorUsageManager
+from lmcache.v1.mp_coordinator.l2.quota_manager import L2QuotaManager
+from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.schemas import (
     EventType,
     L2StatusListResponse,
@@ -35,14 +35,14 @@ def _gb(n_bytes: int) -> float:
     return n_bytes / _GB
 
 
-def _quota_manager(request: Request) -> CoordinatorQuotaManager:
+def _quota_manager(request: Request) -> L2QuotaManager:
     """Return the shared quota manager from app state.
 
     Args:
         request: The incoming request.
 
     Returns:
-        The shared :class:`CoordinatorQuotaManager`.
+        The shared :class:`L2QuotaManager`.
 
     Raises:
         RuntimeError: If the manager is not initialized.
@@ -53,14 +53,14 @@ def _quota_manager(request: Request) -> CoordinatorQuotaManager:
     return mgr
 
 
-def _usage_manager(request: Request) -> CoordinatorUsageManager:
+def _usage_manager(request: Request) -> L2UsageManager:
     """Return the shared usage manager from app state.
 
     Args:
         request: The incoming request.
 
     Returns:
-        The shared :class:`CoordinatorUsageManager`.
+        The shared :class:`L2UsageManager`.
 
     Raises:
         RuntimeError: If the manager is not initialized.
@@ -71,14 +71,14 @@ def _usage_manager(request: Request) -> CoordinatorUsageManager:
     return mgr
 
 
-def _eviction_manager(request: Request) -> CoordinatorEvictionManager:
+def _eviction_manager(request: Request) -> L2EvictionManager:
     """Return the shared eviction manager from app state.
 
     Args:
         request: The incoming request.
 
     Returns:
-        The shared :class:`CoordinatorEvictionManager`.
+        The shared :class:`L2EvictionManager`.
 
     Raises:
         RuntimeError: If the manager is not initialized.

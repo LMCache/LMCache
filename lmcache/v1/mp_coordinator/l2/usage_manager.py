@@ -19,7 +19,7 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 
-class CoordinatorUsageManager:
+class L2UsageManager:
     """Thread-safe in-memory manager of L2 byte usage per ``cache_salt``.
 
     MP servers report ``store`` events. The coordinator calls
