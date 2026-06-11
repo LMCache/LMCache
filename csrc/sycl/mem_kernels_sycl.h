@@ -91,6 +91,23 @@ enum class GPUKVFormat : int {
   - TRT-LLM cross-layer (HND layout)
   physical shape: [num_blocks, num_layers, 2, num_heads, block_size, head_size]
   */
+
+  TWO_X_NL_X_NB_BS_NH_HS = 9,
+  /*
+  used by:
+  - SGLang MHA via the MP daemon path
+  physical shape per layer: [num_blocks, block_size, num_heads, head_size]
+  */
+
+  NL_X_NB_NH_BS_TWO_HS = 10,
+  /*
+  used by:
+  - vLLM non-MLA blocks-first attention with K/V fused into the trailing dim
+  physical shape per layer: [num_blocks, num_heads, block_size, 2, head_size]
+  (recovered by splitting the fused trailing [block_size, 2 * head_size]).
+  Currently only reached via the host gather/scatter path, not the SYCL
+  transfer kernels.
+  */
 };
 
 void multi_layer_kv_transfer(
@@ -98,7 +115,7 @@ void multi_layer_kv_transfer(
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
     const GPUKVFormat gpu_kv_format, const int block_size = 0,
-    const int skip_prefix_n_tokens = 0);
+    const int head_size = 0, const int skip_prefix_n_tokens = 0);
 
 void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               torch::Tensor& vllm_key_value_cache,
@@ -108,9 +125,8 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               const bool token_major = false);
 
 // Asynchronous memory copy between host and device buffers.
-// Note: the direction parameter is retained for API compatibility with the
-// CUDA version but is not used by the SYCL implementation (SYCL USM memcpy
-// infers direction from pointer allocation types).
+// The `direction` parameter is retained for API compatibility but is unused:
+// SYCL USM memcpy infers direction from pointer allocation types.
 void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           TransferDirection direction,
                           size_t host_buffer_offset,

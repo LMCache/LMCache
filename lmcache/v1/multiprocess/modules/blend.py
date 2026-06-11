@@ -453,8 +453,10 @@ class BlendModule:
                 to unregister.
         """
         if instance_id in self._cb_gpu_contexts:
+            model_name, world_size = self._cb_gpu_context_meta[instance_id]
             del self._cb_gpu_contexts[instance_id]
             del self._cb_gpu_context_meta[instance_id]
+            self._ctx.layout_desc_registry.unregister(model_name, world_size)
             logger.info("Unregistered CB KV cache for instance_id %d", instance_id)
         else:
             logger.warning(
@@ -595,7 +597,7 @@ class BlendModule:
         # time, so ipc_key_to_object_keys resolves correctly.
         for group in groups:
             chunk_hashes = [r.hash for r in group]
-            obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+            obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
             handle = self._ctx.storage_manager.submit_prefetch_task(
                 obj_keys,
                 layout_desc,
@@ -612,15 +614,15 @@ class BlendModule:
         # Collect only the CBMatchResults for chunks actually found in storage
         stale_hashes: list[bytes] = []
         for handle, group in zip(prefetch_handles, groups, strict=False):
-            found_count = None
+            found = None
             while True:
-                found_count = self._ctx.storage_manager.query_prefetch_status(handle)
-                if found_count is not None:
+                found = self._ctx.storage_manager.query_prefetch_status(handle)
+                if found is not None:
                     break
                 time.sleep(0.001)
 
             # Real found count after dedup the TP
-            found_count = found_count // world_size
+            found_count = found.count_leading_ones() // world_size
 
             start = group[0].cur_st
             end = group[-1].cur_ed
@@ -825,7 +827,7 @@ class BlendModule:
         # the CB lookup path and via the standard lookup/retrieve path.
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         # convert to object key
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         reserved_dict: dict = {}
         try:
@@ -935,7 +937,7 @@ class BlendModule:
         cb_match_result = sorted(cb_match_result, key=lambda r: r.cur_st)
         num_chunks = len(cb_match_result)
         chunk_hashes = [r.hash for r in cb_match_result]
-        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        all_obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         # CPU-synchronous sentinel: GPU retrieve is about to be enqueued.
         self._ctx.event_bus.publish(
@@ -1108,7 +1110,7 @@ class BlendModule:
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
 
         # convert to object key
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         reserved_dict: dict = {}
         try:

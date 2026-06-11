@@ -22,7 +22,7 @@ import zmq
 # First Party
 from lmcache.cli.commands.bench import BenchCommand
 from lmcache.cli.commands.bench.server_bench.helpers import (
-    _allocate_gpu_kv_cache,
+    _allocate_kv_cache,
     _build_token_ids,
     _make_key,
     _poll_prefetch_status,
@@ -318,12 +318,12 @@ def router_endpoint() -> str:
 
 
 # ------------------------------------------------------------------ #
-#  _allocate_gpu_kv_cache (dtype branching)
+#  _allocate_kv_cache (dtype branching)
 # ------------------------------------------------------------------ #
 
 
 class TestAllocateKVCache:
-    """Regression tests for ``_allocate_gpu_kv_cache`` dtype handling.
+    """Regression tests for ``_allocate_kv_cache`` dtype handling.
 
     ``torch.randn`` only supports floating-point dtypes, so integer
     dtypes in ``DTYPE_MAP`` (e.g. ``uint8`` used by FP8 quantized
@@ -333,7 +333,7 @@ class TestAllocateKVCache:
 
     @staticmethod
     def _alloc(dtype: torch.dtype) -> list[torch.Tensor]:
-        return _allocate_gpu_kv_cache(
+        return _allocate_kv_cache(
             num_layers=1,
             num_heads=2,
             head_size=4,
@@ -389,7 +389,7 @@ class TestAllocateKVCache:
             shape_desc=SimpleNamespace(kv_size=1, nb=2, bs=2, nh=4, hs=32, nl=2),
             dtype=torch.bfloat16,
         )
-        tensors = _allocate_gpu_kv_cache(
+        tensors = _allocate_kv_cache(
             device="cpu",
             groups=[group_a, group_b],
         )

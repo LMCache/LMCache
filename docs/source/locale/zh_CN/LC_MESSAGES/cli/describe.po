@@ -1,0 +1,183 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-01 10:55+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/cli/describe.rst:2
+msgid "lmcache describe"
+msgstr "lmcache 描述"
+
+#: ../../source/cli/describe.rst:4
+msgid ""
+"The ``lmcache describe`` command shows the detailed status of a running "
+"LMCache service, including cache health, L1 storage, registered models, "
+"and L2 adapters."
+msgstr "``lmcache describe`` 命令显示正在运行的 LMCache 服务的详细状态，包括缓存健康状况、L1 存储、注册的模型和 L2 适配器。"
+
+#: ../../source/cli/describe.rst:45
+msgid "The output shows:"
+msgstr "输出显示："
+
+#: ../../source/cli/describe.rst:47
+msgid "**Overview** — health status, engine type, chunk size."
+msgstr "**概述** — 健康状态、引擎类型、块大小。"
+
+#: ../../source/cli/describe.rst:48
+msgid "**L1 storage** — capacity, usage, eviction policy, cached object count."
+msgstr "**L1 存储** — 容量、使用情况、逐出策略、缓存对象数量。"
+
+#: ../../source/cli/describe.rst:49
+msgid ""
+"**Registered models** — per-model KV cache layout including the GPU KV "
+"tensor shape (symbolic and concrete), attention backend, and layer "
+"details."
+msgstr "**注册模型** — 每个模型的 KV Cache 布局，包括 GPU KV 张量形状（符号和具体）、注意力后端和层详细信息。"
+
+#: ../../source/cli/describe.rst:51
+msgid "**L2 adapters** — type, health, backend, stored objects, and utilization."
+msgstr "**L2 适配器** — 类型、健康状况、后端、存储对象和利用率。"
+
+#: ../../source/cli/describe.rst:54
+msgid "Options"
+msgstr "选项"
+
+#: ../../source/cli/describe.rst:60
+msgid "Flag"
+msgstr "标志"
+
+#: ../../source/cli/describe.rst:61
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/cli/describe.rst:62
+msgid "``kvcache``"
+msgstr "``kvcache``"
+
+#: ../../source/cli/describe.rst:63
+msgid ""
+"Target to describe (positional, required; currently only ``kvcache`` is "
+"supported)."
+msgstr "描述目标（位置参数，必需；当前仅支持 ``kvcache``）。"
+
+#: ../../source/cli/describe.rst:65
+msgid "``--url``"
+msgstr "``--url``"
+
+#: ../../source/cli/describe.rst:66
+msgid "LMCache HTTP server URL (default: ``http://localhost:8080``)."
+msgstr "LMCache HTTP 服务器 URL（默认：``http://localhost:8080``）。"
+
+#: ../../source/cli/describe.rst:67
+msgid "``--format``"
+msgstr "``--format``"
+
+#: ../../source/cli/describe.rst:68
+msgid "Output format: ``terminal`` (default) or ``json``."
+msgstr "输出格式：``terminal``（默认）或``json``。"
+
+#: ../../source/cli/describe.rst:69
+msgid "``--output PATH``"
+msgstr "``--output PATH``"
+
+#: ../../source/cli/describe.rst:70
+msgid "Save metrics to a file (format follows ``--format``)."
+msgstr "将指标保存到文件中（格式遵循 ``--format``）。"
+
+#: ../../source/cli/describe.rst:71
+msgid "``-q`` / ``--quiet``"
+msgstr "``-q`` / ``--quiet``"
+
+#: ../../source/cli/describe.rst:72
+msgid "Suppress stdout output. Exit code only."
+msgstr "抑制标准输出。仅返回退出代码。"
+
+#: ../../source/cli/describe.rst:75
+msgid "JSON Output"
+msgstr "JSON 输出"
+
+#: ../../source/cli/describe.rst:77
+msgid ""
+"Use ``--format json`` for machine-readable output. Models and L2 adapters"
+" are collected into lists for easy programmatic access:"
+msgstr "使用 ``--format json`` 以机器可读的输出格式。模型和 L2 适配器被收集到列表中，以便于程序化访问："
+
+#: ../../source/cli/describe.rst:127
+msgid "GPU KV Shape Abbreviations"
+msgstr "GPU KV 形状缩写"
+
+#: ../../source/cli/describe.rst:129
+msgid "The ``gpu_kv_shape`` field uses short names from the ``GPUKVFormat`` enum:"
+msgstr "``gpu_kv_shape`` 字段使用来自 ``GPUKVFormat`` 枚举的简短名称："
+
+#: ../../source/cli/describe.rst:135
+msgid "Abbrev"
+msgstr "缩写"
+
+#: ../../source/cli/describe.rst:136
+msgid "Meaning"
+msgstr "含义"
+
+#: ../../source/cli/describe.rst:137
+msgid "NB"
+msgstr "注意事项"
+
+#: ../../source/cli/describe.rst:138
+msgid "num_blocks"
+msgstr "num_blocks"
+
+#: ../../source/cli/describe.rst:139
+msgid "NL"
+msgstr "NL"
+
+#: ../../source/cli/describe.rst:140
+msgid "num_layers"
+msgstr "num_layers"
+
+#: ../../source/cli/describe.rst:141
+msgid "BS"
+msgstr "批量大小"
+
+#: ../../source/cli/describe.rst:142
+msgid "block_size"
+msgstr "块大小"
+
+#: ../../source/cli/describe.rst:143
+msgid "NH"
+msgstr "NH"
+
+#: ../../source/cli/describe.rst:144
+msgid "num_heads"
+msgstr "头数"
+
+#: ../../source/cli/describe.rst:145
+msgid "HS"
+msgstr "HS"
+
+#: ../../source/cli/describe.rst:146
+msgid "head_size"
+msgstr "头部大小"
+
+#: ../../source/cli/describe.rst:147
+msgid "PBS"
+msgstr "PBS"
+
+#: ../../source/cli/describe.rst:148
+msgid "page_buffer_size (NB × BS)"
+msgstr "页面缓冲区大小 (NB × BS)"
+

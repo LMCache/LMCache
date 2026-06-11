@@ -4,7 +4,8 @@ Engine protocol definitions for core KV cache operations.
 
 This module defines the protocol for:
 - REGISTER_KV_CACHE: Register a KV cache instance with the server
-- UNREGISTER_KV_CACHE: Unregister a KV cache instance
+- UNREGISTER_KV_CACHE: Unregister a KV cache instance (GPU path)
+- UNREGISTER_KV_CACHE_NON_GPU_CONTEXT: Unregister a non-GPU KV cache context
 - STORE: Store KV cache blocks to the server
 - RETRIEVE: Retrieve KV cache blocks from the server
 - LOOKUP: Submit a prefix lookup and return a prefetch job ID
@@ -23,6 +24,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
     RegisterNonGpuContextPayload,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 
@@ -46,6 +48,14 @@ class PrepareRetrieveResponse:
     )  # pickle: {}, shm will put slot info here
 
 
+@dataclass
+class RegisterNonGpuContextResponse:
+    """Response for REGISTER_KV_CACHE_NON_GPU_CONTEXT."""
+
+    shm_name: str = ""
+    pool_size: int = 0
+
+
 # Define request names for this protocol group
 REQUEST_NAMES = [
     "REGISTER_KV_CACHE",
@@ -58,6 +68,7 @@ REQUEST_NAMES = [
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
     "REGISTER_KV_CACHE_NON_GPU_CONTEXT",
+    "UNREGISTER_KV_CACHE_NON_GPU_CONTEXT",
     "PREPARE_STORE",
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
@@ -85,9 +96,19 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - engine_type: EngineType - Which serving engine produced the
         #     caches (vLLM, SGLang, ...). Drives format detection.
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
+        #   - engine_group_infos: list[EngineGroupInfo] - Engine-neutral KV cache
+        #     group metadata (msgspec-encoded by the message queue).
         # Returns: None
         "REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int, EngineType, LayoutHints],
+            payload_classes=[
+                int,
+                KVCache,
+                str,
+                int,
+                EngineType,
+                LayoutHints,
+                list[EngineGroupInfo],
+            ],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
@@ -104,11 +125,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - key: KeyType - Cache key to store
         #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - gpu_block_ids: list[int] - GPU block IDs containing the data
+        #   - gpu_block_ids: list[list[int]] - GPU block IDs containing the
+        #     data, indexed by LMCache KV group index.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "STORE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[int], bytes],
+            payload_classes=[KeyType, int, list[list[int]], bytes],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
@@ -116,13 +138,14 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - key: KeyType - Cache key to retrieve
         #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - gpu_block_ids: list[int] - GPU block IDs to store retrieved data
+        #   - gpu_block_ids: list[list[int]] - GPU block IDs to store
+        #     retrieved data, indexed by LMCache KV group index.
         #   - event_ipc_handle: bytes - CUDA event IPC handle for synchronization
         #   - skip_first_n_tokens: int - Number of tokens to skip writing at the
         #     start of the retrieve range (to avoid overwriting APC-shared blocks)
         # Returns: tuple[bytes, bool] - (CUDA event handle, success flag)
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[int], bytes, int],
+            payload_classes=[KeyType, int, list[list[int]], bytes, int],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),
@@ -176,13 +199,22 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             response_class=None,
             handler_type=HandlerType.BLOCKING,
         ),
+        # Unregister non-GPU KV cache context
+        # Payload:
+        #   - instance_id: int - Unique identifier for the vLLM instance
+        # Returns: None
+        "UNREGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
+            payload_classes=[int],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
+        ),
         # Register non-GPU KV cache context
         # Payload:
         #   - RegisterNonGpuContextPayload - all metadata fields in one struct
-        # Returns: None
+        # Returns: RegisterNonGpuContextResponse
         "REGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
             payload_classes=[RegisterNonGpuContextPayload],
-            response_class=None,
+            response_class=RegisterNonGpuContextResponse,
             handler_type=HandlerType.SYNC,
         ),
         "PREPARE_STORE": ProtocolDefinition(

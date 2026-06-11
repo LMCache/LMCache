@@ -200,7 +200,7 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_prefix_hit_count=0,
+                        l1_found_indices=(),
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -222,7 +222,7 @@ class LookupModule:
                     handle=PrefetchHandle(
                         prefetch_request_id=-1,
                         external_request_id=key.request_id,
-                        l1_prefix_hit_count=0,
+                        l1_found_indices=(),
                         total_requested_keys=0,
                         submit_time=time.monotonic(),
                     ),
@@ -266,7 +266,7 @@ class LookupModule:
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,
@@ -309,11 +309,11 @@ class LookupModule:
             )
             return 0
 
-        found_count = self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
-        if found_count is None:
+        found = self._ctx.storage_manager.query_prefetch_lookup_hits(job.handle)
+        if found is None:
             return None
 
-        found_count = found_count // job.world_size
+        found_count = found // job.world_size
         return found_count
 
     def query_prefetch_status(
@@ -344,15 +344,15 @@ class LookupModule:
             )
             return 0
 
-        found_count = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found_count is None:
+        found = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if found is None:
             return None
 
         # NOTE(Kuntai): this assumes two things:
         # 1. the world size is the same between keys
         # 2. the lookup sort the keys in prefix order and breaks at the
         #    first failure
-        found_count = found_count // job.world_size
+        found_count = found.count_leading_ones() // job.world_size
 
         self._ctx.event_bus.publish(
             Event(
@@ -399,7 +399,7 @@ class LookupModule:
         )
         if not chunk_hashes:
             return
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
@@ -437,7 +437,7 @@ class LookupModule:
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes, [0])[0]
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,

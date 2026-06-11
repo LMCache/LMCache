@@ -415,6 +415,43 @@ class LocalCPUBackend(AllocatorBackendInterface):
             )
             return paged_mem_allocator
         else:
+            extra_config = config.extra_config
+            nixl_cpu_enabled = (
+                extra_config is not None
+                and extra_config.get("enable_nixl_storage")
+                and config.nixl_buffer_device == "cpu"
+            )
+
+            if nixl_cpu_enabled:
+                if metadata is None:
+                    raise ValueError("metadata required for NIXL CPU mode")
+                chunk_bytes = get_size_bytes(
+                    metadata.get_shapes(), metadata.get_dtypes()
+                )
+                aligned_size = (cpu_size_bytes // chunk_bytes) * chunk_bytes
+                if aligned_size == 0:
+                    raise ValueError(
+                        f"max_local_cpu_size ({cpu_size_bytes} bytes) is smaller than "
+                        f"one chunk ({chunk_bytes} bytes); cannot initialize NIXL CPU "
+                        f"shared pool"
+                    )
+                if aligned_size != cpu_size_bytes:
+                    logger.warning(
+                        "max_local_cpu_size not a multiple of chunk size; "
+                        "rounding down from %d to %d bytes for NIXL shared pool",
+                        cpu_size_bytes,
+                        aligned_size,
+                    )
+                return MixedMemoryAllocator(
+                    aligned_size,
+                    use_paging=True,
+                    use_hugepages=use_hugepages,
+                    numa_mapping=numa_mapping,
+                    shapes=metadata.get_shapes(),
+                    dtypes=metadata.get_dtypes(),
+                    fmt=MemoryFormat.KV_2LTD,
+                )
+
             # Check if io_uring is enabled for fixed buffer support
             io_engine = str(
                 config.get_extra_config_value("rust_raw_block.io_engine", "") or ""
@@ -733,7 +770,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             if self.use_hot:
                 # TODO(Jiayi): optimize `num_candidates` with estimation.
                 # Accurate estimation is hard due to fragmentation
-                num_candidates = 1
+                num_candidates = min(64, max(1, len(self.hot_cache)))
                 evict_keys = None
                 with self.cpu_lock:
                     evict_keys = self.cache_policy.get_evict_candidates(
@@ -745,17 +782,26 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     # then the other layers are also ref_count > 1 or
                     # pinned in the cpu memory. This might not be true.
                     if evict_keys:
-                        evict_keys_count += len(evict_keys)
-                        wait_other_requests = False
                         for evict_key in evict_keys:
                             evict_key_all_layer = evict_key.split_layers(batch_size)
 
                             # TODO(Jiayi): batched allocate is not supported through
                             # `batched_remove`. Therefore, features like usage tracking
                             # is not supported.
-                            old_mem_objs = []
+                            old_mem_objs: list[MemoryObj] = []
                             for key in evict_key_all_layer:
-                                old_mem_objs.append(self.hot_cache[key])
+                                old_mem_obj = self.hot_cache.get(key)
+                                if old_mem_obj is None or not old_mem_obj.can_evict:
+                                    old_mem_objs = []
+                                    break
+                                old_mem_objs.append(old_mem_obj)
+
+                            if not old_mem_objs:
+                                continue
+
+                            wait_other_requests = False
+                            evict_keys_count += len(old_mem_objs)
+                            for key in evict_key_all_layer:
                                 self.cache_policy.update_on_force_evict(key)
                                 self.hot_cache.pop(key, None)
 
@@ -764,7 +810,8 @@ class LocalCPUBackend(AllocatorBackendInterface):
                             logger.debug(
                                 f"Evicting {len(old_mem_objs)} chunks from cpu memory"
                             )
-                    else:
+                            break
+                    if wait_other_requests:
                         self.stats_monitor.update_local_cpu_evict_failed_count(
                             num_candidates
                         )
@@ -790,7 +837,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
             memory_objs = self.memory_allocator.batched_allocate(
                 shapes, dtypes, batch_size, fmt
             )
-            if memory_objs:
+            if memory_objs is not None:
                 break
 
             num_attempts += 1

@@ -98,7 +98,7 @@ msgid ""
 "<https://docs.sglang.io/cookbook/autoregressive/MiniMax/MiniMax-M2>`_, "
 "`MiniMax M2.5/M2.1/M2 usage guide "
 "<https://docs.sglang.io/docs/basic_usage/minimax_m2>`_."
-msgstr "**引擎文档：** `MiniMax-M2 SGLang 食谱 <https://docs.sglang.io/cookbook/autoregressive/MiniMax/MiniMax-M2>`_，`MiniMax M2.5/M2.1/M2 使用指南 <https://docs.sglang.io/docs/basic_usage/minimax_m2>`_。"
+msgstr "**引擎文档：** `MiniMax-M2 SGLang 实战指南 <https://docs.sglang.io/cookbook/autoregressive/MiniMax/MiniMax-M2>`_，`MiniMax M2.5/M2.1/M2 使用指南 <https://docs.sglang.io/docs/basic_usage/minimax_m2>`_。"
 
 #: ../../source/recipes/minimax_m2.rst:93
 msgid "**Status:** Not validated with LMCache."

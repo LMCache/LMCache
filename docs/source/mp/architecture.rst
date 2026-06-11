@@ -29,7 +29,8 @@ High-Level Architecture
     StorageManager (distributed/storage_manager.py)
          |
          |--- L1Manager (l1_manager.py)
-         |       |--- L1MemoryManager (memory allocator)
+         |       |--- L1MemoryManager (CPU DRAM) or
+         |       |    GDSL1MemoryManager (NVMe slab via cuFile)
          |       |--- TTLLock per object (read/write)
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
@@ -42,18 +43,31 @@ High-Level Architecture
 Server Variants
 ---------------
 
-All three server entry points share the same ``MPCacheEngine`` and
-``StorageManager`` core.
+All server entry points share the same ``MPCacheEngine`` and
+``StorageManager`` core. ``MPCacheEngine`` is now a thin compositor:
+it holds an ``MPCacheEngineContext`` and a list of ``EngineModule``
+instances assembled by ``build_engine_modules()`` (in ``server.py``)
+based on ``--engine-type`` and ``--supported-transfer-mode``.
 
-**``server.py``** -- The default ZMQ-only server.  Creates an ``MPCacheEngine``
-and a ``MessageQueueServer``, registers handlers for all core
-``RequestType`` values, and blocks in a keep-alive loop.
+**``server.py``** -- The default ZMQ-only server.  Creates an
+``MPCacheEngine``, assembles the engine modules
+(``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule``
+and/or ``NonGPUTransferModule`` depending on
+``--supported-transfer-mode`` — ``gpu`` or ``non_gpu`` loads just one,
+``auto`` (default) loads both — plus ``BlendModule`` when
+``--engine-type blend``), starts a ``MessageQueueServer``, registers
+handlers for every ``RequestType`` exposed by the loaded modules, and
+blocks in a keep-alive loop.
 
-**``blend_server_v2.py``** -- Extends ``MPCacheEngine`` with ``BlendEngineV2``,
-which adds CacheBlend operations (``CB_REGISTER_KV_CACHE``,
+**``modules/blend.py``** -- Defines ``BlendModule`` and ``BlendEngineV2``,
+which add CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 ``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
-``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL``).  Enables non-prefix KV
-cache reuse across document paragraphs.
+``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL`` and their V2
+variants). Enables non-prefix KV cache reuse across document
+paragraphs. Selected by passing ``--engine-type blend`` to
+``lmcache server``; ``BlendModule`` requires
+``--supported-transfer-mode`` to be ``gpu`` or ``auto`` and will refuse
+to load when it is ``non_gpu``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
@@ -181,8 +195,11 @@ Each config module exposes a composable triple:
       # which internally calls add_l2_adapters_args(parser)
     add_observability_args(parser)    # from mp_observability/config.py
 
-Both ``blend_server_v2.py`` and ``http_server.py`` reuse this pattern, adding
-``add_http_frontend_args()`` for the HTTP variant.
+``http_server.py`` reuses this pattern, adding
+``add_http_frontend_args()`` for the HTTP variant. CacheBlend is no
+longer a separate entry point — it is opted into at runtime by passing
+``--engine-type blend`` to ``server.py`` (or ``lmcache server``), which
+appends ``BlendModule`` to the engine module list.
 
 Distributed Storage
 -------------------
@@ -219,8 +236,16 @@ Manages objects in CPU memory with a state machine:
 Each object has two ``TTLLock`` instances (read and write) with configurable
 timeouts to prevent deadlocks from crashed clients.
 
-The ``L1MemoryManager`` handles the underlying memory allocation (lazy growth
-up to ``--l1-size-gb``).
+The underlying memory allocation is handled by one of two interchangeable
+tiers selected at startup (both satisfy ``L1ManagerProtocol``):
+
+- ``L1MemoryManager`` (default) -- pinned CPU DRAM, with lazy growth up to
+  ``--l1-size-gb``.
+- ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
+  The bytes live on disk; reads/writes DMA directly between the GPU staging
+  buffer and the slab via cuFile, driven by the process-global ``GDSContext``
+  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
+  tier is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
@@ -406,8 +431,17 @@ Key Source Files
      - MPCacheEngine + ZMQ server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
-   * - ``lmcache/v1/multiprocess/blend_server_v2.py``
-     - BlendEngineV2 (extends MPCacheEngine)
+   * - ``lmcache/v1/multiprocess/engine_context.py``
+     - MPCacheEngineContext (shared state passed to every EngineModule)
+   * - ``lmcache/v1/multiprocess/engine_module.py``
+     - ``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType``
+       (per-module handler registration)
+   * - ``lmcache/v1/multiprocess/modules/``
+     - Engine module implementations: ``lookup.py`` (``LookupModule``),
+       ``management.py`` (``ManagementModule``), ``gpu_transfer.py``
+       (``GPUTransferModule``), ``non_gpu_transfer.py``
+       (``NonGPUTransferModule``), and ``blend.py``
+       (``BlendModule`` / ``BlendEngineV2``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``

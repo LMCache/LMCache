@@ -218,3 +218,52 @@ A larger L1 cache means fewer L2 round-trips.
 **Logging:**
 Use ``LMCACHE_LOG_LEVEL=DEBUG`` during initial setup to verify L2 store/load
 activity.  Switch to ``INFO`` (default) for production to reduce log volume.
+
+Non-GPU Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)
+---------------------------------------------------------------------
+
+LMCache supports two worker → server transfer paths: a **GPU** path
+(CUDA IPC, used for STORE/RETRIEVE) and a **non-GPU** path
+(PREPARE/COMMIT, used by CPU-only or non-CUDA accelerator workers).
+The server picks which paths to load via ``--supported-transfer-mode``:
+
+- ``auto`` *(default)* -- load both paths.  Workers of either device
+  type can connect without manual configuration; the server has no
+  upfront knowledge of the connecting worker's device.
+- ``gpu`` -- load only the GPU IPC path.  Use when every worker is a
+  CUDA device and you want to skip allocating the non-GPU resources
+  (SHM pool, pickle codec).
+- ``non_gpu`` -- load only the non-GPU path.  Use when serving CPU-only
+  or non-CUDA accelerator workers.
+
+When the non-GPU path is loaded (``auto`` or ``non_gpu``), LMCache by
+default creates a shared-memory (SHM) pool for non-GPU KV transfers
+between the server and vLLM workers.  The ``--shm-name`` option lets
+you control this behavior:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Value
+     - Effect
+   * - *(not set)* (default)
+     - Auto-allocate a SHM pool (current default behavior).
+   * - ``""`` (empty string)
+     - Disable the SHM pool entirely and fall back to the pickle-based
+       transfer path.  Useful when ``/dev/shm`` is unavailable or when
+       running without ``--ipc host`` in Docker.
+   * - ``"my_pool"`` (any non-empty name)
+     - Use that exact name for the SHM segment instead of the
+       auto-generated one.  Handy when you need a deterministic,
+       human-readable segment name for monitoring or debugging.
+
+**Examples:**
+
+.. code-block:: bash
+
+    # Force pickle (no SHM):
+    lmcache server --l1-size-gb 60 --eviction-policy LRU --shm-name ""
+
+    # Named SHM segment:
+    lmcache server --l1-size-gb 60 --eviction-policy LRU --shm-name "lmcache_pool"

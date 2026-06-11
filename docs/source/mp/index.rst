@@ -18,8 +18,9 @@ Key Benefits
   share a single L1 cache, maximizing KV reuse.
 - **Independent resource scaling** -- Allocate CPU memory for caching
   independently of GPU memory for inference.
-- **Multi-tier storage (L1 + L2)** -- In-memory L1 cache backed by persistent
-  L2 storage via NIXL (GDS, POSIX, HF3FS, and more).
+- **Multi-tier storage (L1 + L2)** -- An L1 cache (in CPU DRAM, or an NVMe
+  slab via GPUDirect Storage) backed by persistent L2 storage via NIXL (GDS,
+  POSIX, HF3FS, and more).
 - **Built-in observability** -- Prometheus metrics and a telemetry event system
   out of the box.
 
@@ -32,7 +33,7 @@ Prerequisites
 Server Variants
 ---------------
 
-LMCache ships three server entry points:
+LMCache ships two server entry points:
 
 .. list-table::
    :header-rows: 1
@@ -41,15 +42,11 @@ LMCache ships three server entry points:
    * - Entry Point
      - Description
    * - ``lmcache server``
-     - **Recommended.** ZMQ + FastAPI HTTP frontend (adds ``/healthcheck``
-       for K8s probes, ``/clear-cache``, ``/status`` — see
-       :doc:`http_api`). Use ``--engine-type blend`` to enable BlendEngineV2
-       for cross-request KV reuse.
+     - **Recommended.** ZMQ + FastAPI HTTP frontend — see :doc:`http_api`.
    * - ``python3 -m lmcache.v1.multiprocess.server``
-     - (Legacy) ZMQ-only server using MPCacheEngine (no HTTP endpoints).
-       Prefer ``lmcache server``.
-   * - ``python3 -m lmcache.v1.multiprocess.blend_server_v2``
-     - (Legacy) CacheBlend-enabled server. Prefer ``lmcache server --engine-type blend``.
+     - (Legacy) ZMQ-only server with no HTTP endpoints; same
+       ``--engine-type`` / ``--supported-transfer-mode`` flags as
+       ``lmcache server``. Prefer ``lmcache server``.
 
 .. toctree::
    :maxdepth: 2
@@ -57,11 +54,14 @@ LMCache ships three server entry points:
 
    quickstart
    configuration
+   hybrid_models
    l2_storage
    serde
    deployment
    operator
+   coordinator
    http_api
    observability
    tracing_and_debugging
    architecture
+   frontend_dashboard

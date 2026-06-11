@@ -346,6 +346,55 @@ class CustomizedSerdeConfig:
     code: int
 
 
+@dataclass
+class BlockAllocationRecord:
+    """A single per-request GPU block allocation delta from vLLM."""
+
+    req_id: str
+    new_block_ids: list[int]
+    new_token_ids: list[int]
+
+
+@dataclass
+class CBMatchResult:
+    """Result of a sub-sequence match from BlendTokenRangeMatcher.
+
+    Attributes:
+        old_st: Start position in the originally registered (stored) sequence.
+        old_ed: End position in the originally registered (stored) sequence.
+        cur_st: Start position in the query sequence where the match was found.
+        cur_ed: End position in the query sequence where the match was found.
+        hash: Token hash bytes (from registration) used as the storage key.
+    """
+
+    old_st: int
+    old_ed: int
+    cur_st: int
+    cur_ed: int
+    hash: bytes
+
+
+@dataclass
+class CBUnifiedLookupResult:
+    """Resolved payload of ``CB_UNIFIED_LOOKUP``: prefix lookup + non-prefix
+    fingerprint match, reconciled in one RPC. The RPC returns ``None`` (not this)
+    while either leg's KV is still loading into L1; this type is sent only once
+    both are resident.
+
+    Attributes:
+        prefix_coverage_tokens: Contiguous prefix-cache coverage (L1+L2) in
+            tokens — what the standard LOOKUP would report.
+        non_prefix_segments: Fingerprint matches outside the prefix coverage
+            (cur_st order), each carrying ``(old_st, old_ed, cur_st, cur_ed,
+            hash)``. Token-aligned (any offset, not block-aligned): the per-token
+            slot scatter handles them. Already resident in L1, so the retrieve
+            set equals the prefetched set.
+    """
+
+    prefix_coverage_tokens: int
+    non_prefix_segments: list[CBMatchResult]
+
+
 _CUSTOMERIZED_SERIALIZERS = {
     CudaIPCWrapper: CustomizedSerdeConfig(
         serializer=CudaIPCWrapper.Serialize,
@@ -375,31 +424,3 @@ def get_customized_decoder(type: Any) -> msgspec.msgpack.Decoder:
         raise TypeError(f"Unsupported ext code for deserialization: {code}")
 
     return msgspec.msgpack.Decoder(ext_hook=ext_hook, type=type)
-
-
-@dataclass
-class BlockAllocationRecord:
-    """A single per-request GPU block allocation delta from vLLM."""
-
-    req_id: str
-    new_block_ids: list[int]
-    new_token_ids: list[int]
-
-
-@dataclass
-class CBMatchResult:
-    """Result of a sub-sequence match from BlendTokenRangeMatcher.
-
-    Attributes:
-        old_st: Start position in the originally registered (stored) sequence.
-        old_ed: End position in the originally registered (stored) sequence.
-        cur_st: Start position in the query sequence where the match was found.
-        cur_ed: End position in the query sequence where the match was found.
-        hash: Token hash bytes (from registration) used as the storage key.
-    """
-
-    old_st: int
-    old_ed: int
-    cur_st: int
-    cur_ed: int
-    hash: bytes

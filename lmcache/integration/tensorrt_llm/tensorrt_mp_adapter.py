@@ -368,6 +368,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                 self._world_size,
                 EngineType.TRTLLM,
                 layout_hints,
+                [],
             ],
         )
         try:
@@ -411,7 +412,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                     [
                         key,
                         self._instance_id,
-                        spec.block_ids,
+                        [spec.block_ids],
                         event.ipc_handle(),
                         0,  # skip_first_n_tokens
                     ],
@@ -461,7 +462,7 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
                     [
                         key,
                         self._instance_id,
-                        spec.block_ids,
+                        [spec.block_ids],
                         event.ipc_handle(),
                     ],
                 ).result(timeout=self._mq_timeout)

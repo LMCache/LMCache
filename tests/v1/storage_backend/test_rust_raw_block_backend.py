@@ -178,6 +178,7 @@ def test_raw_block_core_passes_io_engine_options_to_rust_binding(monkeypatch):
                 "use_odirect": False,
                 "alignment": 4096,
                 "io_engine": "io_uring",
+                "use_uring_cmd": False,
                 "iouring_queue_depth": 512,
             }
         ]

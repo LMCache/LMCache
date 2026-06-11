@@ -3,8 +3,10 @@ L2 Storage (Persistent Cache)
 
 LMCache multiprocess mode supports a two-tier storage architecture:
 
-- **L1 (in-memory)** -- Fast CPU memory managed by the L1 Manager.  All KV
-  cache chunks live here during active use.
+- **L1 (fast tier)** -- CPU memory by default, or an NVMe slab via GPUDirect
+  Storage (cuFile) when ``--gds-l1-path`` is set, managed by the L1 Manager.
+  All KV cache chunks live here during active use. (Byte-array L2 adapters are
+  unsupported under the GDS L1 tier, which exposes no L1 memory buffer.)
 - **L2 (persistent)** -- Durable storage backends (NIXL-based or plain
   file-system/raw-block).  The StoreController asynchronously pushes data from L1
   to L2, and the PrefetchController loads data from L2 back into L1 on
@@ -364,7 +366,13 @@ caller-provided load buffers during prefetch.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
   io_uring syscall path).
+- ``use_uring_cmd``: Enable NVMe passthrough via io_uring command interface
+  for direct device access. Requires ``io_engine="io_uring"`` and NVMe
+  character device node (e.g., ``/dev/ng0n1``).
 - ``iouring_queue_depth``: Queue depth for ``io_engine="io_uring"``.
+- ``max_data_transfer_size``: Maximum data transfer size for
+  ``use_uring_cmd=true``. Large transfers are split into smaller chunks
+  that fit within device limits.
 - ``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``:
   Worker-thread counts for each operation type.
 
@@ -372,22 +380,35 @@ caller-provided load buffers during prefetch.
 
 - ``raw_block`` is a server-owned MP adapter. It does **not** support
   per-TP device-path mappings in MP mode.
-- ``raw_block`` remains ``"type": "raw_block"`` for both supported engines.
+- ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
   through ``RawBlockCore``. Slot reclamation is driven by the shared/global
   L2 eviction controller or explicit ``delete()`` calls.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
   at least ``block_align``.
 - ``persist_enabled`` must remain ``true`` for this adapter.
+- For ``use_uring_cmd=true``, ``device_path`` must use the NVMe character
+  device node (e.g., ``/dev/ng0n1``) instead of the block device node
+  (``/dev/nvme0n1``). The character device provides direct NVMe
+  command passthrough.
+- ``use_uring_cmd`` requires ``io_engine="io_uring"`` to be set.
+- When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe namespace
+  character devices.
 
 **Configuration examples:**
 
 .. code-block:: bash
 
+    # Basic raw_block with posix I/O
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
 
+    # With io_uring
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
 
+    # With io_uring_cmd (NVMe passthrough)
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "iouring_queue_depth": 256, "max_data_transfer_size": 131072, "use_odirect": false}'
+
+    # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
 ``mooncake_store`` -- Mooncake Store native connector
@@ -606,6 +627,59 @@ S3-compatible endpoint (MinIO, Ceph RGW, etc.).
 
     # Local MinIO over plain HTTP
     --l2-adapter '{"type": "s3", "s3_endpoint": "minio.local:9000", "s3_region": "us-east-1", "disable_tls": true, "aws_access_key_id": "minio", "aws_secret_access_key": "minio123"}'
+
+``hfbucket`` -- Hugging Face Buckets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter that stores KV cache objects in a `Hugging Face Bucket
+<https://huggingface.co/docs/hub/storage-backends>`_ using the
+``huggingface_hub`` bucket APIs.  Blocking Hub calls run on a bounded thread
+pool driven by an asyncio loop on a daemon thread, so the L2 controller thread
+is never blocked on network I/O.
+
+Object names are derived from the MP ``ObjectKey`` as
+``<model>@<kv_rank_hex>@<chunk_hash_hex>[@<cache_salt>]`` and then encoded with
+the standard HFBucket object-name encoding plus the optional bucket prefix.
+Because Hugging Face batch writes are not transactional, a store task that
+partially fails reconciles backend metadata so that any objects that actually
+landed are still counted for usage accounting and later deletion.
+
+This is a persistent remote backend best suited to warm and cold KV cache
+tiers; prefer a lower-latency local adapter for the hottest cache tier.
+
+**Required fields:**
+
+- ``bucket_handle``: Bucket location in the form
+  ``hf://buckets/<namespace>/<bucket>[/<prefix>]``.
+
+**Optional fields:**
+
+- ``token_env`` (string, default ``"HF_TOKEN"``): Environment variable used to
+  resolve the Hugging Face access token.
+- ``token`` (string): Direct token fallback used when ``token_env`` is unset.
+- ``create_bucket_if_missing`` (bool, default ``false``): Create the bucket
+  lazily on the first store instead of requiring it to exist.
+- ``download_tmp_dir`` (string): Root directory for temporary load downloads.
+- ``metadata_cache_ttl_secs`` (float, default ``30.0``): TTL for the
+  path-size metadata cache that backs lookups and usage accounting.
+- ``num_workers`` (int, default ``4``): Number of worker threads for blocking
+  Hugging Face Hub API calls.
+- ``max_capacity_gb`` (float, default ``0.0``): Aggregate capacity used by
+  ``get_usage()``.  A value of ``0`` disables aggregate eviction.
+- ``eviction`` (dict): Optional eviction policy, see ``L2AdapterConfigBase``.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Minimal: use an existing bucket with a token from $HF_TOKEN
+    --l2-adapter '{"type": "hfbucket", "bucket_handle": "hf://buckets/my-org/lmcache-kv/prod"}'
+
+    # Create the bucket on first store and bound the worker pool
+    --l2-adapter '{"type": "hfbucket", "bucket_handle": "hf://buckets/my-org/lmcache-kv/prod", "create_bucket_if_missing": true, "num_workers": 8}'
+
+    # Enable aggregate eviction with a capacity cap
+    --l2-adapter '{"type": "hfbucket", "bucket_handle": "hf://buckets/my-org/lmcache-kv/prod", "max_capacity_gb": 50, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -841,6 +915,12 @@ drops by ``eviction_ratio``.
        when ``max_capacity_gb`` is ``0`` (disabled); set a non-zero
        ``max_capacity_gb`` to enable the watermark-triggered eviction
        controller.
+   * - ``hfbucket``
+     - ``delete`` removes objects from the bucket and frees aggregate
+       byte accounting. ``get_usage`` reports ``usage_fraction == -1.0``
+       when ``max_capacity_gb`` is ``0`` (disabled); set a non-zero
+       ``max_capacity_gb`` to enable the watermark-triggered eviction
+       controller. Locked keys (in-flight loads) are skipped.
    * - ``dax``
      - Full support. ``delete`` removes unlocked keys from the in-memory
        index immediately and recycles fixed slots once active read borrows
