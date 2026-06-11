@@ -465,10 +465,11 @@ class GPUTransferModule:
                         group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                             group_idx
                         )
-                        # Kernel contract: ``group_lmcache_chunk_size`` here is the
-                        # number of *physical* slots per chunk for this group
-                        # (= logical chunk_size // compress_ratio).
-                        group_lmcache_chunk_size = cache_context.get_slots_per_chunk(
+                        # Kernel contract: ``group_slots_per_chunk`` here is the
+                        # number of *physical* slots per LMCache chunk for this
+                        # group (= lmcache_tokens_per_chunk * slots_per_block //
+                        # tokens_per_block).
+                        group_slots_per_chunk = cache_context.get_slots_per_chunk(
                             group_idx
                         )
                         lmc_ops.multi_layer_block_kv_transfer(
@@ -478,7 +479,7 @@ class GPUTransferModule:
                             cache_context.device,
                             lmc_ops.TransferDirection.D2H,
                             cache_context.get_shape_desc(group_idx),
-                            group_lmcache_chunk_size,
+                            group_slots_per_chunk,
                             cache_context.gpu_kv_format_,
                             0,
                         )
@@ -660,9 +661,7 @@ class GPUTransferModule:
                     group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                         group_idx
                     )
-                    group_lmcache_chunk_size = cache_context.get_slots_per_chunk(
-                        group_idx
-                    )
+                    group_slots_per_chunk = cache_context.get_slots_per_chunk(group_idx)
 
                     lmc_ops.multi_layer_block_kv_transfer(
                         group_kv_pointers,
@@ -671,7 +670,7 @@ class GPUTransferModule:
                         cache_context.device,
                         lmc_ops.TransferDirection.H2D,
                         cache_context.get_shape_desc(group_idx),
-                        group_lmcache_chunk_size,
+                        group_slots_per_chunk,
                         cache_context.gpu_kv_format_,
                         group_skip_blocks,
                     )

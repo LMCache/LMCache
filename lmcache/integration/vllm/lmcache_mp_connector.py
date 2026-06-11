@@ -294,7 +294,7 @@ class LMCacheMPRequestMetadata:
     @staticmethod
     def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
-        chunk_size: int,
+        lmcache_tokens_per_chunk: int,
         group_tokens_per_block: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
@@ -302,15 +302,15 @@ class LMCacheMPRequestMetadata:
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            chunk_size: the number of tokens in a LMCache data chunk
+            lmcache_tokens_per_chunk: the number of tokens in a LMCache data chunk
             group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
-                ``chunk_size`` (hybrid models can mix different values).
+                ``lmcache_tokens_per_chunk`` (hybrid models can mix different values).
         """
         num_engine_groups = len(group_tokens_per_block)
         # NOTE: the invariant here is that `num_stored_tokens` should
-        # always be a multiple of `chunk_size`
+        # always be a multiple of `lmcache_tokens_per_chunk`
         # TODO: This should be checked every time we update the num_stored_tokens
         #
         # Why computed_tokens uses max(num_vllm_hit_tokens, num_lmcache_hit_tokens):
@@ -353,11 +353,11 @@ class LMCacheMPRequestMetadata:
             computed_tokens,
         )
         num_staging_tokens = min_available_tokens - tracker.num_stored_tokens
-        num_chunks = num_staging_tokens // chunk_size
+        num_chunks = num_staging_tokens // lmcache_tokens_per_chunk
 
         if num_chunks >= 1:
             start_token_idx = tracker.num_stored_tokens
-            end_token_idx = start_token_idx + num_chunks * chunk_size
+            end_token_idx = start_token_idx + num_chunks * lmcache_tokens_per_chunk
             block_ids = slice_block_ids_per_group(
                 tracker.allocated_block_ids,
                 group_tokens_per_block,
@@ -388,7 +388,7 @@ class LMCacheMPRequestMetadata:
     @staticmethod
     def GetRetrieveMetadata(
         tracker: LMCacheMPRequestTracker,
-        chunk_size: int,
+        lmcache_tokens_per_chunk: int,
         group_tokens_per_block: list[int],
     ) -> "LMCacheMPRequestMetadata | None":
         """
@@ -396,11 +396,11 @@ class LMCacheMPRequestMetadata:
 
         Args:
             tracker: The request tracker to generate the metadata from.
-            chunk_size: the number of tokens in a LMCache data chunk
+            lmcache_tokens_per_chunk: the number of tokens in a LMCache data chunk
             group_tokens_per_block: per-engine-group tokens covered by one
                 paged chunk (one block ID) of that group, i.e. the group's
                 KV cache spec ``block_size``. Must each divide
-                ``chunk_size`` (hybrid models can mix different values).
+                ``lmcache_tokens_per_chunk`` (hybrid models can mix different values).
         """
         if not tracker.is_ready_for_retrieving():
             return None
@@ -410,9 +410,13 @@ class LMCacheMPRequestMetadata:
         # | lmcache chunk 1   | lmcache chunk 2   |
         #                     |  need to retrieve |
 
-        start_token_idx = tracker.num_vllm_hit_tokens // chunk_size * chunk_size
+        start_token_idx = (
+            tracker.num_vllm_hit_tokens
+            // lmcache_tokens_per_chunk
+            * lmcache_tokens_per_chunk
+        )
         end_token_idx = tracker.num_lmcache_hit_tokens
-        assert end_token_idx % chunk_size == 0, (
+        assert end_token_idx % lmcache_tokens_per_chunk == 0, (
             "The number of LMCache hit tokens should be a multiple of the "
             "LMCache chunk size. "
         )
@@ -572,15 +576,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if self.role == KVConnectorRole.SCHEDULER:
             # Chunk boundaries must land on every group's paged-chunk
             # boundary so per-group block-id slicing stays aligned.
-            chunk_size = self.scheduler_adapter.chunk_size
+            lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
             for engine_group_idx, tokens_per_block in enumerate(
                 self._group_tokens_per_block
             ):
-                if chunk_size % tokens_per_block != 0:
+                if lmcache_tokens_per_chunk % tokens_per_block != 0:
                     raise ValueError(
-                        f"LMCache chunk size {chunk_size} must be a multiple "
-                        f"of group {engine_group_idx} tokens_per_block "
-                        f"{tokens_per_block}"
+                        f"LMCache chunk size {lmcache_tokens_per_chunk} must be "
+                        f"a multiple of group {engine_group_idx} "
+                        f"tokens_per_block {tokens_per_block}"
                     )
 
     @property
@@ -848,7 +852,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         if ret == 0:
             return 0, False
 
-        assert ret % self.scheduler_adapter.chunk_size == 0
+        assert ret % self.scheduler_adapter.lmcache_tokens_per_chunk == 0
 
         # Update num stored tokens for the tracker
         tracker.increase_num_stored_tokens(ret)
@@ -1109,14 +1113,14 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
-        chunk_size = self.scheduler_adapter.chunk_size
+        lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
 
         for request_tracker in self.request_trackers.values():
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
                 request_tracker,
-                chunk_size,
+                lmcache_tokens_per_chunk,
                 group_tokens_per_block=self._group_tokens_per_block,
             )
             if r_metadata is not None:
@@ -1128,7 +1132,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
-        chunk_size = self.scheduler_adapter.chunk_size
+        lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
 
         for new_request in scheduler_output.scheduled_new_reqs:
             request_tracker = self._get_request_tracker(new_request.req_id)
@@ -1138,7 +1142,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
-                chunk_size,
+                lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
             )
             if r_meta is not None:
@@ -1149,7 +1153,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
-        chunk_size = self.scheduler_adapter.chunk_size
+        lmcache_tokens_per_chunk = self.scheduler_adapter.lmcache_tokens_per_chunk
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
@@ -1167,7 +1171,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker,
-                chunk_size,
+                lmcache_tokens_per_chunk,
                 self._group_tokens_per_block,
             )
 
