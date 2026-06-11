@@ -591,6 +591,174 @@ Override Auto-Computed Resources
         limits:
           memory: "100Gi"
 
+CacheBlend
+----------
+
+CacheBlend reuses cached KV at shifted (non-prefix) positions by recomputing a
+small subset of tokens.  The operator manages it as a second CRD,
+``CacheBlendEngine``, plus a **mutating admission webhook** that injects the
+pure-Python ``lmcache-cacheblend`` vLLM plugin into your serving pods -- so you
+do **not** rebuild the vLLM image.  See :doc:`/kv_cache_optimizations/blending`
+for the technique itself.
+
+It has two halves the operator runs together:
+
+- a GPU-resident ``blend_v3`` engine (``lmcache server --engine-type blend_v3``),
+  deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
+  (``privileged`` + ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all``
+  + ``hostIPC``, and **no** ``nvidia.com/gpu`` claim) so it shares the vLLM GPU
+  for same-device CUDA IPC; and
+- the vLLM-side plugin, injected into opted-in pods by the webhook.
+
+Additional Prerequisites
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Beyond the operator prerequisites above:
+
+- **cert-manager** -- the webhook's serving certificate is issued by a
+  cert-manager ``Issuer`` + ``Certificate``.  Install it before ``make deploy``:
+
+  .. code-block:: bash
+
+      kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+      kubectl -n cert-manager wait --for=condition=Available deploy --all --timeout=180s
+
+- **Deploy with the webhook** -- use ``make deploy`` (not ``make run``, which is
+  controller-only and disables the webhook via ``ENABLE_WEBHOOKS=false``).
+- **Pod Security Standards** -- the webhook injects ``hostIPC``/``privileged``,
+  which the ``baseline``/``restricted`` profiles reject, so label the engine's
+  and the vLLM pod's namespaces ``pod-security.kubernetes.io/enforce=privileged``.
+
+Deploying a CacheBlendEngine
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: CacheBlendEngine
+    metadata:
+      name: my-cacheblend
+    spec:
+      l1:
+        sizeGB: 60
+      injection:
+        # The (private) cacheblend-plugin init-container image -- repository/tag/
+        # pullPolicy, like spec.image.  Set repository to YOUR image; the
+        # inherited engine-image default is not a valid payload.
+        payloadImage:
+          repository: <registry>/cacheblend-plugin
+          tag: <tag>
+        # Appended to the vLLM pod so the private payload image can pull; the
+        # Secret must exist in the vLLM pod's namespace.
+        imagePullSecrets:
+          - name: my-registry-secret
+
+The engine runs ``lmcache server --engine-type blend_v3`` as a DaemonSet and
+emits a ``my-cacheblend-connection`` ConfigMap with the ``CBKVConnector``
+``kv-transfer-config`` (the operator wires the node-local Service host/port and
+the ``cb.*`` tunables).
+
+Opting a vLLM Pod In
+~~~~~~~~~~~~~~~~~~~~~
+
+Label the pod template for the webhook and bind it to an engine by name.  Launch
+vLLM via the image **ENTRYPOINT** (args only) -- a
+``command: ["/bin/sh", "-c", ...]`` wrapper is skipped, since appended args would
+not reach ``vllm serve``:
+
+.. code-block:: yaml
+
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: vllm-cacheblend
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: vllm-cacheblend
+      template:
+        metadata:
+          labels:
+            app: vllm-cacheblend
+            lmcache.ai/cacheblend-inject: "true"          # opt-in (webhook objectSelector)
+          annotations:
+            lmcache.ai/cacheblend-engine: "my-cacheblend" # bind to the engine
+        spec:
+          runtimeClassName: nvidia
+          containers:
+            - name: vllm
+              image: lmcache/vllm-openai:<pinned-tag>
+              args: ["<your-model>", "--port", "8000", "--gpu-memory-utilization", "0.8"]
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+
+The webhook injects the plugin init container, ``PYTHONPATH``, ``hostIPC``, the
+private-image pull secret, and the required CacheBlend vLLM flags
+(``--attention-backend CUSTOM``, ``--kv-transfer-config`` from the engine's
+connection ConfigMap, ``--block-size 64``, ``--pipeline-parallel-size 1``,
+``--no-enable-chunked-prefill``, ``--no-async-scheduling``, ``--enforce-eager``).
+You supply only the model and your non-CacheBlend flags.
+
+Verifying Injection
+~~~~~~~~~~~~~~~~~~~~~
+
+The webhook mutates **Pods**, not the Deployment, so inspect a pod:
+
+.. code-block:: bash
+
+    kubectl get pod -l app=vllm-cacheblend -o yaml | \
+      grep -E "initContainers|cb-plugin|PYTHONPATH|attention-backend|cacheblend-injected|skip-reason"
+
+If nothing was injected, check the pod's ``lmcache.ai/cacheblend-skip-reason``
+annotation: ``command-override`` (a ``sh -c`` wrapper was used),
+``kv-transfer-config-present`` (you set your own), ``engine-not-found`` (the
+``<name>-connection`` ConfigMap is missing), ``payload-image-unset`` (the
+engine's ``injection.payloadImage`` has no repository), or
+``target-container-not-found`` (the requested ``targetContainer`` /
+``cacheblend-container`` annotation names a container the pod does not have).
+With ``failurePolicy: Ignore`` a
+webhook/cert problem also leaves the pod un-mutated silently -- confirm the
+operator pod is ``Running`` and the ``MutatingWebhookConfiguration`` exists.
+
+CacheBlendEngine Fields
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``CacheBlendEngineSpec`` mirrors ``LMCacheEngineSpec`` (every field in the CRD
+Spec Reference above) and adds:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``blend.checkLayer``
+     - ``1``
+     - Layer at which token importance is scored (``cb.check_layer``).
+   * - ``blend.recompRatio``
+     - ``0.15``
+     - Fraction of non-prefix-hit tokens recomputed (``cb.recomp_ratio``).
+   * - ``injection.payloadImage``
+     - *required*
+     - The (private) cacheblend-plugin init-container image
+       (``repository`` / ``tag`` / ``pullPolicy``).  Set ``repository`` -- the
+       inherited engine-image default is not a valid payload.
+   * - ``injection.imagePullSecrets``
+     - --
+     - Pull secrets appended to the vLLM pod for the private payload image.
+   * - ``injection.targetContainer``
+     - first container
+     - Name of the vLLM container to inject into.
+   * - ``injection.cudagraph``
+     - ``eager``
+     - ``eager`` | ``piecewise`` | ``full_decode_only`` (never ``full``).
+
+``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
+requires ``chunk_size == vLLM --block-size * 4``).
+
 Operator vs Manual Deployment
 -----------------------------
 

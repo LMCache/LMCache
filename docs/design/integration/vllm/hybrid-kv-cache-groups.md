@@ -141,11 +141,15 @@ Block IDs `{group 0: [10,11], group 1: [20,21]}` are sent as
 - The server reproduces grouping with the same `group_layers_by_identity`; real
   tensors remain the source of truth for shape/dtype/stride.
 
-## Not supported
+## Mamba / linear-attention hybrids
 
-Mamba / linear-attention hybrids (e.g. Qwen3-Next): their recurrent state caches
-have no LMCache transfer format yet. vLLM still exposes them as KV cache groups,
-but LMCache cannot store/retrieve those layers.
+Supported via registration-time tensor re-views (e.g. Qwen3.5 GDN): Mamba
+state pairs become opaque page views, and full-attention layers whose logical
+block size was inflated for page-size unification are re-viewed at
+logical-block granularity. See
+[kv-cache-group-edits](kv_cache_group_edits.md) for the design and its
+limits (notably: edited groups are byte-opaque — no content-aware processing,
+no cross-backend cache sharing).
 
 ## Code map
 
@@ -154,6 +158,7 @@ but LMCache cannot store/retrieve those layers.
 | Engine group info (IPC type) + helpers | `lmcache/v1/multiprocess/group_view.py` |
 | Shared grouping primitive | `lmcache/v1/kv_layer_groups.py` |
 | vLLM → `list[EngineGroupInfo]` | `lmcache/integration/vllm/kv_cache_groups.py` |
+| Group metadata edits (Mamba, sub-paged attention) | `lmcache/integration/vllm/kv_cache_group_edits.py` |
 | Register / store / retrieve | `lmcache/integration/vllm/{lmcache_mp_connector,vllm_multi_process_adapter}.py` |
 | Server GPU context / transfer | `lmcache/v1/multiprocess/{gpu_context,modules/gpu_transfer}.py` |
 | ZMQ protocol | `lmcache/v1/multiprocess/protocols/engine.py` |

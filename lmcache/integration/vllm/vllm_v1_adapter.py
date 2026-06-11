@@ -1146,7 +1146,17 @@ class LMCacheConnectorV1Impl:
 
             slot_mapping = request.slot_mapping
             assert isinstance(slot_mapping, torch.Tensor)
-            assert len(slot_mapping) == len(token_ids)
+            if len(slot_mapping) != len(token_ids):
+                logger.warning(
+                    "Skipping KV save for request %s: slot_mapping/token_ids "
+                    "length mismatch (slot_mapping=%d, token_ids=%d). Likely "
+                    "an upstream allocation/preemption desync; the engine "
+                    "stays alive and only this request's save is dropped.",
+                    request.req_id,
+                    len(slot_mapping),
+                    len(token_ids),
+                )
+                continue
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.to(self.device)

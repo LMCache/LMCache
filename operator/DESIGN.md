@@ -357,10 +357,130 @@ reach (Redis L2 keys, federation deregistration, etc.).
 
 ---
 
+## CacheBlend: `CacheBlendEngine` CRD + Injection Webhook
+
+CacheBlend reuses cached KV at shifted positions. It has two halves the operator
+manages together: a **GPU-resident blend engine** (server side) and a
+**vLLM-side plugin** that must be loaded into the serving container. The operator
+ships both as a second CRD plus a mutating admission webhook.
+
+> This implements what was previously deferred as a future `blend.enabled` field
+> on `LMCacheEngine`. It is instead a **separate `CacheBlendEngine` kind** (with
+> its own controller) plus an injection webhook — cleaner separation, and no
+> behavior change to `LMCacheEngine`.
+
+### `CacheBlendEngine` CRD
+
+Group `lmcache.lmcache.ai`, `v1alpha1`, kind `CacheBlendEngine` (shortName `cbe`).
+The spec **mirrors `LMCacheEngineSpec`** (image, server, l1, eviction, prometheus,
+l2Backend, scheduling, overrides, imagePullSecrets) and adds:
+
+- `blend.checkLayer` (default 1) and `blend.recompRatio` (default 0.15) — CB
+  tunables fed to the vLLM connector.
+- `injection` — what the webhook injects into vLLM pods: `payloadImage` (an
+  `ImageSpec` — `repository`/`tag`/`pullPolicy`, like `spec.image` — for the
+  private `lmcache-cacheblend` init-container image; set `repository` explicitly,
+  the inherited engine-image default is not a valid payload), `imagePullSecrets`
+  (appended to the vLLM pod so the private payload image can pull — the Secret
+  must exist in the vLLM pod's namespace), `targetContainer` (default: first
+  container), and `cudagraph` (`eager`|`piecewise`|`full_decode_only`, default
+  `eager`).
+- `server.chunkSize` defaults to **256** and is validated to equal 256 (the blend
+  matcher requires `chunk_size == vLLM --block-size * 4`).
+
+### The blend engine (controller)
+
+`CacheBlendEngineReconciler` mirrors `LMCacheEngineReconciler` and reconciles a
+DaemonSet running `lmcache server --engine-type blend_v3` (plus
+`--l1-align-bytes 16777216`), a node-local lookup Service, a metrics Service, and
+a `<name>-connection` ConfigMap. **GPU model is identical to `LMCacheEngine`**:
+`privileged` + `runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` +
+`hostIPC: true`, with **no `nvidia.com/gpu` device-plugin claim** — the engine
+*shares* the vLLM GPU rather than reserving one, because the blend server scatters
+re-RoPE'd KV directly into vLLM's paged KV over **same-device CUDA IPC**. The
+engine resource builders are the same name/spec-keyed cores used by
+`LMCacheEngine`.
+
+The `<name>-connection` ConfigMap carries the **`CBKVConnector`**
+`kv-transfer-config` (vs `LMCacheMPConnector` for `LMCacheEngine`) — same node-local
+`tcp://` host/port shape, plus the `cb.*` tunables:
+
+```json
+{
+  "kv_connector": "CBKVConnector",
+  "kv_connector_module_path": "lmcache_cacheblend.connector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {
+    "lmcache.mp.host": "tcp://<name>.<namespace>.svc.cluster.local",
+    "lmcache.mp.port": "<server.port>",
+    "cb.check_layer": <blend.checkLayer>,
+    "cb.recomp_ratio": <blend.recompRatio>
+  }
+}
+```
+
+Co-location works exactly like `LMCacheEngine`: one engine per GPU node
+(DaemonSet), and the node-local Service (`internalTrafficPolicy: Local`) routes a
+vLLM pod to the same-node engine. The control-plane RPC is TCP via that Service;
+the data-plane KV write is CUDA IPC on the shared GPU.
+
+### The injection webhook
+
+A mutating admission webhook (`/mutate--v1-pod`, `CREATE`, `failurePolicy: Ignore`)
+injects the `lmcache-cacheblend` plugin into opted-in pods so a **stock vLLM image
+needs no rebuild**. A pod opts in with label `lmcache.ai/cacheblend-inject: "true"`
+and binds to an engine with annotation `lmcache.ai/cacheblend-engine: <name>`. The
+webhook then applies:
+
+| Mutation | What |
+|---|---|
+| pod `hostIPC: true` | required for CUDA IPC with the node-local engine |
+| `cb-plugin` emptyDir + payload init container | the busybox payload `cp -a`'s the pure-Python plugin tree onto the shared volume |
+| readOnly mount + `PYTHONPATH=/cb-plugin` on the vLLM container | vLLM discovers the plugin via its `vllm.general_plugins` entry point |
+| append required vLLM args | `--attention-backend CUSTOM`, `--kv-transfer-config <from the connection ConfigMap>`, `--block-size 64`, `--pipeline-parallel-size 1`, `--no-enable-chunked-prefill`, `--no-async-scheduling`, `--enforce-eager` (or the configured cudagraph) |
+| append `injection.imagePullSecrets` | so the private payload image can pull |
+| stamp `lmcache.ai/cacheblend-injected: "true"` | idempotency guard |
+
+The webhook **skips** (stamping `lmcache.ai/cacheblend-skip-reason`) when: the
+target container overrides `command` (a `sh -c` wrapper — appended args wouldn't
+reach `vllm serve`); the user already supplies `--kv-transfer-config` (not
+clobbered); the named engine's connection ConfigMap doesn't exist; the engine's
+`injection.payloadImage` resolves to an empty reference (`payload-image-unset`);
+or the requested `targetContainer`/`cacheblend-container` annotation names a
+container that does not exist on the pod (`target-container-not-found`). It does
+**not** gate on engine readiness — like `LMCacheEngine`, the connector connects
+when the engine comes up. Args are emitted in two-token form
+(`--attention-backend CUSTOM`); the replace-not-duplicate dedup still recognizes a
+user-supplied `--flag=value`.
+
+### Prerequisites
+
+- **cert-manager** — the webhook's serving cert is a cert-manager `Issuer` +
+  `Certificate` (caBundle injected via `inject-ca-from`); install it before
+  `make deploy`.
+- **`make deploy`, not `make run`** — `make run` sets `ENABLE_WEBHOOKS=false` and
+  installs no `MutatingWebhookConfiguration`; it is controller-only. The webhook
+  needs the operator running as an in-cluster pod.
+- **Pod Security Standards** — the injected `hostIPC`/`privileged` is rejected by
+  the `baseline`/`restricted` profiles, so the engine's and the vLLM pod's
+  namespaces must be labeled `pod-security.kubernetes.io/enforce=privileged`.
+
+### Resources created (for a `CacheBlendEngine` named `cb`)
+
+| Resource | Name | Purpose |
+|---|---|---|
+| DaemonSet | `cb` | `lmcache server --engine-type blend_v3` on GPU nodes |
+| Service (node-local) | `cb` | same-node discovery for vLLM (`CBKVConnector`) |
+| Service (headless) | `cb-metrics` | Prometheus scrape target |
+| ConfigMap | `cb-connection` | `CBKVConnector` kv-transfer-config |
+| MutatingWebhookConfiguration | (operator-wide) | injects the plugin into opted-in vLLM pods |
+
+---
+
 ## Future Extensibility
 
 - **L2 backends:** The RESP (Redis/Valkey) adapter is natively supported with typed CRD fields and Secret-based auth injection. Other adapter types (nixl_store, fs, mock, mooncake_store, raw_block) can be configured via the `raw` escape hatch. Currently only a single L2 adapter is supported at a time. LMCache MP mode is designed to support multiple adapters in cascade, but this is not yet fully tested — once validated, the operator will support multiple adapters.
-- **Blend mode:** Future `LMCacheEngine` field `blend.enabled` to switch entrypoint from `server.py` to `blend_server.py` (deferred from v1alpha1).
+- **Blend mode:** Implemented as the separate `CacheBlendEngine` CRD + injection webhook — see [CacheBlend](#cacheblend-cacheblendengine-crd--injection-webhook) above. (This supersedes the earlier idea of a `blend.enabled` field on `LMCacheEngine`.)
 - **Update strategy:** Future `spec.updateStrategy` field for `RollingUpdate`/`OnDelete` control on the DaemonSet.
 - **Additional CRDs:** `LMCacheKeyManager` (global key management), `LMCacheMonitor` (engine state monitoring), `LMCacheFederation` (cross-cluster P2P topology).
 

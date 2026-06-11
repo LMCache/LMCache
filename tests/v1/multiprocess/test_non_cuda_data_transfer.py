@@ -678,13 +678,19 @@ def server_module_factory(
         stack.enter_context(
             patch(
                 "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-                return_value=object_keys or ["obj"],
+                return_value=[object_keys or ["obj"]],
             )
         )
 
         session_cls.return_value.get_or_create.return_value = mock_session
+        if storage_manager_config is None:
+            storage_manager_config = MagicMock()
+            # GDS L1 is off in these tests. A bare MagicMock would auto-vivify
+            # gds_l1_config to a truthy mock, making MPCacheEngineContext attempt
+            # real cuFile init; pin it to None so GDS init stays a no-op.
+            storage_manager_config.l1_manager_config.gds_l1_config = None
         ctx = MPCacheEngineContext(
-            storage_manager_config=storage_manager_config or MagicMock(),
+            storage_manager_config=storage_manager_config,
             chunk_size=chunk_size,
         )
         module = NonGPUTransferModule(ctx)
