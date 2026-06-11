@@ -9,7 +9,8 @@
 #
 # Environment variables:
 #   LMCACHE_BENCH_TRANSFER_MODE  data|handle (default: handle)
-#   LMCACHE_E2E_TRANSPORT_MODE  data|handle (default: handle)
+#   LMCACHE_E2E_TRANSPORT_MODE  handle|data|shm|pickle (default: handle)
+#     shm/pickle are user-friendly aliases for data mode with corresponding sub-mode
 #   LMCACHE_E2E_DATA_MODE       shm|pickle (default: shm, data transport sub-mode)
 #   LMCACHE_HTTP_PORT_BENCH     HTTP port for bench (default: 18080)
 #   LMCACHE_ZMQ_PORT_BENCH      ZMQ port for bench (default: 15555)
@@ -45,10 +46,25 @@ case "${BENCH_TRANSFER_MODE}" in
     ;;
 esac
 
+# Map user-facing LMCACHE_E2E_TRANSPORT_MODE to internal representation.
+# shm/pickle are aliases for data mode with corresponding sub-mode selection,
+# preserved for backward compatibility with CI yaml and user convenience.
 case "${E2E_TRANSPORT_MODE}" in
-  pickle|shm|handle) ;;
+  data|handle)
+    MAPPED_TRANSPORT_MODE="${E2E_TRANSPORT_MODE}"
+    MAPPED_DATA_MODE="${E2E_DATA_MODE}"   # keep user override if any
+    ;;
+  shm)
+    MAPPED_TRANSPORT_MODE="data"
+    MAPPED_DATA_MODE="shm"
+    ;;
+  pickle)
+    MAPPED_TRANSPORT_MODE="data"
+    MAPPED_DATA_MODE="pickle"
+    ;;
   *)
     echo "!! Unknown LMCACHE_E2E_TRANSPORT_MODE='${E2E_TRANSPORT_MODE}'"
+    echo "   Valid values: handle, data, shm, pickle"
     exit 1
     ;;
 esac
@@ -98,7 +114,8 @@ run_vllm_e2e() {
     echo "==> Running CPU vLLM e2e test"
     
     # Set environment for e2e test
-    export LMCACHE_TRANSPORT_MODE="${E2E_TRANSPORT_MODE}"
+    export LMCACHE_TRANSPORT_MODE="${MAPPED_TRANSPORT_MODE}"
+    export LMCACHE_DATA_MODE="${MAPPED_DATA_MODE}"
     export LMCACHE_HTTP_PORT="${HTTP_PORT_E2E}"
     export LMCACHE_ZMQ_PORT="${ZMQ_PORT_E2E}"
     export VLLM_PORT="${VLLM_PORT_E2E}"
