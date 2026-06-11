@@ -1571,18 +1571,36 @@ def _transfer_per_layer_hnd(
             for layer_idx, layer in enumerate(layer_tensors):
                 if int(gpu_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS):
                     k_t, v_t = layer[0], layer[1]
+                    torch.index_select(k_t, 0, eff_idx, out=scratch)
+                    chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
+                        scratch.permute(0, 2, 1, 3)
+                    )
+                    torch.index_select(v_t, 0, eff_idx, out=scratch)
+                    chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
+                        scratch.permute(0, 2, 1, 3)
+                    )
                 elif int(gpu_kv_format) == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
                     k_t, v_t = layer[:, :, :, 0], layer[:, :, :, 1]
+                    torch.index_select(k_t, 0, eff_idx, out=scratch)
+                    chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
+                        scratch.permute(0, 2, 1, 3)
+                    )
+                    torch.index_select(v_t, 0, eff_idx, out=scratch)
+                    chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
+                        scratch.permute(0, 2, 1, 3)
+                    )
                 else:
-                    k_t, v_t = layer[:, 0], layer[:, 1]
-                torch.index_select(k_t, 0, eff_idx, out=scratch)
-                chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
-                    scratch.permute(0, 2, 1, 3)
-                )
-                torch.index_select(v_t, 0, eff_idx, out=scratch)
-                chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
-                    scratch.permute(0, 2, 1, 3)
-                )
+                    # FlashInfer HND stores KV as [NB, 2, NH, BS, HS].
+                    # Gather on dim=0 first so reads stay contiguous in memory;
+                    # index_select on layer[:, 0]/layer[:, 1] non-contiguous views
+                    # triggers slower element-wise gather reads.
+                    selected = layer.index_select(0, eff_idx)
+                    chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
+                        selected[:, 0].permute(0, 2, 1, 3)
+                    )
+                    chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
+                        selected[:, 1].permute(0, 2, 1, 3)
+                    )
             obj[:, :, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
         else:
             chunk_gpu = obj[:, :, offset_in_object:token_end].to(
@@ -1606,8 +1624,13 @@ def _transfer_per_layer_hnd(
                     .reshape(n_valid, block_size, nh, hs)
                     .permute(0, 2, 1, 3)
                 )
-                k_t.index_copy_(0, eff_idx, k_blocks)
-                v_t.index_copy_(0, eff_idx, v_blocks)
+                if int(gpu_kv_format) == int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS):
+                    layer.index_copy_(
+                        0, eff_idx, torch.stack([k_blocks, v_blocks], dim=1)
+                    )
+                else:
+                    k_t.index_copy_(0, eff_idx, k_blocks)
+                    v_t.index_copy_(0, eff_idx, v_blocks)
 
 
 def _transfer_per_layer_nhd(
@@ -1662,20 +1685,30 @@ def _transfer_per_layer_nhd(
             for layer_idx, layer in enumerate(layer_tensors):
                 if int(gpu_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
                     k_t, v_t = layer[0], layer[1]
+                    torch.index_select(
+                        k_t,
+                        0,
+                        eff_idx,
+                        out=chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0),
+                    )
+                    torch.index_select(
+                        v_t,
+                        0,
+                        eff_idx,
+                        out=chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0),
+                    )
                 else:
-                    k_t, v_t = layer[:, 0], layer[:, 1]
-                torch.index_select(
-                    k_t,
-                    0,
-                    eff_idx,
-                    out=chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0),
-                )
-                torch.index_select(
-                    v_t,
-                    0,
-                    eff_idx,
-                    out=chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0),
-                )
+                    # FlashInfer NHD stores KV as [NB, 2, BS, NH, HS].
+                    # Gather on dim=0 first to avoid index_select from
+                    # non-contiguous layer[:, 0]/layer[:, 1] views, which
+                    # trigger slower element-wise gather reads.
+                    selected = layer.index_select(0, eff_idx)
+                    chunk_gpu[0, layer_idx].copy_(
+                        selected[:, 0].reshape(n_valid * block_size, nh0 * hs0)
+                    )
+                    chunk_gpu[1, layer_idx].copy_(
+                        selected[:, 1].reshape(n_valid * block_size, nh0 * hs0)
+                    )
             obj[:, :, offset_in_object:token_end].copy_(chunk_gpu, non_blocking=True)
         else:
             chunk_gpu = obj[:, :, offset_in_object:token_end].to(
@@ -1684,18 +1717,26 @@ def _transfer_per_layer_nhd(
             for layer_idx, layer in enumerate(layer_tensors):
                 if int(gpu_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
                     k_t, v_t = layer[0], layer[1]
+                    k_t.index_copy_(
+                        0,
+                        eff_idx,
+                        chunk_gpu[0, layer_idx].reshape(n_valid, block_size, nh0, hs0),
+                    )
+                    v_t.index_copy_(
+                        0,
+                        eff_idx,
+                        chunk_gpu[1, layer_idx].reshape(n_valid, block_size, nh0, hs0),
+                    )
                 else:
-                    k_t, v_t = layer[:, 0], layer[:, 1]
-                k_t.index_copy_(
-                    0,
-                    eff_idx,
-                    chunk_gpu[0, layer_idx].reshape(n_valid, block_size, nh0, hs0),
-                )
-                v_t.index_copy_(
-                    0,
-                    eff_idx,
-                    chunk_gpu[1, layer_idx].reshape(n_valid, block_size, nh0, hs0),
-                )
+                    k_blocks = chunk_gpu[0, layer_idx].reshape(
+                        n_valid, block_size, nh0, hs0
+                    )
+                    v_blocks = chunk_gpu[1, layer_idx].reshape(
+                        n_valid, block_size, nh0, hs0
+                    )
+                    layer.index_copy_(
+                        0, eff_idx, torch.stack([k_blocks, v_blocks], dim=1)
+                    )
 
 
 def single_layer_kv_transfer(
