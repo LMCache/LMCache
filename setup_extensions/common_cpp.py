@@ -6,28 +6,72 @@ are always compiled regardless of which backend is selected.
 """
 
 # Standard
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     # Third Party
     from setuptools.extension import Extension
 
+    # First Party
+    from setup_extensions.strategies import BuildStrategy
+
+
+@dataclass(frozen=True)
+class CommonExtSpec:
+    """Declarative spec for a common C++ extension."""
+
+    name: str
+    sources: list[str]
+    include_dirs: list[str]
+
+
+COMMON_EXTENSIONS: list[CommonExtSpec] = [
+    CommonExtSpec(
+        name="native_storage_ops",
+        sources=[
+            "csrc/storage_manager/bitmap.cpp",
+            "csrc/storage_manager/periodic_event_notifier.cpp",
+            "csrc/storage_manager/pybind.cpp",
+            "csrc/storage_manager/ttl_lock.cpp",
+            "csrc/storage_manager/utils.cpp",
+        ],
+        include_dirs=["csrc/storage_manager"],
+    ),
+    CommonExtSpec(
+        name="lmcache_redis",
+        sources=[
+            "csrc/storage_backends/redis/pybind.cpp",
+            "csrc/storage_backends/redis/connector.cpp",
+        ],
+        include_dirs=[
+            "csrc/storage_backends",
+            "csrc/storage_backends/redis",
+        ],
+    ),
+    CommonExtSpec(
+        name="lmcache_fs",
+        sources=[
+            "csrc/storage_backends/fs/pybind.cpp",
+            "csrc/storage_backends/fs/connector.cpp",
+        ],
+        include_dirs=[
+            "csrc/storage_backends",
+            "csrc/storage_backends/fs",
+        ],
+    ),
+]
+
 
 def build_common_cpp(
-    extra_cxx_flags: list[str],
-    fs_extra_cxx_flags: list[str] | None = None,
+    strategy: "BuildStrategy | None" = None,
 ) -> tuple[list["Extension"], dict]:
     """Build pure C++ extensions that do not depend on any backend.
 
     Args:
-        extra_cxx_flags: Additional C++ compiler flags applied to
-            ``native_storage_ops``, ``lmcache_redis``.
-        fs_extra_cxx_flags: Additional C++ flags for ``lmcache_fs``.
-            Defaults to ``extra_cxx_flags`` when not set.
-
-    Notes:
-        ``fs_extra_cxx_flags`` preserves pre-refactor SYCL behaviour where
-        ``lmcache_fs`` intentionally omitted the ABI define.
+        strategy: Resolved backend strategy (or ``None``).  Each spec in
+            :data:`COMMON_EXTENSIONS` queries ``strategy.extra_cxx_flags_for``
+            to obtain its per-extension extra flags.
 
     Returns:
         ``(ext_modules, cmdclass)`` tuple.
@@ -35,55 +79,19 @@ def build_common_cpp(
     # Third Party
     from torch.utils import cpp_extension
 
-    if fs_extra_cxx_flags is None:
-        fs_extra_cxx_flags = extra_cxx_flags
-
-    storage_manager_sources = [
-        "csrc/storage_manager/bitmap.cpp",
-        "csrc/storage_manager/periodic_event_notifier.cpp",
-        "csrc/storage_manager/pybind.cpp",
-        "csrc/storage_manager/ttl_lock.cpp",
-        "csrc/storage_manager/utils.cpp",
-    ]
-    redis_sources = [
-        "csrc/storage_backends/redis/pybind.cpp",
-        "csrc/storage_backends/redis/connector.cpp",
-    ]
-    fs_sources = [
-        "csrc/storage_backends/fs/pybind.cpp",
-        "csrc/storage_backends/fs/connector.cpp",
-    ]
     ext_modules = [
         cpp_extension.CppExtension(
-            "lmcache.native_storage_ops",
-            sources=storage_manager_sources,
-            include_dirs=["csrc/storage_manager"],
+            "lmcache." + spec.name,
+            sources=spec.sources,
+            include_dirs=spec.include_dirs,
             extra_compile_args={
-                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
+                "cxx": (
+                    (strategy.extra_cxx_flags_for(spec) if strategy else [])
+                    + ["-O3", "-std=c++17"]
+                ),
             },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_redis",
-            sources=redis_sources,
-            include_dirs=[
-                "csrc/storage_backends",
-                "csrc/storage_backends/redis",
-            ],
-            extra_compile_args={
-                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_fs",
-            sources=fs_sources,
-            include_dirs=[
-                "csrc/storage_backends",
-                "csrc/storage_backends/fs",
-            ],
-            extra_compile_args={
-                "cxx": fs_extra_cxx_flags + ["-O3", "-std=c++17"],
-            },
-        ),
+        )
+        for spec in COMMON_EXTENSIONS
     ]
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass

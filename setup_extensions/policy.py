@@ -208,14 +208,8 @@ class BuildPolicy:
         if BuildStrategy.is_native_ext_disabled():
             return [], {}, None
 
-        # ---- common C++ flags from strategy (or defaults) ----
-        cpp_flags = (
-            strategy.common_cpp_flags() if strategy else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
-        )
-        fs_flags = strategy.fs_cpp_flags() if strategy else cpp_flags
-
         # ---- build common C++ extensions ----
-        ext_modules, cmdclass = build_common_cpp(cpp_flags, fs_flags)
+        ext_modules, cmdclass = build_common_cpp(strategy)
 
         # ---- build backend-specific extensions ----
         if strategy and not BuildStrategy.is_gpu_ext_disabled():
@@ -224,7 +218,8 @@ class BuildPolicy:
             cmdclass.update(cc)
 
         # ---- build optional storage backends ----
-        ext_modules.extend(BuildPolicy.collect_storage_backends(cpp_flags))
+        storage_flags = strategy.default_cxx_flags() if strategy else []
+        ext_modules.extend(BuildPolicy.collect_storage_backends(storage_flags))
 
         # ---- requirements ----
         req_file = strategy.requirements_file() if strategy else None

@@ -74,13 +74,17 @@ class SyclStrategy(BuildStrategy):
         cmdclass = {"build_ext": cpp_extension.BuildExtension}
         return ext_modules, cmdclass
 
-    def common_cpp_flags(self) -> list[str]:
-        """SYCL always uses the CXX11 ABI."""
+    def extra_cxx_flags_for(self, spec) -> list[str]:
+        """SYCL uses CXX11 ABI for all common extensions except
+        ``lmcache_fs``, which omits ABI flags to preserve pre-refactor
+        behaviour."""
+        if spec.name == "lmcache_fs":
+            return []
         return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
 
-    def fs_cpp_flags(self) -> list[str]:
-        """Preserve pre-refactor behaviour: lmcache_fs omits ABI flags."""
-        return []
+    def default_cxx_flags(self) -> list[str]:
+        """SYCL downstream consumers use the CXX11 ABI."""
+        return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
 
     def requirements_file(self) -> Optional[str]:
         """SYCL core requirements file."""

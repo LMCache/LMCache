@@ -120,10 +120,6 @@ class RocmStrategy(BuildStrategy):
         cmdclass = {"build_ext": cpp_extension.BuildExtension}
         return ext_modules, cmdclass
 
-    def common_cpp_flags(self) -> list[str]:
-        """HIP builds omit the CXX11 ABI flag."""
-        return []
-
     def requirements_file(self) -> Optional[str]:
         """ROCm core requirements file."""
         return "rocm_core.txt"

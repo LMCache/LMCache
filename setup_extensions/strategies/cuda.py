@@ -73,8 +73,12 @@ class CudaStrategy(BuildStrategy):
         cmdclass = {"build_ext": cpp_extension.BuildExtension}
         return ext_modules, cmdclass
 
-    def common_cpp_flags(self) -> list[str]:
-        """ABI flags for common C++ extensions when building with CUDA."""
+    def extra_cxx_flags_for(self, spec) -> list[str]:
+        """All common extensions share the same ABI flag under CUDA."""
+        return self.default_cxx_flags()
+
+    def default_cxx_flags(self) -> list[str]:
+        """ABI-aware default flags for downstream consumers."""
         if ENABLE_CXX11_ABI:
             return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
         return ["-D_GLIBCXX_USE_CXX11_ABI=0"]

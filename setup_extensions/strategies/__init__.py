@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     # Third Party
     from setuptools.extension import Extension
 
+    # First Party
+    from setup_extensions.common_cpp import CommonExtSpec
+
 
 class BuildStrategy(ABC):
     """Strategy for building platform-specific extensions.
@@ -27,10 +30,10 @@ class BuildStrategy(ABC):
         build()  – return ``(ext_modules, cmdclass)`` for extensions.
 
     Subclasses may override:
-        common_cpp_flags()    – C++ flags for common storage extensions.
-        fs_cpp_flags()        – C++ flags for the ``lmcache_fs`` extension
-                                (defaults to ``common_cpp_flags()``).
-        requirements_file()   – core requirements file name.
+        extra_cxx_flags_for(spec) – per-extension extra C++ flags for the
+                                    common extensions defined in
+                                    ``COMMON_EXTENSIONS``.
+        requirements_file()        – core requirements file name.
     """
 
     name: str = ""
@@ -100,16 +103,24 @@ class BuildStrategy(ABC):
         """
         ...
 
-    def common_cpp_flags(self) -> list[str]:
-        """Additional C++ compile flags for common extensions."""
+    def extra_cxx_flags_for(self, spec: "CommonExtSpec") -> list[str]:
+        """Extra C++ compile flags for a given common extension.
+
+        Called once per spec in :data:`COMMON_EXTENSIONS`.  Default
+        returns an empty list; subclasses override to inject per-extension
+        flags (e.g. ABI defines).
+        """
         return []
 
-    def fs_cpp_flags(self) -> list[str]:
-        """Additional C++ compile flags for ``lmcache_fs``.
+    def default_cxx_flags(self) -> list[str]:
+        """Default C++ flags to hand to downstream consumers (e.g. optional
+        L2 storage backends) that need a representative set of flags
+        compatible with this backend.
 
-        Defaults to ``common_cpp_flags()``; override when flags differ.
+        Subclasses override when their default ABI differs from the empty
+        baseline.
         """
-        return self.common_cpp_flags()
+        return []
 
     def requirements_file(self) -> Optional[str]:
         """Core requirements file name, relative to ``requirements/``.
