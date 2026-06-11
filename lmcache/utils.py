@@ -5,13 +5,15 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, TypeVar, Union
 import asyncio
+import functools
 import hashlib
 import inspect
 import re
 import threading
 import traceback
+import warnings
 
 try:
     # Third Party
@@ -698,6 +700,43 @@ def thread_safe(func):
         return result
 
     return wrapper
+
+
+##### Deprecation #####
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def lmcache_deprecate(reason: str) -> Callable[[F], F]:
+    """Mark a function or method as deprecated.
+
+    Calling the wrapped callable emits a ``DeprecationWarning`` and logs a
+    warning the first time it is invoked, including the supplied reason.
+
+    Args:
+        reason: Human-readable explanation of why the callable is deprecated
+            and, ideally, what to use instead.
+
+    Returns:
+        A decorator that wraps the target callable while preserving its
+        signature and metadata.
+    """
+
+    def decorator(func: F) -> F:
+        warned = False
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            nonlocal warned
+            if not warned:
+                message = f"{func.__qualname__} is deprecated: {reason}"
+                warnings.warn(message, DeprecationWarning, stacklevel=2)
+                logger.warning(message)
+                warned = True
+            return func(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
 
 
 #### Thread/asyncio-related utilities ####

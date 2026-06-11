@@ -13,6 +13,7 @@ Supported Backends
    custom_backend
    dax
    eic
+   fs
    gds
    hfbucket
    infinistore

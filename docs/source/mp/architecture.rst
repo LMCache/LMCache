@@ -29,7 +29,8 @@ High-Level Architecture
     StorageManager (distributed/storage_manager.py)
          |
          |--- L1Manager (l1_manager.py)
-         |       |--- L1MemoryManager (memory allocator)
+         |       |--- L1MemoryManager (CPU DRAM) or
+         |       |    GDSL1MemoryManager (NVMe slab via cuFile)
          |       |--- TTLLock per object (read/write)
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
@@ -235,8 +236,16 @@ Manages objects in CPU memory with a state machine:
 Each object has two ``TTLLock`` instances (read and write) with configurable
 timeouts to prevent deadlocks from crashed clients.
 
-The ``L1MemoryManager`` handles the underlying memory allocation (lazy growth
-up to ``--l1-size-gb``).
+The underlying memory allocation is handled by one of two interchangeable
+tiers selected at startup (both satisfy ``L1ManagerProtocol``):
+
+- ``L1MemoryManager`` (default) -- pinned CPU DRAM, with lazy growth up to
+  ``--l1-size-gb``.
+- ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
+  The bytes live on disk; reads/writes DMA directly between the GPU staging
+  buffer and the slab via cuFile, driven by the process-global ``GDSContext``
+  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
+  tier is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~

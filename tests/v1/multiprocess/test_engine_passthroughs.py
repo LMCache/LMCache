@@ -9,7 +9,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.modules.gpu_transfer import (
-    GPUContextEntry,
+    ContextEntry,
     GPUTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
@@ -28,9 +28,9 @@ def test_storage_manager_returns_context_storage_manager() -> None:
 def test_gpu_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
     gpu0, gpu1 = MagicMock(name="gpu_ctx_0"), MagicMock(name="gpu_ctx_1")
     gpu_transfer = MagicMock(spec=GPUTransferModule)
-    gpu_transfer.gpu_contexts = {
-        0: GPUContextEntry(gpu_context=gpu0, model_name="m", world_size=1),
-        7: GPUContextEntry(gpu_context=gpu1, model_name="m", world_size=1),
+    gpu_transfer.cache_contexts = {
+        0: ContextEntry(cache_context=gpu0, model_name="m", world_size=1),
+        7: ContextEntry(cache_context=gpu1, model_name="m", world_size=1),
     }
 
     engine = MPCacheEngine(MagicMock(), modules=[MagicMock(), gpu_transfer])

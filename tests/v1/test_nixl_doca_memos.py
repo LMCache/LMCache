@@ -156,7 +156,12 @@ class TestCreatePool:
 
     def test_doca_memos_creates_b128_object_pool(self) -> None:
         pool = NixlStaticStorageBackend.createPool(
-            "DOCA_MEMOS", size=8, path="/tmp/unused", use_direct_io=False
+            "DOCA_MEMOS",
+            size=8,
+            path="/tmp/unused",
+            use_direct_io=False,
+            path_sharding="by_gpu",
+            dst_device="cpu",
         )
         assert isinstance(pool, NixlObjectPool)
         # b128 slot names are 32-char lowercase hex (no "obj_" prefix).
@@ -165,7 +170,12 @@ class TestCreatePool:
 
     def test_obj_creates_non_b128_object_pool(self) -> None:
         pool = NixlStaticStorageBackend.createPool(
-            "OBJ", size=8, path="/tmp/unused", use_direct_io=False
+            "OBJ",
+            size=8,
+            path="/tmp/unused",
+            use_direct_io=False,
+            path_sharding="by_gpu",
+            dst_device="cpu",
         )
         assert isinstance(pool, NixlObjectPool)
         assert all(k.startswith("obj_") for k in pool.keys)

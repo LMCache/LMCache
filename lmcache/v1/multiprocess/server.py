@@ -101,7 +101,7 @@ class MPCacheEngine:
         """Close all modules and release shared resources."""
         for module in self._modules:
             module.close()
-        self._context.storage_manager.close()
+        self._context.close()
         logger.info("MPCacheEngine closed")
 
     # HTTP-layer passthroughs lost in the engine refactor.
@@ -113,10 +113,10 @@ class MPCacheEngine:
 
     @property
     def gpu_contexts(self) -> dict[int, GPUCacheContext] | None:
-        """Used by ``/kvcache/check``; unwraps :class:`GPUContextEntry`."""
+        """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
             if isinstance(module, GPUTransferModule):
-                return {i: e.gpu_context for i, e in module.gpu_contexts.items()}
+                return {i: e.cache_context for i, e in module.cache_contexts.items()}
         return None
 
     def clear(self) -> None:
@@ -183,16 +183,30 @@ def _build_modules(
 
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
-    if mp_config.engine_type == "blend":
+    if mp_config.engine_type == "blend_legacy":
         if mp_config.supported_transfer_mode == "non_gpu":
             raise ValueError(
-                "Blend engine requires supported_transfer_mode to be 'gpu' or 'auto', "
-                f"got '{mp_config.supported_transfer_mode}'"
+                "Legacy blend engine requires supported_transfer_mode to be "
+                f"'gpu' or 'auto', got '{mp_config.supported_transfer_mode}'"
             )
         # First Party
         from lmcache.v1.multiprocess.modules.blend import BlendModule
 
         modules.append(BlendModule(ctx))
+
+    # "blend" selects CacheBlend V3 (the current implementation).
+    if mp_config.engine_type == "blend":
+        if mp_config.supported_transfer_mode == "non_gpu":
+            raise ValueError(
+                "blend (V3) engine requires supported_transfer_mode 'gpu' or "
+                f"'auto', got '{mp_config.supported_transfer_mode}'"
+            )
+        # First Party
+        from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
+
+        gpu_transfer = next(m for m in modules if isinstance(m, GPUTransferModule))
+        lookup_module = next(m for m in modules if isinstance(m, LookupModule))
+        modules.append(BlendV3Module(ctx, gpu_transfer, lookup_module))
 
     return modules
 
@@ -221,6 +235,13 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine).
         If return_engine is False: None (blocks until interrupted).
     """
+    # mp_config.instance_id is this server's single source of identity (set via
+    # --instance-id, else a random UUID v4). Project it onto the OTel
+    # service.instance.id unless observability set that attribute explicitly, so
+    # metrics/traces and coordinator membership all key on the same id.
+    if obs_config.service_instance_id is None:
+        obs_config.service_instance_id = mp_config.instance_id
+
     event_bus = init_observability(
         obs_config, start_prometheus_http_server=start_prometheus_http_server
     )
