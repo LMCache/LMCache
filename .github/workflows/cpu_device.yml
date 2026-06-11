@@ -269,33 +269,48 @@ jobs:
           path: ~/.cache/huggingface
           key: hf-opt-125m-v1
 
-      - name: Cache vLLM pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: vllm-cpu-macos-latest-py3.12-nightly
-          restore-keys: |
-            vllm-cpu-macos-latest-py3.12-
-
-      - name: Install vLLM CPU build
-        env:
-          VLLM_TARGET_DEVICE: cpu
-          VLLM_VERSION_TAG: v0.22.1
+      - name: Install vLLM CPU (prebuilt nightly from PyPI)
         run: |
-          # macOS has no prebuilt CPU wheel on wheels.vllm.ai, and the
-          # PyPI sdist for vLLM carries a "+cpu" PEP 440 local label that
-          # pip 26 rejects as "inconsistent version", forcing a silent
-          # fallback to 0.19.1 (which predates kv_connector_module_path
-          # and breaks LMCacheMPConnector). Build from the upstream git
-          # tag instead so the source-tree version stays clean. Build
-          # isolation is left on so vLLM's pyproject build-system pulls
-          # in cmake / setuptools-rust / torch on its own.
-          # TODO: replace with a prebuilt `vllm-cpu-nightly` macOS wheel
-          # once the devcloud build script learns to cross-build for mac.
+          # Pre-built CPU-only vLLM wheel published as `vllm-cpu-nightly`
+          # on PyPI by .github/workflows/build_and_publish_vllm_cpu_nightly_macos.sh
+          # (runs on a Mac arm64 host or via the opendataio/vllm-cpu CI).
+          # Avoids the ~30-40 min in-CI compile. The wheel is built on
+          # macos arm64 + py3.12 and tagged macosx_11_0_universal2, so
+          # GitHub-hosted macos-latest (arm64) runners accept it.
+          # `--extra-index-url` is harmless on mac (mac torch wheels live
+          # on PyPI) but lets us reuse a single command across platforms.
           pip install "numpy<2"
-          pip install \
-            "vllm @ git+https://github.com/vllm-project/vllm@${VLLM_VERSION_TAG}"
-          python -c "import vllm; print('vllm:', vllm.__version__)"
+          pip install vllm-cpu-nightly \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+          # Same dist-info alias trick as the ubuntu job: vLLM's CLI
+          # entrypoint does `importlib.metadata.version("vllm")`, which
+          # looks up the *distribution* name. Our nightly wheel ships as
+          # `vllm-cpu-nightly`, so we synthesize a `vllm-<ver>.dist-info`
+          # alias to make the lookup succeed. Idempotent.
+          python - <<'PY'
+          import importlib.metadata as md
+          import pathlib
+          import shutil
+          dist = md.distribution("vllm-cpu-nightly")
+          ver = dist.version
+          site_root = pathlib.Path(dist.locate_file(""))
+          info_name = next(
+              p.parts[0] for p in (dist.files or [])
+              if p.parts and p.parts[0].endswith(".dist-info")
+          )
+          src = site_root / info_name
+          dst = src.with_name(f"vllm-{ver}.dist-info")
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.copytree(src, dst)
+          meta = dst / "METADATA"
+          txt = meta.read_text()
+          new = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
+          meta.write_text(new)
+          print(f"Aliased {src.name} -> {dst.name}")
+          print("vllm version (via importlib.metadata):", md.version("vllm"))
+          PY
+          python -c "import vllm, torch; print('vllm:', vllm.__version__, 'torch:', torch.__version__, 'cuda:', torch.cuda.is_available())"
 
       - name: Install lmcache (CPU-only, no vLLM)
         env:
