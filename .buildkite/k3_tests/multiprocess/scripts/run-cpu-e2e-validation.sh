@@ -332,6 +332,51 @@ else
     --index-strategy unsafe-best-match
   echo "✅ vLLM CPU install completed"
 
+  # The wheel installs the `vllm/` python package but its distribution
+  # metadata is registered under `vllm-cpu-nightly`. vLLM's own CLI
+  # entrypoint and many internal callers use
+  # `importlib.metadata.version("vllm")`, which looks up the
+  # *distribution* name, not the import name. Without the alias below,
+  # that call raises PackageNotFoundError and `vllm serve` fails to
+  # start. Synthesize a `vllm-<ver>.dist-info` alias that points at the
+  # same RECORD so the metadata lookup succeeds.
+  #
+  # We also tag the aliased Version with a `+cpu` PEP 440 local label.
+  # vLLM's `cpu_platform_plugin()` decides whether to activate the CPU
+  # platform via `"cpu" in version("vllm")`. Our build script strips
+  # the `+cpu` label before upload (PyPI rejects local versions), so
+  # without this re-tagging the CPU platform plugin returns None and
+  # `vllm serve` dies with "Failed to infer device type". Re-tagging
+  # only the alias keeps the original `vllm-cpu-nightly` dist-info
+  # untouched so `pip uninstall` keeps working. Idempotent.
+  echo "Aliasing vllm-cpu-nightly dist-info to vllm + tagging +cpu"
+  python - <<'PY'
+import importlib.metadata as md
+import pathlib
+import shutil
+dist = md.distribution("vllm-cpu-nightly")
+ver = dist.version
+fake_ver = f"{ver}+cpu"
+site_root = pathlib.Path(dist.locate_file(""))
+info_name = next(
+    p.parts[0] for p in (dist.files or [])
+    if p.parts and p.parts[0].endswith(".dist-info")
+)
+src = site_root / info_name
+dst = src.with_name(f"vllm-{fake_ver}.dist-info")
+if dst.exists():
+    shutil.rmtree(dst)
+shutil.copytree(src, dst)
+meta = dst / "METADATA"
+txt = meta.read_text()
+txt = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
+txt = txt.replace(f"Version: {ver}", f"Version: {fake_ver}", 1)
+meta.write_text(txt)
+print(f"Aliased {src.name} -> {dst.name}")
+print("vllm version (via importlib.metadata):", md.version("vllm"))
+PY
+  echo "✅ vllm dist-info alias created"
+
   # Debug: check if vLLM is actually CPU version
   echo "Checking vLLM installation type..."
   python -c "
