@@ -98,6 +98,11 @@ async def set_quota(
 ) -> QuotaResponse | JSONResponse:
     """Create or update a quota for the given ``cache_salt``.
 
+    Args:
+        cache_salt: The tenant identifier.
+        body: Quota limit to apply.
+        request: The incoming request.
+
     Returns:
         The applied quota.
     """
@@ -116,6 +121,10 @@ async def set_quota(
 @router.delete("/l2/quota/{cache_salt}")
 async def delete_quota(cache_salt: str, request: Request) -> QuotaResponse:
     """Remove a salt's quota entry.
+
+    Args:
+        cache_salt: The tenant identifier.
+        request: The incoming request.
 
     Returns:
         Whether the entry was found and removed.
@@ -136,6 +145,10 @@ async def report_events(
     body: ReportUsageRequest, request: Request
 ) -> ReportUsageResponse:
     """Record a batch of L2 store/lookup events.
+
+    Args:
+        body: Batch of store/lookup events to record.
+        request: The incoming request.
 
     Returns:
         Number of events processed.
@@ -158,6 +171,10 @@ async def report_events(
 async def get_status(cache_salt: str, request: Request) -> L2StatusResponse:
     """Read quota and usage for a single salt.
 
+    Args:
+        cache_salt: The tenant identifier.
+        request: The incoming request.
+
     Returns:
         Combined quota and usage detail.
     """
@@ -176,6 +193,9 @@ async def get_status(cache_salt: str, request: Request) -> L2StatusResponse:
 @router.get("/l2/status")
 async def list_status(request: Request) -> L2StatusListResponse:
     """List quota and usage across all cache salts.
+
+    Args:
+        request: The incoming request.
 
     Returns:
         Total usage and per-salt breakdown with quota info.
