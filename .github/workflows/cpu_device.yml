@@ -105,6 +105,42 @@ jobs:
           pip install "numpy<2"
           pip install vllm-cpu-nightly \
             --extra-index-url https://download.pytorch.org/whl/cpu
+          # The wheel installs the `vllm/` python package but its
+          # distribution metadata is registered under `vllm-cpu-nightly`.
+          # vLLM's own CLI entrypoint (`/usr/bin/vllm`) and many internal
+          # callers use `importlib.metadata.version("vllm")`, which looks
+          # up the *distribution* name, not the import name. Without the
+          # alias below, that call raises PackageNotFoundError and the
+          # vLLM server fails to start. Synthesize a `vllm-<ver>.dist-info`
+          # alias that points at the same RECORD so the metadata lookup
+          # succeeds. Idempotent: re-running just rewrites the alias.
+          python - <<'PY'
+          import importlib.metadata as md
+          import pathlib
+          import shutil
+          dist = md.distribution("vllm-cpu-nightly")
+          ver = dist.version
+          # Locate the *.dist-info dir without poking private attributes:
+          # dist.files lists every installed file relative to site-packages,
+          # and the first entry under a `*.dist-info/` dir gives us its name.
+          site_root = pathlib.Path(dist.locate_file(""))
+          info_name = next(
+              p.parts[0] for p in (dist.files or [])
+              if p.parts and p.parts[0].endswith(".dist-info")
+          )
+          src = site_root / info_name
+          dst = src.with_name(f"vllm-{ver}.dist-info")
+          if dst.exists():
+              shutil.rmtree(dst)
+          shutil.copytree(src, dst)
+          meta = dst / "METADATA"
+          txt = meta.read_text()
+          # Only the very first `Name:` header (case-sensitive, line-start).
+          new = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
+          meta.write_text(new)
+          print(f"Aliased {src.name} -> {dst.name}")
+          print("vllm version (via importlib.metadata):", md.version("vllm"))
+          PY
           python -c "import vllm, torch; print('vllm:', vllm.__version__, 'torch:', torch.__version__, 'cuda:', torch.cuda.is_available())"
 
       - name: Install lmcache (CPU-only, no vLLM)
