@@ -92,6 +92,7 @@ def _build_manager(
     num_blocks: int = 4,
     gpu_kv_format: "lmc_ops.GPUKVFormat" = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
     engine_group_infos: Sequence[EngineGroupInfo] = (),
+    lmcache_tokens_per_chunk: int = 256,
 ) -> KVLayerGroupsManager:
     """Build a real :class:`KVLayerGroupsManager` from synthetic tensors."""
     return KVLayerGroupsManager(
@@ -99,6 +100,7 @@ def _build_manager(
         gpu_kv_format=gpu_kv_format,
         num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
+        lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
     )
 
 
@@ -112,7 +114,10 @@ def _make_temp_buffer(
     """Build a ``_TempGPUBuffer`` backed by a real manager."""
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
     manager = _build_manager(
-        tensors, num_blocks=num_blocks, engine_group_infos=engine_group_infos
+        tensors,
+        num_blocks=num_blocks,
+        engine_group_infos=engine_group_infos,
+        lmcache_tokens_per_chunk=chunk_size,
     )
     return _TempGPUBuffer(
         kv_layer_groups_manager=manager,
@@ -318,8 +323,8 @@ class TestTempGPUBufferObjectGroupBuffer:
         """Bytes written through kernel-group views are visible through the
         object-group flat view at matching offsets."""
         tensors = _make_kv_tensors(_MULTI_GROUP)
-        manager = _build_manager(tensors)
         chunk_size = 64
+        manager = _build_manager(tensors, lmcache_tokens_per_chunk=chunk_size)
         buf = _TempGPUBuffer(manager, chunk_size, _DEVICE)
         obj_group = manager.object_groups[0]
 
@@ -353,10 +358,12 @@ class TestTempGPUBufferObjectGroupBuffer:
 
 class TestTempGPUBufferShapeDtype:
     def test_shape_scales_with_num_tokens(self) -> None:
+        # num_tokens must be a whole number of chunks; the shape scales
+        # linearly with the chunk count.
         tensors = _make_kv_tensors(_SINGLE_GROUP)
         manager = _build_manager(tensors)
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
-        for num_tokens in (16, 128, 256):
+        for num_tokens in (256, 512, 768):
             shape, dtype = buf.get_kernel_group_shape_dtype(num_tokens, 0)
             assert shape == _expected_kernel_group_shape(manager, num_tokens, 0)
             assert dtype == manager.kernel_groups[0].dtype
@@ -374,14 +381,14 @@ class TestTempGPUBufferShapeDtype:
         shape, _ = buf.get_kernel_group_shape_dtype(256, 0)
         assert shape[2] == 256 // 2
 
-    def test_not_divisible_by_compress_ratio_raises(self) -> None:
+    def test_not_whole_chunks_raises(self) -> None:
         tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
         manager = _build_manager(
             tensors,
             engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
-        with pytest.raises(ValueError, match="not a multiple of"):
+        with pytest.raises(ValueError, match="must be a multiple of"):
             buf.get_kernel_group_shape_dtype(255, 0)
 
 
@@ -447,8 +454,8 @@ class TestGPUCacheContextBuffers:
     def test_get_kernel_group_shape_dtype(self) -> None:
         ctx = _make_context(_SINGLE_GROUP)
         manager = ctx.kv_layer_groups_manager
-        shape, dtype = ctx.get_kernel_group_shape_dtype(128, 0)
-        assert shape == _expected_kernel_group_shape(manager, 128, 0)
+        shape, dtype = ctx.get_kernel_group_shape_dtype(256, 0)
+        assert shape == _expected_kernel_group_shape(manager, 256, 0)
         assert dtype == manager.kernel_groups[0].dtype
 
 

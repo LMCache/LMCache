@@ -247,7 +247,8 @@ class _TempGPUBuffer:
         MemoryLayoutDesc
 
         Args:
-            num_tokens: Number of tokens
+            num_tokens: Number of tokens. Must be a whole number of lmcache
+                chunk size.
             kernel_group_idx: Index of the kernel group.
 
         Returns:
@@ -280,17 +281,26 @@ class _TempGPUBuffer:
 
         Returns:
             The shape of the temp GPU buffer for the given kernel group index.
+
+        Raises:
+            ValueError: If ``num_tokens`` is not a whole number of LMCache
+                chunks.
         """
+        if num_tokens % self._lmcache_chunk_size != 0:
+            raise ValueError(
+                f"num_tokens ({num_tokens}) must be a multiple of "
+                f"lmcache_chunk_size ({self._lmcache_chunk_size})"
+            )
+
         group = self._kv_groups_manager.kernel_groups[kernel_group_idx]
-        compress_ratio = group.tokens_per_block // group.slots_per_block
         sd = group.shape_desc
 
-        if num_tokens % compress_ratio != 0:
-            raise ValueError(
-                f"logical_num_tokens ({num_tokens}) is not a multiple of "
-                f"compress_ratio ({compress_ratio}) for group {kernel_group_idx}"
-            )
-        num_slots = num_tokens // compress_ratio
+        num_chunks = num_tokens // self._lmcache_chunk_size
+        num_slots = (
+            self._kv_groups_manager.get_transfer_slots_per_chunk(kernel_group_idx)
+            * num_chunks
+        )
+
         return torch.Size(
             (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
@@ -485,11 +495,23 @@ class GPUCacheContext:
         """Returns the PageBufferShapeDesc for the given KV layer group."""
         return self.kv_layer_groups_manager_.get_shape_desc(kernel_group_idx)
 
-    def get_slots_per_chunk(self, kernel_group_idx: int) -> int:
-        """Returns the per-chunk physical slot count for the given kernel
-        group.
+    def get_transfer_slots_per_chunk(self, kernel_group_idx: int) -> int:
+        """Returns the number of slots per lmcache chunk when doing
+        D/H transfer.
+
+        This function will take into account that for subchunk sliding window
+        case, the transfer slots will be smaller than the "actual" slots per
+        chunk (which is calculated based on the lmcache chunk size).
+
+        Args:
+            kernel_group_idx: Index of the kernel group.
+
+        Returns:
+            The number of used slots per lmcache chunk when doing D/H transfer.
         """
-        return self.kv_layer_groups_manager_.get_slots_per_chunk(kernel_group_idx)
+        return self.kv_layer_groups_manager.get_transfer_slots_per_chunk(
+            kernel_group_idx
+        )
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the
@@ -546,7 +568,8 @@ class GPUCacheContext:
         Will be exported by GPUCacheContext and used to construct the MemoryLayoutDesc
 
         Args:
-            num_tokens: Number of tokens
+            num_tokens: Number of tokens. Must be a whole number of lmcache
+                chunk size.
             kernel_group_idx: Index of the kernel group.
 
         Returns:

@@ -179,14 +179,6 @@ class KernelGroupInfo:
     initialization time (carried in ``EngineGroupInfo.tokens_per_block``).
     ``0`` means the engine did not report it; the group is then treated as
     uncompressed (``compress_ratio == 1``)."""
-    slots_per_chunk: int = 0
-    """Number of *physical* slots in one LMCache chunk for this group
-    (= ``lmcache_tokens_per_chunk // tokens_per_block * slots_per_block``).
-    This is what the block-level transfer kernel must be told, not the
-    logical ``lmcache_tokens_per_chunk`` which counts vLLM tokens. ``0``
-    means the field has not been populated yet; ``GPUCacheContext``
-    fills it in after construction once ``lmcache_tokens_per_chunk``
-    is known."""
     engine_group_idx: int = 0
     """Engine group index (paged-block address space). 0 for non-hybrid."""
     sw_size_tokens: int = -1
@@ -209,7 +201,6 @@ class KernelGroupInfo:
             f"dtype={self.dtype}, "
             f"tokens_per_block={self.tokens_per_block}, "
             f"slots_per_block={self.slots_per_block}, "
-            f"slots_per_chunk={self.slots_per_chunk}, "
             f"engine_group_idx={self.engine_group_idx}, "
             f"sw_size_tokens={self.sw_size_tokens})"
         )
@@ -230,6 +221,12 @@ class KernelGroupInfo:
         the registered KV tensors at registration time (the batch-size
         dimension, ``shape_desc.bs``)."""
         return self.shape_desc.bs
+
+    def calculate_slots(self, num_tokens: int) -> int:
+        """Calculate the number of slots for the specified number of
+        tokens. Assuming the number of tokens are already aligned.
+        """
+        return num_tokens * self.slots_per_block // self.tokens_per_block
 
 
 KVLayerGroupInfo = KernelGroupInfo  # Alias for compatibility
@@ -370,15 +367,14 @@ class KVLayerGroupsManager:
             # absent, fall back to the physical slot count so the group is
             # treated as non-compressed (compress_ratio == 1).
             tokens_per_block = engine_tokens_per_block.get(engine_group_idx, bs)
+            sw_size_tokens = self._merge_layer_sw_sizes(per_layer_sw_size, indices)
 
-            # TODO (ApostaC): the code here is not very good.
-            # Conceptually, KV Layer Group should not be aware of lmcache logical
-            # chunk size at all.
-            slots_per_chunk = self._derive_slots_per_chunk(
-                group_idx=group_idx,
+            self._validate_block_chunk_size_config(
+                group_idx,
                 slots_per_block=bs,
                 tokens_per_block=tokens_per_block,
                 lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+                sw_size_tokens=sw_size_tokens,
             )
 
             self._kernel_groups.append(
@@ -387,11 +383,8 @@ class KVLayerGroupsManager:
                     shape_desc=shape_desc,
                     dtype=dt,
                     tokens_per_block=tokens_per_block,
-                    slots_per_chunk=slots_per_chunk,
                     engine_group_idx=engine_group_idx,
-                    sw_size_tokens=self._merge_layer_sw_sizes(
-                        per_layer_sw_size, indices
-                    ),
+                    sw_size_tokens=sw_size_tokens,
                 )
             )
 
@@ -454,16 +447,32 @@ class KVLayerGroupsManager:
         """
         return self._kernel_groups[kernel_group_idx].shape_desc
 
+    @lmcache_deprecate("It does not have hybrid model support")
     def get_slots_per_chunk(self, kernel_group_idx: int) -> int:
-        """Return the per-chunk *physical* slot count for *kernel_group_idx*.
+        """Return the per-chunk slot count for *kernel_group_idx*.
 
         Args:
             kernel_group_idx: 0-based kernel group index.
 
-        Raises:
-            IndexError: If *kernel_group_idx* is out of range.
+        Note:
+            This is a deprecated function because it does not have
+            hybrid model support
         """
-        return self._kernel_groups[kernel_group_idx].slots_per_chunk
+        group = self._kernel_groups[kernel_group_idx]
+        return group.calculate_slots(self._lmcache_chunk_size)
+
+    def get_transfer_slots_per_chunk(self, kernel_group_idx: int) -> int:
+        """Return the per-chunk *transfer* slot count for *kernel_group_idx*.
+
+        For sub-chunk sliding window groups, the transfer slots is smaller
+        than the physical slots in a chunk.
+
+        Args:
+            kernel_group_idx: 0-based kernel group index.
+        """
+        group = self._kernel_groups[kernel_group_idx]
+        sw_size = self.get_subchunk_sw_size_tokens(kernel_group_idx)
+        return group.calculate_slots(sw_size)
 
     def get_subchunk_sw_size_tokens(self, kernel_group_idx: int) -> int:
         """Return the sub-chunk sliding window size of a given kernel group.
@@ -604,29 +613,24 @@ class KVLayerGroupsManager:
         return -1
 
     @staticmethod
-    def _derive_slots_per_chunk(
+    def _validate_block_chunk_size_config(
         group_idx: int,
         slots_per_block: int,
         tokens_per_block: int,
         lmcache_tokens_per_chunk: int,
-    ) -> int:
-        """Resolve ``slots_per_chunk`` (physical slots per LMCache chunk).
-
-        Derived directly from the three ground-truth quantities: the LMCache
-        chunk size ``lmcache_tokens_per_chunk`` (logical tokens), the group's
-        logical ``tokens_per_block`` and its physical ``slots_per_block``. One
-        LMCache chunk spans ``lmcache_tokens_per_chunk // tokens_per_block``
-        paged blocks, each holding ``slots_per_block`` physical slots, so
-        ``slots_per_chunk = lmcache_tokens_per_chunk // tokens_per_block
-        * slots_per_block``. This is the per-chunk physical slot count fed to
-        the block-level transfer kernel.
+        sw_size_tokens: int = -1,
+    ) -> None:
+        """Validate the chunk size configuration against the slot and
+        tokens block detected from the serving engine.
 
         Raises:
-            ValueError: If ``tokens_per_block`` is not a whole multiple of
-                ``slots_per_block`` (each physical slot must pack a whole number
-                of logical tokens), or if ``lmcache_tokens_per_chunk`` is not a
-                whole multiple of ``tokens_per_block`` (an LMCache chunk must
-                align to a whole number of the group's paged blocks).
+            ValueError: If one of the following conditions is met:
+                - ``tokens_per_block`` is not a whole multiple of
+                  ``slots_per_block``
+                - ``lmcache_tokens_per_chunk`` is not a whole multiple of
+                  ``tokens_per_block``
+                - a sub-chunk sliding window is not a whole multiple of
+                  ``tokens_per_block``
         """
         if tokens_per_block % slots_per_block != 0:
             raise ValueError(
@@ -639,18 +643,22 @@ class KVLayerGroupsManager:
                 f"{lmcache_tokens_per_chunk} must be a multiple of "
                 f"tokens_per_block {tokens_per_block}"
             )
-        blocks_per_chunk = lmcache_tokens_per_chunk // tokens_per_block
-        slots_per_chunk = blocks_per_chunk * slots_per_block
+        if (
+            0 < sw_size_tokens < lmcache_tokens_per_chunk
+            and sw_size_tokens % tokens_per_block != 0
+        ):
+            raise ValueError(
+                f"group {group_idx}: sub-chunk sliding window size "
+                f"{sw_size_tokens} must be a multiple of tokens_per_block "
+                f"{tokens_per_block}"
+            )
         if slots_per_block != tokens_per_block:
             logger.info(
-                "group %d: compressed (tokens_per_block=%d, slots_per_block=%d "
-                "-> slots_per_chunk=%d)",
+                "group %d: compressed (tokens_per_block=%d, slots_per_block=%d)",
                 group_idx,
                 tokens_per_block,
                 slots_per_block,
-                slots_per_chunk,
             )
-        return slots_per_chunk
 
 
 # ------------------------------------------------------------------ #
