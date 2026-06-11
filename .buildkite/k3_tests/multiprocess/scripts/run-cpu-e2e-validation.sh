@@ -307,16 +307,18 @@ else
   echo "✅ Installed requirements/common.txt"
 
   echo "Installing vLLM CPU build"
-  # Uninstall any existing vLLM to avoid conflicts
-  uv pip uninstall -y vllm 2>/dev/null || true
-  # Install CPU-only vLLM from the official CPU wheel host.
-  # We use --find-links (alias -f) instead of --extra-index-url to
-  # guarantee the CPU wheel is preferred over the default PyPI index.
-  # Note: if the CPU wheel is not available, uv will fall back to
-  # the default PyPI index (which is GPU-only).
-  uv pip install vllm \
-    --find-links https://wheels.vllm.ai/nightly/cpu \
-    --torch-backend cpu
+  # Uninstall any existing vLLM (or earlier vllm-cpu-nightly) to avoid
+  # conflicts.
+  uv pip uninstall -y vllm vllm-cpu-nightly 2>/dev/null || true
+  # Install our prebuilt CPU-only vLLM wheel published as
+  # `vllm-cpu-nightly` on PyPI by
+  # .github/workflows/build_and_publish_vllm_cpu_nightly.sh (runs on
+  # devcloud). The wheel is built on ubuntu-22.04 + py3.12 with gcc-12
+  # and is ABI-compatible with this runner. `--extra-index-url` is
+  # required because the wheel pins torch==2.11.0 which only lives on
+  # the pytorch CPU index.
+  uv pip install vllm-cpu-nightly \
+    --extra-index-url https://download.pytorch.org/whl/cpu
   echo "✅ vLLM CPU install completed"
 
   # Debug: check if vLLM is actually CPU version
