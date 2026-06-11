@@ -194,11 +194,12 @@ Supports two run modes via ``--mode``:
 - **``gpu``** (default) -- allocates real CUDA tensors and uses CUDA IPC
   (handle transfer path).
 - **``cpu``** -- allocates POSIX-SHM-backed tensors; the server maps the same
-  physical pages for zero-copy STORE/RETRIEVE (data transfer path).
+  physical pages for zero-copy STORE/RETRIEVE (data transfer path by default).
+  To use the zero-copy SHM handle path, add ``--transfer-mode handle``.
 
 The transfer path can be overridden explicitly with ``--transfer-mode
 {auto,handle,data}``. ``auto`` keeps the historical mapping: gpu→handle,
-cpu→data. Note: ``--transfer-mode handle`` on CPU is not yet implemented.
+cpu→data.
 
 ```bash
 $ lmcache bench server \

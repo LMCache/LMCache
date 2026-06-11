@@ -31,7 +31,7 @@ def _xpu_sync():
 @pytest.fixture(scope="module")
 def xops():
     # First Party
-    import lmcache.xpu_ops as XOPS  # noqa: WPS433
+    import lmcache.xpu_ops as XOPS  # noqa: F401
 
     return XOPS
 

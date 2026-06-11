@@ -937,6 +937,128 @@ class BytesBufferMemoryObj(MemoryObj):
         return None
 
 
+class GDSMemoryObject(MemoryObj):
+    """A slab-anchored ``MemoryObj`` for the GDS L1 tier.
+
+    The bytes live in the GDS slab file, not in host or device memory, so
+    this object carries only the slab ``(offset, size)`` (in ``meta.address``
+    / ``meta.phy_size``) and is otherwise a placeholder: ``tensor`` is always
+    ``None`` and ``byte_array`` / ``data_ptr`` raise.
+    """
+
+    def __init__(self, metadata: MemoryObjMetadata) -> None:
+        super().__init__(metadata)
+        self.valid = True
+
+    @property
+    def slab_offset(self) -> int:
+        """Byte offset of this chunk within the slab file (== ``meta.address``)."""
+        return self.meta.address
+
+    def invalidate(self) -> None:
+        self.valid = False
+
+    def is_valid(self) -> bool:
+        return self.valid
+
+    def get_size(self) -> int:
+        return self.meta.phy_size
+
+    def get_shape(self) -> torch.Size:
+        return self.meta.shape
+
+    def get_dtype(self) -> Optional[torch.dtype]:
+        return self.meta.dtype
+
+    def get_shapes(self) -> list[torch.Size]:
+        raise NotImplementedError(
+            "GDSMemoryObject.get_shapes: per-group shapes are not tracked on "
+            "the GDS path (only the singular meta.shape is); use get_shape()"
+        )
+
+    def get_dtypes(self) -> list[torch.dtype]:
+        raise NotImplementedError(
+            "GDSMemoryObject.get_dtypes: per-group dtypes are not tracked on "
+            "the GDS path (only the singular meta.dtype is); use get_dtype()"
+        )
+
+    def get_memory_format(self) -> MemoryFormat:
+        return self.meta.fmt
+
+    def get_physical_size(self) -> int:
+        return self.meta.phy_size
+
+    def ref_count_up(self) -> None:
+        raise NotImplementedError(
+            "GDSMemoryObject.ref_count_up: not used on the GDS path"
+        )
+
+    def ref_count_down(self) -> None:
+        raise NotImplementedError(
+            "GDSMemoryObject.ref_count_down: not used on the GDS path"
+        )
+
+    def get_ref_count(self) -> int:
+        raise NotImplementedError(
+            "GDSMemoryObject.get_ref_count: not used on the GDS path"
+        )
+
+    def get_num_tokens(self) -> int:
+        raise NotImplementedError(
+            "GDSMemoryObject.get_num_tokens: not used on the GDS path"
+        )
+
+    def pin(self) -> bool:
+        raise NotImplementedError("GDSMemoryObject.pin: not used on the GDS path")
+
+    def unpin(self) -> bool:
+        raise NotImplementedError("GDSMemoryObject.unpin: not used on the GDS path")
+
+    @property
+    def metadata(self) -> MemoryObjMetadata:
+        return self.meta
+
+    @property
+    def tensor(self) -> Optional[torch.Tensor]:
+        return None
+
+    @property
+    def byte_array(self) -> bytes:
+        raise NotImplementedError(
+            f"GDSMemoryObject(slab_offset={self.slab_offset}).byte_array is not "
+            "supported; bytes live in the GDS slab file and the staging buffer "
+            "is registered VRAM (no buffer protocol)."
+        )
+
+    @property
+    def data_ptr(self) -> int:
+        raise NotImplementedError(
+            f"GDSMemoryObject(slab_offset={self.slab_offset}).data_ptr is not "
+            "supported; GDS reads/writes use gpu_buffer.data_ptr() via the "
+            "gpu_ops dispatch, never the MemoryObj's data_ptr."
+        )
+
+    @property
+    def is_pinned(self) -> bool:
+        raise NotImplementedError("GDSMemoryObject.is_pinned: not used on the GDS path")
+
+    @property
+    def can_evict(self) -> bool:
+        raise NotImplementedError("GDSMemoryObject.can_evict: not used on the GDS path")
+
+    @property
+    def raw_tensor(self) -> Optional[torch.Tensor]:
+        return None
+
+    def get_tensor(self, index: int) -> Optional[torch.Tensor]:
+        return None
+
+    def parent(self) -> Optional["MemoryAllocatorInterface"]:
+        # The GDS slab is not a MemoryAllocatorInterface; dispatch in gpu_ops
+        # keys off the GDSMemoryObject type, not the parent allocator.
+        return None
+
+
 class MemoryAllocatorInterface(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def allocate(

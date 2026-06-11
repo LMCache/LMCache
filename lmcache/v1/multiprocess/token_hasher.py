@@ -164,7 +164,15 @@ class TokenHasher:
                     none_hash = kv_cache_utils.NONE_HASH
                     logger.info("Initialized NONE_HASH=%s from vLLM", none_hash)
                     return none_hash
-            except (ImportError, AttributeError, ValueError, RuntimeError):
+            except (
+                ImportError,
+                AttributeError,
+                ValueError,
+                RuntimeError,
+                # torch._dynamo.device_interface raises AssertionError
+                # when CudaInterface is defined on non-CUDA platforms.
+                AssertionError,
+            ):
                 pass
 
         # Fallback: compute none_hash using our hash function

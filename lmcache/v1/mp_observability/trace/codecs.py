@@ -152,6 +152,7 @@ def _enc_object_key(k: ObjectKey) -> dict[str, Any]:
         "chunk_hash": k.chunk_hash,
         "model_name": k.model_name,
         "kv_rank": k.kv_rank,
+        "object_group_id": k.object_group_id,
     }
 
 
@@ -160,6 +161,7 @@ def _dec_object_key(d: dict[str, Any]) -> ObjectKey:
         chunk_hash=d["chunk_hash"],
         model_name=d["model_name"],
         kv_rank=d["kv_rank"],
+        object_group_id=d.get("object_group_id", 0),
     )
 
 
