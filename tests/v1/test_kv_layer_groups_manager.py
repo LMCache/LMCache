@@ -446,9 +446,9 @@ class TestKernelAndObjectGroups:
         assert manager.get_subchunk_sw_size_tokens(1) == 64
         assert manager.get_subchunk_sw_size_tokens(2) == 256
         # Transfer slots follow the sub-chunk window (ratio 1 here).
-        assert manager.get_transfer_slots_per_chunk(0) == 256
-        assert manager.get_transfer_slots_per_chunk(1) == 64
-        assert manager.get_transfer_slots_per_chunk(2) == 256
+        assert manager.get_slots_per_chunk_in_sw(0) == 256
+        assert manager.get_slots_per_chunk_in_sw(1) == 64
+        assert manager.get_slots_per_chunk_in_sw(2) == 256
 
     def test_mixed_sw_kernel_groups_share_single_object_group(self):
         # Object-level bucketing by sliding window size is not enabled yet:

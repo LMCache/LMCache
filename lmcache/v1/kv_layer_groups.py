@@ -398,7 +398,7 @@ class KVLayerGroupsManager:
                 )
             )
 
-        self._lmcache_chunk_size = lmcache_tokens_per_chunk
+        self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
 
         logger.info(
             "KV layer groups: ---\n%s\n---",
@@ -469,9 +469,9 @@ class KVLayerGroupsManager:
             hybrid model support
         """
         group = self._kernel_groups[kernel_group_idx]
-        return group.calculate_slots(self._lmcache_chunk_size)
+        return group.calculate_slots(self._lmcache_tokens_per_chunk)
 
-    def get_transfer_slots_per_chunk(self, kernel_group_idx: int) -> int:
+    def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
         """Return the per-chunk *transfer* slot count for *kernel_group_idx*.
 
         For sub-chunk sliding window groups, the transfer slots is smaller
@@ -500,8 +500,8 @@ class KVLayerGroupsManager:
             window models.
         """
         sw_size_tokens = self._kernel_groups[kernel_group_idx].sw_size_tokens
-        if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_chunk_size:
-            return self._lmcache_chunk_size
+        if sw_size_tokens == -1 or sw_size_tokens >= self._lmcache_tokens_per_chunk:
+            return self._lmcache_tokens_per_chunk
         return sw_size_tokens
 
     def get_sw_size_chunks(self, object_group_idx: int) -> int:
@@ -569,7 +569,7 @@ class KVLayerGroupsManager:
         # logic for sliding window has been implemented.
         # For now, we put all the kernel groups into one object group.
 
-        # chunk_size = self._lmcache_chunk_size
+        # chunk_size = self._lmcache_tokens_per_chunk
         # groups_by_sw_size: dict[int, list[int]] = defaultdict(list)
         # for kernel_group_idx, group in enumerate(self._kernel_groups):
         #    if group.sw_size_tokens == -1:
