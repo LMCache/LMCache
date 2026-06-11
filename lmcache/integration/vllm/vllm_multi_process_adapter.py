@@ -22,8 +22,8 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
 )
 from lmcache.v1.multiprocess.group_view import (
-    LMCacheGroupView,
-    expand_block_ids_to_views,
+    EngineGroupInfo,
+    expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -227,8 +227,8 @@ def get_lmcache_chunk_size(
         An integer representing the LMCache chunk size
     """
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
-    chunk_size = future.result(timeout=timeout)
-    return chunk_size
+    lmcache_tokens_per_chunk = future.result(timeout=timeout)
+    return lmcache_tokens_per_chunk
 
 
 def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
@@ -285,32 +285,44 @@ class ParallelStrategy:
     use_mla: bool
     """Whether to use the MLA."""
 
-    kv_world_size: int
-    """
-    The kv world size, kv_world_size may not be equal to the actual_world_size, 
-    in the case of mla, it will 'exclude' the effect of TP, the value is 
-    calculated by `extract_world_size_and_kv_rank` in `lmcache_mp_connector.py`.
+    vllm_world_size: int
+    """Number of workers managed by one vLLM scheduler (TP × PP; excludes DP).
+
+    Mirrors ``vllm.parallel_config.world_size``.
     """
 
-    kv_worker_id: int
-    """
-    The kv worker id of the sub-process, kv_worker_id may not be equal to the 
-    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP, 
-    the value is calculated by `extract_world_size_and_kv_rank` in 
-    `lmcache_mp_connector.py`.
-    """
-
-    actual_world_size: int
-    """The actual world size."""
-
-    actual_worker_id: int
-    """The actual worker id of the sub-process."""
+    vllm_worker_id: int
+    """This worker's rank within its scheduler group."""
 
     tp_size: int
     """The tensor parallel size."""
 
     pp_size: int
     """The pipeline parallel size."""
+
+    @property
+    def kv_world_size(self) -> int:
+        """Number of pieces a single token chunk's KV cache is split into
+        on the LMCache server storage."""
+        if self.use_mla:
+            return self.vllm_world_size // self.tp_size
+        return self.vllm_world_size
+
+    @property
+    def kv_worker_id(self) -> int:
+        """Index of the piece of a single token chunk's KV cache
+        that the current worker is responsible for,
+        in ``[0, kv_world_size)``."""
+        if self.use_mla:
+            return self.vllm_worker_id // self.tp_size
+        return self.vllm_worker_id
+
+    @property
+    def is_kv_writer(self) -> bool:
+        """Whether this rank is responsible for storing KV."""
+        if not self.use_mla:
+            return True
+        return self.vllm_worker_id % self.tp_size == 0
 
 
 def _normalize_adapter_init_args(
@@ -349,10 +361,8 @@ def _normalize_adapter_init_args(
     kv_worker_id = int(parallel_strategy)
     strategy = ParallelStrategy(
         use_mla=False,
-        kv_world_size=kv_world_size,
-        kv_worker_id=kv_worker_id,
-        actual_world_size=kv_world_size,
-        actual_worker_id=kv_worker_id,
+        vllm_world_size=kv_world_size,
+        vllm_worker_id=kv_worker_id,
         tp_size=kv_world_size,
         pp_size=1,
     )
@@ -475,7 +485,19 @@ class LoadStoreOp:
 
     @property
     def flat_block_ids(self) -> list[int]:
-        """Return all block IDs flattened for group-blind error paths."""
+        """Return all block IDs flattened for group-blind error paths.
+
+        Handles both the normal ``list[list[int]]`` format and the
+        IPC-flattened ``list[int]`` format that vLLM v0.19.0 produces when
+        ``SchedulerOutput`` serializes single-element nested lists across
+        process boundaries (e.g. ``[[20, 21]]`` → ``[20, 21]``).
+        Returns an empty list when ``block_ids`` is empty.
+        """
+        if not self.block_ids:
+            return []
+        # Defend against IPC serialization flattening [[20, 21, …]] → [20, 21, …]
+        if isinstance(self.block_ids[0], int):
+            return list(self.block_ids)
         return [
             block_id
             for group_block_ids in self.block_ids
@@ -548,16 +570,16 @@ class LMCacheMPSchedulerAdapter:
 
         # Read chunk size from lmcache
         try:
-            self.chunk_size = get_lmcache_chunk_size(
+            self.lmcache_tokens_per_chunk = get_lmcache_chunk_size(
                 self.mq_client, timeout=self._mq_timeout
             )
         except TimeoutError:
             self.mq_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
-        assert self.chunk_size % vllm_block_size == 0, (
+        assert self.lmcache_tokens_per_chunk % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
-        self.blocks_in_chunk = self.chunk_size // vllm_block_size
+        self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -639,7 +661,9 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
-        aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+        aligned_end = (
+            len(token_ids) // self.lmcache_tokens_per_chunk
+        ) * self.lmcache_tokens_per_chunk
 
         key = self._create_key(
             token_ids,
@@ -714,7 +738,7 @@ class LMCacheMPSchedulerAdapter:
         if result is None:
             return None
 
-        token_count = result * self.chunk_size
+        token_count = result * self.lmcache_tokens_per_chunk
         self._finished_lookup_results[request_id] = token_count
         return token_count
 
@@ -897,9 +921,19 @@ class LMCacheMPWorkerAdapter:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
-            self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
+            # Only treat ``mp_transfer_mode`` as an explicit override when
+            # the user actually set it in extra_config; otherwise leave it
+            # as ``None`` so ``create_transfer_context`` can still consult
+            # the ``LMCACHE_MP_TRANSFER_MODE`` env var.
+            mp_mode_key = (
+                _EXTRA_CONFIG_KEY_PREFIX + ExtraConfigDefault.mp_transfer_mode.name
+            )
+            if mp_mode_key in extra_config:
+                self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
+            else:
+                self._mp_transfer_mode = None
         else:
-            self._mp_transfer_mode = ExtraConfigDefault.mp_transfer_mode.value
+            self._mp_transfer_mode = None
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -908,7 +942,7 @@ class LMCacheMPWorkerAdapter:
 
         # Registered kv caches from vLLM
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self.group_views: list[LMCacheGroupView] = []
+        self.engine_group_infos: list[EngineGroupInfo] = []
 
         # Transport context for transfer operations.
         self.transfer_ctx: TransferContext | None = None
@@ -941,24 +975,17 @@ class LMCacheMPWorkerAdapter:
 
         # Read chunk size from lmcache
         try:
-            chunk_size = get_lmcache_chunk_size(
+            lmcache_tokens_per_chunk = get_lmcache_chunk_size(
                 self.mq_client, timeout=self._mq_timeout
             )
         except TimeoutError:
             self.mq_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
-        assert chunk_size % vllm_block_size == 0, (
+        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        assert lmcache_tokens_per_chunk % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
-        self.blocks_in_chunk = chunk_size // vllm_block_size
-        # Retain the vLLM logical block size so we can ship it to the
-        # LMCache server in ``register_kv_caches`` — the server uses it
-        # (as ``layout_hints["inference_engine_logical_block_size"]``)
-        # to derive per-group compression ratios when some KV layer
-        # groups compress multiple logical tokens into a single physical
-        # slot (``shape_desc.bs <
-        # inference_engine_logical_block_size``).
-        self.vllm_logical_block_size = vllm_block_size
+        self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -1007,22 +1034,14 @@ class LMCacheMPWorkerAdapter:
         return self.parallel_strategy.kv_worker_id
 
     @property
-    def use_mla(self) -> bool:
-        """Whether to use MLA."""
-        return self.parallel_strategy.use_mla
-
-    @property
-    def is_first_rank_of_pp_group(self) -> bool:
-        """Is the first rank of the pipeline parallel group."""
-        return (
-            self.parallel_strategy.actual_worker_id % self.parallel_strategy.tp_size
-            == 0
-        )
+    def is_kv_writer(self) -> bool:
+        """Whether this worker is responsible for storing KV."""
+        return self.parallel_strategy.is_kv_writer
 
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
-        group_views: Sequence[LMCacheGroupView] = (),
+        engine_group_infos: Sequence[EngineGroupInfo] = (),
     ) -> None:
         """
         Register the kv caches with LMCache server.
@@ -1030,19 +1049,32 @@ class LMCacheMPWorkerAdapter:
         Args:
             kv_caches: A dict of kv caches to register. The keys are the
                 layer names and the values are the corresponding tensors.
-            group_views: LMCache-owned engine KV cache group metadata.
+            engine_group_infos: LMCache-owned engine KV cache group metadata.
 
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
+            ValueError: if the LMCache chunk size is not a multiple of an
+                engine group's ``tokens_per_block`` (chunk boundaries would
+                not align with that group's paged-chunk boundaries).
         """
         logger.info("Registering kv caches")
+        for info in engine_group_infos:
+            if (
+                info.tokens_per_block > 0
+                and self.lmcache_tokens_per_chunk % info.tokens_per_block
+            ):
+                raise ValueError(
+                    f"LMCache chunk size {self.lmcache_tokens_per_chunk} must be a "
+                    f"multiple of engine group {info.engine_group_id} "
+                    f"tokens_per_block {info.tokens_per_block}"
+                )
         self.kv_caches = kv_caches
-        self.group_views = list(group_views)
+        self.engine_group_infos = list(engine_group_infos)
         self._send_register_kv_caches_request(kv_caches)
 
     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
-        return expand_block_ids_to_views(self.group_views, op.block_ids)
+        return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
 
     def _send_register_kv_caches_request(
         self, kv_caches: dict[str, torch.Tensor]
@@ -1064,9 +1096,6 @@ class LMCacheMPWorkerAdapter:
             kv_caches, mode=self._mp_transfer_mode
         )
         layout_hints = vllm_layout_hints()
-        layout_hints["inference_engine_logical_block_size"] = (
-            self.vllm_logical_block_size
-        )
         try:
             self.transfer_ctx.register(
                 self.instance_id,
@@ -1078,7 +1107,7 @@ class LMCacheMPWorkerAdapter:
                 self._mq_timeout,
                 send_request=send_lmcache_request,
                 layout_hints=layout_hints,
-                group_views=self.group_views,
+                engine_group_infos=self.engine_group_infos,
             )
         except TimeoutError:
             raise ConnectionError(

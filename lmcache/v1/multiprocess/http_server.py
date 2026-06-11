@@ -107,7 +107,6 @@ async def lifespan(app: FastAPI):
     # the keep_registered task registers, heartbeats, and deregisters on
     # shutdown. Best-effort: failures are logged and retried, never fatal.
     http_config = _configs.get("http")
-    obs_config = _configs.get("observability")
     coordinator_config = _configs.get("coordinator")
     coordinator_client = None
     coordinator_registration_task = None
@@ -117,16 +116,14 @@ async def lifespan(app: FastAPI):
         and http_config is not None
     ):
         coordinator_client = httpx.AsyncClient(timeout=10.0)
-        # Reuse this server's telemetry identity (OTel service.instance.id) so
-        # coordinator membership lines up with metrics/traces. Empty lets the
-        # coordinator assign one.
-        service_instance_id = getattr(obs_config, "service_instance_id", None)
+        # Canonical id resolved by run_cache_server above; shared with
+        # the OTel service.instance.id so membership matches metrics/traces.
         coordinator_registration_task = asyncio.create_task(
             keep_registered(
                 coordinator_client,
                 coordinator_config.url,
                 http_port=http_config.http_port,
-                instance_id=service_instance_id or "",
+                instance_id=mp_config.instance_id,
                 advertise_ip=coordinator_config.advertise_ip,
                 heartbeat_interval=coordinator_config.heartbeat_interval,
             )
