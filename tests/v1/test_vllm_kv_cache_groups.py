@@ -3,6 +3,11 @@
 from dataclasses import dataclass
 
 # Third Party
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
 import torch
 
 # First Party
@@ -30,6 +35,26 @@ class MockKVCacheGroup:
 @dataclass
 class MockKVCacheConfig:
     kv_cache_groups: list[MockKVCacheGroup]
+
+
+def _full_attention_spec(sliding_window: "int | None" = None) -> FullAttentionSpec:
+    return FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=sliding_window,
+    )
+
+
+def _sliding_window_spec(sliding_window: int) -> SlidingWindowSpec:
+    return SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.float16,
+        sliding_window=sliding_window,
+    )
 
 
 def _same_shape_caches(names: list[str]) -> dict[str, torch.Tensor]:
@@ -94,3 +119,102 @@ def test_conversion_splits_by_lmcache_layer_identity():
         [20],
         [10],
     ]
+
+
+def test_conversion_resolves_sliding_window_size():
+    """A SlidingWindowSpec group carries its window size in tokens."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], _full_attention_spec()),
+                MockKVCacheGroup(["layer.1"], _sliding_window_spec(64)),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1, 64]
+
+
+def test_conversion_ignores_full_attention_sliding_window():
+    """SWA layers managed as full attention (hybrid allocator disabled) are
+    not sliding window: vLLM allocates blocks for all tokens."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    ["layer.0", "layer.1"], _full_attention_spec(sliding_window=1024)
+                ),
+            ]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1]
+
+
+def test_conversion_defaults_sliding_window_for_non_sw_spec():
+    """Groups whose spec is not a SlidingWindowSpec resolve to
+    non-sliding-window."""
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(["layer.0"], MockKVCacheSpec(block_size=16))
+            ]
+        ),
+        _same_shape_caches(["layer.0"]),
+    )
+
+    assert [group.sw_size_tokens for group in spec] == [-1]
+
+
+def test_conversion_uniform_type_specs_resolve_per_layer():
+    """Inside a UniformTypeKVCacheSpecs group, per-layer specs decide the
+    window. SW layers with a distinct transfer identity get their own group
+    carrying the window size."""
+    caches = _same_shape_caches(["layer.0", "layer.1"])
+    # layer.1 has a different head count -> distinct transfer identity.
+    caches["layer.1"] = torch.randn(2, 32, 16, 16, 64, dtype=torch.float16)
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer.0": _full_attention_spec(),
+            "layer.1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=16,
+                head_size=64,
+                dtype=torch.float16,
+                sliding_window=512,
+            ),
+        },
+    )
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[MockKVCacheGroup(["layer.0", "layer.1"], uniform_spec)]
+        ),
+        caches,
+    )
+
+    assert [group.layer_indices for group in spec] == [(0,), (1,)]
+    assert [group.sw_size_tokens for group in spec] == [-1, 512]
+
+
+def test_conversion_mixed_window_layers_fall_back_to_full_attention():
+    """Same-identity layers mixing different windows conservatively resolve
+    to non-sliding-window for the merged group."""
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer.0": _full_attention_spec(),
+            "layer.1": _sliding_window_spec(64),
+        },
+    )
+    spec = create_engine_group_infos_from_vllm(
+        MockKVCacheConfig(
+            kv_cache_groups=[MockKVCacheGroup(["layer.0", "layer.1"], uniform_spec)]
+        ),
+        _same_shape_caches(["layer.0", "layer.1"]),
+    )
+
+    assert [group.layer_indices for group in spec] == [(0, 1)]
+    assert [group.sw_size_tokens for group in spec] == [-1]
