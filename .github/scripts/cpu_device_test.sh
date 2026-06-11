@@ -55,9 +55,8 @@ echo "    Bench transfer mode: ${BENCH_TRANSFER_MODE}"
 echo "    E2E transport mode: ${E2E_TRANSPORT_MODE}"
 echo "    Ports: bench=${HTTP_PORT_BENCH}/${ZMQ_PORT_BENCH}, e2e=${HTTP_PORT_E2E}/${ZMQ_PORT_E2E}/${VLLM_PORT_E2E}"
 
-# Make sure any LMCache/vLLM processes started by this run are reaped on exit
-# so the next workflow step does not hit `Address already in use` on the
-# default ZMQ/HTTP ports.
+# Reap any LMCache/vLLM children started by this run on exit so the
+# next workflow step does not collide on default ZMQ/HTTP ports.
 cleanup_processes_safe() {
     local rc=$?
     set +e

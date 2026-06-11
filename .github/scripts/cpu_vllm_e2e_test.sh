@@ -44,11 +44,9 @@ fi
 LMCACHE_TRANSPORT_MODE="${LMCACHE_TRANSPORT_MODE:-handle}"
 
 # Map LMCACHE_TRANSPORT_MODE to the vars expected by the shared script.
-# Note: LMCACHE_MP_TRANSFER_MODE must be set to a non-empty / non-auto value
-# in pickle/shm modes; otherwise the shared script defaults it to ``auto``
-# and treats the run as ``handle``, which breaks Step 5.5 transport-mode
-# verification. ``data`` is the worker-side copy path which is also what
-# ``auto`` resolves to for non-CUDA devices, so behaviour is unchanged.
+# pickle/shm explicitly set LMCACHE_MP_TRANSFER_MODE=data because
+# leaving it at the script default (`auto`) would make Step 5.5's
+# transport-mode verification expect ``auto`` instead of pickle/shm.
 case "${LMCACHE_TRANSPORT_MODE}" in
   pickle)
     export LMCACHE_SHM_NAME=""

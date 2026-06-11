@@ -11,6 +11,7 @@ fi
 
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 VENV_DIR=".venv-${BUILD_ID}"
+SHARED_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)/.github/scripts"
 LMCACHE_LOG="${LMCACHE_LOG_FILE:-/tmp/build_${BUILD_ID}_lmcache_cpu_validation.log}"
 VLLM_LOG="${VLLM_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm_cpu_validation.log}"
 LMCACHE_PID=""
@@ -291,121 +292,26 @@ else
   echo "=== CPU Install Validation (Phase 1) ==="
   echo "Creating virtual environment with uv at ${VENV_DIR}"
   uv venv --python 3.12 "${VENV_DIR}"
+  # shellcheck disable=SC1091
   source "${VENV_DIR}/bin/activate"
-  echo "✅ Virtual environment ready"
 
-  echo "Upgrading pip/setuptools/wheel"
   uv pip install --upgrade pip setuptools wheel
-  echo "✅ Upgraded pip/setuptools/wheel"
 
-  echo "Installing build dependencies from requirements/build.txt"
-  uv pip install -r requirements/build.txt
-  echo "✅ Installed requirements/build.txt"
-
-  echo "Installing common dependencies from requirements/common.txt"
-  uv pip install -r requirements/common.txt
-  echo "✅ Installed requirements/common.txt"
-
-  echo "Installing vLLM CPU build"
-  # Uninstall any existing vLLM (or earlier vllm-cpu-nightly) to avoid
-  # conflicts.
-  uv pip uninstall -y vllm vllm-cpu-nightly 2>/dev/null || true
-  # Install our prebuilt CPU-only vLLM wheel published as
-  # `vllm-cpu-nightly` on PyPI by
-  # .github/workflows/build_and_publish_vllm_cpu_nightly.sh (runs on
-  # devcloud). The wheel is built on ubuntu-22.04 + py3.12 with gcc-12
-  # and is ABI-compatible with this runner. `--extra-index-url` is
-  # required because the wheel pins torch==2.11.0 which only lives on
-  # the pytorch CPU index.
-  #
   # `--index-strategy unsafe-best-match` is required because uv's
   # default `first-index` strategy locks each package to the first
-  # index that lists it. The pytorch CPU index ships its own (older)
-  # mirror of `setuptools` (≤70.2.0), so uv would refuse to upgrade
-  # setuptools to the 80.10.2 that vllm-cpu-nightly's metadata pins,
-  # producing "No solution found when resolving dependencies".
-  # `unsafe-best-match` tells uv to consider every index's full
-  # version pool and pick the best version overall, which is the
-  # behaviour pip already uses by default.
-  uv pip install vllm-cpu-nightly \
-    --extra-index-url https://download.pytorch.org/whl/cpu \
-    --index-strategy unsafe-best-match
-  echo "✅ vLLM CPU install completed"
+  # index that lists it; the pytorch CPU index ships an older mirror
+  # of `setuptools` that would block the version vllm-cpu-nightly
+  # pins.
+  uv pip uninstall -y vllm vllm-cpu-nightly 2>/dev/null || true
+  PIP_BIN="uv pip" \
+  PIP_INSTALL_EXTRA_ARGS="--index-strategy unsafe-best-match" \
+    bash "${SHARED_SCRIPTS_DIR}/install_vllm_cpu.sh"
 
-  # The wheel installs the `vllm/` python package but its distribution
-  # metadata is registered under `vllm-cpu-nightly`. vLLM's own CLI
-  # entrypoint and many internal callers use
-  # `importlib.metadata.version("vllm")`, which looks up the
-  # *distribution* name, not the import name. Without the alias below,
-  # that call raises PackageNotFoundError and `vllm serve` fails to
-  # start. Synthesize a `vllm-<ver>.dist-info` alias that points at the
-  # same RECORD so the metadata lookup succeeds.
-  #
-  # We also tag the aliased Version with a `+cpu` PEP 440 local label.
-  # vLLM's `cpu_platform_plugin()` decides whether to activate the CPU
-  # platform via `"cpu" in version("vllm")`. Our build script strips
-  # the `+cpu` label before upload (PyPI rejects local versions), so
-  # without this re-tagging the CPU platform plugin returns None and
-  # `vllm serve` dies with "Failed to infer device type". Re-tagging
-  # only the alias keeps the original `vllm-cpu-nightly` dist-info
-  # untouched so `pip uninstall` keeps working. Idempotent.
-  echo "Aliasing vllm-cpu-nightly dist-info to vllm + tagging +cpu"
-  python - <<'PY'
-import importlib.metadata as md
-import pathlib
-import shutil
-dist = md.distribution("vllm-cpu-nightly")
-ver = dist.version
-fake_ver = f"{ver}+cpu"
-site_root = pathlib.Path(dist.locate_file(""))
-info_name = next(
-    p.parts[0] for p in (dist.files or [])
-    if p.parts and p.parts[0].endswith(".dist-info")
-)
-src = site_root / info_name
-dst = src.with_name(f"vllm-{fake_ver}.dist-info")
-if dst.exists():
-    shutil.rmtree(dst)
-shutil.copytree(src, dst)
-meta = dst / "METADATA"
-txt = meta.read_text()
-txt = txt.replace("Name: vllm-cpu-nightly", "Name: vllm", 1)
-txt = txt.replace(f"Version: {ver}", f"Version: {fake_ver}", 1)
-meta.write_text(txt)
-print(f"Aliased {src.name} -> {dst.name}")
-print("vllm version (via importlib.metadata):", md.version("vllm"))
-PY
-  echo "✅ vllm dist-info alias created"
-
-  # Debug: check if vLLM is actually CPU version
-  echo "Checking vLLM installation type..."
-  python -c "
-import vllm
-import os
-print('vLLM location:', vllm.__file__)
-print('VLLM_TARGET_DEVICE:', os.environ.get('VLLM_TARGET_DEVICE', 'not set'))
-print('VLLM_DEVICE:', os.environ.get('VLLM_DEVICE', 'not set'))
-# Try to detect if vLLM has CUDA support
-try:
-    import torch
-    print('PyTorch CUDA available:', torch.cuda.is_available())
-except Exception as e:
-    print('PyTorch check failed:', e)
-" || true
-
-  echo "Installing LMCache in editable mode with NO_GPU_EXT=1"
-  NO_GPU_EXT=1 uv pip install -e . --no-build-isolation
-  echo "✅ LMCache install completed"
+  PIP_BIN="uv pip" \
+    bash "${SHARED_SCRIPTS_DIR}/install_lmcache_cpu.sh"
 
   echo "Freezing installed package versions"
   uv pip freeze
-
-  echo "Validating imports"
-  python -c "import lmcache; import vllm; print('✅ Imports OK')"
-
-  echo "Printing package versions"
-  python -c "import vllm; print('vllm:', vllm.__version__)"
-  python -c "import lmcache; print('lmcache:', lmcache.__version__)"
 
   echo "✅ CPU install validation passed"
 fi
@@ -421,10 +327,8 @@ else
 fi
 
 echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (cache-aware)"
-if ! python -c "from huggingface_hub import snapshot_download; snapshot_download('facebook/opt-125m')"; then
-  echo "❌ Failed to download/cache facebook/opt-125m"
-  false
-fi
+HF_DOWNLOAD_FAIL_ON_ERROR=1 \
+  bash "${SHARED_SCRIPTS_DIR}/download_opt125m.sh"
 echo "✅ Model download/check complete"
 
 echo "[Phase 2 / Step 3] Starting LMCache server"
@@ -437,13 +341,11 @@ LMCACHE_ARGS=(
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
   --chunk-size "${LMCACHE_CHUNK_SIZE}"
 )
-# `auto` and `handle` look identical to this script (both leave SHM_NAME
-# at default and don't pass --shm-name) but inside lmcache they take
-# different worker-side paths: `handle` -> HandleTransferContext (true
-# zero-copy server-side copy via POSIX SHM IPC), `auto` -> falls back to
-# DataTransferContext on non-CUDA devices. Treat them as separate cases
-# so Step 5.5 can verify the worker actually entered the expected
-# TransferContext.
+# `auto` and `handle` look identical here (both leave SHM_NAME at
+# default) but resolve to different worker-side TransferContexts:
+#   handle -> HandleTransferContext (server-side copy via POSIX SHM IPC)
+#   auto   -> DataTransferContext on non-CUDA devices
+# Step 5.5 verifies which one the worker actually entered.
 if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ]; then
   echo "Transport mode: server-side copy (handle via POSIX SHM IPC)"
   EXPECTED_TRANSPORT="handle"
