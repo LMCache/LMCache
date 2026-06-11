@@ -266,7 +266,7 @@ class LookupModule:
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
 
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         handle = self._ctx.storage_manager.submit_prefetch_task(
             obj_keys,
@@ -399,7 +399,7 @@ class LookupModule:
         )
         if not chunk_hashes:
             return
-        obj_keys = ipc_key_to_object_keys(key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
 
         extra_count = compute_extra_count(tp_size, key.world_size)
 
@@ -437,7 +437,7 @@ class LookupModule:
             return
 
         chunk_hashes = [TokenHasher.hash_to_bytes(h) for h in session.get_hashes(0)]
-        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes)
+        obj_keys = ipc_key_to_object_keys(session.lookup_ipc_key, chunk_hashes, [0])[0]
         # unified touch of all keys, which include retrieved and stored keys
         # TODO(chunxiaozheng): when l2 is enabled, the prefetched keys from l2 are temp
         #  and will be deleted after finish_read_prefetched, when we touch all keys,

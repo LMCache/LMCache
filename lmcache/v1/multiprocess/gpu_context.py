@@ -481,18 +481,15 @@ class GPUCacheContext:
         """Returns the KV layer groups manager."""
         return self.kv_layer_groups_manager_
 
-    def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
+    def get_shape_desc(self, kernel_group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for the given KV layer group."""
-        return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
+        return self.kv_layer_groups_manager_.get_shape_desc(kernel_group_idx)
 
-    def get_slots_per_chunk(self, group_idx: int) -> int:
-        """Returns the per-chunk physical slot count for the given group.
-
-        Equal to ``lmcache_tokens_per_chunk // compress_ratio``; for
-        non-compressed groups this is just ``lmcache_tokens_per_chunk``.
-        This is the value the block-level transfer kernel must be told.
+    def get_slots_per_chunk(self, kernel_group_idx: int) -> int:
+        """Returns the per-chunk physical slot count for the given kernel
+        group.
         """
-        return self.kv_layer_groups_manager_.get_slots_per_chunk(group_idx)
+        return self.kv_layer_groups_manager_.get_slots_per_chunk(kernel_group_idx)
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the
