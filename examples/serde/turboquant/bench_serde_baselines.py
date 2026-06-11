@@ -3,14 +3,17 @@
 
 """Microbenchmark fp8 and TurboQuant serde backends on synthetic KV tensors."""
 
+# Standard
+from dataclasses import dataclass
+from typing import Any
 import argparse
 import json
 import time
-from dataclasses import dataclass
-from typing import Any
 
+# Third Party
 import torch
 
+# First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.serde.fp8 import (
     Fp8QuantizationDeserializer,
@@ -44,7 +47,9 @@ def corrcoef(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a @ b) / denom).item()
 
 
-def make_serde(name: str, preset: str | None, fp8_dtype: str, head_dim: int, block_size: int):
+def make_serde(
+    name: str, preset: str | None, fp8_dtype: str, head_dim: int, block_size: int
+):
     if name == "fp8":
         dtype = getattr(torch, fp8_dtype)
         return (
@@ -147,7 +152,9 @@ def benchmark_one(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"])
+    parser.add_argument(
+        "--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"]
+    )
     parser.add_argument("--layers", type=int, default=24)
     parser.add_argument("--blocks", type=int, default=4096)
     parser.add_argument("--block-size", type=int, default=16)
@@ -224,14 +231,14 @@ def main() -> None:
                 [
                     str(r["serde"]),
                     str(r["preset"]),
-                    f'{r["raw_MB"]:.2f}',
-                    f'{r["serialized_MB"]:.2f}',
-                    f'{r["compression_ratio"]:.2f}',
-                    f'{r["encode_ms"]:.3f}',
-                    f'{r["decode_ms"]:.3f}',
-                    f'{r["corr"]:.6f}',
-                    f'{r["mean_abs_err"]:.6f}',
-                    f'{r["max_abs_err"]:.6f}',
+                    f"{r['raw_MB']:.2f}",
+                    f"{r['serialized_MB']:.2f}",
+                    f"{r['compression_ratio']:.2f}",
+                    f"{r['encode_ms']:.3f}",
+                    f"{r['decode_ms']:.3f}",
+                    f"{r['corr']:.6f}",
+                    f"{r['mean_abs_err']:.6f}",
+                    f"{r['max_abs_err']:.6f}",
                 ]
             )
         )

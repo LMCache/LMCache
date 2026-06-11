@@ -1,16 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
+from dataclasses import dataclass
+from typing import cast
 import argparse
 import json
 import time
-from dataclasses import dataclass
 
+# Third Party
 import torch
 
+# First Party
+from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantDeserializer,
     TurboQuantSerdeConfig,
     TurboQuantSerializer,
 )
-from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.memory_management import MemoryObj
 
 
 @dataclass
@@ -67,10 +73,10 @@ def benchmark_one(
     dec = _FakeMemoryObj(recovered)
 
     for _ in range(warmup):
-        written = serializer.serialize(src, enc)
+        written = serializer.serialize(cast(MemoryObj, src), cast(MemoryObj, enc))
         if written != n_bytes:
             raise RuntimeError(f"written={written}, expected={n_bytes}")
-        deserializer.deserialize(enc, dec)
+        deserializer.deserialize(cast(MemoryObj, enc), cast(MemoryObj, dec))
     sync()
 
     encode_times = []
@@ -79,14 +85,14 @@ def benchmark_one(
     for _ in range(iters):
         sync()
         t0 = time.perf_counter()
-        written = serializer.serialize(src, enc)
+        written = serializer.serialize(cast(MemoryObj, src), cast(MemoryObj, enc))
         sync()
         t1 = time.perf_counter()
 
         if written != n_bytes:
             raise RuntimeError(f"written={written}, expected={n_bytes}")
 
-        deserializer.deserialize(enc, dec)
+        deserializer.deserialize(cast(MemoryObj, enc), cast(MemoryObj, dec))
         sync()
         t2 = time.perf_counter()
 
@@ -116,7 +122,9 @@ def benchmark_one(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"])
+    parser.add_argument(
+        "--dtype", default="bfloat16", choices=["float16", "bfloat16", "float32"]
+    )
     parser.add_argument("--layers", type=int, default=24)
     parser.add_argument("--blocks", type=int, default=4096)
     parser.add_argument("--block-size", type=int, default=16)
@@ -188,14 +196,14 @@ def main() -> None:
             " | ".join(
                 [
                     str(r["preset"]),
-                    f'{r["raw_MB"]:.2f}',
-                    f'{r["compressed_MB"]:.2f}',
-                    f'{r["compression_ratio"]:.2f}',
-                    f'{r["encode_ms"]:.3f}',
-                    f'{r["decode_ms"]:.3f}',
-                    f'{r["corr"]:.6f}',
-                    f'{r["mean_abs_err"]:.6f}',
-                    f'{r["max_abs_err"]:.6f}',
+                    f"{r['raw_MB']:.2f}",
+                    f"{r['compressed_MB']:.2f}",
+                    f"{r['compression_ratio']:.2f}",
+                    f"{r['encode_ms']:.3f}",
+                    f"{r['decode_ms']:.3f}",
+                    f"{r['corr']:.6f}",
+                    f"{r['mean_abs_err']:.6f}",
+                    f"{r['max_abs_err']:.6f}",
                 ]
             )
         )

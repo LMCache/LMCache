@@ -4,10 +4,11 @@ Unit tests for TurboQuant serde skeleton.
 """
 
 # Standard
+from pathlib import Path
+from typing import cast
 import shutil
 import tempfile
 import time
-from pathlib import Path
 
 # Third Party
 import pytest
@@ -34,6 +35,7 @@ from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerializer,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.memory_management import MemoryObj
 
 
 def test_turboquant_registered() -> None:
@@ -413,6 +415,7 @@ def test_turboquant_direct_roundtrip_cuda(
     corr_lower_bound: float,
 ) -> None:
     """Direct GPU round-trip through TurboQuant serializer/deserializer."""
+    # First Party
     from lmcache.v1.distributed.serde.turboquant import TurboQuantDeserializer
 
     device = torch.device("cuda:0")
@@ -445,14 +448,14 @@ def test_turboquant_direct_roundtrip_cuda(
     recovered = torch.empty_like(original)
 
     written = serializer.serialize(
-        _FakeMemoryObj(original),
-        _FakeMemoryObj(compressed),
+        cast(MemoryObj, _FakeMemoryObj(original)),
+        cast(MemoryObj, _FakeMemoryObj(compressed)),
     )
     assert written == n_bytes
 
     deserializer.deserialize(
-        _FakeMemoryObj(compressed),
-        _FakeMemoryObj(recovered),
+        cast(MemoryObj, _FakeMemoryObj(compressed)),
+        cast(MemoryObj, _FakeMemoryObj(recovered)),
     )
 
     orig_f = original.float().flatten()

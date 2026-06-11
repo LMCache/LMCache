@@ -8,11 +8,10 @@ accumulation) + stage2 (log-sum-exp reduction across splits).
 Supports FP8 (E4M3) keys, 3-bit and 4-bit uniform quantized values.
 """
 
-import math
-from typing import Any
+# Standard
 
+# Third Party
 import torch
-
 import triton
 import triton.language as tl
 
@@ -170,4 +169,3 @@ def _tq_full_dequant_kv(
 
 
 # ---------------------------------------------------------------------------
-

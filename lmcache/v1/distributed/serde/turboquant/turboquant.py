@@ -31,7 +31,6 @@ from lmcache.v1.distributed.serde.base import Deserializer, SerdeProcessor, Seri
 from lmcache.v1.distributed.serde.factory import register_serde_factory
 from lmcache.v1.memory_management import MemoryObj
 
-
 TQ_PRESETS: dict[str, dict[str, object]] = {
     "turboquant_k8v4": {
         "key_quant_bits": 8,
@@ -97,7 +96,7 @@ class TurboQuantSerdeConfig:
 
     @property
     def key_quant_bits(self) -> int:
-        return int(self._preset_config["key_quant_bits"])
+        return int(self._preset_config["key_quant_bits"])  # type: ignore[call-overload]
 
     @property
     def key_fp8(self) -> bool:
@@ -111,7 +110,7 @@ class TurboQuantSerdeConfig:
 
     @property
     def value_quant_bits(self) -> int:
-        return int(self._preset_config["value_quant_bits"])
+        return int(self._preset_config["value_quant_bits"])  # type: ignore[call-overload]
 
     @property
     def effective_value_quant_bits(self) -> int:
@@ -193,9 +192,7 @@ def _validate_layout_shape(
     return num_layers, num_tokens, num_heads, head_dim
 
 
-def _layer_ranges(
-    num_layers: int, cfg: TurboQuantSerdeConfig
-) -> tuple[int, int]:
+def _layer_ranges(num_layers: int, cfg: TurboQuantSerdeConfig) -> tuple[int, int]:
     """Return the half-open range of layers compressed with TurboQuant."""
     quant_start = min(cfg.skip_first_layers, num_layers)
     quant_end = max(quant_start, num_layers - cfg.skip_last_layers)
@@ -229,11 +226,7 @@ def _serialized_nbytes_for_shape(
     quant_layers = quant_end - quant_start
     raw_layers = num_layers - quant_layers
     return _raw_group_nbytes(shape, dtype, raw_layers) + (
-        quant_layers
-        * num_blocks
-        * cfg.block_size
-        * num_heads
-        * cfg.slot_size_aligned
+        quant_layers * num_blocks * cfg.block_size * num_heads * cfg.slot_size_aligned
     )
 
 
@@ -263,7 +256,9 @@ def _make_slot_mapping(num_tokens: int, device: torch.device) -> torch.Tensor:
 
 def _make_block_table(num_blocks: int, device: torch.device) -> torch.Tensor:
     """Sequential block table: logical block i -> physical block i."""
-    return torch.arange(num_blocks, device=device, dtype=torch.int32).view(1, num_blocks)
+    return torch.arange(num_blocks, device=device, dtype=torch.int32).view(
+        1, num_blocks
+    )
 
 
 def _generate_wht_signs(
@@ -292,9 +287,7 @@ def _solve_lloyd_max(
     sigma = math.sqrt(sigma2)
 
     def gaussian_pdf(x: float) -> float:
-        return (1.0 / math.sqrt(2 * math.pi * sigma2)) * math.exp(
-            -x * x / (2 * sigma2)
-        )
+        return (1.0 / math.sqrt(2 * math.pi * sigma2)) * math.exp(-x * x / (2 * sigma2))
 
     def trapz(f, a: float, b: float, n: int = 200) -> float:
         h = (b - a) / n
@@ -308,8 +301,7 @@ def _solve_lloyd_max(
 
     for _ in range(max_iter):
         boundaries = [
-            (centroids[i] + centroids[i + 1]) / 2.0
-            for i in range(n_levels - 1)
+            (centroids[i] + centroids[i + 1]) / 2.0 for i in range(n_levels - 1)
         ]
         edges = [lo * 3] + boundaries + [hi * 3]
 
@@ -324,10 +316,7 @@ def _solve_lloyd_max(
             break
         centroids = new_centroids
 
-    boundaries = [
-        (centroids[i] + centroids[i + 1]) / 2.0
-        for i in range(n_levels - 1)
-    ]
+    boundaries = [(centroids[i] + centroids[i + 1]) / 2.0 for i in range(n_levels - 1)]
 
     return (
         torch.tensor(centroids, dtype=torch.float32),
@@ -531,7 +520,6 @@ def _select_cuda_device(
     return _auto_select_cuda_device(required_bytes)
 
 
-
 class TurboQuantSerializer(Serializer):
     """TurboQuant serializer skeleton."""
 
@@ -573,7 +561,8 @@ class TurboQuantSerializer(Serializer):
 
         if dst_tensor.dtype != torch.uint8:
             raise ValueError(
-                f"TurboQuant serialized destination must be torch.uint8, got {dst_tensor.dtype}"
+                "TurboQuant serialized destination must be torch.uint8, "
+                f"got {dst_tensor.dtype}"
             )
         required_cuda_bytes = n_bytes
         if not src_tensor.is_cuda:
@@ -611,15 +600,14 @@ class TurboQuantSerializer(Serializer):
         dst_flat = dst_work.flatten()[:n_bytes]
         offset = 0
 
-        first_raw_bytes = _raw_group_nbytes(
-            src_work.shape, src_work.dtype, quant_start
-        )
+        first_raw_bytes = _raw_group_nbytes(src_work.shape, src_work.dtype, quant_start)
         if first_raw_bytes:
             raw = src_work[:, :quant_start].contiguous().view(torch.uint8).flatten()
             dst_flat[:first_raw_bytes].copy_(raw)
             offset = first_raw_bytes
 
         if quant_layers:
+            # First Party
             from lmcache.v1.distributed.serde.turboquant.store_kernel import (
                 triton_turboquant_store,
             )
@@ -636,12 +624,16 @@ class TurboQuantSerializer(Serializer):
             # LMCache layout: [2, L, T, hidden_dim]
             # Kernel input layout per layer: key/value [T, H, D]
             for compressed_idx, layer_idx in enumerate(range(quant_start, quant_end)):
-                key = src_work[0, layer_idx].view(
-                    num_tokens, num_heads, head_dim
-                ).contiguous()
-                value = src_work[1, layer_idx].view(
-                    num_tokens, num_heads, head_dim
-                ).contiguous()
+                key = (
+                    src_work[0, layer_idx]
+                    .view(num_tokens, num_heads, head_dim)
+                    .contiguous()
+                )
+                value = (
+                    src_work[1, layer_idx]
+                    .view(num_tokens, num_heads, head_dim)
+                    .contiguous()
+                )
                 pi_t, midpoints, _ = _make_tq_tensors_for_layer(
                     cfg, layer_idx, cuda_device
                 )
@@ -670,7 +662,7 @@ class TurboQuantSerializer(Serializer):
 
     def estimate_serialized_size(self, layout_desc: MemoryLayoutDesc) -> int:
         total = 0
-        for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes):
+        for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=False):
             total += _serialized_nbytes_for_shape(shape, dtype, self._cfg)
         return total
 
@@ -714,7 +706,8 @@ class TurboQuantDeserializer(Deserializer):
 
         if src_tensor.dtype != torch.uint8:
             raise ValueError(
-                f"TurboQuant serialized source must be torch.uint8, got {src_tensor.dtype}"
+                "TurboQuant serialized source must be torch.uint8, "
+                f"got {src_tensor.dtype}"
             )
         required_cuda_bytes = n_bytes
         if not src_tensor.is_cuda:
@@ -757,9 +750,7 @@ class TurboQuantDeserializer(Deserializer):
         src_flat = src_work.flatten()[:n_bytes]
         offset = 0
 
-        first_raw_bytes = _raw_group_nbytes(
-            dst_work.shape, dst_work.dtype, quant_start
-        )
+        first_raw_bytes = _raw_group_nbytes(dst_work.shape, dst_work.dtype, quant_start)
         if first_raw_bytes:
             raw = torch.empty(
                 (2, quant_start, num_tokens, hidden_dim),
@@ -771,6 +762,7 @@ class TurboQuantDeserializer(Deserializer):
             offset = first_raw_bytes
 
         if quant_layers:
+            # First Party
             from lmcache.v1.distributed.serde.turboquant.decode_kernel import (
                 _tq_full_dequant_kv,
                 _use_fp8_e4b15,
@@ -875,15 +867,15 @@ class TurboQuantDeserializer(Deserializer):
 
 def _create_turboquant_serde(kwargs: dict[str, object]) -> SerdeProcessor:
     preset = str(kwargs.get("preset", "turboquant_k8v4"))
-    head_dim = int(kwargs.get("head_dim", 128))  # type: ignore[arg-type]
-    block_size = int(kwargs.get("block_size", 16))  # type: ignore[arg-type]
+    head_dim = int(kwargs.get("head_dim", 128))  # type: ignore[call-overload]
+    block_size = int(kwargs.get("block_size", 16))  # type: ignore[call-overload]
     skip_first_layers = int(
-        kwargs.get("skip_first_layers", 2)  # type: ignore[arg-type]
+        kwargs.get("skip_first_layers", 2)  # type: ignore[call-overload]
     )
     skip_last_layers = int(
-        kwargs.get("skip_last_layers", 2)  # type: ignore[arg-type]
+        kwargs.get("skip_last_layers", 2)  # type: ignore[call-overload]
     )
-    max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[arg-type]
+    max_workers = int(kwargs.get("max_workers", 1))  # type: ignore[call-overload]
 
     cfg = TurboQuantSerdeConfig(
         preset=preset,
