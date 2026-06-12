@@ -36,6 +36,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import argparse
 import itertools
+import math
 import mmap
 import os
 import sys
@@ -705,8 +706,8 @@ def _add_latency_section(
     sorted_lat = sorted(latencies)
     count = len(sorted_lat)
     mean = sum(sorted_lat) / count
-    p50_idx = max(0, int(count * 0.50) - 1)
-    p99_idx = max(0, int(count * 0.99) - 1)
+    p50_idx = max(0, math.ceil(count * 0.50) - 1)
+    p99_idx = max(0, math.ceil(count * 0.99) - 1)
 
     section = metrics.add_section(section_id, section_title)
     section.add(f"{section_id}_count", "count", count)
