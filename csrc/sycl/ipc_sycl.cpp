@@ -146,12 +146,17 @@ torch::Tensor xpu_open_ipc_handle_with_local_fd(
   std::memcpy(&ipc_handle, &fd32, sizeof(fd32));
 
   void* ptr = nullptr;
-  check_ze_result(
-      zeMemOpenIpcHandle(
-          handles.context, handles.device, ipc_handle,
-          ZE_IPC_MEMORY_FLAG_BIAS_CACHED,
-          &ptr),
-      "zeMemOpenIpcHandle(local-fd)");
+  try {
+    check_ze_result(
+        zeMemOpenIpcHandle(
+            handles.context, handles.device, ipc_handle,
+            ZE_IPC_MEMORY_FLAG_BIAS_CACHED,
+            &ptr),
+        "zeMemOpenIpcHandle(local-fd)");
+  } catch (...) {
+    close(fd32);
+    throw;
+  }
 
   auto options = torch::TensorOptions()
                      .dtype(torch::kUInt8)

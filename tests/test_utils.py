@@ -18,6 +18,7 @@ from lmcache.utils import (
     convert_tokens_to_list,
     decompress_slot_mapping,
     get_version,
+    make_transfer_event,
     parse_cache_key,
     parse_mixed_slot_mapping,
     round_down,
@@ -206,6 +207,34 @@ class TestGetVersion:
             patch("lmcache.utils.COMMIT_ID", ""),
         ):
             assert get_version() == "2.0-NA"
+
+
+# ============================================================
+# Device event helpers
+# ============================================================
+class TestMakeTransferEvent:
+    def test_xpu_event_uses_detected_torch_device(self, monkeypatch) -> None:
+        """Verify XPU transfer events use the exported torch device backend."""
+        # First Party
+        import lmcache
+
+        class FakeEvent:
+            def __init__(self) -> None:
+                self.recorded = False
+
+            def record(self) -> None:
+                self.recorded = True
+
+        class FakeTorchDevice:
+            Event = FakeEvent
+
+        monkeypatch.setattr(lmcache, "torch_device_type", "xpu")
+        monkeypatch.setattr(lmcache, "torch_dev", FakeTorchDevice)
+
+        event = make_transfer_event()
+
+        assert isinstance(event, FakeEvent)
+        assert event.recorded
 
 
 # ============================================================

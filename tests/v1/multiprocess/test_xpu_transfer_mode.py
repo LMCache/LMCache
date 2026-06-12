@@ -12,8 +12,10 @@ from lmcache.v1.multiprocess.config import (
 )
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
+from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.modules.xpu_transfer import XpuTransferModule
 from lmcache.v1.multiprocess.server import _build_modules
+from lmcache.v1.multiprocess.transfer_context import worker_transfer
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     XpuHandleTransferContext,
     create_transfer_context,
@@ -74,3 +76,104 @@ def test_create_transfer_context_uses_xpu_context() -> None:
     context = create_transfer_context({"layer_0": fake_tensor})
 
     assert isinstance(context, XpuHandleTransferContext)
+
+
+def test_xpu_store_payload_uses_grouped_block_ids(monkeypatch) -> None:
+    """Verify XPU STORE sends block IDs in the protocol-defined grouped shape."""
+
+    class FakeTorchDevice:
+        @staticmethod
+        def synchronize() -> None:
+            pass
+
+    calls: list[tuple[RequestType, list[object]]] = []
+
+    def send_request(
+        _mq_client: object,
+        request_type: RequestType,
+        payloads: list[object],
+    ) -> MagicMock:
+        calls.append((request_type, payloads))
+        future = MagicMock()
+        future.result.return_value = None
+        return future
+
+    context = XpuHandleTransferContext()
+    monkeypatch.setattr(worker_transfer, "torch_dev", FakeTorchDevice)
+    context.register(
+        instance_id=1,
+        kv_caches={},
+        model_name="model",
+        world_size=1,
+        _blocks_in_chunk=1,
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        send_request=send_request,
+        layout_hints={},
+        group_views=[],
+    )
+
+    grouped_block_ids = [[3, 4]]
+    context.submit_store(
+        "request",
+        MagicMock(),
+        1,
+        {},
+        grouped_block_ids,
+        MagicMock(),
+        1,
+    )
+
+    assert calls[-1][0] == RequestType.STORE
+    assert calls[-1][1][2] == grouped_block_ids
+
+
+def test_xpu_retrieve_payload_uses_grouped_block_ids(monkeypatch) -> None:
+    """Verify XPU RETRIEVE sends block IDs in the protocol-defined grouped shape."""
+
+    class FakeTorchDevice:
+        @staticmethod
+        def synchronize() -> None:
+            pass
+
+    calls: list[tuple[RequestType, list[object]]] = []
+
+    def send_request(
+        _mq_client: object,
+        request_type: RequestType,
+        payloads: list[object],
+    ) -> MagicMock:
+        calls.append((request_type, payloads))
+        future = MagicMock()
+        future.result.return_value = None
+        return future
+
+    context = XpuHandleTransferContext()
+    monkeypatch.setattr(worker_transfer, "torch_dev", FakeTorchDevice)
+    context.register(
+        instance_id=1,
+        kv_caches={},
+        model_name="model",
+        world_size=1,
+        _blocks_in_chunk=1,
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        send_request=send_request,
+        layout_hints={},
+        group_views=[],
+    )
+
+    grouped_block_ids = [[5, 6]]
+    context.submit_retrieve(
+        "request",
+        MagicMock(),
+        1,
+        {},
+        grouped_block_ids,
+        MagicMock(),
+        1,
+        skip_first_n_tokens=2,
+    )
+
+    assert calls[-1][0] == RequestType.RETRIEVE
+    assert calls[-1][1][2] == grouped_block_ids

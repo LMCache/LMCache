@@ -105,7 +105,7 @@ def make_transfer_event() -> Any:
         RuntimeError: If the backend does not support interprocess Events
             (CUDA-only check; skipped for XPU and other backends).
     """
-    from lmcache import torch_device_type
+    from lmcache import torch_dev, torch_device_type
 
     if torch_device_type == "xpu":
         event = torch_dev.Event()
