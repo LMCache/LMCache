@@ -1107,9 +1107,9 @@ class BlendV3Module:
                     key.request_id,
                 )
 
-        # prefix (no re-rope) vs shifted (re-rope), for logging.
-        n_prefix = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
-        n_shifted = len(cb_match_result) - n_prefix
+        # Non-prefix sparse hits split by re-rope need (not prefix coverage).
+        n_non_shifted = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
+        n_shifted = len(cb_match_result) - n_non_shifted
 
         if not all_obj_keys:
             self._event_bus.publish(
@@ -1327,11 +1327,11 @@ class BlendV3Module:
         _scatter_ms = (time.perf_counter() - _retrieve_t0) * 1000
         logger.info(
             "Retrieved pre-computed for %d match results into request %s "
-            "paged blocks (scatter_ms=%.2f, prefix=%d shifted=%d)",
+            "paged blocks (scatter_ms=%.2f, non_shifted=%d shifted=%d)",
             len(cb_match_result),
             key.request_id,
             _scatter_ms,
-            n_prefix,
+            n_non_shifted,
             n_shifted,
         )
         self._event_bus.publish_on_stream(

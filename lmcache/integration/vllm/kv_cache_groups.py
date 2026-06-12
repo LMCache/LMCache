@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 # Standard
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -13,7 +13,78 @@ if TYPE_CHECKING:
     from lmcache.v1.gpu_connector.utils import LayoutHints
 
 # First Party
+from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+
+logger = init_logger(__name__)
+
+
+def _is_sliding_window_spec(spec: Any) -> bool:
+    """Return whether the KV cache spec is a vLLM sliding-window spec.
+
+    Checked by class name so this module stays importable without vLLM.
+    Subclasses such as ``SlidingWindowMLASpec`` count.
+    """
+    return any(cls.__name__ == "SlidingWindowSpec" for cls in type(spec).__mro__)
+
+
+def _resolve_per_layer_sw_sizes(
+    vllm_groups: Sequence[Any],
+    layer_to_idx: Mapping[str, int],
+    num_layers: int,
+) -> list[int]:
+    """Resolve the sliding window size in tokens for each registered KV tensor.
+
+    Will resolve -1 for non-sliding-window layers.
+
+    Args:
+        vllm_groups: vLLM ``KVCacheGroupSpec`` instances.
+        layer_to_idx: Layer name to registered tensor index mapping.
+        num_layers: Number of registered KV tensors.
+
+    Returns:
+        A list of length ``num_layers`` mapping each registered tensor index
+        to its sliding window size in tokens, or ``-1`` for
+        non-sliding-window layers.
+    """
+    per_layer_sw_size = [-1] * num_layers
+    for group in vllm_groups:
+        spec = getattr(group, "kv_cache_spec", None)
+        if spec is None:
+            continue
+        # ``UniformTypeKVCacheSpecs`` carries per-layer specs in
+        # ``kv_cache_specs``; other specs apply to all of the group's layers.
+        per_layer_specs = getattr(spec, "kv_cache_specs", None)
+        for name in group.layer_names:
+            layer_spec = per_layer_specs[name] if per_layer_specs else spec
+            if _is_sliding_window_spec(layer_spec):
+                per_layer_sw_size[layer_to_idx[name]] = layer_spec.sliding_window
+    return per_layer_sw_size
+
+
+def _merge_layer_sw_sizes(per_layer_sw_size: list[int], indices: list[int]) -> int:
+    """Merge the per-layer sliding window sizes of one LMCache group.
+
+    Args:
+        per_layer_sw_size: Sliding window size per registered tensor index.
+        indices: Registered tensor indices of the group's layers.
+
+    Returns:
+        The group's common sliding window size in tokens, or ``-1`` when the
+        layers are not sliding-window attention.
+
+    Raises:
+        ValueError: If the layers have different non-negative sliding window sizes.
+    """
+    sw_sizes = {per_layer_sw_size[idx] for idx in indices}
+    if len(sw_sizes) != 1:
+        raise ValueError(
+            f"Layers with indices {indices} have different sliding window sizes "
+            f"{sw_sizes}, but they are in the same group. This should "
+            "not happen because vLLM should only group layers with the same "
+            "KV cache spec, but got inconsistent metadata or registered tensors."
+        )
+    return sw_sizes.pop()
 
 
 def create_engine_group_infos_from_vllm(
@@ -82,6 +153,7 @@ def create_engine_group_infos_from_vllm(
     # wrong-block-size group would corrupt the per-group block-id counts).
     per_layer_group_idx: list[int] | None = None
     group_tokens_per_block: dict[int, int] = {}
+    per_layer_sw_size = [-1] * num_layers
     if vllm_groups:
         per_layer_group_idx = [EXCLUDED_ENGINE_GROUP] * num_layers
         for engine_group_id, group in enumerate(vllm_groups):
@@ -91,6 +163,9 @@ def create_engine_group_infos_from_vllm(
             group_tokens_per_block[engine_group_id] = group.kv_cache_spec.block_size
             for name in group.layer_names:
                 per_layer_group_idx[layer_to_idx[name]] = engine_group_id
+        per_layer_sw_size = _resolve_per_layer_sw_sizes(
+            vllm_groups, layer_to_idx, num_layers
+        )
 
     # Within one vLLM engine group, layers can have different hidden dimensions
     # (e.g. a different head count), which require different GPU copy kernels.
@@ -104,6 +179,7 @@ def create_engine_group_infos_from_vllm(
             engine_group_id=identity[4],
             layer_indices=tuple(indices),
             tokens_per_block=group_tokens_per_block.get(identity[4], 0),
+            sw_size_tokens=_merge_layer_sw_sizes(per_layer_sw_size, indices),
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,

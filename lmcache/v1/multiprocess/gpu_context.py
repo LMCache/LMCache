@@ -117,7 +117,7 @@ class _TempGPUBuffer:
         max_batch_size: int = 4,
     ) -> None:
         self._kv_groups_manager = kv_layer_groups_manager
-        self._lmcache_chunk_size = lmcache_tokens_per_chunk
+        self._lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
         self._max_batch_size = max_batch_size
 
         self._temp_buffer = torch.empty(
@@ -167,7 +167,7 @@ class _TempGPUBuffer:
         self._shape_cache_kernel_group: dict[int, tuple[torch.Size, torch.dtype]] = {}
         for kernel_group_idx in range(self._kv_groups_manager.num_kernel_groups):
             shape = self._get_shape_for_kernel_group(
-                self._lmcache_chunk_size, kernel_group_idx
+                self._lmcache_tokens_per_chunk, kernel_group_idx
             )
             group = self._kv_groups_manager.kernel_groups[kernel_group_idx]
             dtype = group.dtype
@@ -247,7 +247,8 @@ class _TempGPUBuffer:
         MemoryLayoutDesc
 
         Args:
-            num_tokens: Number of tokens
+            num_tokens: Number of tokens. Must be a whole number of lmcache
+                chunk size.
             kernel_group_idx: Index of the kernel group.
 
         Returns:
@@ -263,7 +264,7 @@ class _TempGPUBuffer:
         """
         Returns the cache size per token (in bytes), summed across all kernel groups.
         """
-        return self._get_size_for_single_batch() // self._lmcache_chunk_size
+        return self._get_size_for_single_batch() // self._lmcache_tokens_per_chunk
 
     # Helper functions
     def _get_shape_for_kernel_group(
@@ -280,17 +281,26 @@ class _TempGPUBuffer:
 
         Returns:
             The shape of the temp GPU buffer for the given kernel group index.
+
+        Raises:
+            ValueError: If ``num_tokens`` is not a whole number of LMCache
+                chunks.
         """
+        if num_tokens % self._lmcache_tokens_per_chunk != 0:
+            raise ValueError(
+                f"num_tokens ({num_tokens}) must be a multiple of "
+                f"lmcache_tokens_per_chunk ({self._lmcache_tokens_per_chunk})"
+            )
+
         group = self._kv_groups_manager.kernel_groups[kernel_group_idx]
-        compress_ratio = group.tokens_per_block // group.slots_per_block
         sd = group.shape_desc
 
-        if num_tokens % compress_ratio != 0:
-            raise ValueError(
-                f"logical_num_tokens ({num_tokens}) is not a multiple of "
-                f"compress_ratio ({compress_ratio}) for group {kernel_group_idx}"
-            )
-        num_slots = num_tokens // compress_ratio
+        num_chunks = num_tokens // self._lmcache_tokens_per_chunk
+        num_slots = (
+            self._kv_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
+            * num_chunks
+        )
+
         return torch.Size(
             (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
@@ -300,12 +310,12 @@ class _TempGPUBuffer:
         Returns the size in bytes of the temp GPU buffer for the given kernel group
         index
 
-        **Assumes the size is lmcache_chunk_size
+        **Assumes the size is lmcache_tokens_per_chunk
 
         Will only be called during initialization
         """
         shape = self._get_shape_for_kernel_group(
-            self._lmcache_chunk_size, kernel_group_idx
+            self._lmcache_tokens_per_chunk, kernel_group_idx
         )
         kernel_group = self._kv_groups_manager.kernel_groups[kernel_group_idx]
         dtype = kernel_group.dtype
@@ -315,7 +325,7 @@ class _TempGPUBuffer:
         """
         Returns the size in bytes of the temp GPU buffer for the given object group
 
-        **Assumes the size is lmcache_chunk_size
+        **Assumes the size is lmcache_tokens_per_chunk
 
         Will only be called during initialization
         """
@@ -330,7 +340,7 @@ class _TempGPUBuffer:
         Returns the size in bytes of the temp GPU buffer for a single batch
         (i.e., a single chunk)
 
-        **Assumes the size is lmcache_chunk_size
+        **Assumes the size is lmcache_tokens_per_chunk
         """
         return sum(
             self._get_size_for_object_group(object_group_idx)
@@ -485,11 +495,21 @@ class GPUCacheContext:
         """Returns the PageBufferShapeDesc for the given KV layer group."""
         return self.kv_layer_groups_manager_.get_shape_desc(kernel_group_idx)
 
-    def get_slots_per_chunk(self, kernel_group_idx: int) -> int:
-        """Returns the per-chunk physical slot count for the given kernel
-        group.
+    def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
+        """Returns the number of slots per lmcache chunk when doing
+        D/H transfer.
+
+        This function will take into account that for subchunk sliding window
+        case, the transfer slots will be smaller than the "actual" slots per
+        chunk (which is calculated based on the lmcache chunk size).
+
+        Args:
+            kernel_group_idx: Index of the kernel group.
+
+        Returns:
+            The number of used slots per lmcache chunk when doing D/H transfer.
         """
-        return self.kv_layer_groups_manager_.get_slots_per_chunk(kernel_group_idx)
+        return self.kv_layer_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the
@@ -546,7 +566,8 @@ class GPUCacheContext:
         Will be exported by GPUCacheContext and used to construct the MemoryLayoutDesc
 
         Args:
-            num_tokens: Number of tokens
+            num_tokens: Number of tokens. Must be a whole number of lmcache
+                chunk size.
             kernel_group_idx: Index of the kernel group.
 
         Returns:
@@ -728,7 +749,7 @@ class PlainGPUCacheContext:
     A plain GPU cache context that have a single contiguous 2LTD buffer
     """
 
-    def __init__(self, kv_caches: KVCache, lmcache_chunk_size: int = 256):
+    def __init__(self, kv_caches: KVCache, lmcache_tokens_per_chunk: int = 256):
         assert len(kv_caches) == 1, (
             "PlainGPUCacheContext only supports a single KV cache tensor"
         )
@@ -746,7 +767,7 @@ class PlainGPUCacheContext:
         self._hidden_dim_size = shape[3]
 
         # Temporary buffer
-        tmp_buffer_shape = self.get_kv_buffer_shape(lmcache_chunk_size)
+        tmp_buffer_shape = self.get_kv_buffer_shape(lmcache_tokens_per_chunk)
         self._tmp_gpu_buffer = torch.empty(
             tmp_buffer_shape, dtype=self.dtype, device=self.device
         )

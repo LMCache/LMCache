@@ -348,7 +348,7 @@ def transfer_kv_per_object_group(
             group_kv_pointers = cache_context.get_kernel_group_kv_pointers(
                 kernel_group_id
             )
-            group_lmcache_chunk_size = cache_context.get_slots_per_chunk(
+            group_lmcache_chunk_size = cache_context.get_slots_per_chunk_in_sw(
                 kernel_group_id
             )
             tmp_gpu_buffers_batched = [
