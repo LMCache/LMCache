@@ -33,7 +33,7 @@ vLLM worker adapter                              MP server
 +---------------------------+                   +--------------------------------------+
 | HeartbeatThread           |   PING [id]       | ManagementModule                     |
 |  (instance_id, 10s)  -----+------------------>|  ping(id) -> touch_instance(id)      |
-|  lazy start on first req, |   (SYNC, O(1))    |  reaper thread (scan = timeout/4)    |
+|  lazy start on first req, |   (NORMAL pool)   |  reaper thread (scan = timeout/4)    |
 |   health cleared at start |                   |   -> reap_stale_instances(           |
 |  unhealthy->healthy edge  |                   |        timeout, registration_grace)  |
 |   -> re-register callback |   REGISTER        |   -> drop_instance_state(id) fan-out |
@@ -51,10 +51,13 @@ vLLM worker adapter                              MP server
 
 The PING payload changes in place from `[]` to `[int | None]`; the response stays
 `bool`, always `True` (`None` marks an untracked prober such as the scheduler
-adapter, which registers nothing and is never reapable). PING also moves to SYNC
-dispatch: the handler is now an O(1) leaf-locked dict touch, and sharing the
-NORMAL pool with slow handlers could make an actively pinging worker look silent.
-The payload change is wire-visible, so both sides upgrade together (Section 7).
+adapter, which registers nothing and is never reapable). PING keeps its BLOCKING
+dispatch on the NORMAL thread pool. SYNC dispatch was considered but rejected:
+SYNC runs on the MQ main loop, where a slow `REGISTER_KV_CACHE` (also SYNC) would
+block PING and make a live worker look dead. Sharing the NORMAL pool is in fact
+desirable — if the pool cannot answer PING within the heartbeat timeout, the
+worker *should* enter degraded mode (the same back-pressure signal). The payload
+change is wire-visible, so both sides upgrade together (Section 7).
 
 ## 4. Instance ID Generation
 
@@ -79,13 +82,16 @@ path, so a worker mid-transfer is never reaped; traffic never latches the flag.
 
 ### 5.2 Locking
 
-Each transfer module gains one leaf `threading.Lock` guarding all of its
-per-instance state; in `NonGPUTransferModule` the context and strategy dicts
-mutate as a pair in one critical section, so a reap racing a re-register can never
-strand a fresh context without its strategy. The lock is never held across context
-construction, storage calls, or any other component, so no thread holds two locks.
-External readers use the locked accessors `get_context_entry` (get-and-refresh)
-and `context_entries_snapshot`, replacing the unlocked `cache_contexts` property.
+The reaper runs on its own thread, so the per-instance dicts are now mutated off
+the MQ handler threads. Each transfer module gains one `threading.Lock` so the
+reaper's scan-and-pop cannot race a concurrent register/unregister/transfer (which
+would otherwise corrupt the dict or hand out a half-removed entry). In
+`NonGPUTransferModule` the context and strategy dicts mutate as a pair under that
+lock, so a reap racing a re-register can never strand a fresh context without its
+strategy. It is a leaf lock — never held across context construction, storage
+calls, or any other component — so no thread ever holds two locks. External
+readers use the locked accessors `get_context_entry` (get-and-refresh) and
+`context_entries_snapshot` instead of touching the dict directly.
 
 ### 5.3 Reaper
 
