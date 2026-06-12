@@ -6,8 +6,8 @@ Two HTTP endpoints, both auto-discovered out of
 `lmcache/v1/multiprocess/http_apis/l2_keys_api.py`:
 
 - `POST /l2/keys:evict` — delete a caller-supplied list of keys.
-- `GET /l2/keys` — paginate keys currently resident in L2, filtered by
-  `cache_salt` and/or `model_name`.
+- `GET /l2/keys` — paginate keys currently resident in L2, optionally
+  filtered by `model_name`.
 
 Both endpoints operate on the **primary** L2 adapter — the first
 adapter configured in the storage manager's adapter list. There is no
@@ -29,7 +29,6 @@ a deployment rename." They are NOT in the hot-path read/write flow.
 def evict_l2_keys(self, keys: list[ObjectKey]) -> dict[str, object]
 def list_l2_keys(
     self,
-    cache_salt: str | None = None,
     model_name: str | None = None,
     page_size: int = 500,
     page_token: str | None = None,
@@ -38,7 +37,6 @@ def list_l2_keys(
 # L2AdapterInterface  (NEW abstract method)
 def list_l2_keys(
     self,
-    cache_salt: str | None = None,
     model_name: str | None = None,
     page_size: int = 500,
     cursor: str | None = None,
@@ -53,7 +51,6 @@ def list_l2_keys(
 class L2KeyEntry:
     key: ObjectKey
     size_bytes: int
-    adapter_name: str = ""   # filled in by StorageManager
 
 @dataclass(frozen=True)
 class L2KeyListPage:
@@ -73,21 +70,21 @@ Body:  {"keys": [{"chunk_hash_hex": "...", "model_name": "...",
 503:   engine not initialized OR no L2 adapters configured
 
 GET /l2/keys
-Query: cache_salt=<str>  use "_default" sentinel for the empty salt
-       model_name=<str>
+Query: model_name=<str>     (optional)
        page_size=<int 1..5000>   (default 500)
        page_token=<opaque str>   (omit on first call)
-200:   {"entries": [{...key fields..., "size_bytes": N,
-                     "adapter": "<type>"}, ...],
+200:   {"entries": [{...key fields..., "size_bytes": N}, ...],
         "next_page_token": "<opaque>" | null}
 400:   invalid filter / malformed page_token
 501:   primary adapter does not implement listing
 503:   engine not initialized OR no L2 adapters configured
 ```
 
-The response carries the adapter's type name in the `"adapter"` field
-(`evict`) or per-entry (`list`), so operators always know which
-adapter answered.
+The `evict` response carries the adapter's type name in the
+`"adapter"` field so operators always know which adapter answered.
+The `list` response omits it — every entry on a given page is from
+the primary adapter by construction, so per-entry tagging would just
+duplicate that one string N times.
 
 ---
 
@@ -156,24 +153,21 @@ write log.
 Costs:
 - **One S3 RTT per page** (vs. zero for an in-memory walk).
 - Server-side prefix filter on `model_name` (when set) lets S3 skip
-  irrelevant keys; `cache_salt` filtering still happens client-side
-  because the salt is at the *end* of the key.
+  irrelevant keys.
 - `MaxKeys` is capped at 1000 by S3, so even when a caller requests
   `page_size=5000` the adapter clamps internally and returns at most
   1000 entries per call — the caller continues via the token.
 
 ### Filtering
 
-- **`model_name`** ⇒ pushed down as `prefix=<flattened_model_name>@`.
-  Flattening (`/` → `_`) is applied so the prefix matches the form
-  `_format_safe_path` stored on S3.
-- **`cache_salt`** ⇒ applied client-side after the XML parse, since
-  the salt sits at the trailing position of the key.
-
-Both filters narrow the returned page but do NOT cause the adapter to
-fetch additional S3 pages to "top up" — the returned page may be
-smaller than the caller's `page_size` after filtering. The caller
-continues paging until `next_page_token` is `null`.
+The only supported filter is **`model_name`**, pushed down as
+`prefix=<flattened_model_name>@`. Flattening (`/` → `_`) is applied
+so the prefix matches the form `_format_safe_path` stored on S3.
+`cache_salt` is intentionally NOT a filter parameter — it sits at the
+*end* of the key and can't be expressed as an S3 prefix, so filtering
+it would only narrow client-side without reducing the RTTs. If a
+future caller needs per-tenant scoping, the simplest path is a
+client-side filter on the response.
 
 ### Pagination
 
@@ -193,26 +187,25 @@ tools (anything whose object name doesn't conform to
 the response — `_string_to_object_key` raises `ValueError`, and the
 parser skips entries it can't decode.
 
-### Round-trip caveat: `/` in model_name
+### `/` in `model_name` is reversibly encoded
 
-`_format_safe_path` flattens `/` to `_` in the URL path before
-issuing a PUT, which means the object name stored on S3 carries the
-flattened form (e.g. a key whose original `model_name` was
-`"meta-llama/Llama-3.1-8B"` is stored under
-`"meta-llama_Llama-3.1-8B@..."`).
+`_format_safe_path` replaces `/` with `-SEP-` before issuing the PUT,
+and `_string_to_object_key` reverses the substitution on decode.
+`-SEP-` was chosen because no HuggingFace model id contains the
+literal substring `-SEP-`, so the round-trip is unambiguous. This
+matches the convention `fs_l2_adapter` already uses.
 
-When the listing decodes such an object name back to an ObjectKey,
-`model_name` carries the flattened `"meta-llama_Llama-3.1-8B"`, not
-the original. Eviction round-trips stay correct because
-`_object_key_to_string` is idempotent over the flattened form (no
-remaining `/` to re-flatten), so the listed key targets the same S3
-object on a subsequent evict.
+Round-trip example:
 
-Operators reading the listing should treat the `model_name` field as
-"the form this adapter sees on S3," not necessarily the form their
-callers originally used. A future PR could roundtrip the original via
-S3 object metadata (`x-amz-meta-model-name`) if a real workflow needs
-it.
+```
+ObjectKey(model_name="meta-llama/Llama-3.1-8B", ...)
+ → stored on S3 as "meta-llama-SEP-Llama-3.1-8B@..."
+ → listed back as ObjectKey(model_name="meta-llama/Llama-3.1-8B", ...)
+```
+
+Operators can pass HF model ids (with `/`) to the `model_name=` filter
+on `GET /l2/keys` exactly as they appear in their config — the adapter
+applies the same substitution to the S3 prefix push-down.
 
 ### Consistency
 
@@ -233,13 +226,11 @@ soft-limits even with verbose keys.
 
 | Requirement | Where enforced |
 |---|---|
-| Empty cache_salt expressible in URL | `_DEFAULT_SALT_SENTINEL = "_default"` in `l2_keys_api.py` |
-| `chunk_hash_hex` is valid hex | `bytes.fromhex` in `_parse_object_key` raises `ValueError` |
+| `chunk_hash_hex` is valid hex | `bytes.fromhex` in `EncodedObjectKey.to_object_key` raises `ValueError` |
 | `model_name` / `cache_salt` invariants (no `@`, etc.) | `ObjectKey.__post_init__` |
 | Per-request eviction batch cap | `_MAX_EVICT_BATCH = 10_000` in `l2_keys_api.py` |
 | `page_size` bounds | `Query(ge=1, le=_MAX_PAGE_SIZE)` |
-| Listing returns stable order under fixed filter | sort by `(cache_salt, model_name, kv_rank, chunk_hash)` |
-| Adapter listing snapshot taken under `_lock` | `with self._lock:` in `S3L2Adapter.list_l2_keys` |
+| Listing returns lex order owned by S3 | S3's `ListObjectsV2` |
 | No adapters configured → 503 | endpoint catches `ValueError("no L2 adapters …")` |
 | Adapter doesn't support listing → 501 | endpoint catches `NotImplementedError` |
 | Adapter delete failure → in-body, not 5xx | `evict_l2_keys` catches per-call exceptions |
@@ -284,14 +275,15 @@ under that same lock so existing lock ordering is preserved.
   verbatim, secondary adapters never touched. Uses
   `StorageManager.__new__` + stub adapters to bypass the heavy ctor.
 - `tests/v1/distributed/test_s3_l2_adapter.py::TestS3L2AdapterListKeys`
-  — S3 listing: sort stability, `cache_salt` filter (incl. empty
-  string), `model_name` filter, full-set pagination walk,
-  `page_size`/`cursor` validation, offset-past-end handling.
+  — S3 listing: `model_name` prefix push-down, pagination walk via
+  continuation tokens, `page_size` clamp to S3's MaxKeys ceiling,
+  circuit-breaker rejection, silent skipping of objects whose names
+  don't conform to this adapter's key format.
 - `tests/v1/multiprocess/http_apis/test_l2_keys_api.py` — endpoint
   shape: happy path, in-body failure reporting, 503 on no adapters /
   no engine, 501 on unsupported listing, 400 on malformed body /
-  page_token / page_size, `_default` sentinel translation, auto-
-  discovery (registry sweep picks up the module).
+  page_token / page_size, auto-discovery (registry sweep picks up
+  the module).
 
 ---
 
@@ -305,8 +297,8 @@ under that same lock so existing lock ordering is preserved.
   descriptor index.
 - Optional `prefix` / `model_name_glob` filters once a real caller
   needs them.
-- A `DELETE /l2/keys?cache_salt=...` convenience that combines
-  listing + evicting for a whole tenant in one call (currently the
+- A `DELETE /l2/keys?model_name=...` convenience that combines
+  listing + evicting for a whole model in one call (currently the
   caller pages through `GET /l2/keys` then issues
   `POST /l2/keys:evict`).
 - Counter-based snapshot tokens so pagination across concurrent

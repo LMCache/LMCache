@@ -44,13 +44,11 @@ class _FakeStorageManager:
 
     def list_l2_keys(
         self,
-        cache_salt: Optional[str] = None,
         model_name: Optional[str] = None,
         page_size: int = 500,
         page_token: Optional[str] = None,
     ) -> L2KeyListPage:
         self.last_list_kwargs = {
-            "cache_salt": cache_salt,
             "model_name": model_name,
             "page_size": page_size,
             "page_token": page_token,
@@ -222,7 +220,7 @@ class TestListEndpoint:
         )
         sm = _FakeStorageManager(
             list_page=L2KeyListPage(
-                entries=(L2KeyEntry(key=k1, size_bytes=4096, adapter_name="s3"),),
+                entries=(L2KeyEntry(key=k1, size_bytes=4096),),
                 next_page_token="opaque-cursor",
             )
         )
@@ -231,7 +229,6 @@ class TestListEndpoint:
         resp = client.get(
             "/l2/keys",
             params={
-                "cache_salt": "alice",
                 "model_name": "llama",
                 "page_size": 100,
             },
@@ -246,28 +243,19 @@ class TestListEndpoint:
                 "object_group_id": 0,
                 "cache_salt": "alice",
                 "size_bytes": 4096,
-                "adapter": "s3",
             }
         ]
         assert body["next_page_token"] == "opaque-cursor"
         assert sm.last_list_kwargs == {
-            "cache_salt": "alice",
             "model_name": "llama",
             "page_size": 100,
             "page_token": None,
         }
 
-    def test_default_salt_sentinel_translates_to_empty_string(self):
-        sm = _FakeStorageManager()
-        client = TestClient(_make_app(sm))
-        client.get("/l2/keys", params={"cache_salt": "_default"})
-        assert sm.last_list_kwargs["cache_salt"] == ""
-
-    def test_no_filters_pass_none_to_storage_manager(self):
+    def test_no_filter_passes_none_to_storage_manager(self):
         sm = _FakeStorageManager()
         client = TestClient(_make_app(sm))
         client.get("/l2/keys")
-        assert sm.last_list_kwargs["cache_salt"] is None
         assert sm.last_list_kwargs["model_name"] is None
 
     def test_page_token_threads_through(self):

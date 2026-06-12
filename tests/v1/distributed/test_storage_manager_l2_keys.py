@@ -50,7 +50,6 @@ class _StubAdapter:
         self._list_raises = list_raises
         self._delete_raises = delete_raises
         self.last_list_cursor: Optional[str] = None
-        self.last_list_cache_salt: Optional[str] = None
         self.last_list_model_name: Optional[str] = None
         self.last_list_page_size: Optional[int] = None
 
@@ -61,14 +60,12 @@ class _StubAdapter:
 
     def list_l2_keys(
         self,
-        cache_salt: Optional[str] = None,
         model_name: Optional[str] = None,
         page_size: int = 500,
         cursor: Optional[str] = None,
     ) -> L2KeyListPage:
         if self._list_raises is not None:
             raise self._list_raises
-        self.last_list_cache_salt = cache_salt
         self.last_list_model_name = model_name
         self.last_list_page_size = page_size
         self.last_list_cursor = cursor
@@ -177,23 +174,21 @@ class TestListL2Keys:
         sm = _make_sm([a1, a2], ["s3", "fs"])
 
         result = sm.list_l2_keys(
-            cache_salt="alice",
             model_name="llama",
             page_size=10,
             page_token="0",
         )
 
-        # Primary adapter saw the filters + cursor.
-        assert a1.last_list_cache_salt == "alice"
+        # Primary adapter saw the filter + cursor.
         assert a1.last_list_model_name == "llama"
         assert a1.last_list_page_size == 10
         assert a1.last_list_cursor == "0"
         # Secondary not consulted.
         assert a2.last_list_cursor is None
-        # Entries wrapped with primary adapter's type_name.
+        # The page is returned as-is from the primary adapter.
         assert len(result.entries) == 1
-        assert result.entries[0].adapter_name == "s3"
         assert result.entries[0].key == k
+        assert result.entries[0].size_bytes == 128
         # next_page_token passed through verbatim.
         assert result.next_page_token == "42"
 

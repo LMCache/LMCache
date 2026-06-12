@@ -61,24 +61,23 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# ``/`` is a legal S3 key character but it carries "folder" semantics
+# on some S3-compatible services and is awkward in URL paths. We
+# encode it with a token that no HuggingFace model name contains, so
+# ``_string_to_object_key`` recovers the original ``model_name`` byte
+# for byte. Matches the convention used by ``fs_l2_adapter``.
+_PATH_SLASH_REPLACEMENT = "-SEP-"
+
+
 def _string_to_object_key(name: str) -> ObjectKey:
-    """Reverse of :func:`_object_key_to_string`.
+    """Reverse of :func:`_object_key_to_string` (with
+    ``_format_safe_path``'s ``/`` → ``-SEP-`` substitution undone).
 
     Object names use ``@`` as a field separator:
     ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>[@<cache_salt>]``.
     Other layouts (wrong field count, malformed hex / rank) raise
     ``ValueError`` — typically an object the bucket contains from
     another tool that this adapter shouldn't try to interpret.
-
-    Note:
-        ``_format_safe_path`` flattens ``/`` in the URL path to ``_``
-        before issuing a PUT, which means the object name actually
-        stored on S3 carries the flattened form. Round-tripping a
-        listed key through ``_object_key_to_string`` is therefore
-        idempotent (no ``/`` to re-flatten), but the recovered
-        ``model_name`` may differ from the original caller-supplied
-        ``model_name`` when the original contained ``/``. See the
-        design doc for the operator-facing implications.
     """
     parts = name.split("@")
     if len(parts) == 4:
@@ -94,6 +93,7 @@ def _string_to_object_key(name: str) -> ObjectKey:
         ) = parts
     else:
         raise ValueError(f"unparsable S3 object name {name!r}: wrong field count")
+    model_name = model_name.replace(_PATH_SLASH_REPLACEMENT, "/")
     try:
         kv_rank = int(kv_rank_hex, 16)
     except ValueError as exc:
@@ -203,8 +203,13 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
 
 def _format_safe_path(key_str: str) -> str:
-    """Flatten slashes and URL-encode to form a safe HTTP path."""
-    flat = key_str.replace("/", "_")
+    """Flatten slashes and URL-encode to form a safe HTTP path.
+
+    ``/`` is replaced with :data:`_PATH_SLASH_REPLACEMENT` so the
+    encoding is reversible by :func:`_string_to_object_key` (a
+    listed key recovers the original ``model_name`` byte for byte).
+    """
+    flat = key_str.replace("/", _PATH_SLASH_REPLACEMENT)
     return "/" + url_quote(flat)
 
 
@@ -718,7 +723,6 @@ class S3L2Adapter(L2AdapterInterface):
 
     def list_l2_keys(
         self,
-        cache_salt: Optional[str] = None,
         model_name: Optional[str] = None,
         page_size: int = 500,
         cursor: Optional[str] = None,
@@ -732,11 +736,6 @@ class S3L2Adapter(L2AdapterInterface):
         ``NextContinuationToken``, passed back verbatim by callers.
 
         Args:
-            cache_salt: when not ``None``, filter to keys whose parsed
-                ``cache_salt`` equals this value (``""`` matches
-                un-salted objects). Applied client-side because
-                ``cache_salt`` lives at the tail of the S3 object name
-                and can't be expressed as a prefix.
             model_name: when not ``None``, restrict the S3 listing to
                 objects whose name starts with ``<model_name>@``.
                 Pushed down to S3 as a ``prefix`` query param so the
@@ -744,9 +743,7 @@ class S3L2Adapter(L2AdapterInterface):
             page_size: target maximum entries per page. Clamped to
                 ``[1, 1000]`` because ``ListObjectsV2`` caps ``MaxKeys``
                 at 1000 — clients that ask for more get S3's max and
-                continue via the returned token. The returned page may
-                also be smaller than this after the ``cache_salt``
-                filter is applied.
+                continue via the returned token.
             cursor: opaque S3 ``ContinuationToken`` from the previous
                 call. ``None`` on the first call.
 
@@ -762,13 +759,11 @@ class S3L2Adapter(L2AdapterInterface):
                 (transient network failures, auth failures, etc.).
 
         Note:
-            S3 stores the URL-flattened key name (``/`` → ``_``) — see
-            ``_format_safe_path``. When this listing decodes a key
-            whose original ``model_name`` contained ``/`` (e.g.
-            ``"meta-llama/Llama-3.1-8B"``), the recovered ObjectKey
-            carries ``"meta-llama_Llama-3.1-8B"``. Eviction round-trips
-            stay correct because ``_object_key_to_string`` is
-            idempotent over the flattened form. See the design doc.
+            ``_format_safe_path`` replaces ``/`` with
+            :data:`_PATH_SLASH_REPLACEMENT` (``"-SEP-"``) when storing,
+            and :func:`_string_to_object_key` reverses that mapping on
+            decode — the recovered :class:`ObjectKey` carries the
+            original caller-supplied ``model_name`` byte for byte.
         """
         if page_size <= 0:
             raise ValueError(f"page_size must be positive (got {page_size})")
@@ -777,14 +772,14 @@ class S3L2Adapter(L2AdapterInterface):
         # max plus a continuation token — they don't need to know
         # about the server-side limit.
         max_keys = min(page_size, 1000)
-        # ``model_name`` is the only filter that can ride along as a
-        # ``prefix=`` query param — the stored object name starts with
-        # ``<flattened_model_name>@``. ``_format_safe_path`` flattens
-        # ``/`` to ``_`` before issuing the PUT, so the prefix must
-        # apply the same flattening to match.
+        # ``model_name`` rides along as a ``prefix=`` query param so S3
+        # skips non-matching keys server-side. ``_format_safe_path``
+        # replaces ``/`` with ``_PATH_SLASH_REPLACEMENT`` before issuing
+        # the PUT, so the prefix must apply the same substitution to
+        # match what's actually on S3.
         prefix: Optional[str] = None
         if model_name is not None:
-            prefix = f"{model_name.replace('/', '_')}@"
+            prefix = f"{model_name.replace('/', _PATH_SLASH_REPLACEMENT)}@"
 
         with self._lock:
             if self._connection_disabled:
@@ -797,9 +792,6 @@ class S3L2Adapter(L2AdapterInterface):
             self._loop,
         )
         entries, next_token = fut.result(timeout=30.0)
-
-        if cache_salt is not None:
-            entries = [(k, sz) for k, sz in entries if k.cache_salt == cache_salt]
         page_entries = tuple(L2KeyEntry(key=k, size_bytes=sz) for k, sz in entries)
         return L2KeyListPage(entries=page_entries, next_page_token=next_token)
 

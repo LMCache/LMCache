@@ -24,7 +24,6 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
-    L2KeyEntry,
     L2KeyListPage,
 )
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
@@ -766,7 +765,6 @@ class StorageManager:
 
     def list_l2_keys(
         self,
-        cache_salt: str | None = None,
         model_name: str | None = None,
         page_size: int = 500,
         page_token: str | None = None,
@@ -775,8 +773,6 @@ class StorageManager:
         adapter.
 
         Args:
-            cache_salt: filter by ``ObjectKey.cache_salt``. ``None``
-                means no filter; ``""`` matches un-salted traffic.
             model_name: filter by ``ObjectKey.model_name``. ``None``
                 means no filter.
             page_size: maximum entries per page. Must be positive.
@@ -796,32 +792,17 @@ class StorageManager:
             NotImplementedError: when the primary adapter does not
                 implement listing (e.g. when ``fs`` is configured
                 first in v1).
-
-        Note:
-            Each entry's :attr:`L2KeyEntry.adapter_name` is populated
-            from the adapter's descriptor type name (e.g. ``"s3"``).
         """
         if page_size <= 0:
             raise ValueError(f"page_size must be positive (got {page_size})")
         if not self._l2_adapters:
             raise ValueError("no L2 adapters configured")
         target = self._l2_adapters[0]
-        desc = self._adapter_descriptors[0]
-        page = target.list_l2_keys(
-            cache_salt=cache_salt,
+        return target.list_l2_keys(
             model_name=model_name,
             page_size=page_size,
             cursor=page_token,
         )
-        wrapped = tuple(
-            L2KeyEntry(
-                key=entry.key,
-                size_bytes=entry.size_bytes,
-                adapter_name=desc.type_name,
-            )
-            for entry in page.entries
-        )
-        return L2KeyListPage(entries=wrapped, next_page_token=page.next_page_token)
 
     def clear(self, force: bool = False):
         """

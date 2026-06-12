@@ -42,7 +42,6 @@ def _entry(
     object_group_id: int = 0,
     cache_salt: str = "alice",
     size_bytes: int = 100,
-    adapter: str = "s3",
 ) -> dict[str, object]:
     return {
         "chunk_hash_hex": chunk_hash_hex,
@@ -51,7 +50,6 @@ def _entry(
         "object_group_id": object_group_id,
         "cache_salt": cache_salt,
         "size_bytes": size_bytes,
-        "adapter": adapter,
     }
 
 

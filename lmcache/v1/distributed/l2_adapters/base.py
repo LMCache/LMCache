@@ -33,19 +33,11 @@ _EMPTY_BY_CACHE_SALT: Mapping[str, int] = MappingProxyType({})
 
 @dataclass(frozen=True)
 class L2KeyEntry:
-    """One entry in a :class:`L2KeyListPage`.
-
-    ``key`` and ``size_bytes`` are populated by the L2 adapter from its
-    own in-memory accounting; the adapter does not need to know which
-    storage manager owns it. ``adapter_name`` is filled in by the
-    storage manager during fan-out (the empty default means
-    "unattributed" and is only valid inside an adapter's own page
-    before the storage manager wraps it).
-    """
+    """One entry in a :class:`L2KeyListPage` — a recovered
+    :class:`ObjectKey` and the bytes the adapter has on disk for it."""
 
     key: ObjectKey
     size_bytes: int
-    adapter_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -501,18 +493,14 @@ class L2AdapterInterface(ABC):
 
     def list_l2_keys(
         self,
-        cache_salt: str | None = None,
         model_name: str | None = None,
         page_size: int = 500,
         cursor: str | None = None,
     ) -> L2KeyListPage:
-        """List keys currently resident in this adapter, with filters
-        and pagination.
+        """List keys currently resident in this adapter, with a
+        ``model_name`` filter and pagination.
 
         Args:
-            cache_salt: when not ``None``, restrict the result to keys
-                whose ``ObjectKey.cache_salt`` equals this value
-                (``""`` matches un-salted traffic).
             model_name: when not ``None``, restrict the result to keys
                 whose ``ObjectKey.model_name`` equals this value.
             page_size: maximum number of entries to return in this page.
@@ -527,10 +515,7 @@ class L2AdapterInterface(ABC):
 
         Returns:
             An :class:`L2KeyListPage`. ``next_page_token`` is ``None``
-            iff the listing is exhausted. Returned entries leave
-            :attr:`L2KeyEntry.adapter_name` empty — the caller (storage
-            manager fan-out) fills it in based on the adapter
-            descriptor.
+            iff the listing is exhausted.
 
         Raises:
             NotImplementedError: when the adapter does not maintain

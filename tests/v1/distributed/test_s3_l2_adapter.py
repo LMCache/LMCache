@@ -777,18 +777,26 @@ class TestFactoryRegistration:
 #
 # These tests populate the fake S3 backend directly via ``_BACKEND.put``,
 # bypassing the adapter's store pipeline. The listing path is what's
-# under test: ListObjectsV2 dispatch, XML parse, prefix filter, cursor
-# pagination, and the ``cache_salt`` post-filter.
+# under test: ListObjectsV2 dispatch, XML parse, prefix filter, and
+# cursor pagination.
 
 
 def _put_object(key: ObjectKey, size: int = 0) -> None:
-    """Place a key in the fake S3 backend with deterministic content."""
+    """Place a key in the fake S3 backend with deterministic content.
+
+    Mirrors the production PUT pipeline: ``_object_key_to_string`` →
+    ``_format_safe_path`` (which substitutes ``/`` for the reversible
+    ``-SEP-`` marker) → URL-unquote → backend storage. Doing the
+    substitution here keeps the fake's stored name byte-identical to
+    what a real PUT would land on S3.
+    """
     # First Party
     from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
+        _PATH_SLASH_REPLACEMENT,
         _object_key_to_string,
     )
 
-    name = _object_key_to_string(key)
+    name = _object_key_to_string(key).replace("/", _PATH_SLASH_REPLACEMENT)
     _BACKEND.put(name, b"\x00" * size)
 
 
@@ -805,30 +813,8 @@ class TestS3L2AdapterListKeys:
         page = adapter.list_l2_keys(page_size=10)
 
         assert len(page.entries) == 3
-        # Adapter does NOT populate adapter_name — that's the storage
-        # manager's job.
-        assert all(e.adapter_name == "" for e in page.entries)
         assert {e.size_bytes for e in page.entries} == {100, 101, 102}
         assert page.next_page_token is None
-
-    def test_cache_salt_filter_client_side(self, adapter):
-        alice = ObjectKey(
-            chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0, cache_salt="alice"
-        )
-        bob = ObjectKey(
-            chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0, cache_salt="bob"
-        )
-        anon = ObjectKey(chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0)
-        for k in (alice, bob, anon):
-            _put_object(k, size=1)
-
-        page = adapter.list_l2_keys(cache_salt="alice", page_size=10)
-        assert [e.key for e in page.entries] == [alice]
-
-        # Empty-string salt is a valid filter value, distinct from
-        # ``None`` (no filter).
-        page = adapter.list_l2_keys(cache_salt="", page_size=10)
-        assert [e.key for e in page.entries] == [anon]
 
     def test_model_name_pushed_down_as_prefix(self, adapter):
         llama = ObjectKey(chunk_hash=b"\x00" * 4, model_name="llama", kv_rank=0)
@@ -838,6 +824,29 @@ class TestS3L2AdapterListKeys:
 
         page = adapter.list_l2_keys(model_name="llama", page_size=10)
         assert [e.key for e in page.entries] == [llama]
+
+    def test_model_name_with_slash_round_trips(self, adapter):
+        # Real HF model ids contain ``/``. The stored S3 name encodes
+        # it as ``-SEP-`` (matching the FS adapter); the listing decodes
+        # it back so the recovered ObjectKey equals the original.
+        original = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="meta-llama/Llama-3.1-8B",
+            kv_rank=7,
+        )
+        _put_object(original, size=128)
+
+        # The listing returns the original model_name (slash intact).
+        page = adapter.list_l2_keys(page_size=10)
+        assert len(page.entries) == 1
+        assert page.entries[0].key == original
+        assert page.entries[0].key.model_name == "meta-llama/Llama-3.1-8B"
+
+        # And the model_name filter matches against the caller-supplied
+        # form — the adapter applies the same substitution on the
+        # prefix.
+        page = adapter.list_l2_keys(model_name="meta-llama/Llama-3.1-8B", page_size=10)
+        assert [e.key for e in page.entries] == [original]
 
     def test_pagination_cursor_walks_full_set(self, adapter):
         # 5 keys, page_size=2 → expect 3 calls: (0,1), (2,3), (4,).

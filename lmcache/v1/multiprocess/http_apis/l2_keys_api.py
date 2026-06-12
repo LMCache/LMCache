@@ -13,9 +13,8 @@ adapter must list that adapter first in its L2 configuration.
   eviction never corrupts an active transfer.
 
 - ``GET /l2/keys`` — paginate keys resident in the primary adapter,
-  filtered by ``cache_salt`` and/or ``model_name``. Returns 501 when
-  the primary adapter does not implement listing (in v1 only
-  ``S3L2Adapter`` does).
+  optionally filtered by ``model_name``. Returns 501 when the primary
+  adapter does not implement listing (in v1 only ``S3L2Adapter`` does).
 
 L1 is intentionally NOT touched by ``:evict`` — keys evicted from L2
 may still return from L1 until natural L1 eviction expires them.
@@ -37,11 +36,6 @@ from lmcache.v1.distributed.api import EncodedObjectKey
 
 router = APIRouter()
 
-
-# Same sentinel convention as ``quota_api`` — an empty ``cache_salt``
-# (un-salted / anonymous traffic) cannot be expressed in a URL query
-# parameter, so callers pass ``_default`` to filter for it.
-_DEFAULT_SALT_SENTINEL = "_default"
 
 _MAX_PAGE_SIZE = 5000
 _DEFAULT_PAGE_SIZE = 500
@@ -124,18 +118,13 @@ async def evict_l2_keys(body: EvictRequest, request: Request) -> Any:
 @router.get("/l2/keys")
 async def list_l2_keys(
     request: Request,
-    cache_salt: str | None = Query(default=None),
     model_name: str | None = Query(default=None),
     page_size: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
     page_token: str | None = Query(default=None),
 ) -> Any:
-    """List keys resident in the primary L2 adapter, filtered +
-    paginated.
+    """List keys resident in the primary L2 adapter, paginated.
 
     Query parameters:
-        cache_salt: restrict to one ``cache_salt`` value. Pass
-            ``"_default"`` to match the empty-string salt (un-salted
-            traffic). Omit to return all salts.
         model_name: restrict to one model name. Omit to return all.
         page_size: max entries per page. Clamped to ``[1, 5000]``;
             default ``500``.
@@ -143,7 +132,7 @@ async def list_l2_keys(
             on the first call. Pass back verbatim to get the next page.
 
     Responses:
-        200: ``{"entries": [<wire ObjectKey + size_bytes + adapter>, ...],
+        200: ``{"entries": [<wire ObjectKey + size_bytes>, ...],
                 "next_page_token": "<opaque>" | null}``.
         400: malformed page_token (adapter-level).
         501: primary adapter does not implement listing.
@@ -153,10 +142,8 @@ async def list_l2_keys(
     if isinstance(sm, JSONResponse):
         return sm
 
-    salt_filter = "" if cache_salt == _DEFAULT_SALT_SENTINEL else cache_salt
     try:
         page = sm.list_l2_keys(
-            cache_salt=salt_filter,
             model_name=model_name,
             page_size=page_size,
             page_token=page_token,
@@ -179,7 +166,6 @@ async def list_l2_keys(
     for entry in page.entries:
         wire = asdict(entry.key.to_encoded_object_key())
         wire["size_bytes"] = entry.size_bytes
-        wire["adapter"] = entry.adapter_name
         entries.append(wire)
     return {
         "entries": entries,
