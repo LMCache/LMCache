@@ -3,9 +3,10 @@
 
 The coordinator is a FastAPI app. Endpoints are auto-discovered from the
 ``http_apis`` package (the same convention as the mp server's HTTP API) and stay
-thin, operating on the shared collaborators carried on ``app.state``: ``config``
-and ``registry``. The lifespan runs the background health-check task (eviction
-of instances whose heartbeats have lapsed).
+thin, operating on the shared collaborators carried on ``app.state``: ``config``,
+``registry``, ``quota_manager``, ``usage_manager``, and ``eviction_manager``.
+The lifespan runs background tasks for health-checking (eviction of instances
+whose heartbeats have lapsed) and L2 eviction (quota enforcement).
 
 Adding a capability = a new ``http_apis/<name>_api.py`` router (auto-discovered)
 that uses those shared collaborators. To push to an mp server, a future router
@@ -27,7 +28,12 @@ from fastapi import FastAPI
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
+from lmcache.v1.mp_coordinator.l2.eviction_manager import (
+    L2EvictionManager,
+)
+from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 from lmcache.v1.utils.router_discovery import discover_api_routers
 
@@ -60,10 +66,18 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
 
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
-        collaborators (``config``, ``registry``); all ``http_apis`` routers are
-        registered.
+        collaborators (``config``, ``registry``, ``quota_manager``,
+        ``usage_manager``); all ``http_apis`` routers are registered.
     """
     registry = InstanceRegistry()
+    quota_manager = QuotaManager()
+    usage_manager = L2UsageManager()
+    eviction_manager = L2EvictionManager(
+        quota_manager=quota_manager,
+        usage_manager=usage_manager,
+        eviction_ratio=config.eviction_ratio,
+        trigger_watermark=config.trigger_watermark,
+    )
 
     async def _health_loop() -> None:
         """Evict stale instances on a timer until cancelled."""
@@ -71,27 +85,40 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
             await asyncio.sleep(config.health_check_interval)
             evict_stale(registry, config.instance_timeout)
 
+    async def _eviction_loop() -> None:
+        """Periodically check usage against quotas and log eviction plans."""
+        while True:
+            await asyncio.sleep(config.eviction_check_interval)
+            eviction_manager.execute_evictions()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """Start the health-check task and clean up resources on shutdown."""
+        """Start background tasks and clean up resources on shutdown."""
         health_task = None
+        eviction_task = None
         if config.health_check_interval > 0:
             health_task = asyncio.create_task(_health_loop())
+        if config.eviction_check_interval > 0:
+            eviction_task = asyncio.create_task(_eviction_loop())
         logger.info(
             "MP coordinator listening on http://%s:%d", config.host, config.port
         )
         try:
             yield
         finally:
-            if health_task is not None:
-                health_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await health_task
+            for task in (health_task, eviction_task):
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)
     # Shared collaborators on app.state so routers compose from them.
     app.state.config = config
     app.state.registry = registry
+    app.state.quota_manager = quota_manager
+    app.state.usage_manager = usage_manager
+    app.state.eviction_manager = eviction_manager
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"

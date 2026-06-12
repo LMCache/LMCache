@@ -105,7 +105,7 @@ def test_server_free_lookup_locks_calls_finish_read_prefetched():
     sentinel_obj_keys = [MagicMock()]
     with patch(
         "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
-        return_value=sentinel_obj_keys,
+        return_value=[sentinel_obj_keys],
     ):
         module.free_lookup_locks(key, 1)
 
@@ -166,9 +166,9 @@ def test_adapter_free_lookup_locks_sends_request():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.chunk_size = 256
+    adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
     adapter._health_event.set()
     adapter._mq_timeout = 30.0
@@ -216,9 +216,9 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.chunk_size = 256
+    adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
     adapter._health_event.set()
     adapter._mq_timeout = 30.0
@@ -245,7 +245,8 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_client.submit_request.reset_mock()
 
     # Submit free_lookup_locks with aligned end
-    aligned_end = (len(token_ids) // adapter.chunk_size) * adapter.chunk_size
+    tokens_per_chunk = adapter.lmcache_tokens_per_chunk
+    aligned_end = (len(token_ids) // tokens_per_chunk) * tokens_per_chunk
     adapter.free_lookup_locks(
         token_ids=token_ids,
         start=0,

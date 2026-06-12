@@ -29,12 +29,21 @@ class MPCoordinatorConfig:
             servers' own heartbeat cadence (which they choose).
         health_check_interval: Seconds between health-check sweeps. A value of
             ``0`` disables the health-check loop.
+        eviction_check_interval: Seconds between eviction sweeps. A value of
+            ``0`` disables the eviction loop.
+        eviction_ratio: Fraction of tracked keys (by count) to evict per
+            cycle (0.0 to 1.0).
+        trigger_watermark: Eviction fires when usage reaches this fraction
+            of the quota (0.0 to 1.0).
     """
 
     host: str = "0.0.0.0"
     port: int = 9300
     instance_timeout: float = 30.0
     health_check_interval: float = 10.0
+    eviction_check_interval: float = 5.0
+    eviction_ratio: float = 0.2
+    trigger_watermark: float = 1.0
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
@@ -46,6 +55,14 @@ class MPCoordinatorConfig:
             raise ValueError("instance_timeout must be positive")
         if self.health_check_interval < 0:
             raise ValueError("health_check_interval must be non-negative")
+        if self.eviction_check_interval < 0:
+            raise ValueError("eviction_check_interval must be non-negative")
+        if not 0.0 <= self.eviction_ratio <= 1.0:
+            raise ValueError("eviction_ratio must be between 0.0 and 1.0")
+        if not 0.0 < self.trigger_watermark <= 1.0:
+            raise ValueError(
+                "trigger_watermark must be between 0.0 (exclusive) and 1.0"
+            )
 
     @classmethod
     def from_env(cls) -> "MPCoordinatorConfig":
@@ -79,4 +96,9 @@ class MPCoordinatorConfig:
             health_check_interval=_num(
                 "HEALTH_CHECK_INTERVAL", cls.health_check_interval, float
             ),
+            eviction_check_interval=_num(
+                "EVICTION_CHECK_INTERVAL", cls.eviction_check_interval, float
+            ),
+            eviction_ratio=_num("EVICTION_RATIO", cls.eviction_ratio, float),
+            trigger_watermark=_num("TRIGGER_WATERMARK", cls.trigger_watermark, float),
         )

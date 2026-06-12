@@ -46,6 +46,7 @@ if lmc_ops is None:
         NL_X_NB_BS_HS = 2
         NL_X_TWO_NB_NH_BS_HS = 3
         NL_X_NB_TWO_NH_BS_HS = 4
+        NL_X_NB_NH_BS_TWO_HS = 5
 
     class MockCOps:
         GPUKVFormat = MockGPUKVFormat
@@ -311,6 +312,9 @@ def generate_kv_cache_paged_list_tensors(
             shape = [2, num_blocks, num_heads, block_size, head_size]
         elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS:
             shape = [num_blocks, 2, num_heads, block_size, head_size]
+        elif gpu_kv_format == lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS:
+            # blocks-first, K/V fused into the trailing dim
+            shape = [num_blocks, num_heads, block_size, 2, head_size]
         else:
             raise ValueError(f"Unsupported gpu_kv_format: {gpu_kv_format}")
 

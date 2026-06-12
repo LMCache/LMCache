@@ -568,10 +568,14 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(1) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(0) / elements_per_entry;
-  } else {  // NL_X_NB_TWO_BS_NH_HS
+  } else if (gpu_kv_format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     vllm_block_key_stride_in_64bit =
         vllm_key_value_cache.stride(0) / elements_per_entry;
     vllm_value_offset = vllm_key_value_cache.stride(1) / elements_per_entry;
+  } else {
+    throw std::runtime_error(
+        "Unsupported non-MLA GPUKVFormat in single_layer_kv_transfer: " +
+        std::to_string(static_cast<int>(gpu_kv_format)));
   }
 
   int n = num_heads * head_size_in_64bit;

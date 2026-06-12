@@ -8,6 +8,7 @@ pure config layer (no native extensions), so it runs without a CUDA build.
 
 # Standard
 import argparse
+import uuid
 
 # Third Party
 import pytest
@@ -15,8 +16,11 @@ import pytest
 # First Party
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
+    MPServerConfig,
     add_coordinator_args,
+    add_mp_server_args,
     parse_args_to_coordinator_config,
+    parse_args_to_mp_server_config,
 )
 
 _COORD_ENV = (
@@ -96,3 +100,30 @@ def test_garbage_env_heartbeat_rejected(monkeypatch):
     monkeypatch.setenv("LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL", "abc")
     with pytest.raises(ValueError, match="not a number"):
         _parse([])
+
+
+def _parse_mp(argv: list[str]) -> MPServerConfig:
+    parser = argparse.ArgumentParser()
+    add_mp_server_args(parser)
+    return parse_args_to_mp_server_config(parser.parse_args(argv))
+
+
+def test_instance_id_defaults_to_uuid4():
+    # No --instance-id flag => a random UUID v4 is minted.
+    config = _parse_mp([])
+    assert uuid.UUID(config.instance_id).version == 4
+
+
+def test_instance_id_flag_is_preserved():
+    config = _parse_mp(["--instance-id", "mp-server-7"])
+    assert config.instance_id == "mp-server-7"
+
+
+def test_instance_id_defaults_are_distinct():
+    # Each parse without the flag gets its own id (no shared default).
+    assert _parse_mp([]).instance_id != _parse_mp([]).instance_id
+
+
+def test_instance_id_dataclass_default_is_distinct():
+    # Direct construction (no CLI) also mints a fresh id per instance.
+    assert MPServerConfig().instance_id != MPServerConfig().instance_id

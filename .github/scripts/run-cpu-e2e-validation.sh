@@ -3,23 +3,44 @@ set -euo pipefail
 
 echo "Build ID: ${BUILDKITE_BUILD_ID:-local}"
 echo "Python: $(python3 --version 2>&1 || true)"
-echo "uv: $(uv --version 2>&1 || true)"
+if command -v uv >/dev/null 2>&1; then
+  echo "uv: $(uv --version 2>&1 || true)"
+else
+  echo "uv: not installed"
+fi
 
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 VENV_DIR=".venv-${BUILD_ID}"
-LMCACHE_LOG="/tmp/build_${BUILD_ID}_lmcache_cpu_validation.log"
-VLLM_LOG="/tmp/build_${BUILD_ID}_vllm_cpu_validation.log"
+SHARED_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LMCACHE_LOG="${LMCACHE_LOG_FILE:-/tmp/build_${BUILD_ID}_lmcache_cpu_validation.log}"
+VLLM_LOG="${VLLM_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm_cpu_validation.log}"
 LMCACHE_PID=""
 VLLM_PID=""
 LMCACHE_HTTP_PORT="${LMCACHE_HTTP_PORT:-8080}"
+LMCACHE_ZMQ_PORT="${LMCACHE_ZMQ_PORT:-5555}"
 VLLM_PORT="${VLLM_PORT:-8000}"
-LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-2}"
+LMCACHE_L1_SIZE_GB="${LMCACHE_L1_SIZE_GB:-1}"
 LMCACHE_EVICTION_POLICY="${LMCACHE_EVICTION_POLICY:-LRU}"
 LMCACHE_CHUNK_SIZE="${LMCACHE_CHUNK_SIZE:-128}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.1}"
+# CPU-only KV cache pool size in GiB. vLLM defaults to 4 GiB when unset;
+# 1 GiB is plenty for opt-125m e2e validation.
+VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE:-1}"
+# Cap context length and concurrent sequences to shrink scheduler buffers.
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-2048}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
 LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-30}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
-# Set LMCACHE_SHM_NAME="" to use pickle transport; unset/default uses shm transport
+# Transport mode selection:
+#   LMCACHE_MP_TRANSFER_MODE=handle  -> handle mode (POSIX SHM server-side copy)
+#   LMCACHE_MP_TRANSFER_MODE=data    -> data mode, sub-selected by LMCACHE_SHM_NAME:
+#       LMCACHE_SHM_NAME=""              -> pickle transport
+#       LMCACHE_SHM_NAME=__default__     -> shm transport (default)
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
+LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-data}"
+# Set SKIP_INSTALL=1 to skip Phase 1 (install) — useful when the caller
+# has already installed everything (e.g. macOS CI workflow steps).
+SKIP_INSTALL="${SKIP_INSTALL:-0}"
 
 # Directory to collect artifacts before workspace is deleted
 ARTIFACT_DIR="/tmp/build_${BUILD_ID}_artifacts"
@@ -141,37 +162,109 @@ print(int(total))
 EOF
 }
 
+# Poll a Prometheus counter until its value differs from `baseline`,
+# or until `timeout` seconds elapse. Returns 0 on change, 1 on timeout
+# (callers typically `|| true` it because not every probe expects a
+# change to actually happen).
+wait_for_metric_change() {
+  local metric_name="$1"
+  local baseline="$2"
+  local timeout="${3:-10}"
+  local current
+  for _ in $(seq 1 "${timeout}"); do
+    current="$(scrape_metric "${metric_name}")"
+    if [ "${current}" != "${baseline}" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 # Send a completion request and print the text output
 send_completion() {
   local prompt_file="$1"
   local max_tokens="${2:-50}"
-  local prompt
-  prompt="$(cat "${prompt_file}")"
-  local response
-  response="$(curl -fsS "http://localhost:${VLLM_PORT}/v1/completions" \
-    -H "Content-Type: application/json" \
-    -d "$(python3 -c "
-import json, sys
-prompt = open('${prompt_file}').read()
+  local body_file
+  body_file="$(mktemp)"
+  # Build the JSON body in a separate process to avoid nested-quote
+  # quoting nightmares with -d "$(python3 -c "...")". Pass the prompt
+  # file path and max_tokens via argv so the python snippet itself
+  # does not need any shell interpolation inside its string body.
+  PROMPT_FILE="${prompt_file}" MAX_TOKENS="${max_tokens}" \
+    python3 - >"${body_file}" <<'PYEOF'
+import json
+import os
+
+prompt = open(os.environ['PROMPT_FILE']).read()
 print(json.dumps({
     'model': 'facebook/opt-125m',
     'prompt': prompt,
-    'max_tokens': ${max_tokens},
-    'temperature': 0
+    'max_tokens': int(os.environ['MAX_TOKENS']),
+    'temperature': 0,
 }))
-")")"
+PYEOF
+  local response
+  response="$(curl -fsS "http://localhost:${VLLM_PORT}/v1/completions" \
+    -H "Content-Type: application/json" \
+    --data-binary "@${body_file}")"
+  rm -f "${body_file}"
   echo "${response}" | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['text'])"
 }
 
 start_vllm() {
   echo "Starting vLLM server..."
-  VLLM_TARGET_DEVICE=cpu vllm serve facebook/opt-125m \
+  # Export so multiproc_executor worker children inherit these. Without
+  # VLLM_CPU_KVCACHE_SPACE, CPU backend falls back to
+  # `total_memory * gpu_memory_utilization`, which can request 100s of GiB
+  # on big hosts and OOM (see vllm/v1/worker/cpu_worker.py:determine_available_memory).
+  # VLLM_DEVICE is the modern env var (vLLM 0.8+); VLLM_TARGET_DEVICE is
+  # kept for backwards-compatibility with older vLLM CPU wheels.
+  export VLLM_DEVICE=cpu
+  export VLLM_TARGET_DEVICE=cpu
+  export VLLM_CPU_KVCACHE_SPACE="${VLLM_CPU_KVCACHE_SPACE}"
+  export LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE}"
+  # Pin gloo / vLLM rendezvous to loopback. Otherwise vLLM's
+  # network_utils.get_ip() picks a LAN address (e.g. 192.168.x.x on the
+  # macOS GHA runner) and gloo's init_process_group sits there for ~16
+  # minutes doing slow socket bind/connect retries before the engine
+  # ever loads weights.
+  export VLLM_HOST_IP="${VLLM_HOST_IP:-127.0.0.1}"
+  if [ -z "${GLOO_SOCKET_IFNAME:-}" ]; then
+    case "$(uname -s)" in
+      Darwin) export GLOO_SOCKET_IFNAME=lo0 ;;
+      Linux)  export GLOO_SOCKET_IFNAME=lo ;;
+    esac
+  fi
+  local kv_cache_bytes
+  kv_cache_bytes="$(python3 -c "print(int(${VLLM_CPU_KVCACHE_SPACE} * 1024 * 1024 * 1024))")"
+  # Tell LMCacheMPConnector where the lmcache server actually listens.
+  # Without this it falls back to tcp://localhost:5555 and dies with
+  # "Cannot reach the LMCache MP server" whenever we run multiple e2e
+  # steps in parallel/sequence on different ZMQ ports.
+  local kv_transfer_config
+  kv_transfer_config="$(python3 -c "
+import json
+print(json.dumps({
+    'kv_connector': 'LMCacheMPConnector',
+    'kv_role': 'kv_both',
+    'kv_connector_module_path': 'lmcache.integration.vllm.lmcache_mp_connector',
+    'kv_connector_extra_config': {
+        'lmcache.mp.host': 'tcp://localhost',
+        'lmcache.mp.port': int('${LMCACHE_ZMQ_PORT}'),
+    },
+}))")"
+  vllm serve facebook/opt-125m \
     --port "${VLLM_PORT}" \
     --dtype bfloat16 \
     --disable-hybrid-kv-cache-manager \
     --no-enable-prefix-caching \
-    --gpu-memory-utilization 0.3 \
-    --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}' \
+    --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}" \
+    --kv-cache-memory-bytes "${kv_cache_bytes}" \
+    --max-model-len "${VLLM_MAX_MODEL_LEN}" \
+    --max-num-seqs "${VLLM_MAX_NUM_SEQS}" \
+    --kv-transfer-config "${kv_transfer_config}" \
+    --enforce-eager \
     >"${VLLM_LOG}" 2>&1 &
   VLLM_PID=$!
   echo "vLLM server started (PID=${VLLM_PID})"
@@ -211,72 +304,89 @@ on_error() {
 
 trap on_error ERR
 
-echo "=== CPU Install Validation (Phase 1) ==="
-echo "Creating virtual environment with uv at ${VENV_DIR}"
-uv venv --python 3.12 "${VENV_DIR}"
-source "${VENV_DIR}/bin/activate"
-echo "✅ Virtual environment ready"
+if [ "${SKIP_INSTALL}" = "1" ]; then
+  echo "=== CPU Install Validation (Phase 1) — SKIPPED (SKIP_INSTALL=1) ==="
+else
+  echo "=== CPU Install Validation (Phase 1) ==="
+  echo "Creating virtual environment with uv at ${VENV_DIR}"
+  uv venv --python 3.12 "${VENV_DIR}"
+  # shellcheck disable=SC1091
+  source "${VENV_DIR}/bin/activate"
 
-echo "Upgrading pip/setuptools/wheel"
-uv pip install --upgrade pip setuptools wheel
-echo "✅ Upgraded pip/setuptools/wheel"
+  uv pip install --upgrade pip setuptools wheel
 
-echo "Installing build dependencies from requirements/build.txt"
-uv pip install -r requirements/build.txt
-echo "✅ Installed requirements/build.txt"
+  # `--index-strategy unsafe-best-match` is required because uv's
+  # default `first-index` strategy locks each package to the first
+  # index that lists it; the pytorch CPU index ships an older mirror
+  # of `setuptools` that would block the version vllm-cpu-nightly
+  # pins.
+  uv pip uninstall -y vllm vllm-cpu-nightly 2>/dev/null || true
+  PIP_BIN="uv pip" \
+  PIP_INSTALL_EXTRA_ARGS="--index-strategy unsafe-best-match" \
+    bash "${SHARED_SCRIPTS_DIR}/install_vllm_cpu.sh"
 
-echo "Installing common dependencies from requirements/common.txt"
-uv pip install -r requirements/common.txt
-echo "✅ Installed requirements/common.txt"
+  PIP_BIN="uv pip" \
+    bash "${SHARED_SCRIPTS_DIR}/install_lmcache_cpu.sh"
 
-echo "Installing vLLM CPU build"
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/71df063c494c111ab60f6a33c54aafe7b9ae1d02/cpu --index-strategy first-index --torch-backend cpu
-echo "✅ vLLM CPU install completed"
+  echo "Freezing installed package versions"
+  uv pip freeze
 
-echo "Installing LMCache in editable mode with NO_GPU_EXT=1"
-NO_GPU_EXT=1 uv pip install -e . --no-build-isolation
-echo "✅ LMCache install completed"
-
-echo "Freezing installed package versions"
-uv pip freeze
-
-echo "Validating imports"
-python -c "import lmcache; import vllm; print('✅ Imports OK')"
-
-echo "Printing package versions"
-python -c "import vllm; print('vllm:', vllm.__version__)"
-python -c "import lmcache; print('lmcache:', lmcache.__version__)"
-
-echo "✅ CPU install validation passed"
+  echo "✅ CPU install validation passed"
+fi
 
 echo "=== CPU E2E Validation (Phase 2) ==="
 
-echo "[Phase 2 / Step 1] Installing numpy<2 for scipy/vLLM compatibility"
-uv pip install "numpy<2"
-echo "✅ numpy<2 installed"
+if [ "${SKIP_INSTALL}" = "1" ]; then
+  echo "[Phase 2 / Step 1] numpy<2 install — SKIPPED (SKIP_INSTALL=1)"
+else
+  echo "[Phase 2 / Step 1] Installing numpy<2 for scipy/vLLM compatibility"
+  uv pip install "numpy<2"
+  echo "✅ numpy<2 installed"
+fi
 
 echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (cache-aware)"
-if ! python -c "from huggingface_hub import snapshot_download; snapshot_download('facebook/opt-125m')"; then
-  echo "❌ Failed to download/cache facebook/opt-125m"
-  false
-fi
+HF_DOWNLOAD_FAIL_ON_ERROR=1 \
+  bash "${SHARED_SCRIPTS_DIR}/download_model.sh" facebook/opt-125m
 echo "✅ Model download/check complete"
 
 echo "[Phase 2 / Step 3] Starting LMCache server"
 echo "LMCache log: ${LMCACHE_LOG}"
 # Build lmcache server args
 LMCACHE_ARGS=(
+  --port "${LMCACHE_ZMQ_PORT}"
+  --http-port "${LMCACHE_HTTP_PORT}"
   --l1-size-gb "${LMCACHE_L1_SIZE_GB}"
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
   --chunk-size "${LMCACHE_CHUNK_SIZE}"
 )
-if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
-  echo "Transport mode: shared memory (shm)"
-  EXPECTED_TRANSPORT="shm"
+# `data` handle look identical here (both leave SHM_NAME at
+# default) but resolve to different worker-side TransferContexts:
+#   handle -> HandleTransferContext (server-side copy via POSIX SHM IPC)
+#   data   -> DataTransferContext on non-CUDA devices
+# Step 5.5 verifies which one the worker actually entered.
+if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ]; then
+  echo "Transport mode: server-side copy (handle via POSIX SHM IPC)"
+  EXPECTED_TRANSPORT="handle"
+elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "data" ]; then
+  if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
+    echo "Transport mode: data/shm (shared memory)"
+    EXPECTED_TRANSPORT="shm"
+  else
+    echo "Transport mode: data/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
+    LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
+    EXPECTED_TRANSPORT="pickle"
+  fi
 else
-  echo "Transport mode: pickle (--shm-name '${LMCACHE_SHM_NAME}')"
-  LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
-  EXPECTED_TRANSPORT="pickle"
+  echo "Transport mode: unknown '${LMCACHE_MP_TRANSFER_MODE}',"
+  echo "  falling back to LMCACHE_SHM_NAME-based detection"
+  if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
+    echo "Transport mode: data/shm (shared memory, fallback)"
+    EXPECTED_TRANSPORT="shm"
+  else
+    echo "Transport mode: data/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
+    LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
+    EXPECTED_TRANSPORT="pickle"
+  fi
 fi
 
 lmcache server "${LMCACHE_ARGS[@]}" \
@@ -295,8 +405,31 @@ if ! wait_for_endpoint_contains "http://localhost:${LMCACHE_HTTP_PORT}/healthche
 fi
 echo "✅ LMCache server is healthy"
 
-echo "[Phase 2 / Step 4] Installing libnuma and starting vLLM server"
-apt-get update && apt-get install -y --no-install-recommends libnuma1
+echo "[Phase 2 / Step 4] Installing libnuma (Linux only) and starting vLLM server"
+if [ "$(uname -s)" = "Linux" ]; then
+  # libnuma1 is required by some vLLM CPU paths. On GitHub Actions
+  # ubuntu runners apt-get must be invoked via sudo; on hardened images
+  # without passwordless sudo it may not be available at all. Skip the
+  # install if the shared object is already present, and never let an
+  # apt-get hiccup fail the whole e2e step (vLLM startup itself will
+  # surface a clearer error if libnuma is genuinely missing).
+  if [ ! -e /usr/lib/x86_64-linux-gnu/libnuma.so.1 ] \
+     && [ ! -e /lib/x86_64-linux-gnu/libnuma.so.1 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+      sudo apt-get update \
+        && sudo apt-get install -y --no-install-recommends libnuma1 \
+        || echo "⚠️  libnuma1 install via sudo apt-get failed; continuing"
+    else
+      apt-get update \
+        && apt-get install -y --no-install-recommends libnuma1 \
+        || echo "⚠️  libnuma1 install via apt-get failed; continuing"
+    fi
+  else
+    echo "libnuma1 already present, skipping apt install"
+  fi
+fi
+# VLLM_DEVICE is the modern env var (vLLM 0.8+)
+export VLLM_DEVICE=cpu
 export VLLM_TARGET_DEVICE=cpu
 start_vllm
 
@@ -317,16 +450,31 @@ echo "✅ E2E request validation passed"
 
 # Verify transport mode (logged after vLLM connects to LMCache server)
 echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANSPORT}'"
-if [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
-  if ! grep -q "Using shm" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected shm transport but 'Using shm' not found in log"
+# Worker logs `Creating transfer context (device_type=<dev>, mode=<m>)`
+# from worker_transfer.py:create_transfer_context, where <m> is the
+# resolved MPTransferMode after env-var lookup. This is the single source
+# of truth for which TransferContext the worker actually entered. Note:
+# the worker is a child of `vllm serve`, so its LMCache log lines land in
+# VLLM_LOG (vllm's stdout), not in LMCACHE_LOG (lmcache server's stdout).
+# The shm/pickle branches still grep LMCACHE_LOG because the strategy
+# line is emitted by the lmcache server itself.
+if [ "${EXPECTED_TRANSPORT}" = "handle" ]; then
+  if ! grep -q "Creating transfer context.*mode=handle" "${VLLM_LOG}" 2>/dev/null; then
+    echo "❌ Expected handle worker context but 'mode=handle' not found in vLLM log"
+    tail -50 "${VLLM_LOG}"
+    false
+  fi
+  echo "✅ Transport mode confirmed: handle (server-side copy)"
+elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
+  if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected shm transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
   echo "✅ Transport mode confirmed: shm"
 elif [ "${EXPECTED_TRANSPORT}" = "pickle" ]; then
-  if ! grep -q "Using pickle" "${LMCACHE_LOG}" 2>/dev/null; then
-    echo "❌ Expected pickle transport but 'Using pickle' not found in log"
+  if ! grep -q "Using pickle non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
+    echo "❌ Expected pickle transport but server strategy line not found in log"
     tail -50 "${LMCACHE_LOG}"
     false
   fi
@@ -374,7 +522,7 @@ start_vllm
 # Request A (first time) → should trigger store
 echo "[Phase 3 / Step 3] Request A (first) — expecting LMCache store"
 L1_WRITE_BEFORE=$(scrape_metric "lmcache_mp_l1_write_chunks_total")
-OUTPUT_1=$(send_completion "${PROMPT_FILE}" 200)
+OUTPUT_1=$(send_completion "${PROMPT_FILE}" 50)
 echo "Output 1: ${OUTPUT_1}"
 sleep 2  # allow async store to complete
 L1_WRITE_AFTER=$(scrape_metric "lmcache_mp_l1_write_chunks_total")
@@ -389,7 +537,7 @@ echo "✅ LMCache store verified (${STORE_DELTA} chunks written)"
 # Request A (second time, same vLLM instance) → should trigger read/hit
 echo "[Phase 3 / Step 4] Request A (second) — expecting LMCache hit"
 L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
-OUTPUT_2=$(send_completion "${PROMPT_FILE}" 200)
+OUTPUT_2=$(send_completion "${PROMPT_FILE}" 50)
 echo "Output 2: ${OUTPUT_2}"
 sleep 2
 L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
@@ -410,7 +558,7 @@ start_vllm
 # Request A (third time, new vLLM instance) → should trigger read/hit from LMCache
 echo "[Phase 3 / Step 6] Request A (third) — expecting LMCache hit after vLLM restart"
 L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
-OUTPUT_3=$(send_completion "${PROMPT_FILE}" 200)
+OUTPUT_3=$(send_completion "${PROMPT_FILE}" 50)
 echo "Output 3: ${OUTPUT_3}"
 sleep 2
 L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
@@ -447,7 +595,7 @@ story_b = '''In the year 2147, humanity established its first permanent colony o
 print(story_b, end='')
 " > "${PROMPT_FILE_B}"
 L1_READ_BEFORE=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
-OUTPUT_B=$(send_completion "${PROMPT_FILE_B}" 200)
+OUTPUT_B=$(send_completion "${PROMPT_FILE_B}" 50)
 echo "Output B: ${OUTPUT_B}"
 wait_for_metric_change "lmcache_mp_l1_read_chunks_total" "${L1_READ_BEFORE}" 5 || true
 L1_READ_AFTER=$(scrape_metric "lmcache_mp_l1_read_chunks_total")
@@ -468,6 +616,10 @@ echo ""
 echo "=========================================="
 echo "✅ All phases passed (Phase 1 + 2 + 3)"
 echo "=========================================="
+
+# Make sure lmcache/vllm processes started in this run are reaped so
+# the next CI step does not collide on their default ZMQ/HTTP ports.
+cleanup_processes
 
 # Upload artifacts BEFORE deleting the workspace
 upload_artifacts

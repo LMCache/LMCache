@@ -100,6 +100,15 @@ def register_l2_parser(
         help="Data size per key in KB (default: 256).",
     )
     parser.add_argument(
+        "--l1-align-bytes",
+        type=int,
+        default=1,
+        help=(
+            "Alignment in bytes for benchmark L1 buffers. "
+            "Use 4096 when benchmarking O_DIRECT backends. Default: 1."
+        ),
+    )
+    parser.add_argument(
         "--rounds",
         type=int,
         default=1,
@@ -125,8 +134,8 @@ def register_l2_parser(
             "never stored. Default: 0.0."
         ),
     )
-    # Round-trip verification is OFF by default (cheaper memory
-    # footprint: see make_memory_objects' share_buffer layout).
+    # Round-trip verification is OFF by default because it needs both
+    # store and load object batches resident at the same time.
     # Use --no-skip-verify to enable verification.
     parser.add_argument(
         "--skip-verify",
@@ -168,12 +177,10 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
         args: Parsed CLI arguments from the ``bench l2`` subparser.
     """
     # Lazy imports: keep CLI loadable without torch / native deps.
-    # Third Party
-    import torch
-
     # First Party
     from lmcache.cli.commands.bench.l2_adapter_bench.data import (
         create_l1_memory_desc,
+        make_aligned_tensor,
         make_memory_objects,
         make_object_keys,
         verify_round_trip,
@@ -191,6 +198,17 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     kb = 1024
     mb = 1024 * 1024
     data_size = args.data_size_kb * kb
+    l1_align_bytes = int(args.l1_align_bytes)
+    if l1_align_bytes <= 0:
+        print("Error: --l1-align-bytes must be positive", file=sys.stderr)
+        sys.exit(2)
+    if data_size % l1_align_bytes != 0:
+        print(
+            "Error: --data-size-kb must produce a payload size that is "
+            "a multiple of --l1-align-bytes",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     in_flight = args.in_flight
     num_keys = args.num_keys
     rounds = args.rounds
@@ -241,8 +259,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Backing L1 memory buffer for adapters that need an L1 desc.
     # Sized for one in-flight wave of store + load buffers.
-    l1_buffer = torch.empty(2 * keys_per_round * data_size, dtype=torch.uint8)
-    l1_memory_desc = create_l1_memory_desc(l1_buffer)
+    l1_buffer = make_aligned_tensor(2 * keys_per_round * data_size, l1_align_bytes)
+    l1_memory_desc = create_l1_memory_desc(l1_buffer, align_bytes=l1_align_bytes)
 
     log("\n[Init] Creating adapter...")
     try:
@@ -277,20 +295,28 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             for i in range(in_flight)
         ]
 
-    def _build_round_objs() -> list[list]:
-        """Allocate per-submit object batches for one round.
+    def _build_round_objs(base_offset: int, fill_offset: int = 0) -> list[list]:
+        """Build per-submit object batches backed by the registered L1 buffer.
 
-        Every key in every batch gets its OWN ``data_size`` tensor,
-        pre-filled with a distinguishing byte pattern. This keeps
-        ``verify_round_trip`` meaningful (it can detect cross-key
-        corruption after a store -> load cycle) and keeps the
-        memory layout consistent regardless of whether verify is
-        actually run.
+        Some adapters register the L1 buffer passed through ``L1MemoryDesc``
+        during initialization. The benchmark objects must therefore be views
+        into that same buffer rather than independent tensors allocated
+        elsewhere.
 
-        Per-round (per direction) memory:
-        ``in_flight * num_keys * data_size`` bytes.
+        ``fill_offset`` lets load buffers start with a pattern that differs
+        from store buffers, so round-trip verification catches silent no-op
+        loads that nevertheless report success.
         """
-        return [make_memory_objects(num_keys, data_size) for _ in range(in_flight)]
+        return [
+            make_memory_objects(
+                l1_buffer,
+                num_keys,
+                data_size,
+                base_offset + i * num_keys * data_size,
+                fill_offset=fill_offset,
+            )
+            for i in range(in_flight)
+        ]
 
     # Lookup hit/miss split per round.
     per_round_hit = int(keys_per_round * max_hit_rate)
@@ -338,13 +364,16 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     def _store_objs(_r: int) -> list[list]:
         nonlocal store_obj_batches
         if store_obj_batches is None:
-            store_obj_batches = _build_round_objs()
+            store_obj_batches = _build_round_objs(0)
         return store_obj_batches
 
     def _load_objs(_r: int) -> list[list]:
         nonlocal load_obj_batches
         if load_obj_batches is None:
-            load_obj_batches = _build_round_objs()
+            load_obj_batches = _build_round_objs(
+                keys_per_round * data_size,
+                fill_offset=1,
+            )
         return load_obj_batches
 
     results: list = []
@@ -418,8 +447,8 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
             # Sanity: store and load used the same key idx range for
             # the last measured round, and load buffers now hold what
             # the adapter returned. Compare against the byte pattern
-            # written by store (i & 0xFF, where i is position within
-            # the batch — see make_memory_objects).
+            # written by the store object batch (i & 0xFF, where i is
+            # position within the batch).
             log(
                 "[Verify] Checking store -> load data integrity for last "
                 "measured round..."

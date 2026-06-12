@@ -8,6 +8,8 @@ bodies and parse replies, so both sides agree on the schema in one place.
 """
 
 # Standard
+from dataclasses import dataclass
+from enum import Enum
 from typing import Annotated
 
 # Third Party
@@ -53,3 +55,130 @@ class HeartbeatResponse(BaseModel):
     """
 
     instance_id: str
+
+
+# -- Quota management --------------------------------------------------------
+
+
+class SetQuotaRequest(BaseModel):
+    """Body of ``PUT /quota/{cache_salt}``.
+
+    Attributes:
+        limit_gb: Non-negative byte budget in GiB.
+    """
+
+    limit_gb: float = Field(ge=0.0)
+
+
+class QuotaResponse(BaseModel):
+    """Reply to ``PUT`` or ``DELETE /quota/{cache_salt}``.
+
+    Attributes:
+        cache_salt: The tenant identifier (``_default`` for empty salt).
+        limit_gb: The current limit in GiB (0.0 after deletion).
+        status: ``"ok"`` or ``"removed"`` or ``"not_found"``.
+    """
+
+    cache_salt: str
+    limit_gb: float
+    status: str
+
+
+# -- L2 usage tracking -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CacheKey:
+    """Lightweight, torch-free equivalent of ``ObjectKey``.
+
+    Used both as the wire format in usage events and as the key type
+    in the eviction controller's per-salt LRU. Frozen so it can be
+    used as a dict key / in ``OrderedDict``.
+
+    Attributes:
+        chunk_hash_hex: Hex-encoded content hash of the chunk.
+        model_name: Name of the model this chunk belongs to.
+        kv_rank: Packed rank bitmap (world_size, global_rank, etc.).
+        cache_salt: The tenant identifier.
+    """
+
+    chunk_hash_hex: str
+    model_name: str
+    kv_rank: int
+    cache_salt: str
+
+
+class EventType(str, Enum):
+    """Type of L2 cache event."""
+
+    STORE = "store"
+    LOOKUP = "lookup"
+
+
+class UsageEvent(BaseModel):
+    """A single L2 store or lookup event reported by an MP server.
+
+    Attributes:
+        type: The event type.
+        key: The cache key this event applies to. The tenant
+            identifier (``cache_salt``) is carried inside the key.
+        bytes: Number of bytes stored (for ``"store"`` events).
+    """
+
+    type: EventType
+    key: CacheKey
+    bytes: int = Field(ge=0)
+
+
+class ReportUsageRequest(BaseModel):
+    """Body of ``POST /l2/events``.
+
+    Attributes:
+        instance_id: Identifier of the MP server that produced this batch.
+        seq: Monotonically increasing sequence number scoped to this
+            ``instance_id``. Starts at 1 for the first flush after the
+            server starts.
+        events: Batch of store/lookup events to record.
+    """
+
+    instance_id: str
+    seq: int = Field(ge=1)
+    events: list[UsageEvent]
+
+
+class ReportUsageResponse(BaseModel):
+    """Reply to ``POST /l2/events``.
+
+    Attributes:
+        recorded: Number of events processed.
+    """
+
+    recorded: int
+
+
+class L2StatusResponse(BaseModel):
+    """Combined quota and usage for a single ``cache_salt``.
+
+    Attributes:
+        cache_salt: The tenant identifier.
+        quota_limit_gb: The byte budget in GiB (0.0 if no quota set).
+        quota_exists: Whether an explicit quota is registered.
+        usage_gb: Current L2 usage in GiB.
+    """
+
+    cache_salt: str
+    quota_limit_gb: float
+    quota_exists: bool
+    usage_gb: float
+
+
+class L2StatusListResponse(BaseModel):
+    """Reply to ``GET /l2/status``.
+
+    Attributes:
+        total_gb: Aggregate L2 usage in GiB.
+        by_cache_salt: Per-tenant breakdown with quota and usage.
+    """
+
+    total_gb: float
+    by_cache_salt: list[L2StatusResponse]
