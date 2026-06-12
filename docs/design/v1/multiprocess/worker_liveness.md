@@ -8,9 +8,9 @@ the vLLM multiprocess adapter.
 When a vLLM worker dies without sending `UNREGISTER_KV_CACHE` (SIGKILL, OOM-kill,
 node loss), its per-instance state leaks on the MP server forever: the GPU
 `ContextEntry` (a `GPUCacheContext` holding CUDA IPC handles), the
-`NonGPUContextEntry` + `TransferStrategy` pair, and the blend-mode mirrors holding
-a second strong reference to the same context. Nothing observes worker death;
-on a shared server, leaked contexts accumulate until device memory is exhausted.
+`NonGPUContextEntry` + `TransferStrategy` pair, and any blend-mode per-instance
+state (e.g. CB rope caches). Nothing observes worker death; on a shared server,
+leaked contexts accumulate until device memory is exhausted.
 
 Worse, `instance_id` is `os.getpid()`: containerized pods reuse small PIDs, so a
 new worker can register with a dead worker's id, and the idempotent register
@@ -40,7 +40,7 @@ vLLM worker adapter                              MP server
 |  freeze-gap detection ->  +------------------>|        |                |            |
 |   force 1 unhealthy cycle |   STORE/RETRIEVE  |        v                v            |
 |                           |   (refresh too)   | GPU / NonGPU            BlendV3      |
-| register_kv_caches        |                   |  TransferModule         (mirrors     |
+| register_kv_caches        |                   |  TransferModule         (CB rope     |
 |  (no pings until traffic) |                   |  Entry{.., last_seen,    dropped)    |
 |                           |                   |   has_liveness_signal}               |
 +---------------------------+                   |  _lock (leaf); pop -> cleanup        |
@@ -159,7 +159,7 @@ and drains futures parked between thaw and detection.
 ```
 T0        outage begins; pings time out -> health_event cleared, traffic stops
 T0+120s   server: entry stale -> reap pops it, frees GPUCacheContext/IPC,
-          layout-desc refcount, blend mirrors                       <- leak fixed
+          layout-desc refcount; blend rope state dropped via listener <- leak fixed
 T1        connectivity back; next ping succeeds -> unhealthy->healthy edge
 T1        recover callback re-registers (id absent -> fresh context) before
           health_event is set; traffic resumes             <- exactly one context
@@ -172,14 +172,14 @@ builds nothing — the server never asks a worker to re-register.
 
 `shutdown()` stops the heartbeat before sending UNREGISTER, so no stray ping
 lands on a closing client. The heartbeat cycle skips the recover callback and
-`health_event.set()` once stopped, and the callback re-checks the stop event
-before submitting REGISTER — a straggling cycle cannot re-create a ghost context.
+`health_event.set()` once stopped, and the callback skips re-registration when a
+stop is already requested — a straggling cycle cannot re-create a ghost context.
 
 ## 7. Failure Modes
 
 | Scenario | Behavior |
 |---|---|
-| Worker crash (SIGKILL, no UNREGISTER) after serving | Pings stop; reaped within ~`timeout + timeout/4`. Context, IPC handles, layout-desc refcount, non-GPU strategy, and blend mirrors released via the same cleanup as a clean unregister. The bug being fixed. |
+| Worker crash (SIGKILL, no UNREGISTER) after serving | Pings stop; reaped within ~`timeout + timeout/4`. Context, IPC handles, layout-desc refcount, and non-GPU strategy released via the same cleanup as a clean unregister; blend rope state dropped via the reap listener. The bug being fixed. |
 | Worker crash during warmup (registered, never pinged) | Reaped on the registration grace. Bounded leak instead of a permanent one. |
 | Worker alive but idle/warming past the grace | Reaped while alive; self-heals at first request (pessimistic start → edge → re-register before traffic flows). Cost: one context rebuild. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
