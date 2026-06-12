@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 # HMA (hybrid memory allocator) correctness test using a real hybrid model.
 #
-# Why google/gemma-4-31B-it:
-#   - Hybrid (sliding-window + full-attention), so vLLM keeps its hybrid KV
-#     cache manager on and exposes multiple KV cache groups.
-#   - Its full layers have a larger head_dim, so the groups get different block
-#     sizes -- this exercises the per-group HMA store/retrieve path.
-#   - Standard paged attention for both layer families, so LMCache's transfer
-#     kernels support it (unlike Mamba/linear-attention hybrids like
-#     Qwen3.5/Qwen3-Next, whose state caches LMCache cannot yet transfer).
-#   - Public, so no HF_TOKEN is required.
+# Models (selected by run-single-test.sh):
+#   - google/gemma-4-31B-it: sliding-window + full-attention hybrid whose full
+#     layers have a larger head_dim, so vLLM gives the KV cache groups
+#     different block sizes -- exercising per-group HMA store/retrieve.
+#   - Qwen/Qwen3.5-0.8B: Mamba/GDN + full-attention hybrid, exercising the
+#     registration-time cache re-views (kv_cache_group_edits.py).
 #
 # Flow (single GPU, no baseline server):
 #   1. vLLM run: lm_eval (gsm8k) against vLLM+LMCache, populating LMCache.
@@ -39,7 +36,8 @@ NUM_CONCURRENT="${NUM_CONCURRENT:-50}"
 # set fits the CPU pool (a too-large set thrashes and the retrieve run misses).
 LIMIT="${LIMIT:-100}"
 # Max abs difference allowed between the two runs' gsm8k scores; 0 requires an
-# exact match.
+# exact match. For non-bit-exact backends, raise LIMIT to shrink run-to-run
+# drift (~1/sqrt(LIMIT)) rather than loosening this.
 SCORE_TOLERANCE="${SCORE_TOLERANCE:-0}"
 # Seconds to let async LMCache stores drain before the retrieve run.
 STORE_DRAIN_SECONDS="${STORE_DRAIN_SECONDS:-20}"
@@ -177,11 +175,11 @@ retrieves_before = int(before_s)
 retrieves_after = int(after_s)
 
 
-def gsm8k_exact_match(results_dir: str) -> float:
-    """Return the gsm8k exact_match score from an lm_eval results directory.
+def gsm8k_score_and_stderr(results_dir: str) -> tuple[float, float]:
+    """Return the gsm8k (exact_match, stderr) from an lm_eval results directory.
 
     Prefers the strict-match variant; falls back to any non-stderr
-    ``exact_match`` metric key.
+    ``exact_match`` metric key (paired with its ``exact_match_stderr`` twin).
 
     Args:
         results_dir: Directory passed to ``lm_eval --output_path``. Searched
@@ -190,7 +188,8 @@ def gsm8k_exact_match(results_dir: str) -> float:
             timestamp).
 
     Returns:
-        The gsm8k ``exact_match`` accuracy as a float in ``[0.0, 1.0]``.
+        ``(score, stderr)``: the gsm8k ``exact_match`` accuracy in
+        ``[0.0, 1.0]`` and its reported sampling stderr (0.0 if absent).
 
     Raises:
         SystemExit: If no ``results_*.json`` exists under ``results_dir`` or the
@@ -205,18 +204,21 @@ def gsm8k_exact_match(results_dir: str) -> float:
     metrics = data["results"]["gsm8k"]
     preferred = "exact_match,strict-match"
     if preferred in metrics:
-        return float(metrics[preferred])
+        stderr = float(metrics.get("exact_match_stderr,strict-match", 0.0))
+        return float(metrics[preferred]), stderr
     for key, value in metrics.items():
         if key.startswith("exact_match,") and "stderr" not in key:
-            return float(value)
+            variant = key.split(",", 1)[1]
+            stderr = float(metrics.get(f"exact_match_stderr,{variant}", 0.0))
+            return float(value), stderr
     raise SystemExit(f"No exact_match metric in {latest}: {sorted(metrics)}")
 
 
-s_vllm = gsm8k_exact_match(vllm_run_dir)
-s_retrieve = gsm8k_exact_match(retrieve_run_dir)
+s_vllm, e_vllm = gsm8k_score_and_stderr(vllm_run_dir)
+s_retrieve, e_retrieve = gsm8k_score_and_stderr(retrieve_run_dir)
 
-print(f"  vLLM run             gsm8k exact_match = {s_vllm:.4f}")
-print(f"  LMCache retrieve run gsm8k exact_match = {s_retrieve:.4f}")
+print(f"  vLLM run             gsm8k exact_match = {s_vllm:.4f} +/- {e_vllm:.4f}")
+print(f"  LMCache retrieve run gsm8k exact_match = {s_retrieve:.4f} +/- {e_retrieve:.4f}")
 print(f"  tolerance = {tol}")
 
 failures = []

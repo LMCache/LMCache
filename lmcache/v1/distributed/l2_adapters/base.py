@@ -374,7 +374,7 @@ class L2AdapterInterface(ABC):
                     self._bytes_by_cache_salt.get(salt, 0) + d
                 )
         for listener in self._listeners:
-            listener.on_l2_keys_stored(keys)
+            listener.on_l2_keys_stored(keys, sizes)
 
     def _notify_keys_accessed(self, keys: list[ObjectKey]) -> None:
         # ``_notify_keys_accessed`` carries no byte impact — only LRU

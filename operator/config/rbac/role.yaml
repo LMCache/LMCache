@@ -41,6 +41,7 @@ rules:
 - apiGroups:
   - lmcache.lmcache.ai
   resources:
+  - cacheblendengines
   - lmcacheengines
   verbs:
   - create
@@ -53,12 +54,14 @@ rules:
 - apiGroups:
   - lmcache.lmcache.ai
   resources:
+  - cacheblendengines/finalizers
   - lmcacheengines/finalizers
   verbs:
   - update
 - apiGroups:
   - lmcache.lmcache.ai
   resources:
+  - cacheblendengines/status
   - lmcacheengines/status
   verbs:
   - get

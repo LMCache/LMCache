@@ -41,6 +41,24 @@ if [ "$TEST_NAME" = "hma_lm_eval_gemma4" ]; then
     # pipeline sets ATTENTION_BACKEND=auto; its ~63GB of weights also need a
     # higher GPU_MEMORY_UTILIZATION than the default (all set in pipeline.yml).
     export MODEL="${MODEL:-google/gemma-4-31B-it}"
+elif [ "$TEST_NAME" = "hma_lm_eval_qwen3_5" ]; then
+    # Qwen3.5-0.8B is a Mamba/GDN + full-attention hybrid (caches re-viewed at
+    # registration; see lmcache/integration/vllm/kv_cache_group_edits.py).
+    export MODEL="${MODEL:-Qwen/Qwen3.5-0.8B}"
+    export ATTENTION_BACKEND="${ATTENTION_BACKEND:-auto}"
+    # LMCache chunk size must be a multiple of the unified vLLM block size (544).
+    export CHUNK_SIZE="${CHUNK_SIZE:-544}"
+    # GDN supports only the 'align' Mamba cache mode.
+    export MAMBA_CACHE_MODE="${MAMBA_CACHE_MODE:-align}"
+    # 'align' snapshots the Mamba state only at scheduler-step boundaries; cap
+    # the step at the chunk size for one reusable snapshot per chunk.
+    export MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-544}"
+    # GDN has no batch-invariant mode, so runs are not bit-exact; compare within
+    # a score tolerance and use enough samples to shrink run-to-run drift
+    # (~1/sqrt(LIMIT)) well inside it.
+    export BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
+    export SCORE_TOLERANCE="${SCORE_TOLERANCE:-0.05}"
+    export LIMIT="${LIMIT:-300}"
 else
     export MODEL="${MODEL:-Qwen/Qwen3-14B}"
 fi
@@ -110,6 +128,9 @@ case "$TEST_NAME" in
         exec_script="${SCRIPT_DIR}/run-lm-eval.sh"
         ;;
     hma_lm_eval_gemma4)
+        exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
+        ;;
+    hma_lm_eval_qwen3_5)
         exec_script="${SCRIPT_DIR}/run-hma-lm-eval.sh"
         ;;
     vllm_bench)

@@ -254,6 +254,7 @@ class NixlStorageAgent:
             file_path: Directory where storage files are created.
             use_direct_io: Whether to open files with O_DIRECT.
         """
+        os.makedirs(file_path, exist_ok=True)
         if file_size % page_size != 0:
             raise ValueError(
                 f"file_size ({file_size}) must be a multiple of page_size ({page_size})"
