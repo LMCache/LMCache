@@ -37,19 +37,37 @@ __device__ inline size_t calculate_engine_global_offset(
     // Normal: L tensors [2, NB, BS, NH, HS]
     return engine_block_idx * scalars_per_block +
            k_or_v * shape_desc.nb * scalars_per_block;
+  } else if constexpr (format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS) {
+    // Normal HND: L tensors [2, NB, NH, BS, HS]
+    return engine_block_idx * scalars_per_block +
+           k_or_v * shape_desc.nb * scalars_per_block;
   } else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_BS_NH_HS) {
     // Flash Infer: L tensors [NB, 2, BS, NH, HS]
+    return engine_block_idx * shape_desc.kv_size * scalars_per_block +
+           k_or_v * scalars_per_block;
+  } else if constexpr (format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS) {
+    // Flash Infer HND: L tensors [NB, 2, NH, BS, HS]
     return engine_block_idx * shape_desc.kv_size * scalars_per_block +
            k_or_v * scalars_per_block;
   } else if constexpr (format == GPUKVFormat::NL_X_NB_BS_HS) {
     // MLA: L tensors [NB, BS, HS]
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
-    // SGLang MHA: 2L tensors [NBBS, NH, HS] — K/V via separate tensor ptrs
+    // SGLang MHA (in-process): 2L tensors [NBBS, NH, HS]
+    return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
+    // SGLang MHA (MP daemon): 2L tensors [NB, BS, NH, HS]
     return engine_block_idx * scalars_per_block;
   } else if constexpr (format == GPUKVFormat::NL_X_NBBS_ONE_HS) {
     // SGLang MLA: L tensors [NBBS, 1, HS]
     return engine_block_idx * scalars_per_block;
+  } else if constexpr (format == GPUKVFormat::NB_NL_TWO_NH_BS_HS) {
+    // TRT-LLM cross-layer HND: single tensor [NB, NL, 2, NH, BS, HS]
+    // same block-level strides as NB_NL_TWO_BS_NH_HS
+    return k_or_v * scalars_per_block +
+           layer_idx * shape_desc.kv_size * scalars_per_block +
+           engine_block_idx * shape_desc.kv_size * scalars_per_block *
+               shape_desc.nl;
   }
 }
 
@@ -63,8 +81,17 @@ __device__ inline size_t calculate_engine_local_offset(
     const PageBufferShapeDesc shape_desc) {
   size_t scalars_per_head = shape_desc.scalars_per_head<ScalarType>();
   size_t scalars_per_token = shape_desc.scalars_per_token<ScalarType>();
-  // for now, everything is BS, NH, HS, so we only have a single case
-  return head_idx * scalars_per_head + token_offset * scalars_per_token;
+  if constexpr (format == GPUKVFormat::NB_NL_TWO_NH_BS_HS ||
+                format == GPUKVFormat::NL_X_TWO_NB_NH_BS_HS ||
+                format == GPUKVFormat::NL_X_NB_TWO_NH_BS_HS) {
+    // HND: [NH, BS, HS] — heads are outermost within a block
+    size_t scalars_per_head_block =
+        shape_desc.bs * scalars_per_head;  // BS * HS
+    return head_idx * scalars_per_head_block + token_offset * scalars_per_head;
+  } else {
+    // NHD: [BS, NH, HS] — tokens are outermost within a block
+    return head_idx * scalars_per_head + token_offset * scalars_per_token;
+  }
 }
 
 /**
@@ -158,10 +185,17 @@ __device__ void multi_layer_block_transfer_single_block(
           k_or_v, offset_in_lmcache_block, layer_idx, lmcache_chunk_size,
           shape_desc);
   ScalarType* paged_buffer_layer_ptr;
-  if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS) {
+  if constexpr (format == GPUKVFormat::NB_NL_TWO_BS_NH_HS ||
+                format == GPUKVFormat::NB_NL_TWO_NH_BS_HS) {
     paged_buffer_layer_ptr = (ScalarType*)paged_buffer_ptrs[0];
   } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS) {
-    // SGLang MHA: ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V per layer
+    // SGLang MHA (in-process): ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V
+    // per layer
+    paged_buffer_layer_ptr =
+        (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
+  } else if constexpr (format == GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS) {
+    // SGLang MHA (MP daemon): ptrs[0..NL-1] = K per layer, ptrs[NL..2NL-1] = V
+    // per layer
     paged_buffer_layer_ptr =
         (ScalarType*)paged_buffer_ptrs[k_or_v * shape_desc.nl + layer_idx];
   } else {
@@ -225,29 +259,41 @@ __global__ void multi_layer_block_transfer_kernel(
                                    skip_prefix_n_blocks);                \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-#define DISPATCH_FORMAT(DIRECTION)                                  \
-  switch (gpu_kv_format) {                                          \
-    case GPUKVFormat::NB_NL_TWO_BS_NH_HS:                           \
-      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NB_NL_TWO_BS_NH_HS);    \
-      break;                                                        \
-    case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:                         \
-      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_TWO_NB_BS_NH_HS);  \
-      break;                                                        \
-    case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:                         \
-      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_TWO_BS_NH_HS);  \
-      break;                                                        \
-    case GPUKVFormat::NL_X_NB_BS_HS:                                \
-      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_BS_HS);         \
-      break;                                                        \
-    case GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS:                        \
-      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS); \
-      break;                                                        \
-    case GPUKVFormat::NL_X_NBBS_ONE_HS:                             \
-      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NBBS_ONE_HS);      \
-      break;                                                        \
-    default:                                                        \
-      TORCH_CHECK(false, "Unsupported GPUKVFormat: ",               \
-                  static_cast<int>(gpu_kv_format));                 \
+#define DISPATCH_FORMAT(DIRECTION)                                   \
+  switch (gpu_kv_format) {                                           \
+    case GPUKVFormat::NB_NL_TWO_BS_NH_HS:                            \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NB_NL_TWO_BS_NH_HS);     \
+      break;                                                         \
+    case GPUKVFormat::NL_X_TWO_NB_BS_NH_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_TWO_NB_BS_NH_HS);   \
+      break;                                                         \
+    case GPUKVFormat::NL_X_TWO_NB_NH_BS_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_TWO_NB_NH_BS_HS);   \
+      break;                                                         \
+    case GPUKVFormat::NL_X_NB_TWO_BS_NH_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_TWO_BS_NH_HS);   \
+      break;                                                         \
+    case GPUKVFormat::NL_X_NB_TWO_NH_BS_HS:                          \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_TWO_NH_BS_HS);   \
+      break;                                                         \
+    case GPUKVFormat::NL_X_NB_BS_HS:                                 \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NB_BS_HS);          \
+      break;                                                         \
+    case GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS:                         \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::TWO_X_NL_X_NBBS_NH_HS);  \
+      break;                                                         \
+    case GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS:                        \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::TWO_X_NL_X_NB_BS_NH_HS); \
+      break;                                                         \
+    case GPUKVFormat::NL_X_NBBS_ONE_HS:                              \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NL_X_NBBS_ONE_HS);       \
+      break;                                                         \
+    case GPUKVFormat::NB_NL_TWO_NH_BS_HS:                            \
+      LAUNCH_KERNEL(DIRECTION, GPUKVFormat::NB_NL_TWO_NH_BS_HS);     \
+      break;                                                         \
+    default:                                                         \
+      TORCH_CHECK(false, "Unsupported GPUKVFormat: ",                \
+                  static_cast<int>(gpu_kv_format));                  \
   }
 
 template <typename ScalarType>

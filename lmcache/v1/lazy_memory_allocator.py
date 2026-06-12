@@ -8,6 +8,7 @@ import threading
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import (
     AddressManager,
@@ -36,7 +37,7 @@ def get_numa_id(numa_mapping: NUMAMapping) -> int:
     Raises:
         KeyError: If GPU id is not detected in the numa mapping.
     """
-    gpu_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
+    gpu_id = torch_dev.current_device() if torch_dev.is_available() else 0
     return numa_mapping.gpu_to_numa_mapping[gpu_id]
 
 
@@ -67,6 +68,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
 
     PIN_CHUNK_SIZE = 1 << 26  # 64 MB pin chunk
     COMMIT_SIZE = 1 << 30  # Do a commit every 1 GB
+    LOG_INTERVAL = 10 << 30  # Log expansion progress every 10 GB
 
     def __init__(
         self,
@@ -89,8 +91,16 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
         # Underlying buffer for the memory allocation
         self._buffer: torch.Tensor
-        # CUDA runtime API
-        self._cudart = torch.cuda.cudart()
+        # Not all backends support cudart() for host memory pinning (CUDA-specific)
+        if not hasattr(torch_dev, "cudart"):
+            raise RuntimeError(
+                f"Backend '{torch_device_type}' does not support "
+                "cudart(). LazyMemoryAllocator requires pinned "
+                "memory via cudaHostRegister, which is not "
+                "available on this backend."
+            )
+        else:
+            self._cudart = torch_dev.cudart()
 
         # List of (ptr, size) for pinned memory chunks
         self._pin_record: list[tuple[int, int]] = []
@@ -240,10 +250,19 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Call sbrk in the address manager to commit the expansion.
         """
         self._address_manager.sbrk(expand_size)
+
+    def _log_expansion_progress(self, expanded_since_last_log: int):
+        """
+        Log the cumulative expansion progress since the last log.
+        """
+        percent = 100.0 * self._curr_size / self._final_size
         logger.info(
-            "LazyMemoryAllocator: Expanded %s MB pinned memory, now total is %s MB",
-            expand_size >> 20,
+            "LazyMemoryAllocator: Expanded %s MB pinned memory, "
+            "now total is %s MB / %s MB (%.1f%%)",
+            expanded_since_last_log >> 20,
             self._curr_size >> 20,
+            self._final_size >> 20,
+            percent,
         )
 
     def _expand_worker(self):
@@ -251,6 +270,7 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         Background worker to expand the pinned memory.
         """
         last_commit_size = self._curr_size
+        last_log_size = self._curr_size
         while self._curr_size < self._final_size and not self._stop_expand.is_set():
             # Expand chunk by chunk and commit
             for i in range(self.COMMIT_SIZE // self.PIN_CHUNK_SIZE):
@@ -262,3 +282,12 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             expand_size = self._curr_size - last_commit_size
             self._commit_expansion(expand_size)
             last_commit_size = self._curr_size
+
+            # Log every LOG_INTERVAL bytes, and always on the final commit.
+            expanded_since_last_log = self._curr_size - last_log_size
+            if (
+                expanded_since_last_log >= self.LOG_INTERVAL
+                or self._curr_size >= self._final_size
+            ):
+                self._log_expansion_progress(expanded_since_last_log)
+                last_log_size = self._curr_size

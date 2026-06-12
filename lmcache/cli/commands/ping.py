@@ -23,7 +23,7 @@ from lmcache.cli.commands.describe import normalize_url
 # -------------------------------------------------------------------
 
 HEALTH_ENDPOINTS: dict[str, str] = {
-    "kvcache": "/api/healthcheck",
+    "kvcache": "/healthcheck",
     "engine": "/health",
 }
 

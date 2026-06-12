@@ -7,7 +7,6 @@ Tests only use public methods and do not access private fields.
 """
 
 # Standard
-import os
 import select
 import shutil
 import tempfile
@@ -55,6 +54,7 @@ from lmcache.v1.memory_management import (  # noqa: E402
     MemoryObjMetadata,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import consume_fd  # noqa: E402
 
 # =============================================================================
 # Constants
@@ -121,7 +121,7 @@ def wait_for_event_fd(event_fd: int, timeout: float = 5.0) -> bool:
     events = poll.poll(timeout * 1000)  # timeout in milliseconds
     if events:
         try:
-            os.eventfd_read(event_fd)
+            consume_fd(event_fd)
         except BlockingIOError:
             pass
         return True
@@ -253,7 +253,7 @@ class TestStoreInterface:
         completed = adpt.pop_completed_store_tasks()
 
         assert task_id in completed
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
     def test_pop_completed_store_tasks_clears_completed(self, adapter):
         """pop_completed_store_tasks should clear the completed tasks."""
@@ -298,7 +298,7 @@ class TestStoreInterface:
 
         for task_id in task_ids:
             assert task_id in completed
-            assert completed[task_id] is True
+            assert completed[task_id].is_successful()
 
     def test_store_batch_of_objects(self, adapter):
         """A single store task can store multiple key-object pairs."""
@@ -315,7 +315,7 @@ class TestStoreInterface:
 
         completed = adpt.pop_completed_store_tasks()
         assert task_id in completed
-        assert completed[task_id] is True
+        assert completed[task_id].is_successful()
 
 
 # =============================================================================
@@ -589,7 +589,7 @@ class TestEndToEndWorkflow:
         store_task_id = adpt.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd, timeout=5.0)
         completed = adpt.pop_completed_store_tasks()
-        assert completed[store_task_id] is True
+        assert completed[store_task_id].is_successful()
 
         # Step 2: Lookup and lock
         lookup_task_id = adpt.submit_lookup_and_lock_task([key])
@@ -627,7 +627,7 @@ class TestEndToEndWorkflow:
         store_task_id = adpt.submit_store_task([key], [store_obj])
         assert wait_for_event_fd(store_fd, timeout=5.0)
         completed = adpt.pop_completed_store_tasks()
-        assert completed[store_task_id] is True
+        assert completed[store_task_id].is_successful()
 
         # Lookup
         lookup_task_id = adpt.submit_lookup_and_lock_task([key])
@@ -668,7 +668,7 @@ class TestEndToEndWorkflow:
         store_task_id = adpt.submit_store_task(keys, store_objs)
         assert wait_for_event_fd(store_fd, timeout=5.0)
         completed = adpt.pop_completed_store_tasks()
-        assert completed[store_task_id] is True
+        assert completed[store_task_id].is_successful()
 
         # Lookup all
         lookup_task_id = adpt.submit_lookup_and_lock_task(keys)

@@ -88,42 +88,42 @@ def test_mq_free_locks():
 
 
 def test_server_free_lookup_locks_calls_finish_read_prefetched():
-    """MPCacheEngine.free_lookup_locks should resolve hash keys and call
+    """LookupModule.free_lookup_locks should resolve hash keys and call
     finish_read_prefetched on the storage manager."""
     # First Party
-    from lmcache.v1.multiprocess.server import MPCacheEngine
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
-    engine = MagicMock()
-    engine.token_hasher = MagicMock()
-    engine.token_hasher.chunk_size = 256
-    engine.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
+    ctx = MagicMock()
+    ctx.token_hasher.chunk_size = 256
+    ctx.token_hasher.compute_chunk_hashes.return_value = [b"hash0"]
+
+    module = LookupModule(ctx)
 
     # Build a key
     key = create_cache_key(0).no_worker_id_version()
 
     sentinel_obj_keys = [MagicMock()]
     with patch(
-        "lmcache.v1.multiprocess.server.ipc_key_to_object_keys",
-        return_value=sentinel_obj_keys,
+        "lmcache.v1.multiprocess.modules.lookup.ipc_key_to_object_keys",
+        return_value=[sentinel_obj_keys],
     ):
-        # Call the real method on the mock
-        MPCacheEngine.free_lookup_locks(engine, key, 1)
+        module.free_lookup_locks(key, 1)
 
-    engine.storage_manager.finish_read_prefetched.assert_called_once_with(
+    module.context.storage_manager.finish_read_prefetched.assert_called_once_with(
         sentinel_obj_keys, extra_count=0
     )
 
 
 def test_server_free_lookup_locks_no_matching_chunks():
-    """MPCacheEngine.free_lookup_locks with no chunks in range should be a no-op."""
+    """LookupModule.free_lookup_locks with no chunks in range should be a no-op."""
     # First Party
-    from lmcache.v1.multiprocess.server import MPCacheEngine
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
-    engine = MagicMock()
-    engine.token_hasher = MagicMock()
-    engine.token_hasher.chunk_size = 256
-    # start=end=0 is passed to compute_chunk_hashes, which returns no hashes
-    engine.token_hasher.compute_chunk_hashes.return_value = []
+    ctx = MagicMock()
+    ctx.token_hasher.chunk_size = 256
+    ctx.token_hasher.compute_chunk_hashes.return_value = []
+
+    module = LookupModule(ctx)
 
     # Key with start == end means no chunks to free
     key = IPCCacheEngineKey(
@@ -136,19 +136,18 @@ def test_server_free_lookup_locks_no_matching_chunks():
         request_id="req-empty",
     )
 
-    MPCacheEngine.free_lookup_locks(engine, key, 1)
+    module.free_lookup_locks(key, 1)
 
-    engine.storage_manager.finish_read_prefetched.assert_not_called()
+    module.context.storage_manager.finish_read_prefetched.assert_not_called()
 
 
 def test_server_handler_registered():
-    """run_cache_server should register a FREE_LOOKUP_LOCKS handler."""
+    """LookupModule should have a free_lookup_locks method."""
     # First Party
-    from lmcache.v1.multiprocess.server import MPCacheEngine
+    from lmcache.v1.multiprocess.modules.lookup import LookupModule
 
-    engine = MPCacheEngine.__new__(MPCacheEngine)
-    assert hasattr(engine, "free_lookup_locks")
-    assert callable(engine.free_lookup_locks)
+    assert hasattr(LookupModule, "free_lookup_locks")
+    assert callable(LookupModule.free_lookup_locks)
 
 
 # ============================================================================
@@ -167,9 +166,9 @@ def test_adapter_free_lookup_locks_sends_request():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.chunk_size = 256
+    adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
     adapter._health_event.set()
     adapter._mq_timeout = 30.0
@@ -217,9 +216,9 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.chunk_size = 256
+    adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
-    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 0, 1, 1)
+    adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
     adapter._health_event.set()
     adapter._mq_timeout = 30.0
@@ -246,7 +245,8 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_client.submit_request.reset_mock()
 
     # Submit free_lookup_locks with aligned end
-    aligned_end = (len(token_ids) // adapter.chunk_size) * adapter.chunk_size
+    tokens_per_chunk = adapter.lmcache_tokens_per_chunk
+    aligned_end = (len(token_ids) // tokens_per_chunk) * tokens_per_chunk
     adapter.free_lookup_locks(
         token_ids=token_ids,
         start=0,

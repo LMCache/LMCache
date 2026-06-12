@@ -1,0 +1,142 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/getting_started/faq.rst:2
+msgid "FAQ"
+msgstr "常见问题解答"
+
+#: ../../source/getting_started/faq.rst:5
+msgid ""
+"What are the KV cache sizes for popular models? And why is LMCache "
+"important?"
+msgstr "流行模型的 KV Cache 大小是多少？LMCache 为什么重要？"
+
+#: ../../source/getting_started/faq.rst:7
+msgid ""
+"You can calculate KV cache sizes using our :doc:`KV cache calculator "
+"<kv_cache_calculator>`. We also provide a reference table below with KV "
+"cache information for some popular models."
+msgstr "您可以使用我们的 :doc:`KV 缓存计算器 <kv_cache_calculator>` 来计算 KV 缓存大小。我们还提供了下面的参考表，其中包含一些流行模型的 KV 缓存信息。"
+
+#: ../../source/getting_started/faq.rst:9
+msgid ""
+"As shown in the table, after loading Qwen/Qwen3-32B for example, there is"
+" only enough space in the spare GPU RAM to hold 275,760 tokens for KV "
+"caches. This supports only 6.73 concurrent users if each prompt is 40,960"
+" tokens long. Once this capacity is exceeded, the KV cache must be "
+"evicted, and when the same user returns, their request needs to be re-"
+"prefilled, which takes significantly longer."
+msgstr "如表所示，以 Qwen/Qwen3-32B 为例，备用显存中仅有足够的空间容纳 275,760 个 token 用于 KV 缓存。如果每个提示为 40,960 个 token，这仅支持 6.73 个并发用户。一旦超过这个容量，KV 缓存必须被逐出，当同一用户返回时，他们的请求需要重新 Prefill，这将花费更长的时间。"
+
+#: ../../source/getting_started/faq.rst:11
+msgid ""
+"**LMCache is designed to extend this virtual memory capacity**, enabling "
+"you to store more KV caches and avoid costly re-prefilling operations."
+msgstr "**LMCache 旨在扩展这种虚拟内存容量**，使您能够存储更多的 KV Cache，并避免昂贵的重新预填充操作。"
+
+#: ../../source/getting_started/faq.rst:13
+msgid "**KV Cache Sizes for Popular Models**"
+msgstr "**流行模型的 KV Cache 大小**"
+
+#: ../../source/getting_started/faq.rst:19
+msgid "Model"
+msgstr "模型"
+
+#: ../../source/getting_started/faq.rst:20
+msgid "KV Cache Size per 1000 tokens"
+msgstr "每1000个令牌的KV缓存大小"
+
+#: ../../source/getting_started/faq.rst:21
+msgid "Spare GPU RAM for KV cache"
+msgstr "为 KV Cache 预留的显存"
+
+#: ../../source/getting_started/faq.rst:22
+msgid "Context length"
+msgstr "上下文长度"
+
+#: ../../source/getting_started/faq.rst:23
+msgid "Number of full-length prompts that can be stored in GPU"
+msgstr "可以存储在显存中的完整提示数量"
+
+#: ../../source/getting_started/faq.rst:24
+msgid "Qwen/Qwen3-8B"
+msgstr "Qwen/Qwen3-8B"
+
+#: ../../source/getting_started/faq.rst:25
+msgid "0.1373 GB"
+msgstr "0.1373 GB"
+
+#: ../../source/getting_started/faq.rst:26
+msgid "50.32 GB (or 366,400 tokens)"
+msgstr "50.32 GB（或 366,400 个 token）"
+
+#: ../../source/getting_started/faq.rst:27
+#: ../../source/getting_started/faq.rst:32
+msgid "40,960 tokens"
+msgstr "40,960 个令牌"
+
+#: ../../source/getting_started/faq.rst:28
+msgid "8.95x"
+msgstr "8.95倍"
+
+#: ../../source/getting_started/faq.rst:29
+msgid "Qwen/Qwen3-32B (tp=2 on H100)"
+msgstr "Qwen/Qwen3-32B (tp=2 on H100)"
+
+#: ../../source/getting_started/faq.rst:30
+msgid "0.2441 GB"
+msgstr "0.2441 GB"
+
+#: ../../source/getting_started/faq.rst:31
+msgid "33.66 GB × 2 (or 275,760 tokens)"
+msgstr "33.66 GB × 2（或 275,760 个 token）"
+
+#: ../../source/getting_started/faq.rst:33
+msgid "6.73x"
+msgstr "6.73倍"
+
+#: ../../source/getting_started/faq.rst:34
+msgid "meta-llama/Llama-3.1-70B (tp=4 on H100)"
+msgstr "meta-llama/Llama-3.1-70B (tp=4 on H100)"
+
+#: ../../source/getting_started/faq.rst:35
+msgid "0.3052 GB"
+msgstr "0.3052 GB"
+
+#: ../../source/getting_started/faq.rst:36
+msgid "32.06 GB × 4 (or 420,208 tokens)"
+msgstr "32.06 GB × 4（或 420,208 个 token）"
+
+#: ../../source/getting_started/faq.rst:37
+msgid "131,072 tokens"
+msgstr "131,072 个 token"
+
+#: ../../source/getting_started/faq.rst:38
+msgid "3.21x"
+msgstr "3.21倍"
+
+#: ../../source/getting_started/faq.rst:41
+msgid ""
+"You may also find this `VRAM Calculator <https://apxml.com/tools/vram-"
+"calculator>`_ useful for calculating the estimated spare GPU RAM for "
+"different models and configurations."
+msgstr "您还可以使用这个 `VRAM Calculator <https://apxml.com/tools/vram-calculator>`_ 来计算不同模型和配置的估计剩余显存。"
+

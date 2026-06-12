@@ -94,6 +94,7 @@ class LookupClientFactory:
             client = ChunkStatisticsLookupClient(
                 client,
                 config,
+                metadata,
             )
         return client
 

@@ -5,10 +5,8 @@ from typing import TYPE_CHECKING, AbstractSet, Optional
 import asyncio
 import importlib  # Added for dynamic import
 
-# Third Party
-import torch
-
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.metadata import LMCacheMetadata
@@ -28,15 +26,15 @@ logger = init_logger(__name__)
 
 def is_cuda_worker(metadata: LMCacheMetadata) -> bool:
     """
-    Check if the current role is worker and CUDA is available.
+    Check if the current role is worker and a GPU accelerator is available.
 
     Args:
         metadata: The LMCache engine metadata.
 
     Returns:
-        True if the worker is not a scheduler and CUDA is available.
+        True if the worker is not a scheduler and a GPU accelerator is available.
     """
-    return metadata.role != "scheduler" and torch.cuda.is_available()
+    return metadata.role != "scheduler" and torch_dev.is_available()
 
 
 def storage_plugin_launcher(
@@ -114,15 +112,13 @@ def CreateStorageBackends(
     config: LMCacheEngineConfig,
     metadata: LMCacheMetadata,
     loop: asyncio.AbstractEventLoop,
-    dst_device: str = "cuda",
+    dst_device: str = torch_device_type,
     lmcache_worker: Optional["LMCacheWorker"] = None,
     skip_backends: Optional[AbstractSet[str]] = None,
     existing_backends: Optional[OrderedDict[str, StorageBackendInterface]] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
     if is_cuda_worker(metadata):
-        dst_device = f"cuda:{torch.cuda.current_device()}"
-    elif dst_device == "xpu":
-        dst_device = f"xpu:{torch.xpu.current_device()}"
+        dst_device = f"{torch_device_type}:{torch_dev.current_device()}"
     else:
         dst_device = "cpu"
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
@@ -135,9 +131,16 @@ def CreateStorageBackends(
 
     if config.enable_pd and "PDBackend" not in _skip:
         # First Party
-        from lmcache.v1.storage_backend.pd_backend import PDBackend
+        if config.pd_backend_mode == "async":
+            # First Party
+            from lmcache.v1.storage_backend.pd_backend_async import PDBackendAsync
 
-        storage_backends["PDBackend"] = PDBackend(config, metadata)
+            storage_backends["PDBackend"] = PDBackendAsync(config, metadata)
+        else:
+            # First Party
+            from lmcache.v1.storage_backend.pd_backend import PDBackend
+
+            storage_backends["PDBackend"] = PDBackend(config, metadata)
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
@@ -151,9 +154,27 @@ def CreateStorageBackends(
             local_cpu_backend = _existing_cpu
 
     if metadata.role == "scheduler":
-        # For scheduler role, local_cpu_backend is None
-        pass
-    elif not config.enable_pd or config.local_cpu:
+        # For scheduler role, local_cpu_backend is None. NIXL CPU mode shares
+        # LocalCPUBackend's pinned pool, which is not created for the scheduler,
+        # so the backend cannot be constructed here. Reject early with a clear
+        # error instead of letting NixlStorageBackend.__init__ raise deep in the
+        # stack. (The scheduler only needs contains(), which never allocates, so
+        # a query-only NIXL agent could in principle support this; it is not
+        # worth the surface area while the separate scheduler process is being
+        # removed in multiprocess mode.)
+        if enable_nixl_storage and config.nixl_buffer_device == "cpu":
+            raise ValueError(
+                "nixl_buffer_device='cpu' is not supported in the scheduler "
+                "role (e.g. enable_scheduler_bypass_lookup=True): the shared "
+                "LocalCPUBackend pool is not created for the scheduler. Use "
+                "nixl_buffer_device='cuda', or disable "
+                "enable_scheduler_bypass_lookup."
+            )
+    elif (
+        not config.enable_pd
+        or config.local_cpu
+        or (enable_nixl_storage and config.nixl_buffer_device == "cpu")
+    ):
         if "LocalCPUBackend" in _skip:
             pass  # Skipped — already exists
         elif config.max_local_cpu_size > 0:
@@ -188,7 +209,9 @@ def CreateStorageBackends(
         )
 
         storage_backends["NixlStorageBackend"] = (
-            NixlStorageBackend.CreateNixlStorageBackend(config, loop, metadata)
+            NixlStorageBackend.CreateNixlStorageBackend(
+                config, loop, metadata, local_cpu_backend
+            )
         )
 
     if (

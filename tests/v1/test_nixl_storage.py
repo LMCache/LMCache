@@ -2,7 +2,13 @@
 # Standard
 from pathlib import Path
 import asyncio
+import contextlib
+import functools
+import os
+import shutil
+import tempfile
 import threading
+import uuid
 
 # Third Party
 import pytest
@@ -10,13 +16,66 @@ import torch
 
 pytest.importorskip("nixl", reason="nixl package is required for nixl tests")
 
+# Third Party
+from nixl._api import nixl_agent as NixlAgent
+from nixl._api import nixl_agent_config as NixlAgentConfig
+
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import PagedTensorMemoryAllocator
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import CreateStorageBackends
-from lmcache.v1.storage_backend.nixl_storage_backend import NixlStorageBackend
+from lmcache.v1.storage_backend.nixl_storage_backend import (
+    NixlStorageBackend,
+    NixlStorageConfig,
+)
+from lmcache.v1.transfer_channel.transfer_utils import get_correct_device
+
+# cuFile-based backends (GDS, GDS_MT) need a GDS-capable filesystem
+_TEST_TMPDIR = os.environ.get("LMCACHE_TEST_TMPDIR") or None
+
+
+@functools.lru_cache(maxsize=None)
+def _can_register_file_with_nixl_backend(backend: str) -> bool:
+    """Probe ``cuFileHandleRegister`` via NIXL on the test scratch dir."""
+
+    probe_dir = tempfile.mkdtemp(prefix="nixl_gds_probe_", dir=_TEST_TMPDIR)
+    probe_path = os.path.join(probe_dir, "probe.bin")
+    fd = -1
+    try:
+        agent = NixlAgent(
+            f"NixlGdsProbe_{uuid.uuid4().hex}",
+            NixlAgentConfig(backends=[]),
+        )
+        agent.create_backend(backend, {})
+        fd = os.open(probe_path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.write(fd, b"\x00" * 4096)
+        agent.register_memory([(0, 4096, fd, "")], mem_type="FILE")
+        return True
+    except Exception:
+        return False
+    finally:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+
+_GDS_SKIP_REASON = (
+    "NIXL {backend} cannot register file handles in this environment; "
+    "set LMCACHE_TEST_TMPDIR to a GDS-capable mount (ext4/xfs) to enable."
+)
+
+
+@pytest.fixture
+def nixl_tmp_path():
+    """Per-test scratch dir, honoring ``LMCACHE_TEST_TMPDIR``."""
+    path = tempfile.mkdtemp(prefix="nixl_test_", dir=_TEST_TMPDIR)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def create_key(chunk_hash: str):
@@ -65,7 +124,9 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             config,
             metadata,
             thread_loop,
-            dst_device=config.nixl_buffer_device,  # Pass the device directly
+            dst_device=get_correct_device(
+                config.nixl_buffer_device, metadata.worker_id
+            ),
         )
         assert len(backends) == 2  # NixlStorageBackend + LocalCPUBackend
         assert BACKEND_NAME in backends
@@ -76,24 +137,31 @@ def run(config: LMCacheEngineConfig, shape, dtype):
         assert nixl_backend is not None
         assert nixl_backend.memory_allocator is not None
 
+        # Allocate via the chunk shape that LMCacheMetadata derives from
+        # kv_shape (LocalCPUBackend / NIXL share the same paged pool sized
+        # by metadata.get_shapes()); passing the raw 5D kv_shape would
+        # produce a same-byte-count but differently-indexed tensor.
+        alloc_shape = metadata.get_shapes()[0]
         for key in keys:
             assert not nixl_backend.contains(key, False)
             assert not nixl_backend.exists_in_put_tasks(key)
 
-            obj = nixl_backend.memory_allocator.allocate(shape=shape, dtype=dtype)
+            obj = nixl_backend.memory_allocator.allocate(alloc_shape, dtype)
             assert obj is not None
             assert obj.tensor is not None
             objs.append(obj)
 
-        # small tensor changes for data validation
-        objs[0].tensor[100, 200] = 1e-3
-        objs[0].tensor[200, 100] = 1e-4
+        # small tensor changes for data validation (chunk shape is 4D:
+        # [kv_size, num_layers, num_tokens, num_heads * head_size] =
+        # [2, 4, 256, 1024] for kv_shape (4, 2, 256, 8, 128))
+        objs[0].tensor[0, 0, 100, 200] = 1e-3
+        objs[0].tensor[1, 0, 200, 100] = 1e-4
 
-        objs[1].tensor[300, 400] = 1e-2
-        objs[1].tensor[400, 300] = 1e-5
+        objs[1].tensor[0, 1, 150, 400] = 1e-2
+        objs[1].tensor[1, 1, 100, 300] = 1e-5
 
-        objs[2].tensor[300, 400] = 3e-2
-        objs[2].tensor[400, 300] = 4e-5
+        objs[2].tensor[0, 2, 50, 200] = 3e-2
+        objs[2].tensor[1, 3, 200, 100] = 4e-5
 
         # Insert first 2 keys
         first_keys = keys[0:2]
@@ -107,7 +175,12 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert returned_memory_obj.get_shape() == obj.get_shape()
             assert returned_memory_obj.get_dtype() == obj.get_dtype()
             assert returned_memory_obj.metadata.address != obj.metadata.address
-            assert torch.equal(returned_memory_obj.tensor, obj.tensor)
+
+            returned_tensor = returned_memory_obj.tensor
+            obj_tensor = obj.tensor
+            assert returned_tensor is not None
+            assert obj_tensor is not None
+            assert torch.equal(returned_tensor, obj_tensor)
 
         obj_list = asyncio.run(
             nixl_backend.batched_get_non_blocking(lookup_id="test", keys=first_keys)
@@ -120,7 +193,12 @@ def run(config: LMCacheEngineConfig, shape, dtype):
             assert returned_memory_obj.get_shape() == obj.get_shape()
             assert returned_memory_obj.get_dtype() == obj.get_dtype()
             assert returned_memory_obj.metadata.address != obj.metadata.address
-            assert torch.equal(returned_memory_obj.tensor, obj.tensor)
+
+            returned_tensor = returned_memory_obj.tensor
+            obj_tensor = obj.tensor
+            assert returned_tensor is not None
+            assert obj_tensor is not None
+            assert torch.equal(returned_tensor, obj_tensor)
 
         def test_eviction(new_idx, old_idx):
             nixl_backend.batched_submit_put_task([keys[new_idx]], [objs[new_idx]])
@@ -186,76 +264,167 @@ def run(config: LMCacheEngineConfig, shape, dtype):
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-def test_nixl_gds_mt_cuda_backend():
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("GDS_MT"),
+    reason=_GDS_SKIP_REASON.format(backend="GDS_MT"),
+)
+def test_nixl_gds_mt_cuda_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([4, 2, 256, 8, 128])
 
-    config.nixl_buffer_device = "cuda:0"  # Use explicit device
+    config.nixl_buffer_device = "cuda"
+    # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
+    # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
+    config.nixl_buffer_size = 1024**3
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = True
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
-def test_nixl_gds_mt_cpu_backend():
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("GDS_MT"),
+    reason=_GDS_SKIP_REASON.format(backend="GDS_MT"),
+)
+def test_nixl_gds_mt_cpu_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS_MT"
     config.extra_config["enable_cuda"] = False
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-def test_nixl_gds_cuda_backend():
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("GDS"),
+    reason=_GDS_SKIP_REASON.format(backend="GDS"),
+)
+def test_nixl_gds_cuda_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([4, 2, 256, 8, 128])
 
-    config.nixl_buffer_device = "cuda:0"  # Use explicit device
+    config.nixl_buffer_device = "cuda"
+    # data/nixl.yaml is CPU-mode (no nixl_buffer_size); CUDA mode sizes the
+    # NIXL buffer via nixl_buffer_size, so restore it when flipping the device.
+    config.nixl_buffer_size = 1024**3
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = True
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
-def test_nixl_gds_cpu_backend():
+@pytest.mark.skipif(
+    not _can_register_file_with_nixl_backend("GDS"),
+    reason=_GDS_SKIP_REASON.format(backend="GDS"),
+)
+def test_nixl_gds_cpu_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "GDS"
     config.extra_config["enable_cuda"] = False
+    config.extra_config["nixl_path"] = nixl_tmp_path
 
     run(config, shape, dtype)
 
 
 @pytest.mark.no_shared_allocator
-def test_nixl_posix_backend():
+def test_nixl_endpoint_list_empty_raises():
+    """nixl_endpoint_list=[] should raise ValueError before any nixl ops."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_endpoint_list"] = []
+
+    metadata = LMCacheMetadata(
+        model_name="Llama-3.1-70B-Instruct",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+    )
+
+    with pytest.raises(ValueError, match="nixl_endpoint_list is set but empty"):
+        NixlStorageConfig.from_cache_engine_config(config, metadata)
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_endpoint_list_malformed_url_raises():
+    """A non-http(s) entry in nixl_endpoint_list should raise ValueError."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
+    config.extra_config["nixl_endpoint_list"] = ["htps://typo.example.com"]
+    config.extra_config["nixl_backend"] = "OBJ"
+
+    metadata = LMCacheMetadata(
+        model_name="Llama-3.1-70B-Instruct",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(4, 2, 256, 8, 128),
+    )
+
+    with pytest.raises(ValueError, match="is not a valid URL"):
+        NixlStorageConfig.from_cache_engine_config(config, metadata)
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_posix_backend(nixl_tmp_path):
     BASE_DIR = Path(__file__).parent
     config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl.yaml")
 
     dtype = torch.bfloat16
-    shape = [2048, 2048]
+    shape = torch.Size([4, 2, 256, 8, 128])
 
     config.nixl_buffer_device = "cpu"
     config.extra_config["nixl_backend"] = "POSIX"
     config.extra_config["enable_cuda"] = False
+    config.extra_config["nixl_path"] = nixl_tmp_path
+
+    run(config, shape, dtype)
+
+
+@pytest.mark.no_shared_allocator
+def test_nixl_posix_backend_multipath():
+    """Test NIXL backend with multipath support and path sharding."""
+    BASE_DIR = Path(__file__).parent
+    config = LMCacheEngineConfig.from_file(BASE_DIR / "data/nixl_multipath.yaml")
+
+    dtype = torch.bfloat16
+    shape = torch.Size([4, 2, 256, 8, 128])
+
+    config.nixl_buffer_device = "cpu"
+    config.extra_config["nixl_backend"] = "POSIX"
+    config.extra_config["enable_cuda"] = False
+
+    # Test that multipath configuration is properly handled
+    assert isinstance(config.extra_config["nixl_path"], list)
+    assert len(config.extra_config["nixl_path"]) == 3
+    assert config.extra_config["nixl_path_sharding"] == "by_gpu"
 
     run(config, shape, dtype)

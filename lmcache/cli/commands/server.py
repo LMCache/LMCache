@@ -6,6 +6,9 @@ import argparse
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 class ServerCommand(BaseCommand):
@@ -44,20 +47,23 @@ class ServerCommand(BaseCommand):
             from lmcache.v1.distributed.config import add_storage_manager_args
             from lmcache.v1.mp_observability.config import add_observability_args
             from lmcache.v1.multiprocess.config import (
+                add_coordinator_args,
                 add_http_frontend_args,
                 add_mp_server_args,
             )
+
+            add_mp_server_args(parser)
+            add_storage_manager_args(parser)
+            add_http_frontend_args(parser)
+            add_observability_args(parser)
+            add_coordinator_args(parser)
         except ImportError as e:
-            print(
-                f"Failed to import server dependencies: {e}. "
-                "Install the full lmcache package to use 'lmcache server'."
+            logger.warning(
+                "lmcache-cli (lightweight) detected (%s); install the full "
+                "lmcache package to use 'server' and 'bench'.",
+                e,
             )
             return
-
-        add_mp_server_args(parser)
-        add_storage_manager_args(parser)
-        add_http_frontend_args(parser)
-        add_observability_args(parser)
 
     def execute(self, args: argparse.Namespace) -> None:
         """Parse CLI arguments into config objects and launch the HTTP server.
@@ -78,6 +84,7 @@ class ServerCommand(BaseCommand):
                 parse_args_to_observability_config,
             )
             from lmcache.v1.multiprocess.config import (
+                parse_args_to_coordinator_config,
                 parse_args_to_http_frontend_config,
                 parse_args_to_mp_server_config,
             )
@@ -96,4 +103,5 @@ class ServerCommand(BaseCommand):
             mp_config=parse_args_to_mp_server_config(args),
             storage_manager_config=parse_args_to_config(args),
             obs_config=parse_args_to_observability_config(args),
+            coordinator_config=parse_args_to_coordinator_config(args),
         )

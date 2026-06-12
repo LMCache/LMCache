@@ -85,6 +85,30 @@ enum class GPUKVFormat : int {
   - vLLM non-MLA flash infer (HND layout)
   physical shape per layer: [num_blocks, 2, num_heads, block_size, head_size]
   */
+
+  NB_NL_TWO_NH_BS_HS = 8,
+  /*
+  used by:
+  - TRT-LLM cross-layer (HND layout)
+  physical shape: [num_blocks, num_layers, 2, num_heads, block_size, head_size]
+  */
+
+  TWO_X_NL_X_NB_BS_NH_HS = 9,
+  /*
+  used by:
+  - SGLang MHA via the MP daemon path
+  physical shape per layer: [num_blocks, block_size, num_heads, head_size]
+  */
+
+  NL_X_NB_NH_BS_TWO_HS = 10,
+  /*
+  used by:
+  - vLLM non-MLA blocks-first attention with K/V fused into the trailing dim
+  physical shape per layer: [num_blocks, num_heads, block_size, 2, head_size]
+  (recovered by splitting the fused trailing [block_size, 2 * head_size]).
+  Currently only reached via the host gather/scatter path, not the CUDA
+  transfer kernels.
+  */
 };
 
 void multi_layer_kv_transfer(

@@ -8,8 +8,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import zmq
+from lmcache import torch_dev, torch_device_type
 from lmcache.integration.vllm.utils import mla_enabled
-from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.utils import check_interprocess_event_support, init_logger as lmcache_init_logger
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -145,6 +146,7 @@ def create_worker_adapter(
         vllm_config.parallel_config.rank,
         vllm_config,
     )
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPWorkerAdapter(
         server_url,
         zmq_context,
@@ -154,6 +156,7 @@ def create_worker_adapter(
         vllm_config.cache_config.block_size,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        extra_config=extra_config,
     )
 
 
@@ -293,10 +296,31 @@ class LMCacheMPRequestMetadata:
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
+        #
+        # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
+        #
+        # Both values represent a prefix of blocks whose KV data is already
+        # available (either from vLLM APC or from LMCache), so they must NOT
+        # be summed (that would double-count the overlapping prefix).
+        #
+        # * num_lmcache_hit_blocks: LMCache-hit blocks are already counted in
+        #   num_stored_blocks (set during lookup), so they must be included
+        #   here to keep the upper bound consistent.  They are NOT re-stored.
+        # * num_vllm_hit_blocks: LMCache stores in units of chunks (N blocks),
+        #   so num_lmcache_hit_blocks is rounded DOWN to the nearest chunk
+        #   boundary.  When vLLM APC hits more blocks than that rounded value
+        #   (e.g. APC=44 blocks, LMCache=32 blocks after chunk alignment),
+        #   using only num_lmcache_hit_blocks would set the upper bound too
+        #   low and silently skip the APC-hit blocks that fall between the
+        #   two values, causing under-storing.  Taking the max ensures we
+        #   always use the tighter (larger) of the two hit counts.
+        computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
+            tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
+        )
         min_available_blocks = min(
             len(tracker.block_hashes),
             len(tracker.allocated_block_ids),
-            tracker.num_scheduled_tokens // vllm_block_size,
+            computed_blocks,
         )
         num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
@@ -409,7 +433,7 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
                 f"direction={req_meta.direction}, "
-                f"num_blocks={len(req_meta.op)}, "
+                f"num_blocks={len(req_meta.op.flat_block_ids)}, "
                 f"block_ids={req_meta.op.block_ids})"
             )
         return "[" + "\n".join(request_strs) + "]"
@@ -428,6 +452,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
     - lmcache.mp.heartbeat_interval: interval (seconds) between server
       heartbeat pings.
+    - lmcache.mp.mp_transfer_mode: routing mode for the worker -> server
+      transfer context. One of ``auto`` (default; CUDA -> handle, others
+      -> data), ``handle`` (force IPC / SHM zero-copy), ``data`` (force
+      worker-side gather/scatter copy). Overrides the
+      ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
     """
 
     def __init__(
@@ -437,6 +466,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+
+        # fast-fail if interprocess is not supported
+        check_interprocess_event_support()
 
         assert vllm_config.kv_transfer_config is not None
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
@@ -522,11 +554,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         Args:
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
-
-        Note:
-            The number of elements in kv_caches and layer_names should be
-            the same.
-
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
@@ -543,8 +570,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
+        with torch_dev.stream(torch_dev.current_stream()):
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            event = torch_dev.Event(interprocess=True)
             event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
@@ -605,8 +633,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
+        with torch_dev.stream(torch_dev.current_stream()):
+            # Not all backends support interprocess Events (CUDA IPC specific)
+            event = torch_dev.Event(interprocess=True)
             event.record()
 
         self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
@@ -996,8 +1025,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             if request_id not in cached_reqs.resumed_req_ids:
                 request_tracker.append_block_ids(new_block_ids)
 
-            # Update new scheduled tokens
-            num_new_tokens = cached_reqs.num_computed_tokens[idx]
+            # Use the incremental num_scheduled_tokens to
+            # stay consistent with _process_new_requests.
+            num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(

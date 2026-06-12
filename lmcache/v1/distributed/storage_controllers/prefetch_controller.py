@@ -5,25 +5,25 @@ Prefetch Controller: asynchronously prefetches data from L2 adapters into L1.
 The controller runs a background thread with an event-driven loop that:
 1. Accepts prefetch requests from external threads via submit_prefetch_request.
 2. Submits lookup_and_lock tasks to all L2 adapters.
-3. Computes a load plan using the PrefetchPolicy, trimmed to the contiguous
-   prefix of found keys.
+3. Computes a load plan, keeping the keys retained by the TrimPolicy
+   (PREFIX, SEGMENTED_PREFIX, or SPARSE).
 4. Reserves L1 write buffers and submits load tasks to L2 adapters.
 5. On load completion, transitions L1 entries from write-locked to read-locked.
-6. Reports prefix hit count.
+6. Reports the retained-key bitmap.
 """
 
 # Standard
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Iterable
 import enum
-import os
 import select
 import threading
 
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface, L2TaskId
@@ -37,88 +37,74 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
+from lmcache.v1.mp_observability.otel_init import register_gauge
+from lmcache.v1.platform import (
+    consume_fd,
+    create_event_notifier,
+)
 
 logger = init_logger(__name__)
 
 
 # HELPER FUNCTIONS
-def trim_load_plan_to_first_n_keys(
-    load_plan: dict[int, Bitmap],
-    num_keys: int,
-    n: int,
-) -> dict[int, Bitmap]:
-    """
-    Trim the load plan to only include keys with indices < n.
-
-    For example, if n=3 and the combined load plan has keys
-    {0, 1, 3}, the trimmed plan will only include key indices [0, 1]
-    and exclude index 3.
-
-    Args:
-        load_plan: Mapping from adapter index to Bitmap of key indices.
-        num_keys: Total number of keys (bitmap size).
-        n: Number of keys to include in the trimmed plan (prefix length).
-
-    Returns:
-        Trimmed load plan with only key indices < n.
-
-    Note:
-        the adapter index will not appear in the return dict if
-        it has no keys in the prefix.
-    """
-    if n <= 0:
-        return {}
-
-    trimmed_plan: dict[int, Bitmap] = {}
-    mask_bitmap = Bitmap(num_keys, n)
-    for adapter_idx, bitmap in load_plan.items():
-        new_bitmap = bitmap & mask_bitmap
-        if new_bitmap.popcount() == 0:
-            continue
-
-        trimmed_plan[adapter_idx] = new_bitmap
-
-    return trimmed_plan
-
-
-def trim_load_plan_to_prefix(
-    load_plan: dict[int, Bitmap],
-    num_keys: int,
-) -> dict[int, Bitmap]:
-    """
-    Trim the load plan to the longest contiguous prefix of keys.
-
-    For example, if num_keys=5 and the combined load plan has keys
-    {0, 1, 3}, the prefix is 2 (keys 0 and 1), so the trimmed plan
-    will only include key indices [0, 1] and exclude index 3.
-
-    Args:
-        load_plan: Mapping from adapter index to Bitmap of key indices.
-        num_keys: Total number of keys in the request.
-
-    Returns:
-        Trimmed load plan with only prefix key indices.
-
-    Note:
-        the adapter index will not appear in the return dict if
-        it has no keys in the prefix.
-    """
-    merged_plan = Bitmap(num_keys)
-    for bitmap in load_plan.values():
-        merged_plan = merged_plan | bitmap
-
-    prefix_length = merged_plan.count_leading_ones()
-    return trim_load_plan_to_first_n_keys(load_plan, num_keys, prefix_length)
-
-
 def merge_bitmaps(bitmaps: Iterable[Bitmap], num_keys: int) -> Bitmap:
-    """Merge multiple bitmaps with a bitwise OR."""
-    if not bitmaps:
-        return Bitmap(0)
+    """Merge bitmaps with a bitwise OR into a ``num_keys``-sized bitmap.
+
+    Always returns a ``num_keys``-sized bitmap (empty input -> all zeros), so
+    downstream ``&`` operations never hit a size mismatch.
+    """
     merged = Bitmap(num_keys)
     for bm in bitmaps:
         merged = merged | bm
     return merged
+
+
+def build_trim_mask(
+    found: Bitmap,
+    num_keys: int,
+    policy: TrimPolicy = TrimPolicy.PREFIX,
+) -> Bitmap:
+    """Subset of ``found`` to keep (load + read-lock + report); the rest is
+    released.
+
+    PREFIX trims at the first gap (leading contiguous run). The non-PREFIX
+    policies keep every set bit, gaps included, and differ only in intent:
+    SEGMENTED_PREFIX keeps the keys that loaded when an L2 hit fails to load
+    into L1 (e.g. OOM) mid-prefix; SPARSE keeps an intentionally scattered set.
+
+    Args:
+        found: Bitmap of found keys, over key indices ``0..num_keys-1``.
+        num_keys: Total number of requested keys.
+        policy: Trim policy to apply (see :class:`TrimPolicy`).
+
+    Returns:
+        Bitmap of the retained key indices.
+    """
+    if policy is TrimPolicy.PREFIX:
+        return Bitmap(num_keys, found.count_leading_ones())
+    return found
+
+
+def trim_load_plan_with_mask(
+    load_plan: dict[int, Bitmap],
+    mask: Bitmap,
+) -> dict[int, Bitmap]:
+    """Trim the load plan to the key indices set in ``mask`` (gap-tolerant).
+
+    Args:
+        load_plan: Mapping from adapter index to Bitmap of key indices.
+        mask: Bitmap of key indices to retain.
+
+    Returns:
+        Trimmed load plan; adapter indices retaining no keys are dropped.
+    """
+    trimmed_plan: dict[int, Bitmap] = {}
+    for adapter_idx, bitmap in load_plan.items():
+        new_bitmap = bitmap & mask
+        if new_bitmap.popcount() == 0:
+            continue
+        trimmed_plan[adapter_idx] = new_bitmap
+    return trimmed_plan
 
 
 # Poll timeout in milliseconds for the prefetch loop
@@ -145,6 +131,9 @@ class InFlightPrefetchRequest:
     transitioning from write-locked to read-locked.  Must match the
     ``extra_count`` used in the corresponding ``submit_prefetch_task`` call."""
 
+    policy: TrimPolicy = TrimPolicy.PREFIX
+    """Which retained-subset policy to apply (see :class:`TrimPolicy`)."""
+
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
     # Lookup phase: adapter_idx -> bitmap (populated as results arrive)
@@ -154,6 +143,9 @@ class InFlightPrefetchRequest:
     load_plan: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: adapter_idx -> task_id (removed as results arrive)
     pending_load_tasks: dict[int, L2TaskId] = field(default_factory=dict)
+    # Load phase: adapter_idx -> L1 bytes reserved for that adapter's
+    # in-flight load.  Read by the inflight_load_memory_usage_bytes gauge.
+    load_bytes_by_adapter: dict[int, int] = field(default_factory=dict)
     # Load phase: adapter_idx -> bitmap (populated as results arrive)
     load_results: dict[int, Bitmap] = field(default_factory=dict)
     # Load phase: keys that were write-reserved in L1
@@ -187,6 +179,13 @@ class PrefetchController(StorageControllerInterface):
         max_in_flight: Maximum number of concurrent prefetch requests.
     """
 
+    # Singleton dispatch for the in-flight load gauges: tests may construct
+    # multiple controllers but the OTel SDK only honors the first gauge
+    # registration, so the callbacks read from the most recently built
+    # instance via ``_gauge_target``.
+    _gauges_registered: bool = False
+    _gauge_target: "PrefetchController | None" = None
+
     def __init__(
         self,
         l1_manager: L1Manager,
@@ -204,7 +203,13 @@ class PrefetchController(StorageControllerInterface):
         # In-flight request tracking (background thread only)
         self._in_flight_requests: dict[PrefetchRequestId, InFlightPrefetchRequest] = {}
         self._pending_queue: list[
-            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
+            tuple[
+                PrefetchRequestId,
+                list[ObjectKey],
+                MemoryLayoutDesc,
+                int,
+                TrimPolicy,
+            ]
         ] = []
 
         # Shadow counters for status reporting (updated in background loop)
@@ -216,10 +221,16 @@ class PrefetchController(StorageControllerInterface):
         # Thread-safe submission queue (external -> background)
         self._submission_lock = threading.Lock()
         self._submission_queue: list[
-            tuple[PrefetchRequestId, list[ObjectKey], MemoryLayoutDesc, int]
+            tuple[
+                PrefetchRequestId,
+                list[ObjectKey],
+                MemoryLayoutDesc,
+                int,
+                TrimPolicy,
+            ]
         ] = []
         self._next_request_id: PrefetchRequestId = 0
-        self._submission_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._submission_efd = create_event_notifier()
 
         # Thread-safe lookup results (background -> external)
         self._lookup_results_lock = threading.Lock()
@@ -227,7 +238,7 @@ class PrefetchController(StorageControllerInterface):
 
         # Thread-safe prefetch results (background -> external)
         self._prefetch_results_lock = threading.Lock()
-        self._completed_results: dict[PrefetchRequestId, int] = {}
+        self._completed_results: dict[PrefetchRequestId, Bitmap] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -240,6 +251,30 @@ class PrefetchController(StorageControllerInterface):
             self._load_efd_to_adapter[adapter.get_load_event_fd()] = i
 
         self._event_bus = get_event_bus()
+
+        PrefetchController._gauge_target = self
+        if not PrefetchController._gauges_registered:
+            PrefetchController._gauges_registered = True
+            register_gauge(
+                "lmcache.l2_prefetch",
+                "lmcache_mp.num_inflight_l2_loads",
+                "L2 -> L1 prefetch load tasks currently executing, per adapter",
+                lambda: (
+                    PrefetchController._gauge_target.get_inflight_loads_observations()
+                    if PrefetchController._gauge_target is not None
+                    else []
+                ),
+            )
+            register_gauge(
+                "lmcache.l2_prefetch",
+                "lmcache_mp.inflight_load_memory_usage_bytes",
+                "L1 bytes reserved by in-flight L2 -> L1 prefetch loads, per adapter",
+                lambda: (
+                    PrefetchController._gauge_target.get_inflight_load_bytes_observations()
+                    if PrefetchController._gauge_target is not None
+                    else []
+                ),
+            )
 
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(
@@ -256,18 +291,21 @@ class PrefetchController(StorageControllerInterface):
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
+        policy: TrimPolicy = TrimPolicy.PREFIX,
     ) -> PrefetchRequestId:
         """
         Submit a prefetch request for the given keys.
 
         Thread-safe. Can be called from any thread.
 
-        Only the **contiguous prefix** of found keys is loaded from L2.
-        If L2 has keys {0, 1, 3, 4} but not key 2, only keys {0, 1} are
-        loaded because the gap at index 2 breaks the prefix.  Keys beyond
-        the prefix are never transferred, saving I/O bandwidth and L1
-        memory.  Use :meth:`query_prefetch_result` to retrieve the number
-        of prefix hits once the request completes.
+        The retained subset of found keys is chosen by ``policy`` (see
+        :class:`TrimPolicy`).  With the default ``PREFIX`` policy, only the
+        **contiguous prefix** of found keys is loaded from L2: if L2 has keys
+        {0, 1, 3, 4} but not key 2, only keys {0, 1} are loaded because the gap
+        at index 2 breaks the prefix.  Keys outside the retained set are never
+        transferred, saving I/O bandwidth and L1 memory.  Use
+        :meth:`query_prefetch_result` to retrieve the retained set once the
+        request completes.
 
         Args:
             keys: List of object keys to prefetch from L2 into L1.
@@ -278,6 +316,8 @@ class PrefetchController(StorageControllerInterface):
                 to read-locked.  Must match the ``extra_count`` used in the
                 corresponding ``submit_prefetch_task`` call so that all TP
                 workers can each consume one read lock.
+            policy: Which retained-subset policy to apply (see
+                :class:`TrimPolicy`).  Defaults to ``PREFIX``.
 
         Returns:
             A request ID for tracking via query_prefetch_result.
@@ -285,15 +325,17 @@ class PrefetchController(StorageControllerInterface):
         with self._submission_lock:
             request_id = self._next_request_id
             self._next_request_id += 1
-            self._submission_queue.append((request_id, keys, layout_desc, extra_count))
-        os.eventfd_write(self._submission_efd, 1)
+            self._submission_queue.append(
+                (request_id, keys, layout_desc, extra_count, policy)
+            )
+        self._submission_efd.notify()
         return request_id
 
     def query_lookup_result(self, request_id: PrefetchRequestId) -> int | None:
         """
-        Query the number of prefix hits from the lookup phase.
+        Query the keys that are found during the lookup for a specific request.
 
-        Thread-safe. Returns the number of prefix hits if the lookup phase
+        Thread-safe. Returns the prefix-hit count if the lookup phase
         has completed, None if still in progress, or the prefetch request
         has already been consumed by query_prefetch_result.
 
@@ -313,11 +355,11 @@ class PrefetchController(StorageControllerInterface):
         with self._lookup_results_lock:
             return self._completed_lookups.get(request_id, None)
 
-    def query_prefetch_result(self, request_id: PrefetchRequestId) -> int | None:
+    def query_prefetch_result(self, request_id: PrefetchRequestId) -> Bitmap | None:
         """
         Query the result of a prefetch request.
 
-        Thread-safe. Returns the number of prefix hits if the request
+        Thread-safe. Returns the retained-key bitmap if the request
         has completed, None if still in progress. Each result can only
         be retrieved once (subsequent calls return None).
 
@@ -360,6 +402,52 @@ class PrefetchController(StorageControllerInterface):
             "num_l2_adapters": len(self._l2_adapters),
         }
 
+    def _snapshot_inflight_loads(self) -> dict[int, tuple[int, int]]:
+        """``{adapter_idx: (count, reserved_bytes)}`` for in-flight L2 -> L1
+        loads, computed via GIL-atomic ``dict.copy()`` snapshots so the
+        OTel reader thread can call this concurrently with the prefetch
+        loop without locking.
+        """
+        counts: dict[int, int] = defaultdict(int)
+        bytes_by_adapter: dict[int, int] = defaultdict(int)
+        for request in self._in_flight_requests.copy().values():
+            for idx, reserved in request.load_bytes_by_adapter.copy().items():
+                counts[idx] += 1
+                bytes_by_adapter[idx] += reserved
+        return {idx: (counts[idx], bytes_by_adapter[idx]) for idx in counts}
+
+    def get_inflight_loads_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Per-adapter ``(count, attributes)`` for the
+        ``lmcache_mp.num_inflight_l2_loads`` gauge."""
+        return [
+            (
+                count,
+                {
+                    "l2_name": self._adapter_descriptors[idx].type_name,
+                    "adapter_index": idx,
+                },
+            )
+            for idx, (count, _) in self._snapshot_inflight_loads().items()
+        ]
+
+    def get_inflight_load_bytes_observations(
+        self,
+    ) -> list[tuple[int | float, dict[str, object]]]:
+        """Per-adapter ``(reserved_bytes, attributes)`` for the
+        ``lmcache_mp.inflight_load_memory_usage_bytes`` gauge."""
+        return [
+            (
+                reserved_bytes,
+                {
+                    "l2_name": self._adapter_descriptors[idx].type_name,
+                    "adapter_index": idx,
+                },
+            )
+            for idx, (_, reserved_bytes) in self._snapshot_inflight_loads().items()
+        ]
+
     # =========================================================================
     # Lifecycle
     # =========================================================================
@@ -377,10 +465,10 @@ class PrefetchController(StorageControllerInterface):
         L2 locks) before returning.
         """
         self._stop_flag.set()
-        os.eventfd_write(self._submission_efd, 1)
+        self._submission_efd.notify()
         self._thread.join()
         self._cleanup_in_flight_requests()
-        os.close(self._submission_efd)
+        self._submission_efd.close()
 
     # =========================================================================
     # Background loop
@@ -396,7 +484,8 @@ class PrefetchController(StorageControllerInterface):
         - Each L2 adapter's load eventfd (completed loads).
         """
         poller = select.poll()
-        poller.register(self._submission_efd, select.POLLIN)
+        submission_fd = self._submission_efd.fileno()
+        poller.register(submission_fd, select.POLLIN)
         for efd in self._lookup_efd_to_adapter:
             poller.register(efd, select.POLLIN)
         for efd in self._load_efd_to_adapter:
@@ -405,29 +494,44 @@ class PrefetchController(StorageControllerInterface):
         while not self._stop_flag.is_set():
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
 
+            signaled_adapters: dict[PrefetchPhase, set[int]] = {
+                phase: set() for phase in PrefetchPhase
+            }
             for fd, events in ready:
                 if not (events & select.POLLIN):
                     continue
 
                 try:
-                    os.eventfd_read(fd)
+                    consume_fd(fd)
                 except (OSError, BlockingIOError):
                     pass
 
                 try:
-                    if fd == self._submission_efd:
+                    if fd == submission_fd:
                         self._drain_submission_queue()
                     elif fd in self._lookup_efd_to_adapter:
-                        self._process_lookup_completions(
+                        signaled_adapters[PrefetchPhase.LOOKUP].add(
                             self._lookup_efd_to_adapter[fd]
                         )
                     elif fd in self._load_efd_to_adapter:
-                        self._process_load_completions(self._load_efd_to_adapter[fd])
+                        signaled_adapters[PrefetchPhase.PLAN_AND_LOAD].add(
+                            self._load_efd_to_adapter[fd]
+                        )
                 except Exception:
                     logger.exception(
                         "Unexpected error in prefetch loop while processing fd %d",
                         fd,
                     )
+
+            if any(signaled_adapters.values()):
+                for request in list(self._in_flight_requests.values()):
+                    try:
+                        self._advance_request(request, signaled_adapters)
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error advancing in-flight prefetch request %d",
+                            request.request_id,
+                        )
 
             try:
                 self._start_pending_requests()
@@ -450,9 +554,11 @@ class PrefetchController(StorageControllerInterface):
         while (
             self._pending_queue and len(self._in_flight_requests) < self._max_in_flight
         ):
-            request_id, keys, layout_desc, extra_count = self._pending_queue.pop(0)
+            request_id, keys, layout_desc, extra_count, policy = (
+                self._pending_queue.pop(0)
+            )
             self._status_pending_count -= 1
-            self._start_lookup_phase(request_id, keys, layout_desc, extra_count)
+            self._start_lookup_phase(request_id, keys, layout_desc, extra_count, policy)
 
     # =========================================================================
     # Lookup phase
@@ -464,10 +570,11 @@ class PrefetchController(StorageControllerInterface):
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
         extra_count: int = 0,
+        policy: TrimPolicy = TrimPolicy.PREFIX,
     ) -> None:
         """Submit lookup_and_lock to all adapters for a new request."""
         if not self._l2_adapters:
-            self._complete_request(request_id, 0)
+            self._complete_request(request_id, Bitmap(len(keys)))
             return
 
         pending_lookup_tasks: dict[int, L2TaskId] = {}
@@ -481,6 +588,7 @@ class PrefetchController(StorageControllerInterface):
             layout_desc=layout_desc,
             phase=PrefetchPhase.LOOKUP,
             extra_count=extra_count,
+            policy=policy,
             pending_lookup_tasks=pending_lookup_tasks,
         )
         self._in_flight_requests[request_id] = request
@@ -494,35 +602,10 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request_id,
                     "key_count": len(keys),
                     "adapter_count": len(pending_lookup_tasks),
+                    "key_count_per_salt": Counter(k.cache_salt for k in keys),
                 },
             )
         )
-
-    def _process_lookup_completions(self, adapter_index: int) -> None:
-        """Check all LOOKUP-phase requests for completed lookups from
-        this adapter."""
-        ready_to_transition: list[InFlightPrefetchRequest] = []
-
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.LOOKUP:
-                continue
-            if adapter_index not in request.pending_lookup_tasks:
-                continue
-
-            task_id = request.pending_lookup_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_lookup_and_lock_result(
-                task_id
-            )
-
-            if result is not None:
-                request.lookup_results[adapter_index] = result
-                del request.pending_lookup_tasks[adapter_index]
-
-                if request.all_lookups_done():
-                    ready_to_transition.append(request)
-
-        for request in ready_to_transition:
-            self._transition_to_load_phase(request)
 
     # =========================================================================
     # Load phase
@@ -540,12 +623,15 @@ class PrefetchController(StorageControllerInterface):
             self._adapter_descriptors,
         )
 
-        # Step 2: trim the load plan to only prefix
-        trimmed_plan = trim_load_plan_to_prefix(load_plan, len(request.keys))
+        # Step 2: trim the load plan to the policy's retained subset
+        num_keys = len(request.keys)
+        merged_lookup = merge_bitmaps(load_plan.values(), num_keys)
+        retained = build_trim_mask(merged_lookup, num_keys, request.policy)
+        trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
 
         if not trimmed_plan:
-            # Nothing to load after trimming to prefix. Unlock all lookup locks
-            # and complete with 0 hits.
+            # Nothing to load after trimming. Unlock all lookup locks and
+            # complete with an empty retained set.
             self._unlock_all_lookups(request)
             self._update_lookup_results(request.request_id, 0)
             self._event_bus.publish(
@@ -557,7 +643,7 @@ class PrefetchController(StorageControllerInterface):
                     },
                 )
             )
-            self._complete_request(request.request_id, 0)
+            self._complete_request(request.request_id, Bitmap(num_keys))
             return
 
         # Step 3: reserve L1 write buffers
@@ -577,12 +663,15 @@ class PrefetchController(StorageControllerInterface):
 
         # Step 4: filter to successfully reserved keys
         reserved_key_set: set[ObjectKey] = set()
+        oom_keys: list[ObjectKey] = []
         for key, (err, mem_obj) in write_results.items():
             if err == L1Error.SUCCESS and mem_obj is not None:
                 request.write_reserved_keys.append(key)
                 request.write_reserved_objs[key] = mem_obj
                 reserved_key_set.add(key)
             else:
+                if err == L1Error.OUT_OF_MEMORY:
+                    oom_keys.append(key)
                 logger.debug(
                     "Prefetch request %d: reserve write failed for %s: %s",
                     request.request_id,
@@ -590,16 +679,28 @@ class PrefetchController(StorageControllerInterface):
                     err,
                 )
 
+        if oom_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L1_ALLOCATION_FAILED,
+                    metadata={"during": "l2_prefetch", "keys": oom_keys},
+                )
+            )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_FAILED,
+                    metadata={"reason": "l1_oom", "keys": oom_keys},
+                )
+            )
+
         # Step 5: recompute load plan excluding failed reservations
-        reserved_bitmap = Bitmap(len(request.keys))
+        reserved_bitmap = Bitmap(num_keys)
         for i, key in enumerate(request.keys):
             if key in reserved_key_set:
                 reserved_bitmap.set(i)
 
-        prefix_length = reserved_bitmap.count_leading_ones()
-        trimmed_plan = trim_load_plan_to_first_n_keys(
-            load_plan, len(request.keys), prefix_length
-        )
+        retained = build_trim_mask(reserved_bitmap, num_keys, request.policy)
+        trimmed_plan = trim_load_plan_with_mask(load_plan, retained)
         request.load_plan = trimmed_plan
 
         ## Step 6: phase 1 unlock — keys locked in lookup but not in plan
@@ -620,7 +721,7 @@ class PrefetchController(StorageControllerInterface):
                     },
                 )
             )
-            self._complete_request(request.request_id, 0)
+            self._complete_request(request.request_id, Bitmap(num_keys))
             return
 
         ## Step 7: submit load tasks per adapter
@@ -633,16 +734,38 @@ class PrefetchController(StorageControllerInterface):
                 per_adapter_keys, per_adapter_objs
             )
             request.pending_load_tasks[adapter_idx] = task_id
+            # Per-adapter byte accounting for L2_LOAD_TASK_* throughput
+            # events.  Uniform layout per chunk -> size * count.
+            total_bytes = (
+                per_adapter_objs[0].get_size() * len(per_adapter_objs)
+                if per_adapter_objs
+                else 0
+            )
+            request.load_bytes_by_adapter[adapter_idx] = total_bytes
+
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_SUBMITTED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                        "key_count": len(per_adapter_keys),
+                        "total_bytes": total_bytes,
+                    },
+                )
+            )
 
         ## Step 8: update the lookup result based on the final load plan
-        self._update_lookup_results(request.request_id, prefix_length)
+        self._update_lookup_results(request.request_id, retained.count_leading_ones())
 
         self._event_bus.publish(
             Event(
                 event_type=EventType.L2_PREFETCH_LOOKUP_COMPLETED,
                 metadata={
                     "request_id": request.request_id,
-                    "prefix_hit_count": prefix_length,
+                    "prefix_hit_count": retained.count_leading_ones(),
                 },
             )
         )
@@ -653,6 +776,9 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request.request_id,
                     "key_count": len(reserved_key_set),
                     "adapter_count": len(trimmed_plan),
+                    "key_count_per_salt": Counter(
+                        k.cache_salt for k in reserved_key_set
+                    ),
                 },
             )
         )
@@ -665,43 +791,87 @@ class PrefetchController(StorageControllerInterface):
         )
 
     def _update_lookup_results(
-        self, request_id: PrefetchRequestId, hit_chunks: int
+        self, request_id: PrefetchRequestId, prefix_hit_count: int
     ) -> None:
-        """Update the completed lookups dict with the number of prefix hits."""
+        """Store the prefix-hit count from the lookup phase."""
         with self._lookup_results_lock:
-            self._completed_lookups[request_id] = hit_chunks
+            self._completed_lookups[request_id] = prefix_hit_count
 
-    def _process_load_completions(self, adapter_index: int) -> None:
-        """Check all PLAN_AND_LOAD-phase requests for completed loads."""
-        ready_to_finalize: list[InFlightPrefetchRequest] = []
+    def _advance_request(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: dict[PrefetchPhase, set[int]],
+    ) -> None:
+        """State-transition dispatcher by phase: poll signaled adapters for
+        the request's current phase via the per-phase helper, then trigger
+        the phase transition when done."""
+        phase_adapters = signaled_adapters[request.phase]
+        if not phase_adapters:
+            return
+        if request.phase == PrefetchPhase.LOOKUP:
+            self._poll_lookup_results(request, phase_adapters)
+            if request.all_lookups_done():
+                self._transition_to_load_phase(request)
+        elif request.phase == PrefetchPhase.PLAN_AND_LOAD:
+            self._poll_load_results(request, phase_adapters)
+            if request.all_loads_done():
+                self._finalize_load(request)
 
-        for request in list(self._in_flight_requests.values()):
-            if request.phase != PrefetchPhase.PLAN_AND_LOAD:
+    def _poll_lookup_results(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: set[int],
+    ) -> None:
+        """Query pending lookup-and-lock results from signaled adapters."""
+        for adapter_idx in list(request.pending_lookup_tasks):
+            if adapter_idx not in signaled_adapters:
                 continue
-            if adapter_index not in request.pending_load_tasks:
+            task_id = request.pending_lookup_tasks[adapter_idx]
+            result = self._l2_adapters[adapter_idx].query_lookup_and_lock_result(
+                task_id
+            )
+            if result is None:
                 continue
+            request.lookup_results[adapter_idx] = result
+            del request.pending_lookup_tasks[adapter_idx]
 
-            task_id = request.pending_load_tasks[adapter_index]
-            result = self._l2_adapters[adapter_index].query_load_result(task_id)
+    def _poll_load_results(
+        self,
+        request: InFlightPrefetchRequest,
+        signaled_adapters: set[int],
+    ) -> None:
+        """Query pending load results from signaled adapters."""
+        for adapter_idx in list(request.pending_load_tasks):
+            if adapter_idx not in signaled_adapters:
+                continue
+            task_id = request.pending_load_tasks[adapter_idx]
+            result = self._l2_adapters[adapter_idx].query_load_result(task_id)
+            if result is None:
+                continue
+            request.load_results[adapter_idx] = result
+            del request.pending_load_tasks[adapter_idx]
+            request.load_bytes_by_adapter.pop(adapter_idx, None)
 
-            if result is not None:
-                request.load_results[adapter_index] = result
-                del request.pending_load_tasks[adapter_index]
-
-                if request.all_loads_done():
-                    ready_to_finalize.append(request)
-
-        for request in ready_to_finalize:
-            self._finalize_load(request)
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_LOAD_TASK_COMPLETED,
+                    metadata={
+                        "request_id": request.request_id,
+                        "adapter_index": adapter_idx,
+                        "task_id": task_id,
+                        "l2_name": self._adapter_descriptors[adapter_idx].type_name,
+                    },
+                )
+            )
 
     def _finalize_load(self, request: InFlightPrefetchRequest) -> None:
         """
         Finalize a completed load: build result bitmap, transition L1
-        state, release non-prefix read locks, and report prefix hits.
+        state, release read locks outside the retained set, and report the
+        retained-key bitmap.
 
-        Only prefix keys are submitted for loading, but partial load
-        failures can create gaps.  Keys beyond the gap that were
-        successfully loaded still need their read locks released.
+        Partial load failures can create gaps, so a loaded key may fall
+        outside the policy's retained set; its read lock must be released.
         """
         num_keys = len(request.keys)
 
@@ -747,20 +917,33 @@ class PrefetchController(StorageControllerInterface):
                     "request_id": request.request_id,
                     "loaded_count": len(loaded_keys),
                     "failed_count": len(failed_keys),
+                    "key_count_per_salt": Counter(k.cache_salt for k in loaded_keys),
                 },
             )
         )
 
-        # Partial load failures can create gaps in the prefix.
-        # Release read locks for loaded keys beyond the prefix.
-        prefix_hits = result_bitmap.count_leading_ones()
-        prefix_mask = Bitmap(num_keys, prefix_hits)
-        non_prefix_loaded_bitmap = result_bitmap & (~prefix_mask)
-        non_prefix_loaded = non_prefix_loaded_bitmap.gather(request.keys)
-        if non_prefix_loaded:
-            l1_mgr.finish_read(non_prefix_loaded, extra_count=request.extra_count)
+        # L2 prefetch-failure anomaly reporting: keys were reserved in L1
+        # (expected to load from L2) but did not appear in the load bitmap.
+        # Classified as ``not_found`` — the serde_failure reason will be
+        # added once the serde PR lands and adapters can distinguish
+        # deserialization errors from missing objects.
+        if failed_keys:
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.L2_PREFETCH_FAILED,
+                    metadata={"reason": "not_found", "keys": failed_keys},
+                )
+            )
 
-        self._complete_request(request.request_id, prefix_hits)
+        # Release read locks for any loaded key outside the retained set
+        # (partial load failures can create gaps).
+        retained = build_trim_mask(result_bitmap, num_keys, request.policy)
+        released_bitmap = result_bitmap & (~retained)
+        released = released_bitmap.gather(request.keys)
+        if released:
+            l1_mgr.finish_read(released, extra_count=request.extra_count)
+
+        self._complete_request(request.request_id, retained)
 
     # =========================================================================
     # Unlock helpers
@@ -792,12 +975,10 @@ class PrefetchController(StorageControllerInterface):
     # Completion and cleanup
     # =========================================================================
 
-    def _complete_request(
-        self, request_id: PrefetchRequestId, prefix_hits: int
-    ) -> None:
-        """Store the result and remove from in-flight tracking."""
+    def _complete_request(self, request_id: PrefetchRequestId, result: Bitmap) -> None:
+        """Store the retained-key bitmap and remove from in-flight tracking."""
         with self._prefetch_results_lock:
-            self._completed_results[request_id] = prefix_hits
+            self._completed_results[request_id] = result
         removed = self._in_flight_requests.pop(request_id, None)
         if removed is not None:
             self._status_in_flight_count -= 1
@@ -806,9 +987,9 @@ class PrefetchController(StorageControllerInterface):
             elif removed.phase == PrefetchPhase.PLAN_AND_LOAD:
                 self._status_load_phase_count -= 1
         logger.debug(
-            "Prefetch request %d completed: %d prefix hits",
+            "Prefetch request %d completed: %d retained keys",
             request_id,
-            prefix_hits,
+            result.popcount(),
         )
 
     def _cleanup_in_flight_requests(self) -> None:

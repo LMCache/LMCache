@@ -18,6 +18,7 @@ from lmcache.v1.lookup_client.record_strategies import (
     RecordStrategy,
     create_record_strategy,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 
 logger = init_logger(__name__)
 
@@ -29,8 +30,11 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         self,
         actual_lookup_client: LookupClientInterface,
         config: LMCacheEngineConfig,
-    ):
+        metadata: Optional[LMCacheMetadata] = None,
+    ) -> None:
         self.actual_lookup_client = actual_lookup_client
+        self.config = config
+        self.metadata = metadata
         self.lock = threading.RLock()
         self.chunk_size = config.chunk_size
         self.enabled = False
@@ -188,13 +192,18 @@ class ChunkStatisticsLookupClient(LookupClientInterface):
         if self.enabled:
             self.stop_statistics()
 
-    def _setup_metrics(self):
-        prometheus_logger = PrometheusLogger.GetInstanceOrNone()
-        if prometheus_logger is not None:
-            prometheus_logger.chunk_statistics_enabled.set_function(
-                lambda: 1.0 if self.enabled else 0.0
-            )
-            prometheus_logger.chunk_statistics_total_requests.set_function(
-                lambda: len(self.request_seen)
-            )
-            self.recorder.strategy.setup_metrics(prometheus_logger)
+    def _setup_metrics(self) -> None:
+        if self.metadata is None:
+            return
+
+        prometheus_logger = PrometheusLogger.GetOrCreate(
+            self.metadata,
+            config=self.config,
+        )
+        prometheus_logger.chunk_statistics_enabled.set_function(
+            lambda: 1.0 if self.enabled else 0.0
+        )
+        prometheus_logger.chunk_statistics_total_requests.set_function(
+            lambda: len(self.request_seen)
+        )
+        self.recorder.strategy.setup_metrics(prometheus_logger)

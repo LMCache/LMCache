@@ -1,12 +1,15 @@
 # Multiprocess tests — one step per test, run in parallel.
-# Each step gets its own K8s pod, launches its own servers, runs one test, cleans up.
-# All steps need 2 GPUs (LMCache+vLLM on GPU 0, baseline on GPU 1).
+# Each step gets its own K8s pod with the exact GPU count it needs.
+# Tests are grouped by GPU requirement; the 2-GPU group is listed first so
+# these heavier jobs get scheduled before 1-GPU jobs.
+#   2-GPU: LMCache+vLLM on GPU 0, baseline on GPU 1 (or TP=2 across both).
+#   1-GPU: LMCache+vLLM on GPU 0 only (no baseline server).
 
 steps:
-  - group: ":compression: Multiprocess"
+  - group: ":compression: Multiprocess (2-GPU)"
     steps:
-      - label: ":compression: lm_eval"
-        command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
+      - label: ":compression: vllm_bench"
+        command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -23,13 +26,6 @@ steps:
                   - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
         artifact_paths: ["*.log"]
 
-      - label: ":compression: vllm_bench"
-        command: .buildkite/k3_tests/multiprocess/run.sh vllm_bench
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
-
       - label: ":compression: long_doc_qa"
         command: .buildkite/k3_tests/multiprocess/run.sh long_doc_qa
         timeout_in_minutes: 30
@@ -44,16 +40,182 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
 
-      - label: ":compression: fault_tolerance"
-        command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
-        timeout_in_minutes: 30
-        agents: { queue: "k8s" }
-        plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
-        artifact_paths: ["*.log"]
-
       - label: ":compression: deadlock"
         command: .buildkite/k3_tests/multiprocess/run.sh deadlock
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins: [{ kubernetes: { podSpec: *pod-2gpu } }]
         artifact_paths: ["*.log"]
+
+  - group: ":compression: Multiprocess (1-GPU)"
+    steps:
+      - label: ":compression: lm_eval"
+        command: .buildkite/k3_tests/multiprocess/run.sh lm_eval
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec: &pod-1gpu
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts: *vol-mounts
+                volumes: *vols
+        artifact_paths: ["*.log"]
+
+      # HMA correctness check on google/gemma-4-31B-it (a hybrid model whose KV
+      # cache groups get different block sizes). Runs gsm8k, resets vLLM's prefix
+      # cache (LMCache preserved), reruns served by LMCache, and asserts the two
+      # runs' scores match. Single GPU, no baseline.
+      - label: ":compression: hma_lm_eval_gemma4"
+        command: .buildkite/k3_tests/multiprocess/run.sh hma_lm_eval_gemma4
+        timeout_in_minutes: 60
+        env:
+          MODEL: "google/gemma-4-31B-it"
+          # Require an exact score match between the two runs.
+          SCORE_TOLERANCE: "0"
+          ATTENTION_BACKEND: "auto"
+          GPU_MEMORY_UTILIZATION: "0.85"
+          # 31B load + CUDA-graph capture is slow; raise the readiness timeout
+          # above the 300s default.
+          MAX_WAIT_SECONDS: "600"
+          # Cap samples and enlarge the CPU pool so the retrieve run stays
+          # cache-served (31B's per-token KV is large).
+          LIMIT: "100"
+          CPU_BUFFER_SIZE: "200"
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: fault_tolerance"
+        command: .buildkite/k3_tests/multiprocess/run.sh fault_tolerance
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: restart_recovery"
+        command: .buildkite/k3_tests/multiprocess/run.sh restart_recovery
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: cache_stats"
+        command: .buildkite/k3_tests/multiprocess/run.sh cache_stats
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: http_api"
+        command: .buildkite/k3_tests/multiprocess/run.sh http_api
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
+        artifact_paths: ["*.log"]
+
+      - label: ":compression: gds_smoke_test"
+        command: .buildkite/k3_tests/multiprocess/run.sh gds_smoke_test
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: scratch, mountPath: /scratch }
+                      - { name: udev, mountPath: /run/udev, readOnly: true }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
+                  - { name: udev, hostPath: { path: /run/udev, type: Directory } }
+        artifact_paths: ["*.log"]
+
+  - group: ":compression: Multiprocess (CPU-only)"
+    steps:
+      - label: ":compression: cpu_e2e_validation (shm)"
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources:
+                      requests:
+                        cpu: "8"
+                        memory: "256Gi"
+                      limits:
+                        cpu: "8"
+                        memory: "256Gi"
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+
+      - label: ":compression: cpu_e2e_validation (pickle)"
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
+        env:
+          LMCACHE_SHM_NAME: ""
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources:
+                      requests:
+                        cpu: "8"
+                        memory: "256Gi"
+                      limits:
+                        cpu: "8"
+                        memory: "256Gi"
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+
+      - label: ":compression: cpu_e2e_validation (server-side copy)"
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
+        env:
+          LMCACHE_MP_TRANSFER_MODE: "handle"
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources:
+                      requests:
+                        cpu: "8"
+                        memory: "256Gi"
+                      limits:
+                        cpu: "8"
+                        memory: "256Gi"
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }

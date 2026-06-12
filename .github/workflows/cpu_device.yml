@@ -1,0 +1,159 @@
+name: CPU Device Tests
+
+# CPU device tests: server bench + vLLM e2e. Both job types share a
+# single environment (built once per OS) to avoid re-installing vLLM.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - "dev"
+      - "release-**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      lmcache: >-
+        ${{
+          github.event_name == 'workflow_dispatch' ||
+          github.event_name == 'workflow_call' ||
+          steps.filter.outputs.lmcache == 'true'
+        }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+
+      - uses: dorny/paths-filter@v3
+        if: >-
+          github.event_name == 'push' ||
+          github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            lmcache:
+              - 'lmcache/**'
+              - 'pyproject.toml'
+              - 'setup.py'
+              - 'requirements/**.txt'
+              - '.github/workflows/cpu_device.yml'
+              - '.github/scripts/cpu_device_test.sh'
+              - '.github/scripts/cpu_server_bench_test.sh'
+              - '.github/scripts/cpu_vllm_e2e_test.sh'
+              - '.github/scripts/install_vllm_cpu.sh'
+              - '.github/scripts/install_lmcache_cpu.sh'
+              - '.github/scripts/download_model.sh'
+              - '.github/scripts/run-cpu-e2e-validation.sh'
+              - '!operator/**'
+
+  cpu-device-test:
+    needs: changes
+    if: needs.changes.outputs.lmcache == 'true'
+    name: CPU device (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest]
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/*.txt
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-opt-125m-v1
+
+      - name: Install vLLM CPU (prebuilt nightly from PyPI)
+        run: bash .github/scripts/install_vllm_cpu.sh
+
+      - name: Install lmcache (CPU-only, no vLLM)
+        run: bash .github/scripts/install_lmcache_cpu.sh
+
+      - name: Download facebook/opt-125m
+        run: bash .github/scripts/download_model.sh facebook/opt-125m
+
+      - name: Server bench — Data
+        run: |
+          LMCACHE_BENCH_TRANSFER_MODE=data \
+          LMCACHE_HTTP_PORT_BENCH=18080 \
+          LMCACHE_ZMQ_PORT_BENCH=15555 \
+            bash .github/scripts/cpu_device_test.sh server_bench
+
+      - name: Server bench — Handle
+        run: |
+          LMCACHE_BENCH_TRANSFER_MODE=handle \
+          LMCACHE_HTTP_PORT_BENCH=18081 \
+          LMCACHE_ZMQ_PORT_BENCH=15556 \
+            bash .github/scripts/cpu_device_test.sh server_bench
+
+      - name: vLLM e2e — Data (pickle)
+        run: |
+          LMCACHE_E2E_TRANSPORT_MODE=pickle \
+          LMCACHE_HTTP_PORT_E2E=18082 \
+          LMCACHE_ZMQ_PORT_E2E=15557 \
+          VLLM_PORT_E2E=18000 \
+            bash .github/scripts/cpu_device_test.sh vllm_e2e
+
+      # POSIX SHM transport is Linux-only.
+      - name: vLLM e2e — Data (shm)
+        if: runner.os == 'Linux'
+        run: |
+          LMCACHE_E2E_TRANSPORT_MODE=shm \
+          LMCACHE_HTTP_PORT_E2E=18083 \
+          LMCACHE_ZMQ_PORT_E2E=15558 \
+          VLLM_PORT_E2E=18001 \
+            bash .github/scripts/cpu_device_test.sh vllm_e2e
+
+      - name: vLLM e2e — Handle
+        run: |
+          LMCACHE_E2E_TRANSPORT_MODE=handle \
+          LMCACHE_HTTP_PORT_E2E=18084 \
+          LMCACHE_ZMQ_PORT_E2E=15559 \
+          VLLM_PORT_E2E=18002 \
+            bash .github/scripts/cpu_device_test.sh vllm_e2e
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-device-logs-${{ matrix.os }}
+          path: |
+            /tmp/cpu_device_*.log
+          if-no-files-found: ignore

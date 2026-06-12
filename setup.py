@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 import os
 import sys
 
 # Third Party
 from setuptools import find_packages, setup
+
+if TYPE_CHECKING:
+    # Third Party
+    from setuptools.extension import Extension
 
 ROOT_DIR = Path(__file__).parent
 HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
@@ -13,19 +18,47 @@ HIPIFY_OUT_DIR = os.path.join(ROOT_DIR, "csrc_hip/")
 
 # python -m build --sdist
 # will run python setup.py sdist --dist-dir dist
-BUILDING_SDIST = "sdist" in sys.argv or os.environ.get("NO_CUDA_EXT", "0") == "1"
+BUILDING_SDIST = "sdist" in sys.argv
+# `NO_NATIVE_EXT=1` skips compilation of all native extensions (pure-Python
+# build). `NO_CUDA_EXT=1` is the legacy name kept for backwards compatibility;
+# it has always controlled all native extensions, not just CUDA ones.
+NO_NATIVE_EXT = (
+    os.environ.get("NO_NATIVE_EXT", "0") == "1"
+    or os.environ.get("NO_CUDA_EXT", "0") == "1"
+)
+if os.environ.get("NO_CUDA_EXT", "0") == "1":
+    print(
+        "warning: NO_CUDA_EXT is deprecated; use NO_NATIVE_EXT=1 instead.",
+        file=sys.stderr,
+    )
+# Common C++ extensions only; skip CUDA / ROCm / SYCL.
+NO_GPU_EXT = os.environ.get("NO_GPU_EXT", "0") == "1"
 
-# New environment variable to choose between CUDA and HIP
+# New environment variable to choose between CUDA, HIP, SYCL, and MUSA.
 BUILD_WITH_HIP = os.environ.get("BUILD_WITH_HIP", "0") == "1"
+BUILD_WITH_SYCL = os.environ.get("BUILD_WITH_SYCL", "0") == "1"
+BUILD_WITH_MUSA = os.environ.get("BUILD_WITH_MUSA", "0") == "1"
 
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
+
+
+def _read_requirements(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+
+    reqs: list[str] = []
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            reqs.append(line)
+    return reqs
 
 
 def hipify_wrapper() -> None:
     # Third Party
     from torch.utils.hipify.hipify_python import hipify
 
-    print("Hipifying sources ")
+    print("Hipifying sources")
 
     # Get absolute path for all source files.
     extra_files = [
@@ -94,7 +127,7 @@ def _mooncake_extension(
             sources=mooncake_sources,
             include_dirs=mc_include_dirs,
             library_dirs=mc_library_dirs,
-            libraries=["store"],
+            libraries=["mooncake_store"],
             runtime_library_dirs=mc_library_dirs,
             extra_compile_args={
                 "cxx": extra_cxx_flags + ["-O3", "-std=c++20", "-DYLT_ENABLE_IBV"],
@@ -103,31 +136,36 @@ def _mooncake_extension(
     ]
 
 
-def cuda_extension() -> tuple[list, dict]:
+def _common_cpp_extensions(
+    extra_cxx_flags: list[str], fs_extra_cxx_flags: list[str] | None = None
+) -> tuple[list["Extension"], dict[str, type]]:
+    """Build pure C++ extensions that do not depend on any GPU backend.
+
+    Args:
+        extra_cxx_flags: Additional C++ compiler flags to apply to the
+            `native_storage_ops` and `lmcache_redis` pure C++ extensions.
+        fs_extra_cxx_flags: Additional C++ compiler flags to apply to the
+            `lmcache_fs` extension. Defaults to `extra_cxx_flags` when not set.
+
+    Notes:
+        `fs_extra_cxx_flags` exists to preserve pre-refactor SYCL compile-flag
+        behavior where `lmcache_fs` intentionally omitted the ABI define.
+
+    Returns:
+        A tuple of:
+            - list: CppExtension modules for native storage backends,
+              including optional mooncake when enabled.
+            - dict: cmdclass containing BuildExtension.
+    """
     # Third Party
-    from torch.utils import cpp_extension  # Import here
+    from torch.utils import cpp_extension
 
-    print("Building CUDA extensions")
-    global ENABLE_CXX11_ABI
-    if ENABLE_CXX11_ABI:
-        flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=1"
-    else:
-        flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=0"
+    if fs_extra_cxx_flags is None:
+        fs_extra_cxx_flags = extra_cxx_flags
 
-    cuda_sources = [
-        "csrc/pybind.cpp",
-        "csrc/mem_kernels.cu",
-        "csrc/mp_mem_kernels.cu",
-        "csrc/cal_cdf.cu",
-        "csrc/ac_enc.cu",
-        "csrc/ac_dec.cu",
-        "csrc/pos_kernels.cu",
-        "csrc/mem_alloc.cpp",
-        "csrc/utils.cpp",
-        "csrc/event_recorder.cpp",
-    ]
     storage_manager_sources = [
         "csrc/storage_manager/bitmap.cpp",
+        "csrc/storage_manager/periodic_event_notifier.cpp",
         "csrc/storage_manager/pybind.cpp",
         "csrc/storage_manager/ttl_lock.cpp",
         "csrc/storage_manager/utils.cpp",
@@ -145,6 +183,63 @@ def cuda_extension() -> tuple[list, dict]:
         "csrc/storage_backends/mooncake/connector.cpp",
     ]
     ext_modules = [
+        cpp_extension.CppExtension(
+            "lmcache.native_storage_ops",
+            sources=storage_manager_sources,
+            include_dirs=["csrc/storage_manager"],
+            extra_compile_args={
+                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_redis",
+            sources=redis_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
+            extra_compile_args={
+                "cxx": extra_cxx_flags + ["-O3", "-std=c++17"],
+            },
+        ),
+        cpp_extension.CppExtension(
+            "lmcache.lmcache_fs",
+            sources=fs_sources,
+            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
+            extra_compile_args={
+                "cxx": fs_extra_cxx_flags + ["-O3", "-std=c++17"],
+            },
+        ),
+    ]
+    # Mooncake extension is optional.
+    ext_modules.extend(
+        _mooncake_extension(cpp_extension, mooncake_sources, extra_cxx_flags)
+    )
+    cmdclass = {"build_ext": cpp_extension.BuildExtension}
+    return ext_modules, cmdclass
+
+
+def cuda_extension() -> tuple[list, dict]:
+    # Third Party
+    from torch.utils import cpp_extension  # Import here
+
+    print("Building CUDA extensions")
+    if ENABLE_CXX11_ABI:
+        flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=1"
+    else:
+        flag_cxx_abi = "-D_GLIBCXX_USE_CXX11_ABI=0"
+
+    cuda_sources = [
+        "csrc/pybind.cpp",
+        "csrc/mem_kernels.cu",
+        "csrc/mp_mem_kernels.cu",
+        "csrc/cal_cdf.cu",
+        "csrc/ac_enc.cu",
+        "csrc/ac_dec.cu",
+        "csrc/pos_kernels.cu",
+        "csrc/mem_alloc.cpp",
+        "csrc/utils.cpp",
+        "csrc/event_recorder.cpp",
+        "csrc/completion_recorder.cpp",
+    ]
+    ext_modules = [
         cpp_extension.CUDAExtension(
             "lmcache.c_ops",
             sources=cuda_sources,
@@ -153,35 +248,7 @@ def cuda_extension() -> tuple[list, dict]:
                 "nvcc": [flag_cxx_abi],
             },
         ),
-        cpp_extension.CppExtension(
-            "lmcache.native_storage_ops",
-            sources=storage_manager_sources,
-            include_dirs=["csrc/storage_manager"],
-            extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_redis",
-            sources=redis_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
-            extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_fs",
-            sources=fs_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
-            extra_compile_args={
-                "cxx": [flag_cxx_abi, "-O3", "-std=c++17"],
-            },
-        ),
     ]
-    # Mooncake extension is optional.
-    ext_modules.extend(
-        _mooncake_extension(cpp_extension, mooncake_sources, [flag_cxx_abi])
-    )
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
@@ -203,24 +270,7 @@ def rocm_extension() -> tuple[list, dict]:
         "csrc/mem_alloc_hip.cpp",
         "csrc/utils_hip.cpp",
         "csrc/event_recorder.cpp",
-    ]
-    storage_manager_sources = [
-        "csrc/storage_manager/bitmap.cpp",
-        "csrc/storage_manager/pybind.cpp",
-        "csrc/storage_manager/ttl_lock.cpp",
-        "csrc/storage_manager/utils.cpp",
-    ]
-    redis_sources = [
-        "csrc/storage_backends/redis/pybind.cpp",
-        "csrc/storage_backends/redis/connector.cpp",
-    ]
-    fs_sources = [
-        "csrc/storage_backends/fs/pybind.cpp",
-        "csrc/storage_backends/fs/connector.cpp",
-    ]
-    mooncake_sources = [
-        "csrc/storage_backends/mooncake/pybind.cpp",
-        "csrc/storage_backends/mooncake/connector.cpp",
+        "csrc/completion_recorder.cpp",
     ]
     # For HIP, we generally use CppExtension and let hipcc handle things.
     # Ensure CXX environment variable is set to hipcc when running this build.
@@ -253,51 +303,171 @@ def rocm_extension() -> tuple[list, dict]:
             # libraries=['amdhip64'] # Or other relevant HIP libs if needed
             define_macros=define_macros,
         ),
-        cpp_extension.CppExtension(
-            "lmcache.native_storage_ops",
-            sources=storage_manager_sources,
-            include_dirs=["csrc/storage_manager"],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_redis",
-            sources=redis_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/redis"],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-            },
-        ),
-        cpp_extension.CppExtension(
-            "lmcache.lmcache_fs",
-            sources=fs_sources,
-            include_dirs=["csrc/storage_backends", "csrc/storage_backends/fs"],
-            extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
-            },
-        ),
     ]
-    # Mooncake extension is optional.
-    ext_modules.extend(_mooncake_extension(cpp_extension, mooncake_sources, []))
     cmdclass = {"build_ext": cpp_extension.BuildExtension}
     return ext_modules, cmdclass
 
 
-def source_dist_extension() -> tuple[list, dict]:
-    print("Not building CUDA/HIP extensions for sdist")
+def sycl_extension() -> tuple[list, dict]:
+    # Third Party
+    from torch.utils import cpp_extension  # Import here
+
+    print("Building SYCL/XPU extensions")
+
+    # Standard
+    import shutil
+
+    if shutil.which("icpx") is None:
+        sys.exit("icpx not found. Please source oneAPI setvars.sh at first")
+    os.environ["CXX"] = "icpx"
+    oneapi_root = os.environ.get("ONEAPI_ROOT", "/opt/intel/oneapi")
+    include_dirs = [f"{oneapi_root}/include"]
+    library_dirs = [f"{oneapi_root}/lib"]
+
+    sycl_sources = [
+        "csrc/sycl/pybind_sycl.cpp",
+        "csrc/sycl/mem_kernels_sycl.cpp",
+        "csrc/sycl/cal_cdf_sycl.cpp",
+        "csrc/sycl/pos_kernels_sycl.cpp",
+        "csrc/sycl/ac_enc_sycl.cpp",
+        "csrc/sycl/ac_dec_sycl.cpp",
+    ]
+    # Use CppExtension with DPC++ compiler (set CXX=icpx before invoking).
+    # The -fsycl flag enables SYCL compilation and linking.
+    # Intel XPU optimizations:
+    #   -ftarget-register-alloc-mode=pvc:auto
+    #       Register allocation tuned for Ponte Vecchio / Data Center GPU Max.
+    #   -fno-sycl-id-queries-fit-in-int
+    #       Allow 64-bit index arithmetic in SYCL kernels.
+    #   -ffast-math
+    #       Aggressive FP opts (safe for current implementation: kernels
+    #       only copy data, no FP arithmetic.  Review if FP math is added).
+    #   -funroll-loops
+    #       Unroll inner copy loops for better instruction packing.
+    ext_modules = [
+        cpp_extension.SyclExtension(
+            "lmcache.xpu_ops",
+            sources=sycl_sources,
+            include_dirs=include_dirs,
+            library_dirs=library_dirs,
+            extra_compile_args={
+                "cxx": [
+                    "-std=c++17",
+                    "-D_GLIBCXX_USE_CXX11_ABI=1",
+                    "-O3",
+                    "-fsycl",
+                    "-fno-sycl-id-queries-fit-in-int",
+                    "-ffast-math",
+                    "-funroll-loops",
+                    # Suppress deprecation warnings from SYCL standard
+                    # headers (sycl/accessor.hpp references the deprecated
+                    # 'host_buffer' internally; our code uses USM only).
+                    "-Wno-deprecated-declarations",
+                    "-Wno-nan-infinity-disabled",
+                ],
+            },
+            extra_link_args=["-fsycl"],
+        ),
+    ]
+    cmdclass = {"build_ext": cpp_extension.BuildExtension}
+    return ext_modules, cmdclass
+
+
+def musa_extension() -> tuple[list, dict]:
+    print("MUSA GPU extensions are not built yet; skipping GPU extensions")
     return [], {}
 
 
-if __name__ == "__main__":
-    if BUILDING_SDIST:
-        get_extension = source_dist_extension
-    elif BUILD_WITH_HIP:
-        get_extension = rocm_extension
-    else:
-        get_extension = cuda_extension
+def source_dist_extension() -> tuple[list, dict]:
+    print("Not building CUDA/HIP/SYCL/MUSA extensions for sdist")
+    return [], {}
 
-    ext_modules, cmdclass = get_extension()
+
+def _get_common_cpp_flags() -> list[str]:
+    """Select common pure C++ ABI flags based on the configured build backend.
+
+    Returns:
+        A list of compiler flags for pure C++ extensions.
+    """
+    if BUILD_WITH_HIP:
+        return []
+    if BUILD_WITH_SYCL:
+        return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
+    if ENABLE_CXX11_ABI:
+        return ["-D_GLIBCXX_USE_CXX11_ABI=1"]
+    return ["-D_GLIBCXX_USE_CXX11_ABI=0"]
+
+
+def _collect_extensions() -> tuple[list, dict]:
+    """Collect extension modules according to current setup.py build settings.
+
+    Returns:
+        A tuple of:
+            - list: extension modules selected for the current build mode.
+            - dict: cmdclass containing BuildExtension when extensions are built.
+
+    Notes:
+        - `sdist`: no extensions.
+        - `NO_NATIVE_EXT=1`: no extensions (pure-Python lmcache-cli wheel).
+        - `NO_GPU_EXT=1`: common C++ extensions only.
+        - `BUILD_WITH_MUSA=1`: common C++ extensions only; MUSA fused GPU
+          extensions are not built yet.
+        - Default: common C++ extensions + one GPU backend (CUDA/ROCm/SYCL).
+    """
+    if BUILDING_SDIST:
+        return source_dist_extension()
+
+    if NO_NATIVE_EXT:
+        return [], {}
+
+    common_cpp_flags = _get_common_cpp_flags()
+    # Preserve historical SYCL compatibility: lmcache_fs was compiled without
+    # _GLIBCXX_USE_CXX11_ABI in pre-refactor builds.
+    fs_cpp_flags = [] if BUILD_WITH_SYCL else common_cpp_flags
+    ext_modules, cmdclass = _common_cpp_extensions(common_cpp_flags, fs_cpp_flags)
+
+    if NO_GPU_EXT:
+        return ext_modules, cmdclass
+
+    if BUILD_WITH_SYCL:
+        gpu_ext_modules, cmdclass = sycl_extension()
+    elif BUILD_WITH_HIP:
+        gpu_ext_modules, cmdclass = rocm_extension()
+    elif BUILD_WITH_MUSA:
+        gpu_ext_modules, cmdclass = musa_extension()
+    else:
+        gpu_ext_modules, cmdclass = cuda_extension()
+    ext_modules.extend(gpu_ext_modules)
+    return ext_modules, cmdclass
+
+
+if __name__ == "__main__":
+    ext_modules, cmdclass = _collect_extensions()
+
+    install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
+    # NO_GPU_EXT skips GPU-vendor deps (cupy / nixl).
+    if not NO_GPU_EXT:
+        core_file: Optional[str]
+        if BUILD_WITH_HIP:
+            core_file = "rocm_core.txt"
+        elif BUILD_WITH_SYCL:
+            core_file = "xpu_core.txt"
+        elif BUILD_WITH_MUSA:
+            core_file = None
+        else:
+            # CUDA major selects between cu12 and cu13 vendor pins (cupy, nixl).
+            # Defaults to cu13 (the PyPI build); cu12.9 wheel builds set
+            # LMCACHE_CUDA_MAJOR=12 to pull cu12 wheels of those deps.
+            cuda_major = os.environ.get("LMCACHE_CUDA_MAJOR", "13")
+            if cuda_major not in ("12", "13"):
+                raise ValueError(
+                    f"LMCACHE_CUDA_MAJOR must be '12' or '13', got '{cuda_major}'"
+                )
+            core_file = f"cuda{cuda_major}_core.txt"
+        if core_file is not None:
+            install_requires += _read_requirements(
+                ROOT_DIR / "requirements" / core_file
+            )
 
     setup(
         packages=find_packages(
@@ -306,4 +476,5 @@ if __name__ == "__main__":
         ext_modules=ext_modules,
         cmdclass=cmdclass,
         include_package_data=True,
+        install_requires=install_requires,
     )

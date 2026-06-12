@@ -11,6 +11,7 @@ import time
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor, PrometheusLogger
 from lmcache.utils import CacheEngineKey, DiskCacheMetadata, _lmcache_nvtx_annotate
@@ -211,11 +212,11 @@ class LocalDiskBackend(StorageBackendInterface):
         config: LMCacheEngineConfig,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
-        dst_device: str = "cuda",
+        dst_device: str = torch_device_type,
         lmcache_worker: Optional["LMCacheWorker"] = None,
         metadata: Optional[LMCacheMetadata] = None,
     ):
-        if torch.cuda.is_available():
+        if torch_dev.is_available():
             super().__init__(dst_device)
         else:
             super().__init__("cpu")
@@ -718,6 +719,7 @@ class LocalDiskBackend(StorageBackendInterface):
             except Exception as e:
                 logger.warning(f"on_complete_callback failed for key {key}: {e}")
 
+    @_lmcache_nvtx_annotate
     def batched_async_load_bytes_from_disk(
         self,
         paths: list[str],
@@ -790,6 +792,7 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
         )
 
+    @_lmcache_nvtx_annotate
     def read_file(self, key, buffer, path):
         start_time = time.time()
         size = len(buffer)

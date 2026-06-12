@@ -12,7 +12,6 @@ from collections import defaultdict
 from typing import Any, Union
 import asyncio
 import copy
-import os
 import threading
 import time
 
@@ -23,6 +22,7 @@ import torch  # noqa: F401  # must precede native_storage_ops
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
@@ -34,6 +34,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     TensorMemoryObj,
 )
+from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
@@ -119,16 +120,16 @@ class InMemoryL2Adapter(L2AdapterInterface):
         self._bw_bps = bw
         self._cur_size = 0
 
-        self._store_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._lookup_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
-        self._load_efd = os.eventfd(0, os.EFD_NONBLOCK | os.EFD_CLOEXEC)
+        self._store_efd = create_event_notifier()
+        self._lookup_efd = create_event_notifier()
+        self._load_efd = create_event_notifier()
 
         self._objects: dict[ObjectKey, MemoryObj] = {}
         self._key_queue: list[ObjectKey] = []
         self._locked: dict[ObjectKey, int] = defaultdict(int)
 
         self._next_id: L2TaskId = 0
-        self._done_store: dict[L2TaskId, bool] = {}
+        self._done_store: dict[L2TaskId, L2StoreResult] = {}
         self._done_lookup: dict[L2TaskId, Bitmap] = {}
         self._done_load: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
@@ -146,13 +147,13 @@ class InMemoryL2Adapter(L2AdapterInterface):
     # ---- event fd ------------------------------------------
 
     def get_store_event_fd(self) -> int:
-        return self._store_efd
+        return self._store_efd.fileno()
 
     def get_lookup_and_lock_event_fd(self) -> int:
-        return self._lookup_efd
+        return self._lookup_efd.fileno()
 
     def get_load_event_fd(self) -> int:
-        return self._load_efd
+        return self._load_efd.fileno()
 
     # ---- store ---------------------------------------------
 
@@ -171,7 +172,7 @@ class InMemoryL2Adapter(L2AdapterInterface):
 
     def pop_completed_store_tasks(
         self,
-    ) -> dict[L2TaskId, bool]:
+    ) -> dict[L2TaskId, L2StoreResult]:
         with self._lock:
             done = self._done_store
             self._done_store = {}
@@ -243,9 +244,9 @@ class InMemoryL2Adapter(L2AdapterInterface):
             self._loop.call_soon_threadsafe(self._loop.stop)
 
         self._thread.join()
-        os.close(self._store_efd)
-        os.close(self._lookup_efd)
-        os.close(self._load_efd)
+        self._store_efd.close()
+        self._lookup_efd.close()
+        self._load_efd.close()
 
     # ---- helpers -------------------------------------------
 
@@ -300,8 +301,8 @@ class InMemoryL2Adapter(L2AdapterInterface):
             await asyncio.sleep(delay)
 
         with self._lock:
-            self._done_store[tid] = ok
-        os.eventfd_write(self._store_efd, 1)
+            self._done_store[tid] = L2StoreResult(ok, total)
+        self._store_efd.notify()
 
     def _do_lookup(
         self,
@@ -316,7 +317,7 @@ class InMemoryL2Adapter(L2AdapterInterface):
             self._locked[k] += 1
         with self._lock:
             self._done_lookup[tid] = bm
-        os.eventfd_write(self._lookup_efd, 1)
+        self._lookup_efd.notify()
 
     async def _do_load(
         self,
@@ -344,4 +345,4 @@ class InMemoryL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._done_load[tid] = bm
-        os.eventfd_write(self._load_efd, 1)
+        self._load_efd.notify()

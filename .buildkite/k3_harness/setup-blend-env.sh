@@ -17,7 +17,7 @@ fi
 source "${REPO_ROOT}/.buildkite/k3_tests/common_scripts/helpers.sh"
 check_gpu_health 80
 
-echo "--- :python: Installing vLLM (nightly cu128 wheels)"
+echo "--- :python: Installing vLLM (nightly wheels)"
 
 
 DEFAULT_VENV_BIN="/opt/venv/bin"
@@ -38,7 +38,6 @@ vllm_default_out="$("${DEFAULT_VENV_BIN}/python" -c "import vllm; print(vllm.__v
 }
 echo "vLLM in default venv (${DEFAULT_VENV_BIN}): ${vllm_default_out}"
 
-
 # If uv prompts because /workspace/.venv already exists: use the `--clear` flag or set UV_VENV_CLEAR=1
 # to skip the prompt and recreate; this script defaults to --allow-existing (reuse, non-interactive).
 UV_VENV_CLEAR="${UV_VENV_CLEAR:-0}"
@@ -54,20 +53,49 @@ TEST_VENV_BIN="/workspace/.venv/bin"
 # When flashinfer and flashinfer-cubin resolve to different patch versions, skip strict check.
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 
-"${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U vllm "torch==2.10.0+cu128" --pre \
-    --extra-index-url https://wheels.vllm.ai/nightly/cu128 \
-    --extra-index-url https://download.pytorch.org/whl/cu128 \
+# vLLM: force cu12.9 variant; PyPI default is cu13 (libcudart.so.13), unloadable in this cu12 container.
+echo "--- :python: Installing vLLM (nightly cu129)"
+
+# --index-strategy unsafe-best-match is needed so uv considers PyPI for vLLM's
+# transitive deps (setuptools>=77 specifically — the PyTorch cu129 index only
+# carries setuptools<=70.2.0, and uv's default first-index would refuse to
+# look at PyPI for it). VLLM_PRECOMPILED_WHEEL_VARIANT pins the vLLM CUDA
+# variant, so the resolver strategy can't pull a mismatched build.
+VLLM_PRECOMPILED_WHEEL_VARIANT=cu129 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -U vllm --pre \
+    --extra-index-url https://wheels.vllm.ai/nightly/cu129 \
+    --extra-index-url https://download.pytorch.org/whl/cu129 \
     --index-strategy unsafe-best-match
 
 
-# install LMCache from source twice as two torch version might be different
- 
-"${DEFAULT_VENV_BIN}/python" -c 'import vllm; print(f"default venv vllm={vllm.__version__}")' 
+"${DEFAULT_VENV_BIN}/python" -c 'import vllm; print(f"default venv vllm={vllm.__version__}")'
 "${TEST_VENV_BIN}/python" -c 'import vllm; print(f"test venv vllm={vllm.__version__}")'
-"${DEFAULT_VENV_BIN}/python" -c 'import torch; print(f"default venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")' 
+"${DEFAULT_VENV_BIN}/python" -c 'import torch; print(f"default venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")'
 "${TEST_VENV_BIN}/python" -c 'import torch; print(f"test venv torch={torch.__version__}, torch.version.cuda={torch.version.cuda}")'
 
+echo "--- :wrench: Install sitecustomize.py in both venvs (transformers pre-import)"
+# The blend test runs prefiller in /opt/venv and decoder in
+# /workspace/.venv. Both launch vllm, which spawns a BG thread that
+# calls `import transformers` concurrently with the main thread's
+# later `from transformers import GenerationConfig, ...`. Pre-import
+# on the main thread via sitecustomize.py so the race is closed in
+# both venvs (see setup-env.sh for the full write-up).
+for site in \
+    /opt/venv/lib/python3.12/site-packages \
+    /workspace/.venv/lib/python3.12/site-packages; do
+    cat > "${site}/sitecustomize.py" <<'PY'
+try:
+    import transformers  # noqa: F401
+except Exception:
+    pass
+PY
+done
+
 echo "--- :python: Installing LMCache from source"
+# Skip setuptools_scm git describe; the repo carries non-PEP-440 tags
+# (nightly, nightly-cu13) that crash the newer vcs_versioning backend.
+export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE:-0.0.0+ci}"
+# Select cu12 nixl wheel
+export LMCACHE_CUDA_MAJOR=12
 "${UV_BIN}" pip install -p "${DEFAULT_VENV_BIN}/python" -e . --no-build-isolation
 "${UV_BIN}" pip install -p "${TEST_VENV_BIN}/python" -e . --no-build-isolation
 # Work around openai_harmony vocab download/load issues for GPT-OSS (vLLM recipes troubleshooting).

@@ -15,7 +15,6 @@ Validates that:
 # Standard
 from typing import TYPE_CHECKING
 import json
-import os
 import platform
 import select
 
@@ -33,6 +32,7 @@ from lmcache.v1.distributed.l2_adapters.factory import (
 )
 from lmcache.v1.distributed.l2_adapters.plugin_l2_adapter import PluginL2AdapterConfig
 from lmcache.v1.memory_management import TensorMemoryObj
+from lmcache.v1.platform import consume_fd
 
 if TYPE_CHECKING:
     pass
@@ -139,7 +139,7 @@ def _wait_event_fd(fd: int, timeout: float = 5.0) -> bool:
     events = poll.poll(timeout * 1000)
     if events:
         try:
-            os.eventfd_read(fd)
+            consume_fd(fd)
         except BlockingIOError:
             pass
         return True
@@ -289,7 +289,8 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task([key], [obj])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         ltid = adapter.submit_lookup_and_lock_task([key])
         assert _wait_event_fd(lookup_fd)
@@ -311,7 +312,8 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task([key], [obj])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         dst = torch.zeros_like(src)
         load_obj = _make_tensor_obj(dst)
@@ -334,7 +336,8 @@ class TestPluginRoundTrip:
         tid = adapter.submit_store_task(keys, objs)
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         ltid = adapter.submit_lookup_and_lock_task(keys)
         assert _wait_event_fd(lookup_fd)
@@ -387,13 +390,15 @@ class TestPluginRoundTrip:
             tid = adapter.submit_store_task([k], [_create_obj(OBJ_SIZE)])
             assert _wait_event_fd(store_fd)
             done = adapter.pop_completed_store_tasks()
-            assert done.get(tid) is True
+            assert done.get(tid) is not None
+            assert done[tid].is_successful()
 
         # Store k3 -- should evict k1
         tid = adapter.submit_store_task([k3], [_create_obj(OBJ_SIZE)])
         assert _wait_event_fd(store_fd)
         done = adapter.pop_completed_store_tasks()
-        assert done.get(tid) is True
+        assert done.get(tid) is not None
+        assert done[tid].is_successful()
 
         # Lookup all three
         ltid = adapter.submit_lookup_and_lock_task([k1, k2, k3])

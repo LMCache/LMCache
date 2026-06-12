@@ -48,10 +48,44 @@ Source: ``lmcache/v1/multiprocess/config.py``
        Choices: ``builtin``, ``sha256_cbor``, ``blake3``.
    * - ``--engine-type``
      - ``default``
-     - Cache engine backend type.
-       ``default`` uses MPCacheEngine; ``blend`` uses BlendEngineV2
-       for cross-request KV reuse.
+     - Cache engine backend type. ``default`` uses standard prefix
+       caching; ``blend`` enables CacheBlend non-prefix KV reuse
+       (composes a ``BlendModule`` into the engine, which requires
+       ``--supported-transfer-mode`` to be ``gpu`` or ``auto``).
        Choices: ``default``, ``blend``.
+   * - ``--supported-transfer-mode``
+     - ``auto``
+     - Which worker → server transfer paths the server loads.
+       ``gpu`` enables only GPU-based IPC transfer (STORE/RETRIEVE);
+       ``non_gpu`` enables only the non-GPU (PREPARE/COMMIT) transfer
+       path; ``auto`` (default) loads both so workers of either device
+       type can connect without manual configuration.
+       Choices: ``gpu``, ``non_gpu``, ``auto``.
+   * - ``--runtime-plugin-locations``
+     - ``[]``
+     - Zero or more paths to runtime plugin scripts or directories to
+       launch alongside the server. Plugins are spawned by
+       ``MPRuntimePluginLauncher`` and receive the full server config
+       via the ``LMCACHE_RUNTIME_PLUGIN_CONFIG`` environment variable.
+   * - ``--runtime-plugin-config``
+     - ``"{}"``
+     - JSON string of extra key-value config forwarded to runtime
+       plugins via ``LMCACHE_RUNTIME_PLUGIN_EXTRA_CONFIG``. Example:
+       ``'{"plugin.frontend.heartbeat_url": "http://localhost:5000/heartbeat"}'``.
+   * - ``--script-allowed-imports``
+     - ``[]``
+     - Space-separated list of Python module names that scripts posted
+       to the HTTP ``/run_script`` endpoint are allowed to import.
+       Example: ``--script-allowed-imports numpy pandas``.
+   * - ``--shm-name``
+     - *(not set)*
+     - SHM segment name for non-GPU KV transfer (only used when the
+       non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
+       ``auto`` or ``non_gpu``).
+       Not set (default): auto-allocate a shared-memory pool.
+       ``""`` (empty string): disable SHM and force the pickle transfer
+       path.  Any other value: use that exact name for the SHM pool
+       segment.
 
 Lookup Hash Logging
 -------------------
@@ -122,18 +156,51 @@ Source: ``lmcache/v1/distributed/config.py``
      - Description
    * - ``--l1-size-gb``
      - *required*
-     - Size of L1 memory in GB.
+     - Size of the L1 tier in GB. Sizes the pinned-DRAM L1 by default, or the
+       GDS slab file when ``--gds-l1-path`` is set (see *GDS L1 Tier* below).
    * - ``--l1-use-lazy`` / ``--no-l1-use-lazy``
      - ``True``
      - Enable or disable lazy allocation for L1 memory.
        Pass ``--l1-use-lazy`` to enable (default) or
        ``--no-l1-use-lazy`` to explicitly disable.
+       Lazy allocation relies on ``cudart`` host-pinned memory, so on
+       non-CUDA backends (where ``lmcache.torch_dev`` exposes no
+       ``cudart`` attribute) it is automatically downgraded to eager
+       allocation with a logged warning, regardless of the flag value.
    * - ``--l1-init-size-gb``
      - ``20``
      - Initial allocation size (GB) when using lazy allocation.
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).
+
+GDS L1 Tier
+-----------
+
+Source: ``lmcache/v1/distributed/config.py``
+
+Opt-in. Setting ``--gds-l1-path`` switches the L1 medium from pinned DRAM to
+an NVMe slab file accessed via GPUDirect Storage (cuFile DMA). The CPU
+pinned-DRAM tier is then disabled, and ``--l1-size-gb`` sizes the slab.
+Disable byte-array L2 adapters when this is on (the GDS tier exposes no L1
+memory buffer for them to register).
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Argument
+     - Default
+     - Description
+   * - ``--gds-l1-path``
+     - Not set
+     - NVMe directory for the GDS L1 slab. Setting this enables the GDS L1
+       tier; one shared slab per process lives at
+       ``<path>/lmcache_gds_slab.bin``.
+   * - ``--gds-l1-use-direct-io`` / ``--no-gds-l1-use-direct-io``
+     - ``True``
+     - Open the slab with ``O_DIRECT`` (required for the GDS DMA fast path on
+       ext4).
 
 L1 Manager TTLs
 ----------------
@@ -169,9 +236,16 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--eviction-policy``
      - *required*
      - Eviction policy.
-       Choices: ``LRU``, ``noop``.
+       Choices: ``LRU``, ``IsolatedLRU``, ``noop``.
        Use ``noop`` for buffer-only mode where L1 acts as a pure
        write buffer (data is deleted from L1 after L2 store).
+       ``IsolatedLRU`` maintains one LRU list per ``cache_salt``
+       and requires per-``cache_salt`` quotas to be configured at
+       runtime via the ``/quota`` HTTP endpoints
+       (see :ref:`mp-http-quota-api`); a ``cache_salt`` with no
+       registered quota has an effective limit of ``0`` bytes,
+       so its data is evicted at the next eviction cycle
+       (allowlist semantics).
    * - ``--eviction-trigger-watermark``
      - ``0.8``
      - Memory usage ratio (0.0--1.0) that triggers eviction.
@@ -213,6 +287,13 @@ Source: ``lmcache/v1/distributed/config.py``
      - Maximum number of concurrent prefetch (L2 load) requests.
        Limits how many in-flight loads the PrefetchController may
        issue at once, preventing excessive L1 memory pressure.
+   * - ``--periodic-notifier-interval-ms``
+     - ``5``
+     - Interval in milliseconds for the periodic event notifier
+       heartbeat.  A native C++ background thread writes to all
+       registered file descriptors at this interval, waking
+       controller poll loops for L2 adapters that lack native
+       async completion callbacks.
 
 L2 Adapters
 -----------
@@ -223,14 +304,16 @@ L2 adapters are configured via repeatable ``--l2-adapter <JSON>`` arguments.
 Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
-Registered adapter types: ``nixl_store``, ``fs``, ``mock``.
+Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
+``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
+``native_plugin``, ``raw_block``, ``dax``.
 
 ``nixl_store`` -- NIXL-based persistent storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Fields:
 
-- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``.
+- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
 - ``backend_params`` *(required for file-based backends)*: Dict of string
   key-value pairs.  File-based backends (``GDS``, ``GDS_MT``, ``POSIX``,
   ``HF3FS``) require ``file_path`` and ``use_direct_io``.
@@ -254,6 +337,10 @@ Examples:
 
     # OBJ backend (object store -- no file_path needed)
     --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
+
+    # AZURE_BLOB backend
+    --l2-adapter '{"type": "nixl_store", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}, "pool_size": 32}'
+
 
 ``fs`` -- File-system backed storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -290,6 +377,34 @@ Example:
 .. code-block:: bash
 
     --l2-adapter '{"type": "mock", "max_size_gb": 256, "mock_bandwidth_gb": 10}'
+
+``s3`` -- S3-compatible object store
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+S3-backed L2 adapter using the AWS CRT (Common Runtime) for high-throughput
+transfers to AWS S3 or any S3-compatible endpoint. See
+:doc:`l2_storage` for details.
+
+Fields:
+
+- ``s3_endpoint`` *(required)*: Bucket URL, either ``"s3://<bucket>"`` or
+  the bare host form.
+- ``s3_region`` *(required)*: AWS region string.
+- ``s3_num_io_threads`` *(optional, default ``64``)*: CRT I/O threads.
+- ``s3_prefer_http2`` *(optional, default ``true``)*: Negotiate HTTP/2 via ALPN.
+- ``s3_enable_s3express`` *(optional, default ``false``)*: Enable S3 Express signing.
+- ``disable_tls`` *(optional, default ``false``)*: Bypass TLS (for
+  non-AWS HTTP endpoints).
+- ``aws_access_key_id`` / ``aws_secret_access_key`` *(optional)*:
+  Static credentials; omit to use the default credential provider chain.
+- ``max_capacity_gb`` *(optional, default ``0.0``)*: Aggregate capacity
+  used by ``get_usage()``. A value of ``0`` disables aggregate eviction.
+
+Example:
+
+.. code-block:: bash
+
+    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -337,6 +452,12 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
+   * - ``--service-instance-id``
+     - *(unset, default UUID v4)*
+     - Identifier for this MP server instance, attached as the OTel
+       Resource attribute ``service.instance.id`` on every metric and
+       span. When the flag is not passed, defaults to a random UUID v4.
+       Pass ``--service-instance-id=""`` to force an empty value.
 
 vLLM Client Configuration
 --------------------------
@@ -349,6 +470,45 @@ On the vLLM side, specify the LMCache server host and port via the
     vllm serve Qwen/Qwen3-14B \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "127.0.0.1", "lmcache.mp.port": 6000}}'
+
+``LMCacheMPConnector`` reads the following keys from
+``kv_connector_extra_config``:
+
+Connector ``extra_config`` Keys
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All connector-level options are passed through
+``kv_connector_extra_config`` and use the ``lmcache.mp.`` prefix.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 55
+
+   * - Key
+     - Default
+     - Description
+   * - ``lmcache.mp.host``
+     - ``tcp://localhost``
+     - Host (with ZMQ transport prefix) of the LMCache MP server.
+   * - ``lmcache.mp.port``
+     - ``5555``
+     - Port of the LMCache MP server. Must match the server's ``--port``.
+   * - ``lmcache.mp.mq_timeout``
+     - ``300.0``
+     - Timeout (seconds) for blocking message-queue requests, including
+       the initial chunk-size query and KV cache
+       registration/unregistration. If the server does not respond within
+       this window, the connector raises ``ConnectionError`` on startup.
+   * - ``lmcache.mp.heartbeat_interval``
+     - ``10.0``
+     - Interval (seconds) between periodic heartbeat pings sent from the
+       connector to the server.
+   * - ``lmcache.mp.mp_transfer_mode``
+     - ``auto``
+     - Routing mode for the worker -> server transfer context. One of
+       ``auto`` (CUDA -> handle, others -> data), ``handle`` (force IPC /
+       SHM zero-copy), or ``data`` (force worker-side gather/scatter copy).
+       Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
 
 Environment Variables
 ---------------------
@@ -395,8 +555,9 @@ Full Example
         --eviction-ratio 0.1 \
         --l2-prefetch-policy default \
         --l2-prefetch-max-in-flight 8 \
+        --periodic-notifier-interval-ms 5 \
         --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}' \
         --prometheus-port 9090 \
-        --prometheus-log-interval 10 \
-        --enable-telemetry \
-        --telemetry-processor '{"type": "logging", "log_level": "DEBUG"}'
+        --metrics-sample-rate 0.01 \
+        --enable-tracing \
+        --otlp-endpoint http://localhost:4317
