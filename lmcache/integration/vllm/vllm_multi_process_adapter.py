@@ -306,33 +306,21 @@ class ParallelStrategy:
     @property
     def kv_world_size(self) -> int:
         """Number of pieces a single token chunk's KV cache is split into
-        on a single LMCache server."""
+        on the LMCache server storage."""
         if self.use_mla:
-            # MLA: TP ranks share KV, and PP stages are split across
-            # ``n_servers`` (each server holds a contiguous block of PP
-            # stages). One server therefore stores
-            # ``pp_size // n_servers`` distinct KV pieces per chunk.
-            return self.vllm_world_size // self.tp_size // self.n_servers
-        # Non-MLA: every rank owns a distinct KV shard; ``n_servers``
-        # servers split the global world evenly.
+            if self.pp_size == 1:
+                return self.vllm_world_size // self.tp_size
+            return self.vllm_world_size // (self.tp_size * self.n_servers)
         return self.vllm_world_size // self.n_servers
 
     @property
     def kv_worker_id(self) -> int:
-        """Index of the piece a single token chunk's KV cache
-        this worker owns on its LMCache server,
-        in ``[0, kv_world_size)``.
-
-        Must live in the *same* numbering space as ``kv_world_size`` so
-        that ``ipc_key_to_object_keys`` produces matching ObjectKeys for
-        STORE (specific worker_id) and LOOKUP (worker_id=None, which
-        explodes to every id in ``[0, kv_world_size)``).  Concretely,
-        for MLA + multi-server, this means the *server-local* PP index
-        rather than the global PP rank — otherwise writers on server 1+
-        encode ``kv_rank`` values that LOOKUP never probes and every
-        lookup misses.
-        """
+        """Index of the piece of a single token chunk's KV cache
+        that the current worker is responsible for,
+        in ``[0, kv_world_size)``."""
         if self.use_mla:
+            if self.pp_size == 1:
+                return self.vllm_worker_id // self.tp_size
             pp_per_server = self.pp_size // self.n_servers
             global_pp_rank = self.vllm_worker_id // self.tp_size
             return global_pp_rank % pp_per_server
@@ -341,7 +329,9 @@ class ParallelStrategy:
     @property
     def kv_tp_size(self) -> int:
         """Tensor-parallel size as seen from a single LMCache server."""
-        return self.tp_size // self.n_servers
+        if self.pp_size == 1 and self.n_servers > 1:
+            return self.tp_size // self.n_servers
+        return self.tp_size
 
     @property
     def is_kv_writer(self) -> bool:
@@ -349,6 +339,8 @@ class ParallelStrategy:
         if not self.use_mla:
             # Non-MLA: every rank owns a distinct KV shard and must write it.
             return True
+        if self.pp_size == 1:
+            return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
         # MLA: KV is identical across all TP ranks within a PP stage, so each
         # PP stage only needs one writer. The connector enforces that a PP
         # stage never spans nodes (tp_size divides ranks_per_node), so the
