@@ -46,6 +46,15 @@ repos = sys.argv[1:]
 failures = []
 
 for repo in repos:
+    # Try local cache first to avoid unnecessary HF API calls
+    # (which can 429 on busy CI runners even when the model is cached).
+    try:
+        snapshot_download(repo, local_files_only=True)
+        print(f"CACHED: {repo} (local, no network)")
+        continue
+    except Exception:
+        pass
+
     delay = base_delay
     ok = False
     for attempt in range(max_retries):
