@@ -11,9 +11,11 @@ Supports FP8 (E4M3) keys, 3-bit and 4-bit uniform quantized values.
 # Standard
 
 # Third Party
-import torch
 import triton
 import triton.language as tl
+
+# First Party
+from lmcache import torch_dev
 
 _FP8_E4B15: dict[int, int] = {}
 
@@ -21,7 +23,7 @@ _FP8_E4B15: dict[int, int] = {}
 def _use_fp8_e4b15(device: int = 0) -> int:
     """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
     if device not in _FP8_E4B15:
-        cap = torch.cuda.get_device_capability(device)
+        cap = torch_dev.get_device_capability(device)
         _FP8_E4B15[device] = 1 if cap < (8, 9) else 0
     return _FP8_E4B15[device]
 

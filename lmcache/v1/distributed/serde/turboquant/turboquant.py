@@ -25,6 +25,7 @@ import subprocess
 import torch
 
 # First Party
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.serde.async_processor import AsyncSerdeProcessor
 from lmcache.v1.distributed.serde.base import Deserializer, SerdeProcessor, Serializer
@@ -416,16 +417,16 @@ def _normalize_cuda_device(cuda_device: str) -> torch.device:
         ValueError: If the configured device is not a CUDA device.
     """
     if cuda_device.isdigit():
-        return torch.device(f"cuda:{cuda_device}")
+        return torch.device(f"{torch_device_type}:{cuda_device}")
 
     device = torch.device(cuda_device)
-    if device.type != "cuda":
+    if device.type != torch_device_type:
         raise ValueError(
             f"TurboQuant cuda_device must be a CUDA device, got {cuda_device!r}"
         )
     if device.index is None:
-        return torch.device("cuda", torch.cuda.current_device())
-    return torch.device("cuda", device.index)
+        return torch.device(torch_device_type, torch_dev.current_device())
+    return torch.device(torch_device_type, device.index)
 
 
 def _auto_select_cuda_device(required_bytes: int) -> torch.device:
@@ -441,13 +442,13 @@ def _auto_select_cuda_device(required_bytes: int) -> torch.device:
     Raises:
         RuntimeError: If CUDA is unavailable or no device has enough free memory.
     """
-    if not torch.cuda.is_available():
+    if not torch_dev.is_available():
         raise RuntimeError("TurboQuant Triton serde requires CUDA")
 
     candidates: list[tuple[int, int, int]] = []
-    for device_index in range(torch.cuda.device_count()):
-        with torch.cuda.device(device_index):
-            free_bytes, _ = torch.cuda.mem_get_info()
+    for device_index in range(torch_dev.device_count()):
+        with torch_dev.device(device_index):
+            free_bytes, _ = torch_dev.mem_get_info()
 
         if int(free_bytes) < required_bytes:
             continue
@@ -462,8 +463,8 @@ def _auto_select_cuda_device(required_bytes: int) -> torch.device:
         )
 
     _, _, selected = min(candidates)
-    torch.cuda.set_device(selected)
-    return torch.device("cuda", selected)
+    torch_dev.set_device(selected)
+    return torch.device(torch_device_type, selected)
 
 
 def _select_cuda_device(
@@ -511,10 +512,10 @@ def _select_cuda_device(
     if cuda_devices:
         selected = next(iter(cuda_devices))
         if selected.index is None:
-            selected = torch.device("cuda", torch.cuda.current_device())
+            selected = torch.device(torch_device_type, torch_dev.current_device())
         else:
-            selected = torch.device("cuda", selected.index)
-        torch.cuda.set_device(selected)
+            selected = torch.device(torch_device_type, selected.index)
+        torch_dev.set_device(selected)
         return selected
 
     return _auto_select_cuda_device(required_bytes)

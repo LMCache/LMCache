@@ -15,6 +15,7 @@ import pytest
 import torch
 
 # First Party
+from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
@@ -35,7 +36,6 @@ from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerializer,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.memory_management import MemoryObj
 
 
@@ -358,7 +358,9 @@ def test_turboquant_storage_manager_roundtrip(
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
         handle = sm.submit_prefetch_task(keys, layout)
-        hits = _wait_for_prefetch_status(sm, handle, timeout=120.0)
+        hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
+        assert hit_bitmap is not None
+        hits = hit_bitmap.count_leading_ones()
         assert hits == len(keys), f"Expected {len(keys)} hits, got {hits}"
 
         with sm.read_prefetched_results(keys) as objs:
@@ -418,7 +420,7 @@ def test_turboquant_direct_roundtrip_cuda(
     from lmcache.v1.distributed.serde.turboquant import TurboQuantDeserializer
 
     device = torch.device("cuda:0")
-    dtype = torch.bfloat16
+    dtype = torch.float16
 
     # LMCache KV layout: [2, num_layers, num_tokens, hidden_dim]
     num_layers = 4
@@ -431,6 +433,8 @@ def test_turboquant_direct_roundtrip_cuda(
         preset=preset,
         head_dim=head_dim,
         block_size=16,
+        skip_first_layers=0,
+        skip_last_layers=0,
     )
 
     torch.manual_seed(2026)
@@ -584,7 +588,9 @@ def test_turboquant_fs_storage_manager_roundtrip(
         assert ok, f"L1 not cleared: {sm.report_status()['l1_manager']}"
 
         handle = sm.submit_prefetch_task(keys, layout)
-        hits = _wait_for_prefetch_status(sm, handle, timeout=120.0)
+        hit_bitmap = _wait_for_prefetch_status(sm, handle, timeout=120.0)
+        assert hit_bitmap is not None
+        hits = hit_bitmap.count_leading_ones()
         assert hits == len(keys), f"Expected {len(keys)} hits, got {hits}"
 
         with sm.read_prefetched_results(keys) as objs:
