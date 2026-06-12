@@ -139,57 +139,93 @@ adapter is anything else, the endpoint returns 501. Future PRs can
 opt additional adapters in by overriding the method; no
 `StorageManager` changes are needed.
 
-### S3 listing is served from in-memory accounting
+### S3 listing is served from S3 itself, via `ListObjectsV2`
 
-S3's `list_l2_keys` reads from `self._key_sizes` — the
-`dict[ObjectKey, int]` the adapter maintains alongside its byte
-accounting. This is the same source `_notify_keys_stored` /
-`_notify_keys_deleted` keep current, so the listing matches exactly
-what the adapter considers resident.
+The adapter issues a real `ListObjectsV2` request against the bucket
+on every page call. The response XML is parsed into `(ObjectKey, size)`
+pairs via :func:`_string_to_object_key` (the inverse of the adapter's
+key serializer), and S3's `NextContinuationToken` becomes the next
+wire `page_token`.
 
-The AWS CRT `s3.S3Client` used by the adapter does NOT expose a
-low-cost `ListObjectsV2`-style API, so a bucket-side listing would
-require falling back to boto3 — out of scope for v1. The in-memory
-approach is also cheaper (no S3 RTT) and consistent with how the
-adapter answers `get_usage()`.
+Rationale: the in-memory `_key_sizes` tracker only knows what *this*
+LMCache instance has stored since startup. Operators running multiple
+instances against the same bucket, or restarting an instance, need a
+listing that reflects what's actually on S3 — not just this process's
+write log.
 
-**Caveat:** keys written to the bucket by a *different* writer (e.g.
-another LMCache instance sharing the same prefix) are invisible to
-this listing. This matches the rest of the adapter's semantics — that
-writer also doesn't show up in `get_usage()` byte counts.
+Costs:
+- **One S3 RTT per page** (vs. zero for an in-memory walk).
+- Server-side prefix filter on `model_name` (when set) lets S3 skip
+  irrelevant keys; `cache_salt` filtering still happens client-side
+  because the salt is at the *end* of the key.
+- `MaxKeys` is capped at 1000 by S3, so even when a caller requests
+  `page_size=5000` the adapter clamps internally and returns at most
+  1000 entries per call — the caller continues via the token.
 
-### Stable ordering
+### Filtering
 
-For a fixed filter, keys are sorted by `(cache_salt, model_name,
-kv_rank, chunk_hash)`. This ordering is:
+- **`model_name`** ⇒ pushed down as `prefix=<flattened_model_name>@`.
+  Flattening (`/` → `_`) is applied so the prefix matches the form
+  `_format_safe_path` stored on S3.
+- **`cache_salt`** ⇒ applied client-side after the XML parse, since
+  the salt sits at the trailing position of the key.
 
-- **stable** across calls when the underlying set doesn't change
-  (snapshot taken under `self._lock`, sort applied off-lock so a
-  paginated walk doesn't block writers);
-- **deterministic** so the wire-level cursor (an offset into the
-  sorted list) converges to "end-of-list" instead of looping.
-
-If stores/evictions mutate the key set between pages, individual keys
-MAY appear, disappear, or shift between pages. The contract is
-best-effort consistency, not snapshot isolation. Operator workflows
-that need an exact snapshot should quiesce writes first.
+Both filters narrow the returned page but do NOT cause the adapter to
+fetch additional S3 pages to "top up" — the returned page may be
+smaller than the caller's `page_size` after filtering. The caller
+continues paging until `next_page_token` is `null`.
 
 ### Pagination
 
-Because each call targets one adapter, the wire `page_token` is just
-the adapter's own cursor passed through verbatim — no envelope
-encoding. For the S3 adapter today, that cursor is a stringified
-integer offset into the sorted list.
+The wire `page_token` is S3's `NextContinuationToken`, passed through
+verbatim by `StorageManager.list_l2_keys`. Callers MUST treat it as
+opaque — it's a base64-ish string whose format is owned by S3.
 
-Callers MUST still treat the token as opaque: a future adapter might
-use a different cursor shape (e.g. base64 of `LastEvaluatedKey` for a
-DynamoDB-backed L2), and the storage manager makes no commitments
-about format stability beyond "pass it back verbatim."
+When `IsTruncated` is `false` in the response, the adapter returns
+`next_page_token=None` and the listing is complete.
+
+### Cross-instance visibility
+
+Because the listing is bucket-side, keys written by other LMCache
+instances sharing the same prefix DO appear. Keys written by other
+tools (anything whose object name doesn't conform to
+`<model>@<rank>@<group>@<hash>[@<salt>]`) are silently dropped from
+the response — `_string_to_object_key` raises `ValueError`, and the
+parser skips entries it can't decode.
+
+### Round-trip caveat: `/` in model_name
+
+`_format_safe_path` flattens `/` to `_` in the URL path before
+issuing a PUT, which means the object name stored on S3 carries the
+flattened form (e.g. a key whose original `model_name` was
+`"meta-llama/Llama-3.1-8B"` is stored under
+`"meta-llama_Llama-3.1-8B@..."`).
+
+When the listing decodes such an object name back to an ObjectKey,
+`model_name` carries the flattened `"meta-llama_Llama-3.1-8B"`, not
+the original. Eviction round-trips stay correct because
+`_object_key_to_string` is idempotent over the flattened form (no
+remaining `/` to re-flatten), so the listed key targets the same S3
+object on a subsequent evict.
+
+Operators reading the listing should treat the `model_name` field as
+"the form this adapter sees on S3," not necessarily the form their
+callers originally used. A future PR could roundtrip the original via
+S3 object metadata (`x-amz-meta-model-name`) if a real workflow needs
+it.
+
+### Consistency
+
+S3 `ListObjectsV2` is strongly consistent for new keys (read-after-write)
+but offers no snapshot guarantees across paged calls — keys written
+or deleted between calls may appear, disappear, or shift positions.
+The contract is best-effort. Operator workflows that need an exact
+snapshot should quiesce writes first.
 
 `page_size` is clamped to `[1, 5000]` at the HTTP layer and to
-`> 0` at the StorageManager layer. Default 500 — chosen to keep a
-single response under typical HTTP body soft-limits even with verbose
-keys.
+`[1, 1000]` at the S3 adapter layer (S3's `MaxKeys` ceiling). Default
+500 — chosen to keep a single response under typical HTTP body
+soft-limits even with verbose keys.
 
 ---
 

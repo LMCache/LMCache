@@ -100,6 +100,59 @@ def _path_to_key(path: str) -> str:
     return unquote(path.lstrip("/"))
 
 
+def _build_list_objects_v2_response(
+    backend: "_FakeBackend",
+    prefix: str | None,
+    max_keys: int,
+    continuation_token: str | None,
+) -> bytes:
+    """Render a minimal ListObjectsV2 XML response from the fake backend.
+
+    The adapter's parser only consumes ``<Contents>/<Key>`` +
+    ``<Contents>/<Size>`` and ``<NextContinuationToken>``, so other
+    fields can be omitted. Continuation tokens here are just the
+    "start-after-this-key" cursor — opaque to the adapter, simple
+    enough for tests.
+    """
+    with backend._lock:
+        all_keys = sorted(backend._data.keys())
+        sizes = {k: len(backend._data[k]) for k in all_keys}
+
+    if prefix:
+        all_keys = [k for k in all_keys if k.startswith(prefix)]
+    if continuation_token is not None:
+        # In our fake, the token IS the last key returned on the
+        # previous page. Start strictly after it.
+        all_keys = [k for k in all_keys if k > continuation_token]
+
+    page = all_keys[:max_keys]
+    truncated = len(all_keys) > max_keys
+    next_token = page[-1] if (truncated and page) else None
+
+    body = ["<?xml version='1.0' encoding='UTF-8'?>"]
+    body.append("<ListBucketResult xmlns='http://s3.amazonaws.com/doc/2006-03-01/'>")
+    body.append(f"<IsTruncated>{'true' if truncated else 'false'}</IsTruncated>")
+    for k in page:
+        body.append(f"<Contents><Key>{k}</Key><Size>{sizes[k]}</Size></Contents>")
+    if next_token is not None:
+        body.append(f"<NextContinuationToken>{next_token}</NextContinuationToken>")
+    body.append("</ListBucketResult>")
+    return "".join(body).encode("utf-8")
+
+
+def _parse_list_query(path: str) -> tuple[str | None, int, str | None]:
+    """Pull ``prefix`` / ``max-keys`` / ``continuation-token`` out of the
+    ListObjectsV2 query string."""
+    # Standard
+    from urllib.parse import parse_qs, urlsplit
+
+    qs = parse_qs(urlsplit(path).query)
+    prefix = qs.get("prefix", [None])[0]
+    max_keys = int(qs.get("max-keys", ["1000"])[0])
+    cont = qs.get("continuation-token", [None])[0]
+    return prefix, max_keys, cont
+
+
 class _FakeS3Request:
     """In-process substitute for awscrt.s3.S3Request.
 
@@ -127,6 +180,30 @@ class _FakeS3Request:
         # Extract method + path from the HttpRequest
         method = request.method
         path = request.path
+
+        # ListObjectsV2 is dispatched as GET on the bucket root with a
+        # ``?list-type=2&...`` query string — intercept before the
+        # per-key GET branch below so it doesn't try to look up an
+        # object named "".
+        if (
+            method == "GET"
+            and operation_name == "ListObjectsV2"
+            and path.startswith("/?")
+        ):
+            prefix, max_keys, cont = _parse_list_query(path)
+            xml = _build_list_objects_v2_response(_BACKEND, prefix, max_keys, cont)
+            try:
+                if on_headers is not None:
+                    on_headers(200, [("content-type", "application/xml")])
+                if on_body is not None:
+                    on_body(xml, 0)
+                if on_done is not None:
+                    on_done(error=None, status_code=200)
+                self.finished_future.set_result(None)
+            except Exception as e:
+                if not self.finished_future.done():
+                    self.finished_future.set_exception(e)
+            return
         key_str = _path_to_key(path)
 
         err_inj = _BACKEND._inject_error
@@ -698,27 +775,32 @@ class TestFactoryRegistration:
 # list_l2_keys
 # =============================================================================
 #
-# These tests poke ``_key_sizes`` directly to set up the listing's
-# input — the production code path that fills it (``submit_store_task``
-# → ``_handle_store_completion``) is already covered elsewhere in this
-# module. The point here is to exercise listing's filtering, ordering,
-# and pagination semantics in isolation from the I/O pipeline.
+# These tests populate the fake S3 backend directly via ``_BACKEND.put``,
+# bypassing the adapter's store pipeline. The listing path is what's
+# under test: ListObjectsV2 dispatch, XML parse, prefix filter, cursor
+# pagination, and the ``cache_salt`` post-filter.
+
+
+def _put_object(key: ObjectKey, size: int = 0) -> None:
+    """Place a key in the fake S3 backend with deterministic content."""
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
+        _object_key_to_string,
+    )
+
+    name = _object_key_to_string(key)
+    _BACKEND.put(name, b"\x00" * size)
 
 
 class TestS3L2AdapterListKeys:
-    def _populate(self, adapter, keys_and_sizes):
-        with adapter._lock:
-            for k, sz in keys_and_sizes:
-                adapter._key_sizes[k] = sz
-
-    def test_empty_adapter_returns_empty_page(self, adapter):
+    def test_empty_bucket_returns_empty_page(self, adapter):
         page = adapter.list_l2_keys()
         assert page.entries == ()
         assert page.next_page_token is None
 
     def test_lists_all_keys_when_unfiltered(self, adapter):
-        keys = [(create_object_key(i, model_name="llama"), 100 + i) for i in range(3)]
-        self._populate(adapter, keys)
+        for i in range(3):
+            _put_object(create_object_key(i, model_name="llama"), size=100 + i)
 
         page = adapter.list_l2_keys(page_size=10)
 
@@ -729,26 +811,7 @@ class TestS3L2AdapterListKeys:
         assert {e.size_bytes for e in page.entries} == {100, 101, 102}
         assert page.next_page_token is None
 
-    def test_stable_sort_order(self, adapter):
-        # Insertion order is reverse of expected sort order — listing
-        # must apply the sort independent of dict iteration order.
-        k_late = ObjectKey(
-            chunk_hash=b"\xff" * 4, model_name="z", kv_rank=9, cache_salt="z"
-        )
-        k_early = ObjectKey(
-            chunk_hash=b"\x00" * 4, model_name="a", kv_rank=0, cache_salt="a"
-        )
-        k_mid = ObjectKey(
-            chunk_hash=b"\x80" * 4, model_name="a", kv_rank=1, cache_salt="a"
-        )
-        self._populate(adapter, [(k_late, 1), (k_early, 2), (k_mid, 3)])
-
-        page = adapter.list_l2_keys(page_size=10)
-
-        # Sort key: (cache_salt, model_name, kv_rank, chunk_hash).
-        assert [e.key for e in page.entries] == [k_early, k_mid, k_late]
-
-    def test_cache_salt_filter(self, adapter):
+    def test_cache_salt_filter_client_side(self, adapter):
         alice = ObjectKey(
             chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0, cache_salt="alice"
         )
@@ -756,32 +819,33 @@ class TestS3L2AdapterListKeys:
             chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0, cache_salt="bob"
         )
         anon = ObjectKey(chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0)
-        self._populate(adapter, [(alice, 1), (bob, 2), (anon, 3)])
+        for k in (alice, bob, anon):
+            _put_object(k, size=1)
 
-        # Filter to one tenant.
         page = adapter.list_l2_keys(cache_salt="alice", page_size=10)
         assert [e.key for e in page.entries] == [alice]
 
-        # Filter to un-salted traffic — empty string is a valid filter
-        # value distinct from ``None``.
+        # Empty-string salt is a valid filter value, distinct from
+        # ``None`` (no filter).
         page = adapter.list_l2_keys(cache_salt="", page_size=10)
         assert [e.key for e in page.entries] == [anon]
 
-    def test_model_name_filter(self, adapter):
+    def test_model_name_pushed_down_as_prefix(self, adapter):
         llama = ObjectKey(chunk_hash=b"\x00" * 4, model_name="llama", kv_rank=0)
         mistral = ObjectKey(chunk_hash=b"\x00" * 4, model_name="mistral", kv_rank=0)
-        self._populate(adapter, [(llama, 1), (mistral, 2)])
+        _put_object(llama, size=1)
+        _put_object(mistral, size=1)
 
         page = adapter.list_l2_keys(model_name="llama", page_size=10)
         assert [e.key for e in page.entries] == [llama]
 
     def test_pagination_cursor_walks_full_set(self, adapter):
-        keys = [(create_object_key(i, model_name="llama"), 1) for i in range(5)]
-        self._populate(adapter, keys)
+        # 5 keys, page_size=2 → expect 3 calls: (0,1), (2,3), (4,).
+        for i in range(5):
+            _put_object(create_object_key(i, model_name="llama"), size=1)
 
         collected = []
         cursor = None
-        # Page size of 2 → expect 3 calls: (0,1), (2,3), (4,)
         while True:
             page = adapter.list_l2_keys(page_size=2, cursor=cursor)
             collected.extend(page.entries)
@@ -794,16 +858,33 @@ class TestS3L2AdapterListKeys:
         with pytest.raises(ValueError):
             adapter.list_l2_keys(page_size=0)
 
-    def test_invalid_cursor_raises(self, adapter):
-        with pytest.raises(ValueError):
-            adapter.list_l2_keys(cursor="not-an-int")
-        with pytest.raises(ValueError):
-            adapter.list_l2_keys(cursor="-1")
-
-    def test_offset_past_end_returns_empty(self, adapter):
-        self._populate(
-            adapter, [(create_object_key(i, model_name="m"), 1) for i in range(2)]
-        )
-        page = adapter.list_l2_keys(page_size=10, cursor="100")
-        assert page.entries == ()
+    def test_page_size_clamped_to_s3_max(self, adapter):
+        # Ask for far more than S3's MaxKeys ceiling. The adapter
+        # clamps internally and the fake honors whatever it receives,
+        # so 5 keys come back without error.
+        for i in range(5):
+            _put_object(create_object_key(i, model_name="m"), size=1)
+        page = adapter.list_l2_keys(page_size=999_999)
+        assert len(page.entries) == 5
         assert page.next_page_token is None
+
+    def test_circuit_breaker_blocks_listing(self, adapter):
+        # When the connection is disabled, listing must surface a
+        # clear error instead of issuing a doomed request.
+        with adapter._lock:
+            adapter._connection_disabled = True
+        with pytest.raises(RuntimeError) as exc:
+            adapter.list_l2_keys()
+        assert "disabled" in str(exc.value)
+
+    def test_unparsable_objects_silently_skipped(self, adapter):
+        # An object with a name that isn't this adapter's format
+        # (e.g. left behind by another tool) must not poison the
+        # response — it's just dropped from the listing.
+        _put_object(create_object_key(0, model_name="m"), size=1)
+        _BACKEND.put("not-our-format-key", b"junk")
+
+        page = adapter.list_l2_keys(page_size=10)
+
+        assert len(page.entries) == 1
+        assert page.entries[0].key == create_object_key(0, model_name="m")

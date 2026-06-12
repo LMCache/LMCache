@@ -35,6 +35,22 @@ class MPCoordinatorConfig:
             cycle (0.0 to 1.0).
         trigger_watermark: Eviction fires when usage reaches this fraction
             of the quota (0.0 to 1.0).
+        enable_startup_resync: When ``True`` the coordinator runs a
+            one-shot L2 resync on startup that paginates an MP server's
+            ``GET /l2/keys`` and backfills usage + eviction trackers.
+            Set to ``False`` to skip — useful in tests and in
+            deployments that start the coordinator before any MP
+            servers exist and don't care about pre-existing L2 state.
+        resync_poll_interval: Seconds between registry checks while
+            waiting for the first MP server to register before startup
+            resync.
+        resync_max_wait: Maximum seconds the startup resync waits for
+            an MP server before giving up. Beyond this, the coordinator
+            keeps running with empty trackers until normal usage events
+            fill them in.
+        resync_page_size: ``page_size`` to request from ``GET /l2/keys``
+            during resync. Larger values reduce RTT count; the server
+            clamps to its own ceiling.
     """
 
     host: str = "0.0.0.0"
@@ -44,6 +60,10 @@ class MPCoordinatorConfig:
     eviction_check_interval: float = 5.0
     eviction_ratio: float = 0.2
     trigger_watermark: float = 1.0
+    enable_startup_resync: bool = True
+    resync_poll_interval: float = 1.0
+    resync_max_wait: float = 60.0
+    resync_page_size: int = 1000
 
     def __post_init__(self) -> None:
         """Validate timing parameters.
@@ -63,6 +83,12 @@ class MPCoordinatorConfig:
             raise ValueError(
                 "trigger_watermark must be between 0.0 (exclusive) and 1.0"
             )
+        if self.resync_poll_interval <= 0:
+            raise ValueError("resync_poll_interval must be positive")
+        if self.resync_max_wait < 0:
+            raise ValueError("resync_max_wait must be non-negative")
+        if self.resync_page_size <= 0:
+            raise ValueError("resync_page_size must be positive")
 
     @classmethod
     def from_env(cls) -> "MPCoordinatorConfig":
@@ -89,6 +115,12 @@ class MPCoordinatorConfig:
                 )
                 return default
 
+        def _bool(name: str, default: bool) -> bool:
+            raw = os.getenv(f"{_ENV_PREFIX}{name}")
+            if raw is None:
+                return default
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+
         return cls(
             host=_str("HOST", cls.host),
             port=int(_num("PORT", cls.port, int)),
@@ -101,4 +133,12 @@ class MPCoordinatorConfig:
             ),
             eviction_ratio=_num("EVICTION_RATIO", cls.eviction_ratio, float),
             trigger_watermark=_num("TRIGGER_WATERMARK", cls.trigger_watermark, float),
+            enable_startup_resync=_bool(
+                "ENABLE_STARTUP_RESYNC", cls.enable_startup_resync
+            ),
+            resync_poll_interval=_num(
+                "RESYNC_POLL_INTERVAL", cls.resync_poll_interval, float
+            ),
+            resync_max_wait=_num("RESYNC_MAX_WAIT", cls.resync_max_wait, float),
+            resync_page_size=int(_num("RESYNC_PAGE_SIZE", cls.resync_page_size, int)),
         )

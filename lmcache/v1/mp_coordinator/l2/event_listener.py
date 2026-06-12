@@ -3,7 +3,7 @@
 
 Implements :class:`L2AdapterListener` to receive store/lookup/delete
 notifications from the L2 adapter, converts ``ObjectKey`` to
-``CacheKey``, buffers events, and flushes them to the coordinator in
+``EncodedObjectKey``, buffers events, and flushes them to the coordinator in
 batches on a timer.
 
 Thread-safe: listener callbacks can fire from any thread while
@@ -22,7 +22,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.mp_coordinator.schemas import (
-    CacheKey,
     EventType,
     ReportUsageRequest,
     ReportUsageResponse,
@@ -32,23 +31,6 @@ from lmcache.v1.mp_coordinator.schemas import (
 logger = init_logger(__name__)
 
 _DEFAULT_FLUSH_INTERVAL = 1.0
-
-
-def _object_key_to_cache_key(obj: ObjectKey) -> CacheKey:
-    """Convert an ``ObjectKey`` to a ``CacheKey``.
-
-    Args:
-        obj: The object key to convert.
-
-    Returns:
-        The equivalent cache key.
-    """
-    return CacheKey(
-        chunk_hash_hex=obj.chunk_hash.hex(),
-        model_name=obj.model_name,
-        kv_rank=obj.kv_rank,
-        cache_salt=obj.cache_salt,
-    )
 
 
 class L2EventListener(L2AdapterListener):
@@ -87,7 +69,7 @@ class L2EventListener(L2AdapterListener):
         for obj, size in zip(keys, sizes, strict=True):
             event = UsageEvent(
                 type=EventType.STORE,
-                key=_object_key_to_cache_key(obj),
+                key=obj.to_encoded_object_key(),
                 bytes=size,
             )
             with self._lock:
@@ -98,7 +80,7 @@ class L2EventListener(L2AdapterListener):
         for obj in keys:
             event = UsageEvent(
                 type=EventType.LOOKUP,
-                key=_object_key_to_cache_key(obj),
+                key=obj.to_encoded_object_key(),
                 bytes=0,
             )
             with self._lock:

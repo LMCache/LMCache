@@ -10,14 +10,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.l2.eviction_manager import (
     L2EvictionManager,
 )
 from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
 from lmcache.v1.mp_coordinator.schemas import (
-    CacheKey,
     EventType,
     L2StatusListResponse,
     L2StatusResponse,
@@ -41,23 +39,6 @@ def _resolve_salt_from_api_path(cache_salt: str) -> str:
 def _gb(n_bytes: int) -> float:
     """Convert bytes to GiB."""
     return n_bytes / _GB
-
-
-def _to_object_key(ck: CacheKey) -> ObjectKey:
-    """Convert a wire-format CacheKey to an ObjectKey.
-
-    Args:
-        ck: The cache key from the REST API.
-
-    Returns:
-        The equivalent ObjectKey for internal use.
-    """
-    return ObjectKey(
-        chunk_hash=bytes.fromhex(ck.chunk_hash_hex),
-        model_name=ck.model_name,
-        kv_rank=ck.kv_rank,
-        cache_salt=ck.cache_salt,
-    )
 
 
 def _quota_manager(request: Request) -> QuotaManager:
@@ -185,10 +166,10 @@ async def report_events(
     tracker = _usage_manager(request)
     ctrl = _eviction_manager(request)
     for event in body.events:
-        ok = _to_object_key(event.key)
+        ok = event.key.to_object_key()
         if event.type == EventType.STORE:
-            tracker.record_stored(event.key.cache_salt, event.bytes)
-            ctrl.on_store(ok, event.bytes)
+            tracker.record_stored(ok, event.bytes)
+            ctrl.on_store(ok)
         elif event.type == EventType.LOOKUP:
             ctrl.on_lookup(ok)
     return ReportUsageResponse(recorded=len(body.events))

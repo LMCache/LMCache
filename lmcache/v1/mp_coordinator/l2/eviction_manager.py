@@ -7,16 +7,22 @@ matching the eviction logic in
 
 The manager periodically checks per-salt usage
 (from :class:`L2UsageManager`) against ``watermark * quota``
-(from :class:`QuotaManager`).
-When a salt exceeds its threshold, it selects LRU keys and **logs**
-them — actual deletion is not implemented yet.
+(from :class:`QuotaManager`). When a salt exceeds its threshold, the
+manager selects LRU keys, dispatches a ``POST /l2/keys:evict`` to one
+registered MP server, and updates its local LRU tracking after the
+delete returns. The MP server in turn calls the underlying L2
+adapter (S3 today), so a single dispatch is enough — all coordinators
+share the same backing bucket.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
-import threading
+from dataclasses import asdict
+
+# Third Party
+import httpx
 
 # First Party
 from lmcache.logging import init_logger
@@ -26,6 +32,7 @@ from lmcache.v1.distributed.eviction_policy.isolated_lru import (
 )
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.mp_coordinator.l2.usage_manager import L2UsageManager
+from lmcache.v1.mp_coordinator.registry import InstanceRegistry
 
 logger = init_logger(__name__)
 
@@ -33,19 +40,20 @@ logger = init_logger(__name__)
 class L2EvictionManager:
     """Per-``cache_salt`` LRU eviction manager for the coordinator.
 
-    Delegates LRU ordering to :class:`IsolatedLRUEvictionPolicy`.
+    Delegates LRU ordering to :class:`IsolatedLRUEvictionPolicy` and
+    the per-key size ledger to the shared :class:`L2UsageManager`.
     Mirrors the trigger and ratio logic of
     :class:`L2EvictionController._check_and_evict_by_cache_salt`:
     eviction fires when ``usage >= watermark * quota``, and
     ``eviction_ratio`` is passed directly to the policy as a
     fraction of keys by count.
 
-    Thread-safety: ``_key_sizes`` is guarded by ``_lock``;
-    the policy has its own internal lock.
-
     Args:
         quota_manager: The shared quota registry.
-        usage_manager: The shared usage manager.
+        usage_manager: The shared usage manager; owns the per-key
+            size ledger that this class reads for logging and that
+            :meth:`on_remove` updates as part of the eviction
+            bookkeeping.
         eviction_ratio: Fraction of tracked keys to evict per
             cycle (by count). Passed to the policy.
         trigger_watermark: Eviction fires when usage reaches
@@ -59,53 +67,49 @@ class L2EvictionManager:
         eviction_ratio: float = 0.5,
         trigger_watermark: float = 1.0,
     ) -> None:
-        self._lock = threading.Lock()
         self._quota_manager = quota_manager
         self._usage_manager = usage_manager
         self._eviction_ratio = max(0.0, min(1.0, eviction_ratio))
         self._trigger_watermark = trigger_watermark
         self._policy = IsolatedLRUEvictionPolicy()
-        self._key_sizes: dict[ObjectKey, int] = {}
 
-    def on_store(self, key: ObjectKey, size_bytes: int) -> None:
-        """Record that a key was stored.
+    def on_store(self, key: ObjectKey) -> None:
+        """Record that a key was stored — register it in the LRU policy.
 
-        Args:
-            key: The object key that was stored.
-            size_bytes: Number of bytes stored for this key.
+        Sizes / per-tenant byte accounting are owned by
+        :class:`L2UsageManager`; callers should invoke
+        ``usage_manager.record_stored(key, num_bytes)`` separately.
         """
         self._policy.on_keys_created([key])
-        with self._lock:
-            self._key_sizes[key] = size_bytes
 
     def on_lookup(self, key: ObjectKey) -> None:
-        """Record that a key was looked up (touch — move to MRU end).
-
-        Args:
-            key: The object key that was looked up.
-        """
+        """Record that a key was looked up (touch — move to MRU end)."""
         self._policy.on_keys_touched([key])
 
     def on_remove(self, keys: list[ObjectKey]) -> None:
-        """Remove keys from LRU tracking (after eviction is executed).
+        """Remove keys from LRU tracking and the size ledger.
 
-        Args:
-            keys: The object keys that were removed.
+        Calls :meth:`L2UsageManager.record_evicted` for each key so
+        per-tenant byte totals reflect the freed bytes.
         """
         if not keys:
             return
         self._policy.on_keys_removed(keys)
-        with self._lock:
-            for key in keys:
-                self._key_sizes.pop(key, None)
+        for key in keys:
+            self._usage_manager.record_evicted(key)
 
-    def execute_evictions(self) -> dict[str, list[ObjectKey]]:
-        """Check all tracked salts against their quotas and log eviction candidates.
+    def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
+        """Check all tracked salts against their quotas and select
+        eviction candidates per salt.
 
         For every tracked salt, compare usage against
         ``watermark * quota``. Salts over threshold get eviction
         scoped to their own LRU list. Salts with no quota or zero
         quota get a full eviction (ratio=1.0).
+
+        Pure: no network calls, no state mutation beyond logging. The
+        caller (:meth:`execute_evictions`) is responsible for applying
+        the plan against the fleet and updating the LRU.
 
         Returns:
             A mapping of ``cache_salt`` to the list of keys selected
@@ -132,8 +136,9 @@ class L2EvictionManager:
 
             if keys_to_evict:
                 eviction_plan[cache_salt] = keys_to_evict
-                with self._lock:
-                    sizes = [self._key_sizes.get(k, 0) for k in keys_to_evict]
+                sizes = [
+                    self._usage_manager.get_key_size(k) or 0 for k in keys_to_evict
+                ]
                 evict_bytes = sum(sizes)
                 logger.info(
                     "Eviction plan for cache_salt=%r: %d keys "
@@ -147,15 +152,78 @@ class L2EvictionManager:
                     self._trigger_watermark,
                     effective_ratio,
                 )
-                for k, size in zip(keys_to_evict, sizes, strict=True):
-                    logger.info(
-                        "  -> evict key: model=%s, kv_rank=%d, hash=%s, size=%d",
-                        k.model_name,
-                        k.kv_rank,
-                        k.chunk_hash.hex(),
-                        size,
-                    )
 
-        # TODO: once eviction is wired end-to-end, call on_remove()
-        # for each salt's victims after the MP server confirms deletion.
         return eviction_plan
+
+    async def execute_evictions(
+        self,
+        registry: InstanceRegistry,
+        http_client: httpx.AsyncClient,
+        request_timeout: float = 30.0,
+    ) -> dict[str, list[ObjectKey]]:
+        """Compute the eviction plan and apply it via the MP fleet.
+
+        Picks any one MP server from ``registry`` and dispatches the
+        full set of victim keys to its ``POST /l2/keys:evict``
+        endpoint. Since every MP server in the fleet shares the same
+        backing L2 (e.g. one S3 bucket), a single dispatch evicts the
+        keys for all of them — there is no need to broadcast.
+
+        On a successful HTTP response, removes the dispatched keys
+        from the local LRU via :meth:`on_remove` so the coordinator's
+        tracking matches the fleet's actual state. On any failure
+        (no registered instances, network error, non-2xx response)
+        the LRU is **not** updated — the next eviction cycle will
+        re-select the same keys and retry.
+
+        Args:
+            registry: Live MP server registry. Eviction is a no-op
+                when empty.
+            http_client: Shared async HTTP client owned by the
+                coordinator app lifespan.
+            request_timeout: Per-request timeout in seconds passed to
+                ``httpx``.
+
+        Returns:
+            The eviction plan that was attempted (same shape as
+            :meth:`compute_eviction_plan`). A non-empty return does
+            NOT imply the dispatch succeeded — check the logs.
+        """
+        plan = self.compute_eviction_plan()
+        if not plan:
+            return plan
+
+        instances = registry.all_instances()
+        if not instances:
+            logger.warning(
+                "Eviction plan computed (%d salts) but no MP servers are "
+                "registered; skipping dispatch",
+                len(plan),
+            )
+            return plan
+
+        target = instances[0]
+        url = f"http://{target.ip}:{target.http_port}/l2/keys:evict"
+        all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
+        body = {"keys": [asdict(k.to_encoded_object_key()) for k in all_keys]}
+
+        try:
+            resp = await http_client.post(url, json=body, timeout=request_timeout)
+            resp.raise_for_status()
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning(
+                "Eviction dispatch to %s (%d keys) failed: %s; LRU unchanged",
+                target.instance_id,
+                len(all_keys),
+                e,
+            )
+            return plan
+
+        logger.info(
+            "Eviction dispatched to %s: %d keys across %d salts",
+            target.instance_id,
+            len(all_keys),
+            len(plan),
+        )
+        self.on_remove(all_keys)
+        return plan

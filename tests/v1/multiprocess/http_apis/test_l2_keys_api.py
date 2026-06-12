@@ -148,11 +148,10 @@ class TestEvictEndpoint:
     @pytest.mark.parametrize(
         "body",
         [
-            "not-json-text",  # invalid JSON
-            {},  # missing 'keys'
-            {"keys": "not-a-list"},
-            {"keys": [{"chunk_hash_hex": "zz", "model_name": "m", "kv_rank": 0}]},
-            {"keys": [{"chunk_hash_hex": _hex(1), "kv_rank": 0}]},  # no model
+            "not-json-text",  # invalid JSON → 422
+            {},  # missing 'keys' → 422
+            {"keys": "not-a-list"},  # wrong type → 422
+            {"keys": [{"chunk_hash_hex": _hex(1), "kv_rank": 0}]},  # no model → 422
             {
                 "keys": [
                     {
@@ -161,10 +160,12 @@ class TestEvictEndpoint:
                         "kv_rank": "not-int",
                     }
                 ]
-            },
+            },  # → 422
         ],
     )
-    def test_400_on_malformed_input(self, body):
+    def test_422_on_pydantic_validation_failure(self, body):
+        """Pydantic-level body-shape errors surface as 422 (FastAPI's
+        default for request validation)."""
         sm = _FakeStorageManager()
         client = TestClient(_make_app(sm))
         if isinstance(body, str):
@@ -175,6 +176,33 @@ class TestEvictEndpoint:
             )
         else:
             resp = client.post("/l2/keys:evict", json=body)
+        assert resp.status_code == 422, resp.text
+        assert sm.evict_calls == []
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # Bad hex — survives Pydantic typing but fails bytes.fromhex.
+            {"keys": [{"chunk_hash_hex": "zz", "model_name": "m", "kv_rank": 0}]},
+            # @ in model_name — survives Pydantic typing but violates the
+            # ObjectKey invariant.
+            {
+                "keys": [
+                    {
+                        "chunk_hash_hex": _hex(1),
+                        "model_name": "bad@name",
+                        "kv_rank": 0,
+                    }
+                ]
+            },
+        ],
+    )
+    def test_400_on_object_key_invariant_violation(self, body):
+        """Bodies that type-check but violate ``ObjectKey`` invariants
+        surface as 400 from our handler."""
+        sm = _FakeStorageManager()
+        client = TestClient(_make_app(sm))
+        resp = client.post("/l2/keys:evict", json=body)
         assert resp.status_code == 400, resp.text
         assert sm.evict_calls == []
 
@@ -215,6 +243,7 @@ class TestListEndpoint:
                 "chunk_hash_hex": "deadbeef",
                 "model_name": "llama",
                 "kv_rank": 2,
+                "object_group_id": 0,
                 "cache_salt": "alice",
                 "size_bytes": 4096,
                 "adapter": "s3",

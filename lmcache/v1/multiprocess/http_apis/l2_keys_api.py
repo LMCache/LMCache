@@ -24,14 +24,16 @@ or wait for the existing L1 eviction controller.
 """
 
 # Standard
+from dataclasses import asdict
 from typing import Any
 
 # Third Party
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import EncodedObjectKey
 
 router = APIRouter()
 
@@ -65,112 +67,45 @@ def _get_storage_manager(request: Request) -> Any:
     return engine.storage_manager
 
 
-def _parse_object_key(raw: Any) -> ObjectKey:
-    """Decode one wire-format key into an :class:`ObjectKey`.
+class EvictRequest(BaseModel):
+    """Wire body for :py:func:`evict_l2_keys`.
 
-    Wire schema (JSON object)::
-
-        {
-            "chunk_hash_hex": "<lowercase hex>",
-            "model_name": "<str>",
-            "kv_rank": <int>,
-            "cache_salt": "<str, optional, defaults to ''>"
-        }
-
-    Raises ``ValueError`` on any malformed field. Caller is responsible
-    for catching and turning the error into a 400 response.
+    Pydantic validates the ``keys`` list (length cap, per-item type
+    coercion) before our handler runs; malformed bodies surface as
+    FastAPI 422s without us writing manual checks. Per-item
+    :class:`EncodedObjectKey` → :class:`ObjectKey` conversion still happens
+    inside the handler because the ObjectKey invariants
+    (hex parse, ``@``-in-model-name, salt charset) aren't expressible
+    as Pydantic types — those raise ``ValueError`` which we map to 400.
     """
-    if not isinstance(raw, dict):
-        raise ValueError("each key must be a JSON object")
-    try:
-        chunk_hash_hex = raw["chunk_hash_hex"]
-        model_name = raw["model_name"]
-        kv_rank = raw["kv_rank"]
-    except KeyError as exc:
-        raise ValueError(f"missing required field: {exc.args[0]}") from None
-    if not isinstance(chunk_hash_hex, str):
-        raise ValueError("chunk_hash_hex must be a hex string")
-    if not isinstance(model_name, str):
-        raise ValueError("model_name must be a string")
-    if not isinstance(kv_rank, int) or isinstance(kv_rank, bool):
-        raise ValueError("kv_rank must be an integer")
-    cache_salt = raw.get("cache_salt", "")
-    if not isinstance(cache_salt, str):
-        raise ValueError("cache_salt must be a string")
-    try:
-        chunk_hash = bytes.fromhex(chunk_hash_hex)
-    except ValueError as exc:
-        raise ValueError(f"chunk_hash_hex is not valid hex: {exc}") from None
-    # ObjectKey enforces additional invariants on model_name / cache_salt
-    # (no ``@`` in model_name, etc.) — let the dataclass post_init raise
-    # ValueError; we catch & relabel in the endpoint.
-    return ObjectKey(
-        chunk_hash=chunk_hash,
-        model_name=model_name,
-        kv_rank=kv_rank,
-        cache_salt=cache_salt,
-    )
 
-
-def _encode_object_key(key: ObjectKey) -> dict[str, Any]:
-    """Serialize an :class:`ObjectKey` into the wire schema."""
-    return {
-        "chunk_hash_hex": key.chunk_hash.hex(),
-        "model_name": key.model_name,
-        "kv_rank": key.kv_rank,
-        "cache_salt": key.cache_salt,
-    }
+    keys: list[EncodedObjectKey] = Field(..., max_length=_MAX_EVICT_BATCH)
 
 
 @router.post("/l2/keys:evict")
-async def evict_l2_keys(request: Request) -> Any:
+async def evict_l2_keys(body: EvictRequest, request: Request) -> Any:
     """Evict a caller-supplied list of keys from the primary L2 adapter.
 
-    Body::
-
-        {"keys": [<ObjectKey wire-form>, ...]}
-
-    See :func:`_parse_object_key` for the per-key wire schema.
+    Body schema: :class:`EvictRequest` — ``{"keys": [EncodedObjectKey, ...]}``.
 
     Responses:
         200: ``{"requested": N, "adapter": "<type_name>", "ok": <bool>}``
             (with optional ``"error"`` field on ``ok=False``).
-        400: malformed body or unknown per-key field.
+        400: a key's payload survived Pydantic typing but violates an
+            ``ObjectKey`` invariant (bad hex, ``@`` in ``model_name``,
+            forbidden ``cache_salt`` char, ...).
+        422: Pydantic-level validation failure (missing ``keys``,
+            wrong types, batch over ``_MAX_EVICT_BATCH``).
         503: engine not initialized OR no L2 adapters configured.
     """
     sm = _get_storage_manager(request)
     if isinstance(sm, JSONResponse):
         return sm
 
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
-    if not isinstance(body, dict) or "keys" not in body:
-        return JSONResponse(
-            status_code=400,
-            content={"error": "body must be {'keys': [<ObjectKey>, ...]}"},
-        )
-    raw_keys = body["keys"]
-    if not isinstance(raw_keys, list):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "'keys' must be a list"},
-        )
-    if len(raw_keys) > _MAX_EVICT_BATCH:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": (
-                    f"too many keys in a single request "
-                    f"(limit={_MAX_EVICT_BATCH}, got={len(raw_keys)})"
-                )
-            },
-        )
-    parsed: list[ObjectKey] = []
-    for i, raw in enumerate(raw_keys):
+    parsed = []
+    for i, cache_key in enumerate(body.keys):
         try:
-            parsed.append(_parse_object_key(raw))
+            parsed.append(cache_key.to_object_key())
         except ValueError as exc:
             return JSONResponse(
                 status_code=400,
@@ -242,7 +177,7 @@ async def list_l2_keys(
 
     entries: list[dict[str, Any]] = []
     for entry in page.entries:
-        wire = _encode_object_key(entry.key)
+        wire = asdict(entry.key.to_encoded_object_key())
         wire["size_bytes"] = entry.size_bytes
         wire["adapter"] = entry.adapter_name
         entries.append(wire)

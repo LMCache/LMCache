@@ -97,6 +97,20 @@ class ObjectKey:
                 f"(got {len(self.cache_salt)})"
             )
 
+    def to_encoded_object_key(self) -> "EncodedObjectKey":
+        """Return the wire-format projection of this key.
+
+        See :class:`EncodedObjectKey` for the contract and round-trip
+        rules.
+        """
+        return EncodedObjectKey(
+            chunk_hash_hex=self.chunk_hash.hex(),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
+        )
+
     @staticmethod
     def IntHash2Bytes(chunk_hash: int) -> bytes:
         # NOTE: this is only used by tests
@@ -158,6 +172,60 @@ class ObjectKey:
             | (global_rank << 16)
             | (local_world_size << 8)
             | local_rank
+        )
+
+
+@dataclass(frozen=True)
+class EncodedObjectKey:
+    """Wire-format projection of :class:`ObjectKey`.
+
+    Canonical HTTP / JSON encoding of an ``ObjectKey``: the bytes-typed
+    ``chunk_hash`` is hex-encoded so the structure is JSON-safe, and
+    every other field is preserved with its original semantics. Use
+    :meth:`ObjectKey.to_encoded_object_key` to project an ``ObjectKey``
+    into an ``EncodedObjectKey``, and
+    :meth:`EncodedObjectKey.to_object_key` to recover the ``ObjectKey``.
+
+    Field types are enforced by whatever validation layer materializes
+    the instance — Pydantic when used as a FastAPI request body,
+    ``bytes.fromhex`` / :class:`ObjectKey`'s own ``__post_init__`` when
+    :meth:`to_object_key` is called. Direct construction with garbage
+    values is permitted; the error surfaces at conversion time.
+
+    Frozen so instances are usable as dict keys / inside
+    ``OrderedDict``s — the coordinator's LRU relies on this.
+
+    Attributes:
+        chunk_hash_hex: Hex-encoded ``ObjectKey.chunk_hash``.
+        model_name: Same as ``ObjectKey.model_name``.
+        kv_rank: Same as ``ObjectKey.kv_rank``.
+        object_group_id: Same as ``ObjectKey.object_group_id``. Default
+            ``0`` so callers using the pre-``object_group_id`` wire
+            shape continue to deserialize.
+        cache_salt: Same as ``ObjectKey.cache_salt``. Default ``""``.
+    """
+
+    chunk_hash_hex: str
+    model_name: str
+    kv_rank: int
+    object_group_id: int = 0
+    cache_salt: str = ""
+
+    def to_object_key(self) -> ObjectKey:
+        """Construct the corresponding :class:`ObjectKey`.
+
+        Raises:
+            ValueError: when ``chunk_hash_hex`` is not a valid hex
+                string, or when one of :class:`ObjectKey`'s field
+                invariants (no ``@`` in ``model_name``, salt charset,
+                etc.) is violated.
+        """
+        return ObjectKey(
+            chunk_hash=bytes.fromhex(self.chunk_hash_hex),
+            model_name=self.model_name,
+            kv_rank=self.kv_rank,
+            object_group_id=self.object_group_id,
+            cache_salt=self.cache_salt,
         )
 
 
