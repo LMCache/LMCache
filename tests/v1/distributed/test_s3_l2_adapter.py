@@ -683,3 +683,118 @@ class TestFactoryRegistration:
             assert isinstance(adp, S3L2Adapter)
         finally:
             adp.close()
+
+
+# =============================================================================
+# list_l2_keys
+# =============================================================================
+#
+# These tests poke ``_key_sizes`` directly to set up the listing's
+# input — the production code path that fills it (``submit_store_task``
+# → ``_handle_store_completion``) is already covered elsewhere in this
+# module. The point here is to exercise listing's filtering, ordering,
+# and pagination semantics in isolation from the I/O pipeline.
+
+
+class TestS3L2AdapterListKeys:
+    def _populate(self, adapter, keys_and_sizes):
+        with adapter._lock:
+            for k, sz in keys_and_sizes:
+                adapter._key_sizes[k] = sz
+
+    def test_empty_adapter_returns_empty_page(self, adapter):
+        page = adapter.list_l2_keys()
+        assert page.entries == ()
+        assert page.next_page_token is None
+
+    def test_lists_all_keys_when_unfiltered(self, adapter):
+        keys = [(create_object_key(i, model_name="llama"), 100 + i) for i in range(3)]
+        self._populate(adapter, keys)
+
+        page = adapter.list_l2_keys(page_size=10)
+
+        assert len(page.entries) == 3
+        # Adapter does NOT populate adapter_name — that's the storage
+        # manager's job.
+        assert all(e.adapter_name == "" for e in page.entries)
+        assert {e.size_bytes for e in page.entries} == {100, 101, 102}
+        assert page.next_page_token is None
+
+    def test_stable_sort_order(self, adapter):
+        # Insertion order is reverse of expected sort order — listing
+        # must apply the sort independent of dict iteration order.
+        k_late = ObjectKey(
+            chunk_hash=b"\xff" * 4, model_name="z", kv_rank=9, cache_salt="z"
+        )
+        k_early = ObjectKey(
+            chunk_hash=b"\x00" * 4, model_name="a", kv_rank=0, cache_salt="a"
+        )
+        k_mid = ObjectKey(
+            chunk_hash=b"\x80" * 4, model_name="a", kv_rank=1, cache_salt="a"
+        )
+        self._populate(adapter, [(k_late, 1), (k_early, 2), (k_mid, 3)])
+
+        page = adapter.list_l2_keys(page_size=10)
+
+        # Sort key: (cache_salt, model_name, kv_rank, chunk_hash).
+        assert [e.key for e in page.entries] == [k_early, k_mid, k_late]
+
+    def test_cache_salt_filter(self, adapter):
+        alice = ObjectKey(
+            chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0, cache_salt="alice"
+        )
+        bob = ObjectKey(
+            chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0, cache_salt="bob"
+        )
+        anon = ObjectKey(chunk_hash=b"\x00" * 4, model_name="m", kv_rank=0)
+        self._populate(adapter, [(alice, 1), (bob, 2), (anon, 3)])
+
+        # Filter to one tenant.
+        page = adapter.list_l2_keys(cache_salt="alice", page_size=10)
+        assert [e.key for e in page.entries] == [alice]
+
+        # Filter to un-salted traffic — empty string is a valid filter
+        # value distinct from ``None``.
+        page = adapter.list_l2_keys(cache_salt="", page_size=10)
+        assert [e.key for e in page.entries] == [anon]
+
+    def test_model_name_filter(self, adapter):
+        llama = ObjectKey(chunk_hash=b"\x00" * 4, model_name="llama", kv_rank=0)
+        mistral = ObjectKey(chunk_hash=b"\x00" * 4, model_name="mistral", kv_rank=0)
+        self._populate(adapter, [(llama, 1), (mistral, 2)])
+
+        page = adapter.list_l2_keys(model_name="llama", page_size=10)
+        assert [e.key for e in page.entries] == [llama]
+
+    def test_pagination_cursor_walks_full_set(self, adapter):
+        keys = [(create_object_key(i, model_name="llama"), 1) for i in range(5)]
+        self._populate(adapter, keys)
+
+        collected = []
+        cursor = None
+        # Page size of 2 → expect 3 calls: (0,1), (2,3), (4,)
+        while True:
+            page = adapter.list_l2_keys(page_size=2, cursor=cursor)
+            collected.extend(page.entries)
+            cursor = page.next_page_token
+            if cursor is None:
+                break
+        assert len(collected) == 5
+
+    def test_page_size_must_be_positive(self, adapter):
+        with pytest.raises(ValueError):
+            adapter.list_l2_keys(page_size=0)
+
+    def test_invalid_cursor_raises(self, adapter):
+        with pytest.raises(ValueError):
+            adapter.list_l2_keys(cursor="not-an-int")
+        with pytest.raises(ValueError):
+            adapter.list_l2_keys(cursor="-1")
+
+    def test_offset_past_end_returns_empty(self, adapter):
+        self._populate(
+            adapter, [(create_object_key(i, model_name="m"), 1) for i in range(2)]
+        )
+        page = adapter.list_l2_keys(page_size=10, cursor="100")
+        assert page.entries == ()
+        assert page.next_page_token is None

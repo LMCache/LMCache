@@ -37,6 +37,8 @@ from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
+    L2KeyEntry,
+    L2KeyListPage,
     L2TaskId,
 )
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -55,6 +57,25 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers (lifted from s3_connector.py / native_connector_l2_adapter.py)
 # ---------------------------------------------------------------------------
+
+
+def _parse_s3_list_cursor(cursor: Optional[str]) -> int:
+    """Decode a ``list_l2_keys`` cursor into a non-negative offset.
+
+    The cursor is the stringified next-offset returned by the previous
+    page (``None`` on the first call). Defensive validation keeps a
+    malformed cursor — caller-supplied — from manifesting as a confused
+    slice later.
+    """
+    if cursor is None:
+        return 0
+    try:
+        offset = int(cursor)
+    except ValueError as exc:
+        raise ValueError(f"malformed S3 list cursor: {exc}") from None
+    if offset < 0:
+        raise ValueError(f"S3 list cursor must be non-negative (got {offset})")
+    return offset
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
@@ -589,6 +610,73 @@ class S3L2Adapter(L2AdapterInterface):
     # via ``_notify_keys_stored`` / ``_notify_keys_deleted`` and returns
     # an ``AdapterUsage`` snapshot with ``usage_fraction == -1.0`` when
     # ``max_capacity_gb`` was 0 (unlimited / no eviction signal).
+
+    # ------------------------------------------------------------------
+    # Listing
+    # ------------------------------------------------------------------
+
+    def list_l2_keys(
+        self,
+        cache_salt: Optional[str] = None,
+        model_name: Optional[str] = None,
+        page_size: int = 500,
+        cursor: Optional[str] = None,
+    ) -> L2KeyListPage:
+        """List S3-resident keys from the adapter's in-memory accounting.
+
+        Backed by ``self._key_sizes`` — the dict maintained by
+        ``_handle_store_completion`` / ``_execute_delete`` so the
+        listing matches exactly what this adapter would consider
+        resident for byte accounting.
+
+        Pagination is stable across calls for a fixed filter as long as
+        no stores or deletes mutate ``_key_sizes`` between calls: the
+        keys are sorted by
+        ``(cache_salt, model_name, kv_rank, chunk_hash)`` and the cursor
+        is an offset into the sorted list. Concurrent mutations may
+        cause individual keys to appear, disappear, or shift between
+        pages — see :meth:`L2AdapterInterface.list_l2_keys` for the
+        consistency contract.
+
+        Note:
+            S3 doesn't expose a low-cost ``list_objects_v2``-style API
+            through the AWS CRT client used here, so we list from the
+            in-memory tracker rather than the bucket. Keys evicted by
+            another writer to the same bucket are invisible to this
+            method — outside scope for v1.
+        """
+        if page_size <= 0:
+            raise ValueError(f"page_size must be positive (got {page_size})")
+        offset = _parse_s3_list_cursor(cursor)
+
+        with self._lock:
+            # Snapshot the live state under the lock, then release —
+            # sorting/filtering happens off-lock so writers aren't
+            # blocked by a paginated walk over a large key set.
+            snapshot = list(self._key_sizes.items())
+
+        if cache_salt is not None:
+            snapshot = [(k, s) for k, s in snapshot if k.cache_salt == cache_salt]
+        if model_name is not None:
+            snapshot = [(k, s) for k, s in snapshot if k.model_name == model_name]
+        snapshot.sort(
+            key=lambda kv: (
+                kv[0].cache_salt,
+                kv[0].model_name,
+                kv[0].kv_rank,
+                kv[0].chunk_hash,
+            )
+        )
+
+        total = len(snapshot)
+        if offset >= total:
+            return L2KeyListPage(entries=(), next_page_token=None)
+        end = min(offset + page_size, total)
+        page_entries = tuple(
+            L2KeyEntry(key=k, size_bytes=s) for k, s in snapshot[offset:end]
+        )
+        next_cursor = str(end) if end < total else None
+        return L2KeyListPage(entries=page_entries, next_page_token=next_cursor)
 
     # ------------------------------------------------------------------
     # Status / Cleanup

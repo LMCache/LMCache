@@ -21,7 +21,11 @@ from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
-from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.base import (
+    L2AdapterInterface,
+    L2KeyEntry,
+    L2KeyListPage,
+)
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
@@ -720,6 +724,103 @@ class StorageManager:
             for salt, used in snap.items():
                 totals[salt] = totals.get(salt, 0) + used
         return totals
+
+    def evict_l2_keys(self, keys: list[ObjectKey]) -> dict[str, object]:
+        """Evict ``keys`` from the primary (first-configured) L2 adapter.
+
+        Args:
+            keys: keys to delete. An empty list is forwarded to the
+                adapter unchanged; the adapter decides whether to no-op.
+
+        Returns:
+            ``{"adapter": <type_name>, "ok": True}`` on success, or
+            ``{"adapter": <type_name>, "ok": False, "error": <str>}``
+            when the adapter's ``delete`` raised. Best-effort:
+            underlying adapter exceptions are caught and reported, not
+            re-raised, so the HTTP layer can return a structured 200
+            response even when a downstream call fails.
+
+        Raises:
+            ValueError: when no L2 adapters are configured.
+
+        Note:
+            The adapter is responsible for honoring its own in-flight
+            locks and firing ``on_l2_keys_deleted`` on listeners.
+
+            L1 is intentionally NOT touched — see the module docstring
+            of ``http_apis/l2_keys_api.py`` for rationale.
+        """
+        if not self._l2_adapters:
+            raise ValueError("no L2 adapters configured")
+        target = self._l2_adapters[0]
+        desc = self._adapter_descriptors[0]
+        try:
+            target.delete(keys)
+        except Exception as exc:
+            logger.exception(
+                "L2 adapter %s delete(%d keys) failed", desc.type_name, len(keys)
+            )
+            return {"adapter": desc.type_name, "ok": False, "error": str(exc)}
+        return {"adapter": desc.type_name, "ok": True}
+
+    def list_l2_keys(
+        self,
+        cache_salt: str | None = None,
+        model_name: str | None = None,
+        page_size: int = 500,
+        page_token: str | None = None,
+    ) -> L2KeyListPage:
+        """Paginate keys resident on the primary (first-configured) L2
+        adapter.
+
+        Args:
+            cache_salt: filter by ``ObjectKey.cache_salt``. ``None``
+                means no filter; ``""`` matches un-salted traffic.
+            model_name: filter by ``ObjectKey.model_name``. ``None``
+                means no filter.
+            page_size: maximum entries per page. Must be positive.
+            page_token: opaque cursor returned by the previous call.
+                Forwarded to the adapter verbatim (the adapter owns the
+                cursor format; ``StorageManager`` does no wrapping).
+                ``None`` on the first call.
+
+        Returns:
+            An :class:`L2KeyListPage`. ``next_page_token`` is ``None``
+            iff the underlying adapter signaled exhaustion.
+
+        Raises:
+            ValueError: when no L2 adapters are configured, when
+                ``page_size`` is non-positive, or when the
+                ``page_token`` is malformed (adapter-defined).
+            NotImplementedError: when the primary adapter does not
+                implement listing (e.g. when ``fs`` is configured
+                first in v1).
+
+        Note:
+            Each entry's :attr:`L2KeyEntry.adapter_name` is populated
+            from the adapter's descriptor type name (e.g. ``"s3"``).
+        """
+        if page_size <= 0:
+            raise ValueError(f"page_size must be positive (got {page_size})")
+        if not self._l2_adapters:
+            raise ValueError("no L2 adapters configured")
+        target = self._l2_adapters[0]
+        desc = self._adapter_descriptors[0]
+        page = target.list_l2_keys(
+            cache_salt=cache_salt,
+            model_name=model_name,
+            page_size=page_size,
+            cursor=page_token,
+        )
+        wrapped = tuple(
+            L2KeyEntry(
+                key=entry.key,
+                size_bytes=entry.size_bytes,
+                adapter_name=desc.type_name,
+            )
+            for entry in page.entries
+        )
+        return L2KeyListPage(entries=wrapped, next_page_token=page.next_page_token)
 
     def clear(self, force: bool = False):
         """
