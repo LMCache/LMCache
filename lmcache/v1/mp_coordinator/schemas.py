@@ -134,9 +134,15 @@ class ReportUsageRequest(BaseModel):
     """Body of ``POST /l2/events``.
 
     Attributes:
+        instance_id: Identifier of the MP server that produced this batch.
+        seq: Monotonically increasing sequence number scoped to this
+            ``instance_id``. Starts at 1 for the first flush after the
+            server starts.
         events: Batch of store/lookup events to record.
     """
 
+    instance_id: str
+    seq: int = Field(ge=1)
     events: list[UsageEvent]
 
 

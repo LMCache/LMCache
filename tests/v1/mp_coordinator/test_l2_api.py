@@ -31,6 +31,15 @@ def _lookup(salt: str, **kw) -> dict:
     return {"type": "lookup", "key": _key(salt, **kw), "bytes": 0}
 
 
+_seq_counter = 0
+
+
+def _events_body(events: list[dict], instance_id: str = "test-server") -> dict:
+    global _seq_counter
+    _seq_counter += 1
+    return {"instance_id": instance_id, "seq": _seq_counter, "events": events}
+
+
 # -- Quota writes ------------------------------------------------------------
 
 
@@ -98,13 +107,13 @@ def test_report_store_events():
     with _client() as client:
         resp = client.post(
             "/l2/events",
-            json={
-                "events": [
+            json=_events_body(
+                [
                     _store("user-a", 1000, h="01"),
                     _store("user-a", 500, h="02"),
                     _store("user-b", 2000, h="03"),
                 ]
-            },
+            ),
         )
         assert resp.status_code == 200
         assert resp.json()["recorded"] == 3
@@ -120,7 +129,7 @@ def test_report_lookup_events_accepted():
     with _client() as client:
         resp = client.post(
             "/l2/events",
-            json={"events": [_lookup("user-a")]},
+            json=_events_body([_lookup("user-a")]),
         )
         assert resp.status_code == 200
         assert resp.json()["recorded"] == 1
@@ -128,7 +137,10 @@ def test_report_lookup_events_accepted():
 
 def test_empty_events_batch():
     with _client() as client:
-        resp = client.post("/l2/events", json={"events": []})
+        resp = client.post(
+            "/l2/events",
+            json=_events_body([]),
+        )
         assert resp.status_code == 200
         assert resp.json()["recorded"] == 0
 
@@ -137,7 +149,7 @@ def test_invalid_event_type_rejected():
     with _client() as client:
         resp = client.post(
             "/l2/events",
-            json={"events": [{"type": "delete", "key": _key("a"), "bytes": 100}]},
+            json=_events_body([{"type": "delete", "key": _key("a"), "bytes": 100}]),
         )
         assert resp.status_code == 422
 
@@ -146,7 +158,7 @@ def test_negative_bytes_rejected():
     with _client() as client:
         resp = client.post(
             "/l2/events",
-            json={"events": [{"type": "store", "key": _key("a"), "bytes": -1}]},
+            json=_events_body([{"type": "store", "key": _key("a"), "bytes": -1}]),
         )
         assert resp.status_code == 422
 
@@ -159,7 +171,7 @@ def test_status_single_salt():
         client.put("/l2/quota/user-a", json={"limit_gb": 2.5})
         client.post(
             "/l2/events",
-            json={"events": [_store("user-a", 1000)]},
+            json=_events_body([_store("user-a", 1000)]),
         )
         data = client.get("/l2/status/user-a").json()
         assert data["cache_salt"] == "user-a"
@@ -181,12 +193,12 @@ def test_status_list():
         client.put("/l2/quota/a", json={"limit_gb": 1.0})
         client.post(
             "/l2/events",
-            json={
-                "events": [
+            json=_events_body(
+                [
                     _store("a", 100, h="01"),
                     _store("b", 200, h="02"),
                 ]
-            },
+            ),
         )
         data = client.get("/l2/status").json()
         assert abs(data["total_gb"] - 300 / 1024**3) < 1e-12
@@ -221,7 +233,7 @@ def test_default_salt_sentinel():
         client.put("/l2/quota/_default", json={"limit_gb": 3.0})
         client.post(
             "/l2/events",
-            json={"events": [_store("", 500)]},
+            json=_events_body([_store("", 500)]),
         )
         data = client.get("/l2/status/_default").json()
         assert data["cache_salt"] == ""

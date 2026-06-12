@@ -61,6 +61,7 @@ class L2EventListener(L2AdapterListener):
     Args:
         client: The HTTP client to send with.
         coordinator_url: Coordinator base URL (e.g. ``http://host:9300``).
+        instance_id: Identifier of this MP server (included in every batch).
         flush_interval: Seconds between flush attempts.
     """
 
@@ -68,11 +69,14 @@ class L2EventListener(L2AdapterListener):
         self,
         client: httpx.AsyncClient,
         coordinator_url: str,
+        instance_id: str,
         flush_interval: float = _DEFAULT_FLUSH_INTERVAL,
     ) -> None:
         self._client = client
         self._base_url = coordinator_url.rstrip("/")
+        self._instance_id = instance_id
         self._flush_interval = flush_interval
+        self._seq = 0
         self._lock = threading.Lock()
         self._buffer: list[UsageEvent] = []
 
@@ -122,8 +126,14 @@ class L2EventListener(L2AdapterListener):
                 return
             batch = self._buffer
             self._buffer = []
+            self._seq += 1
+            seq = self._seq
 
-        body = ReportUsageRequest(events=batch)
+        body = ReportUsageRequest(
+            instance_id=self._instance_id,
+            seq=seq,
+            events=batch,
+        )
         try:
             resp = await self._client.post(
                 f"{self._base_url}/l2/events",

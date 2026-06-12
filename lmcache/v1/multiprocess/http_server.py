@@ -143,6 +143,7 @@ async def lifespan(app: FastAPI):
         coordinator_l2_event_client = L2EventListener(
             coordinator_client,
             coordinator_config.url,
+            instance_id=mp_config.instance_id,
             flush_interval=coordinator_config.l2_event_flush_interval,
         )
         if engine.storage_manager is not None:
