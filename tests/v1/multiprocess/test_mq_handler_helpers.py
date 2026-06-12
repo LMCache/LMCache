@@ -52,10 +52,7 @@ def register_kv_cache_handler(
         model_name: Name of the model associated with this KV cache
         world_size: World size associated with this KV cache
         engine_type: Which serving engine produced the caches
-        layout_hints: Engine-provided hints dict. For vLLM,
-            ``layout_hints["inference_engine_logical_block_size"]``
-            carries the logical tokens-per-engine-block (previously a
-            standalone argument).
+        layout_hints: Engine-provided hints dict.
         engine_group_infos: Engine-neutral KV cache group metadata,
             msgspec-decoded from the request payload.
 
@@ -79,12 +76,6 @@ def register_kv_cache_handler(
     )
     assert isinstance(layout_hints, dict), (
         f"Expected layout_hints to be dict, got {type(layout_hints)}"
-    )
-    # inference_engine_logical_block_size, if present, must be an int.
-    ie_logical_block_size = layout_hints.get("inference_engine_logical_block_size")
-    assert ie_logical_block_size is None or isinstance(ie_logical_block_size, int), (
-        "Expected layout_hints['inference_engine_logical_block_size'] to be int, got "
-        f"{type(ie_logical_block_size)}"
     )
     assert isinstance(engine_group_infos, list), (
         f"Expected engine_group_infos to be a list, got {type(engine_group_infos)}"

@@ -35,7 +35,6 @@ SAMPLE_STATUS = {
             "world_size": 1,
             "kv_cache_layout": {
                 "num_layers": 32,
-                "inference_engine_logical_block_size": 16,
                 "num_blocks": 2048,
                 "cache_size_per_token": 163840,
                 "kernel_groups": [
@@ -45,8 +44,8 @@ SAMPLE_STATUS = {
                         "object_group_idx": 0,
                         "num_layers": 32,
                         "layer_indices": list(range(32)),
-                        "physical_block_size": 16,
-                        "compress_ratio": 1,
+                        "tokens_per_block": 16,
+                        "slots_per_block": 16,
                         "dtype": "torch.float16",
                         "gpu_kv_concrete_shape": "32 x [2, 2048, 16, 8, 128]",
                         "is_mla": False,
@@ -205,8 +204,7 @@ class TestDescribeKvcacheFields:
         assert kg["engine_group_idx"] == 0
         assert kg["object_group_idx"] == 0
         assert kg["num_layers"] == 32
-        assert kg["physical_block_size"] == 16
-        assert kg["compress_ratio"] == 1
+        assert kg["slots_per_block"] == 16
         assert kg["dtype"] == "torch.float16"
         assert kg["is_mla"] is False
         assert kg["attention_backend"] == "vLLM non-MLA flash attention"

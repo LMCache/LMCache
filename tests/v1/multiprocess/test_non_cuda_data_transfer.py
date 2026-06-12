@@ -678,7 +678,7 @@ def server_module_factory(
         stack.enter_context(
             patch(
                 "lmcache.v1.multiprocess.engine_context.ipc_key_to_object_keys",
-                return_value=object_keys or ["obj"],
+                return_value=[object_keys or ["obj"]],
             )
         )
 

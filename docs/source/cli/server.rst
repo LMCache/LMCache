@@ -73,6 +73,11 @@ Commonly used flags include:
    * - ``--coordinator-heartbeat-interval SECONDS``
      - Seconds between heartbeats (``> 0``, default ``5``). Keep well below the
        coordinator's instance timeout.
+   * - ``--coordinator-l2-event-reporting``
+     - Enable reporting L2 store/lookup events to the coordinator for
+       fleet-wide usage tracking and quota-based eviction.
+   * - ``--coordinator-l2-event-flush-interval SECONDS``
+     - Seconds between L2 event batch flushes (``> 0``, default ``1``).
    * - ``--trace-level {storage}``
      - Enable storage-level trace recording (see :doc:`trace`).
    * - ``--trace-output PATH``

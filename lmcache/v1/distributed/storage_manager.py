@@ -19,6 +19,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
+from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
@@ -768,6 +769,15 @@ class StorageManager:
             "l2_adapters": adapters,
             "num_l2_adapters": len(self._l2_adapters),
         }
+
+    def register_l2_listener(self, listener: L2AdapterListener) -> None:
+        """Register a listener on all L2 adapters.
+
+        Args:
+            listener: The listener to register.
+        """
+        for adapter in self._l2_adapters:
+            adapter.register_listener(listener)
 
     # Functions for debugging and testing
     def memcheck(self) -> bool:

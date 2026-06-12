@@ -329,11 +329,9 @@ def registered_instance(
     """
     instance_id = os.getpid()
 
-    # Register KV cache. ``layout_hints['inference_engine_logical_block_size']``
-    # must match the client context's ``page_size`` (=16) — mismatching
-    # them would cause the server to compute a bogus ``compress_ratio``
-    # and the retrieve path would size the tmp GPU buffer in physical
-    # slots while the stored memory_obj is still sized in logical tokens.
+    # Register KV cache. No engine group infos are sent, so the server
+    # detects ``slots_per_block`` from the tensors and treats every group
+    # as uncompressed (``compress_ratio == 1``).
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
         [
@@ -342,7 +340,7 @@ def registered_instance(
             "testmodel",
             1,
             EngineType.VLLM,
-            {"inference_engine_logical_block_size": 16},
+            {},
             [],
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
@@ -391,8 +389,8 @@ def test_register_unregister_kv_cache(
     """
     instance_id = os.getpid()
 
-    # Register. ``layout_hints['inference_engine_logical_block_size']``
-    # must match ClientContext.page_size (=16).
+    # Register. No engine group infos: geometry is detected from the
+    # tensors (uncompressed).
     future = client.submit_request(
         RequestType.REGISTER_KV_CACHE,
         [
@@ -401,7 +399,7 @@ def test_register_unregister_kv_cache(
             "testmodel",
             1,
             EngineType.VLLM,
-            {"inference_engine_logical_block_size": 16},
+            {},
             [],
         ],
         get_response_class(RequestType.REGISTER_KV_CACHE),
