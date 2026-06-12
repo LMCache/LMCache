@@ -76,7 +76,7 @@ def _make_memory_obj(address: int) -> MemoryObj:
     return obj
 
 
-def _make_pd_backend_data_dict():
+def _make_pd_backend_data_dict() -> object:
     """
     Create a minimal stand-in for PDBackendAsync's data dict and lock,
     with put/get_blocking/remove/contains methods copied from the real
@@ -97,7 +97,7 @@ def _make_pd_backend_data_dict():
                     return
                 self.data[key] = mem_obj
 
-        def get_blocking(self, key: CacheEngineKey):
+        def get_blocking(self, key: CacheEngineKey) -> MemoryObj:
             with self.data_lock:
                 mem_obj = self.data.get(key, None)
                 assert mem_obj is not None, f"Key {key} not found in local data."

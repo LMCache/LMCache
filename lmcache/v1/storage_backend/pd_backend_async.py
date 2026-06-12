@@ -906,16 +906,16 @@ class PDBackendAsync(AllocatorBackendInterface):
                         await self._abort_request(req_id)
                     return
 
+            # Track all keys (including deduped) for abort cleanup.
+            if req_id:
+                sent = self._sent_keys.setdefault(req_id, [])
+                sent.extend(k.to_string() for k in keys)
+
             if mem_objs_to_send:
                 channel_transfer_spec = {
                     "receiver_id": receiver_id,
                     "remote_indexes": remote_indexes,
                 }
-
-                # Track all keys (including deduped) for abort cleanup.
-                if req_id:
-                    sent = self._sent_keys.setdefault(req_id, [])
-                    sent.extend(k.to_string() for k in keys)
 
                 await self.transfer_channel.async_batched_write(
                     objects=mem_objs_to_send,
@@ -1355,6 +1355,7 @@ class PDBackendAsync(AllocatorBackendInterface):
                 key = CacheEngineKey.from_string(key_str)
                 if self.contains(key, pin=True):
                     already_sent_indexes.append(idx)
+                    current_batch_keys.append(key_str)
                     continue
 
                 if idx == total_allocs - 1:
