@@ -332,15 +332,11 @@ class ParallelStrategy:
             # Non-MLA: every rank owns a distinct KV shard and must write it.
             return True
         # MLA: KV is identical across all TP ranks within a PP stage, so each
-        # PP stage only needs one writer *per node it occupies*.  When a PP
-        # stage spans two nodes (e.g. tp=3, pp=8, n_servers=3 -> pp_rank=2
-        # owns ranks {6,7,8} which split across node0 and node1), both nodes
-        # must contribute a writer so that each LMCache server sees the
-        # stage's KV.
-        ranks_per_node = self.vllm_world_size // self.n_servers
-        pp_start = (self.vllm_worker_id // self.tp_size) * self.tp_size
-        node_start = (self.vllm_worker_id // ranks_per_node) * ranks_per_node
-        return self.vllm_worker_id == max(pp_start, node_start)
+        # PP stage only needs one writer. The connector enforces that a PP
+        # stage never spans nodes (tp_size divides ranks_per_node), so the
+        # first TP rank of every PP stage is always co-located with that
+        # stage's LMCache server and is the natural single writer.
+        return self.vllm_worker_id % self.tp_size == 0
 
 
 def _normalize_adapter_init_args(

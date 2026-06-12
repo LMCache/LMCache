@@ -463,7 +463,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     """
     The connector for LMCache multi-process mode.
 
-    Extra configs (kv_transfer_config.kv_connector_extra_config):
+    Extra configs (kv_transfer_config.extra_config):
 
     Multi-server deployment:
     - lmcache.mp.server_urls: server URL list or comma-separated string,
@@ -475,7 +475,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
     - lmcache.mp.port: the port of the LMCache server.
 
     - lmcache.mp.mq_timeout: timeout (seconds) for message queue requests.
-    - lmcache.mp.heartbeat_interval: interval (seconds) between heartbeat pings.
+    - lmcache.mp.heartbeat_interval: interval (seconds) between server
+      heartbeat pings.
     """
 
     def __init__(
@@ -537,6 +538,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "DP across multiple LMCache servers will be "
                 "supported in a follow-up PR."
             )
+
+        # Multi-server + MLA: a PP stage must not span multiple nodes,
+        # otherwise the per-piece reader count would vary per (server,
+        # pp_stage) pair and break the single-``tp_size`` LOOKUP /
+        # FREE_LOOKUP_LOCKS protocol.
+        if n_servers > 1 and mla_enabled(vllm_config.model_config):
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
+            ranks_per_node = vllm_config.parallel_config.world_size // n_servers
+            if ranks_per_node % tp_size != 0:
+                raise ValueError(
+                    "LMCacheMPConnector multi-server MLA requires "
+                    f"tensor_parallel_size ({tp_size}) to divide "
+                    f"ranks_per_node ({ranks_per_node}); PP stages spanning "
+                    "multiple nodes are not supported."
+                )
 
         zmq_context = zmq.Context.instance()
 
