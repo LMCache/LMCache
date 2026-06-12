@@ -110,31 +110,41 @@ def validate_mamba_step_alignment(vllm_config: VllmConfig) -> None:
     (``MambaManager.allocate_new_blocks``). LMCache keys chunks by token hash,
     so a skipped boundary would be stored as null-block garbage under a valid
     key and silently corrupt any request that later resumes from that prefix.
-    Requiring ``block_size <= max_num_batched_tokens < 2 * block_size`` makes
-    vLLM's block-aligned splitting (``Scheduler._mamba_block_aligned_split``)
-    advance every mid-prefill step by exactly one block, so every chunk
-    boundary holds a real snapshot.
+    Requiring either ``block_size <= max_num_batched_tokens < 2 * block_size``
+    or vLLM's ``mamba_align_single_block_prefill`` scheduler cap makes vLLM's
+    block-aligned splitting (``Scheduler._mamba_block_aligned_split``) advance
+    every cacheable prefill step by exactly one block, so every chunk boundary
+    holds a real snapshot.
 
     Args:
         vllm_config: The vLLM config; only Mamba-hybrid models in ``align``
             cache mode are constrained, others pass.
 
     Raises:
-        ValueError: If ``max_num_batched_tokens`` is not in
-            ``[block_size, 2 * block_size)``.
+        ValueError: If ``max_num_batched_tokens`` is below ``block_size``, or
+            if it can schedule multi-block Mamba-align prefill steps.
     """
     if getattr(vllm_config.cache_config, "mamba_cache_mode", "none") != "align":
         return
     block_size = vllm_config.cache_config.block_size
     max_batched = vllm_config.scheduler_config.max_num_batched_tokens
-    if not (block_size <= max_batched < 2 * block_size):
+    single_block_prefill = getattr(
+        vllm_config.scheduler_config, "mamba_align_single_block_prefill", False
+    )
+    if max_batched < block_size or (
+        max_batched >= 2 * block_size and not single_block_prefill
+    ):
         raise ValueError(
             f"Mamba-hybrid models with LMCache require "
-            f"block_size <= max_num_batched_tokens < 2 * block_size so every "
+            f"max_num_batched_tokens >= block_size and either "
+            f"max_num_batched_tokens < 2 * block_size or vLLM's "
+            f"--mamba-align-single-block-prefill enabled, so every cacheable "
             f"prefill step advances exactly one block and every block boundary "
             f"gets a state snapshot; got max_num_batched_tokens={max_batched}, "
-            f"block_size={block_size}. Set --max-num-batched-tokens "
-            f"{block_size}."
+            f"block_size={block_size}, "
+            f"mamba_align_single_block_prefill={single_block_prefill}. Set "
+            f"--max-num-batched-tokens {block_size}, or keep the larger batch "
+            f"and add --mamba-align-single-block-prefill."
         )
 
 

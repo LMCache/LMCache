@@ -133,12 +133,29 @@ Step 2 — derive the three required flags from ``N``
 
        lmcache server --chunk-size 784 --l1-size-gb 100 --eviction-policy LRU
 
-#. **vLLM** ``--max-num-batched-tokens`` **in [N, 2·N)** — setting it equal to
-   ``N`` is the simple, always-valid choice. Outside this range LMCache raises
-   at engine startup. ``align`` mode snapshots the Mamba state only at the
-   *end* of each scheduler step, so each prefill step must advance exactly one
-   block; a larger budget would let a step skip block boundaries, leaving no
-   snapshot for LMCache to store at those prefixes.
+#. **vLLM** must either cap each cacheable Mamba-align prefill step to one
+   unified block or keep ``--max-num-batched-tokens`` in ``[N, 2·N)``. The
+   recommended setting keeps a large global batch budget for decode and static
+   buffers while capping only Mamba-align prefill chunks::
+
+       vllm serve <model> \
+           --enable-prefix-caching --mamba-cache-mode align \
+           --max-num-batched-tokens 8192 \
+           --mamba-align-single-block-prefill \
+           --kv-transfer-config \
+           '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+   The legacy safe setting is still valid::
+
+       vllm serve <model> \
+           --enable-prefix-caching --mamba-cache-mode align \
+           --max-num-batched-tokens 784 \
+           --kv-transfer-config \
+           '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+
+   ``align`` mode snapshots the Mamba state only at the *end* of each scheduler
+   step; an uncapped larger budget would let one step skip block boundaries,
+   leaving no snapshot for LMCache to store at those prefixes.
 
 #. **vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align`` is
    mandatory (GDN backends do not support the ``all`` mode)::
@@ -150,8 +167,9 @@ Step 2 — derive the three required flags from ``N``
            '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
 So for a freshly-probed model the whole derivation is just: read ``N`` (step 1),
-then pass ``--chunk-size N`` to the server and ``--max-num-batched-tokens N`` to
-vLLM.
+then pass ``--chunk-size N`` to the server and either use
+``--mamba-align-single-block-prefill`` with a larger vLLM batch budget or set
+``--max-num-batched-tokens N``.
 
 No ``--no-disable-hybrid-kv-cache-manager`` or attention-backend flag is needed;
 ``LMCacheMPConnector`` advertises hybrid support and vLLM auto-selects the GDN

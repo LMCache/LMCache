@@ -60,22 +60,24 @@ Validated models
          vllm serve Qwen/Qwen3.6-27B \
              --enable-prefix-caching \
              --mamba-cache-mode align \
-             --max-num-batched-tokens 784 \
+             --max-num-batched-tokens 8192 \
+             --mamba-align-single-block-prefill \
              --kv-transfer-config \
              '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
       |
 
       **Qwen3.5-0.8B** (1 GPU, ``N = 544``): identical to the above, with
-      ``784`` replaced by ``544`` in both ``--chunk-size`` and
-      ``--max-num-batched-tokens``.
+      ``784`` replaced by ``544`` in ``--chunk-size``.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the
-      ``all`` mode). ``--max-num-batched-tokens`` must be at least the unified
-      block size and below twice it — LMCache raises at engine startup
-      otherwise. ``align`` snapshots the Mamba state only at scheduler-step
-      ends, so each prefill step must advance exactly one block for every
-      block boundary to hold a reusable snapshot.
+      ``all`` mode). ``align`` snapshots the Mamba state only at
+      scheduler-step ends, so cacheable prefill steps must advance exactly one
+      unified block for every block boundary to hold a reusable snapshot.
+      ``--mamba-align-single-block-prefill`` provides that per-request cap
+      while allowing ``--max-num-batched-tokens`` to stay large for batching.
+      Without that cap, ``--max-num-batched-tokens`` must be at least the
+      unified block size and below twice it.
 
       For the generic LMCache + vLLM wiring (ports, remote hosts), see
       :doc:`../mp/quickstart`.
