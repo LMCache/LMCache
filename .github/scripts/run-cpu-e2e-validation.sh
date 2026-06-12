@@ -11,7 +11,7 @@ fi
 
 BUILD_ID="${BUILDKITE_BUILD_ID:-local_$$}"
 VENV_DIR=".venv-${BUILD_ID}"
-SHARED_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)/.github/scripts"
+SHARED_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LMCACHE_LOG="${LMCACHE_LOG_FILE:-/tmp/build_${BUILD_ID}_lmcache_cpu_validation.log}"
 VLLM_LOG="${VLLM_LOG_FILE:-/tmp/build_${BUILD_ID}_vllm_cpu_validation.log}"
 LMCACHE_PID=""
