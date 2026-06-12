@@ -286,6 +286,10 @@ class RemoteBackendHealthCheck(HealthCheck):
         try:
             # put
             put_obj = self.backend.local_cpu_backend.allocate(shapes, dtypes, fmt)
+            if put_obj is None:
+                logger.warning("Health check skipped: CPU memory allocation failed.")
+                yield None, None
+                return
             future = self.backend.submit_put_task(key, put_obj)
             future.result(timeout=self._get_ping_timeout())
             # get
