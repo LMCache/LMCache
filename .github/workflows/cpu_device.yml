@@ -60,7 +60,7 @@ jobs:
               - '.github/scripts/install_vllm_cpu.sh'
               - '.github/scripts/install_lmcache_cpu.sh'
               - '.github/scripts/download_model.sh'
-              - '.buildkite/k3_tests/multiprocess/scripts/run-cpu-e2e-validation.sh'
+              - '.github/scripts/run-cpu-e2e-validation.sh'
               - '!operator/**'
 
   cpu-device-test:

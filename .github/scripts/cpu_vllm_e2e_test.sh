@@ -33,7 +33,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SHARED_SCRIPT="${REPO_ROOT}/.buildkite/k3_tests/multiprocess/scripts/run-cpu-e2e-validation.sh"
+SHARED_SCRIPT="${REPO_ROOT}/.github/scripts/run-cpu-e2e-validation.sh"
 
 if [ ! -f "${SHARED_SCRIPT}" ]; then
     echo "!! Shared script not found: ${SHARED_SCRIPT}"
