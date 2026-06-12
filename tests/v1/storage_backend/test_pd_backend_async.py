@@ -67,7 +67,20 @@ def _make_mem_obj(idx: int = 0) -> MemoryObj:
         shape=torch.Size(_DEFAULT_SHAPE),
         dtype=torch.bfloat16,
     )
-    obj.get_ref_count.return_value = 1
+    obj._ref_count = 1
+
+    def _ref_up():
+        obj._ref_count += 1
+
+    def _ref_down():
+        obj._ref_count -= 1
+
+    def _get_ref_count():
+        return obj._ref_count
+
+    obj.ref_count_up.side_effect = _ref_up
+    obj.ref_count_down.side_effect = _ref_down
+    obj.get_ref_count.side_effect = _get_ref_count
     return obj
 
 
