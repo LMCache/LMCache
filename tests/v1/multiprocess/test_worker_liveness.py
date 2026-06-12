@@ -183,7 +183,9 @@ class _FakeTarget:
     def touch_instance(self, instance_id: int) -> None:
         self.touched.append(instance_id)
 
-    def reap_stale_instances(self, timeout: float, grace: float) -> list[int]:
+    def reap_stale_instances(
+        self, reap_timeout_s: float, registration_grace_s: float
+    ) -> list[int]:
         reaped = self.to_reap[:]
         self.to_reap.clear()
         return reaped
@@ -273,21 +275,21 @@ def test_management_report_status_summarizes_liveness() -> None:
     assert ManagementModule(MagicMock()).report_status() == {}
 
 
-def test_blend_drop_instance_state_releases_mirror() -> None:
-    """drop_instance_state pops the blend mirrors for a reaped instance."""
+def test_blend_drop_instance_state_drops_rope_state() -> None:
+    """drop_instance_state pops the reaped instance's CB rope state.
+
+    The GPU context is no longer mirrored in BlendV3Module (reaping the GPU
+    entry frees it directly), so only the rope state is dropped here.
+    """
     # First Party
     from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
 
     module = BlendV3Module.__new__(BlendV3Module)
     module._cb_rope_state = {5: MagicMock()}
-    module._cb_gpu_contexts = {5: MagicMock()}
-    module._cb_gpu_context_meta = {5: ("m", 1)}
 
     module.drop_instance_state(5)
 
     assert 5 not in module._cb_rope_state
-    assert 5 not in module._cb_gpu_contexts
-    assert 5 not in module._cb_gpu_context_meta
     module.drop_instance_state(999)  # nothing held -> no error
 
 
