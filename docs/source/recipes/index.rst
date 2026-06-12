@@ -25,9 +25,9 @@ Each recipe page is intentionally minimal:
   with per-method validation status. Extensible: new methods get a row.
 - **Caveats** -- known limitations, if any.
 
-For the generic LMCache + engine wiring (ports, remote hosts, in-process mode,
-sending a first request), see :doc:`../getting_started/quickstart` and
-:doc:`../mp/quickstart`. Recipes assume those pages as a prerequisite.
+For the generic LMCache + engine wiring (ports, remote hosts,
+sending a first request), see :doc:`../mp/quickstart`. Recipes assume that
+page as a prerequisite.
 
 Supported architectures
 -----------------------
@@ -43,6 +43,13 @@ Supported architectures
      - TRT-LLM
      - Recipe
 
+   * - ``DeepseekV4ForCausalLM``
+     - ``deepseek-ai/DeepSeek-V4-Flash``
+     - ✓
+     - —
+     - —
+     - :doc:`deepseek_v4_flash`
+
    * - ``MiniMaxM2ForCausalLM``
      - ``MiniMaxAI/MiniMax-M2``
      - ✓
@@ -51,7 +58,15 @@ Supported architectures
      - :doc:`minimax_m2`
 
    * - ``Gemma4ForConditionalGeneration``
-     - ``google/gemma-4-31B-it``
+     - | ``google/gemma-4-31B-it``
+       | ``google/gemma-4-E4B-it``
+     - ✓
+     - —
+     - —
+     - :doc:`gemma4`
+
+   * - ``Gemma4UnifiedForConditionalGeneration``
+     - ``google/gemma-4-12B-it``
      - ✓
      - —
      - —
@@ -84,6 +99,14 @@ Supported architectures
      - —
      - —
      - :doc:`qwen3`
+
+   * - ``Qwen3_5ForConditionalGeneration``
+     - | ``Qwen/Qwen3.6-27B``
+       | ``Qwen/Qwen3.5-0.8B``
+     - ✓
+     - —
+     - —
+     - :doc:`qwen3_5`
 
    * - ``LlamaForCausalLM``
      - ``meta-llama/Meta-Llama-3.1-70B-Instruct``
@@ -124,12 +147,14 @@ To add a new architecture:
    :hidden:
    :maxdepth: 1
 
+   deepseek_v4_flash
    minimax_m2
    gemma4
    gemma3
    devstral
    gpt_oss
    qwen3
+   qwen3_5
    llama
    phi3
    mixtral

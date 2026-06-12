@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+"""CPU pinned-DRAM L1 memory manager."""
 
 # Standard
 from multiprocessing import shared_memory

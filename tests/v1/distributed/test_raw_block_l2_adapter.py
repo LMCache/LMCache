@@ -134,12 +134,16 @@ def _make_config(
     *,
     slot_bytes: int = 64 * 1024,
     capacity_bytes: int = 0,
+    io_engine: str = "posix",
+    use_uring_cmd: bool = False,
 ) -> RawBlockL2AdapterConfig:
     return RawBlockL2AdapterConfig(
         device_path=device_path,
         slot_bytes=slot_bytes,
         capacity_bytes=capacity_bytes,
         use_odirect=False,
+        io_engine=io_engine,
+        use_uring_cmd=use_uring_cmd,
         block_align=4096,
         header_bytes=4096,
         meta_total_bytes=1 * 1024 * 1024,
@@ -216,6 +220,47 @@ def _run_load(adapter: RawBlockL2Adapter, keys, objects):
     task_id = adapter.submit_load_task(keys, objects)
     assert _wait_event_fd(adapter.get_load_event_fd())
     return task_id, adapter.query_load_result(task_id)
+
+
+def test_raw_block_l2_adapter_config_parses_uring_flags():
+    cfg = RawBlockL2AdapterConfig.from_dict(
+        {
+            "type": "raw_block",
+            "device_path": "/tmp/raw-block-dev",
+            "slot_bytes": 64 * 1024,
+            "use_odirect": False,
+            "io_engine": "io_uring",
+        }
+    )
+
+    assert cfg.io_engine == "io_uring"
+    assert cfg.use_uring_cmd is False
+
+    with pytest.raises(ValueError, match="use_uring_cmd requires io_uring"):
+        RawBlockL2AdapterConfig.from_dict(
+            {
+                "type": "raw_block",
+                "device_path": "/tmp/raw-block-dev",
+                "slot_bytes": 64 * 1024,
+                "use_uring_cmd": True,
+            }
+        )
+
+
+def test_raw_block_l2_adapter_uring_cmd_rejects_regular_file():
+    with tempfile.TemporaryDirectory() as td:
+        dev_path = os.path.join(td, "dev.bin")
+        with open(dev_path, "wb") as f:
+            f.truncate(8 * 1024 * 1024)
+
+        with pytest.raises(ValueError, match="NVMe namespace character device"):
+            RawBlockL2Adapter(
+                _make_config(
+                    dev_path,
+                    io_engine="io_uring",
+                    use_uring_cmd=True,
+                )
+            )
 
 
 @requires_raw_block_ext
