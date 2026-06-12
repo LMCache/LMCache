@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from unittest.mock import MagicMock, patch
 import asyncio
 import os
 import shutil
@@ -10,13 +11,13 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import CacheEngineKey, DiskCacheMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.config_base import _parse_local_disk
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
-from tests.v1.utils import create_test_memory_obj
 
 
 class MockLookupServer:
@@ -197,17 +198,74 @@ class TestLocalDiskBackend:
 
     def test_submit_put_task_gated_by_min_chunk_size(
         self, temp_disk_path, async_loop, local_cpu_backend
-    ):
-        """Large ssd_gate_min_size_bytes rejects put before enqueue (extra_config).
-
-        Does not call ``LocalDiskBackend.close()`` here: the test ``async_loop``
-        is never run, and ``close()`` would block on executor shutdown.
-        """
+    ) -> None:
+        """Large ssd_gate_min_size_bytes rejects put before enqueue."""
         config = create_test_config(temp_disk_path)
         config.extra_config = {
             "ssd_gate_min_size_bytes": 10**9,
             "ssd_gate_min_access_count": 0,
         }
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+        key = create_test_key(42)
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = object()
+        memory_obj.get_physical_size.return_value = 1024
+
+        backend.submit_put_task(key, memory_obj)
+
+        assert not backend.exists_in_put_tasks(key)
+        local_cpu_backend.memory_allocator.close()
+
+    def test_get_blocking_success_records_read_for_frequency_gate(
+        self, temp_disk_path, async_loop, local_cpu_backend
+    ) -> None:
+        """Successful public reads warm the frequency gate for later writes."""
+        config = create_test_config(temp_disk_path)
+        config.extra_config = {"ssd_gate_min_access_count": 1}
+        backend = LocalDiskBackend(
+            config=config,
+            loop=async_loop,
+            local_cpu_backend=local_cpu_backend,
+            dst_device="cuda:0",
+        )
+        key = create_test_key(43)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        meta = DiskCacheMetadata(
+            path="/nonexistent/path.pt",
+            size=1024,
+            shape=shape,
+            dtype=torch.bfloat16,
+            cached_positions=None,
+            fmt=MemoryFormat.KV_2LTD,
+            pin_count=0,
+        )
+        with backend.disk_lock:
+            backend.dict[key] = meta
+            backend.cache_policy.update_on_put(key)
+
+        memory_obj = MagicMock(spec=MemoryObj)
+        memory_obj.tensor = object()
+        memory_obj.get_physical_size.return_value = 1024
+        with patch.object(backend, "load_bytes_from_disk", return_value=memory_obj):
+            assert backend.get_blocking(key) is memory_obj
+
+        def close_scheduled_coro(coro, loop):  # noqa: ANN001, ARG001
+            coro.close()
+            return MagicMock()
+
+        with patch(
+            "asyncio.run_coroutine_threadsafe", side_effect=close_scheduled_coro
+        ):
+            backend.submit_put_task(key, memory_obj)
+
+        assert backend.exists_in_put_tasks(key)
+        local_cpu_backend.memory_allocator.close()
+
 
 class TestMultiPathDiskBackend:
     """Test cases for multi-path (multi-device) LocalDiskBackend."""
@@ -303,24 +361,6 @@ class TestMultiPathDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
-        )
-        key = create_test_key(42)
-        memory_obj = create_test_memory_obj()
-        backend.submit_put_task(key, memory_obj)
-        assert not backend.exists_in_put_tasks(key)
-        local_cpu_backend.memory_allocator.close()
-
-    def test_submit_put_task_gated_by_read_count_until_warmed(
-        self, temp_disk_path, async_loop, local_cpu_backend
-    ):
-        """Frequency gate: enqueue only after enough read credits on the gate.
-
-        Uses ``_storage_gate.record_read`` to simulate hits without seeding the
-        on-disk dict. Same note as min-size test: no ``close()`` while loop idle.
-        """
-        config = create_test_config(temp_disk_path)
-        config.extra_config = {"ssd_gate_min_access_count": 2}
             dst_device="cuda:0",
         )
         assert backend.path == temp_disk_path
@@ -335,19 +375,6 @@ class TestMultiPathDiskBackend:
             config=config,
             loop=async_loop,
             local_cpu_backend=local_cpu_backend,
-            dst_device="cuda",
-        )
-        key = create_test_key(43)
-        memory_obj = create_test_memory_obj()
-        backend.submit_put_task(key, memory_obj)
-        assert not backend.exists_in_put_tasks(key)
-        backend._storage_gate.record_read(key)
-        backend.submit_put_task(key, memory_obj)
-        assert not backend.exists_in_put_tasks(key)
-        backend._storage_gate.record_read(key)
-        backend.submit_put_task(key, memory_obj)
-        assert backend.exists_in_put_tasks(key)
-        local_cpu_backend.memory_allocator.close()
             dst_device="cuda:0",
         )
         assert backend.path == temp_disk_path
@@ -422,3 +449,90 @@ class TestParseLocalDisk:
 
     def test_empty_string(self):
         assert _parse_local_disk("") is None
+
+
+class TestGetBlockingCachePolicyUpdate:
+    """Regression tests for phantom cache hit in get_blocking() (issue #3015).
+
+    ``get_blocking()`` must call ``cache_policy.update_on_hit()`` only when
+    ``load_bytes_from_disk()`` returns a valid ``MemoryObj``.  Calling it
+    before confirming load success records a phantom hit that skews future
+    eviction decisions.
+    """
+
+    def _inject_key(
+        self,
+        backend: LocalDiskBackend,
+        key: CacheEngineKey,
+        shape: torch.Size,
+        dtype: torch.dtype,
+    ) -> None:
+        """Insert a key into backend.dict without writing anything to disk."""
+        meta = DiskCacheMetadata(
+            path="/nonexistent/path.pt",
+            size=0,
+            shape=shape,
+            dtype=dtype,
+            cached_positions=None,
+            fmt=MemoryFormat.KV_2LTD,
+            pin_count=0,
+        )
+        with backend.disk_lock:
+            backend.dict[key] = meta
+            backend.cache_policy.update_on_put(key)
+
+    def test_no_phantom_hit_when_load_fails(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """update_on_hit must NOT be called when load_bytes_from_disk returns None."""
+        key = create_test_key(101)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        self._inject_key(local_disk_backend, key, shape, torch.bfloat16)
+
+        with patch.object(
+            local_disk_backend, "load_bytes_from_disk", return_value=None
+        ):
+            with patch.object(
+                local_disk_backend.cache_policy, "update_on_hit"
+            ) as mock_update:
+                result = local_disk_backend.get_blocking(key)
+
+        assert result is None
+        mock_update.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_updates_cache_policy_on_successful_load(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """update_on_hit must be called exactly once when the load succeeds."""
+        key = create_test_key(102)
+        shape = torch.Size([28, 2, 256, 8, 128])
+        self._inject_key(local_disk_backend, key, shape, torch.bfloat16)
+
+        fake_memory_obj = MagicMock(spec=MemoryObj)
+        with patch.object(
+            local_disk_backend, "load_bytes_from_disk", return_value=fake_memory_obj
+        ):
+            with patch.object(
+                local_disk_backend.cache_policy, "update_on_hit"
+            ) as mock_update:
+                result = local_disk_backend.get_blocking(key)
+
+        assert result is fake_memory_obj
+        mock_update.assert_called_once_with(key, local_disk_backend.dict)
+        local_disk_backend.local_cpu_backend.memory_allocator.close()
+
+    def test_key_absent_returns_none_without_policy_update(
+        self, local_disk_backend: LocalDiskBackend
+    ) -> None:
+        """get_blocking must return None immediately when the key is not cached."""
+        key = create_test_key(103)
+
+        with patch.object(
+            local_disk_backend.cache_policy, "update_on_hit"
+        ) as mock_update:
+            result = local_disk_backend.get_blocking(key)
+
+        assert result is None
+        mock_update.assert_not_called()
+        local_disk_backend.local_cpu_backend.memory_allocator.close()

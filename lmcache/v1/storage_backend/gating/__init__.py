@@ -5,7 +5,10 @@ from typing import Any
 
 # First Party
 from lmcache.v1.storage_backend.gating.base_gate import BaseStorageGate, NullStorageGate
-from lmcache.v1.storage_backend.gating.ssd_gate import SsdStorageGate
+from lmcache.v1.storage_backend.gating.ssd_gate import (
+    SsdStorageGate,
+    SsdStorageGateStats,
+)
 from lmcache.v1.storage_backend.gating.write_veto import WriteVetoReason
 
 
@@ -30,6 +33,7 @@ __all__ = [
     "BaseStorageGate",
     "NullStorageGate",
     "SsdStorageGate",
+    "SsdStorageGateStats",
     "WriteVetoReason",
     "build_storage_gate_from_extra",
 ]

@@ -1,12 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TypedDict
 import threading
 
 # First Party
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.storage_backend.gating.base_gate import BaseStorageGate
 from lmcache.v1.storage_backend.gating.write_veto import WriteVetoReason
+
+
+class SsdStorageGateStats(TypedDict):
+    """Aggregated storage-gate counters for diagnostics and tests."""
+
+    lookup_tracked_count: int
+    read_tracked_count: int
+    write_tracked_count: int
+    delete_tracked_count: int
+    total_lookup_count: int
+    total_read_count: int
+    total_write_count: int
+    total_delete_count: int
 
 
 class SsdStorageGate(BaseStorageGate):
@@ -106,3 +119,23 @@ class SsdStorageGate(BaseStorageGate):
             self._read_counts.pop(h, None)
             self._write_counts.pop(h, None)
             self._delete_counts[h] = self._delete_counts.get(h, 0) + 1
+
+    def get_stats(self) -> SsdStorageGateStats:
+        """
+        Return aggregate gate counters without exposing per-chunk internals.
+
+        Returns:
+            Aggregated counts for tracked chunk hashes and completed lookup,
+            read, write, and delete records.
+        """
+        with self._lock:
+            return {
+                "lookup_tracked_count": len(self._lookup_counts),
+                "read_tracked_count": len(self._read_counts),
+                "write_tracked_count": len(self._write_counts),
+                "delete_tracked_count": len(self._delete_counts),
+                "total_lookup_count": sum(self._lookup_counts.values()),
+                "total_read_count": sum(self._read_counts.values()),
+                "total_write_count": sum(self._write_counts.values()),
+                "total_delete_count": sum(self._delete_counts.values()),
+            }

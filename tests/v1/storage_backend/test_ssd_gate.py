@@ -11,7 +11,7 @@ from lmcache.v1.storage_backend.gating import (
 from ..utils import dumb_cache_engine_key
 
 
-def test_null_gate_admits_all():
+def test_null_gate_admits_all() -> None:
     gate = NullStorageGate()
     key = dumb_cache_engine_key(1)
     assert gate.on_lookup(key)
@@ -21,7 +21,7 @@ def test_null_gate_admits_all():
     assert gate.explain_write_veto(key, 1) is None
 
 
-def test_ssd_gate_length_veto():
+def test_ssd_gate_length_veto() -> None:
     gate = SsdStorageGate(min_size_bytes=100, min_read_count_before_write=0)
     key = dumb_cache_engine_key(1)
     assert gate.explain_write_veto(key, 50) == WriteVetoReason.LENGTH
@@ -29,7 +29,7 @@ def test_ssd_gate_length_veto():
     assert gate.explain_write_veto(key, 200) is None
 
 
-def test_ssd_gate_frequency_veto():
+def test_ssd_gate_frequency_veto() -> None:
     gate = SsdStorageGate(min_size_bytes=0, min_read_count_before_write=3)
     key = dumb_cache_engine_key(1)
     assert gate.explain_write_veto(key, 1000) == WriteVetoReason.FREQUENCY
@@ -41,7 +41,7 @@ def test_ssd_gate_frequency_veto():
     assert gate.explain_write_veto(key, 1000) is None
 
 
-def test_ssd_gate_record_write_resets_read_counter():
+def test_ssd_gate_record_write_resets_read_counter() -> None:
     gate = SsdStorageGate(min_size_bytes=0, min_read_count_before_write=2)
     key = dumb_cache_engine_key(1)
     gate.record_read(key)
@@ -51,16 +51,15 @@ def test_ssd_gate_record_write_resets_read_counter():
     assert gate.explain_write_veto(key, 500) == WriteVetoReason.FREQUENCY
 
 
-def test_ssd_gate_record_write_refresh_does_not_bump_write_counter():
+def test_ssd_gate_record_write_refresh_does_not_bump_write_counter() -> None:
     gate = SsdStorageGate(min_size_bytes=0, min_read_count_before_write=0)
     key = dumb_cache_engine_key(1)
     gate.record_write(key, new_admission=True)
     gate.record_write(key, new_admission=False)
-    h = key.chunk_hash
-    assert gate._write_counts.get(h) == 1
+    assert gate.get_stats()["total_write_count"] == 1
 
 
-def test_ssd_gate_lookup_trim():
+def test_ssd_gate_lookup_trim() -> None:
     gate = SsdStorageGate(
         min_size_bytes=0,
         min_read_count_before_write=0,
@@ -68,15 +67,17 @@ def test_ssd_gate_lookup_trim():
     )
     gate.record_lookup(dumb_cache_engine_key(0))
     gate.record_lookup(dumb_cache_engine_key(1))
-    assert len(gate._lookup_counts) == 2
+    assert gate.get_stats()["lookup_tracked_count"] == 2
     gate.record_lookup(dumb_cache_engine_key(2))
-    assert len(gate._lookup_counts) == 1
+    stats = gate.get_stats()
+    assert stats["lookup_tracked_count"] == 1
+    assert stats["total_lookup_count"] == 1
 
 
-def test_build_gate_from_extra_empty():
+def test_build_gate_from_extra_empty() -> None:
     assert isinstance(build_storage_gate_from_extra({}), NullStorageGate)
 
 
-def test_build_gate_from_extra_ssd():
+def test_build_gate_from_extra_ssd() -> None:
     g = build_storage_gate_from_extra({"ssd_gate_min_size_bytes": 64})
     assert isinstance(g, SsdStorageGate)

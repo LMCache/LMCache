@@ -78,12 +78,21 @@ class DiskPrometheusListener:
             lambda: self._disk_gated_by_frequency_count
         )
         prometheus_logger.disk_write_avg_size_bytes.set_function(
-            lambda: (
-                self._disk_write_bytes // self._disk_write_ops
-                if self._disk_write_ops > 0
-                else 0
-            )
+            self.get_disk_write_avg_size_bytes
         )
+
+    def get_disk_write_avg_size_bytes(self) -> float:
+        """
+        Return the average disk write size in bytes.
+
+        Returns:
+            Average bytes written per disk write, or 0.0 when no writes have
+            completed.
+        """
+        with self._lock:
+            if self._disk_write_ops == 0:
+                return 0.0
+            return self._disk_write_bytes / self._disk_write_ops
 
     def on_write(self, size_bytes: int) -> None:
         """Record one completed disk write of ``size_bytes``."""
@@ -119,7 +128,7 @@ class DiskPrometheusListener:
             gated = self._disk_gated_count
             glen = self._disk_gated_by_length_count
             gfreq = self._disk_gated_by_frequency_count
-        avg_size = wbytes // wops if wops > 0 else 0
+        avg_size = wbytes / wops if wops > 0 else 0.0
         logger.info(
             "Disk metrics: disk_write_ops=%s, disk_write_bytes=%s, "
             "disk_write_avg_size_bytes=%s, disk_remove_ops=%s, disk_evict_bytes=%s, "
@@ -285,7 +294,6 @@ class LocalDiskBackend(StorageBackendInterface):
         self._disk_prom_listener = DiskPrometheusListener()
         self._disk_prom_listener.register()
 
-    def __str__(self):
     def __str__(self) -> str:
         return "LocalDiskBackend"
 
@@ -508,33 +516,43 @@ class LocalDiskBackend(StorageBackendInterface):
         key: CacheEngineKey,
     ) -> Optional[MemoryObj]:
         """
-        Blocking get function.
+        Load a cached KV chunk from disk synchronously.
+
+        The cache policy and gate read counters are updated only after a
+        successful load. A failed load (``load_bytes_from_disk`` returning
+        ``None``) must not record a phantom cache hit or read credit.
+
+        Args:
+            key: The cache key identifying the KV chunk.
+
+        Returns:
+            A ``MemoryObj`` containing the loaded KV data, or ``None`` if the
+            key is not present, the gate rejects the read, or the load fails.
         """
-        self.disk_lock.acquire()
-        if key not in self.dict:
-            self.disk_lock.release()
-            return None
+        with self.disk_lock:
+            if key not in self.dict:
+                return None
 
-        if not self._storage_gate.on_read(key):
-            self.disk_lock.release()
-            return None
+            if not self._storage_gate.on_read(key):
+                return None
 
-        # Update cache recency; gate read counter for write admission
-        self.cache_policy.update_on_hit(key, self.dict)
-        self._storage_gate.record_read(key)
+            disk_meta = self.dict[key]
+            path = disk_meta.path
+            dtype = disk_meta.dtype
+            shape = disk_meta.shape
+            fmt = disk_meta.fmt
+            assert dtype is not None
+            assert shape is not None
 
-        disk_meta = self.dict[key]
-        path = disk_meta.path
-        dtype = disk_meta.dtype
-        shape = disk_meta.shape
-        fmt = disk_meta.fmt
-        assert dtype is not None
-        assert shape is not None
-
-        self.disk_lock.release()
         memory_obj = self.load_bytes_from_disk(
             key, path, dtype=dtype, shape=shape, fmt=fmt
         )
+
+        if memory_obj is not None:
+            with self.disk_lock:
+                if key in self.dict:
+                    self.cache_policy.update_on_hit(key, self.dict)
+                    self._storage_gate.record_read(key)
 
         return memory_obj
 
