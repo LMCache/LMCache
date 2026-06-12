@@ -61,23 +61,18 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
-# ``/`` is a legal S3 key character but it carries "folder" semantics
-# on some S3-compatible services and is awkward in URL paths. We
-# encode it with a token that no HuggingFace model name contains, so
-# ``_string_to_object_key`` recovers the original ``model_name`` byte
-# for byte. Matches the convention used by ``fs_l2_adapter``.
-_PATH_SLASH_REPLACEMENT = "-SEP-"
-
-
 def _string_to_object_key(name: str) -> ObjectKey:
-    """Reverse of :func:`_object_key_to_string` (with
-    ``_format_safe_path``'s ``/`` → ``-SEP-`` substitution undone).
+    """Reverse of :func:`_object_key_to_string`.
 
     Object names use ``@`` as a field separator:
     ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>[@<cache_salt>]``.
     Other layouts (wrong field count, malformed hex / rank) raise
     ``ValueError`` — typically an object the bucket contains from
     another tool that this adapter shouldn't try to interpret.
+
+    ``model_name`` is round-tripped byte-for-byte; the adapter stores
+    keys under their literal name on S3 (no path-flattening), so a
+    listed key recovers the original ObjectKey exactly.
     """
     parts = name.split("@")
     if len(parts) == 4:
@@ -93,7 +88,6 @@ def _string_to_object_key(name: str) -> ObjectKey:
         ) = parts
     else:
         raise ValueError(f"unparsable S3 object name {name!r}: wrong field count")
-    model_name = model_name.replace(_PATH_SLASH_REPLACEMENT, "/")
     try:
         kv_rank = int(kv_rank_hex, 16)
     except ValueError as exc:
@@ -203,14 +197,14 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
 
 def _format_safe_path(key_str: str) -> str:
-    """Flatten slashes and URL-encode to form a safe HTTP path.
+    """URL-encode the object name to form a safe HTTP path.
 
-    ``/`` is replaced with :data:`_PATH_SLASH_REPLACEMENT` so the
-    encoding is reversible by :func:`_string_to_object_key` (a
-    listed key recovers the original ``model_name`` byte for byte).
+    ``url_quote`` keeps ``/`` (which is legal inside S3 object names)
+    and percent-encodes other reserved characters like ``@``. The
+    leading ``/`` is required by the HTTP path grammar — S3 strips it
+    when resolving to the object key.
     """
-    flat = key_str.replace("/", _PATH_SLASH_REPLACEMENT)
-    return "/" + url_quote(flat)
+    return "/" + url_quote(key_str)
 
 
 def _make_credentials_provider(
@@ -759,11 +753,11 @@ class S3L2Adapter(L2AdapterInterface):
                 (transient network failures, auth failures, etc.).
 
         Note:
-            ``_format_safe_path`` replaces ``/`` with
-            :data:`_PATH_SLASH_REPLACEMENT` (``"-SEP-"``) when storing,
-            and :func:`_string_to_object_key` reverses that mapping on
-            decode — the recovered :class:`ObjectKey` carries the
-            original caller-supplied ``model_name`` byte for byte.
+            Keys are stored on S3 under their literal object name (no
+            path-flattening), so a listed key recovers the original
+            :class:`ObjectKey` byte-for-byte. Model names containing
+            ``/`` render as virtual folders in the S3 web console but
+            this has no effect on correctness.
         """
         if page_size <= 0:
             raise ValueError(f"page_size must be positive (got {page_size})")
@@ -773,13 +767,12 @@ class S3L2Adapter(L2AdapterInterface):
         # about the server-side limit.
         max_keys = min(page_size, 1000)
         # ``model_name`` rides along as a ``prefix=`` query param so S3
-        # skips non-matching keys server-side. ``_format_safe_path``
-        # replaces ``/`` with ``_PATH_SLASH_REPLACEMENT`` before issuing
-        # the PUT, so the prefix must apply the same substitution to
-        # match what's actually on S3.
+        # skips non-matching keys server-side. Keys are stored under
+        # their literal name (no path-flattening), so the prefix is
+        # just ``<model_name>@``.
         prefix: Optional[str] = None
         if model_name is not None:
-            prefix = f"{model_name.replace('/', _PATH_SLASH_REPLACEMENT)}@"
+            prefix = f"{model_name}@"
 
         with self._lock:
             if self._connection_disabled:

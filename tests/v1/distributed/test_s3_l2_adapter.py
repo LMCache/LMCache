@@ -785,19 +785,17 @@ def _put_object(key: ObjectKey, size: int = 0) -> None:
     """Place a key in the fake S3 backend with deterministic content.
 
     Mirrors the production PUT pipeline: ``_object_key_to_string`` →
-    ``_format_safe_path`` (which substitutes ``/`` for the reversible
-    ``-SEP-`` marker) → URL-unquote → backend storage. Doing the
-    substitution here keeps the fake's stored name byte-identical to
-    what a real PUT would land on S3.
+    ``_format_safe_path`` (URL-encoding only — no path-flattening) →
+    URL-unquote in the fake → backend storage. So the fake's stored
+    name is byte-identical to the literal S3 object name a real PUT
+    would land.
     """
     # First Party
     from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
-        _PATH_SLASH_REPLACEMENT,
         _object_key_to_string,
     )
 
-    name = _object_key_to_string(key).replace("/", _PATH_SLASH_REPLACEMENT)
-    _BACKEND.put(name, b"\x00" * size)
+    _BACKEND.put(_object_key_to_string(key), b"\x00" * size)
 
 
 class TestS3L2AdapterListKeys:
@@ -826,9 +824,9 @@ class TestS3L2AdapterListKeys:
         assert [e.key for e in page.entries] == [llama]
 
     def test_model_name_with_slash_round_trips(self, adapter):
-        # Real HF model ids contain ``/``. The stored S3 name encodes
-        # it as ``-SEP-`` (matching the FS adapter); the listing decodes
-        # it back so the recovered ObjectKey equals the original.
+        # Real HF model ids contain ``/``. The adapter stores the
+        # literal object name on S3 (no path-flattening) and the
+        # listing decodes it back unchanged.
         original = ObjectKey(
             chunk_hash=b"\xde\xad\xbe\xef",
             model_name="meta-llama/Llama-3.1-8B",
@@ -842,9 +840,8 @@ class TestS3L2AdapterListKeys:
         assert page.entries[0].key == original
         assert page.entries[0].key.model_name == "meta-llama/Llama-3.1-8B"
 
-        # And the model_name filter matches against the caller-supplied
-        # form — the adapter applies the same substitution on the
-        # prefix.
+        # And the model_name filter accepts the caller-supplied form
+        # verbatim — no encoding magic to remember.
         page = adapter.list_l2_keys(model_name="meta-llama/Llama-3.1-8B", page_size=10)
         assert [e.key for e in page.entries] == [original]
 

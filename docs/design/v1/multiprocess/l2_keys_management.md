@@ -187,25 +187,25 @@ tools (anything whose object name doesn't conform to
 the response — `_string_to_object_key` raises `ValueError`, and the
 parser skips entries it can't decode.
 
-### `/` in `model_name` is reversibly encoded
+### `/` in `model_name` is stored verbatim
 
-`_format_safe_path` replaces `/` with `-SEP-` before issuing the PUT,
-and `_string_to_object_key` reverses the substitution on decode.
-`-SEP-` was chosen because no HuggingFace model id contains the
-literal substring `-SEP-`, so the round-trip is unambiguous. This
-matches the convention `fs_l2_adapter` already uses.
+The adapter stores objects under their literal `_object_key_to_string`
+output — no path-flattening. `_format_safe_path` only URL-encodes the
+HTTP path (`/` stays as `/` in the URL, `@` becomes `%40`). S3 accepts
+`/` in object keys as a legal character (it's only the AWS console
+that treats `/` as a virtual-folder delimiter — purely cosmetic).
 
 Round-trip example:
 
 ```
 ObjectKey(model_name="meta-llama/Llama-3.1-8B", ...)
- → stored on S3 as "meta-llama-SEP-Llama-3.1-8B@..."
+ → stored on S3 as literal "meta-llama/Llama-3.1-8B@..."
  → listed back as ObjectKey(model_name="meta-llama/Llama-3.1-8B", ...)
 ```
 
-Operators can pass HF model ids (with `/`) to the `model_name=` filter
-on `GET /l2/keys` exactly as they appear in their config — the adapter
-applies the same substitution to the S3 prefix push-down.
+Operators pass HF model ids (with `/`) to the `model_name=` filter on
+`GET /l2/keys` exactly as they appear in their config — the adapter
+forwards them straight to S3's `prefix=` query param.
 
 ### Consistency
 
