@@ -717,45 +717,6 @@ def test_recover_callback_skips_register_after_stop_requested(
     assert contexts[-1].register.call_count == 1  # no second REGISTER
 
 
-def test_recover_callback_aborts_register_when_stop_lands_mid_rebuild(
-    fake_adapter, monkeypatch
-) -> None:
-    """A stop landing mid-rebuild is still honored before the REGISTER
-    submission: no REGISTER is submitted, the rebuilt context is closed,
-    and the previously registered context stays in place."""
-    adapter, _send_mock, _ = fake_adapter
-    contexts = _patch_transfer_context_factory(monkeypatch)
-
-    fake_tensor = MagicMock()
-    fake_tensor.device.type = "cuda"
-    adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[0]
-    # First store lazily starts the heartbeat; the simulated first ping
-    # fires the recover callback, which rebuilds the context.
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())  # contexts[1]
-    heartbeat = FakeHeartbeatThread.instances[0]
-    assert heartbeat.recover_callback is not None
-    registered_ctx = adapter.transfer_ctx
-
-    rebuilt: list[MagicMock] = []
-
-    def create_and_stop(kv_caches: dict[str, torch.Tensor], mode: object) -> MagicMock:
-        # The stop lands mid-rebuild, after the callback already began.
-        heartbeat.stop()
-        ctx = MagicMock(name="rebuilt_ctx")
-        rebuilt.append(ctx)
-        return ctx
-
-    monkeypatch.setattr(adapter_mod, "create_transfer_context", create_and_stop)
-
-    assert heartbeat.recover_callback() is False
-
-    assert len(rebuilt) == 1
-    rebuilt[0].register.assert_not_called()  # no REGISTER after the stop
-    rebuilt[0].close.assert_called_once()  # discarded context is released
-    assert adapter.transfer_ctx is registered_ctx  # not republished
-    assert registered_ctx is contexts[-1]  # still the pre-stop context
-
-
 def test_register_uses_local_context_when_self_transfer_ctx_nulled(
     monkeypatch,
 ) -> None:

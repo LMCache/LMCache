@@ -286,11 +286,6 @@ def send_ping(
         return False
 
 
-def _never_abort_registration() -> bool:
-    """Default abort predicate for KV cache registration: never abort."""
-    return False
-
-
 @dataclass
 class ParallelStrategy:
     use_mla: bool
@@ -1126,8 +1121,7 @@ class LMCacheMPWorkerAdapter:
     def _send_register_kv_caches_request(
         self,
         kv_caches: dict[str, torch.Tensor],
-        abort_predicate: Callable[[], bool] = _never_abort_registration,
-    ) -> bool:
+    ) -> None:
         """Submit a REGISTER_KV_CACHE request and wait for the response.
 
         Shared by the public ``register_kv_caches`` entry point and the
@@ -1135,14 +1129,6 @@ class LMCacheMPWorkerAdapter:
 
         Args:
             kv_caches: The KV cache dict to register.
-            abort_predicate: Consulted after the transfer context is built,
-                right before the REGISTER is submitted. ``True`` closes and
-                discards the new context (``self.transfer_ctx`` untouched)
-                and sends nothing.
-
-        Returns:
-            ``True`` if the REGISTER was submitted and acknowledged;
-            ``False`` if ``abort_predicate`` aborted the submission.
 
         Raises:
             ConnectionError: if the server does not respond within
@@ -1151,9 +1137,6 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches = kv_caches
         transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
         layout_hints = vllm_layout_hints()
-        if abort_predicate():
-            transfer_ctx.close()
-            return False
         self.transfer_ctx = transfer_ctx
         try:
             # Register on the local, not self.transfer_ctx: a concurrent
@@ -1177,7 +1160,6 @@ class LMCacheMPWorkerAdapter:
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
-        return True
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first use (pessimistic).
@@ -1227,17 +1209,13 @@ class LMCacheMPWorkerAdapter:
             # health event can be set.
             return True
 
-        # A REGISTER submitted after UNREGISTER would ghost a server-side
-        # context. Early check skips the rebuild; the abort_predicate below
-        # re-checks right before submission (stop can land mid-rebuild).
+        # Skip the rebuild if a shutdown already requested the heartbeat stop.
         if self._heartbeat_stop_requested():
             logger.info("Heartbeat stop requested; skipping KV cache re-registration")
             return False
 
         try:
-            registered = self._send_register_kv_caches_request(
-                self.kv_caches, abort_predicate=self._heartbeat_stop_requested
-            )
+            self._send_register_kv_caches_request(self.kv_caches)
         except ConnectionError:
             logger.exception(
                 "Failed to re-register KV caches after server recovery; "
@@ -1249,9 +1227,6 @@ class LMCacheMPWorkerAdapter:
                 "Unexpected error during KV cache re-registration; "
                 "will retry on next heartbeat"
             )
-            return False
-        if not registered:
-            logger.info("Heartbeat stop requested; skipping KV cache re-registration")
             return False
         logger.warning("Finished re-registering KV caches after server recovery")
         return True
