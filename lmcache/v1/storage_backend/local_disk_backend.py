@@ -35,6 +35,25 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _get_available_space_bytes(path: str) -> int:
+    """Return the currently usable filesystem space for ``path`` in bytes."""
+    stat = os.statvfs(path)
+    fragment_size = stat.f_frsize if stat.f_frsize > 0 else stat.f_bsize
+    return stat.f_bavail * fragment_size
+
+
+def _get_filesystem_id(path: str) -> int:
+    """Return the device id for the filesystem backing ``path``."""
+    return os.stat(path).st_dev
+
+
+def _split_evenly(total_bytes: int, num_parts: int) -> list[int]:
+    """Split ``total_bytes`` across ``num_parts`` nearly-equal integer quotas."""
+    base_quota = total_bytes // num_parts
+    remainder = total_bytes % num_parts
+    return [base_quota + (1 if idx < remainder else 0) for idx in range(num_parts)]
+
+
 # TODO(Jiayi): handle cases where cache is repetitvely prefetched.
 class LocalDiskWorker:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -111,8 +130,7 @@ class LocalDiskBackend(StorageBackendInterface):
         else:
             super().__init__("cpu")
 
-        self.cache_policy = get_cache_policy(config.cache_policy)
-        self.dict = self.cache_policy.init_mutable_mapping()
+        self.dict: dict[CacheEngineKey, DiskCacheMetadata] = {}
 
         self.dst_device = dst_device
 
@@ -122,28 +140,66 @@ class LocalDiskBackend(StorageBackendInterface):
 
         assert config.local_disk is not None
 
+        # Pass local-worker metadata so that, when more disks than workers
+        # are configured, this worker is assigned a contiguous subset of
+        # paths instead of a single one. When metadata is absent the
+        # sharder falls back to the legacy device-index single-path mapping.
+        local_rank = metadata.local_worker_id if metadata is not None else None
+        local_world_size = metadata.local_world_size if metadata is not None else None
+
         sharder = PathSharder(
             raw_csv=config.local_disk,
             strategy=config.local_disk_path_sharding,
             dst_device=dst_device,
+            local_rank=local_rank,
+            local_world_size=local_world_size,
             create_dirs=True,
         )
+        self.path_sharder = sharder
+        self.assigned_paths: list[str] = sharder.assigned_paths
         self.path: str = sharder.selected
 
         logger.info(
-            "Local disk cache path: %s (device %s, %d path(s) configured)",
-            self.path,
+            "Local disk cache strategy=%s device=%s "
+            "configured_paths=%d assigned_paths=%s",
+            sharder.strategy,
             dst_device,
             len(sharder.all_paths),
+            self.assigned_paths,
         )
 
         self.loop = loop
 
         self.use_local_cpu = config.local_cpu
 
-        # Block size (for file system I/O)
-        stat = os.statvfs(self.path)
-        self.os_disk_bs = stat.f_bsize
+        # Block size (for file system I/O), per assigned path so that
+        # multi-path workers use the correct block size for each file.
+        self.path_block_sizes = {
+            path: os.statvfs(path).f_bsize for path in self.assigned_paths
+        }
+        self.os_disk_bs = self.path_block_sizes[self.path]
+        self.path_max_cache_sizes = dict(
+            zip(
+                self.assigned_paths,
+                _split_evenly(
+                    int(config.max_local_disk_size * 1024**3),
+                    len(self.assigned_paths),
+                ),
+                strict=True,
+            )
+        )
+        self.path_current_cache_sizes = {path: 0 for path in self.assigned_paths}
+        self.path_cache_policies = {
+            path: get_cache_policy(config.cache_policy) for path in self.assigned_paths
+        }
+        self.path_dicts = {
+            path: policy.init_mutable_mapping()
+            for path, policy in self.path_cache_policies.items()
+        }
+        self.keys_in_request_by_path: dict[str, List[CacheEngineKey]] = {
+            path: [] for path in self.assigned_paths
+        }
+        self._validate_assigned_path_capacity()
         self.use_odirect = False
 
         if config.extra_config is not None:
@@ -154,13 +210,8 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # TODO(Jiayi): We need a disk space allocator to avoid fragmentation
         # and hide the following details away from the backend.
-        self.max_cache_size = int(config.max_local_disk_size * 1024**3)
-        self.current_cache_size = 0.0
-
-        # to help maintain suffix -> prefix order in the dict
-        # assumption: only one request is looked up at a time
-        # (only one worker per cache engine)
-        self.keys_in_request: List[CacheEngineKey] = []
+        self.max_cache_size = sum(self.path_max_cache_sizes.values())
+        self.current_cache_size = 0
 
         self.lmcache_worker = lmcache_worker
         self.instance_id = config.lmcache_instance_id
@@ -188,7 +239,73 @@ class LocalDiskBackend(StorageBackendInterface):
         self,
         key: CacheEngineKey,
     ) -> str:
-        return os.path.join(self.path, key.to_string().replace("/", "-") + ".pt")
+        base_path = self.path_sharder.resolve_path_for_key(key)
+        return os.path.join(base_path, key.to_string().replace("/", "-") + ".pt")
+
+    def _get_disk_block_size(self, path: str) -> int:
+        # path is always produced by _key_to_path(), which places files
+        # directly under an assigned mount point with no subdirectories.
+        root_path = os.path.dirname(path)
+        return self.path_block_sizes.get(root_path, self.os_disk_bs)
+
+    def _validate_assigned_path_capacity(self) -> None:
+        """Ensure assigned filesystems have enough currently available space."""
+        quotas_by_filesystem: dict[int, tuple[str, int, int]] = {}
+        for path, quota_bytes in self.path_max_cache_sizes.items():
+            filesystem_id = _get_filesystem_id(path)
+            available_bytes = _get_available_space_bytes(path)
+            sample_path, current_required, _ = quotas_by_filesystem.get(
+                filesystem_id,
+                (path, 0, available_bytes),
+            )
+            quotas_by_filesystem[filesystem_id] = (
+                sample_path,
+                current_required + quota_bytes,
+                available_bytes,
+            )
+
+        for path, required_bytes, available_bytes in quotas_by_filesystem.values():
+            if available_bytes < required_bytes:
+                raise ValueError(
+                    "Assigned local disk paths do not have enough available "
+                    "filesystem space for their LMCache quota "
+                    f"(path={path}, available_bytes={available_bytes}, "
+                    f"required_bytes={required_bytes})"
+                )
+
+    def _get_path_for_key(self, key: CacheEngineKey) -> str:
+        """Return the assigned base path for ``key`` on this worker."""
+        return self.path_sharder.resolve_path_for_key(key)
+
+    def _get_cache_path_for_key(self, key: CacheEngineKey) -> str:
+        """Return the path-local cache selected for ``key``."""
+        if meta := self.dict.get(key):
+            return os.path.dirname(meta.path)
+        return self._get_path_for_key(key)
+
+    def _get_path_cache_policy(self, path: str):
+        return self.path_cache_policies[path]
+
+    def _get_path_cache_dict(self, path: str):
+        return self.path_dicts[path]
+
+    def _update_path_usage(self, path: str, size_delta: int) -> None:
+        """Apply a signed usage delta to one assigned path and the global total."""
+        self.path_current_cache_sizes[path] = (
+            self.path_current_cache_sizes.get(path, 0) + size_delta
+        )
+        self.current_cache_size += size_delta
+
+    def _get_evict_candidates_for_path(
+        self,
+        path: str,
+        num_candidates: int = 1,
+    ) -> list[CacheEngineKey]:
+        """Return eviction candidates from one path-local cache."""
+        return self._get_path_cache_policy(path).get_evict_candidates(
+            self._get_path_cache_dict(path),
+            num_candidates=num_candidates,
+        )
 
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         with self.disk_lock:
@@ -197,15 +314,20 @@ class LocalDiskBackend(StorageBackendInterface):
             if pin:
                 self.dict[key].pin()
                 # vllm lookup sets pin to True
-                self.keys_in_request.append(key)
+                cache_path = self._get_cache_path_for_key(key)
+                self.keys_in_request_by_path[cache_path].append(key)
             return True
 
     def touch_cache(self):
         # flip the order of the keys in the request
         with self.disk_lock:
-            for key in reversed(self.keys_in_request):
-                self.cache_policy.update_on_hit(key, self.dict)
-            self.keys_in_request = []
+            for path, keys_in_request in self.keys_in_request_by_path.items():
+                path_dict = self._get_path_cache_dict(path)
+                path_policy = self._get_path_cache_policy(path)
+                for key in reversed(keys_in_request):
+                    if key in path_dict:
+                        path_policy.update_on_hit(key, path_dict)
+                self.keys_in_request_by_path[path] = []
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         return self.disk_worker.exists_in_put_tasks(key)
@@ -246,7 +368,11 @@ class LocalDiskBackend(StorageBackendInterface):
             return False
 
         path = meta.path
+        base_path = os.path.dirname(path)
+        path_dict = self._get_path_cache_dict(base_path)
+        path_dict.pop(key, None)
         size = meta.size
+        self._update_path_usage(base_path, -size)
         self.usage -= size
         self.stats_monitor.update_local_storage_usage(self.usage)
 
@@ -257,11 +383,16 @@ class LocalDiskBackend(StorageBackendInterface):
         # )
         # res.result()
 
-        os.remove(path)
-
         if force:
-            self.cache_policy.update_on_force_evict(key)
+            self._get_path_cache_policy(base_path).update_on_force_evict(key)
             self.disk_lock.release()
+
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            logger.warning(f"File already removed: {path}")
+        except OSError as e:
+            logger.error(f"Failed to remove file {path}: {e}")
 
         # Push kv evict msg with batching
         if self.batched_msg_sender is not None:
@@ -282,17 +413,22 @@ class LocalDiskBackend(StorageBackendInterface):
         cached_positions: Optional[torch.Tensor] = None,
     ) -> None:
         path = self._key_to_path(key)
+        base_path = os.path.dirname(path)
+        path_dict = self._get_path_cache_dict(base_path)
+        path_policy = self._get_path_cache_policy(base_path)
 
         has_stored = False
         with self.disk_lock:
             if key in self.dict:
                 # Update cache recency
-                self.cache_policy.update_on_hit(key, self.dict)
+                path_policy.update_on_hit(key, path_dict)
                 has_stored = True
             else:
-                self.dict[key] = DiskCacheMetadata(
+                meta = DiskCacheMetadata(
                     path, size, shape, dtype, cached_positions, fmt, 0
                 )
+                self.dict[key] = meta
+                path_dict[key] = meta
 
         # Push kv admit msg with batching
         if self.batched_msg_sender is not None and not has_stored:
@@ -327,29 +463,34 @@ class LocalDiskBackend(StorageBackendInterface):
 
         # TODO(Jiayi): Fragmentation is not considered here.
         required_size = memory_obj.get_physical_size()
-        all_evict_keys = []
+        target_path = self._get_path_for_key(key)
+        path_quota = self.path_max_cache_sizes[target_path]
         evict_success = True
         with self.disk_lock:
-            while self.current_cache_size + required_size > self.max_cache_size:
-                evict_keys = self.cache_policy.get_evict_candidates(
-                    self.dict, num_candidates=1
+            while (
+                self.path_current_cache_sizes[target_path] + required_size > path_quota
+            ):
+                evict_keys = self._get_evict_candidates_for_path(
+                    target_path,
+                    num_candidates=1,
                 )
                 if not evict_keys:
                     logger.warning(
-                        "No eviction candidates found. Disk space under pressure."
+                        "No eviction candidates found for local disk path under "
+                        "pressure (path=%s, required_size=%s, quota=%s, current=%s).",
+                        target_path,
+                        required_size,
+                        path_quota,
+                        self.path_current_cache_sizes[target_path],
                     )
                     evict_success = False
                     break
 
-                for evict_key in evict_keys:
-                    self.current_cache_size -= self.dict[evict_key].size
-
                 self.batched_remove(evict_keys, force=False)
 
-                all_evict_keys.extend(evict_keys)
             if evict_success:
-                self.current_cache_size += required_size
-                self.cache_policy.update_on_put(key)
+                self._update_path_usage(target_path, required_size)
+                self._get_path_cache_policy(target_path).update_on_put(key)
 
         if not evict_success:
             return None
@@ -416,6 +557,7 @@ class LocalDiskBackend(StorageBackendInterface):
             fmt = disk_meta.fmt
             assert dtype is not None
             assert shape is not None
+            assert fmt is not None
 
         # Load is performed outside the lock: it can block for a non-trivial
         # amount of time (CPU staging pool allocation + memcpy from disk) and
@@ -432,7 +574,13 @@ class LocalDiskBackend(StorageBackendInterface):
             # consistent and no update is needed.
             with self.disk_lock:
                 if key in self.dict:
-                    self.cache_policy.update_on_hit(key, self.dict)
+                    cache_path = self._get_cache_path_for_key(key)
+                    path_dict = self._get_path_cache_dict(cache_path)
+                    if key in path_dict:
+                        self._get_path_cache_policy(cache_path).update_on_hit(
+                            key,
+                            path_dict,
+                        )
 
         return memory_obj
 
@@ -481,7 +629,11 @@ class LocalDiskBackend(StorageBackendInterface):
 
             # NOTE(Jiayi): Currently, we consider prefetch as cache hit.
             # Update cache recency
-            self.cache_policy.update_on_hit(key, self.dict)
+            cache_path = self._get_cache_path_for_key(key)
+            self._get_path_cache_policy(cache_path).update_on_hit(
+                key,
+                self._get_path_cache_dict(cache_path),
+            )
 
             self.disk_lock.release()
             logger.debug(f"Prefetching {key} from disk.")
@@ -510,7 +662,8 @@ class LocalDiskBackend(StorageBackendInterface):
                     return num_hit_counts
                 if pin:
                     self.dict[key].pin()
-                    self.keys_in_request.append(key)
+                    cache_path = self._get_cache_path_for_key(key)
+                    self.keys_in_request_by_path[cache_path].append(key)
                 num_hit_counts += 1
         return num_hit_counts
 
@@ -622,7 +775,8 @@ class LocalDiskBackend(StorageBackendInterface):
     def write_file(self, buffer, path):
         start_time = time.time()
         size = len(buffer)
-        if size % self.os_disk_bs != 0 or not self.use_odirect:
+        disk_block_size = self._get_disk_block_size(path)
+        if size % disk_block_size != 0 or not self.use_odirect:
             with open(path, "wb") as f:
                 f.write(buffer)
         else:
@@ -639,7 +793,8 @@ class LocalDiskBackend(StorageBackendInterface):
     def read_file(self, key, buffer, path):
         start_time = time.time()
         size = len(buffer)
-        fblock_aligned = size % self.os_disk_bs == 0
+        disk_block_size = self._get_disk_block_size(path)
+        fblock_aligned = size % disk_block_size == 0
         if not fblock_aligned and self.use_odirect:
             logger.warning(
                 "Cannot use O_DIRECT for this file, "
@@ -656,8 +811,14 @@ class LocalDiskBackend(StorageBackendInterface):
                     fdo.readinto(buffer)
         except FileNotFoundError:
             logger.warning(f"File not found on disk: {path}")
-            if self.dict.get(key, None):
-                self.dict.pop(key)
+            with self.disk_lock:
+                if meta := self.dict.pop(key, None):
+                    cache_path = os.path.dirname(meta.path)
+                    self._get_path_cache_dict(cache_path).pop(key, None)
+                    self._get_path_cache_policy(cache_path).update_on_force_evict(key)
+                    self._update_path_usage(cache_path, -meta.size)
+                    self.usage -= meta.size
+                    self.stats_monitor.update_local_storage_usage(self.usage)
             return
 
         disk_read_time = time.time() - start_time
