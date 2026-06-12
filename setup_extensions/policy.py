@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Policy-driven extension build orchestrator.
 
-:class:`BuildPolicy` auto-discovers available backend strategies,
+:class:`BuildPolicy` auto-discovers available platform strategies,
 selects the best one via explicit env var or auto-detection with fallback,
-and drives the common C++ + backend extension build pipeline.
+and drives the common C++ + platform extension build pipeline.
 """
 
 # Standard
@@ -16,8 +16,8 @@ import sys
 
 # First Party
 from setup_extensions.common_cpp import build_common_cpp
+from setup_extensions.platforms import PlatformStrategy
 from setup_extensions.storage_backends import StorageBackendStrategy  # noqa: E402
-from setup_extensions.strategies import BuildStrategy
 
 # ---------------------------------------------------------------------------
 # Generic subclass discovery (filesystem-based, from _discovery.py)
@@ -78,26 +78,26 @@ def discover_subclasses(
 
 
 # ---------------------------------------------------------------------------
-# Strategy auto-discovery (filesystem-based, no hard-coded module list)
+# Platform auto-discovery (filesystem-based, no hard-coded module list)
 # ---------------------------------------------------------------------------
 
 
-def _discover_strategies() -> list[BuildStrategy]:
-    """Auto-discover all backend strategies.
+def _discover_platforms() -> list[PlatformStrategy]:
+    """Auto-discover all platform strategies.
 
-    Walks ``setup_extensions.strategies`` via ``discover_subclasses``,
+    Walks ``setup_extensions.platforms`` via ``discover_subclasses``,
     which uses ``pkgutil.iter_modules`` to find submodules at the
     filesystem level.  Adding a new ``.py`` file under that package
-    with a concrete ``BuildStrategy`` subclass is all that is needed —
+    with a concrete ``PlatformStrategy`` subclass is all that is needed —
     no module list to maintain.
     """
-    strategies: list[BuildStrategy] = []
+    platforms: list[PlatformStrategy] = []
     for cls in discover_subclasses(
-        "setup_extensions.strategies",
-        BuildStrategy,  # type: ignore[type-abstract]
+        "setup_extensions.platforms",
+        PlatformStrategy,  # type: ignore[type-abstract]
     ):
-        strategies.append(cls())
-    return strategies
+        platforms.append(cls())
+    return platforms
 
 
 def _discover_storage_backends() -> list[StorageBackendStrategy]:
@@ -122,10 +122,10 @@ def _discover_storage_backends() -> list[StorageBackendStrategy]:
 
 
 class BuildPolicy:
-    """Selects and builds extensions using platform-aware backend strategies.
+    """Selects and builds extensions using platform-aware build strategies.
 
     Resolution order:
-        1. If an explicit ``BUILD_WITH_*`` env var is set, use that backend
+        1. If an explicit ``BUILD_WITH_*`` env var is set, use that platform
            unconditionally (no fallback). A warning is emitted when its
            toolchain cannot be auto-detected, but the build proceeds so
            that the underlying compiler produces the authoritative error.
@@ -134,19 +134,19 @@ class BuildPolicy:
     """
 
     def __init__(self) -> None:
-        self._strategies = _discover_strategies()
+        self._platforms = _discover_platforms()
 
-    def resolve_strategy(self) -> Optional[BuildStrategy]:
-        """Resolve the active backend strategy.
+    def resolve_strategy(self) -> Optional[PlatformStrategy]:
+        """Resolve the active platform strategy.
 
         Returns ``None`` when building sdist, native extensions are
-        disabled, GPU extensions are disabled, or no backend was
+        disabled, GPU extensions are disabled, or no platform was
         detected.
         """
         if (
-            BuildStrategy.is_building_sdist()
-            or BuildStrategy.is_native_ext_disabled()
-            or BuildStrategy.is_gpu_ext_disabled()
+            PlatformStrategy.is_building_sdist()
+            or PlatformStrategy.is_native_ext_disabled()
+            or PlatformStrategy.is_gpu_ext_disabled()
         ):
             return None
 
@@ -154,17 +154,17 @@ class BuildPolicy:
         # Phase 1: explicit env var selection
         # ---------------------------------------------------------------
         explicitly_requested = [
-            s for s in self._strategies if s.is_explicitly_requested()
+            s for s in self._platforms if s.is_explicitly_requested()
         ]
         if len(explicitly_requested) > 1:
             names = ", ".join(s.name for s in explicitly_requested)
-            raise RuntimeError("Multiple backends explicitly requested: %s" % names)
+            raise RuntimeError("Multiple platforms explicitly requested: %s" % names)
         if explicitly_requested:
             strategy = explicitly_requested[0]
-            print("Using explicitly requested backend: %s" % strategy.name)
+            print("Using explicitly requested platform: %s" % strategy.name)
             if not strategy.detect():
                 print(
-                    "warning: backend '%s' was explicitly requested but its "
+                    "warning: platform '%s' was explicitly requested but its "
                     "toolchain was not auto-detected; proceeding anyway"
                     % strategy.name,
                     file=sys.stderr,
@@ -174,45 +174,45 @@ class BuildPolicy:
         # ---------------------------------------------------------------
         # Phase 2: auto-detect with fallback
         # ---------------------------------------------------------------
-        print("No backend explicitly selected, auto-detecting...")
-        for strategy in self._strategies:
+        print("No platform explicitly selected, auto-detecting...")
+        for strategy in self._platforms:
             if strategy.detect():
-                print("Auto-detected backend: %s" % strategy.name)
+                print("Auto-detected platform: %s" % strategy.name)
                 return strategy
 
         # ---------------------------------------------------------------
         # Phase 3: nothing found
         # ---------------------------------------------------------------
         print(
-            "warning: no backend detected, building without extensions",
+            "warning: no platform detected, building without extensions",
             file=sys.stderr,
         )
         return None
 
     @staticmethod
     def collect_extensions(
-        strategy: Optional[BuildStrategy],
+        strategy: Optional[PlatformStrategy],
     ) -> tuple[list, dict, Optional[str]]:
         """Build all extensions and return requirements file name.
 
         Args:
-            strategy: Resolved backend strategy, or ``None``.
+            strategy: Resolved platform strategy, or ``None``.
 
         Returns:
             ``(ext_modules, cmdclass, requirements_file)`` tuple.
         """
-        if BuildStrategy.is_building_sdist():
+        if PlatformStrategy.is_building_sdist():
             print("Not building extensions for sdist")
             return [], {}, None
 
-        if BuildStrategy.is_native_ext_disabled():
+        if PlatformStrategy.is_native_ext_disabled():
             return [], {}, None
 
         # ---- build common C++ extensions ----
         ext_modules, cmdclass = build_common_cpp(strategy)
 
-        # ---- build backend-specific extensions ----
-        if strategy and not BuildStrategy.is_gpu_ext_disabled():
+        # ---- build platform-specific extensions ----
+        if strategy and not PlatformStrategy.is_gpu_ext_disabled():
             em, cc = strategy.build()
             ext_modules.extend(em)
             cmdclass.update(cc)
@@ -235,9 +235,9 @@ class BuildPolicy:
         Each storage backend can be enabled via its ``BUILD_WITH_*``
         env var or auto-detected through its SDK presence.
         """
-        storage_strategies = _discover_storage_backends()
+        storage_backends = _discover_storage_backends()
         ext_modules = []
-        for s in storage_strategies:
+        for s in storage_backends:
             if s.is_explicitly_requested():
                 print("Using explicitly requested storage backend: %s" % s.name)
                 ext_modules.extend(s.build(extra_cxx_flags))

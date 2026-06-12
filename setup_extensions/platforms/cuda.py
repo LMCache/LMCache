@@ -15,12 +15,12 @@ if TYPE_CHECKING:
     from setuptools.extension import Extension
 
 # First Party
-from setup_extensions.strategies import BuildStrategy
+from setup_extensions.platforms import PlatformStrategy
 
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 
 
-class CudaStrategy(BuildStrategy):
+class CudaStrategy(PlatformStrategy):
     """CUDA GPU extension build strategy."""
 
     name = "cuda"

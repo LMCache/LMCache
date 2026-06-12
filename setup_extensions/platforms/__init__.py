@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Base classes for the extension build strategy pattern.
+"""Base classes for the platform extension build pattern.
 
-Each backend (CUDA, ROCm, SYCL, MUSA, ...) implements :class:`BuildStrategy`.
+Each hardware platform (CUDA, ROCm, SYCL, MUSA, ...) implements
+:class:`PlatformStrategy`.
 The :class:`BuildPolicy` orchestrates auto-detection, fallback, and building.
 """
 
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
     from setup_extensions.common_cpp import CommonExtSpec
 
 
-class BuildStrategy(ABC):
+class PlatformStrategy(ABC):
     """Strategy for building platform-specific extensions.
 
     Subclasses must define:
@@ -26,7 +27,7 @@ class BuildStrategy(ABC):
                    selection.
 
     Subclasses must implement:
-        detect() – auto-detect if this backend's hardware/compiler is present.
+        detect() – auto-detect if this platform's hardware/compiler is present.
         build()  – return ``(ext_modules, cmdclass)`` for extensions.
 
     Subclasses may override:
@@ -53,7 +54,13 @@ class BuildStrategy(ABC):
 
     @classmethod
     def is_native_ext_disabled(cls) -> bool:
-        """Return True when native extensions are disabled."""
+        """Return True when native extensions are disabled.
+
+        Controlled by the ``NO_NATIVE_EXT`` environment variable.
+        When ``True``, all native C++ extensions are skipped — including
+        both common extensions (Redis, filesystem, storage manager)
+        and GPU backend extensions.
+        """
         # Standard
         import os
         import sys
@@ -63,14 +70,18 @@ class BuildStrategy(ABC):
                 "warning: NO_CUDA_EXT is deprecated; use NO_NATIVE_EXT=1 instead.",
                 file=sys.stderr,
             )
-        return (
-            os.environ.get("NO_NATIVE_EXT", "0") == "1"
-            or os.environ.get("NO_CUDA_EXT", "0") == "1"
-        )
+        return os.environ.get("NO_NATIVE_EXT", "0") == "1"
 
     @classmethod
     def is_gpu_ext_disabled(cls) -> bool:
-        """Return True when GPU extensions are disabled."""
+        """Return True when GPU extensions are disabled.
+
+        Controlled by the ``NO_GPU_EXT`` environment variable.
+        When ``True``, GPU-specific extensions (CUDA kernels, ROCm
+        hipified sources, SYCL kernels, etc.) are skipped even when
+        a platform is detected or explicitly requested.  Common C++
+        extensions are still built.
+        """
         # Standard
         import os
 
@@ -81,7 +92,7 @@ class BuildStrategy(ABC):
     # ------------------------------------------------------------------
 
     def is_explicitly_requested(self) -> bool:
-        """Return True when this backend was selected via env var."""
+        """Return True when this platform was selected via env var."""
         if not self.env_var:
             return False
         # Standard
@@ -91,12 +102,12 @@ class BuildStrategy(ABC):
 
     @abstractmethod
     def detect(self) -> bool:
-        """Auto-detect if this backend's toolchain / hardware is available."""
+        """Auto-detect if this platform's toolchain / hardware is available."""
         ...
 
     @abstractmethod
     def build(self) -> tuple[list["Extension"], dict]:
-        """Build backend-specific extension modules.
+        """Build platform-specific extension modules.
 
         Returns:
             ``(ext_modules, cmdclass)`` tuple.
@@ -115,7 +126,7 @@ class BuildStrategy(ABC):
     def default_cxx_flags(self) -> list[str]:
         """Default C++ flags to hand to downstream consumers (e.g. optional
         L2 storage backends) that need a representative set of flags
-        compatible with this backend.
+        compatible with this platform.
 
         Subclasses override when their default ABI differs from the empty
         baseline.
@@ -125,6 +136,6 @@ class BuildStrategy(ABC):
     def requirements_file(self) -> Optional[str]:
         """Core requirements file name, relative to ``requirements/``.
 
-        Return ``None`` when this backend has no extra deps.
+        Return ``None`` when this platform has no extra deps.
         """
         return None
