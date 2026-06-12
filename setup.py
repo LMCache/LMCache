@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """LMCache setup script — policy-driven extension build.
 
-Uses the strategy pattern so that each backend lives in its own file
-under ``setup_extensions/strategies/``.  Adding a new backend requires
+Uses the strategy pattern so that each platform lives in its own file
+under ``setup_extensions/platforms/``.  Adding a new platform requires
 zero changes to this file.
 """
 
@@ -20,7 +20,7 @@ if str(ROOT_DIR) not in sys.path:
 from setuptools import find_packages, setup  # noqa: E402
 
 # First Party
-from setup_extensions import BuildPolicy, BuildStrategy  # noqa: E402
+from setup_extensions import BuildPolicy, PlatformStrategy  # noqa: E402
 
 
 def _read_requirements(path: Path) -> list[str]:
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     ext_modules, cmdclass, req_file = policy.collect_extensions(strategy)
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
-    if not BuildStrategy.is_gpu_ext_disabled() and req_file is not None:
+    if not PlatformStrategy.is_gpu_ext_disabled() and req_file is not None:
         install_requires += _read_requirements(ROOT_DIR / "requirements" / req_file)
 
     setup(

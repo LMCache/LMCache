@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from setuptools.extension import Extension
 
     # First Party
-    from setup_extensions.strategies import BuildStrategy
+    from setup_extensions.platforms import PlatformStrategy
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,7 @@ COMMON_EXTENSIONS: list[CommonExtSpec] = [
 
 
 def build_common_cpp(
-    strategy: "BuildStrategy | None" = None,
+    strategy: "PlatformStrategy | None" = None,
 ) -> tuple[list["Extension"], dict]:
     """Build pure C++ extensions that do not depend on any backend.
 
