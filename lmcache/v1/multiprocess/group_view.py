@@ -49,6 +49,10 @@ class EngineGroupInfo(msgspec.Struct, frozen=True):
     from the registered tensors (i.e. the group is treated as
     uncompressed)."""
 
+    sw_size_tokens: int = -1
+    """Sliding window size in tokens for the layers of this group.
+    ``-1`` means the layers are not sliding-window attention."""
+
 
 def num_engine_groups(groups: Sequence[EngineGroupInfo]) -> int:
     """Return the number of engine groups (block-id lists per transfer request).

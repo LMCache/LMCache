@@ -44,11 +44,22 @@ def test_engine_group_infos_expand_engine_block_ids():
     ]
 
 
+def test_engine_group_info_old_payload_defaults_sw_size():
+    """A pre-sw_size_tokens msgspec payload decodes with the -1 default."""
+    old_payload = {"engine_group_id": 0, "layer_indices": (0, 1)}
+
+    decoded = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(old_payload), type=EngineGroupInfo
+    )
+
+    assert decoded.sw_size_tokens == -1
+
+
 def test_engine_group_infos_msgspec_round_trip():
     """The groups encode/decode losslessly via msgspec (the IPC path)."""
     groups = [
         EngineGroupInfo(0, (0, 2)),
-        EngineGroupInfo(1, (1, 3)),
+        EngineGroupInfo(1, (1, 3), sw_size_tokens=128),
     ]
 
     decoded = msgspec.msgpack.decode(

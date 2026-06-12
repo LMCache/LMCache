@@ -25,7 +25,7 @@ Each recipe page is intentionally minimal:
   with per-method validation status. Extensible: new methods get a row.
 - **Caveats** -- known limitations, if any.
 
-For the generic LMCache + engine wiring (ports, remote hosts, in-process mode,
+For the generic LMCache + engine wiring (ports, remote hosts,
 sending a first request), see :doc:`../mp/quickstart`. Recipes assume that
 page as a prerequisite.
 
@@ -101,7 +101,8 @@ Supported architectures
      - :doc:`qwen3`
 
    * - ``Qwen3_5ForConditionalGeneration``
-     - ``Qwen/Qwen3.5-0.8B``
+     - | ``Qwen/Qwen3.6-27B``
+       | ``Qwen/Qwen3.5-0.8B``
      - ✓
      - —
      - —

@@ -336,9 +336,18 @@ class CpuCacheContext:
         """Returns the PageBufferShapeDesc for the given group."""
         return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
 
-    def get_slots_per_chunk(self, group_idx: int) -> int:
-        """Returns the per-chunk physical slot count for the group."""
-        return self.kv_layer_groups_manager_.get_slots_per_chunk(group_idx)
+    def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
+        """Returns the number of slots per lmcache chunk when doing D/H transfer.
+
+        Mirrors :meth:`GPUCacheContext.get_slots_per_chunk_in_sw`.
+
+        Args:
+            kernel_group_idx: Index of the kernel group.
+
+        Returns:
+            The number of used slots per lmcache chunk when doing D/H transfer.
+        """
+        return self.kv_layer_groups_manager_.get_slots_per_chunk_in_sw(kernel_group_idx)
 
     def blocks_for_tokens(self, num_logical_tokens: int, group_idx: int) -> int:
         """Number of blocks that span *num_logical_tokens* for a group.
