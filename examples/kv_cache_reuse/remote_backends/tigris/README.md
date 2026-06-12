@@ -24,7 +24,7 @@ PYTHONHASHSEED=0 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Llama-3.
 
 ## Step 4: Sending requests
 
-You should be able to see cache hit on the second time by sending the following request twice:
+You should be able to verify a cache hit on the second request by checking the vLLM/LMCache console logs (which will show cache hit messages) or by observing a significantly lower Time-to-First-Token (TTFT):
 
 ```bash
 curl -X POST http://localhost:8000/v1/completions   -H "Content-Type: application/json"   -d '{
