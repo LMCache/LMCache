@@ -5,7 +5,7 @@ metadata:
   namespace: default
 spec:
   # -- Container image (the LMCache blend_v3 ENGINE image) --
-  # The engine runs `lmcache server --engine-type blend_v3`. If this image lives
+  # The engine runs `lmcache server --engine-type blend`. If this image lives
   # in a PRIVATE registry, set imagePullSecrets (the Secret must exist in this
   # namespace).
   image:

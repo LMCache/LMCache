@@ -983,10 +983,12 @@ class BlendV3Module:
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
         for group_idx in range(num_groups):
             group = gpu_context.kv_layer_groups_manager.kernel_groups[group_idx]
-            if group.compress_ratio != 1:
+            if group.tokens_per_block != group.slots_per_block:
                 raise RuntimeError(
-                    f"CB v3: group {group_idx} has compress_ratio="
-                    f"{group.compress_ratio}; compressed layouts unsupported."
+                    f"CB v3: group {group_idx} is compressed "
+                    f"(tokens_per_block={group.tokens_per_block}, "
+                    f"slots_per_block={group.slots_per_block}); "
+                    f"compressed layouts unsupported."
                 )
             all_slots = [
                 gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)
@@ -1105,9 +1107,9 @@ class BlendV3Module:
                     key.request_id,
                 )
 
-        # prefix (no re-rope) vs shifted (re-rope), for logging.
-        n_prefix = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
-        n_shifted = len(cb_match_result) - n_prefix
+        # Non-prefix sparse hits split by re-rope need (not prefix coverage).
+        n_non_shifted = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
+        n_shifted = len(cb_match_result) - n_non_shifted
 
         if not all_obj_keys:
             self._event_bus.publish(
@@ -1120,13 +1122,16 @@ class BlendV3Module:
 
         logger.debug("CB V3 retrieving object keys: %s", all_obj_keys)
 
-        ie_logical_block_size = (
-            gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
-        if chunk_size % ie_logical_block_size != 0:
+        # CB v3 only supports uncompressed single-block-id-space layouts
+        # (enforced per group in ``_apply_cb_rope_batched``), so the first
+        # kernel group's chunk geometry is representative.
+        tokens_per_block = gpu_context.kv_layer_groups_manager.kernel_groups[
+            0
+        ].tokens_per_block
+        if chunk_size % tokens_per_block != 0:
             raise ValueError(
                 f"chunk_size {chunk_size} must be a multiple of "
-                f"inference_engine_logical_block_size {ie_logical_block_size}"
+                f"tokens_per_block {tokens_per_block}"
             )
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
 
@@ -1175,7 +1180,7 @@ class BlendV3Module:
                     # Per-token scatter handles any cur_st; just bound the
                     # matched range to the allocated slots.
                     pairs: list[tuple[CBMatchResult, Any]] = []
-                    num_slots = int(all_block_ids_gpu.numel()) * ie_logical_block_size
+                    num_slots = int(all_block_ids_gpu.numel()) * tokens_per_block
                     for r, memory_obj in zip(cb_match_result, memory_objs, strict=True):
                         if r.cur_ed > num_slots:
                             logger.warning(
@@ -1247,7 +1252,7 @@ class BlendV3Module:
 
                             # (c) Per-token slot scatter: partial vLLM blocks
                             # shared with recomputed tokens stay disjoint.
-                            bs = ie_logical_block_size
+                            bs = tokens_per_block
                             pos = torch.cat(
                                 [
                                     torch.arange(
@@ -1322,11 +1327,11 @@ class BlendV3Module:
         _scatter_ms = (time.perf_counter() - _retrieve_t0) * 1000
         logger.info(
             "Retrieved pre-computed for %d match results into request %s "
-            "paged blocks (scatter_ms=%.2f, prefix=%d shifted=%d)",
+            "paged blocks (scatter_ms=%.2f, non_shifted=%d shifted=%d)",
             len(cb_match_result),
             key.request_id,
             _scatter_ms,
-            n_prefix,
+            n_non_shifted,
             n_shifted,
         )
         self._event_bus.publish_on_stream(

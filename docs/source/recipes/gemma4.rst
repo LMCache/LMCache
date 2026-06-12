@@ -54,7 +54,7 @@ Validated models
       |
 
       Adjust ``--tensor-parallel-size`` to match your hardware. For the
-      generic LMCache + vLLM wiring (ports, remote hosts, in-process mode),
+      generic LMCache + vLLM wiring (ports, remote hosts),
       see :doc:`../mp/quickstart`.
 
       If there are any issues with vLLM setup, please refer to the

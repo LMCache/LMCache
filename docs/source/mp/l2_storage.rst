@@ -366,7 +366,13 @@ caller-provided load buffers during prefetch.
 - ``io_engine``: Rust raw-block I/O engine. Valid values are ``"posix"``
   (default synchronous ``pread``/``pwrite`` path), ``"io_uring"`` (direct Rust
   io_uring syscall path).
+- ``use_uring_cmd``: Enable NVMe passthrough via io_uring command interface
+  for direct device access. Requires ``io_engine="io_uring"`` and NVMe
+  character device node (e.g., ``/dev/ng0n1``).
 - ``iouring_queue_depth``: Queue depth for ``io_engine="io_uring"``.
+- ``max_data_transfer_size``: Maximum data transfer size for
+  ``use_uring_cmd=true``. Large transfers are split into smaller chunks
+  that fit within device limits.
 - ``num_store_workers`` / ``num_lookup_workers`` / ``num_load_workers``:
   Worker-thread counts for each operation type.
 
@@ -374,22 +380,35 @@ caller-provided load buffers during prefetch.
 
 - ``raw_block`` is a server-owned MP adapter. It does **not** support
   per-TP device-path mappings in MP mode.
-- ``raw_block`` remains ``"type": "raw_block"`` for both supported engines.
+- ``raw_block`` remains ``"type": "raw_block"`` for all supported engines.
 - ``raw_block`` owns on-device slot allocation, checkpointing, and recovery
   through ``RawBlockCore``. Slot reclamation is driven by the shared/global
   L2 eviction controller or explicit ``delete()`` calls.
 - If ``use_odirect`` is enabled, the server's ``--l1-align-bytes`` should be
   at least ``block_align``.
 - ``persist_enabled`` must remain ``true`` for this adapter.
+- For ``use_uring_cmd=true``, ``device_path`` must use the NVMe character
+  device node (e.g., ``/dev/ng0n1``) instead of the block device node
+  (``/dev/nvme0n1``). The character device provides direct NVMe
+  command passthrough.
+- ``use_uring_cmd`` requires ``io_engine="io_uring"`` to be set.
+- When ``use_uring_cmd=true``, ``use_odirect`` is ignored for NVMe namespace
+  character devices.
 
 **Configuration examples:**
 
 .. code-block:: bash
 
+    # Basic raw_block with posix I/O
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "block_align": 4096, "header_bytes": 4096, "meta_total_bytes": 268435456, "use_odirect": true, "num_store_workers": 2, "num_lookup_workers": 1, "num_load_workers": 4}'
 
+    # With io_uring
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "iouring_queue_depth": 256, "use_odirect": true}'
 
+    # With io_uring_cmd (NVMe passthrough)
+    --l2-adapter '{"type": "raw_block", "device_path": "/dev/ng0n1", "slot_bytes": 1048576, "io_engine": "io_uring", "use_uring_cmd": true, "iouring_queue_depth": 256, "max_data_transfer_size": 131072, "use_odirect": false}'
+
+    # With eviction
     --l2-adapter '{"type": "raw_block", "device_path": "/dev/nvme0n1", "slot_bytes": 1048576, "load_checkpoint_on_init": false, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.9, "eviction_ratio": 0.1}}'
 
 ``mooncake_store`` -- Mooncake Store native connector

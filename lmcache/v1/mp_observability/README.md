@@ -58,7 +58,6 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `--event-bus-queue-size N` | `10000` | Maximum number of events in the EventBus queue before tail-drop. |
 | `--otlp-endpoint URL` | *(none)* | OTLP gRPC endpoint (e.g. `http://localhost:4317`). When set, metrics and traces are pushed to an OTel collector. When unset, metrics fall back to Prometheus pull mode. |
 | `--prometheus-port PORT` | `9090` | Port for the Prometheus `/metrics` endpoint. Only used when `--otlp-endpoint` is not set. |
-| `--service-instance-id ID` | *unset* (default random UUID v4) | Identifier for this MP server instance.  Attached as the OTel Resource attribute `service.instance.id` on every metric and span.  When the flag is not passed, defaults to a random UUID v4 minted at startup.  Pass `--service-instance-id=""` to force an explicit empty value. |
 
 ### `ObservabilityConfig` fields
 
@@ -71,7 +70,7 @@ CLI, pass the flags below; when embedding programmatically, construct an
 | `tracing_enabled` | `bool` | `False` | Register tracing subscribers (OTel spans). |
 | `otlp_endpoint` | `str \| None` | `None` | OTLP gRPC endpoint. When set, metrics and traces are pushed. When `None`, metrics use Prometheus pull fallback. |
 | `prometheus_port` | `int` | `9090` | Port for the Prometheus `/metrics` endpoint (pull fallback only). |
-| `service_instance_id` | `str \| None` | `None` (default random UUID v4) | Identifier for this MP server instance; attached as the OTel Resource attribute `service.instance.id` on every metric and span.  `None` defaults to a random UUID v4 at `init_observability` time.  An explicit `""` is preserved. |
+| `service_instance_id` | `str \| None` | `None` | OTel Resource attribute `service.instance.id`, attached to every metric and span. No CLI flag: `run_cache_server` projects the MP server's `--instance-id` onto it. `None` (standalone callers only) falls back to a random UUID v4 at `init_observability` time; an explicit value is preserved. |
 
 ### Metrics export modes
 
