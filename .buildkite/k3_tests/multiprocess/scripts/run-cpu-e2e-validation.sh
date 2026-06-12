@@ -41,8 +41,6 @@ LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-data}"
 # Set SKIP_INSTALL=1 to skip Phase 1 (install) — useful when the caller
 # has already installed everything (e.g. macOS CI workflow steps).
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
-# Set SKIP_CACHE_HIT_VALIDATION=1 to skip Phase 3 (cache-hit metrics).
-SKIP_CACHE_HIT_VALIDATION="${SKIP_CACHE_HIT_VALIDATION:-0}"
 
 # Directory to collect artifacts before workspace is deleted
 ARTIFACT_DIR="/tmp/build_${BUILD_ID}_artifacts"
@@ -499,10 +497,6 @@ echo "✅ CPU E2E validation passed"
 #   - All three outputs must be identical (bit-exact with temperature=0)
 # ═══════════════════════════════════════════════════════════════════
 
-if [ "${SKIP_CACHE_HIT_VALIDATION}" = "1" ]; then
-  echo "=== Cache Hit Validation (Phase 3) — SKIPPED (SKIP_CACHE_HIT_VALIDATION=1) ==="
-else
-
 echo "=== Cache Hit Validation (Phase 3) ==="
 
 # Generate a fixed ~1000 token prompt
@@ -617,15 +611,10 @@ echo "[Phase 3 / Step 9] Cleaning up"
 stop_vllm
 cleanup_processes
 echo "✅ Phase 3 cleanup completed"
-fi  # end SKIP_CACHE_HIT_VALIDATION
 
 echo ""
 echo "=========================================="
-if [ "${SKIP_CACHE_HIT_VALIDATION}" = "1" ]; then
-  echo "✅ All phases passed (Phase 1 + 2)"
-else
-  echo "✅ All phases passed (Phase 1 + 2 + 3)"
-fi
+echo "✅ All phases passed (Phase 1 + 2 + 3)"
 echo "=========================================="
 
 # Make sure lmcache/vllm processes started in this run are reaped so

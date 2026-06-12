@@ -7,7 +7,6 @@
 #
 # Delegates all logic to the shared run-cpu-e2e-validation.sh with:
 #   SKIP_INSTALL=1              (install done by CI workflow steps)
-#   SKIP_CACHE_HIT_VALIDATION=1 (skip Phase 3 to keep CI time reasonable)
 #
 # Transport mode is selected via LMCACHE_TRANSPORT_MODE:
 #   handle -> LMCACHE_MP_TRANSFER_MODE=handle (POSIX SHM server-side copy)
@@ -76,7 +75,6 @@ case "${LMCACHE_TRANSPORT_MODE}" in
 esac
 
 export SKIP_INSTALL="${SKIP_INSTALL:-1}"
-export SKIP_CACHE_HIT_VALIDATION="${SKIP_CACHE_HIT_VALIDATION:-0}"
 export LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-60}"
 export VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-300}"
 export LMCACHE_LOG_FILE="${LMCACHE_LOG_FILE:-/tmp/cpu_e2e_lmcache.log}"
@@ -85,7 +83,6 @@ export VLLM_LOG_FILE="${VLLM_LOG_FILE:-/tmp/cpu_e2e_vllm.log}"
 echo "    LMCACHE_TRANSPORT_MODE=${LMCACHE_TRANSPORT_MODE}"
 echo "    LMCACHE_DATA_MODE=${LMCACHE_DATA_MODE}"
 echo "    SKIP_INSTALL=${SKIP_INSTALL}"
-echo "    SKIP_CACHE_HIT_VALIDATION=${SKIP_CACHE_HIT_VALIDATION}"
 echo "    Delegating to: ${SHARED_SCRIPT}"
 
 exec bash "${SHARED_SCRIPT}"
