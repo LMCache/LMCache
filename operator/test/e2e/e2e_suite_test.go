@@ -54,6 +54,10 @@ var (
 	// Initialised once in BeforeSuite after CRDs are installed; spec files
 	// read it directly without rebuilding their own client.
 	k8sClient client.Client
+	// certManagerInstalledBySuite records whether BeforeSuite installed
+	// cert-manager (vs. finding it pre-installed). AfterSuite only uninstalls
+	// what the suite installed, so a shared cluster's cert-manager is preserved.
+	certManagerInstalledBySuite bool
 )
 
 // envDefault returns os.Getenv(key) or def if the env var is unset/empty.
@@ -76,6 +80,18 @@ func TestE2E(t *testing.T) {
 var _ = BeforeSuite(func() {
 	_, _ = fmt.Fprintf(GinkgoWriter, "manager image: %s (skipImageLoad=%v)\n",
 		managerImage, skipImageLoad)
+
+	// cert-manager must exist before `make deploy` applies the operator's
+	// Issuer/Certificate and the CA-injected mutating webhook. Install it up
+	// front (before the slow image build/load) so its webhook endpoints are
+	// warm by the time we deploy. Skip when the cluster already ships it.
+	By("ensuring cert-manager is installed (required by the operator's webhook serving cert)")
+	if utils.IsCertManagerCRDsInstalled() {
+		By("cert-manager CRDs already present; skipping install")
+	} else {
+		Expect(utils.InstallCertManager()).To(Succeed(), "Failed to install cert-manager")
+		certManagerInstalledBySuite = true
+	}
 
 	if skipImageLoad {
 		// Existing-cluster path: the user pushed the image to a
@@ -137,6 +153,11 @@ var _ = AfterSuite(func() {
 	By("uninstalling CRDs")
 	if _, err := utils.RunMake("uninstall", "ignore-not-found=true"); err != nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "warning: uninstall failed: %v\n", err)
+	}
+
+	if certManagerInstalledBySuite {
+		By("uninstalling cert-manager")
+		utils.UninstallCertManager()
 	}
 })
 

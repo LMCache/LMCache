@@ -10,9 +10,16 @@ retrieve scatters into the request's paged blocks.
 from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import threading
 import time
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.mp_coordinator.blend_client import (
+        BlendCoordinatorClient,
+        RemoteMatch,
+    )
 
 # Third Party
 import numpy as np
@@ -29,6 +36,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
+from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
@@ -80,6 +88,8 @@ class _CBUnifiedJob:
     expanded_uidx: list[int] | None = None
     found_uidx: set[int] | None = None  # stashed when the sparse poll completes
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
+    coord_submitted: bool = False  # coordinator match query was issued
+    coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
 
 
 class BlendTokenRangeMatcherV3:
@@ -312,6 +322,7 @@ class BlendV3Module:
         ctx: MPCacheEngineContext,
         gpu_transfer: GPUTransferModule,
         lookup_module: LookupModule,
+        coordinator: "BlendCoordinatorClient | None" = None,
     ):
         self._ctx = ctx
         self._gpu_transfer = gpu_transfer
@@ -319,6 +330,9 @@ class BlendV3Module:
         # (registers the prefix prefetch job + session state the retrieve
         # path depends on) inside the single unified RPC.
         self._lookup_module = lookup_module
+        # Optional bridge to the fleet-wide fingerprint directory. ``None`` =>
+        # purely local matching (publish/query paths skipped).
+        self._coordinator = coordinator
 
         self._token_range_matcher = BlendTokenRangeMatcherV3(ctx.chunk_size)
         self._event_bus = ctx.event_bus
@@ -404,6 +418,10 @@ class BlendV3Module:
 
     def close(self) -> None:
         self._fingerprint_stop.set()
+        if self._coordinator is not None:
+            # Joins the client's daemon thread and closes its httpx.Client;
+            # otherwise the coordinator leg leaks both on server shutdown.
+            self._coordinator.close()
         self._cb_rope_state.clear()
 
     # ------------------------------------------------------------------
@@ -517,30 +535,45 @@ class BlendV3Module:
                 logger.exception("CB fingerprint registration failed (sync drain)")
 
     def _match_fingerprints(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
-        """Match the query's reusable chunks, leftmost-greedy deduped.
+        """Drain pending registrations and fingerprint-match sub-sequences.
 
-        Drains pending fingerprint registrations, probes the matcher, then keeps
-        a non-overlapping leftmost-greedy subset.
-
-        Args:
-            key (IPCCacheEngineKey): The query request key.
-
-        Returns:
-            list[CBMatchResult]: Non-overlapping matches sorted by cur_st
-            (empty if none).
+        Returns the raw matches (any order, possibly overlapping); the caller
+        applies the prefix filter + overlap dedup once via
+        :meth:`_non_overlapping_after_prefix`.
         """
         self._drain_fingerprints_sync()
-        matches = self._token_range_matcher.match_sub_sequence(list(key.token_ids))
-        if not matches:
-            return []
-        matches.sort(key=lambda r: r.cur_st)
-        deduped: list[CBMatchResult] = []
+        return self._token_range_matcher.match_sub_sequence(list(key.token_ids))
+
+    @staticmethod
+    def _non_overlapping_after_prefix(
+        matches: list[CBMatchResult], prefix_tokens: int
+    ) -> list[CBMatchResult]:
+        """Matches outside the prefix coverage, leftmost-greedy overlap-deduped.
+
+        Drops matches the prefix leg already covers (``cur_st < prefix_tokens``),
+        then keeps a left-to-right non-overlapping subset -- two matches over the
+        same request range can't both scatter. Filtering precedes the dedup so a
+        prefix-covered match cannot suppress a usable one in the greedy pass.
+
+        Args:
+            matches: Candidate matches in any order; ``cur_st``/``cur_ed`` are
+                request token positions.
+            prefix_tokens: Contiguous prefix coverage in tokens; matches starting
+                before it are dropped. Pass ``0`` to keep all (dedup only).
+
+        Returns:
+            Non-overlapping matches in ascending ``cur_st`` order.
+        """
+        kept: list[CBMatchResult] = []
         covered_end = -1
-        for r in matches:
+        for r in sorted(
+            (r for r in matches if r.cur_st >= prefix_tokens),
+            key=lambda r: r.cur_st,
+        ):
             if r.cur_st >= covered_end:
-                deduped.append(r)
+                kept.append(r)
                 covered_end = r.cur_ed
-        return deduped
+        return kept
 
     def _resolve_cb_layout_desc(
         self, model_name: str, world_size: int
@@ -731,19 +764,33 @@ class BlendV3Module:
             # mp.lookup_prefetch (LookupModule self-instruments); prefix_chunks
             # lands on cb.lookup via CB_LOOKUP_END below.
             self._lookup_module.lookup(key, tp_size)
-            # Fingerprint match: CPU-bound, tight span.
-            self._event_bus.publish(
-                Event(event_type=EventType.CB_FINGERPRINT_MATCH_START, session_id=rid)
-            )
-            matches = self._match_fingerprints(key)
-            self._event_bus.publish(
-                Event(
-                    event_type=EventType.CB_FINGERPRINT_MATCH_END,
-                    session_id=rid,
-                    metadata={"matches": len(matches)},
+            # Local and coordinator matching are mutually exclusive: with a
+            # coordinator the fleet directory is the only source, so skip the
+            # local matcher (and its span). The coordinator leg is async
+            # (submitted below, resolved at poll) and is timed by cb.lookup.
+            matches: list[CBMatchResult]
+            if self._coordinator is not None:
+                matches = []
+            else:
+                # Local fingerprint match: CPU-bound, tight span.
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_FINGERPRINT_MATCH_START,
+                        session_id=rid,
+                    )
                 )
-            )
+                matches = self._match_fingerprints(key)
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_FINGERPRINT_MATCH_END,
+                        session_id=rid,
+                        metadata={"matches": len(matches)},
+                    )
+                )
             job = _CBUnifiedJob(matches=matches, num_tokens=len(key.token_ids))
+            job.coord_submitted = self._submit_coordinator_match(key)
+            if job.coord_submitted and self._coordinator is not None:
+                job.coord_deadline = time.monotonic() + self._coordinator.match_budget_s
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
@@ -759,9 +806,16 @@ class BlendV3Module:
         # enter the sparse prefetch, so they cannot leak a read lock.
         if not job.sparse_started:
             prefix_tokens = job.prefix_chunks * chunk_size
-            # Any offset is fine: the per-token slot scatter writes
-            # non-block-aligned matches.
-            job.non_prefix = [r for r in job.matches if r.cur_st >= prefix_tokens]
+            if self._coordinator is not None:
+                candidates = self._poll_coordinator_match(job, rid)
+                if candidates is None:
+                    return None  # coordinator still in flight (bounded by deadline)
+            else:
+                candidates = job.matches
+            # Single prefix-filter + overlap dedup over the raw matches
+            job.non_prefix = self._non_overlapping_after_prefix(
+                candidates, prefix_tokens
+            )
             if job.non_prefix:
                 layout_desc = self._resolve_cb_layout_desc(
                     key.model_name, key.world_size
@@ -923,7 +977,140 @@ class BlendV3Module:
                 key.request_id,
             )
 
+        if self._coordinator is not None:
+            self._publish_fingerprints(key, chunk_hashes, tokens_in_range)
+
         return result
+
+    def _publish_fingerprints(
+        self,
+        key: IPCCacheEngineKey,
+        chunk_hashes: list[bytes],
+        tokens_in_range: list[int],
+    ) -> None:
+        """Publish this stored range's chunk fingerprints to the coordinator.
+
+        Best-effort and fire-and-forget (enqueue only): one wire
+        ``ChunkFingerprint`` per stored chunk -- its content poly-hash (the same
+        ``chunk_hash_windows_numba`` the match probes, with the fleet base), its
+        shared-L2 ``object_key`` (the chunk storage key ``th``), and its token
+        position. Never raises into the store path.
+
+        Args:
+            key: The store request key (model/scope/positions).
+            chunk_hashes: Per-chunk storage keys (``th``) for the range.
+            tokens_in_range: The stored tokens ``token_ids[start:end]``.
+        """
+        coordinator = self._coordinator
+        if coordinator is None or not chunk_hashes:
+            return
+        try:
+            model_scope = f"{key.model_name}@{key.cache_salt}"
+            store_range = {
+                "model_scope": model_scope,
+                "tokens": list(tokens_in_range),
+                "object_keys": [h.hex() for h in chunk_hashes],
+                "old_st_base": key.start,
+            }
+            coordinator.enqueue_register([store_range])
+        except Exception:
+            logger.warning(
+                "CB coordinator publish build failed for request %s "
+                "(does not affect store correctness)",
+                key.request_id,
+            )
+
+    def _submit_coordinator_match(self, key: IPCCacheEngineKey) -> bool:
+        """Issue a fleet directory match query for this request (best-effort).
+
+        Args:
+            key: The lookup request key.
+
+        Returns:
+            ``True`` if a query was submitted (so the finalize step should poll
+            for it), ``False`` when there is no coordinator or submission failed.
+        """
+        coordinator = self._coordinator
+        if coordinator is None:
+            return False
+        try:
+            tokens = list(key.token_ids)
+            if len(tokens) < self._ctx.chunk_size:
+                return False
+            model_scope = f"{key.model_name}@{key.cache_salt}"
+            coordinator.submit_match(key.request_id, model_scope, tokens)
+            return True
+        except Exception:
+            logger.warning(
+                "CB coordinator match submit failed for request %s", key.request_id
+            )
+            return False
+
+    def _poll_coordinator_match(
+        self, job: "_CBUnifiedJob", rid: str
+    ) -> "list[CBMatchResult] | None":
+        """Poll the coordinator match result, deferring until it resolves.
+
+        Mirrors the prefix/sparse legs: ``return None`` to defer while pending.
+        A per-lookup wall-clock deadline (``job.coord_deadline``) bounds the
+        total wait: the daemon services match queries serially, so queue backlog
+        can keep a query ``PENDING`` well past one HTTP round-trip. Once the
+        deadline passes, the leg is abandoned and the lookup proceeds local-only
+        (the daemon's later fill, if any, is dropped via ``take_match``).
+
+        Args:
+            job: The per-request poll state.
+            rid: Request id.
+
+        Returns:
+            The global segments (possibly empty) once resolved or timed out, or
+            ``None`` to defer (still in flight and within the deadline).
+        """
+        coordinator = self._coordinator
+        if coordinator is None or not job.coord_submitted:
+            return []
+        poll = coordinator.poll_match(rid)
+        if poll is PENDING:
+            if time.monotonic() < job.coord_deadline:
+                return None  # defer; bounded by job.coord_deadline
+            coordinator.take_match(rid)
+            logger.warning(
+                "CB coordinator match deadline exceeded for %s; local-only", rid
+            )
+            return []
+        coordinator.take_match(rid)
+        if isinstance(poll, list):
+            return self._build_global_segments(poll)
+        return []
+
+    def _build_global_segments(
+        self, matches: "list[RemoteMatch]"
+    ) -> list[CBMatchResult]:
+        """Convert coordinator matches into chunk-granular retrievable segments.
+
+        Each coordinator ``object_key`` is the hex of the chunk's content hash
+        (the same ``th`` a local ``CBMatchResult.hash`` holds), so the matches
+        are returned as ``CBMatchResult`` directly: the retrieve path then
+        expands ``hash`` to per-rank shared-L2 object keys via
+        ``ipc_key_to_object_keys``, identical to local matches.
+
+        Args:
+            matches: Matched chunks returned by the coordinator client.
+
+        Returns:
+            One :class:`CBMatchResult` per matched chunk (request order).
+        """
+        chunk_size = self._ctx.chunk_size
+        return [
+            CBMatchResult(
+                old_st=m.old_st,
+                old_ed=m.old_st + chunk_size,
+                cur_st=m.cur_st,
+                cur_ed=m.cur_st + chunk_size,
+                hash=bytes.fromhex(m.object_key),
+            )
+            for m in matches
+        ]
 
     def _drain_fingerprint_queue(self) -> None:
         """Best-effort background drainer for _fingerprint_queue."""
