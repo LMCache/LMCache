@@ -775,6 +775,19 @@ Options
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
+   * - ``--format FORMAT``
+     - ``terminal``
+     - Stdout output format for the final metrics summary. Available:
+       ``terminal``, ``json``.
+   * - ``--output PATH``
+     - *(unset)*
+     - Save the final metrics summary to a file at PATH (format chosen
+       by ``--format``).
+   * - ``-q`` / ``--quiet``
+     - *(unset)*
+     - Suppress all progress messages during the run. Only the final
+       structured metrics summary is emitted (unless also redirected
+       via ``--output``).
 
 
 CPU mode (no GPU)
@@ -842,12 +855,76 @@ See ``parse_kvcache_shape_spec`` in ``lmcache/v1/kv_layer_groups.py``
 for the authoritative parsing rules and validation errors.
 
 
-Example output
-~~~~~~~~~~~~~~
+Output
+~~~~~~
+
+After the run completes (or is interrupted with ``Ctrl-C``), a structured
+metrics summary is printed. The summary includes:
+
+* **Configuration** -- RPC URL, mode, transfer mode, tokens per request,
+  interval.
+* **Results** -- total requests, checksum OK / FAIL counts, pass rate.
+* **Latency sections** -- per-operation latency statistics (count, mean,
+  min, max, p50, p99) for cold lookup, cold store, warm lookup, and warm
+  retrieve.
+
+Use ``--format json`` to get machine-readable output, or ``--output FILE``
+to save the summary to a file.
 
 .. code-block:: text
 
-   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu, transfer=auto) ...
+   ================ Server Bench Result =================
+   ---------------------- Configuration -----------------
+   RPC URL:                          tcp://localhost:15556
+   Mode:                             gpu
+   Transfer mode:                    auto
+   Tokens / request:                 512
+   Interval (s):                     0.5
+   ------------------------- Results --------------------
+   Total requests:                   3
+   Checksum OK:                      3
+   Checksum FAIL:                    0
+   Pass rate (%):                    100.0
+   -------------------- Cold Lookup (ms) ---------------
+   count:                            3
+   mean:                             1.647
+   min:                              1.312
+   max:                              1.823
+   p50:                              1.647
+   p99:                              1.823
+   --------------------- Cold Store (ms) ---------------
+   count:                            3
+   mean:                             1.740
+   min:                              1.521
+   max:                              1.982
+   p50:                              1.740
+   p99:                              1.982
+   -------------------- Warm Lookup (ms) ---------------
+   count:                            3
+   mean:                             1.310
+   min:                              1.102
+   max:                              1.512
+   p50:                              1.310
+   p99:                              1.512
+   ------------------- Warm Retrieve (ms) --------------
+   count:                            3
+   mean:                             1.480
+   min:                              1.321
+   max:                              1.612
+   p50:                              1.480
+   p99:                              1.612
+   =====================================================
+
+
+Example output (progress)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+During the run, progress messages are printed to stdout (suppressed by
+``-q`` / ``--quiet``):
+
+.. code-block:: text
+
+   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu) ...
    Server chunk_size = 256
    Resolved KV shape spec: (2,1024,16,8,128):float16:32
    [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
