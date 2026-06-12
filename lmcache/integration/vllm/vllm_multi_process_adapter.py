@@ -1502,19 +1502,17 @@ class LMCacheMPWorkerAdapter:
             self.retrieve_events.pop(request_id, None)
 
         # Retrieves dropped while unhealthy still must be reported,
-        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
-        dropped_retrieves = set(self._dropped_retrieves)
-        finished_retrieves.update(dropped_retrieves)
+        # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
+        # finished_sending dedup is needed (unlike the unhealthy branch): a
+        # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
+        # this report, so it cannot also be engine-finished in the same call.
+        finished_retrieves.update(self._dropped_retrieves)
         self._dropped_retrieves.clear()
 
         # Update the internal states
         ret_stores = self._process_finished_stores(
             finished_stores, finished_req_ids_from_engine
         )
-        # A dropped retrieve may already be engine-finished in this same
-        # call; it must not appear in both finished_recving and
-        # finished_sending (mirrors the unhealthy branch's guard).
-        ret_stores -= dropped_retrieves
 
         # the invocation of `get_finished` means that
         # these requests' KV caches are already fully stored.

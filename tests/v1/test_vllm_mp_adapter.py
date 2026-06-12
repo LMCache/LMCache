@@ -591,28 +591,6 @@ def test_dropped_retrieve_reported_once_via_healthy_get_finished(
     assert finished_retrieves == set()
 
 
-def test_dropped_retrieve_engine_finished_same_healthy_call_reported_once(
-    fake_adapter,
-) -> None:
-    """A dropped retrieve whose request is also engine-finished in the same
-    healthy ``get_finished`` call is reported only in finished_retrieves,
-    never also in finished_sending."""
-    adapter, _send_mock, _ = fake_adapter
-    adapter.transfer_ctx = MagicMock()
-    FakeHeartbeatThread.start_hook = lambda heartbeat: None  # ping never succeeds
-
-    adapter.submit_retrieve_request("req-1", _op([[5]]), MagicMock())
-    assert not adapter.is_healthy
-
-    # Server recovers between the drop and the next get_finished poll.
-    FakeHeartbeatThread.instances[0].simulate_successful_ping()
-    assert adapter.is_healthy
-
-    ret_stores, finished_retrieves = adapter.get_finished({"req-1"})
-    assert finished_retrieves == {"req-1"}
-    assert ret_stores == set()
-
-
 def test_shutdown_stops_heartbeat_before_unregister(fake_adapter) -> None:
     """shutdown() stops the heartbeat before sending UNREGISTER, so no
     stray heartbeat ping can race the closing mq_client."""
