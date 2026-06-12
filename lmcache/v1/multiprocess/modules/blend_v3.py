@@ -88,7 +88,6 @@ class _CBUnifiedJob:
     expanded_uidx: list[int] | None = None
     found_uidx: set[int] | None = None  # stashed when the sparse poll completes
     l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
-    found_result: list[CBMatchResult] | None = None  # local classify, computed once
     coord_submitted: bool = False  # coordinator match query was issued
     coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
 
@@ -870,20 +869,17 @@ class BlendV3Module:
                     )
                 )
 
-        # --- Local legs ready: classify the complement once (side effects). ---
-        if job.found_result is None:
-            if job.handle is not None:
-                found = self._sparse_classify(
-                    key,
-                    job.non_prefix or [],
-                    job.found_uidx or set(),
-                    job.per_hash_obj_keys or {},
-                    job.expanded_uidx or [],
-                )
-            else:
-                found = []
-            job.found_result = found
-        found = job.found_result
+        # --- BOTH legs ready: classify the complement + finalize. ---
+        if job.handle is not None:
+            found = self._sparse_classify(
+                key,
+                job.non_prefix or [],
+                job.found_uidx or set(),
+                job.per_hash_obj_keys or {},
+                job.expanded_uidx or [],
+            )
+        else:
+            found = []
 
         prefix_tokens = job.prefix_chunks * chunk_size
         num_tokens = job.num_tokens
