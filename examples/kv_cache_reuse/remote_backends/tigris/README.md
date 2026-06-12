@@ -16,7 +16,7 @@ See [Tigris's Manage Access Keys documentation](https://www.tigrisdata.com/docs/
 
 Replace `{BUCKET_NAME}`, `{TIGRIS_ACCESS_KEY_ID}`, and `{TIGRIS_SECRET_ACCESS_KEY}` in `example.yaml` with the values from Step 1.
 
-## Step 3: Start an vLLM engine with LMCache
+## Step 3: Start a vLLM engine with LMCache
 
 ```bash
 PYTHONHASHSEED=0 LMCACHE_CONFIG_FILE=example.yaml vllm serve meta-llama/Llama-3.1-8B-Instruct --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1", "kv_role":"kv_both"}' --disable-log-requests --no-enable-prefix-caching
