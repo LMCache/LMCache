@@ -8,6 +8,7 @@ import inspect
 import itertools
 import queue
 import threading
+import time
 
 # Third Party
 import msgspec
@@ -170,7 +171,9 @@ class ClientPollingLoop:
             inst._notifier.notify()
             cls._instance = None
 
-        inst._thread.join()
+        inst._thread.join(timeout=5.0)
+        if inst._thread.is_alive():
+            logger.warning("ClientPollingLoop thread did not stop within 5 seconds")
         inst._notifier.close()
         logger.debug("ClientPollingLoop shut down")
 
@@ -185,7 +188,11 @@ class ClientPollingLoop:
         done = threading.Event()
         self._ops_queue.put(_PollOp(kind=_OpKind.REGISTER, client=client, done=done))
         self._notifier.notify()
-        done.wait()
+        if not done.wait(timeout=5.0):
+            logger.error(
+                "ClientPollingLoop register timed out – loop thread may be dead"
+            )
+            raise RuntimeError("ClientPollingLoop register timed out")
 
     def unregister(self, client: "MessageQueueClient") -> None:
         """Unregister a client's DEALER socket from the shared poller.
@@ -198,7 +205,11 @@ class ClientPollingLoop:
         done = threading.Event()
         self._ops_queue.put(_PollOp(kind=_OpKind.UNREGISTER, client=client, done=done))
         self._notifier.notify()
-        done.wait()
+        if not done.wait(timeout=5.0):
+            logger.error(
+                "ClientPollingLoop unregister timed out – loop thread may be dead"
+            )
+            # Don't raise; we are in close(), best-effort cleanup.
 
     def notify(self) -> None:
         """Wake the polling loop to process outbound tasks."""
@@ -224,27 +235,58 @@ class ClientPollingLoop:
     def _main_loop(self) -> None:
         """Unified poll loop for all registered clients."""
         notifier_fd = self._notifier.fileno()
+        error_count = 0
+        last_logged_at = 0.0
 
         while not self._is_finished.is_set():
-            self._process_ops()
+            try:
+                self._process_ops()
 
-            socks = dict(self._poller.poll(1000))
+                socks = dict(self._poller.poll(1000))
 
-            # Outbound: shared notifier woke us — drain it, then flush
-            # all clients' output queues.
-            if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
-                self._notifier.consume()
-                for client in self._socket_to_client.values():
-                    client.process_outbound_task()
+                # Outbound: shared notifier woke us — drain it, then flush
+                # all clients' output queues.
+                if socks.get(notifier_fd) and socks[notifier_fd] & zmq.POLLIN:
+                    self._notifier.consume()
+                    for client in self._socket_to_client.values():
+                        client.process_outbound_task()
 
-            # Inbound: dispatch each ready DEALER socket to its client.
-            for sock, event in socks.items():
-                if sock is notifier_fd:
-                    continue
-                if event & zmq.POLLIN:
-                    owner = self._socket_to_client.get(sock)
-                    if owner is not None:
-                        owner.process_inbound()
+                # Inbound: dispatch each ready DEALER socket to its client.
+                for sock, event in socks.items():
+                    if sock is notifier_fd:
+                        continue
+                    if event & zmq.POLLIN:
+                        owner = self._socket_to_client.get(sock)
+                        if owner is not None:
+                            owner.process_inbound()
+
+                # One clean iteration resets the error streak (transient)
+                error_count = 0
+            except Exception as e:
+                error_count += 1
+                now = time.monotonic()
+                if error_count == 1:
+                    logger.error(
+                        "ClientPollingLoop: exception in main loop: %s: %s",
+                        type(e).__name__,
+                        e,
+                        exc_info=True,
+                    )
+                    last_logged_at = now
+                elif now - last_logged_at >= 10.0:
+                    logger.error(
+                        "ClientPollingLoop: %d consecutive "
+                        "exceptions, latest: %s: %s "
+                        "(suppressed stack traces)",
+                        error_count,
+                        type(e).__name__,
+                        e,
+                    )
+                    last_logged_at = now
+
+                # Park ourselves briefly so a tight crash-loop doesn't
+                # burn CPU, then try again.
+                self._is_finished.wait(0.5)
 
         # Drain remaining ops so any waiting threads unblock.
         self._process_ops()
@@ -263,6 +305,7 @@ class MessageQueueClient:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.DEALER)
+        self.socket.setsockopt(zmq.LINGER, 0)
         self.socket.connect(server_url)
 
         # Input queue
@@ -486,6 +529,7 @@ class MessageQueueServer:
         # Socket
         self.ctx = context
         self.socket = self.ctx.socket(zmq.ROUTER)
+        self.socket.setsockopt(zmq.LINGER, 0)
         self.socket.bind(bind_url)
         # Use a cross-platform Notifier instead of zmq PUSH/PULL sockets
         # because blocking handler callbacks run on ThreadPoolExecutor

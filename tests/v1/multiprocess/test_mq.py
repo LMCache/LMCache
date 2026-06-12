@@ -60,6 +60,7 @@ def _server_process(
     ready_event: EventClass,
     shutdown_event: EventClass,
     request_handlers: dict[RequestType, Callable],
+    error_queue: mp.Queue,
 ):
     """
     Server process that runs the MessageQueueServer.
@@ -69,36 +70,42 @@ def _server_process(
         ready_event: Event to signal when server is ready
         shutdown_event: Event to signal server shutdown
         request_handlers: Dict mapping RequestType to handler functions
+        error_queue: Queue to report startup errors to the parent process
     """
     # First Party
     from lmcache.v1.multiprocess.protocol import HandlerType
 
-    context = zmq.Context.instance()
-    server = MessageQueueServer(server_url, context)
+    try:
+        context = zmq.Context.instance()
+        server = MessageQueueServer(server_url, context)
 
-    # Register all handlers
-    blocking_types: list[RequestType] = []
-    for request_type, handler in request_handlers.items():
-        payload_classes = get_payload_classes(request_type)
-        handler_type = get_handler_type(request_type)
-        server.add_handler(request_type, payload_classes, handler_type, handler)
-        if handler_type == HandlerType.BLOCKING:
-            blocking_types.append(request_type)
+        # Register all handlers
+        blocking_types: list[RequestType] = []
+        for request_type, handler in request_handlers.items():
+            payload_classes = get_payload_classes(request_type)
+            handler_type = get_handler_type(request_type)
+            server.add_handler(request_type, payload_classes, handler_type, handler)
+            if handler_type == HandlerType.BLOCKING:
+                blocking_types.append(request_type)
 
-    # Assign a normal pool for all blocking handlers in tests
-    if blocking_types:
-        server.add_normal_thread_pool(blocking_types, max_workers=4)
+        # Assign a normal pool for all blocking handlers in tests
+        if blocking_types:
+            server.add_normal_thread_pool(blocking_types, max_workers=4)
 
-    server.start()
+        server.start()
 
-    # Signal that server is ready
-    ready_event.set()
+        # Signal that server is ready
+        ready_event.set()
 
-    # Wait for shutdown signal
-    shutdown_event.wait()
+        # Wait for shutdown signal
+        shutdown_event.wait()
 
-    # Cleanup
-    server.close()
+        # Cleanup
+        server.close()
+    except Exception as e:
+        error_queue.put((type(e).__name__, str(e)))
+        # Re-raise so the process exits with non-zero code
+        raise
 
 
 def _run_client_test(
@@ -238,13 +245,51 @@ class MessageQueueTestHelper:
         """
         ready_event = self.ctx.Event()
         shutdown_event = self.ctx.Event()
+        error_queue: mp.Queue = self.ctx.Queue()
 
         # Start server process
         server_process = self.ctx.Process(
             target=_server_process,
-            args=(self.server_url, ready_event, shutdown_event, self.handlers),
+            args=(
+                self.server_url,
+                ready_event,
+                shutdown_event,
+                self.handlers,
+                error_queue,
+            ),
         )
         server_process.start()
+
+        # Wait for server to be ready or for an error
+        server_ready = ready_event.wait(timeout=5.0)
+        if not server_ready:
+            # Check if the server reported an error
+            server_errors: list[str] = []
+            while not error_queue.empty():
+                try:
+                    err_type, err_msg = error_queue.get_nowait()
+                    server_errors.append("%s: %s" % (err_type, err_msg))
+                except Exception:
+                    break
+            if server_errors:
+                shutdown_event.set()
+                server_process.join(timeout=2)
+                if server_process.is_alive():
+                    server_process.terminate()
+                    server_process.join()
+                pytest.fail(
+                    "Server process failed to start: %s" % "; ".join(server_errors)
+                )
+            # No explicit error – maybe just slow
+            shutdown_event.set()
+            server_process.join(timeout=2)
+            if server_process.is_alive():
+                server_process.terminate()
+                server_process.join()
+            pytest.fail(
+                "Server process did not become ready within timeout "
+                "(exit code: %s)" % server_process.exitcode
+            )
 
         # Start multiple client processes
         client_processes = []
@@ -292,7 +337,17 @@ class MessageQueueTestHelper:
             failure_details = ", ".join(
                 [f"Client {cid}: {reason}" for cid, reason in failed_clients]
             )
-            pytest.fail(f"Some clients failed: {failure_details}")
+            # Drain any server-side errors for diagnostics
+            backend_errors: list[str] = []
+            while not error_queue.empty():
+                try:
+                    err_type, err_msg = error_queue.get_nowait()
+                    backend_errors.append("%s: %s" % (err_type, err_msg))
+                except Exception:
+                    break
+            if backend_errors:
+                failure_details += " (server errors: %s)" % "; ".join(backend_errors)
+            pytest.fail("Some clients failed: %s" % failure_details)
 
         if server_process.exitcode != 0:
             pytest.fail(
