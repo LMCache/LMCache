@@ -35,6 +35,7 @@ from lmcache.v1.distributed.serde.turboquant import (
     TurboQuantSerializer,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.memory_management import MemoryObj
 
 
@@ -133,11 +134,9 @@ def test_estimate_serialized_size_k8v4() -> None:
     )
 
     # num_layers = 3
-    # num_tokens = 20
-    # num_heads = 4
-    # num_blocks = ceil(20 / 16) = 2
-    # slot_size_aligned = 196
-    expected = 3 * 2 * 16 * 4 * 196
+    # default skip_first_layers=2 and skip_last_layers=2 leaves no middle
+    # layers to compress, so all layers are stored as raw bfloat16 KV.
+    expected = 2 * 3 * 20 * 512 * torch.bfloat16.itemsize
 
     assert serializer.estimate_serialized_size(layout) == expected
 
@@ -216,7 +215,7 @@ def _wait_for_prefetch_status(
     handle,
     timeout: float = 20.0,
     poll_interval: float = 0.05,
-) -> int | None:
+) -> Bitmap | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = sm.query_prefetch_status(handle)
