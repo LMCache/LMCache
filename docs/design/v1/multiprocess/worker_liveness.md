@@ -101,9 +101,11 @@ the module lock, collect ids whose staleness exceeds their window and pop them;
 outside the lock, run the same cleanup as a client unregister and log a WARNING
 per instance (repeated reaps of one id signal a too-small timeout). Reaped ids fan
 out to every `InstanceReapListener.drop_instance_state(id)`; `BlendV3Module` drops
-its context mirrors there, releasing the last strong reference. Collect+pop shares
-the module lock with register's refresh, serializing every register-vs-reap race;
-on close, the reaper is stopped and joined before any module clears state.
+the reaped instance's per-instance CB state (e.g. rope state) there. (It no longer
+mirrors the GPU cache context — that mirror was removed upstream, so reaping the
+GPU entry now frees the context directly.) Collect+pop shares the module lock with
+register's refresh, serializing every register-vs-reap race; on close, the reaper
+is stopped and joined before any module clears state.
 
 ### 5.4 Public protocols and config
 
