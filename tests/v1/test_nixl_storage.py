@@ -441,7 +441,7 @@ def test_nixl_presence_cache_only_requires_presence_cache():
     config.extra_config["nixl_presence_cache_only"] = True
 
     with pytest.raises(ValueError, match="nixl_presence_cache must be true"):
-        NixlStorageConfig.from_cache_engine_config(config, _presence_cache_metadata())
+        config.validate()
 
 
 @pytest.mark.no_shared_allocator
