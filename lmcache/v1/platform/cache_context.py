@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 def create_cache_context(
     kv_caches: KVCache,
-    lmcache_logical_chunk_size: int = 256,
+    lmcache_tokens_per_chunk: int = 256,
     layout_hints: LayoutHints | None = None,
     engine_group_infos: "Sequence[EngineGroupInfo]" = (),
     engine_type: EngineType = EngineType.VLLM,
@@ -52,7 +52,7 @@ def create_cache_context(
     Args:
         kv_caches: KV cache tensor wrappers from the serving engine.
             Must be non-empty.
-        lmcache_logical_chunk_size: Number of tokens per LMCache chunk.
+        lmcache_tokens_per_chunk: Number of tokens per LMCache chunk.
         layout_hints: Optional hints for GPU KV format detection.
             Forwarded verbatim to the concrete context constructor.
         engine_group_infos: Engine-neutral KV cache group metadata.
@@ -78,7 +78,7 @@ def create_cache_context(
     )
     return cls(
         kv_caches,
-        lmcache_logical_chunk_size,
+        lmcache_tokens_per_chunk,
         layout_hints,
         engine_group_infos,
         engine_type,

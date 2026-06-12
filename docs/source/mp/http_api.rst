@@ -237,7 +237,6 @@ prefetch jobs. Intended for operators and debugging, not for monitoring
           "world_size": 1,
           "kv_cache_layout": {
             "num_layers": 32,
-            "inference_engine_logical_block_size": 16,
             "num_blocks": 12345,
             "cache_size_per_token": 131072,
             "kernel_groups": [
@@ -247,8 +246,8 @@ prefetch jobs. Intended for operators and debugging, not for monitoring
                 "object_group_idx": 0,
                 "num_layers": 32,
                 "layer_indices": [0, 1, "..."],
-                "physical_block_size": 16,
-                "compress_ratio": 1,
+                "tokens_per_block": 16,
+                "slots_per_block": 16,
                 "dtype": "torch.bfloat16",
                 "gpu_kv_concrete_shape": "...",
                 "is_mla": false,

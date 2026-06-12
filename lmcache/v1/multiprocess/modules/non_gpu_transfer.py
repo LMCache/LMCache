@@ -161,6 +161,11 @@ class NonGPUTransferModule:
     ) -> tuple[int, IPCCacheEngineKey]:
         return (instance_id, key)
 
+    def _resolve_single_group_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
+        """Resolve object keys for the single object group used by
+        non-GPU transfers."""
+        return self._ctx.resolve_obj_keys(key, [0])[0]
+
     def register_kv_cache_non_gpu_context(
         self,
         payload: RegisterNonGpuContextPayload,
@@ -310,7 +315,7 @@ class NonGPUTransferModule:
             key=key,
             instance_id=instance_id,
             context=entry.metadata,
-            resolve_obj_keys=self._ctx.resolve_obj_keys,
+            resolve_obj_keys=self._resolve_single_group_obj_keys,
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["store_start_time"] = time.perf_counter()
@@ -354,10 +359,12 @@ class NonGPUTransferModule:
             instance_id=instance_id,
             cpu_data=cpu_data,
             context=entry.metadata,
-            resolve_obj_keys=self._ctx.resolve_obj_keys,
+            resolve_obj_keys=self._resolve_single_group_obj_keys,
         )
         if st is not None and result:
-            num_tokens = len(self._ctx.resolve_obj_keys(key)) * self._ctx.chunk_size
+            num_tokens = (
+                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
+            )
             logger.info(
                 "Stored %d tokens in %.3f seconds",
                 num_tokens,
@@ -392,7 +399,7 @@ class NonGPUTransferModule:
         response = strategy.prepare_retrieve(
             key=key,
             instance_id=instance_id,
-            resolve_obj_keys=self._ctx.resolve_obj_keys,
+            resolve_obj_keys=self._resolve_single_group_obj_keys,
         )
         session = self._ctx.session_manager.get_or_create(key.request_id)
         session.extras["retrieve_start_time"] = time.perf_counter()
@@ -422,7 +429,9 @@ class NonGPUTransferModule:
         st = session.extras.pop("retrieve_start_time", None)
         result = strategy.commit_retrieve(key=key, instance_id=instance_id)
         if st is not None:
-            num_tokens = len(self._ctx.resolve_obj_keys(key)) * self._ctx.chunk_size
+            num_tokens = (
+                len(self._resolve_single_group_obj_keys(key)) * self._ctx.chunk_size
+            )
             logger.info(
                 "Retrieved %d tokens in %.3f seconds",
                 num_tokens,

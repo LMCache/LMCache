@@ -227,8 +227,8 @@ def get_lmcache_chunk_size(
         An integer representing the LMCache chunk size
     """
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
-    chunk_size = future.result(timeout=timeout)
-    return chunk_size
+    lmcache_tokens_per_chunk = future.result(timeout=timeout)
+    return lmcache_tokens_per_chunk
 
 
 def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
@@ -570,16 +570,16 @@ class LMCacheMPSchedulerAdapter:
 
         # Read chunk size from lmcache
         try:
-            self.chunk_size = get_lmcache_chunk_size(
+            self.lmcache_tokens_per_chunk = get_lmcache_chunk_size(
                 self.mq_client, timeout=self._mq_timeout
             )
         except TimeoutError:
             self.mq_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
-        assert self.chunk_size % vllm_block_size == 0, (
+        assert self.lmcache_tokens_per_chunk % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
-        self.blocks_in_chunk = self.chunk_size // vllm_block_size
+        self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -661,7 +661,9 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
-        aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+        aligned_end = (
+            len(token_ids) // self.lmcache_tokens_per_chunk
+        ) * self.lmcache_tokens_per_chunk
 
         key = self._create_key(
             token_ids,
@@ -736,7 +738,7 @@ class LMCacheMPSchedulerAdapter:
         if result is None:
             return None
 
-        token_count = result * self.chunk_size
+        token_count = result * self.lmcache_tokens_per_chunk
         self._finished_lookup_results[request_id] = token_count
         return token_count
 
@@ -973,24 +975,17 @@ class LMCacheMPWorkerAdapter:
 
         # Read chunk size from lmcache
         try:
-            chunk_size = get_lmcache_chunk_size(
+            lmcache_tokens_per_chunk = get_lmcache_chunk_size(
                 self.mq_client, timeout=self._mq_timeout
             )
         except TimeoutError:
             self.mq_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
-        assert chunk_size % vllm_block_size == 0, (
+        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        assert lmcache_tokens_per_chunk % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
-        self.blocks_in_chunk = chunk_size // vllm_block_size
-        # Retain the vLLM logical block size so we can ship it to the
-        # LMCache server in ``register_kv_caches`` — the server uses it
-        # (as ``layout_hints["inference_engine_logical_block_size"]``)
-        # to derive per-group compression ratios when some KV layer
-        # groups compress multiple logical tokens into a single physical
-        # slot (``shape_desc.bs <
-        # inference_engine_logical_block_size``).
-        self.vllm_logical_block_size = vllm_block_size
+        self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -1059,8 +1054,21 @@ class LMCacheMPWorkerAdapter:
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
+            ValueError: if the LMCache chunk size is not a multiple of an
+                engine group's ``tokens_per_block`` (chunk boundaries would
+                not align with that group's paged-chunk boundaries).
         """
         logger.info("Registering kv caches")
+        for info in engine_group_infos:
+            if (
+                info.tokens_per_block > 0
+                and self.lmcache_tokens_per_chunk % info.tokens_per_block
+            ):
+                raise ValueError(
+                    f"LMCache chunk size {self.lmcache_tokens_per_chunk} must be a "
+                    f"multiple of engine group {info.engine_group_id} "
+                    f"tokens_per_block {info.tokens_per_block}"
+                )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
         self._send_register_kv_caches_request(kv_caches)
@@ -1088,9 +1096,6 @@ class LMCacheMPWorkerAdapter:
             kv_caches, mode=self._mp_transfer_mode
         )
         layout_hints = vllm_layout_hints()
-        layout_hints["inference_engine_logical_block_size"] = (
-            self.vllm_logical_block_size
-        )
         try:
             self.transfer_ctx.register(
                 self.instance_id,

@@ -633,7 +633,7 @@ func TestBuildDaemonSet_PrometheusDisabled(t *testing.T) {
 	if len(c.Ports) != 2 {
 		t.Fatalf("expected 2 container ports, got %d", len(c.Ports))
 	}
-	if c.Ports[0].Name != "server" { //nolint:goconst // test assertion
+	if c.Ports[0].Name != serverPortName {
 		t.Fatalf("expected port name 'server', got %s", c.Ports[0].Name)
 	}
 }
@@ -723,7 +723,7 @@ func TestBuildDaemonSet_RESPNoAuth(t *testing.T) {
 	c := ds.Spec.Template.Spec.Containers[0]
 
 	// Should use direct command, not shell wrapper
-	if c.Command[0] != "/opt/venv/bin/lmcache" || c.Command[1] != "server" {
+	if c.Command[0] != lmcacheServerBinary || c.Command[1] != serverSubcommand {
 		t.Fatalf("expected lmcache server command, got %v", c.Command)
 	}
 
@@ -756,7 +756,7 @@ func TestBuildDaemonSet_RESPWithAuth(t *testing.T) {
 	c := ds.Spec.Template.Spec.Containers[0]
 
 	// Should use direct python command (no shell wrapper needed)
-	if c.Command[0] != "/opt/venv/bin/lmcache" || c.Command[1] != "server" {
+	if c.Command[0] != lmcacheServerBinary || c.Command[1] != serverSubcommand {
 		t.Fatalf("expected lmcache server command, got %v", c.Command)
 	}
 
@@ -823,7 +823,7 @@ func TestBuildLookupService_Default(t *testing.T) {
 	if svc.Spec.Ports[0].Port != 5555 {
 		t.Fatalf("expected server port 5555, got %d", svc.Spec.Ports[0].Port)
 	}
-	if svc.Spec.Ports[0].Name != "server" {
+	if svc.Spec.Ports[0].Name != serverPortName {
 		t.Fatalf("expected port name server, got %s", svc.Spec.Ports[0].Name)
 	}
 	if svc.Spec.Ports[1].Port != 8080 {
@@ -1103,15 +1103,15 @@ func TestBuildDaemonSet_GPUVendorNvidiaDefault(t *testing.T) {
 	ds := BuildDaemonSet(engine)
 	podSpec := ds.Spec.Template.Spec
 
-	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != "nvidia" {
+	if podSpec.RuntimeClassName == nil || *podSpec.RuntimeClassName != nvidiaRuntimeClass {
 		t.Fatalf("expected RuntimeClassName=nvidia, got %v", podSpec.RuntimeClassName)
 	}
 
 	c := podSpec.Containers[0]
-	if !hasEnv(c.Env, "NVIDIA_VISIBLE_DEVICES", "all") {
+	if !hasEnvAll(c.Env, "NVIDIA_VISIBLE_DEVICES") {
 		t.Fatal("missing NVIDIA_VISIBLE_DEVICES=all on default (nvidia) vendor")
 	}
-	if !hasEnv(c.Env, "NVIDIA_DRIVER_CAPABILITIES", "all") {
+	if !hasEnvAll(c.Env, "NVIDIA_DRIVER_CAPABILITIES") {
 		t.Fatal("missing NVIDIA_DRIVER_CAPABILITIES=all on default (nvidia) vendor")
 	}
 }
@@ -1136,9 +1136,11 @@ func TestBuildDaemonSet_GPUVendorAMD(t *testing.T) {
 	}
 }
 
-func hasEnv(envs []corev1.EnvVar, name, value string) bool {
+// hasEnvAll reports whether envs contains an env var named name set to the
+// literal "all" (the value the GPU passthrough vars are always set to).
+func hasEnvAll(envs []corev1.EnvVar, name string) bool {
 	for _, e := range envs {
-		if e.Name == name && e.Value == value {
+		if e.Name == name && e.Value == "all" {
 			return true
 		}
 	}
