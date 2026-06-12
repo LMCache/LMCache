@@ -40,7 +40,6 @@ def discover_api_routers(
     """
     excluded = set(exclude or ())
     routers: List[APIRouter] = []
-    importlib.invalidate_caches()
     for _, module_name, _ in pkgutil.iter_modules([str(search_path)]):
         if not module_name.endswith(suffix):
             continue
