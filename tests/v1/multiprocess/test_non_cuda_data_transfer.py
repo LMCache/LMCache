@@ -41,10 +41,10 @@ if TYPE_CHECKING:
         IPCCacheEngineKey,
         RegisterNonGpuContextPayload,
     )
-
-# First Party
-from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+    from lmcache.v1.multiprocess.modules.non_gpu_transfer import (
+        NonGPUTransferModule,
+    )
 
 
 class ServerModuleFactory(Protocol):

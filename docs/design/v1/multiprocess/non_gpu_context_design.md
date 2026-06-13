@@ -29,16 +29,16 @@ Worker adapter (vLLM MP adapter)
 
 MPCacheServer (server)
 ├─ MPCacheServerContext (engine_context.py)
-      ├─ StorageManager
-      ├─ TokenHasher
-      ├─ SessionManager
-      ├─ EventBus
-      ├─ LayoutDescRegistry
-      └─ shm_pool_info (pre-computed once)
-  └─ NonGPUTransferModule (modules/non_gpu_transfer.py)
-      └─ TransferStrategy (modules/server_transfer.py)
-         ├─ PickleTransferStrategy
-         └─ ShmTransferStrategy
+│    ├─ StorageManager
+│    ├─ TokenHasher
+│    ├─ SessionManager
+│    ├─ EventBus
+│    ├─ LayoutDescRegistry
+│    └─ shm_pool_info (pre-computed once)
+└─ NonGPUTransferModule (modules/non_gpu_transfer.py)
+     └─ TransferStrategy (modules/server_transfer.py)
+          ├─ PickleTransferStrategy
+          └─ ShmTransferStrategy
 ```
 
 State machine overview (worker-side):
