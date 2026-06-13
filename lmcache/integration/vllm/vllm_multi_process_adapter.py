@@ -53,11 +53,11 @@ class ExtraConfigDefault(enum.Enum):
     # to the server.
     heartbeat_interval = 10.0
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
-    # historical CUDA -> handle / others -> data dispatch; ``handle``
-    # forces the IPC / SHM zero-copy path; ``data`` forces the
-    # worker-side gather/scatter copy path. Mirrors the
-    # ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config key wins
-    # when both are set.
+    # historical CUDA -> engine_driven / others -> lmcache_driven dispatch;
+    # ``engine_driven`` forces the IPC / SHM zero-copy path;
+    # ``lmcache_driven`` forces the worker-side gather/scatter copy path.
+    # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
+    # key wins when both are set.
     mp_transfer_mode = "auto"
 
 
