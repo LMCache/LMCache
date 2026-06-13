@@ -212,6 +212,10 @@ class CpuCacheContext:
                 free_bytes,
             )
 
+    def close(self) -> None:
+        """Release resources. No-op for CPU context (no GDS staging buffer)."""
+        pass
+
     # -- Properties (same API as GPUCacheContext) --
 
     @property
