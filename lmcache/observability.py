@@ -9,6 +9,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Literal,
     Optional,
     Sequence,
     Union,
@@ -32,6 +33,19 @@ if TYPE_CHECKING:
     from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
+
+GaugeMultiprocessMode = Literal[
+    "all",
+    "liveall",
+    "min",
+    "livemin",
+    "max",
+    "livemax",
+    "sum",
+    "livesum",
+    "mostrecent",
+    "livemostrecent",
+]
 
 
 @dataclass
@@ -1469,7 +1483,7 @@ class PrometheusLogger:
         name: str,
         documentation: str,
         labelnames: List[str],
-        multiprocess_mode: str,
+        multiprocess_mode: GaugeMultiprocessMode,
     ) -> None:
         metric_attr = name.removeprefix("lmcache:")
         if metric_attr == name or not metric_attr.isidentifier():
@@ -1917,6 +1931,18 @@ class PrometheusLogger:
 
         PrometheusLogger._instances[metadata_key] = logger_instance
         return logger_instance
+
+    @staticmethod
+    @thread_safe
+    def GetInstanceOrNone() -> Optional["PrometheusLogger"]:
+        """
+        Return an existing Prometheus logger without creating one.
+
+        Returns:
+            An existing logger instance, or ``None`` when Prometheus logging has
+            not been initialized.
+        """
+        return PrometheusLogger._get_base_logger()
 
     @staticmethod
     def _get_base_logger() -> Optional["PrometheusLogger"]:
