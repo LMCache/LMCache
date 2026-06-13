@@ -8,6 +8,7 @@ manager wiring while keeping CI portable.
 
 # Standard
 from typing import cast
+import argparse
 import gc
 import json
 import os
@@ -23,7 +24,8 @@ from lmcache.v1.distributed.config import (
     L1ManagerConfig,
     L1MemoryManagerConfig,
     StorageManagerConfig,
-    parse_args,
+    add_storage_manager_args,
+    parse_args_to_config,
 )
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -32,8 +34,11 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_type_name_for_config,
 )
+from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
+from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import DevDaxMemoryAllocator, MixedMemoryAllocator
+from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
 import lmcache.v1.memory_management as memory_management
 
@@ -57,6 +62,13 @@ def _key(seed: int = 0) -> ObjectKey:
 
 def _layout(num_bytes: int = 4096) -> MemoryLayoutDesc:
     return MemoryLayoutDesc(shapes=[torch.Size([num_bytes])], dtypes=[torch.uint8])
+
+
+def _parse_mp_storage_args(args: list[str]) -> StorageManagerConfig:
+    parser = argparse.ArgumentParser()
+    add_mp_server_args(parser)
+    add_storage_manager_args(parser)
+    return parse_args_to_config(parser.parse_args(args))
 
 
 class _FakeMooncakeL2Config:
@@ -95,7 +107,7 @@ def _hybrid_storage_config(path: str, adapter_config: object) -> StorageManagerC
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=1024 * 1024,
                 use_lazy=False,
-                use_shm=False,
+                shm_name="",
                 devdax_path=path,
                 devdax_size_in_bytes=1024 * 1024,
             )
@@ -115,7 +127,6 @@ def test_devdax_config_rejects_lazy_allocation(tmp_path):
         L1MemoryManagerConfig(
             size_in_bytes=1024 * 1024,
             use_lazy=True,
-            use_shm=False,
             shm_name="",
             devdax_path=path,
         )
@@ -124,11 +135,10 @@ def test_devdax_config_rejects_lazy_allocation(tmp_path):
 def test_devdax_config_rejects_shm(tmp_path):
     path = _make_mmap_file(tmp_path)
 
-    with pytest.raises(ValueError, match="--no-l1-use-shm"):
+    with pytest.raises(ValueError, match="--shm-name"):
         L1MemoryManagerConfig(
             size_in_bytes=1024 * 1024,
             use_lazy=False,
-            use_shm=True,
             shm_name="lmcache_l1_pool_test",
             devdax_path=path,
             devdax_size_in_bytes=2 * 1024 * 1024,
@@ -141,14 +151,12 @@ def test_devdax_config_accepts_explicit_lazy_and_shm_disable(tmp_path):
     cfg = L1MemoryManagerConfig(
         size_in_bytes=1024 * 1024,
         use_lazy=False,
-        use_shm=False,
-        shm_name="lmcache_l1_pool_test",
+        shm_name="",
         devdax_path=path,
     )
 
     assert cfg.devdax_path == path
     assert cfg.use_lazy is False
-    assert cfg.use_shm is False
     assert cfg.shm_name == ""
 
 
@@ -309,7 +317,7 @@ def test_l1_manager_round_trip_on_devdax_mapping(tmp_path):
         memory_config=L1MemoryManagerConfig(
             size_in_bytes=1024 * 1024,
             use_lazy=False,
-            use_shm=False,
+            shm_name="",
             devdax_path=path,
         )
     )
@@ -347,7 +355,7 @@ def test_l1_memory_manager_spills_from_dram_to_devdax(tmp_path):
         L1MemoryManagerConfig(
             size_in_bytes=8192,
             use_lazy=False,
-            use_shm=False,
+            shm_name="",
             align_bytes=4096,
             devdax_path=path,
             devdax_size_in_bytes=8192,
@@ -389,7 +397,7 @@ def test_l1_memory_manager_reports_devdax_desc(tmp_path):
         L1MemoryManagerConfig(
             size_in_bytes=1024 * 1024,
             use_lazy=False,
-            use_shm=False,
+            shm_name="",
             devdax_path=path,
         )
     )
@@ -405,16 +413,121 @@ def test_l1_memory_manager_reports_devdax_desc(tmp_path):
     manager.close()
 
 
+def test_l1_devdax_reconfigure_resize_remove_add(tmp_path):
+    path = _make_mmap_file(tmp_path, size=4 * 1024 * 1024)
+    storage_manager = StorageManager(
+        StorageManagerConfig(
+            l1_manager_config=L1ManagerConfig(
+                memory_config=L1MemoryManagerConfig(
+                    size_in_bytes=1024 * 1024,
+                    use_lazy=False,
+                    shm_name="",
+                    devdax_path=path,
+                    devdax_size_in_bytes=1024 * 1024,
+                )
+            ),
+            eviction_config=EvictionConfig(eviction_policy="LRU"),
+        )
+    )
+
+    try:
+        status = storage_manager.get_l2_adapter_reconfigure_status()
+        assert status["enabled"] is True
+        assert status["adapters"][0]["backend"] == "dax"
+        assert status["adapters"][0]["tier"] == "l1"
+        assert status["adapters"][0]["status"]["total_capacity_bytes"] == 1024 * 1024
+
+        resized = storage_manager.reconfigure_l2_adapter(
+            0,
+            "resize",
+            {
+                "device_path": path,
+                "size_bytes": 2 * 1024 * 1024,
+                "mode": "migrate",
+                "force": False,
+            },
+        )
+        assert resized["operation"] == "resize"
+        assert resized["new_size_bytes"] == 2 * 1024 * 1024
+        assert (
+            storage_manager.report_status()["l1_manager"]["memory_total_bytes"]
+            == 3 * 1024 * 1024
+        )
+
+        removed = storage_manager.reconfigure_l2_adapter(
+            0,
+            "remove",
+            {
+                "device_path": path,
+                "mode": "evict",
+                "force": False,
+            },
+        )
+        assert removed["operation"] == "remove"
+        assert removed["state"] == "removed"
+        assert (
+            storage_manager.report_status()["l1_manager"]["memory_total_bytes"]
+            == 1024 * 1024
+        )
+
+        added = storage_manager.reconfigure_l2_adapter(
+            0,
+            "add",
+            {
+                "device_path": path,
+                "size_bytes": 1024 * 1024,
+            },
+        )
+        assert added["operation"] == "add"
+        assert (
+            storage_manager.report_status()["l1_manager"]["memory_total_bytes"]
+            == 2 * 1024 * 1024
+        )
+    finally:
+        storage_manager.close()
+
+
+def test_l1_devdax_reconfigure_rejects_active_allocations(tmp_path):
+    path = _make_mmap_file(tmp_path, size=2 * 1024 * 1024)
+    manager = L1MemoryManager(
+        L1MemoryManagerConfig(
+            size_in_bytes=1024 * 1024,
+            use_lazy=False,
+            shm_name="",
+            devdax_path=path,
+        )
+    )
+    error, objs = manager.allocate(_layout(4096), count=1)
+
+    try:
+        assert error == L1Error.SUCCESS
+        with pytest.raises(L2ReconfigureError) as exc_info:
+            manager.reconfigure_devdax(
+                "resize",
+                {
+                    "device_path": path,
+                    "size_bytes": 2 * 1024 * 1024,
+                    "mode": "migrate",
+                    "force": False,
+                },
+            )
+        assert exc_info.value.status_code == 409
+    finally:
+        manager.free(objs)
+        manager.close()
+
+
 def test_cli_parses_l1_devdax_path(tmp_path):
     path = _make_mmap_file(tmp_path)
-    config = parse_args(
+    config = _parse_mp_storage_args(
         [
             "--l1-size-gb",
             "1",
             "--eviction-policy",
             "LRU",
             "--no-l1-use-lazy",
-            "--no-l1-use-shm",
+            "--shm-name",
+            "",
             "--l1-devdax-path",
             path,
         ]
@@ -423,7 +536,6 @@ def test_cli_parses_l1_devdax_path(tmp_path):
     mem_cfg = config.l1_manager_config.memory_config
     assert mem_cfg.devdax_path == path
     assert mem_cfg.use_lazy is False
-    assert mem_cfg.use_shm is False
     assert mem_cfg.shm_name == ""
 
 
@@ -431,14 +543,15 @@ def test_cli_rejects_devdax_l1_with_gds_l1(tmp_path):
     path = _make_mmap_file(tmp_path)
 
     with pytest.raises(ValueError, match="gds-l1-path"):
-        parse_args(
+        _parse_mp_storage_args(
             [
                 "--l1-size-gb",
                 "1",
                 "--eviction-policy",
                 "LRU",
                 "--no-l1-use-lazy",
-                "--no-l1-use-shm",
+                "--shm-name",
+                "",
                 "--l1-devdax-path",
                 path,
                 "--gds-l1-path",
@@ -449,14 +562,15 @@ def test_cli_rejects_devdax_l1_with_gds_l1(tmp_path):
 
 def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
     path = _make_mmap_file(tmp_path)
-    config = parse_args(
+    config = _parse_mp_storage_args(
         [
             "--l1-size-gb",
             "1",
             "--eviction-policy",
             "LRU",
             "--no-l1-use-lazy",
-            "--no-l1-use-shm",
+            "--shm-name",
+            "",
             "--l1-devdax-path",
             path,
             "--l2-adapter",
@@ -470,7 +584,6 @@ def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
     assert mem_cfg.devdax_path == path
     assert mem_cfg.devdax_size_in_bytes == 2 << 30
     assert mem_cfg.use_lazy is False
-    assert mem_cfg.use_shm is False
     assert mem_cfg.shm_name == ""
     assert config.l2_adapter_config.adapters == []
 
@@ -507,14 +620,15 @@ def test_cli_hybrid_l1_keeps_ordinary_l2_adapters(
         for key, value in adapter_spec.items()
     }
 
-    config = parse_args(
+    config = _parse_mp_storage_args(
         [
             "--l1-size-gb",
             "1",
             "--eviction-policy",
             "LRU",
             "--no-l1-use-lazy",
-            "--no-l1-use-shm",
+            "--shm-name",
+            "",
             "--l1-devdax-path",
             path,
             "--l2-adapter",
@@ -547,7 +661,7 @@ def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):
             memory_config=L1MemoryManagerConfig(
                 size_in_bytes=1024 * 1024,
                 use_lazy=False,
-                use_shm=False,
+                shm_name="",
                 devdax_path=path,
             )
         ),

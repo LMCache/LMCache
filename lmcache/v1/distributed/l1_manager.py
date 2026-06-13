@@ -15,6 +15,10 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1ManagerListener
+from lmcache.v1.distributed.l2_adapters.reconfiguration import (
+    L2ReconfigureError,
+    L2ReconfigureStatus,
+)
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
@@ -814,6 +818,30 @@ class L1Manager:
     def get_l1_memory_desc(self):
         """Return an L1MemoryDesc describing the underlying L1 memory buffer."""
         return self._memory_manager.get_l1_memory_desc()
+
+    @l1_mgr_synchronized
+    def get_devdax_reconfigure_status(self) -> L2ReconfigureStatus | None:
+        """Return L1 Device-DAX reconfiguration status when available."""
+        get_status = getattr(
+            self._memory_manager,
+            "get_devdax_reconfigure_status",
+            None,
+        )
+        if get_status is None:
+            return None
+        return get_status()
+
+    @l1_mgr_synchronized
+    def reconfigure_devdax(
+        self,
+        operation: str,
+        payload: dict[str, object],
+    ) -> dict:
+        """Apply a runtime operation to the L1 Device-DAX mapping."""
+        reconfigure = getattr(self._memory_manager, "reconfigure_devdax", None)
+        if reconfigure is None:
+            raise L2ReconfigureError(404, "L1 Device-DAX is not configured")
+        return reconfigure(operation, payload)
 
     def close(self) -> None:
         """Close the L1Manager and free all resources."""
