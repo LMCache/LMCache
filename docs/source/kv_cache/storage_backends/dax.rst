@@ -61,7 +61,7 @@ are required.
        "num_load_workers": 4
      }'
 
-The ``--l2-adapter`` JSON accepts these fields:
+The legacy single-device ``--l2-adapter`` JSON accepts these fields:
 
 - ``device_path``: required path to a readable and writable DAX device.
 - ``max_dax_size_gb``: required mapped size in GiB. The value must fit within
@@ -75,15 +75,115 @@ The ``--l2-adapter`` JSON accepts these fields:
 - ``persist_enabled``: accepted by common MP L2 parsing but ignored by
   ``dax`` in this release.
 
+Runtime hotplug uses the multi-device form. The ``devices`` list may also be
+empty when ``hotplug_enabled`` is ``true``.
+
+.. code-block:: bash
+
+   lmcache server \
+     --l1-size-gb 80 \
+     --eviction-policy LRU \
+     --l2-adapter '{
+       "type": "dax",
+       "devices": [
+         {"device_path": "/dev/daxX.X", "max_dax_size_gb": 100},
+         {"device_path": "/dev/daxY.Y", "max_dax_size_gb": 100}
+       ],
+       "slot_bytes": 268435456,
+       "hotplug_enabled": true,
+       "num_store_workers": 1,
+       "num_lookup_workers": 1,
+       "num_load_workers": 4
+     }'
+
 MP DAX stores opaque ``ObjectKey`` values in memory and is volatile-only in
 this release.  Closing and reopening the server on the same DAX path starts
 with an empty index, so previously written bytes are not discoverable after
 restart.
 
-MP DAX uses one mapped device path per LMCache server.  It does not add
-per-TP DAX partitions, multi-device striping, on-device metadata, or restart
-recovery.  Capacity accounting and eviction are slot-based: a stored object
+MP DAX uses one stable adapter facade per LMCache server.  The facade owns
+stable event fds and worker pools, and runtime add/remove/resize only changes
+the mapped DAX cores behind that facade.  It does not add kernel-level CXL or
+DAX reconfiguration, per-TP DAX partitions, on-device metadata, or restart
+recovery. Capacity accounting and eviction are slot-based: a stored object
 occupies one slot even if its payload is smaller than ``slot_bytes``.
+
+
+Runtime Hotplug API
+-------------------
+
+Runtime hotplug is disabled unless ``hotplug_enabled`` is ``true``. The API
+changes only LMCache runtime mappings and metadata; the ``/dev/dax*`` device
+must already exist and be readable and writable by the LMCache server process.
+The runtime endpoints are implemented through StorageManager's generic L2
+adapter reconfiguration interface, which routes backend, operation name, and
+adapter-specific payload to the selected adapter. DAX owns the path, mode,
+migration, and resize semantics; the generic interface is reusable by other
+adapters such as P2P.
+Use JSON bodies because DAX paths contain slashes:
+
+.. code-block:: bash
+
+   curl http://127.0.0.1:9000/reconfigure/dax/status
+   curl -X POST http://127.0.0.1:9000/reconfigure/dax/add \
+     -H 'Content-Type: application/json' \
+     -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
+   curl -X POST http://127.0.0.1:9000/reconfigure/dax/remove \
+     -H 'Content-Type: application/json' \
+     -d '{"device_path": "/dev/daxX.X", "mode": "migrate"}'
+   curl -X POST http://127.0.0.1:9000/reconfigure/dax/resize \
+     -H 'Content-Type: application/json' \
+     -d '{"device_path": "/dev/daxX.X", "size": "200GiB"}'
+
+``size`` is required for add and resize. Use an integer byte count or a string
+such as ``"100GiB"``. ``remove`` supports these modes:
+
+- ``migrate``: move DAX-resident KV to other active DAX devices before closing
+  the source device.
+- ``evict``: delete DAX-resident KV on the source device. This is destructive
+  for the DAX tier.
+- ``drain``: stop new writes to the source device and leave existing KV
+  readable until it is evicted or the server closes.
+
+``resize`` supports ``migrate`` and ``evict`` modes. It does not support
+``drain`` because resize completes synchronously.
+
+Hotplug operations are lock-safe by default. A remove or shrink that would
+delete externally locked or borrowed slots returns ``409 Conflict`` unless
+``force`` is set. A migration that has no active destination capacity returns
+``507 Insufficient Storage``. Resize grow preserves the in-memory key index and
+does not move KV payloads. Resize shrink never silently drops keys; entries
+outside the new slot range must migrate first, or the request fails.
+
+
+Hardware Validation Flow
+------------------------
+
+Use the same Qwen 8B or 14B long-context workload before and after a runtime
+capacity change. Without hotplug support, ``/reconfigure/dax/status`` and
+``/reconfigure/dax/add`` are not available; changing the DAX device set
+requires restarting LMCache with a new ``--l2-adapter`` value, which drops the
+volatile DAX key index.
+
+.. code-block:: bash
+
+   export MODEL=Qwen/Qwen3-8B  # or a local Qwen 8B/14B checkpoint
+   curl http://127.0.0.1:9000/reconfigure/dax/status
+   python benchmarks/long_doc_qa/long_doc_qa.py \
+     --model "$MODEL" --num-documents 1 --document-length 1024 \
+     --output-len 16 --repeat-count 2 --repeat-mode tile \
+     --completions --host 127.0.0.1 --port 8000 --json-output
+   curl -X POST http://127.0.0.1:9000/reconfigure/dax/add \
+     -H 'Content-Type: application/json' \
+     -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
+   curl http://127.0.0.1:9000/reconfigure/dax/status
+
+Record these fields for the comparison:
+
+- ``total_capacity_bytes`` before and after ``/reconfigure/dax/add``.
+- ``total_used_bytes`` while the Qwen workload is running.
+- Whether an LMCache restart was required.
+- Whether the same cached prompt remains retrievable after the capacity change.
 
 
 Using The Batched Restore Path

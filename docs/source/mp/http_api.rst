@@ -83,6 +83,15 @@ compatibility with the vLLM-embedded API server.
      - ``/clear-cache``
      - Force-clear all KV data in L1 (CPU) memory.
    * - GET
+     - ``/reconfigure/backends``
+     - List backend strings accepted by runtime reconfiguration routes.
+   * - GET
+     - ``/reconfigure/{backend}/status``
+     - Report runtime-manageable L2 adapters for one backend type.
+   * - POST
+     - ``/reconfigure/{backend}/{operation}``
+     - Apply one runtime reconfiguration operation to a backend adapter.
+   * - GET
      - ``/kvcache/check``
      - Compute MD5 checksums over the GPU KV cache for a set of block IDs.
        Intended for diagnostics and round-trip integrity checks from
@@ -317,6 +326,33 @@ The request body is ignored.
 .. code-block:: bash
 
     curl -s -X POST http://localhost:8080/clear-cache
+
+.. _mp-http-dax-api:
+
+``/reconfigure/{backend}`` — runtime L2 adapter reconfiguration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+These endpoints are available when the server has a runtime-reconfigurable L2
+adapter. They only change LMCache runtime mappings and metadata; backend
+resources such as DAX device paths must already exist and be readable and
+writable by the server. The endpoint routes ``backend``, ``operation``, and the
+JSON request body into the generic L2 adapter reconfiguration API, while
+backend-specific validation and migration semantics stay inside the adapter.
+
+Use ``GET /reconfigure/backends`` to list the backend strings that can be used
+in ``/reconfigure/{backend}/status`` and
+``/reconfigure/{backend}/{operation}``.
+If an L2 adapter is wrapped by serde, the backend string is still the configured
+L2 adapter type, not the serde wrapper type.
+
+For Device-DAX, use ``backend=dax``. DAX operations use JSON request bodies
+because DAX paths contain slashes. ``add`` and ``resize`` accept ``size`` as an
+integer byte count or a string such as ``"100GiB"``. ``remove`` supports
+``migrate``, ``evict``, and ``drain``; ``resize`` supports ``migrate`` and
+``evict``.
+
+See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
+mode semantics, and validation guidance.
 
 ``GET /kvcache/check``
 ~~~~~~~~~~~~~~~~~~~~~~
