@@ -103,6 +103,7 @@ class DynamicNixlStorageAgent:
         self.backend_params = backend_params
         self.l1_align_bytes = l1_memory_desc.align_bytes
         self.file_path = backend_params["file_path"]
+        os.makedirs(self.file_path, exist_ok=True)
         self.use_direct_io = (
             str(backend_params.get("use_direct_io", "false")).lower() == "true"
         )

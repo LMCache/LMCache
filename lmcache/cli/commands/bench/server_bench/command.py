@@ -259,6 +259,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         format_kvcache_shape_spec,
         parse_kvcache_shape_spec,
     )
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.mq import MessageQueueClient
 
     use_gpu = args.mode == "gpu"
@@ -370,16 +371,23 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             "head_size": head_size_disp,
             "num_blocks": num_blocks,
             "block_size": block_size,
-            # Tell the server the inference-engine-side logical block
-            # size explicitly. Otherwise ``KVLayerGroupsManager`` falls
-            # back to ``shape_desc.bs``, which on the CPU/HND path can
-            # be the per-block ``num_heads`` value instead of the real
-            # ``block_size`` (HND swaps NH and BS in the tensor shape),
-            # and STORE/RETRIEVE would then expect twice as many block
-            # IDs as the bench client actually sends.
-            "inference_engine_logical_block_size": block_size,
             "dtype": dtype_str,
         }
+        # Tell the server each group's true tokens-per-paged-chunk
+        # explicitly. Otherwise the server falls back to the block size
+        # discovered from the tensors (``shape_desc.bs``), which on the
+        # CPU/HND path can be the per-block ``num_heads`` value instead
+        # of the real ``block_size`` (HND swaps NH and BS in the tensor
+        # shape), and STORE/RETRIEVE would then expect twice as many
+        # block IDs as the bench client actually sends.
+        engine_group_infos = [
+            EngineGroupInfo(
+                engine_group_id=group_idx,
+                layer_indices=tuple(group.layer_indices),
+                tokens_per_block=block_size,
+            )
+            for group_idx, group in enumerate(layer_groups)
+        ]
 
         num_tokens = args.num_tokens
         print(
@@ -449,6 +457,7 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
             kv_caches=kv_wrappers if use_handle else None,
             use_gpu=use_gpu,
             use_handle=use_handle,
+            engine_group_infos=engine_group_infos,
         )
         print("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
         print()

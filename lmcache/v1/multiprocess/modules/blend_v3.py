@@ -10,9 +10,16 @@ retrieve scatters into the request's paged blocks.
 from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import threading
 import time
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.mp_coordinator.blend_client import (
+        BlendCoordinatorClient,
+        RemoteMatch,
+    )
 
 # Third Party
 import numpy as np
@@ -29,6 +36,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.distributed.storage_manager import PrefetchHandle
 from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
+from lmcache.v1.mp_coordinator.blend_client import PENDING
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
@@ -79,6 +87,9 @@ class _CBUnifiedJob:
     per_hash_obj_keys: dict | None = None
     expanded_uidx: list[int] | None = None
     found_uidx: set[int] | None = None  # stashed when the sparse poll completes
+    l2_keys: int = 0  # sparse keys needing an L2 load (0 => no L2 read, span skipped)
+    coord_submitted: bool = False  # coordinator match query was issued
+    coord_deadline: float = 0.0  # time.monotonic() wall-clock cutoff for the leg
 
 
 class BlendTokenRangeMatcherV3:
@@ -255,7 +266,14 @@ class BlendTokenRangeMatcherV3:
             return results
 
     def remove_chunks(self, token_hashes: list[bytes]) -> None:
-        """Evict stale entries; clears poly_hash so re-probes can't match."""
+        """Evict the given chunks from the matcher.
+
+        Clears each chunk's table slot + poly hash so later probes cannot match
+        it. Thread-safe.
+
+        Args:
+            token_hashes (list[bytes]): Content hashes of the chunks to evict.
+        """
         with self._lock:
             for th in token_hashes:
                 cid = self._token_hash_to_compact_id.get(th)
@@ -304,6 +322,7 @@ class BlendV3Module:
         ctx: MPCacheEngineContext,
         gpu_transfer: GPUTransferModule,
         lookup_module: LookupModule,
+        coordinator: "BlendCoordinatorClient | None" = None,
     ):
         self._ctx = ctx
         self._gpu_transfer = gpu_transfer
@@ -311,10 +330,9 @@ class BlendV3Module:
         # (registers the prefix prefetch job + session state the retrieve
         # path depends on) inside the single unified RPC.
         self._lookup_module = lookup_module
-
-        # Populated by cb_register_rope; mirrors gpu_transfer.gpu_contexts.
-        self._cb_gpu_contexts: dict[int, GPUCacheContext] = {}
-        self._cb_gpu_context_meta: dict[int, tuple[str, int]] = {}
+        # Optional bridge to the fleet-wide fingerprint directory. ``None`` =>
+        # purely local matching (publish/query paths skipped).
+        self._coordinator = coordinator
 
         self._token_range_matcher = BlendTokenRangeMatcherV3(ctx.chunk_size)
         self._event_bus = ctx.event_bus
@@ -384,19 +402,27 @@ class BlendV3Module:
         ]
 
     def report_status(self) -> dict:
+        # Meta is derived live from MP server gpu_transfe
+
+        cache_contexts = self._gpu_transfer.cache_contexts
+
+        def _meta(iid: int) -> "tuple[str, int] | None":
+            entry = cache_contexts.get(iid)
+            return (entry.model_name, entry.world_size) if entry is not None else None
+
         return {
             "registered_cb_rope_instances": list(self._cb_rope_state.keys()),
-            "cb_rope_meta": {
-                str(instance_id): self._cb_gpu_context_meta.get(instance_id)
-                for instance_id in self._cb_rope_state.keys()
-            },
+            "cb_rope_meta": {str(iid): _meta(iid) for iid in self._cb_rope_state},
+            "active_cb_lookups": len(self._cb_jobs),
         }
 
     def close(self) -> None:
         self._fingerprint_stop.set()
+        if self._coordinator is not None:
+            # Joins the client's daemon thread and closes its httpx.Client;
+            # otherwise the coordinator leg leaks both on server shutdown.
+            self._coordinator.close()
         self._cb_rope_state.clear()
-        self._cb_gpu_contexts.clear()
-        self._cb_gpu_context_meta.clear()
 
     # ------------------------------------------------------------------
     # V3 RPCs
@@ -409,22 +435,34 @@ class BlendV3Module:
         head_size: int,
         is_neox_style: bool,
     ) -> None:
-        """Bolt rope state onto an already-registered cache_contexts entry;
-        idempotent. REGISTER_KV_CACHE must precede this."""
+        """Bolt CB re-RoPE state onto an already-registered KV-cache instance.
+
+        Idempotent; ``REGISTER_KV_CACHE`` must precede this. Strips any
+        YaRN/longrope mscale baked into the rope cache so re-RoPE stays a pure
+        rotation.
+
+        Args:
+            instance_id (int): KV-cache instance to attach rope state to.
+            cos_sin_cache_ipc (CudaIPCWrapper): IPC handle to vLLM's cos/sin
+                rope cache.
+            head_size (int): Rotary head dimension.
+            is_neox_style (bool): True for NeoX (contiguous halves), else GPT-J.
+
+        Raises:
+            ValueError: If ``instance_id`` has no registered KV cache.
+        """
         cache_contexts = self._gpu_transfer.cache_contexts
         if instance_id not in cache_contexts:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
             )
-        entry = cache_contexts[instance_id]
-        gpu_context = entry.cache_context
 
         cos_sin_cache = cos_sin_cache_ipc.to_tensor()
         # YaRN/longrope bake an mscale m into the rope cache (cos²+sin²=m²≠1).
         # vLLM already folds m into stored K, but CB re-RoPE assumes a pure
         # rotation, so an un-normalized m injects an m² error per K element
-        # (gpt-oss m≈1.347 → degenerate output). Strip m; m≈1 models untouched.
+
         _c32 = cos_sin_cache.to(torch.float32)
         _half = _c32.shape[1] // 2
         _m = float((_c32[:, :_half] ** 2 + _c32[:, _half:] ** 2).mean().sqrt())
@@ -448,10 +486,6 @@ class BlendV3Module:
             cos_sin_cache=cos_sin_cache,
         )
 
-        # cb_unified_lookup resolves (model, ws) → ctx via this mirror.
-        self._cb_gpu_contexts[instance_id] = gpu_context
-        self._cb_gpu_context_meta[instance_id] = (entry.model_name, entry.world_size)
-
         logger.info(
             "Registered CB rope state for instance %d "
             "(cos_sin_cache shape=%s dtype=%s, head_size=%d, is_neox=%s)",
@@ -463,10 +497,13 @@ class BlendV3Module:
         )
 
     def cb_unregister_rope(self, instance_id: int) -> None:
-        """Drop rope state. Paged KV cache stays (use UNREGISTER_KV_CACHE)."""
+        """Drop the instance's CB rope state; the paged KV cache is left intact.
+
+        Args:
+            instance_id (int): Instance whose rope state to remove (use
+                ``UNREGISTER_KV_CACHE`` to free the KV cache itself).
+        """
         self._cb_rope_state.pop(instance_id, None)
-        self._cb_gpu_contexts.pop(instance_id, None)
-        self._cb_gpu_context_meta.pop(instance_id, None)
         if instance_id not in self._gpu_transfer.cache_contexts:
             logger.warning(
                 "cb_unregister_rope: instance %d not registered", instance_id
@@ -498,34 +535,66 @@ class BlendV3Module:
                 logger.exception("CB fingerprint registration failed (sync drain)")
 
     def _match_fingerprints(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
-        """Drain pending registrations, fingerprint-match sub-sequences, then
-        leftmost-greedy dedup over overlapping ranges. Returns matches sorted
-        by cur_st (empty if none)."""
+        """Drain pending registrations and fingerprint-match sub-sequences.
+
+        Returns the raw matches (any order, possibly overlapping); the caller
+        applies the prefix filter + overlap dedup once via
+        :meth:`_non_overlapping_after_prefix`.
+        """
         self._drain_fingerprints_sync()
-        matches = self._token_range_matcher.match_sub_sequence(list(key.token_ids))
-        if not matches:
-            return []
-        matches.sort(key=lambda r: r.cur_st)
-        deduped: list[CBMatchResult] = []
+        return self._token_range_matcher.match_sub_sequence(list(key.token_ids))
+
+    @staticmethod
+    def _non_overlapping_after_prefix(
+        matches: list[CBMatchResult], prefix_tokens: int
+    ) -> list[CBMatchResult]:
+        """Matches outside the prefix coverage, leftmost-greedy overlap-deduped.
+
+        Drops matches the prefix leg already covers (``cur_st < prefix_tokens``),
+        then keeps a left-to-right non-overlapping subset -- two matches over the
+        same request range can't both scatter. Filtering precedes the dedup so a
+        prefix-covered match cannot suppress a usable one in the greedy pass.
+
+        Args:
+            matches: Candidate matches in any order; ``cur_st``/``cur_ed`` are
+                request token positions.
+            prefix_tokens: Contiguous prefix coverage in tokens; matches starting
+                before it are dropped. Pass ``0`` to keep all (dedup only).
+
+        Returns:
+            Non-overlapping matches in ascending ``cur_st`` order.
+        """
+        kept: list[CBMatchResult] = []
         covered_end = -1
-        for r in matches:
+        for r in sorted(
+            (r for r in matches if r.cur_st >= prefix_tokens),
+            key=lambda r: r.cur_st,
+        ):
             if r.cur_st >= covered_end:
-                deduped.append(r)
+                kept.append(r)
                 covered_end = r.cur_ed
-        return deduped
+        return kept
 
     def _resolve_cb_layout_desc(
         self, model_name: str, world_size: int
     ) -> "MemoryLayoutDesc | None":
-        """Find the CB KV buffer layout for (model, world_size), or None."""
-        for gpu_id, (m_name, w_size) in self._cb_gpu_context_meta.items():
-            if m_name == model_name and w_size == world_size:
-                cb_ctx = self._cb_gpu_contexts[gpu_id]
-                return MemoryLayoutDesc(
-                    shapes=[cb_ctx.get_kv_buffer_shape(self._ctx.chunk_size)],
-                    dtypes=[cb_ctx.dtype],
-                )
-        return None
+        """Find the CB KV buffer layout for ``(model_name, world_size)``.
+
+        Reads the thread-safe ``layout_desc_registry`` (populated by
+        ``gpu_transfer`` on KV-cache registration) rather than iterating
+        ``cache_contexts``: iteration races concurrent register/unregister, and
+        the registry holds the complete multi-group descriptor instead of a
+        single-group manual reconstruction.
+
+        Args:
+            model_name (str): Model name to match.
+            world_size (int): Tensor-parallel world size to match.
+
+        Returns:
+            MemoryLayoutDesc | None: The matching layout, or None if no
+            registered CB context matches.
+        """
+        return self._ctx.layout_desc_registry.find(model_name, world_size)
 
     def _sparse_prefetch_submit(
         self,
@@ -533,13 +602,28 @@ class BlendV3Module:
         layout_desc: "MemoryLayoutDesc",
         matches: list[CBMatchResult],
     ) -> "tuple[PrefetchHandle, dict[bytes, list], list[int]]":
-        """Coalesce all matches into one sparse prefetch and submit it
-        (non-blocking). The caller polls query_prefetch_status(handle) then
-        calls :meth:`_sparse_classify` with the found set."""
+        """Coalesce all matches into one sparse L2->L1 prefetch and submit it.
+
+        Non-blocking. Dedups object keys before submit (sparse keeps one read
+        lock per loaded key, so a duplicate would leak). The caller polls
+        ``query_prefetch_status(handle)`` then calls :meth:`_sparse_classify`
+        with the found set.
+
+        Args:
+            key (IPCCacheEngineKey): The request key.
+            layout_desc (MemoryLayoutDesc): CB KV buffer layout for L1 alloc.
+            matches (list[CBMatchResult]): Non-prefix matches to prefetch.
+
+        Returns:
+            tuple[PrefetchHandle, dict[bytes, list], list[int]]: the prefetch
+            handle, per-hash TP-expanded object keys, and each expanded
+            position's deduped-key index (maps the per-key found set back to
+            every chunk).
+        """
         world_size = key.world_size
         per_hash_obj_keys: dict[bytes, list] = {}
         all_hashes = [r.hash for r in matches]
-        all_obj_keys = ipc_key_to_object_keys(key, all_hashes)
+        all_obj_keys = ipc_key_to_object_keys(key, all_hashes, [0])[0]
         for i, h in enumerate(all_hashes):
             per_hash_obj_keys[h] = all_obj_keys[i * world_size : (i + 1) * world_size]
 
@@ -573,9 +657,22 @@ class BlendV3Module:
         per_hash_obj_keys: dict[bytes, list],
         expanded_uidx: list[int],
     ) -> list[CBMatchResult]:
-        """Classify each chunk found/stale by whether every TP rank's key
-        loaded, run stale-strike bookkeeping, and stash the obj_keys cache for
-        retrieve. Returns the found subset (cur_st order)."""
+        """Classify each prefetched chunk as found or stale, and finalize state.
+
+        A chunk is found only if every TP rank's key loaded; stale chunks take
+        an eviction strike (evicted at threshold, kept while still in-flight).
+        Stashes the found chunks' obj_keys for the retrieve path.
+
+        Args:
+            key (IPCCacheEngineKey): The request key.
+            matches (list[CBMatchResult]): The submitted non-prefix matches.
+            found_uidx (set[int]): Deduped-key indices that loaded.
+            per_hash_obj_keys (dict[bytes, list]): Per-hash TP-expanded keys.
+            expanded_uidx (list[int]): Each expanded position's deduped index.
+
+        Returns:
+            list[CBMatchResult]: The found subset, in cur_st order.
+        """
         world_size = key.world_size
         found_cb_match_result: list[CBMatchResult] = []
         stale_hashes: list[bytes] = []
@@ -631,10 +728,20 @@ class BlendV3Module:
         """Non-blocking single-RPC CB lookup (submit-once, poll-on-recall).
 
         First call submits the prefix lookup + fingerprint match; later calls
-        poll both legs, returning None until the prefix and the sparse
-        complement are both resident in L1 (so a worker thread never blocks on
-        the L2->L1 loads). The prefix job's L1 read locks persist for the
-        retrieve.
+        poll both legs, returning ``None`` until the prefix and the sparse
+        non-prefix complement are both resident in L1 (so a worker thread never
+        blocks on the L2->L1 loads). The prefix job's L1 read locks persist for
+        the retrieve.
+
+        Args:
+            key (IPCCacheEngineKey): Request key (token IDs, request_id, model,
+                world_size).
+            tp_size (int): Tensor-parallel size for the prefix lookup.
+
+        Returns:
+            CBUnifiedLookupResult | None: ``None`` while either leg is still
+            loading (the caller re-issues to poll); on completion, the prefix
+            coverage in tokens plus the found non-prefix segments.
         """
         rid = key.request_id
         chunk_size = self._ctx.chunk_size
@@ -653,11 +760,37 @@ class BlendV3Module:
                     metadata={"num_tokens": len(key.token_ids)},
                 )
             )
-            self._lookup_module.lookup(key, tp_size)  # submit prefix (non-blocking)
-            job = _CBUnifiedJob(
-                matches=self._match_fingerprints(key),
-                num_tokens=len(key.token_ids),
-            )
+            # Prefix leg: submit (non-blocking). Already traced upstream by
+            # mp.lookup_prefetch (LookupModule self-instruments); prefix_chunks
+            # lands on cb.lookup via CB_LOOKUP_END below.
+            self._lookup_module.lookup(key, tp_size)
+            # Local and coordinator matching are mutually exclusive: with a
+            # coordinator the fleet directory is the only source, so skip the
+            # local matcher (and its span). The coordinator leg is async
+            # (submitted below, resolved at poll) and is timed by cb.lookup.
+            matches: list[CBMatchResult]
+            if self._coordinator is not None:
+                matches = []
+            else:
+                # Local fingerprint match: CPU-bound, tight span.
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_FINGERPRINT_MATCH_START,
+                        session_id=rid,
+                    )
+                )
+                matches = self._match_fingerprints(key)
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_FINGERPRINT_MATCH_END,
+                        session_id=rid,
+                        metadata={"matches": len(matches)},
+                    )
+                )
+            job = _CBUnifiedJob(matches=matches, num_tokens=len(key.token_ids))
+            job.coord_submitted = self._submit_coordinator_match(key)
+            if job.coord_submitted and self._coordinator is not None:
+                job.coord_deadline = time.monotonic() + self._coordinator.match_budget_s
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
@@ -673,9 +806,16 @@ class BlendV3Module:
         # enter the sparse prefetch, so they cannot leak a read lock.
         if not job.sparse_started:
             prefix_tokens = job.prefix_chunks * chunk_size
-            # Any offset is fine: the per-token slot scatter writes
-            # non-block-aligned matches.
-            job.non_prefix = [r for r in job.matches if r.cur_st >= prefix_tokens]
+            if self._coordinator is not None:
+                candidates = self._poll_coordinator_match(job, rid)
+                if candidates is None:
+                    return None  # coordinator still in flight (bounded by deadline)
+            else:
+                candidates = job.matches
+            # Single prefix-filter + overlap dedup over the raw matches
+            job.non_prefix = self._non_overlapping_after_prefix(
+                candidates, prefix_tokens
+            )
             if job.non_prefix:
                 layout_desc = self._resolve_cb_layout_desc(
                     key.model_name, key.world_size
@@ -686,6 +826,22 @@ class BlendV3Module:
                         job.per_hash_obj_keys,
                         job.expanded_uidx,
                     ) = self._sparse_prefetch_submit(key, layout_desc, job.non_prefix)
+                    # Only trace the span when the prefetch actually reads L2;
+                    # all-L1-resident matches do no L2 work worth a span.
+                    job.l2_keys = len(job.handle.l2_orig_indices)
+                    if job.l2_keys > 0:
+                        self._event_bus.publish(
+                            Event(
+                                event_type=EventType.CB_SPARSE_PREFETCH_START,
+                                session_id=rid,
+                                metadata={
+                                    "n_chunks": len(job.non_prefix),
+                                    "world_size": key.world_size,
+                                    "n_keys": len(job.non_prefix) * key.world_size,
+                                    "l2_keys": job.l2_keys,
+                                },
+                            )
+                        )
                 else:
                     logger.error(
                         "No CB GPU context for model %s ws %d during cb_unified_lookup",
@@ -701,6 +857,17 @@ class BlendV3Module:
             if bm is None:
                 return None  # sparse still loading -> defer
             job.found_uidx = set(bm.get_indices_list())
+            if job.l2_keys > 0:
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_SPARSE_PREFETCH_END,
+                        session_id=rid,
+                        metadata={
+                            "found_keys": len(job.found_uidx),
+                            "l2_keys": job.l2_keys,
+                        },
+                    )
+                )
 
         # --- BOTH legs ready: classify the complement + finalize. ---
         if job.handle is not None:
@@ -716,6 +883,10 @@ class BlendV3Module:
 
         prefix_tokens = job.prefix_chunks * chunk_size
         num_tokens = job.num_tokens
+        # V3 hit rate = (prefix + non-prefix) reuse. The two ranges are disjoint
+        # (non_prefix has cur_st >= prefix_tokens), so they sum without double-
+        # counting. hit_tokens carries the sum (the hit_rate numerator).
+        non_prefix_hit_tokens = _unique_token_coverage(found)
         self._event_bus.publish(
             Event(
                 event_type=EventType.CB_LOOKUP_END,
@@ -724,10 +895,13 @@ class BlendV3Module:
                     "num_tokens": num_tokens,
                     "fingerprint_hits": len(found),
                     "prefix_hits": job.prefix_chunks,
+                    "prefix_chunks": job.prefix_chunks,
                     "storage_hits": len(found),
                     "stale_chunks": len(job.non_prefix or []) - len(found),
                     "no_gpu_context": False,
-                    "hit_tokens": _unique_token_coverage(found),
+                    "prefix_hit_tokens": prefix_tokens,
+                    "non_prefix_hit_tokens": non_prefix_hit_tokens,
+                    "hit_tokens": prefix_tokens + non_prefix_hit_tokens,
                     "requested_tokens": (num_tokens // chunk_size) * chunk_size,
                 },
             )
@@ -746,8 +920,24 @@ class BlendV3Module:
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Paged store + matcher fingerprint registration (skips pos-0
-        chunks; fingerprint failures logged, never raised)."""
+        """Paged store, then register the stored chunks as match fingerprints.
+
+        Delegates the KV write to ``GPUTransfer.store``, then (worker 0 only)
+        enqueues the chunk hashes for async fingerprint registration ordered
+        after the L1 commit. Chunk 0 of a position-0 store is skipped (owned by
+        the standard prefix path). Fingerprint failures are logged, never
+        raised — they do not affect store correctness.
+
+        Args:
+            key (IPCCacheEngineKey): Store key (token IDs + ``[start, end)``).
+            instance_id (int): Target KV-cache instance.
+            gpu_block_ids (list[list[int]]): Per-layer-group paged block IDs.
+            event_ipc_handle (bytes): IPC handle to the producer's CUDA event.
+
+        Returns:
+            tuple[bytes, bool]: The underlying ``GPUTransfer.store`` result
+            (event handle, success).
+        """
         result = self._gpu_transfer.store(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
@@ -787,7 +977,140 @@ class BlendV3Module:
                 key.request_id,
             )
 
+        if self._coordinator is not None:
+            self._publish_fingerprints(key, chunk_hashes, tokens_in_range)
+
         return result
+
+    def _publish_fingerprints(
+        self,
+        key: IPCCacheEngineKey,
+        chunk_hashes: list[bytes],
+        tokens_in_range: list[int],
+    ) -> None:
+        """Publish this stored range's chunk fingerprints to the coordinator.
+
+        Best-effort and fire-and-forget (enqueue only): one wire
+        ``ChunkFingerprint`` per stored chunk -- its content poly-hash (the same
+        ``chunk_hash_windows_numba`` the match probes, with the fleet base), its
+        shared-L2 ``object_key`` (the chunk storage key ``th``), and its token
+        position. Never raises into the store path.
+
+        Args:
+            key: The store request key (model/scope/positions).
+            chunk_hashes: Per-chunk storage keys (``th``) for the range.
+            tokens_in_range: The stored tokens ``token_ids[start:end]``.
+        """
+        coordinator = self._coordinator
+        if coordinator is None or not chunk_hashes:
+            return
+        try:
+            model_scope = f"{key.model_name}@{key.cache_salt}"
+            store_range = {
+                "model_scope": model_scope,
+                "tokens": list(tokens_in_range),
+                "object_keys": [h.hex() for h in chunk_hashes],
+                "old_st_base": key.start,
+            }
+            coordinator.enqueue_register([store_range])
+        except Exception:
+            logger.warning(
+                "CB coordinator publish build failed for request %s "
+                "(does not affect store correctness)",
+                key.request_id,
+            )
+
+    def _submit_coordinator_match(self, key: IPCCacheEngineKey) -> bool:
+        """Issue a fleet directory match query for this request (best-effort).
+
+        Args:
+            key: The lookup request key.
+
+        Returns:
+            ``True`` if a query was submitted (so the finalize step should poll
+            for it), ``False`` when there is no coordinator or submission failed.
+        """
+        coordinator = self._coordinator
+        if coordinator is None:
+            return False
+        try:
+            tokens = list(key.token_ids)
+            if len(tokens) < self._ctx.chunk_size:
+                return False
+            model_scope = f"{key.model_name}@{key.cache_salt}"
+            coordinator.submit_match(key.request_id, model_scope, tokens)
+            return True
+        except Exception:
+            logger.warning(
+                "CB coordinator match submit failed for request %s", key.request_id
+            )
+            return False
+
+    def _poll_coordinator_match(
+        self, job: "_CBUnifiedJob", rid: str
+    ) -> "list[CBMatchResult] | None":
+        """Poll the coordinator match result, deferring until it resolves.
+
+        Mirrors the prefix/sparse legs: ``return None`` to defer while pending.
+        A per-lookup wall-clock deadline (``job.coord_deadline``) bounds the
+        total wait: the daemon services match queries serially, so queue backlog
+        can keep a query ``PENDING`` well past one HTTP round-trip. Once the
+        deadline passes, the leg is abandoned and the lookup proceeds local-only
+        (the daemon's later fill, if any, is dropped via ``take_match``).
+
+        Args:
+            job: The per-request poll state.
+            rid: Request id.
+
+        Returns:
+            The global segments (possibly empty) once resolved or timed out, or
+            ``None`` to defer (still in flight and within the deadline).
+        """
+        coordinator = self._coordinator
+        if coordinator is None or not job.coord_submitted:
+            return []
+        poll = coordinator.poll_match(rid)
+        if poll is PENDING:
+            if time.monotonic() < job.coord_deadline:
+                return None  # defer; bounded by job.coord_deadline
+            coordinator.take_match(rid)
+            logger.warning(
+                "CB coordinator match deadline exceeded for %s; local-only", rid
+            )
+            return []
+        coordinator.take_match(rid)
+        if isinstance(poll, list):
+            return self._build_global_segments(poll)
+        return []
+
+    def _build_global_segments(
+        self, matches: "list[RemoteMatch]"
+    ) -> list[CBMatchResult]:
+        """Convert coordinator matches into chunk-granular retrievable segments.
+
+        Each coordinator ``object_key`` is the hex of the chunk's content hash
+        (the same ``th`` a local ``CBMatchResult.hash`` holds), so the matches
+        are returned as ``CBMatchResult`` directly: the retrieve path then
+        expands ``hash`` to per-rank shared-L2 object keys via
+        ``ipc_key_to_object_keys``, identical to local matches.
+
+        Args:
+            matches: Matched chunks returned by the coordinator client.
+
+        Returns:
+            One :class:`CBMatchResult` per matched chunk (request order).
+        """
+        chunk_size = self._ctx.chunk_size
+        return [
+            CBMatchResult(
+                old_st=m.old_st,
+                old_ed=m.old_st + chunk_size,
+                cur_st=m.cur_st,
+                cur_ed=m.cur_st + chunk_size,
+                hash=bytes.fromhex(m.object_key),
+            )
+            for m in matches
+        ]
 
     def _drain_fingerprint_queue(self) -> None:
         """Best-effort background drainer for _fingerprint_queue."""
@@ -819,17 +1142,31 @@ class BlendV3Module:
         batch_len: int,
         slots_to_rope: list[tuple[int, int, int]],
     ) -> None:
-        """Re-RoPE tmp-pool slots in-place (K-only, per group); list of
-        (slot_idx, old_st, cur_st)."""
+        """Re-RoPE the given tmp-pool slots in place (K-only, per kernel group).
+
+        Args:
+            gpu_context (GPUCacheContext): The instance's GPU cache context.
+            rope_state (_CBRopeState): Cached cos/sin + head layout.
+            batch_len (int): Number of tmp slots staged for this batch.
+            slots_to_rope (list[tuple[int, int, int]]): ``(slot_idx, old_st,
+                cur_st)`` per shifted slot — re-RoPE K from stored position
+                ``old_st`` to new position ``cur_st``.
+
+        Raises:
+            RuntimeError: On a compressed (compress_ratio != 1) or MLA
+                (kv_size != 2) layout, or a head_size/hidden_dim mismatch.
+        """
         if not slots_to_rope:
             return
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
         for group_idx in range(num_groups):
             group = gpu_context.kv_layer_groups_manager.kernel_groups[group_idx]
-            if group.compress_ratio != 1:
+            if group.tokens_per_block != group.slots_per_block:
                 raise RuntimeError(
-                    f"CB v3: group {group_idx} has compress_ratio="
-                    f"{group.compress_ratio}; compressed layouts unsupported."
+                    f"CB v3: group {group_idx} is compressed "
+                    f"(tokens_per_block={group.tokens_per_block}, "
+                    f"slots_per_block={group.slots_per_block}); "
+                    f"compressed layouts unsupported."
                 )
             all_slots = [
                 gpu_context.get_temp_kernel_group_buffer(slot_idx, group_idx)
@@ -873,9 +1210,31 @@ class BlendV3Module:
         instance_id: int,
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
-        """Scatter EVERY matched chunk into paged KV (prefix-hit + shifted);
-        K-only re-RoPE on the shifted subset. Drops misaligned matches;
-        MLA layouts unsupported."""
+        """Scatter every matched token range into the request's paged KV.
+
+        Reuses the lookup's prefetched chunks: fills tmp slots, K-only re-RoPEs
+        the shifted (non-prefix) subset, then writes per-token via the slot
+        kernel — so non-block-aligned matches and partial vLLM blocks shared
+        with recomputed tokens are written correctly (no block-alignment trim).
+        Only matches past the currently allocated slots are dropped (vLLM may
+        call this twice: partial- then full-block alloc).
+
+        Args:
+            key (IPCCacheEngineKey): The request key.
+            cb_match_result (list[CBMatchResult]): Matched ranges to scatter
+                (prefix-hit and shifted), any order.
+            gpu_block_ids (list[int]): This request's full paged block table.
+            instance_id (int): Target KV-cache instance.
+            event_ipc_handle (bytes): IPC handle to the forward's CUDA event.
+
+        Returns:
+            tuple[bytes, bool]: The scatter-complete event handle and whether
+            the scatter ran (False if the prefetched objects were unavailable).
+
+        Raises:
+            ValueError: If the instance has no registered KV cache or rope
+                state. MLA layouts are unsupported (raised during re-RoPE).
+        """
         cache_contexts = self._gpu_transfer.cache_contexts
         if instance_id not in cache_contexts:
             raise ValueError(
@@ -906,8 +1265,8 @@ class BlendV3Module:
                 all_obj_keys = [k for r in cb_match_result for k in cached[r.hash]]
         else:
             all_obj_keys = ipc_key_to_object_keys(
-                key, [r.hash for r in cb_match_result]
-            )
+                key, [r.hash for r in cb_match_result], [0]
+            )[0]
 
         # Lookup read-locked the full found set, but the connector may have
         # dropped some matches (parent-covered / misaligned) before retrieve,
@@ -926,9 +1285,9 @@ class BlendV3Module:
                     key.request_id,
                 )
 
-        # prefix (no re-rope) vs shifted (re-rope), for logging.
-        n_prefix = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
-        n_shifted = len(cb_match_result) - n_prefix
+        # Non-prefix sparse hits split by re-rope need (not prefix coverage).
+        n_non_shifted = sum(1 for r in cb_match_result if r.old_st == r.cur_st)
+        n_shifted = len(cb_match_result) - n_non_shifted
 
         if not all_obj_keys:
             self._event_bus.publish(
@@ -941,13 +1300,16 @@ class BlendV3Module:
 
         logger.debug("CB V3 retrieving object keys: %s", all_obj_keys)
 
-        ie_logical_block_size = (
-            gpu_context.kv_layer_groups_manager.inference_engine_logical_block_size
-        )
-        if chunk_size % ie_logical_block_size != 0:
+        # CB v3 only supports uncompressed single-block-id-space layouts
+        # (enforced per group in ``_apply_cb_rope_batched``), so the first
+        # kernel group's chunk geometry is representative.
+        tokens_per_block = gpu_context.kv_layer_groups_manager.kernel_groups[
+            0
+        ].tokens_per_block
+        if chunk_size % tokens_per_block != 0:
             raise ValueError(
                 f"chunk_size {chunk_size} must be a multiple of "
-                f"inference_engine_logical_block_size {ie_logical_block_size}"
+                f"tokens_per_block {tokens_per_block}"
             )
         num_groups = gpu_context.kv_layer_groups_manager.num_kernel_groups
 
@@ -996,7 +1358,7 @@ class BlendV3Module:
                     # Per-token scatter handles any cur_st; just bound the
                     # matched range to the allocated slots.
                     pairs: list[tuple[CBMatchResult, Any]] = []
-                    num_slots = int(all_block_ids_gpu.numel()) * ie_logical_block_size
+                    num_slots = int(all_block_ids_gpu.numel()) * tokens_per_block
                     for r, memory_obj in zip(cb_match_result, memory_objs, strict=True):
                         if r.cur_ed > num_slots:
                             logger.warning(
@@ -1009,6 +1371,29 @@ class BlendV3Module:
                             )
                             continue
                         pairs.append((r, memory_obj))
+
+                    # cb.scatter span (GPU): the L1->paged write of every
+                    # applied match. Re-RoPE is folded in (n_shifted) — it is
+                    # interleaved per-batch, so not a separate span.
+                    self._event_bus.publish_on_stream(
+                        gpu_context.cupy_stream,
+                        Event(
+                            event_type=EventType.CB_SCATTER_START,
+                            session_id=key.request_id,
+                            metadata={
+                                "scattered_tokens": sum(
+                                    r.cur_ed - r.cur_st for r, _ in pairs
+                                ),
+                                "n_prefix": sum(
+                                    1 for r, _ in pairs if r.old_st == r.cur_st
+                                ),
+                                "n_shifted": sum(
+                                    1 for r, _ in pairs if r.old_st != r.cur_st
+                                ),
+                                "dropped": len(cb_match_result) - len(pairs),
+                            },
+                        ),
+                    )
 
                     # Consecutive matches → one batched scatter per group.
                     runs: list[list[tuple[CBMatchResult, Any]]] = []
@@ -1045,7 +1430,7 @@ class BlendV3Module:
 
                             # (c) Per-token slot scatter: partial vLLM blocks
                             # shared with recomputed tokens stay disjoint.
-                            bs = ie_logical_block_size
+                            bs = tokens_per_block
                             pos = torch.cat(
                                 [
                                     torch.arange(
@@ -1080,6 +1465,14 @@ class BlendV3Module:
                                     block_size=bs,
                                     head_size=rope_state.head_size,
                                 )
+
+                    self._event_bus.publish_on_stream(
+                        gpu_context.cupy_stream,
+                        Event(
+                            event_type=EventType.CB_SCATTER_END,
+                            session_id=key.request_id,
+                        ),
+                    )
             except Exception:
                 logger.exception("Error during retrieving prefetched results")
                 self._event_bus.publish_on_stream(
@@ -1112,11 +1505,11 @@ class BlendV3Module:
         _scatter_ms = (time.perf_counter() - _retrieve_t0) * 1000
         logger.info(
             "Retrieved pre-computed for %d match results into request %s "
-            "paged blocks (scatter_ms=%.2f, prefix=%d shifted=%d)",
+            "paged blocks (scatter_ms=%.2f, non_shifted=%d shifted=%d)",
             len(cb_match_result),
             key.request_id,
             _scatter_ms,
-            n_prefix,
+            n_non_shifted,
             n_shifted,
         )
         self._event_bus.publish_on_stream(

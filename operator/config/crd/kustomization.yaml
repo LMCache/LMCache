@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/lmcache.lmcache.ai_lmcacheengines.yaml
+- bases/lmcache.lmcache.ai_cacheblendengines.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
@@ -12,5 +13,5 @@ patches:
 
 # [WEBHOOK] To enable webhook, uncomment the following section
 # the following config is for teaching kustomize how to do kustomization for CRDs.
-#configurations:
-#- kustomizeconfig.yaml
+configurations:
+- kustomizeconfig.yaml

@@ -141,7 +141,7 @@ class TestQueryCommandExecute:
         )
         assert args.func == cmd.execute
 
-    @patch("lmcache.cli.commands.query.Request")
+    @patch("lmcache.cli.commands.query.engine_command.Request")
     def test_execute_calls_request_send_request(
         self,
         mock_request_cls: MagicMock,
@@ -184,7 +184,7 @@ class TestQueryCommandExecute:
         assert "Input tokens" in out
         assert "Prompt tokens" not in out
 
-    @patch("lmcache.cli.commands.query.Request")
+    @patch("lmcache.cli.commands.query.engine_command.Request")
     def test_execute_uses_engine_model_when_cli_model_omitted(
         self,
         mock_request_cls: MagicMock,

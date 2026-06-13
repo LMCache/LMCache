@@ -199,17 +199,21 @@ class MPCacheEngineContext:
         """Registry mapping (model_name, world_size) to MemoryLayoutDesc."""
         return self._layout_desc_registry
 
-    def resolve_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
-        """Resolve object keys from an IPC cache key.
+    def resolve_obj_keys(
+        self, key: IPCCacheEngineKey, object_group_ids: list[int]
+    ) -> list[list[ObjectKey]]:
+        """Resolve per-object-group object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
         to compute chunk hashes for the requested range.
 
         Args:
             key: IPC cache key describing model/session/token range.
+            object_group_ids: Object group ids to produce keys for.
 
         Returns:
-            Resolved object keys for the requested token range.
+            The i-th element is the list of ObjectKeys for
+            ``object_group_ids[i]``.
 
         Raises:
             ValueError: If ``key.worker_id`` is ``None``.
@@ -221,7 +225,7 @@ class MPCacheEngineContext:
         ]
         if key.worker_id is None:
             raise ValueError("Must resolve keys with worker_id != None")
-        return ipc_key_to_object_keys(key, chunk_hashes)
+        return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
 
     @staticmethod
     def _compute_shm_pool_info(

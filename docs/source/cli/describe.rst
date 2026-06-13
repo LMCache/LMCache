@@ -33,8 +33,7 @@ L2 adapters.
    Engine group index:                              0
    Object group index:                              0
    Num layers:                                     80
-   Physical block size:                           128
-   Compress ratio:                                  1
+   Slots per block:                               128
    Dtype:                               torch.float16
    MLA:                                         False
    Attention backend:    vLLM non-MLA flash attention
@@ -119,8 +118,7 @@ L2 adapters are collected into lists for easy programmatic access:
            "engine_group_idx": 0,
            "object_group_idx": 0,
            "num_layers": 80,
-           "physical_block_size": 128,
-           "compress_ratio": 1,
+           "slots_per_block": 128,
            "dtype": "torch.float16",
            "is_mla": false,
            "attention_backend": "vLLM non-MLA flash attention",

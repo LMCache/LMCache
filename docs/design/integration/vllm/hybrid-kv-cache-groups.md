@@ -27,26 +27,28 @@ store/retrieve address those infos directly.
   IDs are indexed by that order.
 - Reuse one grouping primitive (`group_layers_by_identity`) on both the vLLM and
   server sides so group order matches.
-- **Not** in scope: sliding-window load-plan trimming; DeepSeek-V4 slot
-  compression (`compress_ratio > 1`, packing several logical tokens per physical
-  slot — the per-group machinery exists but is validated separately); HMA on the
-  non-GPU transfer path (it rejects multi-group); removing `layout_hints` (still
-  used for tensor layout). Per-group block *sizes* and cross-layer KV sharing
-  *are* supported (see Store and retrieve).
+- **Not** in scope: sliding-window load-plan trimming; HMA on the non-GPU
+  transfer path (it rejects multi-group); removing `layout_hints` (still used
+  for tensor layout). Per-group block *sizes*, cross-layer KV sharing, and
+  DeepSeek-V4-style slot compression (`compress_ratio > 1`, packing several
+  logical tokens per physical slot) *are* supported (see Store and retrieve).
 
 ## Types
 
 - **`EngineGroupInfo`** (`msgspec.Struct`): `engine_group_id` (which engine
-  block group its layers live in; dense from 0) + `layer_indices`. Several infos
-  may share an `engine_group_id` when one engine group is split by physical
-  transfer identity. The list order is the protocol-visible group order; an
-  empty list means a single non-hybrid group.
+  block group its layers live in; dense from 0) + `layer_indices` +
+  `tokens_per_block` (logical tokens covered by one of the group's paged
+  chunks, from the engine's KV cache spec `block_size`; `0` = unreported).
+  Several infos may share an `engine_group_id` when one engine group is split
+  by physical transfer identity. The list order is the protocol-visible group
+  order; an empty list means a single non-hybrid group.
 - Helpers in `group_view.py` operate on `Sequence[EngineGroupInfo]`:
   `num_engine_groups`, `num_engine_group_infos`, `expand_engine_block_ids`,
   `get_engine_group_indices`.
 - **`KVLayerGroupInfo`** (runtime, server-only): layer indices,
-  `PageBufferShapeDesc`, dtype, compress ratio, physical chunk size,
-  `engine_group_idx`. Derived from real tensors — never the API contract.
+  `PageBufferShapeDesc`, dtype, `tokens_per_block` / `slots_per_block`,
+  `slots_per_chunk`, `engine_group_idx`. Derived from real tensors — never the
+  API contract.
 
 ## Data flow
 
@@ -83,22 +85,33 @@ info reuses its source engine group's block IDs), so `STORE`/`RETRIEVE` receive
 `list[list[int]]` indexed by info order. The server loop is then trivial: for
 info `i`, use `gpu_block_ids[i]`.
 
-### Per-group block sizes
+### Per-group block sizes and compression
 
-Engine groups may use *different* `block_size`s. When a hybrid model's
-attention types have different per-token page sizes, vLLM unifies the physical
-page size by scaling the smaller-page group's `block_size` up (e.g.
-`google/gemma-4-E4B-it`: sliding-window groups `block_size=32`, full-attention
-groups `block_size=16`). The connector's block accounting (hit counts,
-`blocks_in_chunk`, the `start`/`end` range) stays in the *canonical* unit —
-`cache_config.block_size`, the GCD of all group block sizes — while each group's
-block IDs are in its own `block_size`. So the scheduler-side slice divides the
-canonical range by `k_g = group_block_size / canonical` per group
-(`_slice_block_ids`), and the server counts `blocks_per_chunk = chunk // bs` per
-group (`GPUCacheContext.blocks_for_tokens`). The server's per-group
-`compress_ratio` is derived from the *per-group* logical block size
-(`max(canonical, bs)`), so an uncompressed larger-block group gets
-`compress_ratio == 1` rather than being rejected.
+There is no single "engine block size". Each group has two per-group
+quantities, and everything else is derived from them:
+
+- **`tokens_per_block`** — logical tokens covered by one of the group's paged
+  chunks (one block ID). Read from the group's KV cache spec `block_size` in
+  `kv_cache_config` at initialization and carried in `EngineGroupInfo`.
+  Hybrid models mix values freely (`google/gemma-4-E4B-it`: sliding-window
+  groups 32, full-attention groups 16; DeepSeek-V4-Flash: 256/64/8/4).
+- **`slots_per_block`** — physical slots in one paged chunk, detected from the
+  registered tensors at registration time (the batch-size dimension,
+  `shape_desc.bs`). Only available per kernel group.
+
+A group is compressed when `tokens_per_block > slots_per_block` (each physical
+slot packs `tokens_per_block // slots_per_block` logical tokens): ordinary
+attention has one token per slot, while DeepSeek-V4-Flash's MLA / indexer
+caches pack 4 and 128. No `compress_ratio` is stored — wherever a ratio is
+needed it is computed inline from these two ground-truth quantities. The
+LMCache chunk size must be a multiple of every group's `tokens_per_block`
+(validated at connector init and registration).
+
+The scheduler-side connector does all accounting (hit counts, store/retrieve
+ranges) in *tokens* — the only unit shared by every group — and slices each
+group's block IDs by `token_range / tokens_per_block_g`
+(`slice_block_ids_per_group`). The server counts
+`blocks_per_chunk = lmcache_tokens_per_chunk // tokens_per_block` per group.
 
 ### Cross-layer KV sharing
 

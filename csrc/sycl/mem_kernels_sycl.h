@@ -98,6 +98,16 @@ enum class GPUKVFormat : int {
   - SGLang MHA via the MP daemon path
   physical shape per layer: [num_blocks, block_size, num_heads, head_size]
   */
+
+  NL_X_NB_NH_BS_TWO_HS = 10,
+  /*
+  used by:
+  - vLLM non-MLA blocks-first attention with K/V fused into the trailing dim
+  physical shape per layer: [num_blocks, num_heads, block_size, 2, head_size]
+  (recovered by splitting the fused trailing [block_size, 2 * head_size]).
+  Currently only reached via the host gather/scatter path, not the SYCL
+  transfer kernels.
+  */
 };
 
 void multi_layer_kv_transfer(
@@ -107,12 +117,26 @@ void multi_layer_kv_transfer(
     const GPUKVFormat gpu_kv_format, const int block_size = 0,
     const int head_size = 0, const int skip_prefix_n_tokens = 0);
 
+// collapses to multi_layer_kv_transfer for MLA
+void multi_layer_kv_transfer_unilateral(
+    torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
+    const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
+    const int page_buffer_size, const TransferDirection direction,
+    const GPUKVFormat gpu_kv_format);
+
 void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               torch::Tensor& vllm_key_value_cache,
                               torch::Tensor& slot_mapping,
                               const TransferDirection direction,
                               const GPUKVFormat gpu_kv_format,
                               const bool token_major = false);
+
+void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
+                                  torch::Tensor& sgl_key_cache,
+                                  torch::Tensor& sgl_value_cache,
+                                  torch::Tensor& slot_mapping,
+                                  const TransferDirection direction,
+                                  const bool token_major = false);
 
 // Asynchronous memory copy between host and device buffers.
 // The `direction` parameter is retained for API compatibility but is unused:
