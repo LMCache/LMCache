@@ -239,7 +239,7 @@ class ClientPollingLoop:
 
             # Inbound: dispatch each ready DEALER socket to its client.
             for sock, event in socks.items():
-                if sock == notifier_fd:
+                if sock is notifier_fd:
                     continue
                 if event & zmq.POLLIN:
                     owner = self._socket_to_client.get(sock)

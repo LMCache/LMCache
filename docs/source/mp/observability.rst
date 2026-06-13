@@ -392,7 +392,7 @@ Sampled (default 1%) GPU KV cache block lifecycle tracking via
 selection with a ``_skipped`` set (bounded by the finite number of
 physical GPU blocks).
 
-All L0 metrics are emitted with ``instance_id`` and ``model_name``
+All L0 lifecycle metrics are emitted with ``instance_id`` and ``model_name``
 OTel attributes, enabling per-instance and per-model metric slicing
 in Prometheus (e.g.
 ``lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}``).
@@ -419,6 +419,10 @@ in Prometheus (e.g.
    * - ``lmcache_mp.l0_block_reuse_gap``
      - Histogram
      - Time gaps between consecutive accesses of the same GPU block.
+
+These counters are boundary signals: they show that vLLM allocation
+reports reached LMCache MP observability. They do not prove a full
+CacheBlend or L2-backed reuse path.
 
 L0 ↔ L1 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -522,6 +526,10 @@ operators can distinguish workers that serve more than one GPU.
      - Total bytes copied from L1 CPU memory into L0 GPU KV blocks
        during ``retrieve()`` operations that loaded at least one chunk
        and reported a positive byte count.
+
+These counters provide low-cardinality MP boundary visibility. They do
+not prove where the data came from before L1, nor do they validate
+end-to-end serving quality or application semantics.
 
 Observable Gauges
 ~~~~~~~~~~~~~~~~~

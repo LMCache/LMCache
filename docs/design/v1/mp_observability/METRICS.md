@@ -223,13 +223,13 @@ sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
 
 ---
 
-## L0 (GPU) Block Lifecycle Histograms
+## L0 (GPU) Block Lifecycle Metrics
 
 Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
 of `MP_VLLM_BLOCK_ALLOCATION` and `MP_VLLM_END_SESSION` events.  Eviction is
 detected at reallocation time (when a block is assigned different tokens).
 
-All L0 histograms carry `instance_id` and `model_name` OTel attributes, enabling
+All L0 lifecycle metrics carry `instance_id` and `model_name` OTel attributes, enabling
 per-instance and per-model Prometheus metric slicing (e.g.
 `lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}`).
 
@@ -242,6 +242,10 @@ per-instance and per-model Prometheus metric slicing (e.g.
 | `lmcache_mp.l0_block_reuse_gap` | `lmcache_mp_l0_block_reuse_gap_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (cache hit) | Time gaps between consecutive accesses from access history |
 
 **What it answers:** How long do GPU blocks live before eviction? How idle are they? How frequently are cached blocks reused? Which instance/model is experiencing the most churn?
+
+**What it does not answer:** These counters only prove that vLLM allocation
+reports reached LMCache MP observability. They do not prove a full CacheBlend
+or L2-backed reuse path.
 
 ---
 
@@ -334,6 +338,10 @@ workers/devices to spot uneven demand or underserved ranks. Slice by
 `cache_salt` for per-tenant attribution (note: `cache_salt` can be
 high-cardinality — drop it at scrape time with `metric_relabel_configs` if
 storage cost matters).
+
+**What it does not answer:** These counters do not prove where the data came
+from before L1, nor do they validate end-to-end serving quality or application
+semantics. Use them as low-cardinality MP boundary visibility.
 
 ---
 
