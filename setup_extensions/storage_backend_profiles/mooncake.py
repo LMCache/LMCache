@@ -15,10 +15,10 @@ if TYPE_CHECKING:
     from setuptools.extension import Extension
 
 # First Party
-from setup_extensions.storage_backends import StorageBackendStrategy
+from setup_extensions.storage_backend_profiles import StorageBackendProfile
 
 
-class MooncakeStorageBackend(StorageBackendStrategy):
+class MooncakeStorageBackend(StorageBackendProfile):
     """Mooncake distributed KV-cache storage backend."""
 
     name = "mooncake"

@@ -15,9 +15,11 @@ import pkgutil
 import sys
 
 # First Party
+from setup_extensions.build_profiles import BuildProfile
 from setup_extensions.common_cpp import build_common_cpp
-from setup_extensions.platforms import PlatformStrategy
-from setup_extensions.storage_backends import StorageBackendStrategy  # noqa: E402
+from setup_extensions.storage_backend_profiles import (  # noqa: E402
+    StorageBackendProfile,
+)
 
 # ---------------------------------------------------------------------------
 # Generic subclass discovery (filesystem-based, from _discovery.py)
@@ -82,38 +84,39 @@ def discover_subclasses(
 # ---------------------------------------------------------------------------
 
 
-def _discover_platforms() -> list[PlatformStrategy]:
-    """Auto-discover all platform strategies.
+def _discover_platforms() -> list[BuildProfile]:
+    """Auto-discover all platform build profiles.
 
-    Walks ``setup_extensions.platforms`` via ``discover_subclasses``,
+    Walks ``setup_extensions.build_profiles`` via ``discover_subclasses``,
     which uses ``pkgutil.iter_modules`` to find submodules at the
     filesystem level.  Adding a new ``.py`` file under that package
-    with a concrete ``PlatformStrategy`` subclass is all that is needed —
+    with a concrete ``BuildProfile`` subclass is all that is needed —
     no module list to maintain.
     """
-    platforms: list[PlatformStrategy] = []
+    platforms: list[BuildProfile] = []
     for cls in discover_subclasses(
-        "setup_extensions.platforms",
-        PlatformStrategy,  # type: ignore[type-abstract]
+        "setup_extensions.build_profiles",
+        BuildProfile,  # type: ignore[type-abstract]
     ):
         platforms.append(cls())
     return platforms
 
 
-def _discover_storage_backends() -> list[StorageBackendStrategy]:
-    """Auto-discover all optional L2 storage backend strategies.
+def _discover_storage_backends() -> list[StorageBackendProfile]:
+    """Auto-discover all optional L2 storage backend build profiles.
 
-    Walks ``setup_extensions.storage_backends`` via ``discover_subclasses``.
-    Adding a new ``.py`` file under that package with a concrete
-    ``StorageBackendStrategy`` subclass is all that is needed.
+    Walks ``setup_extensions.storage_backend_profiles`` via
+    ``discover_subclasses``. Adding a new ``.py`` file under that
+    package with a concrete ``StorageBackendProfile`` subclass is all
+    that is needed.
     """
-    strategies: list[StorageBackendStrategy] = []
+    backends: list[StorageBackendProfile] = []
     for cls in discover_subclasses(
-        "setup_extensions.storage_backends",
-        StorageBackendStrategy,  # type: ignore[type-abstract]
+        "setup_extensions.storage_backend_profiles",
+        StorageBackendProfile,  # type: ignore[type-abstract]
     ):
-        strategies.append(cls())
-    return strategies
+        backends.append(cls())
+    return backends
 
 
 # ---------------------------------------------------------------------------
@@ -122,10 +125,10 @@ def _discover_storage_backends() -> list[StorageBackendStrategy]:
 
 
 class BuildPolicy:
-    """Selects and builds extensions using platform-aware build strategies.
+    """Selects and builds extensions using platform-aware build profiles.
 
     Resolution order:
-        1. If an explicit ``BUILD_WITH_*`` env var is set, use that platform
+        1. If an explicit ``BUILD_WITH_*`` env var is set, use that profile
            unconditionally (no fallback). A warning is emitted when its
            toolchain cannot be auto-detected, but the build proceeds so
            that the underlying compiler produces the authoritative error.
@@ -136,17 +139,17 @@ class BuildPolicy:
     def __init__(self) -> None:
         self._platforms = _discover_platforms()
 
-    def resolve_strategy(self) -> Optional[PlatformStrategy]:
-        """Resolve the active platform strategy.
+    def resolve_strategy(self) -> Optional[BuildProfile]:
+        """Resolve the active build profile.
 
         Returns ``None`` when building sdist, native extensions are
-        disabled, GPU extensions are disabled, or no platform was
+        disabled, GPU extensions are disabled, or no profile was
         detected.
         """
         if (
-            PlatformStrategy.is_building_sdist()
-            or PlatformStrategy.is_native_ext_disabled()
-            or PlatformStrategy.is_gpu_ext_disabled()
+            BuildProfile.is_building_sdist()
+            or BuildProfile.is_native_ext_disabled()
+            or BuildProfile.is_gpu_ext_disabled()
         ):
             return None
 
@@ -158,13 +161,13 @@ class BuildPolicy:
         ]
         if len(explicitly_requested) > 1:
             names = ", ".join(s.name for s in explicitly_requested)
-            raise RuntimeError("Multiple platforms explicitly requested: %s" % names)
+            raise RuntimeError("Multiple profiles explicitly requested: %s" % names)
         if explicitly_requested:
             strategy = explicitly_requested[0]
-            print("Using explicitly requested platform: %s" % strategy.name)
+            print("Using explicitly requested profile: %s" % strategy.name)
             if not strategy.detect():
                 print(
-                    "warning: platform '%s' was explicitly requested but its "
+                    "warning: profile '%s' was explicitly requested but its "
                     "toolchain was not auto-detected; proceeding anyway"
                     % strategy.name,
                     file=sys.stderr,
@@ -174,45 +177,45 @@ class BuildPolicy:
         # ---------------------------------------------------------------
         # Phase 2: auto-detect with fallback
         # ---------------------------------------------------------------
-        print("No platform explicitly selected, auto-detecting...")
+        print("No profile explicitly selected, auto-detecting...")
         for strategy in self._platforms:
             if strategy.detect():
-                print("Auto-detected platform: %s" % strategy.name)
+                print("Auto-detected profile: %s" % strategy.name)
                 return strategy
 
         # ---------------------------------------------------------------
         # Phase 3: nothing found
         # ---------------------------------------------------------------
         print(
-            "warning: no platform detected, building without extensions",
+            "warning: no profile detected, building without extensions",
             file=sys.stderr,
         )
         return None
 
     @staticmethod
     def collect_extensions(
-        strategy: Optional[PlatformStrategy],
+        strategy: Optional[BuildProfile],
     ) -> tuple[list, dict, Optional[str]]:
         """Build all extensions and return requirements file name.
 
         Args:
-            strategy: Resolved platform strategy, or ``None``.
+            strategy: Resolved build profile, or ``None``.
 
         Returns:
             ``(ext_modules, cmdclass, requirements_file)`` tuple.
         """
-        if PlatformStrategy.is_building_sdist():
+        if BuildProfile.is_building_sdist():
             print("Not building extensions for sdist")
             return [], {}, None
 
-        if PlatformStrategy.is_native_ext_disabled():
+        if BuildProfile.is_native_ext_disabled():
             return [], {}, None
 
         # ---- build common C++ extensions ----
         ext_modules, cmdclass = build_common_cpp(strategy)
 
-        # ---- build platform-specific extensions ----
-        if strategy and not PlatformStrategy.is_gpu_ext_disabled():
+        # ---- build profile-specific extensions ----
+        if strategy and not BuildProfile.is_gpu_ext_disabled():
             em, cc = strategy.build()
             ext_modules.extend(em)
             cmdclass.update(cc)
