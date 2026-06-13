@@ -170,9 +170,8 @@ class L2ResyncManager:
         """
         deadline = asyncio.get_running_loop().time() + max_wait
         while True:
-            instances = registry.all_instances()
-            if instances:
-                target = instances[0]
+            target = registry.random_instance()
+            if target is not None:
                 logger.info(
                     "Starting L2 resync from %s (%s:%d)",
                     target.instance_id,

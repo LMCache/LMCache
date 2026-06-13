@@ -163,11 +163,14 @@ class L2EvictionManager:
     ) -> dict[str, list[ObjectKey]]:
         """Compute the eviction plan and apply it via the MP fleet.
 
-        Picks any one MP server from ``registry`` and dispatches the
+        Picks a uniformly random MP server from ``registry`` (via
+        :meth:`InstanceRegistry.random_instance`) and dispatches the
         full set of victim keys to its ``DELETE /l2`` endpoint. Since
         every MP server in the fleet shares the same backing L2 (e.g.
         one S3 bucket), a single dispatch evicts the keys for all of
-        them — there is no need to broadcast.
+        them — there is no need to broadcast. Random selection spreads
+        eviction-RPC load across the fleet over time instead of
+        pinning it to the first-registered server.
 
         On a successful HTTP response, removes the dispatched keys
         from the local LRU via :meth:`on_remove` so the coordinator's
@@ -193,8 +196,8 @@ class L2EvictionManager:
         if not plan:
             return plan
 
-        instances = registry.all_instances()
-        if not instances:
+        target = registry.random_instance()
+        if target is None:
             logger.warning(
                 "Eviction plan computed (%d salts) but no MP servers are "
                 "registered; skipping dispatch",
@@ -202,7 +205,6 @@ class L2EvictionManager:
             )
             return plan
 
-        target = instances[0]
         url = f"http://{target.ip}:{target.http_port}/l2"
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
         body = {"keys": [asdict(k.to_encoded_object_key()) for k in all_keys]}
