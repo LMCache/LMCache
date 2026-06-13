@@ -357,7 +357,10 @@ class LMCacheLayerwiseConnector(LMCacheConnector):
                     next(layerwise_storer)
                 except StopIteration:
                     logger.error(
-                        f"store_layer generator stopped at layer {layer_idx}/{self.sgl_config.num_hidden_layers}"
+                        (
+                            f"store_layer generator stopped at layer {layer_idx}/"
+                            f"{self.sgl_config.num_hidden_layers}"
+                        )
                     )
                     break
 
