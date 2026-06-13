@@ -58,14 +58,6 @@ class MPTransferMode(str, Enum):
     LMCACHE_DRIVEN = "lmcache_driven"
 
 
-# Backward-compatible mapping from legacy mode names to current ones.
-# Remove when all external configurations have been updated.
-_LEGACY_MODE_MAP: dict[str, str] = {
-    "handle": MPTransferMode.ENGINE_DRIVEN.value,
-    "data": MPTransferMode.LMCACHE_DRIVEN.value,
-}
-
-
 def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
     """Coerce ``mode`` into :class:`MPTransferMode`, falling back to env."""
     raw = (
@@ -75,18 +67,8 @@ def _resolve_mode(mode: "str | MPTransferMode | None") -> MPTransferMode:
     )
     if isinstance(raw, MPTransferMode):
         return raw
-    raw_lower = str(raw).lower()
-    # Backward compatibility: accept legacy mode names.
-    if raw_lower in _LEGACY_MODE_MAP:
-        new_value = _LEGACY_MODE_MAP[raw_lower]
-        logger.warning(
-            "Legacy MP transfer mode %r is deprecated; use %r instead.",
-            raw_lower,
-            new_value,
-        )
-        raw_lower = new_value
     try:
-        return MPTransferMode(raw_lower)
+        return MPTransferMode(str(raw).lower())
     except ValueError as exc:
         valid = ", ".join(m.value for m in MPTransferMode)
         raise ValueError(
