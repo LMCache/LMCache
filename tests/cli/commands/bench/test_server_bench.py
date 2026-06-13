@@ -305,16 +305,33 @@ class TestQueryChecksum:
 # ------------------------------------------------------------------ #
 
 
-@pytest.fixture
-def router_endpoint() -> str:
-    """Allocate an ephemeral inproc/tcp endpoint for the ROUTER."""
-    # Use tcp with port=0 so the OS assigns a free port.
+def _allocate_free_tcp_endpoint() -> str:
+    """Pick an ephemeral TCP endpoint via ``port=0`` probe-then-close.
+
+    NOTE: there is an inherent TOCTOU window between the probe-close
+    and the caller's real ``bind()``. Prefer letting the actual
+    consumer ``bind("tcp://127.0.0.1:0")`` itself and read back
+    ``LAST_ENDPOINT`` so the kernel allocation is atomic. This helper
+    is kept for callers that need to know the endpoint up front.
+    """
     ctx = zmq.Context.instance()
     probe = ctx.socket(zmq.ROUTER)
     probe.bind("tcp://127.0.0.1:0")
     endpoint = probe.getsockopt_string(zmq.LAST_ENDPOINT)
     probe.close(linger=0)
     return endpoint
+
+
+@pytest.fixture
+def router_endpoint() -> None:
+    """Sentinel fixture: tell ``_LookupRouter`` to self-allocate.
+
+    Returning ``None`` makes the router bind ``tcp://127.0.0.1:0``
+    and read back ``LAST_ENDPOINT``, so the kernel atomically
+    allocates and reserves the port — no probe-close TOCTOU window
+    (see Buildkite k3-unit-tests build #3090).
+    """
+    return None
 
 
 # ------------------------------------------------------------------ #
@@ -422,17 +439,21 @@ class _LookupRouter:
 
     def __init__(
         self,
-        endpoint: str,
+        endpoint: str | None = None,
         in_progress_polls: int = 1,
         hit_chunks: int = 3,
     ) -> None:
-        self._endpoint = endpoint
         self._in_progress_left = in_progress_polls
         self._hit_chunks = hit_chunks
         self.last_query_request_id: str | None = None
         self._ctx = zmq.Context.instance()
         self._router = self._ctx.socket(zmq.ROUTER)
-        self._router.bind(endpoint)
+        # When endpoint is None, let the kernel atomically allocate a
+        # free TCP port via bind(port=0). Reading LAST_ENDPOINT after
+        # bind avoids the probe-close TOCTOU race.
+        bind_target = endpoint if endpoint is not None else "tcp://127.0.0.1:0"
+        self._router.bind(bind_target)
+        self.endpoint: str = self._router.getsockopt_string(zmq.LAST_ENDPOINT)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -472,13 +493,13 @@ class TestLookupProtocol:
 
     def test_send_lookup_void_reply_is_success(
         self,
-        router_endpoint: str,
+        router_endpoint: None,
     ) -> None:
         """LOOKUP handler returns None (void) — must not be timeout."""
         router = _LookupRouter(router_endpoint)
         router.start()
         try:
-            client = self._make_client(router_endpoint)
+            client = self._make_client(router.endpoint)
             key = _make_key((1, 9906, 9906), request_id="req-void")
             assert _send_lookup(client, key) is True
             client.close()
@@ -487,7 +508,7 @@ class TestLookupProtocol:
 
     def test_poll_prefetch_status_uses_request_id(
         self,
-        router_endpoint: str,
+        router_endpoint: None,
     ) -> None:
         """QUERY_PREFETCH_STATUS payload is keyed by request_id str."""
         router = _LookupRouter(
@@ -497,7 +518,7 @@ class TestLookupProtocol:
         )
         router.start()
         try:
-            client = self._make_client(router_endpoint)
+            client = self._make_client(router.endpoint)
             hit = _poll_prefetch_status(
                 client,
                 "req-42",
