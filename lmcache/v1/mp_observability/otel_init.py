@@ -168,31 +168,31 @@ def register_gauge(
 ) -> None:
     """Register an OTel observable gauge with a callback.
 
-    This is a convenience wrapper that hides the OTel boilerplate.
-    If OTel is not available, the call is silently ignored.
+        This is a convenience wrapper that hides the OTel boilerplate.
+        If OTel is not available, the call is silently ignored.
 
-    Two callback shapes are accepted:
+        Two callback shapes are accepted:
 
-    - **Single value (no attributes).** ``func`` returns ``int`` / ``float``
-      and the gauge emits one datapoint per scrape with no attributes.
-      Use this for whole-process metrics like
-      ``lmcache_mp.active_prefetch_jobs``.
-    - **Per-attribute-set values.** ``func`` returns a list of
-      ``(value, attrs)`` tuples; the gauge emits one datapoint per tuple
-      with the given attributes.  Use this for per-adapter or per-tier
-      metrics that share a name but vary by attribute.  An empty list
-      reports no datapoints (the metric simply does not appear in the
-      next scrape, which is the correct shape when there is nothing to
-      observe).
+        - **Single value (no attributes).** ``func`` returns ``int`` / ``float``
+          and the gauge emits one datapoint per scrape with no attributes.
+          Use this for whole-process metrics like
+          ``lmcache_mp.active_prefetch_jobs``.
+        - **Per-attribute-set values.** ``func`` returns a list of
+          ``(value, attrs)`` tuples; the gauge emits one datapoint per tuple
+          with the given attributes.  Use this for per-adapter or per-tier
+          metrics that share a name but vary by attribute.  An empty list
+          reports no datapoints (the metric simply does not appear in the
+          next scrape, which is the correct shape when there is nothing to
+          observe).
 
-    Args:
-        meter_name: OTel meter name (e.g. ``lmcache.mp_engine``).
-        gauge_name: Metric name (e.g.
-            ``lmcache_mp.active_prefetch_jobs``).
-        description: Human-readable description of the gauge.
-        func: Zero-arg callable.  Either a function returning the current
-            scalar value, or a function returning a list of
-            ``(value, attrs)`` tuples for tagged observations.
+        Args:
+    meter_name: OTel meter name (e.g. ``lmcache.mp_server``).
+            gauge_name: Metric name (e.g.
+                ``lmcache_mp.active_prefetch_jobs``).
+            description: Human-readable description of the gauge.
+            func: Zero-arg callable.  Either a function returning the current
+                scalar value, or a function returning a list of
+                ``(value, attrs)`` tuples for tagged observations.
     """
     try:
         # Third Party

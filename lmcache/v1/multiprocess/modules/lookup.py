@@ -459,7 +459,7 @@ class LookupModule:
 
     def _setup_metrics(self) -> None:
         """Register OTel observable gauges for lookup module metrics."""
-        _gauge = partial(register_gauge, "lmcache.mp_engine")
+        _gauge = partial(register_gauge, "lmcache.mp_server")
         _gauge(
             "lmcache_mp.active_prefetch_jobs",
             "Number of active prefetch jobs",
