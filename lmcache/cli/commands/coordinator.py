@@ -75,6 +75,32 @@ class CoordinatorCommand(BaseCommand):
                 "(default: 10)."
             ),
         )
+        parser.add_argument(
+            "--eviction-check-interval",
+            type=float,
+            default=None,
+            help=(
+                "Seconds between L2 eviction sweeps; 0 disables the loop (default: 5)."
+            ),
+        )
+        parser.add_argument(
+            "--eviction-ratio",
+            type=float,
+            default=None,
+            help=(
+                "Fraction of tracked keys (by count) to evict per cycle, "
+                "0.0 to 1.0 (default: 0.2)."
+            ),
+        )
+        parser.add_argument(
+            "--trigger-watermark",
+            type=float,
+            default=None,
+            help=(
+                "Eviction fires when usage reaches this fraction of the "
+                "quota, 0.0 (exclusive) to 1.0 (default: 1.0)."
+            ),
+        )
 
     def execute(self, args: argparse.Namespace) -> None:
         """Build the coordinator config and serve the app with uvicorn.
@@ -116,6 +142,9 @@ class CoordinatorCommand(BaseCommand):
                 ("port", args.port),
                 ("instance_timeout", args.instance_timeout),
                 ("health_check_interval", args.health_check_interval),
+                ("eviction_check_interval", args.eviction_check_interval),
+                ("eviction_ratio", args.eviction_ratio),
+                ("trigger_watermark", args.trigger_watermark),
             )
             if value is not None
         }

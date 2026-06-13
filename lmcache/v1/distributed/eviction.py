@@ -182,7 +182,7 @@ class L2EvictionPolicy(L2AdapterListener):
     def policy(self) -> EvictionPolicy:
         return self._policy
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey]):
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]):
         self._policy.on_keys_created(keys)
 
     def on_l2_keys_accessed(self, keys: list[ObjectKey]):
