@@ -7,7 +7,7 @@ manager wiring while keeping CI portable.
 """
 
 # Standard
-from typing import cast
+from typing import Any, cast
 import argparse
 import gc
 import json
@@ -652,6 +652,57 @@ def test_cli_hybrid_l1_keeps_ordinary_l2_adapters(
         get_type_name_for_config(config.l2_adapter_config.adapters[0])
         == expected_adapter_type
     )
+
+
+def test_cli_hybrid_l1_splits_matching_dax_device_and_keeps_other_l2(tmp_path):
+    l1_dax_path = _make_mmap_file(tmp_path, name="l1-devdax.bin")
+    l2_dax_path = _make_mmap_file(tmp_path, name="l2-devdax.bin")
+
+    config = _parse_mp_storage_args(
+        [
+            "--l1-size-gb",
+            "1",
+            "--eviction-policy",
+            "LRU",
+            "--no-l1-use-lazy",
+            "--shm-name",
+            "",
+            "--l1-devdax-path",
+            l1_dax_path,
+            "--l2-adapter",
+            json.dumps(
+                {
+                    "type": "dax",
+                    "devices": [
+                        {"device_path": l1_dax_path, "max_dax_size_gb": 2},
+                        {"device_path": l2_dax_path, "max_dax_size_gb": 3},
+                    ],
+                    "slot_bytes": 4096,
+                    "hotplug_enabled": True,
+                    "num_store_workers": 2,
+                    "num_lookup_workers": 3,
+                    "num_load_workers": 4,
+                }
+            ),
+            "--l2-adapter",
+            json.dumps({"type": "fs", "base_path": str(tmp_path / "fs-l2")}),
+        ]
+    )
+
+    mem_cfg = config.l1_manager_config.memory_config
+    assert mem_cfg.devdax_size_in_bytes == 2 << 30
+    assert len(config.l2_adapter_config.adapters) == 2
+
+    dax_adapter = cast(Any, config.l2_adapter_config.adapters[0])
+    assert get_type_name_for_config(dax_adapter) == "dax"
+    assert [device.device_path for device in dax_adapter.devices] == [l2_dax_path]
+    assert dax_adapter.max_dax_size_gb == 3
+    assert dax_adapter.hotplug_enabled is True
+    assert dax_adapter.num_store_workers == 2
+    assert dax_adapter.num_lookup_workers == 3
+    assert dax_adapter.num_load_workers == 4
+
+    assert get_type_name_for_config(config.l2_adapter_config.adapters[1]) == "fs"
 
 
 def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):

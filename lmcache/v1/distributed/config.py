@@ -52,24 +52,51 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
         return
 
     l1_devdax_path = memory_config.devdax_path
-    remaining_adapters = []
-    matched_dax_adapters = []
+    remaining_adapters: list[L2AdapterConfigBase] = []
+    matched_dax_device: Any | None = None
     for adapter_config in l2_adapter_config.adapters:
-        if (
-            get_type_name_for_config(adapter_config) == "dax"
-            and getattr(adapter_config, "device_path", None) == l1_devdax_path
-        ):
-            matched_dax_adapters.append(adapter_config)
-        else:
+        if get_type_name_for_config(adapter_config) != "dax":
             remaining_adapters.append(adapter_config)
+            continue
 
-    if not matched_dax_adapters:
+        dax_adapter = cast(Any, adapter_config)
+        devices = list(getattr(dax_adapter, "devices", []))
+        matched_devices = [
+            device
+            for device in devices
+            if getattr(device, "device_path", None) == l1_devdax_path
+        ]
+        if not matched_devices:
+            remaining_adapters.append(adapter_config)
+            continue
+        if matched_dax_device is not None or len(matched_devices) > 1:
+            raise ValueError(
+                "Only one DAX device can match l1-devdax-path for hybrid L1"
+            )
+
+        matched_dax_device = matched_devices[0]
+        remaining_devices = [
+            device
+            for device in devices
+            if getattr(device, "device_path", None) != l1_devdax_path
+        ]
+        if remaining_devices:
+            remaining_dax_adapter = type(dax_adapter)(
+                devices=remaining_devices,
+                hotplug_enabled=dax_adapter.hotplug_enabled,
+                slot_bytes=dax_adapter.slot_bytes,
+                num_store_workers=dax_adapter.num_store_workers,
+                num_lookup_workers=dax_adapter.num_lookup_workers,
+                num_load_workers=dax_adapter.num_load_workers,
+            )
+            remaining_dax_adapter.eviction_config = dax_adapter.eviction_config
+            remaining_dax_adapter.persist_config = dax_adapter.persist_config
+            remaining_dax_adapter.serde_config = dax_adapter.serde_config
+            remaining_adapters.append(remaining_dax_adapter)
+
+    if matched_dax_device is None:
         return
-    if len(matched_dax_adapters) > 1:
-        raise ValueError("Only one DAX adapter can match l1-devdax-path for hybrid L1")
-
-    dax_adapter = cast(Any, matched_dax_adapters[0])
-    max_dax_size_gb = dax_adapter.max_dax_size_gb
+    max_dax_size_gb = matched_dax_device.max_dax_size_gb
     memory_config.devdax_size_in_bytes = int(max_dax_size_gb * (1 << 30))
     l2_adapter_config.adapters = remaining_adapters
 
