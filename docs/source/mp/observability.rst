@@ -383,8 +383,8 @@ per tenant or isolation domain); drop it at scrape time with
     sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
     / sum(rate(lmcache_mp_lookup_requested_tokens_total[5m])) by (model_name)
 
-L0 (GPU) Block Lifecycle Histograms
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+L0 (GPU) Block Lifecycle Metrics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Sampled (default 1%) GPU KV cache block lifecycle tracking via
 ``L0LifecycleSubscriber``. Eviction is detected at reallocation time
@@ -392,7 +392,7 @@ Sampled (default 1%) GPU KV cache block lifecycle tracking via
 selection with a ``_skipped`` set (bounded by the finite number of
 physical GPU blocks).
 
-All L0 histograms are emitted with ``instance_id`` and ``model_name``
+All L0 lifecycle metrics are emitted with ``instance_id`` and ``model_name``
 OTel attributes, enabling per-instance and per-model metric slicing
 in Prometheus (e.g.
 ``lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}``).
@@ -404,6 +404,12 @@ in Prometheus (e.g.
    * - Metric
      - Type
      - Description
+   * - ``lmcache_mp.l0_block_allocation_records``
+     - Counter
+     - Number of vLLM block-allocation records processed.
+   * - ``lmcache_mp.l0_block_allocated_blocks``
+     - Counter
+     - Number of newly allocated vLLM GPU KV block IDs processed.
    * - ``lmcache_mp.l0_block_lifetime``
      - Histogram
      - Time from allocation to eviction per sampled GPU block.
@@ -413,6 +419,10 @@ in Prometheus (e.g.
    * - ``lmcache_mp.l0_block_reuse_gap``
      - Histogram
      - Time gaps between consecutive accesses of the same GPU block.
+
+These counters are boundary signals: they show that vLLM allocation
+reports reached LMCache MP observability. They do not prove a full
+CacheBlend or L2-backed reuse path.
 
 L0 ↔ L1 Throughput Histograms
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -488,7 +498,8 @@ Engine Counters
 Worker-scoped counters tied to what the MP server delivers back to each
 vLLM worker via ``retrieve()``.  Labeled by ``worker_id`` (the vLLM
 worker instance id) — distinct from any scheduler-scoped id that may
-appear on other metrics.
+appear on other metrics. CPU→GPU load counters also carry ``device`` so
+operators can distinguish workers that serve more than one GPU.
 
 .. list-table::
    :header-rows: 1
@@ -504,6 +515,21 @@ appear on other metrics.
        model, and per tenant / isolation domain (``cache_salt``).
        ``cache_salt`` may be high-cardinality; drop it at scrape time
        with ``metric_relabel_configs`` if storage cost matters.
+   * - ``lmcache_mp.l0_l1_load_requests``
+     - Counter (attrs: ``worker_id``, ``model_name``, ``cache_salt``,
+       ``device``)
+     - Number of completed L1 CPU to L0 GPU ``retrieve()`` operations
+       that loaded at least one LMCache chunk.
+   * - ``lmcache_mp.l0_l1_load_bytes``
+     - Counter (attrs: ``worker_id``, ``model_name``, ``cache_salt``,
+       ``device``)
+     - Total bytes copied from L1 CPU memory into L0 GPU KV blocks
+       during ``retrieve()`` operations that loaded at least one chunk
+       and reported a positive byte count.
+
+These counters provide low-cardinality MP boundary visibility. They do
+not prove where the data came from before L1, nor do they validate
+end-to-end serving quality or application semantics.
 
 Observable Gauges
 ~~~~~~~~~~~~~~~~~

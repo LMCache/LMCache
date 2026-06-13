@@ -11,6 +11,9 @@ provider and assert on histogram observations.
 
 # Standard
 from dataclasses import dataclass
+import subprocess
+import sys
+import textwrap
 import time
 
 # Third Party
@@ -90,6 +93,28 @@ def _get_histogram_attrs(name: str) -> list[dict]:
     return [dict(dp.attributes) for dp in dps if dp.count > 0]
 
 
+def _read_counter_values() -> dict[str, int]:
+    """Snapshot summed OTel counter values by metric name."""
+    data = _reader.get_metrics_data()
+    result: dict[str, int] = {}
+    if data is None:
+        return result
+    for resource_metrics in data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                total = 0
+                has_value = False
+                for dp in metric.data.data_points:
+                    value = getattr(dp, "value", None)
+                    if value is None:
+                        continue
+                    total += int(value)
+                    has_value = True
+                if has_value:
+                    result[metric.name] = result.get(metric.name, 0) + total
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -113,6 +138,88 @@ def subscriber(bus):
 
 
 class TestL0NewAllocation:
+    def test_block_allocation_updates_l0_block_counters(self, bus, subscriber):
+        before = _read_counter_values()
+        bus.start()
+        try:
+            bus.publish(
+                _make_allocation_event(
+                    [
+                        FakeBlockAllocationRecord("req-1", [0, 1], [10, 20]),
+                        FakeBlockAllocationRecord("req-2", [2], [30]),
+                    ],
+                    instance_id=42,
+                    model_name="llama-7b",
+                )
+            )
+            time.sleep(_DRAIN_WAIT)
+        finally:
+            bus.stop()
+
+        after = _read_counter_values()
+        assert (
+            after.get("lmcache_mp.l0_block_allocation_records", 0)
+            - before.get("lmcache_mp.l0_block_allocation_records", 0)
+        ) == 2
+        assert (
+            after.get("lmcache_mp.l0_block_allocated_blocks", 0)
+            - before.get("lmcache_mp.l0_block_allocated_blocks", 0)
+        ) == 3
+
+    def test_block_allocation_counters_export_to_prometheus(self):
+        code = r"""
+from dataclasses import dataclass
+import os
+import sys
+import time
+
+from opentelemetry import metrics
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import REGISTRY, generate_latest
+
+from lmcache.v1.mp_observability.event import Event, EventType
+from lmcache.v1.mp_observability.event_bus import EventBus, EventBusConfig
+from lmcache.v1.mp_observability.subscribers.metrics.l0_lifecycle import (
+    L0LifecycleSubscriber,
+)
+
+@dataclass
+class Rec:
+    req_id: str
+    new_block_ids: list[int]
+    new_token_ids: list[int]
+
+reader = PrometheusMetricReader()
+metrics.set_meter_provider(MeterProvider(metric_readers=[reader]))
+bus = EventBus(EventBusConfig(enabled=True, max_queue_size=100))
+bus.register_subscriber(L0LifecycleSubscriber(sample_rate=1.0))
+bus.start()
+bus.publish(Event(event_type=EventType.MP_VLLM_BLOCK_ALLOCATION, metadata={
+    "instance_id": 42,
+    "model_name": "llama-7b",
+    "records": [Rec("req-1", [0, 1], [10, 20])],
+}))
+time.sleep(0.2)
+bus.stop()
+for line in generate_latest(REGISTRY).decode().splitlines():
+    if "lmcache_mp_l0_block" in line:
+        print(line)
+sys.stdout.flush()
+os._exit(0)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(code)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert "lmcache_mp_l0_block_allocation_records_total" in result.stdout
+        assert "lmcache_mp_l0_block_allocated_blocks_total" in result.stdout
+        assert 'instance_id="42"' in result.stdout
+        assert 'model_name="llama-7b"' in result.stdout
+
     def test_new_block_no_metrics_emitted(self, bus, subscriber):
         count_before = _get_histogram_count("lmcache_mp.l0_block_lifetime")
         bus.start()

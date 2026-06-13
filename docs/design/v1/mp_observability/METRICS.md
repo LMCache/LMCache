@@ -223,23 +223,29 @@ sum(rate(lmcache_mp_lookup_hit_tokens_total[5m])) by (model_name)
 
 ---
 
-## L0 (GPU) Block Lifecycle Histograms
+## L0 (GPU) Block Lifecycle Metrics
 
 Sampled (default 1%) GPU KV cache block lifecycle tracking via shadow monitoring
 of `MP_VLLM_BLOCK_ALLOCATION` and `MP_VLLM_END_SESSION` events.  Eviction is
 detected at reallocation time (when a block is assigned different tokens).
 
-All L0 histograms carry `instance_id` and `model_name` OTel attributes, enabling
+All L0 lifecycle metrics carry `instance_id` and `model_name` OTel attributes, enabling
 per-instance and per-model Prometheus metric slicing (e.g.
 `lmcache_mp_l0_block_lifetime_seconds{instance_id="12345",model_name="llama-7b"}`).
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
+| `lmcache_mp.l0_block_allocation_records` | `lmcache_mp_l0_block_allocation_records_total` | Counter | `MP_VLLM_BLOCK_ALLOCATION` | Number of vLLM block-allocation records processed |
+| `lmcache_mp.l0_block_allocated_blocks` | `lmcache_mp_l0_block_allocated_blocks_total` | Counter | `MP_VLLM_BLOCK_ALLOCATION` | Number of newly allocated vLLM GPU KV block IDs processed |
 | `lmcache_mp.l0_block_lifetime` | `lmcache_mp_l0_block_lifetime_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - alloc_time` per sampled block |
 | `lmcache_mp.l0_block_idle_before_evict` | `lmcache_mp_l0_block_idle_before_evict_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (eviction detected) | `eviction_time - last_access_time` per sampled block |
 | `lmcache_mp.l0_block_reuse_gap` | `lmcache_mp_l0_block_reuse_gap_seconds` | Histogram | `MP_VLLM_BLOCK_ALLOCATION` (cache hit) | Time gaps between consecutive accesses from access history |
 
 **What it answers:** How long do GPU blocks live before eviction? How idle are they? How frequently are cached blocks reused? Which instance/model is experiencing the most churn?
+
+**What it does not answer:** These counters only prove that vLLM allocation
+reports reached LMCache MP observability. They do not prove a full CacheBlend
+or L2-backed reuse path.
 
 ---
 
@@ -259,8 +265,8 @@ per-worker, per-device, and per-model slicing in Prometheus (e.g.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GBs` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
-| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GBs` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_store_throughput` | `lmcache_mp_l0_l1_store_throughput_GB_per_second` | Histogram | `MP_STORE_START` → `MP_STORE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
+| `lmcache_mp.l0_l1_load_throughput` | `lmcache_mp_l0_l1_load_throughput_GB_per_second` | Histogram | `MP_RETRIEVE_START` → `MP_RETRIEVE_END` | `total_bytes / (end_ts - start_ts) / 1e9` per request |
 
 **What it answers:** What GPU↔CPU throughput is each vLLM worker actually
 achieving for KV store/load? Does it match the theoretical PCIe bandwidth?
@@ -303,8 +309,8 @@ entirely. The load path continues to use the submitted `total_bytes`.
 
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GBs` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `bytes_transferred / (completed_ts - submitted_ts) / 1e9` per task. `bytes_transferred` is read from the `L2_STORE_COMPLETED` event (populated from the `L2StoreResult` returned by `pop_completed_store_tasks()`); samples where `bytes_transferred <= 0` (e.g. duplicate-key fast paths that skip the write) are dropped, so the histogram reflects real work, not submitted-but-skipped bytes. |
-| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GBs` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
+| `lmcache_mp.l2_store_throughput` | `lmcache_mp_l2_store_throughput_GB_per_second` | Histogram | `L2_STORE_SUBMITTED` → `L2_STORE_COMPLETED` | `bytes_transferred / (completed_ts - submitted_ts) / 1e9` per task. `bytes_transferred` is read from the `L2_STORE_COMPLETED` event (populated from the `L2StoreResult` returned by `pop_completed_store_tasks()`); samples where `bytes_transferred <= 0` (e.g. duplicate-key fast paths that skip the write) are dropped, so the histogram reflects real work, not submitted-but-skipped bytes. |
+| `lmcache_mp.l2_load_throughput` | `lmcache_mp_l2_load_throughput_GB_per_second` | Histogram | `L2_LOAD_TASK_SUBMITTED` → `L2_LOAD_TASK_COMPLETED` | `total_bytes / (completed_ts - submitted_ts) / 1e9` per (request, adapter) pair. The load path still uses submitted `total_bytes`; per-task real-bytes accounting only applies to the store path. |
 
 **What it answers:** What end-to-end throughput is each L2 adapter
 delivering? Which backends are keeping up with demand, and which are
@@ -321,13 +327,21 @@ distinct from any scheduler-scoped id used elsewhere.
 | OTel metric name | Prometheus name | Type | Source event | Calculation |
 |---|---|---|---|---|
 | `lmcache_mp.num_chunks_loaded` | `lmcache_mp_num_chunks_loaded_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`) | `MP_RETRIEVE_END` | `+retrieved_count` per event |
+| `lmcache_mp.l0_l1_load_requests` | `lmcache_mp_l0_l1_load_requests_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`, `device`) | `MP_RETRIEVE_END` | `+1` per retrieve that loaded at least one chunk |
+| `lmcache_mp.l0_l1_load_bytes` | `lmcache_mp_l0_l1_load_bytes_total` | Counter (attrs: `worker_id`, `model_name`, `cache_salt`, `device`) | `MP_RETRIEVE_END` | `+total_bytes` per retrieve that loaded at least one chunk and reports positive bytes |
 
 **What it answers:** How many LMCache chunks is each vLLM worker loading
-from LMCache into its engine?  Compare across workers to spot uneven
-demand or underserved ranks.  Slice by `model_name` to see per-model
-load volume in multi-model deployments, or by `cache_salt` for per-tenant
-attribution (note: `cache_salt` can be high-cardinality — drop it at
-scrape time with `metric_relabel_configs` if storage cost matters).
+from LMCache into its engine, how many completed CPU-to-GPU load operations
+occurred, and how many bytes crossed the L1-to-L0 boundary? Compare across
+workers/devices to spot uneven demand or underserved ranks. Slice by
+`model_name` to see per-model load volume in multi-model deployments, or by
+`cache_salt` for per-tenant attribution (note: `cache_salt` can be
+high-cardinality — drop it at scrape time with `metric_relabel_configs` if
+storage cost matters).
+
+**What it does not answer:** These counters do not prove where the data came
+from before L1, nor do they validate end-to-end serving quality or application
+semantics. Use them as low-cardinality MP boundary visibility.
 
 ---
 
