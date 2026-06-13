@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Non-GPU KV cache transfer operations for the MPCacheEngine."""
+"""Non-GPU KV cache transfer operations for the MPCacheServer."""
 
 # Standard
 from dataclasses import dataclass
@@ -20,7 +20,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     RegisterNonGpuContextPayload,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext, ShmPoolInfo
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
@@ -68,7 +68,7 @@ class NonGPUTransferModule:
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheEngineContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._non_gpu_contexts: dict[int, NonGPUContextEntry] = {}
         self._strategies: dict[int, TransferStrategy] = {}
@@ -82,7 +82,7 @@ class NonGPUTransferModule:
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 

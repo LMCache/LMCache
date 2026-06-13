@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Blend V3: paged-aware CacheBlend as an EngineModule.
 
-Plugs into the unified MPCacheEngine; standard REGISTER_KV_CACHE +
+Plugs into the unified MPCacheServer; standard REGISTER_KV_CACHE +
 CB_REGISTER_ROPE_V3 for setup; STORE wrapper registers fingerprints;
 retrieve scatters into the request's paged blocks.
 """
@@ -44,7 +44,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
@@ -319,7 +319,7 @@ class BlendV3Module:
 
     def __init__(
         self,
-        ctx: MPCacheEngineContext,
+        ctx: MPCacheServerContext,
         gpu_transfer: GPUTransferModule,
         lookup_module: LookupModule,
         coordinator: "BlendCoordinatorClient | None" = None,
@@ -372,7 +372,7 @@ class BlendV3Module:
     # ------------------------------------------------------------------
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         return self._ctx
 
     def get_handlers(self) -> list[HandlerSpec]:

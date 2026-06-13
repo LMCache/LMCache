@@ -28,7 +28,7 @@ from lmcache.v1.multiprocess.group_view import (
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
-    DataTransferContext,
+    LMCacheDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
@@ -1467,7 +1467,7 @@ class LMCacheMPWorkerAdapter:
         try:
             unregister_type = (
                 RequestType.UNREGISTER_KV_CACHE_NON_GPU_CONTEXT
-                if isinstance(self.transfer_ctx, DataTransferContext)
+                if isinstance(self.transfer_ctx, LMCacheDrivenTransferContext)
                 else RequestType.UNREGISTER_KV_CACHE
             )
             send_lmcache_request(

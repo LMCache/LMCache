@@ -16,7 +16,7 @@ from lmcache.v1.distributed.api import (
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
@@ -100,14 +100,14 @@ class LookupModule:
             chunk size.
     """
 
-    def __init__(self, ctx: MPCacheEngineContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._prefetch_jobs: dict[str, _PrefetchJob] = {}
         self._prefetch_job_lock = threading.Lock()
         self._setup_metrics()
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 

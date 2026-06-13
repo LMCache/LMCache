@@ -125,7 +125,7 @@ class LayoutDescRegistry:
             return entry.layout_desc
 
 
-class MPCacheEngineContext:
+class MPCacheServerContext:
     """Shared infrastructure for all engine modules.
 
     Holds the storage manager, token hasher, session manager, event bus,

@@ -25,7 +25,7 @@ from lmcache.cli.commands.describe import (
 
 SAMPLE_STATUS = {
     "is_healthy": True,
-    "engine_type": "MPCacheEngine",
+    "engine_type": "MPCacheServer",
     "chunk_size": 256,
     "hash_algorithm": "sha256",
     "registered_gpu_ids": [0],
@@ -178,7 +178,7 @@ class TestDescribeKvcacheFields:
         m = output["metrics"]
         assert m["health"] == "OK"
         assert m["url"] == "http://localhost:8000"
-        assert m["engine_type"] == "MPCacheEngine"
+        assert m["engine_type"] == "MPCacheServer"
         assert m["chunk_size"] == 256
         assert m["l1_capacity_gb"] == 60.0
         assert m["l1_used_gb"] == "42.30 (70.5%)"
@@ -245,7 +245,7 @@ class TestDescribeKvcacheFields:
         # First Party
         from lmcache.cli.commands.describe import DescribeCommand
 
-        minimal_data = {"is_healthy": True, "engine_type": "MPCacheEngine"}
+        minimal_data = {"is_healthy": True, "engine_type": "MPCacheServer"}
         cmd = DescribeCommand()
 
         class FakeArgs:

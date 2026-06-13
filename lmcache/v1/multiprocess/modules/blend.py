@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend (context-blend / cross-request KV reuse) module for MPCacheEngine."""
+"""Blend (context-blend / cross-request KV reuse) module for MPCacheServer."""
 
 # Standard
 from typing import Any
@@ -29,7 +29,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheEngineKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
@@ -321,7 +321,7 @@ class BlendModule:
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheEngineContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
         self._cb_gpu_context_meta: dict[int, tuple[str, int]] = {}
@@ -329,7 +329,7 @@ class BlendModule:
         self._gpu_copy_lock = threading.Lock()
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 

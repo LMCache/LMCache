@@ -36,10 +36,10 @@ msgstr ""
 #: ../../source/mp/observability.rst:9
 msgid ""
 "All three modes are powered by an internal **EventBus** that decouples "
-"producers (L1Manager, StorageManager, MPCacheEngine) from subscribers."
+"producers (L1Manager, StorageManager, MPCacheServer) from subscribers."
 msgstr ""
 "这三种模式都由一个内部 **EventBus** "
-"驱动，该总线将生产者（L1Manager、StorageManager、MPCacheEngine）与订阅者解耦。"
+"驱动，该总线将生产者（L1Manager、StorageManager、MPCacheServer）与订阅者解耦。"
 
 #: ../../source/mp/observability.rst:17
 msgid "Quick Start"
@@ -1541,9 +1541,9 @@ msgstr "KV 张量字节。重放练习的记账和控制逻辑；重放时的有
 
 #: ../../source/mp/observability.rst:829
 msgid ""
-"Calls inside the ``MPCacheEngine``, the message queue, or any GPU-copy "
+"Calls inside the ``MPCacheServer``, the message queue, or any GPU-copy "
 "code. These layers are **out of scope** for the storage trace level."
-msgstr "在 ``MPCacheEngine``、消息队列或任何 GPU 复制代码中的调用。这些层级在存储跟踪级别中是 **超出范围** 的。"
+msgstr "在 ``MPCacheServer``、消息队列或任何 GPU 复制代码中的调用。这些层级在存储跟踪级别中是 **超出范围** 的。"
 
 #: ../../source/mp/observability.rst:834
 msgid "File format"

@@ -7,7 +7,7 @@ optional OTel log forwarding), and **tracing** (OTel spans for per-request
 latency).
 
 All three modes are powered by an internal **EventBus** that decouples
-producers (L1Manager, StorageManager, MPCacheEngine) from subscribers.
+producers (L1Manager, StorageManager, MPCacheServer) from subscribers.
 
 .. contents::
    :local:
@@ -826,7 +826,7 @@ What is captured (and what is not)
 
 - KV tensor bytes. Replay exercises bookkeeping and controller logic;
   payloads at replay time are zeros.
-- Calls inside the ``MPCacheEngine``, the message queue, or any
+- Calls inside the ``MPCacheServer``, the message queue, or any
   GPU-copy code. These layers are **out of scope** for the storage
   trace level.
 
