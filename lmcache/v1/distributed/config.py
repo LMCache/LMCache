@@ -86,9 +86,6 @@ class L1MemoryManagerConfig:
     use_lazy: bool
     """ Whether to use lazy initialization for L1 memory. """
 
-    use_shm: bool = True
-    """ Whether to advertise/use POSIX SHM for non-lazy L1 memory. """
-
     init_size_in_bytes: int = field(default=20 << 30)
     """ The initial size when using lazy allocation. Default is 20GB. """
 
@@ -115,18 +112,14 @@ class L1MemoryManagerConfig:
         if self.devdax_size_in_bytes and not self.devdax_path:
             raise ValueError("devdax_size_in_bytes requires devdax_path")
 
-        if not self.use_shm:
-            self.shm_name = ""
-
         if self.devdax_path and self.use_lazy:
             raise ValueError(
                 "l1-devdax-path requires lazy allocation to be disabled. "
                 "Please set --no-l1-use-lazy."
             )
-        if self.devdax_path and self.use_shm:
+        if self.devdax_path and self.shm_name:
             raise ValueError(
-                "l1-devdax-path requires SHM to be disabled. "
-                "Please set --no-l1-use-shm."
+                'l1-devdax-path requires SHM to be disabled. Please set --shm-name "".'
             )
 
         # LazyMemoryAllocator requires cudart (CUDA host-pinned memory).
@@ -332,12 +325,6 @@ def add_storage_manager_args(
         help="Whether to use lazy loading for L1 memory. (Default is True)",
     )
     memory_group.add_argument(
-        "--l1-use-shm",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Whether to use POSIX SHM for non-lazy L1 memory. (Default is True)",
-    )
-    memory_group.add_argument(
         "--l1-init-size-gb",
         type=int,
         default=20,
@@ -356,7 +343,8 @@ def add_storage_manager_args(
         help=(
             "Optional /dev/dax device or mmap-able file to use as the L1 "
             "backing arena. When set, L1 lazy allocation and SHM transfer "
-            "advertising are disabled because the L1 bytes live in the DAX map. "
+            "advertising must be disabled because the L1 bytes live in the DAX "
+            'map. Set --no-l1-use-lazy and --shm-name "". '
             "If a DAX L2 adapter with the same device_path is registered, "
             "that adapter's max_dax_size_gb is used as L1 overflow size."
         ),
@@ -511,14 +499,24 @@ def parse_args_to_config(
     Returns:
         StorageManagerConfig: The configuration object.
     """
-    memory_config = L1MemoryManagerConfig(
-        size_in_bytes=int(args.l1_size_gb * (1 << 30)),
-        use_lazy=args.l1_use_lazy,
-        use_shm=args.l1_use_shm,
-        init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
-        align_bytes=args.l1_align_bytes,
-        devdax_path=args.l1_devdax_path,
-    )
+    shm_name = getattr(args, "shm_name", None)
+    if shm_name is None:
+        memory_config = L1MemoryManagerConfig(
+            size_in_bytes=int(args.l1_size_gb * (1 << 30)),
+            use_lazy=args.l1_use_lazy,
+            init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
+            align_bytes=args.l1_align_bytes,
+            devdax_path=args.l1_devdax_path,
+        )
+    else:
+        memory_config = L1MemoryManagerConfig(
+            size_in_bytes=int(args.l1_size_gb * (1 << 30)),
+            use_lazy=args.l1_use_lazy,
+            init_size_in_bytes=int(args.l1_init_size_gb * (1 << 30)),
+            align_bytes=args.l1_align_bytes,
+            shm_name=shm_name,
+            devdax_path=args.l1_devdax_path,
+        )
 
     gds_l1_config: GdsL1Config | None = None
     if getattr(args, "gds_l1_path", None):

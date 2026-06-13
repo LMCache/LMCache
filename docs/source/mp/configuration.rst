@@ -176,10 +176,12 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-devdax-path``
      - *(not set)*
      - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
-       backing arena.  When set, lazy allocation and SHM transfer advertising
-       are disabled because the L1 bytes live in the DAX mapping.  If a DAX
-       L2 adapter with the same ``device_path`` is registered, that adapter's
-       ``max_dax_size_gb`` is used as the L1 Device-DAX overflow size.
+       backing arena.  When set, disable lazy allocation with
+       ``--no-l1-use-lazy`` and disable SHM transfer advertising with
+       ``--shm-name ""`` because the L1 bytes live in the DAX mapping.  If a
+       DAX L2 adapter with the same ``device_path`` is registered, that
+       adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
+       size.
 
 GDS L1 Tier
 -----------
