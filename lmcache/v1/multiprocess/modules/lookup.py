@@ -15,7 +15,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
@@ -161,7 +161,7 @@ class LookupModule:
 
     def lookup(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         tp_size: int,
     ) -> None:
         """Submit a prefix lookup.
@@ -375,7 +375,7 @@ class LookupModule:
 
     def free_lookup_locks(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         tp_size: int,
     ) -> None:
         """Release read locks acquired during lookup.

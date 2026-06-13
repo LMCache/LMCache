@@ -179,7 +179,7 @@ either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
 vLLM-owned and not observable from LMCache.
 
 Both counters carry `model_name` and `cache_salt` OTel attributes (captured
-at lookup time from `IPCCacheEngineKey`), enabling per-model and per-tenant
+at lookup time from `IPCCacheServerKey`), enabling per-model and per-tenant
 slicing of the hit rate.  `cache_salt` can be high-cardinality; drop it at
 scrape time with `metric_relabel_configs` if storage cost matters.
 

@@ -18,7 +18,7 @@ from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.group_view import (
@@ -847,7 +847,7 @@ class LMCacheMPSchedulerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
-    ) -> IPCCacheEngineKey:
+    ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
         Args:
@@ -858,11 +858,11 @@ class LMCacheMPSchedulerAdapter:
             cache_salt: Per-user isolation salt.
 
         Returns:
-            IPCCacheEngineKey: The constructed key.
+            IPCCacheServerKey: The constructed key.
         """
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -1509,7 +1509,7 @@ class LMCacheMPWorkerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
-    ) -> IPCCacheEngineKey:
+    ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
         Args:
@@ -1520,9 +1520,9 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
 
         Returns:
-            IPCCacheEngineKey: The constructed key.
+            IPCCacheServerKey: The constructed key.
         """
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,

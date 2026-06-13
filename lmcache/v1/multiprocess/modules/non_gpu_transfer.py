@@ -17,7 +17,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
 )
 from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
@@ -73,10 +73,10 @@ class NonGPUTransferModule:
         self._non_gpu_contexts: dict[int, NonGPUContextEntry] = {}
         self._strategies: dict[int, TransferStrategy] = {}
         self._pending_shm_writes: dict[
-            tuple[int, IPCCacheEngineKey], list[ObjectKey]
+            tuple[int, IPCCacheServerKey], list[ObjectKey]
         ] = {}
         self._pending_shm_reads: dict[
-            tuple[int, IPCCacheEngineKey], list[ObjectKey]
+            tuple[int, IPCCacheServerKey], list[ObjectKey]
         ] = {}
         self._pending_shm_lock = threading.Lock()
         self._shm_pool_info: ShmPoolInfo = self._ctx.shm_pool_info
@@ -157,11 +157,11 @@ class NonGPUTransferModule:
 
     @staticmethod
     def _make_transfer_key(
-        key: IPCCacheEngineKey, instance_id: int
-    ) -> tuple[int, IPCCacheEngineKey]:
+        key: IPCCacheServerKey, instance_id: int
+    ) -> tuple[int, IPCCacheServerKey]:
         return (instance_id, key)
 
-    def _resolve_single_group_obj_keys(self, key: IPCCacheEngineKey) -> list[ObjectKey]:
+    def _resolve_single_group_obj_keys(self, key: IPCCacheServerKey) -> list[ObjectKey]:
         """Resolve object keys for the single object group used by
         non-GPU transfers."""
         return self._ctx.resolve_obj_keys(key, [0])[0]
@@ -289,7 +289,7 @@ class NonGPUTransferModule:
     @_lmcache_nvtx_annotate
     def prepare_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
     ) -> PrepareStoreResponse:
         """Prepare a store operation.
@@ -324,7 +324,7 @@ class NonGPUTransferModule:
     @_lmcache_nvtx_annotate
     def commit_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         cpu_data: bytes,
     ) -> bool:
@@ -375,7 +375,7 @@ class NonGPUTransferModule:
     @_lmcache_nvtx_annotate
     def prepare_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
     ) -> PrepareRetrieveResponse:
         """Retrieve prefetched chunks and return serialized CPU tensors.
@@ -408,7 +408,7 @@ class NonGPUTransferModule:
     @_lmcache_nvtx_annotate
     def commit_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
     ) -> bool:
         """Finalize a retrieve operation.

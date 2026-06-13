@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.config import StorageManagerConfig
     from lmcache.v1.gpu_connector.utils import LayoutHints
     from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheEngineKey,
+        IPCCacheServerKey,
         RegisterNonGpuContextPayload,
     )
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -198,7 +198,7 @@ def _default_register_payload(instance_id: int = 1) -> "RegisterNonGpuContextPay
     )
 
 
-def _default_key(tokens: int = 8) -> "IPCCacheEngineKey":
+def _default_key(tokens: int = 8) -> "IPCCacheServerKey":
     """Build a default IPC cache key with ``tokens`` contiguous token IDs.
 
     Args:
@@ -209,9 +209,9 @@ def _default_key(tokens: int = 8) -> "IPCCacheEngineKey":
     and ``request_id="req"``.
     """
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-    return IPCCacheEngineKey.from_token_ids(
+    return IPCCacheServerKey.from_token_ids(
         "m",
         1,
         0,

@@ -366,7 +366,7 @@ so they always advance together per completed lookup. Early-exit lookups
 contribute ``0`` to both, and abandoned lookups contribute to neither.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
-time from ``IPCCacheEngineKey`` so dashboards can compute per-model or
+time from ``IPCCacheServerKey`` so dashboards can compute per-model or
 per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry
 per tenant or isolation domain); drop it at scrape time with
 ``metric_relabel_configs`` if storage cost matters.

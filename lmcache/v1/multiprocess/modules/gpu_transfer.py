@@ -30,7 +30,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -587,7 +587,7 @@ class GPUTransferModule:
     @_lmcache_nvtx_annotate
     def store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
@@ -797,7 +797,7 @@ class GPUTransferModule:
     @_lmcache_nvtx_annotate
     def retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
