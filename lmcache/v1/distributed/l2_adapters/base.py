@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import KeyListPage, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
@@ -29,29 +29,6 @@ L2TaskId = int
 
 
 _EMPTY_BY_CACHE_SALT: Mapping[str, int] = MappingProxyType({})
-
-
-@dataclass(frozen=True)
-class L2KeyEntry:
-    """One entry in a :class:`L2KeyListPage` — a recovered
-    :class:`ObjectKey` and the bytes the adapter has on disk for it."""
-
-    key: ObjectKey
-    size_bytes: int
-
-
-@dataclass(frozen=True)
-class L2KeyListPage:
-    """A page of keys returned by :meth:`L2AdapterInterface.list_l2_keys`
-    or :meth:`StorageManager.list_l2_keys`.
-
-    ``next_page_token`` is ``None`` when the listing is exhausted; pass
-    it verbatim to the next call to continue. The token is opaque — the
-    caller MUST NOT inspect or modify it.
-    """
-
-    entries: tuple[L2KeyEntry, ...]
-    next_page_token: str | None
 
 
 @dataclass(frozen=True)
@@ -496,7 +473,7 @@ class L2AdapterInterface(ABC):
         model_name: str | None = None,
         page_size: int = 500,
         cursor: str | None = None,
-    ) -> L2KeyListPage:
+    ) -> KeyListPage:
         """List keys currently resident in this adapter, with a
         ``model_name`` filter and pagination.
 
@@ -514,7 +491,7 @@ class L2AdapterInterface(ABC):
                 inspect it.
 
         Returns:
-            An :class:`L2KeyListPage`. ``next_page_token`` is ``None``
+            An :class:`KeyListPage`. ``next_page_token`` is ``None``
             iff the listing is exhausted.
 
         Raises:

@@ -821,7 +821,7 @@ class TestS3L2AdapterListKeys:
         _put_object(mistral, size=1)
 
         page = adapter.list_l2_keys(model_name="llama", page_size=10)
-        assert [e.key for e in page.entries] == [llama]
+        assert [e.key for e in page.entries] == [llama.to_encoded_object_key()]
 
     def test_model_name_with_slash_round_trips(self, adapter):
         # Real HF model ids contain ``/``. The adapter stores the
@@ -832,18 +832,19 @@ class TestS3L2AdapterListKeys:
             model_name="meta-llama/Llama-3.1-8B",
             kv_rank=7,
         )
+        encoded = original.to_encoded_object_key()
         _put_object(original, size=128)
 
         # The listing returns the original model_name (slash intact).
         page = adapter.list_l2_keys(page_size=10)
         assert len(page.entries) == 1
-        assert page.entries[0].key == original
+        assert page.entries[0].key == encoded
         assert page.entries[0].key.model_name == "meta-llama/Llama-3.1-8B"
 
         # And the model_name filter accepts the caller-supplied form
         # verbatim — no encoding magic to remember.
         page = adapter.list_l2_keys(model_name="meta-llama/Llama-3.1-8B", page_size=10)
-        assert [e.key for e in page.entries] == [original]
+        assert [e.key for e in page.entries] == [encoded]
 
     def test_pagination_cursor_walks_full_set(self, adapter):
         # 5 keys, page_size=2 → expect 3 calls: (0,1), (2,3), (4,).
@@ -893,4 +894,7 @@ class TestS3L2AdapterListKeys:
         page = adapter.list_l2_keys(page_size=10)
 
         assert len(page.entries) == 1
-        assert page.entries[0].key == create_object_key(0, model_name="m")
+        assert (
+            page.entries[0].key
+            == create_object_key(0, model_name="m").to_encoded_object_key()
+        )

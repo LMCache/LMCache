@@ -3,9 +3,10 @@
 ## Overview
 
 Two HTTP endpoints, both auto-discovered out of
-`lmcache/v1/multiprocess/http_apis/l2_keys_api.py`:
+`lmcache/v1/multiprocess/http_apis/l2_api.py`:
 
-- `POST /l2/keys:evict` — delete a caller-supplied list of keys.
+- `DELETE /l2` — delete the KV cache for a caller-supplied list of
+  keys (the keys are addresses; the cached bytes are what gets removed).
 - `GET /l2/keys` — paginate keys currently resident in L2, optionally
   filtered by `model_name`.
 
@@ -26,13 +27,15 @@ a deployment rename." They are NOT in the hot-path read/write flow.
 
 ```python
 # StorageManager
-def evict_l2_keys(self, keys: list[ObjectKey]) -> dict[str, object]
+def delete_l2(self, keys: list[ObjectKey]) -> dict[str, object]
 def list_l2_keys(
     self,
     model_name: str | None = None,
     page_size: int = 500,
     page_token: str | None = None,
-) -> L2KeyListPage
+) -> dict[str, object]
+    # Returns {"adapter": <type_name>, "entries": tuple[KeyEntry, ...],
+    #          "next_page_token": <opaque> | None}
 
 # L2AdapterInterface  (NEW abstract method)
 def list_l2_keys(
@@ -40,51 +43,55 @@ def list_l2_keys(
     model_name: str | None = None,
     page_size: int = 500,
     cursor: str | None = None,
-) -> L2KeyListPage
+) -> KeyListPage
     # Default: raises NotImplementedError. S3L2Adapter overrides.
 ```
 
-### New dataclasses (in `l2_adapters/base.py`)
+### New dataclasses (in `distributed/api.py`)
 
 ```python
 @dataclass(frozen=True)
-class L2KeyEntry:
+class KeyEntry:
     key: ObjectKey
     size_bytes: int
 
 @dataclass(frozen=True)
-class L2KeyListPage:
-    entries: tuple[L2KeyEntry, ...]
+class KeyListPage:
+    entries: tuple[KeyEntry, ...]
     next_page_token: str | None   # None ⇒ listing exhausted
 ```
 
 ### HTTP
 
 ```
-POST /l2/keys:evict
+DELETE /l2
 Body:  {"keys": [{"chunk_hash_hex": "...", "model_name": "...",
                   "kv_rank": <int>, "cache_salt": "<opt>"}, ...]}
 200:   {"requested": N, "adapter": "<type>", "ok": <bool>,
         "error": "<opt>"}
-400:   malformed body / per-key validation error
+400:   key payload violates ``ObjectKey`` invariants (bad hex,
+       ``@`` in ``model_name``, etc.)
+422:   Pydantic-level body shape failure
 503:   engine not initialized OR no L2 adapters configured
 
 GET /l2/keys
 Query: model_name=<str>     (optional)
        page_size=<int 1..5000>   (default 500)
        page_token=<opaque str>   (omit on first call)
-200:   {"entries": [{...key fields..., "size_bytes": N}, ...],
+200:   {"adapter": "<type>",
+        "entries": [{"key": <EncodedObjectKey>, "size_bytes": N}, ...],
         "next_page_token": "<opaque>" | null}
 400:   invalid filter / malformed page_token
 501:   primary adapter does not implement listing
 503:   engine not initialized OR no L2 adapters configured
 ```
 
-The `evict` response carries the adapter's type name in the
+Both responses carry the adapter's type name in a top-level
 `"adapter"` field so operators always know which adapter answered.
-The `list` response omits it — every entry on a given page is from
-the primary adapter by construction, so per-entry tagging would just
-duplicate that one string N times.
+The `GET /l2/keys` response reports it once per page (not per entry):
+every entry on a given page is from the primary adapter by
+construction, so per-entry tagging would just duplicate that one
+string N times.
 
 ---
 
@@ -92,7 +99,7 @@ duplicate that one string N times.
 
 ### Single target, idempotent
 
-`evict_l2_keys` reads `self._l2_adapters[0]` and calls its
+`delete_l2` reads `self._l2_adapters[0]` and calls its
 `delete(keys)`. No selection logic, no fan-out. Idempotent:
 re-evicting an already-deleted key is harmless — the adapter filters
 keys it doesn't have or that are locked by an in-flight operation.
@@ -228,13 +235,13 @@ soft-limits even with verbose keys.
 |---|---|
 | `chunk_hash_hex` is valid hex | `bytes.fromhex` in `EncodedObjectKey.to_object_key` raises `ValueError` |
 | `model_name` / `cache_salt` invariants (no `@`, etc.) | `ObjectKey.__post_init__` |
-| Per-request eviction batch cap | `_MAX_EVICT_BATCH = 10_000` in `l2_keys_api.py` |
+| Per-request eviction batch cap | `_MAX_DELETE_BATCH = 10_000` in `l2_api.py` |
 | `page_size` bounds | `Query(ge=1, le=_MAX_PAGE_SIZE)` |
 | Listing returns lex order owned by S3 | S3's `ListObjectsV2` |
 | No adapters configured → 503 | endpoint catches `ValueError("no L2 adapters …")` |
 | Adapter doesn't support listing → 501 | endpoint catches `NotImplementedError` |
-| Adapter delete failure → in-body, not 5xx | `evict_l2_keys` catches per-call exceptions |
-| L1 not touched on evict | documented in module + `StorageManager.evict_l2_keys` docstrings |
+| Adapter delete failure → in-body, not 5xx | `delete_l2` catches per-call exceptions |
+| L1 not touched on evict | documented in module + `StorageManager.delete_l2` docstrings |
 
 ---
 
@@ -246,7 +253,7 @@ soft-limits even with verbose keys.
 that raises `NotImplementedError`. All existing concrete L2 adapters
 inherit the default — no caller code changes needed.
 
-The new dataclasses (`L2KeyEntry`, `L2KeyListPage`) are additive — no
+The new dataclasses (`KeyEntry`, `KeyListPage`) are additive — no
 existing import path moves.
 
 ### Existing callers of `StorageManager`
@@ -279,7 +286,7 @@ under that same lock so existing lock ordering is preserved.
   continuation tokens, `page_size` clamp to S3's MaxKeys ceiling,
   circuit-breaker rejection, silent skipping of objects whose names
   don't conform to this adapter's key format.
-- `tests/v1/multiprocess/http_apis/test_l2_keys_api.py` — endpoint
+- `tests/v1/multiprocess/http_apis/test_l2_api.py` — endpoint
   shape: happy path, in-body failure reporting, 503 on no adapters /
   no engine, 501 on unsupported listing, 400 on malformed body /
   page_token / page_size, auto-discovery (registry sweep picks up
@@ -297,9 +304,9 @@ under that same lock so existing lock ordering is preserved.
   descriptor index.
 - Optional `prefix` / `model_name_glob` filters once a real caller
   needs them.
-- A `DELETE /l2/keys?model_name=...` convenience that combines
-  listing + evicting for a whole model in one call (currently the
-  caller pages through `GET /l2/keys` then issues
-  `POST /l2/keys:evict`).
+- A `DELETE /l2?model_name=...` (or equivalent body filter) convenience
+  that combines listing + deletion for a whole model in one call
+  (currently the caller pages through `GET /l2/keys` then issues
+  `DELETE /l2`).
 - Counter-based snapshot tokens so pagination across concurrent
   mutations is fully consistent (currently best-effort).

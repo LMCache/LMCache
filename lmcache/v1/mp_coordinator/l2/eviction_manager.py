@@ -8,7 +8,7 @@ matching the eviction logic in
 The manager periodically checks per-salt usage
 (from :class:`L2UsageManager`) against ``watermark * quota``
 (from :class:`QuotaManager`). When a salt exceeds its threshold, the
-manager selects LRU keys, dispatches a ``POST /l2/keys:evict`` to one
+manager selects LRU keys, dispatches a ``DELETE /l2`` to one
 registered MP server, and updates its local LRU tracking after the
 delete returns. The MP server in turn calls the underlying L2
 adapter (S3 today), so a single dispatch is enough — all coordinators
@@ -164,10 +164,10 @@ class L2EvictionManager:
         """Compute the eviction plan and apply it via the MP fleet.
 
         Picks any one MP server from ``registry`` and dispatches the
-        full set of victim keys to its ``POST /l2/keys:evict``
-        endpoint. Since every MP server in the fleet shares the same
-        backing L2 (e.g. one S3 bucket), a single dispatch evicts the
-        keys for all of them — there is no need to broadcast.
+        full set of victim keys to its ``DELETE /l2`` endpoint. Since
+        every MP server in the fleet shares the same backing L2 (e.g.
+        one S3 bucket), a single dispatch evicts the keys for all of
+        them — there is no need to broadcast.
 
         On a successful HTTP response, removes the dispatched keys
         from the local LRU via :meth:`on_remove` so the coordinator's
@@ -203,12 +203,17 @@ class L2EvictionManager:
             return plan
 
         target = instances[0]
-        url = f"http://{target.ip}:{target.http_port}/l2/keys:evict"
+        url = f"http://{target.ip}:{target.http_port}/l2"
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
         body = {"keys": [asdict(k.to_encoded_object_key()) for k in all_keys]}
 
         try:
-            resp = await http_client.post(url, json=body, timeout=request_timeout)
+            # ``httpx.AsyncClient.delete`` doesn't accept ``json=`` —
+            # ``request("DELETE", ...)`` is the supported form for
+            # DELETE-with-body.
+            resp = await http_client.request(
+                "DELETE", url, json=body, timeout=request_timeout
+            )
             resp.raise_for_status()
         except (httpx.HTTPError, ValueError) as e:
             logger.warning(

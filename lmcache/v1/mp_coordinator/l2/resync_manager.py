@@ -112,12 +112,13 @@ class L2ResyncManager:
             pages += 1
             for entry in body.get("entries", []):
                 try:
+                    key = entry["key"]
                     encoded = EncodedObjectKey(
-                        chunk_hash_hex=entry["chunk_hash_hex"],
-                        model_name=entry["model_name"],
-                        kv_rank=entry["kv_rank"],
-                        object_group_id=entry.get("object_group_id", 0),
-                        cache_salt=entry.get("cache_salt", ""),
+                        chunk_hash_hex=key["chunk_hash_hex"],
+                        model_name=key["model_name"],
+                        kv_rank=key["kv_rank"],
+                        object_group_id=key.get("object_group_id", 0),
+                        cache_salt=key.get("cache_salt", ""),
                     )
                     obj_key = encoded.to_object_key()
                     size_bytes = int(entry["size_bytes"])

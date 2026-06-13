@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Unit tests for ``StorageManager.evict_l2_keys`` / ``list_l2_keys`` —
+Unit tests for ``StorageManager.delete_l2`` / ``list_l2_keys`` —
 the thin "operate on the primary adapter" layer the HTTP endpoints sit
 on.
 
@@ -18,12 +18,8 @@ from typing import Optional, cast
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.l2_adapters.base import (
-    L2AdapterInterface,
-    L2KeyEntry,
-    L2KeyListPage,
-)
+from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 
@@ -41,7 +37,7 @@ class _StubAdapter:
     def __init__(
         self,
         *,
-        list_page: Optional[L2KeyListPage] = None,
+        list_page: Optional[KeyListPage] = None,
         list_raises: Optional[BaseException] = None,
         delete_raises: Optional[BaseException] = None,
     ):
@@ -63,14 +59,14 @@ class _StubAdapter:
         model_name: Optional[str] = None,
         page_size: int = 500,
         cursor: Optional[str] = None,
-    ) -> L2KeyListPage:
+    ) -> KeyListPage:
         if self._list_raises is not None:
             raise self._list_raises
         self.last_list_model_name = model_name
         self.last_list_page_size = page_size
         self.last_list_cursor = cursor
         if self._list_page is None:
-            return L2KeyListPage(entries=(), next_page_token=None)
+            return KeyListPage(entries=(), next_page_token=None)
         return self._list_page
 
 
@@ -98,17 +94,17 @@ def _make_key(
 
 
 # =============================================================================
-# evict_l2_keys
+# delete_l2
 # =============================================================================
 
 
-class TestEvictL2Keys:
+class TestDeleteL2Keys:
     def test_delegates_to_primary_adapter(self):
         a1, a2 = _StubAdapter(), _StubAdapter()
         sm = _make_sm([a1, a2], ["s3", "fs"])
         keys = [_make_key(chunk=1), _make_key(chunk=2)]
 
-        result = sm.evict_l2_keys(keys)
+        result = sm.delete_l2(keys)
 
         # Only the FIRST adapter receives the call.
         assert a1.delete_calls == [keys]
@@ -118,13 +114,13 @@ class TestEvictL2Keys:
     def test_no_adapters_raises(self):
         sm = _make_sm([], [])
         with pytest.raises(ValueError):
-            sm.evict_l2_keys([_make_key()])
+            sm.delete_l2([_make_key()])
 
     def test_adapter_failure_is_reported_not_raised(self):
         a = _StubAdapter(delete_raises=RuntimeError("s3 down"))
         sm = _make_sm([a], ["s3"])
 
-        result = sm.evict_l2_keys([_make_key()])
+        result = sm.delete_l2([_make_key()])
 
         assert result["adapter"] == "s3"
         assert result["ok"] is False
@@ -134,7 +130,7 @@ class TestEvictL2Keys:
         a = _StubAdapter()
         sm = _make_sm([a], ["s3"])
 
-        result = sm.evict_l2_keys([])
+        result = sm.delete_l2([])
 
         assert a.delete_calls == [[]]
         assert result == {"adapter": "s3", "ok": True}
@@ -158,16 +154,22 @@ class TestListL2Keys:
 
     def test_delegates_to_primary_and_wraps(self):
         k = _make_key(chunk=1)
+        encoded = k.to_encoded_object_key()
         a1 = _StubAdapter(
-            list_page=L2KeyListPage(
-                entries=(L2KeyEntry(key=k, size_bytes=128),),
+            list_page=KeyListPage(
+                entries=(KeyEntry(key=encoded, size_bytes=128),),
                 next_page_token="42",
             )
         )
         # Second adapter MUST NOT be touched.
         a2 = _StubAdapter(
-            list_page=L2KeyListPage(
-                entries=(L2KeyEntry(key=_make_key(chunk=99), size_bytes=999),),
+            list_page=KeyListPage(
+                entries=(
+                    KeyEntry(
+                        key=_make_key(chunk=99).to_encoded_object_key(),
+                        size_bytes=999,
+                    ),
+                ),
                 next_page_token=None,
             )
         )
@@ -185,21 +187,23 @@ class TestListL2Keys:
         assert a1.last_list_cursor == "0"
         # Secondary not consulted.
         assert a2.last_list_cursor is None
-        # The page is returned as-is from the primary adapter.
-        assert len(result.entries) == 1
-        assert result.entries[0].key == k
-        assert result.entries[0].size_bytes == 128
+        # The page is forwarded from the primary adapter, with the
+        # storage manager filling in ``adapter`` from the descriptor.
+        assert len(result["entries"]) == 1
+        assert result["entries"][0].key == encoded
+        assert result["entries"][0].size_bytes == 128
+        assert result["adapter"] == "s3"
         # next_page_token passed through verbatim.
-        assert result.next_page_token == "42"
+        assert result["next_page_token"] == "42"
 
     def test_exhausted_listing_returns_none_token(self):
-        a = _StubAdapter(list_page=L2KeyListPage(entries=(), next_page_token=None))
+        a = _StubAdapter(list_page=KeyListPage(entries=(), next_page_token=None))
         sm = _make_sm([a], ["s3"])
 
         result = sm.list_l2_keys()
 
-        assert result.entries == ()
-        assert result.next_page_token is None
+        assert result["entries"] == ()
+        assert result["next_page_token"] is None
 
     def test_not_implemented_propagates(self):
         # Primary adapter is one that doesn't implement listing → the

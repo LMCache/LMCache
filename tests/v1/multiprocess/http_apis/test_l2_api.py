@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-HTTP-level tests for ``l2_keys_api`` — the ``POST /l2/keys:evict`` and
+HTTP-level tests for ``l2_api`` — the ``DELETE /l2`` and
 ``GET /l2/keys`` endpoints.
 
 The endpoints reach into ``request.app.state.engine.storage_manager``;
@@ -19,35 +19,34 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.l2_adapters.base import L2KeyEntry, L2KeyListPage
-from lmcache.v1.multiprocess.http_apis.l2_keys_api import router as l2_keys_router
+from lmcache.v1.distributed.api import KeyEntry, ObjectKey
+from lmcache.v1.multiprocess.http_apis.l2_api import router as l2_keys_router
 
 
 @dataclass
 class _FakeStorageManager:
     """Records calls and serves staged responses for the endpoints."""
 
-    evict_calls: list[list[ObjectKey]] = field(default_factory=list)
-    evict_response: Optional[dict[str, object]] = None
-    evict_raises: Optional[BaseException] = None
+    delete_calls: list[list[ObjectKey]] = field(default_factory=list)
+    delete_response: Optional[dict[str, object]] = None
+    delete_raises: Optional[BaseException] = None
 
-    list_page: Optional[L2KeyListPage] = None
+    list_page: Optional[dict[str, object]] = None
     list_raises: Optional[BaseException] = None
     last_list_kwargs: dict[str, object] = field(default_factory=dict)
 
-    def evict_l2_keys(self, keys: list[ObjectKey]) -> dict[str, object]:
-        self.evict_calls.append(list(keys))
-        if self.evict_raises is not None:
-            raise self.evict_raises
-        return self.evict_response or {"adapter": "s3", "ok": True}
+    def delete_l2(self, keys: list[ObjectKey]) -> dict[str, object]:
+        self.delete_calls.append(list(keys))
+        if self.delete_raises is not None:
+            raise self.delete_raises
+        return self.delete_response or {"adapter": "s3", "ok": True}
 
     def list_l2_keys(
         self,
         model_name: Optional[str] = None,
         page_size: int = 500,
         page_token: Optional[str] = None,
-    ) -> L2KeyListPage:
+    ) -> dict[str, object]:
         self.last_list_kwargs = {
             "model_name": model_name,
             "page_size": page_size,
@@ -56,7 +55,7 @@ class _FakeStorageManager:
         if self.list_raises is not None:
             raise self.list_raises
         if self.list_page is None:
-            return L2KeyListPage(entries=(), next_page_token=None)
+            return {"adapter": "", "entries": (), "next_page_token": None}
         return self.list_page
 
 
@@ -80,17 +79,18 @@ def _hex(n: int, width: int = 4) -> str:
 
 
 # =============================================================================
-# Evict
+# Delete
 # =============================================================================
 
 
-class TestEvictEndpoint:
+class TestDeleteEndpoint:
     def test_happy_path(self):
         sm = _FakeStorageManager()
         client = TestClient(_make_app(sm))
 
-        resp = client.post(
-            "/l2/keys:evict",
+        resp = client.request(
+            "DELETE",
+            "/l2",
             json={
                 "keys": [
                     {
@@ -110,7 +110,7 @@ class TestEvictEndpoint:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body == {"requested": 2, "adapter": "s3", "ok": True}
-        forwarded = sm.evict_calls[0]
+        forwarded = sm.delete_calls[0]
         assert forwarded[0] == ObjectKey(
             chunk_hash=b"\x00\x00\x00\x01",
             model_name="llama",
@@ -121,26 +121,26 @@ class TestEvictEndpoint:
 
     def test_propagates_storage_manager_failure_in_body(self):
         sm = _FakeStorageManager(
-            evict_response={"adapter": "s3", "ok": False, "error": "s3 down"}
+            delete_response={"adapter": "s3", "ok": False, "error": "s3 down"}
         )
         client = TestClient(_make_app(sm))
 
-        resp = client.post("/l2/keys:evict", json={"keys": []})
+        resp = client.request("DELETE", "/l2", json={"keys": []})
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["ok"] is False
         assert body["error"] == "s3 down"
 
     def test_503_when_no_adapters_configured(self):
-        sm = _FakeStorageManager(evict_raises=ValueError("no L2 adapters configured"))
+        sm = _FakeStorageManager(delete_raises=ValueError("no L2 adapters configured"))
         client = TestClient(_make_app(sm))
-        resp = client.post("/l2/keys:evict", json={"keys": []})
+        resp = client.request("DELETE", "/l2", json={"keys": []})
         assert resp.status_code == 503
-        assert "no L2 adapters" in resp.json()["error"]
+        assert "no L2 adapters" in resp.json()["detail"]
 
     def test_503_when_engine_not_initialized(self):
         client = TestClient(_make_app(None))
-        resp = client.post("/l2/keys:evict", json={"keys": []})
+        resp = client.request("DELETE", "/l2", json={"keys": []})
         assert resp.status_code == 503
 
     @pytest.mark.parametrize(
@@ -167,15 +167,16 @@ class TestEvictEndpoint:
         sm = _FakeStorageManager()
         client = TestClient(_make_app(sm))
         if isinstance(body, str):
-            resp = client.post(
-                "/l2/keys:evict",
+            resp = client.request(
+                "DELETE",
+                "/l2",
                 content=body,
                 headers={"content-type": "application/json"},
             )
         else:
-            resp = client.post("/l2/keys:evict", json=body)
+            resp = client.request("DELETE", "/l2", json=body)
         assert resp.status_code == 422, resp.text
-        assert sm.evict_calls == []
+        assert sm.delete_calls == []
 
     @pytest.mark.parametrize(
         "body",
@@ -200,9 +201,27 @@ class TestEvictEndpoint:
         surface as 400 from our handler."""
         sm = _FakeStorageManager()
         client = TestClient(_make_app(sm))
-        resp = client.post("/l2/keys:evict", json=body)
+        resp = client.request("DELETE", "/l2", json=body)
         assert resp.status_code == 400, resp.text
-        assert sm.evict_calls == []
+        assert sm.delete_calls == []
+
+    def test_400_when_batch_exceeds_cap(self):
+        """The handler enforces the ``_MAX_DELETE_BATCH`` cap (the
+        dataclass body type no longer carries a Pydantic Field
+        constraint)."""
+        # First Party
+        from lmcache.v1.multiprocess.http_apis.l2_api import _MAX_DELETE_BATCH
+
+        sm = _FakeStorageManager()
+        client = TestClient(_make_app(sm))
+        oversized = [
+            {"chunk_hash_hex": _hex(i), "model_name": "m", "kv_rank": 0}
+            for i in range(_MAX_DELETE_BATCH + 1)
+        ]
+        resp = client.request("DELETE", "/l2", json={"keys": oversized})
+        assert resp.status_code == 400, resp.text
+        assert "too many keys" in resp.json()["detail"]
+        assert sm.delete_calls == []
 
 
 # =============================================================================
@@ -219,10 +238,11 @@ class TestListEndpoint:
             cache_salt="alice",
         )
         sm = _FakeStorageManager(
-            list_page=L2KeyListPage(
-                entries=(L2KeyEntry(key=k1, size_bytes=4096),),
-                next_page_token="opaque-cursor",
-            )
+            list_page={
+                "adapter": "s3",
+                "entries": (KeyEntry(key=k1.to_encoded_object_key(), size_bytes=4096),),
+                "next_page_token": "opaque-cursor",
+            }
         )
         client = TestClient(_make_app(sm))
 
@@ -235,13 +255,16 @@ class TestListEndpoint:
         )
         assert resp.status_code == 200, resp.text
         body = resp.json()
+        assert body["adapter"] == "s3"
         assert body["entries"] == [
             {
-                "chunk_hash_hex": "deadbeef",
-                "model_name": "llama",
-                "kv_rank": 2,
-                "object_group_id": 0,
-                "cache_salt": "alice",
+                "key": {
+                    "chunk_hash_hex": "deadbeef",
+                    "model_name": "llama",
+                    "kv_rank": 2,
+                    "object_group_id": 0,
+                    "cache_salt": "alice",
+                },
                 "size_bytes": 4096,
             }
         ]
@@ -277,7 +300,7 @@ class TestListEndpoint:
         client = TestClient(_make_app(sm))
         resp = client.get("/l2/keys")
         assert resp.status_code == 501
-        assert "does not support listing" in resp.json()["error"]
+        assert "does not support listing" in resp.json()["detail"]
 
     def test_400_on_invalid_page_size(self):
         sm = _FakeStorageManager()
@@ -318,6 +341,15 @@ class TestAutoDiscovery:
         app = FastAPI()
         registry = HTTPAPIRegistry(app)
         registry.register_all_apis()
-        paths = {r.path for r in app.routes if hasattr(r, "path")}
-        assert "/l2/keys:evict" in paths
-        assert "/l2/keys" in paths
+        # ``DELETE /l2`` (the cache-purge action) and ``GET /l2/keys``
+        # (the key listing) live on different paths — verify both are
+        # registered with the right method.
+        methods_by_path: dict[str, set[str]] = {}
+        for r in app.routes:
+            path = getattr(r, "path", None)
+            if path in ("/l2", "/l2/keys"):
+                methods_by_path.setdefault(path, set()).update(
+                    getattr(r, "methods", set())
+                )
+        assert "DELETE" in methods_by_path.get("/l2", set())
+        assert "GET" in methods_by_path.get("/l2/keys", set())

@@ -22,10 +22,7 @@ from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
-from lmcache.v1.distributed.l2_adapters.base import (
-    L2AdapterInterface,
-    L2KeyListPage,
-)
+from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
@@ -725,8 +722,8 @@ class StorageManager:
                 totals[salt] = totals.get(salt, 0) + used
         return totals
 
-    def evict_l2_keys(self, keys: list[ObjectKey]) -> dict[str, object]:
-        """Evict ``keys`` from the primary (first-configured) L2 adapter.
+    def delete_l2(self, keys: list[ObjectKey]) -> dict[str, object]:
+        """Delete ``keys`` from the primary (first-configured) L2 adapter.
 
         Args:
             keys: keys to delete. An empty list is forwarded to the
@@ -748,7 +745,7 @@ class StorageManager:
             locks and firing ``on_l2_keys_deleted`` on listeners.
 
             L1 is intentionally NOT touched — see the module docstring
-            of ``http_apis/l2_keys_api.py`` for rationale.
+            of ``http_apis/l2_api.py`` for rationale.
         """
         if not self._l2_adapters:
             raise ValueError("no L2 adapters configured")
@@ -768,7 +765,7 @@ class StorageManager:
         model_name: str | None = None,
         page_size: int = 500,
         page_token: str | None = None,
-    ) -> L2KeyListPage:
+    ) -> dict[str, object]:
         """Paginate keys resident on the primary (first-configured) L2
         adapter.
 
@@ -782,8 +779,11 @@ class StorageManager:
                 ``None`` on the first call.
 
         Returns:
-            An :class:`L2KeyListPage`. ``next_page_token`` is ``None``
-            iff the underlying adapter signaled exhaustion.
+            ``{"adapter": <type_name>, "entries": tuple[KeyEntry, ...],
+            "next_page_token": <opaque> | None}``. ``next_page_token``
+            is ``None`` iff the underlying adapter signaled exhaustion.
+            ``entries`` are :class:`KeyEntry` dataclasses; FastAPI /
+            ``jsonable_encoder`` serializes them via ``asdict``.
 
         Raises:
             ValueError: when no L2 adapters are configured, when
@@ -798,11 +798,17 @@ class StorageManager:
         if not self._l2_adapters:
             raise ValueError("no L2 adapters configured")
         target = self._l2_adapters[0]
-        return target.list_l2_keys(
+        desc = self._adapter_descriptors[0]
+        page = target.list_l2_keys(
             model_name=model_name,
             page_size=page_size,
             cursor=page_token,
         )
+        return {
+            "adapter": desc.type_name,
+            "entries": page.entries,
+            "next_page_token": page.next_page_token,
+        }
 
     def clear(self, force: bool = False):
         """

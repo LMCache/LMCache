@@ -240,7 +240,7 @@ def _instance(instance_id: str, ip: str = "10.0.0.1", port: int = 8000) -> MPIns
 @pytest.mark.asyncio
 async def test_execute_evictions_dispatches_to_first_registered_instance():
     """Computed plan must POST to one registered MP server's
-    ``/l2/keys:evict`` and clear those keys from the LRU on success."""
+    ``/l2/keys`` and clear those keys from the LRU on success."""
     ctrl, qs, ut = _setup(eviction_ratio=1.0)
     k = _make_key("alice", h="aa")
     _store(ctrl, ut, k, 100)
@@ -260,8 +260,8 @@ async def test_execute_evictions_dispatches_to_first_registered_instance():
         plan = await ctrl.execute_evictions(registry, client)
 
     assert plan == {"alice": [k]}
-    # Picked first (only) instance — http://<ip>:<port>/l2/keys:evict.
-    assert captured["url"] == "http://10.0.0.7:8765/l2/keys:evict"
+    # Picked first (only) instance — http://<ip>:<port>/l2/keys.
+    assert captured["url"] == "http://10.0.0.7:8765/l2"
     # Body shape matches the MP endpoint's contract.
     # Standard
     import json as _json

@@ -35,12 +35,10 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
-    L2KeyEntry,
-    L2KeyListPage,
     L2TaskId,
 )
 from lmcache.v1.distributed.l2_adapters.config import (
@@ -720,7 +718,7 @@ class S3L2Adapter(L2AdapterInterface):
         model_name: Optional[str] = None,
         page_size: int = 500,
         cursor: Optional[str] = None,
-    ) -> L2KeyListPage:
+    ) -> KeyListPage:
         """List keys from the S3 bucket via ``ListObjectsV2``.
 
         Unlike the in-memory tracker, this enumerates whatever is
@@ -742,7 +740,7 @@ class S3L2Adapter(L2AdapterInterface):
                 call. ``None`` on the first call.
 
         Returns:
-            An :class:`L2KeyListPage`. ``next_page_token`` is ``None``
+            An :class:`KeyListPage`. ``next_page_token`` is ``None``
             iff S3 reported the listing as not truncated.
 
         Raises:
@@ -785,8 +783,10 @@ class S3L2Adapter(L2AdapterInterface):
             self._loop,
         )
         entries, next_token = fut.result(timeout=30.0)
-        page_entries = tuple(L2KeyEntry(key=k, size_bytes=sz) for k, sz in entries)
-        return L2KeyListPage(entries=page_entries, next_page_token=next_token)
+        page_entries = tuple(
+            KeyEntry(key=k.to_encoded_object_key(), size_bytes=sz) for k, sz in entries
+        )
+        return KeyListPage(entries=page_entries, next_page_token=next_token)
 
     # ------------------------------------------------------------------
     # Status / Cleanup

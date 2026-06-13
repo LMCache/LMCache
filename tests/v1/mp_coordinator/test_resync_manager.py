@@ -43,12 +43,16 @@ def _entry(
     cache_salt: str = "alice",
     size_bytes: int = 100,
 ) -> dict[str, object]:
+    """Wire shape of one ``KeyListPage`` entry: nested ``key`` plus
+    a sibling ``size_bytes``."""
     return {
-        "chunk_hash_hex": chunk_hash_hex,
-        "model_name": model_name,
-        "kv_rank": kv_rank,
-        "object_group_id": object_group_id,
-        "cache_salt": cache_salt,
+        "key": {
+            "chunk_hash_hex": chunk_hash_hex,
+            "model_name": model_name,
+            "kv_rank": kv_rank,
+            "object_group_id": object_group_id,
+            "cache_salt": cache_salt,
+        },
         "size_bytes": size_bytes,
     }
 
@@ -161,12 +165,15 @@ class TestResyncFrom:
                         _entry(model_name="bad@name", size_bytes=99),
                         # Bad: non-hex chunk_hash_hex → skipped.
                         _entry(chunk_hash_hex="not-hex", size_bytes=99),
-                        # Bad: missing size_bytes → skipped.
+                        # Bad: missing ``key`` field → skipped.
+                        {"size_bytes": 99},
+                        # Bad: missing ``size_bytes`` → skipped.
                         {
-                            "chunk_hash_hex": "aa",
-                            "model_name": "m",
-                            "kv_rank": 0,
-                            "cache_salt": "alice",
+                            "key": {
+                                "chunk_hash_hex": "aa",
+                                "model_name": "m",
+                                "kv_rank": 0,
+                            }
                         },
                         # Good.
                         _entry(chunk_hash_hex="aa", size_bytes=50),
