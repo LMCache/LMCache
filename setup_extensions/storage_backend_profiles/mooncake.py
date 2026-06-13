@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Mooncake L2 storage backend strategy.
+"""Mooncake L2 storage backend profile.
 
 Builds the ``lmcache.lmcache_mooncake`` extension when the Mooncake SDK
 is available.  Enabled via ``BUILD_WITH_MOONCAKE=1`` or auto-detected

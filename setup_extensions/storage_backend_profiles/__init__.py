@@ -51,7 +51,7 @@ class StorageBackendProfile(ABC):
 
         Args:
             extra_cxx_flags: Additional C++ compiler flags from the
-                selected GPU backend strategy.
+                selected GPU backend profile.
 
         Returns:
             List of ``Extension`` objects for this backend.

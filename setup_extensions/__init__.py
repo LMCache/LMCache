@@ -5,8 +5,8 @@ Usage from setup.py::
 
     from setup_extensions import BuildPolicy
     policy = BuildPolicy()
-    strategy = policy.resolve_strategy()
-    ext_modules, cmdclass, req_file = policy.collect_extensions(strategy)
+    profile = policy.resolve_profile()
+    ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
 """
 
 # First Party

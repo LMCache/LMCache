@@ -64,13 +64,13 @@ COMMON_EXTENSIONS: list[CommonExtSpec] = [
 
 
 def build_common_cpp(
-    strategy: "BuildProfile | None" = None,
+    profile: "BuildProfile | None" = None,
 ) -> tuple[list["Extension"], dict]:
     """Build pure C++ extensions that do not depend on any backend.
 
     Args:
-        strategy: Resolved backend strategy (or ``None``).  Each spec in
-            :data:`COMMON_EXTENSIONS` queries ``strategy.extra_cxx_flags_for``
+        profile: Resolved backend profile (or ``None``).  Each spec in
+            :data:`COMMON_EXTENSIONS` queries ``profile.extra_cxx_flags_for``
             to obtain its per-extension extra flags.
 
     Returns:
@@ -86,7 +86,7 @@ def build_common_cpp(
             include_dirs=spec.include_dirs,
             extra_compile_args={
                 "cxx": (
-                    (strategy.extra_cxx_flags_for(spec) if strategy else [])
+                    (profile.extra_cxx_flags_for(spec) if profile else [])
                     + ["-O3", "-std=c++17"]
                 ),
             },

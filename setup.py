@@ -36,8 +36,8 @@ def _read_requirements(path: Path) -> list[str]:
 
 if __name__ == "__main__":
     policy = BuildPolicy()
-    strategy = policy.resolve_strategy()
-    ext_modules, cmdclass, req_file = policy.collect_extensions(strategy)
+    profile = policy.resolve_profile()
+    ext_modules, cmdclass, req_file = policy.collect_extensions(profile)
 
     install_requires = _read_requirements(ROOT_DIR / "requirements" / "common.txt")
     if not BuildProfile.is_gpu_ext_disabled() and req_file is not None:

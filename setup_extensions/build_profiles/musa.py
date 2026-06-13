@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MUSA GPU backend strategy (placeholder).
+"""MUSA GPU backend profile (placeholder).
 
-MUSA fused GPU extensions are not built yet; this strategy is a stub
+MUSA fused GPU extensions are not built yet; this profile is a stub
 ready for future implementation.
 """
 
@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 from setup_extensions.build_profiles import BuildProfile
 
 
-class MusaStrategy(BuildProfile):
-    """MUSA GPU extension build strategy (stub)."""
+class MusaProfile(BuildProfile):
+    """MUSA GPU extension build profile (stub)."""
 
     name = "musa"
     env_var = "BUILD_WITH_MUSA"

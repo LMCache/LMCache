@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""ROCm/HIP GPU backend strategy.
+"""ROCm/HIP GPU backend profile.
 
 Hipifies CUDA sources via ``torch.utils.hipify``, then builds
 ``lmcache.c_ops`` with hipcc as the C++ compiler.
@@ -64,8 +64,8 @@ def _hipify_wrapper() -> list[str]:
     return hipified_sources
 
 
-class RocmStrategy(BuildProfile):
-    """ROCm/HIP GPU extension build strategy."""
+class RocmProfile(BuildProfile):
+    """ROCm/HIP GPU extension build profile."""
 
     name = "rocm"
     env_var = "BUILD_WITH_HIP"
