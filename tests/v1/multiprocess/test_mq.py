@@ -265,7 +265,7 @@ class MessageQueueTestHelper:
         if not server_ready:
             # Check if the server reported an error
             server_errors: list[str] = []
-            while not error_queue.empty():
+            while True:
                 try:
                     err_type, err_msg = error_queue.get_nowait()
                     server_errors.append("%s: %s" % (err_type, err_msg))
@@ -339,7 +339,7 @@ class MessageQueueTestHelper:
             )
             # Drain any server-side errors for diagnostics
             backend_errors: list[str] = []
-            while not error_queue.empty():
+            while True:
                 try:
                     err_type, err_msg = error_queue.get_nowait()
                     backend_errors.append("%s: %s" % (err_type, err_msg))
