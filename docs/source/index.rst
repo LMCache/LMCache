@@ -67,18 +67,45 @@ Documentation
    self
 
 .. toctree::
+   :maxdepth: 1
+   :caption: Contributing
+
+   developer_guide/contributing
+
+:raw-html:`<br />`
+
+.. toctree::
    :maxdepth: 2
    :caption: Getting Started
 
    getting_started/installation
    getting_started/quickstart
-   getting_started/quickstart/index
    getting_started/benchmarking
    getting_started/kv_cache_calculator
-   getting_started/troubleshoot
-   getting_started/faq
-   getting_started/quickstart/standalone_starter
-   
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Multiprocess Mode
+
+   mp/index
+   mp/quickstart
+   mp/configuration
+   mp/hybrid_models
+   mp/l2_storage
+   mp/serde
+   mp/deployment
+   mp/operator
+   mp/coordinator
+   mp/http_api
+   mp/observability
+   mp/tracing_and_debugging
+   mp/architecture
+   mp/frontend_dashboard
+   mp/disaggregated_prefill
+   mp/kv_cache_management
+   mp/p2p
 
 :raw-html:`<br />`
 
@@ -92,55 +119,9 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: KV Cache offloading and sharing
-
-   kv_cache/storage_backends/index
-   kv_cache/async_loading
-   kv_cache/caching_policies
-   kv_cache/p2p_sharing
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Non-KV caching
-
-   non_kv_cache/encoder_cache
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 3
-   :caption: Multiprocess Mode
-
-   mp/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Disaggregated prefill
-
-   disaggregated_prefill/nixl/index
-   disaggregated_prefill/shared_storage
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: KV Cache management
-
-   kv_cache_management/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
    :caption: KV Cache Optimizations
 
-   kv_cache_optimizations/compression/index
    kv_cache_optimizations/blending
-   kv_cache_optimizations/layerwise
 
 :raw-html:`<br />`
 
@@ -157,33 +138,26 @@ Documentation
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: CLI
 
    cli/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Internal API Server
-
-   internal_api_server/internal_api_server
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Controller WebUI
-   
-   controller/index
+   cli/server
+   cli/coordinator
+   cli/describe
+   cli/ping
+   cli/query
+   cli/bench
+   cli/kvcache
+   cli/quota
+   cli/trace
+   cli/tool
 
 :raw-html:`<br />`
 
 .. toctree::
    :caption: Developer Guide
 
-   developer_guide/contributing
    developer_guide/docker_file
    developer_guide/architecture
    developer_guide/integration
@@ -198,10 +172,7 @@ Documentation
    :caption: API Reference
 
    api_reference/configurations
-   api_reference/storage_backends
-   api_reference/dynamic_connector
-   api_reference/multimodality
-   
+
 :raw-html:`<br />`
 
 .. toctree::
@@ -210,5 +181,29 @@ Documentation
 
    community/meetings
    community/blogs
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Legacy (In-Process Mode)
+
+   legacy/index
+   getting_started/quickstart/index
+   kv_cache/storage_backends/index
+   kv_cache/async_loading
+   kv_cache/caching_policies
+   kv_cache/p2p_sharing
+   non_kv_cache/encoder_cache
+   disaggregated_prefill/nixl/index
+   disaggregated_prefill/shared_storage
+   kv_cache_optimizations/compression/index
+   kv_cache_optimizations/layerwise
+   kv_cache_management/index
+   api_reference/multimodality
+   api_reference/storage_backends
+   api_reference/dynamic_connector
+   internal_api_server/internal_api_server
+   controller/index
 
 :raw-html:`<br />`

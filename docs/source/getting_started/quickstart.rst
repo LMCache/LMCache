@@ -438,4 +438,4 @@ Next Steps
 ----------
 
 - **Performance Testing**: Try the :doc:`benchmarking` section to experience LMCache's performance benefits with more comprehensive examples
-- **More Examples**: Explore the :doc:`quickstart/index` section for detailed examples including KV cache sharing across instances and disaggregated prefill
+- **Multiprocess Mode**: Continue with the :doc:`../mp/index` section for the recommended production setup -- shared cache, management endpoints, and observability

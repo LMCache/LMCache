@@ -48,20 +48,8 @@ LMCache ships two server entry points:
        ``--engine-type`` / ``--supported-transfer-mode`` flags as
        ``lmcache server``. Prefer ``lmcache server``.
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Contents
+Next Steps
+----------
 
-   quickstart
-   configuration
-   hybrid_models
-   l2_storage
-   serde
-   deployment
-   operator
-   coordinator
-   http_api
-   observability
-   tracing_and_debugging
-   architecture
-   frontend_dashboard
+Continue with :doc:`quickstart` to launch your first ``lmcache server``, or
+jump to :doc:`configuration` for the full server and connector reference.
