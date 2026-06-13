@@ -15,10 +15,10 @@ if TYPE_CHECKING:
     from setuptools.extension import Extension
 
 # First Party
-from setup_extensions.platforms import PlatformStrategy
+from setup_extensions.build_profiles import BuildProfile
 
 
-class SyclStrategy(PlatformStrategy):
+class SyclStrategy(BuildProfile):
     """SYCL / Intel XPU GPU extension build strategy."""
 
     name = "sycl"

@@ -2,7 +2,7 @@
 """Base classes for the platform extension build pattern.
 
 Each hardware platform (CUDA, ROCm, SYCL, MUSA, ...) implements
-:class:`PlatformStrategy`.
+:class:`BuildProfile`.
 The :class:`BuildPolicy` orchestrates auto-detection, fallback, and building.
 """
 
@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from setup_extensions.common_cpp import CommonExtSpec
 
 
-class PlatformStrategy(ABC):
-    """Strategy for building platform-specific extensions.
+class BuildProfile(ABC):
+    """Build profile for platform-specific extensions.
 
     Subclasses must define:
         name     – unique identifier string.
@@ -27,7 +27,7 @@ class PlatformStrategy(ABC):
                    selection.
 
     Subclasses must implement:
-        detect() – auto-detect if this platform's hardware/compiler is present.
+        detect() – auto-detect if this profile's hardware/compiler is present.
         build()  – return ``(ext_modules, cmdclass)`` for extensions.
 
     Subclasses may override:
@@ -92,7 +92,7 @@ class PlatformStrategy(ABC):
     # ------------------------------------------------------------------
 
     def is_explicitly_requested(self) -> bool:
-        """Return True when this platform was selected via env var."""
+        """Return True when this profile was selected via env var."""
         if not self.env_var:
             return False
         # Standard
@@ -102,12 +102,12 @@ class PlatformStrategy(ABC):
 
     @abstractmethod
     def detect(self) -> bool:
-        """Auto-detect if this platform's toolchain / hardware is available."""
+        """Auto-detect if this profile's toolchain / hardware is available."""
         ...
 
     @abstractmethod
     def build(self) -> tuple[list["Extension"], dict]:
-        """Build platform-specific extension modules.
+        """Build profile-specific extension modules.
 
         Returns:
             ``(ext_modules, cmdclass)`` tuple.
@@ -126,7 +126,7 @@ class PlatformStrategy(ABC):
     def default_cxx_flags(self) -> list[str]:
         """Default C++ flags to hand to downstream consumers (e.g. optional
         L2 storage backends) that need a representative set of flags
-        compatible with this platform.
+        compatible with this profile.
 
         Subclasses override when their default ABI differs from the empty
         baseline.
@@ -136,6 +136,6 @@ class PlatformStrategy(ABC):
     def requirements_file(self) -> Optional[str]:
         """Core requirements file name, relative to ``requirements/``.
 
-        Return ``None`` when this platform has no extra deps.
+        Return ``None`` when this profile has no extra deps.
         """
         return None

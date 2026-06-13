@@ -13,10 +13,10 @@ if TYPE_CHECKING:
     from setuptools.extension import Extension
 
 # First Party
-from setup_extensions.platforms import PlatformStrategy
+from setup_extensions.build_profiles import BuildProfile
 
 
-class MusaStrategy(PlatformStrategy):
+class MusaStrategy(BuildProfile):
     """MUSA GPU extension build strategy (stub)."""
 
     name = "musa"

@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from setuptools.extension import Extension
 
 # First Party
-from setup_extensions.platforms import PlatformStrategy
+from setup_extensions.build_profiles import BuildProfile
 
 ROOT_DIR = Path(__file__).parent.parent.parent
 HIPIFY_DIR = os.path.join(ROOT_DIR, "csrc/")
@@ -64,7 +64,7 @@ def _hipify_wrapper() -> list[str]:
     return hipified_sources
 
 
-class RocmStrategy(PlatformStrategy):
+class RocmStrategy(BuildProfile):
     """ROCm/HIP GPU extension build strategy."""
 
     name = "rocm"

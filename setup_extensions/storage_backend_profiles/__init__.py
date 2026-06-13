@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Base classes for the optional L2 storage backend strategy pattern.
+"""Base classes for the optional L2 storage backend build profile pattern.
 
 Each optional storage backend (Mooncake, ...) implements
-:class:`StorageBackendStrategy`.  Unlike GPU backends, multiple storage
+:class:`StorageBackendProfile`.  Unlike GPU backends, multiple storage
 backends can be selected simultaneously.
 """
 
@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from setuptools.extension import Extension
 
 
-class StorageBackendStrategy(ABC):
-    """Strategy for building an optional L2 storage backend extension.
+class StorageBackendProfile(ABC):
+    """Build profile for an optional L2 storage backend extension.
 
     Subclasses must define:
         name     – unique identifier string.
