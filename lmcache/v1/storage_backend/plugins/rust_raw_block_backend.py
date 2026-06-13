@@ -139,6 +139,17 @@ class RustRawBlockBackend(StoragePluginInterface):
             self._build_core_config(extra),
             key_namespace="legacy",
         )
+        if self._core.io_engine == "io_uring":
+            try:
+                self._core.register_fixed_buffers_from_allocator(
+                    self.local_cpu_backend.get_memory_allocator()
+                )
+            except Exception as e:
+                logger.warning(
+                    "RustRawBlockBackend: failed to register io_uring fixed "
+                    "buffers: %s. Falling back to non-fixed buffer mode.",
+                    e,
+                )
         self._warn_if_loaded_metadata_looks_cross_rank()
 
         self._put_lock = threading.Lock()
@@ -189,6 +200,16 @@ class RustRawBlockBackend(StoragePluginInterface):
         """Return the byte offset where data slots begin."""
         return self._core.data_base_offset()
 
+    @property
+    def _raw(self) -> Any:
+        """Return the raw device handle for legacy test compatibility."""
+        return self._core.raw_device()
+
+    @_raw.setter
+    def _raw(self, raw_device: Any) -> None:
+        """Replace the raw device handle for legacy test compatibility."""
+        self._core.set_raw_device_for_testing(raw_device)
+
     def lock_refcount(self, encoded_key: str) -> int:
         """Return the L2 lock refcount for a legacy encoded key."""
         return self._core.lock_refcount(encoded_key)
@@ -226,6 +247,10 @@ class RustRawBlockBackend(StoragePluginInterface):
         )
         iouring_queue_depth = int(
             extra.get("rust_raw_block.iouring_queue_depth", DEFAULT_IOURING_QUEUE_DEPTH)
+        )
+        use_uring_cmd = bool(extra.get("rust_raw_block.use_uring_cmd", False))
+        max_data_transfer_size = int(
+            extra.get("rust_raw_block.max_data_transfer_size", 0)
         )
         validate_raw_block_io_options(
             iouring_queue_depth=iouring_queue_depth,
@@ -285,8 +310,10 @@ class RustRawBlockBackend(StoragePluginInterface):
             meta_verify_on_load=bool(
                 extra.get("rust_raw_block.meta_verify_on_load", True)
             ),
+            max_data_transfer_size=max_data_transfer_size,
             io_engine=io_engine,
             iouring_queue_depth=iouring_queue_depth,
+            use_uring_cmd=use_uring_cmd,
         )
 
     def _warn_if_loaded_metadata_looks_cross_rank(self) -> None:
@@ -352,7 +379,11 @@ class RustRawBlockBackend(StoragePluginInterface):
         on_complete_callback: Optional[Callable[[CacheEngineKey], None]] = None,
     ) -> list[Future] | None:
         del transfer_spec
-        futures: list[Future] = []
+        loop = self.loop
+        if loop is None:
+            raise RuntimeError("RustRawBlockBackend requires an asyncio event loop")
+
+        pending: list[tuple[CacheEngineKey, RawBlockKeySpec, MemoryObj]] = []
         for key, obj in zip(keys, objs, strict=False):
             with self._put_lock:
                 if key in self._put_tasks:
@@ -370,16 +401,27 @@ class RustRawBlockBackend(StoragePluginInterface):
                 continue
 
             obj.ref_count_up()
-            loop = self.loop
-            if loop is None:
-                obj.ref_count_down()
-                raise RuntimeError("RustRawBlockBackend requires an asyncio event loop")
+            pending.append((key, spec, obj))
+
+        if not pending:
+            return None
+
+        if self._core.io_engine == "io_uring" and len(pending) > 1:
             fut = asyncio.run_coroutine_threadsafe(
-                self._submit_put_one(key, spec, obj, on_complete_callback),
+                self._submit_put_many(pending, on_complete_callback),
                 loop,
             )
-            futures.append(fut)
-        return futures or None
+            return [fut]
+
+        futures: list[Future] = []
+        for key, spec, obj in pending:
+            futures.append(
+                asyncio.run_coroutine_threadsafe(
+                    self._submit_put_one(key, spec, obj, on_complete_callback),
+                    loop,
+                )
+            )
+        return futures
 
     async def _submit_put_one(
         self,
@@ -405,6 +447,63 @@ class RustRawBlockBackend(StoragePluginInterface):
             memory_obj.ref_count_down()
             with self._put_lock:
                 self._put_tasks.discard(key)
+
+    async def _submit_put_many(
+        self,
+        pending: Sequence[tuple[CacheEngineKey, RawBlockKeySpec, MemoryObj]],
+        on_complete_callback: Optional[Callable[[CacheEngineKey], None]],
+    ) -> None:
+        """Persist multiple legacy raw-block keys in one background batch.
+
+        Args:
+            pending: Ordered ``(key, spec, memory_obj)`` tuples to persist.
+            on_complete_callback: Optional per-key completion callback.
+
+        Raises:
+            RuntimeError: If any key fails to persist.
+            Exception: Propagates raw-device write failures from the core.
+        """
+        keys = [item[0] for item in pending]
+        specs = [item[1] for item in pending]
+        memory_objs = [item[2] for item in pending]
+        try:
+            put_result = await asyncio.to_thread(
+                self._core.put_many,
+                specs,
+                memory_objs,
+            )
+            if len(put_result.results) != len(pending) or not all(put_result.results):
+                failed = []
+
+                for key, spec, ok in zip(keys, specs, put_result.results, strict=False):
+                    if ok:
+                        if on_complete_callback is not None:
+                            try:
+                                on_complete_callback(key)
+                            except Exception as e:
+                                logger.warning(
+                                    "on_complete_callback failed for key %s: %s", key, e
+                                )
+                    else:
+                        failed.append(spec.encoded)
+
+                if failed:
+                    raise RuntimeError(
+                        "Failed to persist raw-block keys: " + ", ".join(failed)
+                    )
+            if on_complete_callback is not None:
+                for key in keys:
+                    try:
+                        on_complete_callback(key)
+                    except Exception as e:
+                        logger.warning(
+                            "on_complete_callback failed for key %s: %s", key, e
+                        )
+        finally:
+            for key, _spec, memory_obj in pending:
+                memory_obj.ref_count_down()
+                with self._put_lock:
+                    self._put_tasks.discard(key)
 
     def _batched_get_prefix(
         self,

@@ -166,7 +166,7 @@ def test_adapter_free_lookup_locks_sends_request():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.chunk_size = 256
+    adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
     adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
@@ -216,7 +216,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
 
     adapter = LMCacheMPSchedulerAdapter.__new__(LMCacheMPSchedulerAdapter)
     adapter.model_name = "test_model"
-    adapter.chunk_size = 256
+    adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
     adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1)
     adapter._health_event = threading.Event()
@@ -245,7 +245,8 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_client.submit_request.reset_mock()
 
     # Submit free_lookup_locks with aligned end
-    aligned_end = (len(token_ids) // adapter.chunk_size) * adapter.chunk_size
+    tokens_per_chunk = adapter.lmcache_tokens_per_chunk
+    aligned_end = (len(token_ids) // tokens_per_chunk) * tokens_per_chunk
     adapter.free_lookup_locks(
         token_ids=token_ids,
         start=0,

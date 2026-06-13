@@ -202,11 +202,19 @@ def _build_modules(
                 f"'auto', got '{mp_config.supported_transfer_mode}'"
             )
         # First Party
+        from lmcache.v1.mp_coordinator.blend_client import (
+            BlendCoordinatorClient,
+        )
         from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
 
         gpu_transfer = next(m for m in modules if isinstance(m, GPUTransferModule))
         lookup_module = next(m for m in modules if isinstance(m, LookupModule))
-        modules.append(BlendV3Module(ctx, gpu_transfer, lookup_module))
+        # Opt-in: enabled only when LMCACHE_COORDINATOR_URL is set; otherwise
+        # None and the blend module matches purely locally.
+        coordinator = BlendCoordinatorClient.maybe_from_env()
+        modules.append(
+            BlendV3Module(ctx, gpu_transfer, lookup_module, coordinator=coordinator)
+        )
 
     return modules
 
@@ -235,6 +243,13 @@ def run_cache_server(
         If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine).
         If return_engine is False: None (blocks until interrupted).
     """
+    # mp_config.instance_id is this server's single source of identity (set via
+    # --instance-id, else a random UUID v4). Project it onto the OTel
+    # service.instance.id unless observability set that attribute explicitly, so
+    # metrics/traces and coordinator membership all key on the same id.
+    if obs_config.service_instance_id is None:
+        obs_config.service_instance_id = mp_config.instance_id
+
     event_bus = init_observability(
         obs_config, start_prometheus_http_server=start_prometheus_http_server
     )

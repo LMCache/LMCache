@@ -59,6 +59,7 @@ try:
         RegisterNonGpuContextPayload,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
+    from lmcache.v1.multiprocess.group_view import EngineGroupInfo
     from lmcache.v1.multiprocess.mq import MessageQueueClient
     from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
     from lmcache.v1.multiprocess.protocols.base import RequestType
@@ -322,6 +323,7 @@ def _send_register_kv_cache(
     kv_caches: list[CudaIPCWrapper] | None = None,
     use_gpu: bool = True,
     use_handle: bool | None = None,
+    engine_group_infos: "list[EngineGroupInfo] | None" = None,
 ) -> "bool | RegisterNonGpuContextResponse":
     """Register a KV cache context with the MP server.
 
@@ -334,6 +336,13 @@ def _send_register_kv_cache(
 
     ``use_handle`` defaults to ``use_gpu`` for backwards compatibility:
     GPU always goes through the handle path, CPU defaults to data.
+
+    ``engine_group_infos`` (handle mode only) carries the per-group
+    metadata — including each group's true ``tokens_per_block`` — so the
+    server does not have to trust the block size discovered from the
+    tensors (which the HND layout can swap with ``num_heads``). ``None``
+    sends an empty list (single non-hybrid group, geometry discovered
+    from the tensors).
     """
     if use_handle is None:
         use_handle = use_gpu
@@ -354,7 +363,7 @@ def _send_register_kv_cache(
             world_size,
             EngineType.VLLM,
             hints,
-            [],  # group_views: empty = single non-hybrid group
+            list(engine_group_infos or ()),
         ]
         result = _call(client, RequestType.REGISTER_KV_CACHE, payloads)
         return result is not _TIMEOUT
