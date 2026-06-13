@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CUDA GPU backend strategy.
+"""CUDA GPU backend profile.
 
 Builds the ``lmcache.c_ops`` extension containing memory kernels, lookup
 kernels, Cascade-AC encode/decode, position kernels, and event recorders.
@@ -20,8 +20,8 @@ from setup_extensions.build_profiles import BuildProfile
 ENABLE_CXX11_ABI = os.environ.get("ENABLE_CXX11_ABI", "1") == "1"
 
 
-class CudaStrategy(BuildProfile):
-    """CUDA GPU extension build strategy."""
+class CudaProfile(BuildProfile):
+    """CUDA GPU extension build profile."""
 
     name = "cuda"
     env_var = "BUILD_WITH_CUDA"

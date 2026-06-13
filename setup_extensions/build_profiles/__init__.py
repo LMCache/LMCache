@@ -41,7 +41,7 @@ class BuildProfile(ABC):
     env_var: str = ""
 
     # ------------------------------------------------------------------
-    # Build-mode flags (owned by the strategy, not the policy)
+    # Build-mode flags (owned by the profile, not the policy)
     # ------------------------------------------------------------------
 
     @classmethod

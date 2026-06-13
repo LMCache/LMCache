@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""SYCL / Intel XPU GPU backend strategy.
+"""SYCL / Intel XPU GPU backend profile.
 
 Builds ``lmcache.xpu_ops`` using the DPC++ compiler (icpx).
 Requires Intel oneAPI environment to be sourced before building.
@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 from setup_extensions.build_profiles import BuildProfile
 
 
-class SyclStrategy(BuildProfile):
-    """SYCL / Intel XPU GPU extension build strategy."""
+class SyclProfile(BuildProfile):
+    """SYCL / Intel XPU GPU extension build profile."""
 
     name = "sycl"
     env_var = "BUILD_WITH_SYCL"

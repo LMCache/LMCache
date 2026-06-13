@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Policy-driven extension build orchestrator.
 
-:class:`BuildPolicy` auto-discovers available platform strategies,
+:class:`BuildPolicy` auto-discovers available platform profiles,
 selects the best one via explicit env var or auto-detection with fallback,
 and drives the common C++ + platform extension build pipeline.
 """
@@ -139,7 +139,7 @@ class BuildPolicy:
     def __init__(self) -> None:
         self._platforms = _discover_platforms()
 
-    def resolve_strategy(self) -> Optional[BuildProfile]:
+    def resolve_profile(self) -> Optional[BuildProfile]:
         """Resolve the active build profile.
 
         Returns ``None`` when building sdist, native extensions are
@@ -163,25 +163,24 @@ class BuildPolicy:
             names = ", ".join(s.name for s in explicitly_requested)
             raise RuntimeError("Multiple profiles explicitly requested: %s" % names)
         if explicitly_requested:
-            strategy = explicitly_requested[0]
-            print("Using explicitly requested profile: %s" % strategy.name)
-            if not strategy.detect():
+            profile = explicitly_requested[0]
+            print("Using explicitly requested profile: %s" % profile.name)
+            if not profile.detect():
                 print(
                     "warning: profile '%s' was explicitly requested but its "
-                    "toolchain was not auto-detected; proceeding anyway"
-                    % strategy.name,
+                    "toolchain was not auto-detected; proceeding anyway" % profile.name,
                     file=sys.stderr,
                 )
-            return strategy
+            return profile
 
         # ---------------------------------------------------------------
         # Phase 2: auto-detect with fallback
         # ---------------------------------------------------------------
         print("No profile explicitly selected, auto-detecting...")
-        for strategy in self._platforms:
-            if strategy.detect():
-                print("Auto-detected profile: %s" % strategy.name)
-                return strategy
+        for profile in self._platforms:
+            if profile.detect():
+                print("Auto-detected profile: %s" % profile.name)
+                return profile
 
         # ---------------------------------------------------------------
         # Phase 3: nothing found
@@ -194,12 +193,12 @@ class BuildPolicy:
 
     @staticmethod
     def collect_extensions(
-        strategy: Optional[BuildProfile],
+        profile: Optional[BuildProfile],
     ) -> tuple[list, dict, Optional[str]]:
         """Build all extensions and return requirements file name.
 
         Args:
-            strategy: Resolved build profile, or ``None``.
+            profile: Resolved build profile, or ``None``.
 
         Returns:
             ``(ext_modules, cmdclass, requirements_file)`` tuple.
@@ -212,20 +211,20 @@ class BuildPolicy:
             return [], {}, None
 
         # ---- build common C++ extensions ----
-        ext_modules, cmdclass = build_common_cpp(strategy)
+        ext_modules, cmdclass = build_common_cpp(profile)
 
         # ---- build profile-specific extensions ----
-        if strategy and not BuildProfile.is_gpu_ext_disabled():
-            em, cc = strategy.build()
+        if profile and not BuildProfile.is_gpu_ext_disabled():
+            em, cc = profile.build()
             ext_modules.extend(em)
             cmdclass.update(cc)
 
         # ---- build optional storage backends ----
-        storage_flags = strategy.default_cxx_flags() if strategy else []
+        storage_flags = profile.default_cxx_flags() if profile else []
         ext_modules.extend(BuildPolicy.collect_storage_backends(storage_flags))
 
         # ---- requirements ----
-        req_file = strategy.requirements_file() if strategy else None
+        req_file = profile.requirements_file() if profile else None
 
         return ext_modules, cmdclass, req_file
 
