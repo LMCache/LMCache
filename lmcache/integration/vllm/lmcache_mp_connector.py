@@ -96,7 +96,7 @@ logger = lmcache_init_logger(__name__)
 
 # Helper functions
 def build_parallel_strategy_from_vllm_config(
-    vllm_config: VllmConfig,
+    vllm_config: "VllmConfig",
     n_servers: int,
 ) -> ParallelStrategy:
     """Build a ParallelStrategy from a vLLM config.
@@ -544,12 +544,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # pp_stage) pair and break the single-``tp_size`` LOOKUP /
         # FREE_LOOKUP_LOCKS protocol.
         if n_servers > 1 and mla_enabled(vllm_config.model_config):
+            pp_size = vllm_config.parallel_config.pipeline_parallel_size
             tp_size = vllm_config.parallel_config.tensor_parallel_size
             ranks_per_node = vllm_config.parallel_config.world_size // n_servers
-            if ranks_per_node % tp_size != 0:
+            # pp_size == 1 is a valid degenerate case: every server holds a full
+            # KV replica (MLA shares KV across TP ranks), so the per-piece
+            # reader count is uniform tp_size on every server by construction.
+            # For pp_size > 1 we still require PP stages to fit inside one node.
+            if pp_size > 1 and ranks_per_node % tp_size != 0:
                 raise ValueError(
-                    "LMCacheMPConnector multi-server MLA requires "
-                    f"tensor_parallel_size ({tp_size}) to divide "
+                    "LMCacheMPConnector multi-server MLA with pipeline parallelism "
+                    f"requires tensor_parallel_size ({tp_size}) to divide "
                     f"ranks_per_node ({ranks_per_node}); PP stages spanning "
                     "multiple nodes are not supported."
                 )
