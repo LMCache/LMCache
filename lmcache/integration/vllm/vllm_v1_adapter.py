@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generator, Optional, Union
 import math
 import os
+import sys
 
 # Third Party
 from vllm.config import (
@@ -28,6 +29,7 @@ import torch
 # Use LMCache's own math utilities instead of vllm's
 # (avoids dependency on vllm internal changes like https://github.com/vllm-project/vllm/pull/27188)
 from lmcache import utils
+from lmcache.banner import print_banner_once
 from lmcache.integration.vllm.utils import (
     ENGINE_NAME,
     apply_mm_hashes_to_token_ids,
@@ -455,6 +457,11 @@ class LMCacheConnectorV1Impl:
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
+        # Banner from the scheduler role only, so tensor-parallel
+        # deployments print it once rather than once per worker.
+        if role == KVConnectorRole.SCHEDULER:
+            print_banner_once(sys.stderr)
+
         self._parent = parent
         self._vllm_config = vllm_config
         self._role = role
@@ -1139,7 +1146,17 @@ class LMCacheConnectorV1Impl:
 
             slot_mapping = request.slot_mapping
             assert isinstance(slot_mapping, torch.Tensor)
-            assert len(slot_mapping) == len(token_ids)
+            if len(slot_mapping) != len(token_ids):
+                logger.warning(
+                    "Skipping KV save for request %s: slot_mapping/token_ids "
+                    "length mismatch (slot_mapping=%d, token_ids=%d). Likely "
+                    "an upstream allocation/preemption desync; the engine "
+                    "stays alive and only this request's save is dropped.",
+                    request.req_id,
+                    len(slot_mapping),
+                    len(token_ids),
+                )
+                continue
 
             # TODO: have a pre-allocated buffer to hold the slot_mappings
             slot_mapping = slot_mapping.to(self.device)

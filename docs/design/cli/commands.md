@@ -13,6 +13,7 @@ LMCache functionality.
 ```
 lmcache
 ├── server                          # Launch LMCache server (ZMQ + HTTP)
+├── coordinator                     # Launch the mp coordinator (HTTP)
 ├── describe {kvcache,engine}       # Rich status view of a running endpoint
 ├── ping     {kvcache,engine}       # Pure liveness check (OK/FAIL)
 ├── query    {kvcache,engine}       # Single-shot query with metrics
@@ -52,6 +53,25 @@ lmcache server \
 Server args are composed from existing helpers: `add_mp_server_args()`,
 `add_storage_manager_args()`, `add_prometheus_args()`, `add_telemetry_args()`,
 `add_http_frontend_args()`.
+
+### `lmcache coordinator`
+
+Replaces `python3 -m lmcache.v1.mp_coordinator`. Runs the mp coordinator's
+FastAPI/HTTP app in the foreground (Ctrl-C to stop). The coordinator tracks mp
+server instances in a registry and evicts those whose heartbeats lapse.
+
+```bash
+lmcache coordinator \
+    --host 0.0.0.0 --port 9300 \
+    --instance-timeout 30 \
+    --health-check-interval 10
+```
+
+Config resolves from `MPCoordinatorConfig.from_env()` (the
+`LMCACHE_MP_COORDINATOR_*` environment variables); any CLI flag that is supplied
+overrides the corresponding field. Each flag defaults to unset so env-only
+deployments keep working. See
+[../v1/mp_coordinator/README.md](../v1/mp_coordinator/README.md).
 
 ### `lmcache describe`
 
@@ -169,13 +189,25 @@ API. Exercises the full RPC path
 (``REGISTER_KV_CACHE → GET_CHUNK_SIZE → LOOKUP → QUERY_PREFETCH_STATUS →
 RETRIEVE → STORE → END_SESSION``).
 
+Supports two run modes via ``--mode``:
+
+- **``gpu``** (default) -- allocates real CUDA tensors and uses CUDA IPC
+  (handle transfer path).
+- **``cpu``** -- allocates POSIX-SHM-backed tensors; the server maps the same
+  physical pages for zero-copy STORE/RETRIEVE (data transfer path by default).
+  To use the zero-copy SHM handle path, add ``--transfer-mode handle``.
+
+The transfer path can be overridden explicitly with ``--transfer-mode
+{auto,handle,data}``. ``auto`` keeps the historical mapping: gpu→handle,
+cpu→data.
+
 ```bash
 $ lmcache bench server \
     --rpc-url tcp://localhost:5555 \
     --url http://localhost:8080 \
     --start 0 --end 2
 
-Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu) ...
+Connecting to LMCache MP Server at tcp://localhost:5555 (mode=gpu, transfer=auto) ...
 Server chunk_size = 256
 Resolved KV shape spec: (2,1024,16,8,128):float16:32
 [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
@@ -289,6 +321,7 @@ lmcache/cli/
 │   ├── base.py          # BaseCommand ABC
 │   ├── mock.py          # lmcache mock  (example/test command)
 │   ├── server.py        # lmcache server
+│   ├── coordinator.py   # lmcache coordinator
 │   ├── describe.py      # lmcache describe {kvcache,engine}
 │   ├── ping.py          # lmcache ping {kvcache,engine}
 │   ├── query.py         # lmcache query {kvcache,engine}

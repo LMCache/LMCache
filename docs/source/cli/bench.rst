@@ -672,8 +672,9 @@ the HTTP API.
 
 Unlike :ref:`lmcache bench engine <lmcache-bench-engine>`, this command does
 **not** require an inference engine. It only needs a running LMCache MP
-server (ZMQ + HTTP) and a GPU. It also requires the full ``lmcache`` install
-(not the lightweight ``lmcache-cli`` package).
+server (ZMQ + HTTP). GPU mode additionally requires a CUDA-capable device.
+It also requires the full ``lmcache`` install (not the lightweight
+``lmcache-cli`` package).
 
 
 What it does
@@ -740,10 +741,18 @@ Options
      - ``http://localhost:8080``
      - HTTP base URL of the server's checksum API. Used to
        verify per-chunk checksums end-to-end.
-   * - ``--mode {gpu}``
+   * - ``--mode {gpu,cpu}``
      - ``gpu``
-     - Run mode. Only ``gpu`` is supported today; CPU mode is a
-       planned follow-up.
+     - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
+       (handle path). ``cpu`` allocates POSIX-SHM-backed tensors and
+       uses the data-transfer path (gather/scatter via slot descriptors).
+   * - ``--transfer-mode {auto,handle,data}``
+     - ``auto``
+     - Transport routing for STORE/RETRIEVE. ``handle`` forces the
+       single-shot path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``).
+       ``data`` forces the two-phase gather/scatter path
+       (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` + ``PREPARE``/``COMMIT``).
+       ``auto`` maps gpu→handle and cpu→data.
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
@@ -766,6 +775,32 @@ Options
    * - ``--kvcache-shape-spec SPEC``
      - ``(2,1024,16,8,128):float16:32``
      - KV cache shape spec (see below).
+
+
+CPU mode (no GPU)
+~~~~~~~~~~~~~~~~~
+
+``--mode cpu`` runs the same end-to-end path without a GPU. The server
+runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
+POSIX-SHM-backed KV tensors and exercises the full RPC path.
+
+By default ``--mode cpu`` uses the data-transfer path (``auto`` →
+``cpu→data``). To use the zero-copy SHM handle path instead, pass
+``--transfer-mode handle``:
+
+.. code-block:: bash
+
+   # Terminal 1 -- start the LMCache server (no GPU required)
+   lmcache server \
+       --host localhost --port 5555 \
+       --l1-size-gb 2 --eviction-policy LRU
+
+   # Terminal 2 -- run bench in CPU + handle mode
+   lmcache bench server \
+       --rpc-url tcp://localhost:5555 \
+       --url http://localhost:8080 \
+       --mode cpu --transfer-mode handle \
+       --start 0 --end 2
 
 
 KV cache shape spec
@@ -812,7 +847,7 @@ Example output
 
 .. code-block:: text
 
-   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu) ...
+   Connecting to LMCache MP Server at tcp://localhost:15556 (mode=gpu, transfer=auto) ...
    Server chunk_size = 256
    Resolved KV shape spec: (2,1024,16,8,128):float16:32
    [seq=0] LOOKUP cold:  0/2 chunks hit (1.82 ms)
@@ -841,7 +876,6 @@ Exit codes
    * - ``1``
      - Fatal error (for example, CUDA unavailable in ``--mode gpu``,
        server unreachable, or a checksum mismatch).
-
 
 .. _lmcache-bench-l2:
 
@@ -915,6 +949,12 @@ support a clean store -> load round-trip.
    ``"use_odirect": true``) or that talk to a remote service without
    a local cache, the default combined run is usually fine.
 
+   O_DIRECT adapters may also require the benchmark L1 buffer to
+   satisfy the adapter's block alignment. Use ``--l1-align-bytes`` to
+   set that alignment, commonly ``4096`` for local block devices. The
+   payload size (``--data-size-kb * 1024``) must be a multiple of the
+   selected alignment.
+
 
 Quick start
 ~~~~~~~~~~~
@@ -938,6 +978,15 @@ Stress the adapter with more in-flight submits and larger payloads:
        --num-keys 32 --in-flight 4 \
        --data-size-kb 512 \
        --rounds 5 --warmup-rounds 1
+
+Benchmark an O_DIRECT adapter with aligned L1 buffers:
+
+.. code-block:: bash
+
+   lmcache bench l2 \
+       --l2-adapter '{"type":"raw_block","device_path":"/dev/nvme0n1","slot_bytes":4194304,"use_odirect":true,"block_align":4096}' \
+       --data-size-kb 1024 \
+       --l1-align-bytes 4096
 
 Run only one operation (useful to isolate store vs. load throughput):
 
@@ -1005,6 +1054,13 @@ Options
    * - ``--data-size-kb N``
      - ``256``
      - Data size per key, in KiB.
+   * - ``--l1-align-bytes N``
+     - ``1``
+     - Alignment in bytes for benchmark L1 buffers. Use a value
+       at least as large as the adapter's block alignment when
+       benchmarking O_DIRECT backends, for example ``4096`` for local
+       block devices. ``--data-size-kb * 1024`` must be a multiple of
+       this value.
    * - ``--rounds N``
      - ``1``
      - Measurement rounds per operation.
@@ -1152,9 +1208,8 @@ round against the byte pattern that ``store`` wrote (see
    [Verify] OK
 
 Verification is **off** by default because the stricter byte pattern
-also forces every key to allocate its own ``data_size`` buffer
-(otherwise the runner is free to reuse a single shared buffer across
-keys to keep the memory footprint small).
+requires both the store and load object batches to stay resident so the
+loaded data can be compared against the original store pattern.
 
 
 Exit codes

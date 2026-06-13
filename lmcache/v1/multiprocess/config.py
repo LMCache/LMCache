@@ -8,6 +8,9 @@ Configuration for the multiprocess (ZMQ) server and HTTP frontend.
 from dataclasses import dataclass, field
 import argparse
 import json
+import math
+import os
+import uuid
 
 
 @dataclass
@@ -59,6 +62,13 @@ class MPServerConfig:
     script_allowed_imports: list[str] = field(default_factory=list)
     """Modules that /run_script endpoint is allowed to import."""
 
+    instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    """Stable identity of this MP server, the single source of truth for who
+    this server is. Used as the coordinator membership key and projected onto
+    the OTel ``service.instance.id`` resource attribute (see
+    ``run_cache_server``) so metrics, traces, and coordinator state all key on
+    the same id. Set via ``--instance-id``; defaults to a random UUID v4."""
+
 
 @dataclass
 class RuntimePluginConfig:
@@ -91,6 +101,38 @@ class HTTPFrontendConfig:
 DEFAULT_HTTP_FRONTEND_CONFIG = HTTPFrontendConfig()
 
 
+@dataclass
+class CoordinatorConfig:
+    """Configuration for joining an MP coordinator (registrant side).
+
+    Consumed by the HTTP server's lifespan to start the registration task.
+    When :attr:`url` is empty, the server registers with no coordinator and
+    runs exactly as before.
+    """
+
+    url: str = ""
+    """Coordinator base URL, e.g. ``http://coordinator:9300``. Empty disables
+    registration."""
+
+    advertise_ip: str = ""
+    """IP the coordinator should reach this server at. Empty defers to the
+    server's outbound IP (resolved by the registrar)."""
+
+    heartbeat_interval: float = 5.0
+    """Seconds between heartbeats. Must be strictly positive and kept well below
+    the coordinator's ``INSTANCE_TIMEOUT``."""
+
+    l2_event_reporting: bool = False
+    """When ``True``, report L2 store/lookup events to the coordinator for
+    fleet-wide usage tracking and eviction."""
+
+    l2_event_flush_interval: float = 1.0
+    """Seconds between L2 event flush attempts to the coordinator."""
+
+
+DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
+
+
 def add_mp_server_args(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
@@ -105,6 +147,15 @@ def add_mp_server_args(
     """
     mp_group = parser.add_argument_group(
         "MP Server", "Configuration for the ZMQ multiprocess cache server"
+    )
+    mp_group.add_argument(
+        "--instance-id",
+        type=str,
+        default=None,
+        help="Stable identity of this MP server. Used as the coordinator "
+        "membership key and as the OTel 'service.instance.id' resource "
+        "attribute on every metric and span. Defaults to a random UUID v4 "
+        "minted at startup.",
     )
     mp_group.add_argument(
         "--host",
@@ -157,9 +208,10 @@ def add_mp_server_args(
         "--engine-type",
         type=str,
         default="default",
-        choices=["default", "blend"],
-        help="Cache engine backend type. 'default' uses standard prefix caching, "
-        "'blend' when cacheblend is enabled. Default is 'default'.",
+        choices=["default", "blend", "blend_legacy"],
+        help="Cache engine backend type. 'default' uses standard prefix caching; "
+        "'blend' selects CacheBlend V3 (the current implementation); "
+        "'blend_legacy' selects the original CacheBlend. Default is 'default'.",
     )
     mp_group.add_argument(
         "--supported-transfer-mode",
@@ -228,6 +280,7 @@ def parse_args_to_mp_server_config(
     except json.JSONDecodeError as exc:
         raise ValueError("--runtime-plugin-config is not valid JSON: %s" % exc) from exc
     return MPServerConfig(
+        instance_id=args.instance_id or str(uuid.uuid4()),
         host=args.host,
         port=args.port,
         chunk_size=args.chunk_size,
@@ -291,4 +344,146 @@ def parse_args_to_http_frontend_config(
     return HTTPFrontendConfig(
         http_host=args.http_host,
         http_port=args.http_port,
+    )
+
+
+def add_coordinator_args(
+    parser: argparse.ArgumentParser,
+) -> argparse.ArgumentParser:
+    """Add MP coordinator registration arguments to an existing parser.
+
+    Each flag falls back to its ``LMCACHE_COORDINATOR_*`` environment variable
+    so the server can be configured either way (the env var is convenient for
+    the Kubernetes downward API); an explicit flag wins over the env var.
+
+    Args:
+        parser: The argument parser to add arguments to.
+
+    Returns:
+        The same parser with coordinator arguments added.
+    """
+    group = parser.add_argument_group(
+        "Coordinator", "Configuration for joining an MP coordinator"
+    )
+    group.add_argument(
+        "--coordinator-url",
+        type=str,
+        default=None,
+        help="Coordinator base URL (e.g. http://coordinator:9300). When set, "
+        "this server registers, heartbeats, and deregisters on shutdown. "
+        "Defaults to LMCACHE_COORDINATOR_URL; unset disables registration.",
+    )
+    group.add_argument(
+        "--coordinator-advertise-ip",
+        type=str,
+        default=None,
+        help="IP the coordinator should reach this server at. Defaults to "
+        "LMCACHE_COORDINATOR_ADVERTISE_IP, then the server's outbound IP.",
+    )
+    group.add_argument(
+        "--coordinator-heartbeat-interval",
+        type=float,
+        default=None,
+        help="Seconds between heartbeats (must be > 0). Defaults to "
+        "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL, then 5.0.",
+    )
+    group.add_argument(
+        "--coordinator-l2-event-reporting",
+        action="store_true",
+        default=None,
+        help="Report L2 store/lookup events to the coordinator for "
+        "fleet-wide usage tracking and eviction. Defaults to "
+        "LMCACHE_COORDINATOR_L2_EVENT_REPORTING; unset disables.",
+    )
+    group.add_argument(
+        "--coordinator-l2-event-flush-interval",
+        type=float,
+        default=None,
+        help="Seconds between L2 event flush attempts (must be > 0). "
+        "Defaults to LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL, then 1.0.",
+    )
+    return parser
+
+
+def parse_args_to_coordinator_config(
+    args: argparse.Namespace,
+) -> CoordinatorConfig:
+    """Convert parsed command line arguments to a CoordinatorConfig.
+
+    A flag value takes precedence over its environment variable. The heartbeat
+    interval is validated here so a malformed value fails fast at startup
+    (runtime best-effort only covers coordinator *reachability*, not config).
+
+    Args:
+        args: Parsed arguments from the argument parser.
+
+    Returns:
+        The configuration object.
+
+    Raises:
+        ValueError: If the heartbeat interval is not a positive number.
+    """
+    url = (
+        args.coordinator_url
+        if args.coordinator_url is not None
+        else os.getenv("LMCACHE_COORDINATOR_URL", "")
+    )
+    advertise_ip = (
+        args.coordinator_advertise_ip
+        if args.coordinator_advertise_ip is not None
+        else os.getenv("LMCACHE_COORDINATOR_ADVERTISE_IP", "")
+    )
+    if args.coordinator_heartbeat_interval is not None:
+        heartbeat_interval = args.coordinator_heartbeat_interval
+    else:
+        raw = os.getenv("LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL")
+        if raw:
+            try:
+                heartbeat_interval = float(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL is not a number: %r" % raw
+                ) from exc
+        else:
+            heartbeat_interval = 5.0
+    if not math.isfinite(heartbeat_interval) or heartbeat_interval <= 0:
+        # Reject inf/nan too: inf would register once then sleep forever
+        # (never heartbeat), and nan has undefined sleep behavior.
+        raise ValueError(
+            "coordinator heartbeat interval must be a finite number > 0, "
+            "got %s" % heartbeat_interval
+        )
+    if args.coordinator_l2_event_reporting is not None:
+        l2_event_reporting = args.coordinator_l2_event_reporting
+    else:
+        l2_event_reporting = os.getenv(
+            "LMCACHE_COORDINATOR_L2_EVENT_REPORTING", ""
+        ).lower() in ("1", "true", "yes")
+
+    if args.coordinator_l2_event_flush_interval is not None:
+        l2_event_flush_interval = args.coordinator_l2_event_flush_interval
+    else:
+        raw = os.getenv("LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL")
+        if raw:
+            try:
+                l2_event_flush_interval = float(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    "LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL is not a number: %r"
+                    % raw
+                ) from exc
+        else:
+            l2_event_flush_interval = 1.0
+    if not math.isfinite(l2_event_flush_interval) or l2_event_flush_interval <= 0:
+        raise ValueError(
+            "coordinator L2 event flush interval must be a finite number > 0, "
+            "got %s" % l2_event_flush_interval
+        )
+
+    return CoordinatorConfig(
+        url=url,
+        advertise_ip=advertise_ip,
+        heartbeat_interval=heartbeat_interval,
+        l2_event_reporting=l2_event_reporting,
+        l2_event_flush_interval=l2_event_flush_interval,
     )

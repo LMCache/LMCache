@@ -1,14 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Run one OpenAI-compatible inference request and report token/latency metrics."""
+"""``lmcache query`` command — single-shot inference request interface.
+
+Subcommands:
+
+* ``engine`` — send one request to an OpenAI-compatible HTTP API
+* ``kvcache`` — query KV-cache endpoints (not implemented yet)
+"""
 
 # Standard
 import argparse
 import sys
 
 # First Party
-from lmcache.cli.commands.base import BaseCommand, _add_output_args
-from lmcache.cli.commands.query.prompt import PromptBuilder
-from lmcache.cli.commands.query.request import Request
+from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.query.engine_command import (
+    register_engine_parser,
+    run_query_engine,
+)
+from lmcache.cli.commands.query.kvcache_command import (
+    register_kvcache_parser,
+    run_query_kvcache,
+)
 
 
 class QueryCommand(BaseCommand):
@@ -21,9 +33,14 @@ class QueryCommand(BaseCommand):
         return "Run one inference request and report metrics."
 
     def add_arguments(self, _parser: argparse.ArgumentParser) -> None:
-        pass
+        pass  # args registered in register() via subparsers
 
     def register(self, subparsers: argparse._SubParsersAction) -> None:
+        """Register ``lmcache query`` and all query sub-subcommands.
+
+        Args:
+            subparsers: The subparsers action from the root parser.
+        """
         parser = subparsers.add_parser(
             self.name(),
             help=self.help(),
@@ -36,120 +53,24 @@ class QueryCommand(BaseCommand):
             required=True,
             metavar="{engine,kvcache}",
         )
-        self._register_engine(inner)
-        self._register_kvcache(inner)
-
-    def _register_engine(self, subparsers: argparse._SubParsersAction) -> None:
-        parser = subparsers.add_parser(
-            "engine",
-            help="Send one request to an OpenAI-compatible HTTP API.",
-        )
-        parser.add_argument("--url", required=True, help="Serving engine base URL.")
-        parser.add_argument(
-            "--prompt",
-            required=True,
-            help="Prompt text with optional {name} placeholders.",
-        )
-        parser.add_argument(
-            "--model",
-            default=None,
-            metavar="ID",
-            help="Model ID for the serving engine.",
-        )
-        parser.add_argument(
-            "--max-tokens",
-            type=int,
-            default=128,
-            help="Maximum completion tokens (default: 128).",
-        )
-        parser.add_argument(
-            "--timeout",
-            type=float,
-            default=30.0,
-            help="HTTP timeout in seconds (default: 30).",
-        )
-        parser.add_argument(
-            "--documents",
-            action="extend",
-            nargs="+",
-            default=[],
-            metavar="NAME=PATH",
-            help=(
-                "Load file text for {NAME} in --prompt. "
-                "Accepts one or more NAME=PATH values."
-            ),
-        )
-        parser.add_argument(
-            "--path",
-            dest="documents",
-            action="extend",
-            nargs="+",
-            metavar="NAME=PATH",
-            help=argparse.SUPPRESS,
-        )
-        parser.add_argument(
-            "--completions",
-            action="store_true",
-            help="Use POST /v1/completions only.",
-        )
-        parser.add_argument(
-            "--chat-first",
-            action="store_true",
-            help="Try /v1/chat/completions first, then fall back to /v1/completions.",
-        )
-        _add_output_args(parser)
-        parser.set_defaults(func=self.execute)
-
-    def _register_kvcache(self, subparsers: argparse._SubParsersAction) -> None:
-        parser = subparsers.add_parser(
-            "kvcache",
-            help="Query KV-cache endpoints (not implemented yet).",
-        )
-        _add_output_args(parser)
-        parser.set_defaults(func=self.execute)
+        register_engine_parser(inner, self.execute)
+        register_kvcache_parser(inner, self.execute)
 
     def execute(self, args: argparse.Namespace) -> None:
+        """Dispatch to the appropriate query subcommand handler.
+
+        Args:
+            args: Parsed CLI arguments containing ``query_target``.
+        """
         handlers = {
-            "engine": self.query_engine,
-            "kvcache": self.query_kvcache,
+            "engine": lambda a: run_query_engine(self, a),
+            "kvcache": lambda a: run_query_kvcache(self, a),
         }
         handler = handlers.get(args.query_target)
         if handler is None:
-            print(f"Unknown query target: {args.query_target}", file=sys.stderr)
+            print(
+                f"Unknown query target: {args.query_target}",
+                file=sys.stderr,
+            )
             sys.exit(1)
         handler(args)
-
-    def query_engine(self, args: argparse.Namespace) -> None:
-        try:
-            prompt_builder = PromptBuilder(args.prompt, args.documents)
-            sender = Request(
-                base=args.url,
-                model=args.model,
-                max_tokens=args.max_tokens,
-                timeout=args.timeout,
-                completions_only=args.completions,
-                chat_first=args.chat_first,
-            )
-            engine_stats = sender.send_request(prompt_builder.complete_prompt)
-
-            model_id = args.model or str(engine_stats["model"][1])
-            metrics = self.create_metrics("Query Engine", args)
-            metrics.add("model", "Model", model_id)
-            prompt_name, prompt_value = engine_stats["prompt_tokens"]
-            metrics.add("prompt_tokens", prompt_name, int(prompt_value))
-            output_name, output_value = engine_stats["output_tokens"]
-            metrics.add("output_tokens", output_name, int(output_value))
-
-            latency = metrics.add_section("latency", "Latency Metrics")
-            for key, (name, value) in engine_stats.items():
-                if key in ("model", "prompt_tokens", "output_tokens"):
-                    continue
-                latency.add(key, name, round(float(value), 2))
-
-            metrics.emit()
-        except (RuntimeError, ValueError) as err:
-            print(str(err), file=sys.stderr)
-            sys.exit(1)
-
-    def query_kvcache(self, args: argparse.Namespace) -> None:
-        pass

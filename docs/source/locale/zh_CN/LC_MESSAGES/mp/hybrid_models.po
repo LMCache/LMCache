@@ -1,0 +1,180 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-08 10:45+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/mp/hybrid_models.rst:2
+msgid "Hybrid-Attention Models"
+msgstr "混合注意力模型"
+
+#: ../../source/mp/hybrid_models.rst:4
+msgid ""
+"Some models interleave more than one attention type across their layers —"
+" most commonly **sliding-window attention** on most layers and **full "
+"attention** on a few. vLLM serves these with its *hybrid KV cache "
+"manager*, which splits the model's layers into multiple **KV cache "
+"groups** (one per attention behavior)."
+msgstr "一些模型在其层中交错使用多种注意力类型——最常见的是在大多数层上使用 **滑动窗口注意力**，而在少数层上使用 **全注意力**。vLLM 通过其 *混合 KV 缓存管理器* 来服务这些模型，该管理器将模型的层分成多个 **KV 缓存组**（每种注意力行为一个）。"
+
+#: ../../source/mp/hybrid_models.rst:9
+msgid ""
+"The LMCache multiprocess connector (``LMCacheMPConnector``) supports "
+"these hybrid models: it stores and retrieves the KV cache for every "
+"group, so prefix caching and KV reuse work the same way they do for plain"
+" models."
+msgstr "LMCache 多进程连接器 (``LMCacheMPConnector``) 支持这些混合模型：它为每个组存储和检索 KV Cache，因此前缀缓存和 KV 重用的工作方式与普通模型相同。"
+
+#: ../../source/mp/hybrid_models.rst:18
+msgid "What Works"
+msgstr "有效的内容"
+
+#: ../../source/mp/hybrid_models.rst:20
+msgid ""
+"Models whose layers all use **standard paged attention** — including "
+"hybrids that mix sliding-window and full attention — are supported with "
+"no special configuration. Examples:"
+msgstr "所有层均使用 **标准分页注意力** 的模型——包括混合滑动窗口和全注意力的混合模型——在没有特殊配置的情况下得到支持。示例："
+
+#: ../../source/mp/hybrid_models.rst:28
+msgid "Model family"
+msgstr "模型家族"
+
+#: ../../source/mp/hybrid_models.rst:29
+msgid "Attention layout"
+msgstr "注意力布局"
+
+#: ../../source/mp/hybrid_models.rst:30
+msgid "Status"
+msgstr "状态"
+
+#: ../../source/mp/hybrid_models.rst:31
+msgid "Gemma 2 / Gemma 3"
+msgstr "Gemma 2 / Gemma 3"
+
+#: ../../source/mp/hybrid_models.rst:32 ../../source/mp/hybrid_models.rst:35
+msgid "Interleaved sliding-window + full"
+msgstr "交错滑动窗口 + 完整"
+
+#: ../../source/mp/hybrid_models.rst:33 ../../source/mp/hybrid_models.rst:36
+#: ../../source/mp/hybrid_models.rst:39
+msgid "Supported"
+msgstr "支持"
+
+#: ../../source/mp/hybrid_models.rst:34
+msgid "gpt-oss"
+msgstr "gpt-oss"
+
+#: ../../source/mp/hybrid_models.rst:37
+msgid "Llama, Qwen2/Qwen3 (dense), Mistral, …"
+msgstr "Llama, Qwen2/Qwen3 (dense), Mistral, …"
+
+#: ../../source/mp/hybrid_models.rst:38
+msgid "Single attention type"
+msgstr "单一注意力类型"
+
+#: ../../source/mp/hybrid_models.rst:41
+msgid ""
+"Just point vLLM at the LMCache server as usual (see :doc:`quickstart`); "
+"LMCache detects the model's KV cache groups automatically at registration"
+" time."
+msgstr "只需像往常一样将 vLLM 指向 LMCache 服务器（请参见 :doc:`quickstart`）；LMCache 在注册时会自动检测模型的 KV Cache 组。"
+
+#: ../../source/mp/hybrid_models.rst:46
+msgid ""
+"Because ``LMCacheMPConnector`` advertises hybrid support to vLLM, vLLM "
+"keeps its hybrid KV cache manager **enabled** for these models (it does "
+"not fall back to a single unified group). You do not need ``--no-disable-"
+"hybrid-kv-cache-manager`` or any related flag."
+msgstr "因为 ``LMCacheMPConnector`` 向 vLLM 宣传了混合支持，vLLM 为这些模型保持其混合 KV 缓存管理器 **启用**（它不会回退到单一统一组）。您不需要 ``--no-disable-hybrid-kv-cache-manager`` 或任何相关标志。"
+
+#: ../../source/mp/hybrid_models.rst:52
+msgid "What Is Not Supported Yet"
+msgstr "尚未支持的内容"
+
+#: ../../source/mp/hybrid_models.rst:54
+msgid ""
+"**Mamba / linear-attention hybrids** (e.g. Qwen3-Next, Qwen3.5, and other"
+" Gated-DeltaNet models). These layers keep a recurrent *state cache* (a "
+"convolution + SSM state) instead of a paged key/value cache, which "
+"LMCache's transfer path cannot represent today. Such models will fail to "
+"register with the LMCache server. Tracking support is future work."
+msgstr "**Mamba / 线性注意力混合模型**（例如 Qwen3-Next、Qwen3.5 和其他 Gated-DeltaNet 模型）。这些层保持一个递归的 *状态缓存*（一个卷积 + SSM 状态），而不是分页的键/值缓存，这在今天的 LMCache 传输路径中无法表示。这些模型将无法在 LMCache 服务器上注册。跟踪支持是未来的工作。"
+
+#: ../../source/mp/hybrid_models.rst:59
+msgid ""
+"**DeepSeek-V4-style compressed / indexer caches** are likewise not yet "
+"handled by the multiprocess connector."
+msgstr "**DeepSeek-V4 风格的压缩 / 索引器缓存** 同样尚未被多进程连接器处理。"
+
+#: ../../source/mp/hybrid_models.rst:63
+msgid "Verifying Correctness"
+msgstr "验证正确性"
+
+#: ../../source/mp/hybrid_models.rst:65
+msgid ""
+"To convince yourself that a hybrid model's KV is being cached and reused "
+"correctly, you can compare a cold run against a run served from LMCache:"
+msgstr "为了确保混合模型的 KV 被正确缓存和重用，您可以将冷启动与从 LMCache 提供的运行进行比较："
+
+#: ../../source/mp/hybrid_models.rst:68
+msgid ""
+"Run an evaluation (e.g. ``lm_eval`` on ``gsm8k``) against vLLM + LMCache."
+" This computes the KV cache and **stores** it in LMCache."
+msgstr "对 vLLM + LMCache 运行评估（例如在 ``gsm8k`` 上使用 ``lm_eval``）。这会计算 KV Cache 并 **存储** 在 LMCache 中。"
+
+#: ../../source/mp/hybrid_models.rst:70
+msgid ""
+"Reset *only* vLLM's local prefix cache, leaving the LMCache-managed cache"
+" intact (requires launching vLLM with ``VLLM_SERVER_DEV_MODE=1``)::"
+msgstr "重置 *仅* vLLM 的本地前缀缓存，保持 LMCache 管理的缓存不变（需要以 ``VLLM_SERVER_DEV_MODE=1`` 启动 vLLM）::"
+
+#: ../../source/mp/hybrid_models.rst:75
+msgid ""
+"Omit the ``reset_external=true`` query parameter so the LMCache cache is "
+"preserved."
+msgstr "省略 ``reset_external=true`` 查询参数，以便保留 LMCache 缓存。"
+
+#: ../../source/mp/hybrid_models.rst:77
+msgid ""
+"Re-run the same evaluation. vLLM now misses in its local cache, so the "
+"prefix KV is **retrieved** from LMCache. The score should match the first"
+" run."
+msgstr "重新运行相同的评估。vLLM 现在在其本地缓存中未命中，因此前缀 KV 从 LMCache 中 **检索**。得分应与第一次运行匹配。"
+
+#: ../../source/mp/hybrid_models.rst:80
+msgid ""
+"The project ships this as the ``hma_lm_eval`` continuous-integration test"
+" (see ``.buildkite/k3_tests/multiprocess``)."
+msgstr "该项目将其作为 ``hma_lm_eval`` 持续集成测试发布（参见 ``.buildkite/k3_tests/multiprocess``）。"
+
+#: ../../source/mp/hybrid_models.rst:84
+msgid "See Also"
+msgstr "另请参阅"
+
+#: ../../source/mp/hybrid_models.rst:86
+msgid ":doc:`quickstart` — launching the LMCache server and a vLLM client."
+msgstr "：doc:`quickstart` — 启动 LMCache 服务器和 vLLM 客户端。"
+
+#: ../../source/mp/hybrid_models.rst:87
+msgid ""
+"Design notes on how groups are detected and addressed: "
+"``docs/design/integration/vllm/hybrid-kv-cache-groups.md`` in the source "
+"tree."
+msgstr "关于如何检测和处理组的设计说明：``docs/design/integration/vllm/hybrid-kv-cache-groups.md`` 在源代码树中。"
+
