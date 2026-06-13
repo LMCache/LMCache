@@ -172,6 +172,9 @@ async def report_events(
             ctrl.on_store(ok)
         elif event.type == EventType.LOOKUP:
             ctrl.on_lookup(ok)
+        elif event.type == EventType.DELETE:
+            tracker.record_evicted(ok)
+            ctrl.on_remove(ok)
     return ReportUsageResponse(recorded=len(body.events))
 
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import asdict
+import asyncio
 
 # Third Party
 import httpx
@@ -51,9 +52,10 @@ class L2EvictionManager:
     Args:
         quota_manager: The shared quota registry.
         usage_manager: The shared usage manager; owns the per-key
-            size ledger that this class reads for logging and that
-            :meth:`on_remove` updates as part of the eviction
-            bookkeeping.
+            size ledger that this class reads for logging. Writes to
+            the ledger (``record_stored`` / ``record_evicted``) are
+            the caller's responsibility — paired with
+            :meth:`on_store` / :meth:`on_remove`.
         eviction_ratio: Fraction of tracked keys to evict per
             cycle (by count). Passed to the policy.
         trigger_watermark: Eviction fires when usage reaches
@@ -86,17 +88,14 @@ class L2EvictionManager:
         """Record that a key was looked up (touch — move to MRU end)."""
         self._policy.on_keys_touched([key])
 
-    def on_remove(self, keys: list[ObjectKey]) -> None:
-        """Remove keys from LRU tracking and the size ledger.
+    def on_remove(self, key: ObjectKey) -> None:
+        """Drop a single key from the LRU policy.
 
-        Calls :meth:`L2UsageManager.record_evicted` for each key so
-        per-tenant byte totals reflect the freed bytes.
+        Callers must also invoke :meth:`L2UsageManager.record_evicted`
+        for the same key so the per-salt byte totals + per-key size
+        ledger stay consistent.
         """
-        if not keys:
-            return
-        self._policy.on_keys_removed(keys)
-        for key in keys:
-            self._usage_manager.record_evicted(key)
+        self._policy.on_keys_removed([key])
 
     def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
         """Check all tracked salts against their quotas and select
@@ -159,38 +158,42 @@ class L2EvictionManager:
         self,
         registry: InstanceRegistry,
         http_client: httpx.AsyncClient,
-        request_timeout: float = 30.0,
     ) -> dict[str, list[ObjectKey]]:
-        """Compute the eviction plan and apply it via the MP fleet.
+        """Compute the eviction plan and fire a fan-out DELETE.
 
         Picks a uniformly random MP server from ``registry`` (via
-        :meth:`InstanceRegistry.random_instance`) and dispatches the
-        full set of victim keys to its ``DELETE /l2`` endpoint. Since
-        every MP server in the fleet shares the same backing L2 (e.g.
-        one S3 bucket), a single dispatch evicts the keys for all of
-        them — there is no need to broadcast. Random selection spreads
-        eviction-RPC load across the fleet over time instead of
-        pinning it to the first-registered server.
+        :meth:`InstanceRegistry.random_instance`) and **fire-and-forget**
+        dispatches the full set of victim keys to its ``DELETE /l2``
+        endpoint. Since every MP server in the fleet shares the same
+        backing L2 (e.g. one S3 bucket), a single dispatch evicts the
+        keys for all of them — there is no need to broadcast. Random
+        selection spreads eviction-RPC load across the fleet.
 
-        On a successful HTTP response, removes the dispatched keys
-        from the local LRU via :meth:`on_remove` so the coordinator's
-        tracking matches the fleet's actual state. On any failure
-        (no registered instances, network error, non-2xx response)
-        the LRU is **not** updated — the next eviction cycle will
-        re-select the same keys and retry.
+        The LRU + per-salt usage updates are **not** applied here.
+        After the MP server's L2 adapter finishes the deletion, it
+        fires ``on_l2_keys_deleted`` on its registered listeners —
+        :class:`L2EventListener` then ships ``DELETE`` events back
+        through ``POST /l2/events``, and the coordinator's
+        ``/l2/events`` handler calls :meth:`on_remove` on this
+        manager. That round-trip is the authoritative signal that the
+        keys are gone from the bucket.
+
+        If dispatch fails (network error, no instances registered) the
+        next eviction cycle will re-pick the same keys (the LRU still
+        carries them) and try again — at-least-once semantics, safe
+        because the lmcache delete is itself idempotent.
 
         Args:
             registry: Live MP server registry. Eviction is a no-op
                 when empty.
             http_client: Shared async HTTP client owned by the
                 coordinator app lifespan.
-            request_timeout: Per-request timeout in seconds passed to
-                ``httpx``.
 
         Returns:
-            The eviction plan that was attempted (same shape as
-            :meth:`compute_eviction_plan`). A non-empty return does
-            NOT imply the dispatch succeeded — check the logs.
+            The eviction plan that was scheduled. ``execute_evictions``
+            returns as soon as the background dispatch task is
+            spawned; a non-empty return does NOT imply the dispatch
+            even left the process.
         """
         plan = self.compute_eviction_plan()
         if not plan:
@@ -209,28 +212,51 @@ class L2EvictionManager:
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
         body = {"keys": [asdict(k.to_encoded_object_key()) for k in all_keys]}
 
+        asyncio.create_task(  # noqa: RUF006
+            self._dispatch_eviction(
+                http_client=http_client,
+                url=url,
+                body=body,
+                instance_id=target.instance_id,
+                key_count=len(all_keys),
+                salt_count=len(plan),
+            )
+        )
+        return plan
+
+    @staticmethod
+    async def _dispatch_eviction(
+        http_client: httpx.AsyncClient,
+        url: str,
+        body: dict,
+        instance_id: str,
+        key_count: int,
+        salt_count: int,
+    ) -> None:
+        """Background task: send the DELETE and log the outcome.
+
+        Failures are logged but not retried here — the next eviction
+        cycle's :meth:`compute_eviction_plan` will pick the same keys
+        again (because the LRU is only cleared by ``DELETE`` events,
+        not by a successful dispatch).
+        """
         try:
             # ``httpx.AsyncClient.delete`` doesn't accept ``json=`` —
             # ``request("DELETE", ...)`` is the supported form for
             # DELETE-with-body.
-            resp = await http_client.request(
-                "DELETE", url, json=body, timeout=request_timeout
-            )
+            resp = await http_client.request("DELETE", url, json=body)
             resp.raise_for_status()
         except (httpx.HTTPError, ValueError) as e:
             logger.warning(
-                "Eviction dispatch to %s (%d keys) failed: %s; LRU unchanged",
-                target.instance_id,
-                len(all_keys),
+                "Eviction dispatch to %s (%d keys) failed: %s",
+                instance_id,
+                key_count,
                 e,
             )
-            return plan
-
+            return
         logger.info(
             "Eviction dispatched to %s: %d keys across %d salts",
-            target.instance_id,
-            len(all_keys),
-            len(plan),
+            instance_id,
+            key_count,
+            salt_count,
         )
-        self.on_remove(all_keys)
-        return plan

@@ -87,7 +87,21 @@ class L2EventListener(L2AdapterListener):
                 self._buffer.append(event)
 
     def on_l2_keys_deleted(self, keys: list[ObjectKey]):
-        """No-op — the coordinator handles deletion separately."""
+        """Buffer DELETE events for each key. Thread-safe.
+
+        Fired by the L2 adapter after deletion completes (regardless
+        of who initiated it). The coordinator's ``/l2/events`` handler
+        consumes these to drop the keys from its LRU and adjust the
+        per-``cache_salt`` byte totals via the usage manager.
+        """
+        for obj in keys:
+            event = UsageEvent(
+                type=EventType.DELETE,
+                key=obj.to_encoded_object_key(),
+                bytes=0,
+            )
+            with self._lock:
+                self._buffer.append(event)
 
     # -- Flush loop ----------------------------------------------------------
 

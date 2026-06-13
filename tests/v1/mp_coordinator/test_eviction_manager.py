@@ -2,6 +2,7 @@
 """Tests for the coordinator eviction manager."""
 
 # Standard
+import asyncio
 import time
 
 # Third Party
@@ -55,6 +56,18 @@ def _store(
     ctrl.on_store(key)
 
 
+def _remove(
+    ctrl: L2EvictionManager,
+    ut: L2UsageManager,
+    key: ObjectKey,
+) -> None:
+    """Helper: subtract the key's bytes from the usage ledger and
+    drop it from the eviction LRU — the two calls that the production
+    ``/l2/events`` handler issues for a single delete event."""
+    ut.record_evicted(key)
+    ctrl.on_remove(key)
+
+
 def test_on_store_tracks_key():
     ctrl, _, ut = _setup(eviction_ratio=1.0)
     k = _make_key("a")
@@ -93,8 +106,8 @@ def test_on_remove():
     k2 = _make_key("a", h="02")
     _store(ctrl, ut, k1, 100)
     _store(ctrl, ut, k2, 200)
-    ctrl.on_remove([k1])
-    # on_remove drops k1 from both LRU and the size ledger.
+    _remove(ctrl, ut, k1)
+    # _remove drops k1 from both LRU and the size ledger.
     assert not ut.has_key(k1)
     assert ut.has_key(k2)
     result = ctrl.compute_eviction_plan()
@@ -108,7 +121,7 @@ def test_on_remove_subtracts_bytes_from_usage():
     _store(ctrl, ut, k1, 100)
     _store(ctrl, ut, k2, 200)
     assert ut.get("a") == 300
-    ctrl.on_remove([k1])
+    _remove(ctrl, ut, k1)
     # Bucket loses exactly k1's bytes.
     assert ut.get("a") == 200
 
@@ -117,15 +130,8 @@ def test_on_remove_cleans_empty_bucket():
     ctrl, _, ut = _setup(eviction_ratio=1.0)
     k = _make_key("a")
     _store(ctrl, ut, k, 100)
-    ctrl.on_remove([k])
+    _remove(ctrl, ut, k)
     assert ut.get("a") == 0
-    result = ctrl.compute_eviction_plan()
-    assert result == {}
-
-
-def test_on_remove_empty_list_is_noop():
-    ctrl, _, _ = _setup()
-    ctrl.on_remove([])
     result = ctrl.compute_eviction_plan()
     assert result == {}
 
@@ -237,10 +243,26 @@ def _instance(instance_id: str, ip: str = "10.0.0.1", port: int = 8000) -> MPIns
     )
 
 
+async def _drain_dispatches(ctrl: L2EvictionManager) -> None:
+    """Wait for the eviction manager's fire-and-forget DELETE tasks to
+    finish so the mock-transport handler has actually run before the
+    test asserts on its side effects (and before the client closes).
+    The eviction manager doesn't track its dispatch tasks, so we
+    drain by gathering every pending task on the loop that isn't the
+    current test coroutine."""
+    del ctrl  # Unused: kept for call-site symmetry with the API.
+    current = asyncio.current_task()
+    pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
 @pytest.mark.asyncio
-async def test_execute_evictions_dispatches_to_first_registered_instance():
-    """Computed plan must POST to one registered MP server's
-    ``/l2/keys`` and clear those keys from the LRU on success."""
+async def test_execute_evictions_dispatches_to_registered_instance():
+    """Computed plan must DELETE /l2 to a registered MP server with
+    the right body shape. The LRU is NOT cleared by ``execute_evictions``
+    itself — that happens later via the coordinator's ``/l2/events``
+    handler when the MP server reports the deletion back."""
     ctrl, qs, ut = _setup(eviction_ratio=1.0)
     k = _make_key("alice", h="aa")
     _store(ctrl, ut, k, 100)
@@ -258,9 +280,12 @@ async def test_execute_evictions_dispatches_to_first_registered_instance():
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
         plan = await ctrl.execute_evictions(registry, client)
+        # Dispatch is fire-and-forget — wait for the background task
+        # to actually issue the HTTP call before the client closes.
+        await _drain_dispatches(ctrl)
 
     assert plan == {"alice": [k]}
-    # Picked first (only) instance — http://<ip>:<port>/l2/keys.
+    # Hit the single registered instance.
     assert captured["url"] == "http://10.0.0.7:8765/l2"
     # Body shape matches the MP endpoint's contract.
     # Standard
@@ -278,9 +303,11 @@ async def test_execute_evictions_dispatches_to_first_registered_instance():
             }
         ]
     }
-    # LRU cleared and the usage manager subtracted the freed bytes.
-    assert ctrl.compute_eviction_plan() == {}
-    assert ut.get("alice") == 0
+    # LRU + usage are UNCHANGED at this point — the DELETE event hasn't
+    # arrived yet. Cleanup happens once the MP server flushes its
+    # ``on_l2_keys_deleted`` events back through ``/l2/events``.
+    assert ctrl.compute_eviction_plan() == {"alice": [k]}
+    assert ut.get("alice") == 100
 
 
 @pytest.mark.asyncio
@@ -300,6 +327,7 @@ async def test_execute_evictions_no_instances_skips_dispatch_and_keeps_lru():
         )
     ) as client:
         plan = await ctrl.execute_evictions(registry, client)
+        await _drain_dispatches(ctrl)
 
     assert plan == {"alice": [k]}
     # LRU UNCHANGED — the same plan should re-emerge next cycle.
@@ -322,6 +350,7 @@ async def test_execute_evictions_http_failure_keeps_lru():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         plan = await ctrl.execute_evictions(registry, client)
+        await _drain_dispatches(ctrl)
 
     assert plan == {"alice": [k]}
     # LRU UNCHANGED — retry on the next cycle.
@@ -341,5 +370,6 @@ async def test_execute_evictions_empty_plan_is_noop():
         )
     ) as client:
         plan = await ctrl.execute_evictions(registry, client)
+        await _drain_dispatches(ctrl)
 
     assert plan == {}
