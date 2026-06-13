@@ -1448,8 +1448,12 @@ class LMCacheMPWorkerAdapter:
 
             # Retrieves dropped at submit time still must be reported,
             # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
-            finished_retrieves.update(self._dropped_retrieves)
-            self._dropped_retrieves.clear()
+            # Swap-drain (not update-then-clear): a concurrent
+            # submit_retrieve_request add lands in the old set (reported now)
+            # or the fresh set (reported next call), never lost.
+            dropped = self._dropped_retrieves
+            self._dropped_retrieves = set()
+            finished_retrieves.update(dropped)
 
             ret_stores = self._process_finished_stores(
                 finished_stores, finished_req_ids_from_engine
@@ -1506,8 +1510,10 @@ class LMCacheMPWorkerAdapter:
         # finished_sending dedup is needed (unlike the unhealthy branch): a
         # dropped retrieve's request is parked in WAITING_FOR_REMOTE_KVS until
         # this report, so it cannot also be engine-finished in the same call.
-        finished_retrieves.update(self._dropped_retrieves)
-        self._dropped_retrieves.clear()
+        # Swap-drain so a concurrent submit_retrieve_request add is never lost.
+        dropped = self._dropped_retrieves
+        self._dropped_retrieves = set()
+        finished_retrieves.update(dropped)
 
         # Update the internal states
         ret_stores = self._process_finished_stores(
