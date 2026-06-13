@@ -90,13 +90,13 @@ def CreateGPUConnector(
         device = torch.device(f"{torch_device_type}:{local_worker_id}")
         kv_dtype = metadata.kv_dtype
 
-
         if torch_device_type == "xpu":
             # First Party
             from lmcache.v1.gpu_connector.xpu_connectors import (
                 SGLangLayerwiseXPUConnector,
                 SGLangXPUConnector,
             )
+
             if config.use_layerwise:
                 return SGLangLayerwiseXPUConnector(
                     hidden_dim_size,
@@ -115,7 +115,7 @@ def CreateGPUConnector(
                     dtype=kv_dtype,
                     device=device,
                 )
-        else: # GPU for SGLang
+        else:  # GPU for SGLang
             # First Party
             from lmcache.v1.gpu_connector.gpu_connectors import (
                 SGLangGPUConnector,
