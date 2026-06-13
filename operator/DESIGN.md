@@ -391,7 +391,7 @@ l2Backend, scheduling, overrides, imagePullSecrets) and adds:
 ### The blend engine (controller)
 
 `CacheBlendEngineReconciler` mirrors `LMCacheEngineReconciler` and reconciles a
-DaemonSet running `lmcache server --engine-type blend_v3` (plus
+DaemonSet running `lmcache server --engine-type blend` (plus
 `--l1-align-bytes 16777216`), a node-local lookup Service, a metrics Service, and
 a `<name>-connection` ConfigMap. **GPU model is identical to `LMCacheEngine`**:
 `privileged` + `runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` +
@@ -469,7 +469,7 @@ user-supplied `--flag=value`.
 
 | Resource | Name | Purpose |
 |---|---|---|
-| DaemonSet | `cb` | `lmcache server --engine-type blend_v3` on GPU nodes |
+| DaemonSet | `cb` | `lmcache server --engine-type blend` on GPU nodes |
 | Service (node-local) | `cb` | same-node discovery for vLLM (`CBKVConnector`) |
 | Service (headless) | `cb-metrics` | Prometheus scrape target |
 | ConfigMap | `cb-connection` | `CBKVConnector` kv-transfer-config |

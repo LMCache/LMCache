@@ -330,9 +330,9 @@ class DataTransferContext(TransferContext):
         hybrid KV cache groups and rejects multi-group transfers at store /
         retrieve time (see ``_single_group_block_ids``).
         """
-        # TODO: inference_engine_logical_block_size is currently used by
-        # DeepSeek V4 on the CUDA path. The non-CUDA path is yet to be
-        # implemented.
+        # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
+        # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
+        # on the CUDA path. The non-CUDA path is yet to be implemented.
         (
             block_size,
             num_layers,

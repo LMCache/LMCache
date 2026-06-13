@@ -18,6 +18,7 @@ from lmcache.v1.distributed.config import (
     add_storage_manager_args,
     parse_args_to_config,
 )
+from lmcache.v1.mp_coordinator.l2.event_listener import L2EventListener
 from lmcache.v1.mp_coordinator.registrar import keep_registered
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
@@ -107,7 +108,6 @@ async def lifespan(app: FastAPI):
     # the keep_registered task registers, heartbeats, and deregisters on
     # shutdown. Best-effort: failures are logged and retried, never fatal.
     http_config = _configs.get("http")
-    obs_config = _configs.get("observability")
     coordinator_config = _configs.get("coordinator")
     coordinator_client = None
     coordinator_registration_task = None
@@ -117,22 +117,44 @@ async def lifespan(app: FastAPI):
         and http_config is not None
     ):
         coordinator_client = httpx.AsyncClient(timeout=10.0)
-        # Reuse this server's telemetry identity (OTel service.instance.id) so
-        # coordinator membership lines up with metrics/traces. Empty lets the
-        # coordinator assign one.
-        service_instance_id = getattr(obs_config, "service_instance_id", None)
+        # Canonical id resolved by run_cache_server above; shared with
+        # the OTel service.instance.id so membership matches metrics/traces.
         coordinator_registration_task = asyncio.create_task(
             keep_registered(
                 coordinator_client,
                 coordinator_config.url,
                 http_port=http_config.http_port,
-                instance_id=service_instance_id or "",
+                instance_id=mp_config.instance_id,
                 advertise_ip=coordinator_config.advertise_ip,
                 heartbeat_interval=coordinator_config.heartbeat_interval,
             )
         )
+    # Optionally report L2 store/lookup events to the coordinator for
+    # fleet-wide usage tracking and eviction. Registers as a listener on
+    # all L2 adapters and flushes batched events on a timer.
+    coordinator_l2_event_client = None
+    coordinator_l2_event_task = None
+    if (
+        coordinator_client is not None
+        and coordinator_config is not None
+        and coordinator_config.url
+        and coordinator_config.l2_event_reporting
+    ):
+        coordinator_l2_event_client = L2EventListener(
+            coordinator_client,
+            coordinator_config.url,
+            instance_id=mp_config.instance_id,
+            flush_interval=coordinator_config.l2_event_flush_interval,
+        )
+        if engine.storage_manager is not None:
+            engine.storage_manager.register_l2_listener(coordinator_l2_event_client)
+        coordinator_l2_event_task = asyncio.create_task(
+            coordinator_l2_event_client.run()
+        )
+
     app.state.coordinator_client = coordinator_client
     app.state.coordinator_registration_task = coordinator_registration_task
+    app.state.coordinator_l2_event_task = coordinator_l2_event_task
 
     logger.info("LMCache HTTP server initialized")
 
@@ -140,6 +162,11 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("Shutting down LMCache HTTP server...")
+    coordinator_l2_event_task = getattr(app.state, "coordinator_l2_event_task", None)
+    if coordinator_l2_event_task is not None:
+        coordinator_l2_event_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await coordinator_l2_event_task
     coordinator_registration_task = getattr(
         app.state, "coordinator_registration_task", None
     )

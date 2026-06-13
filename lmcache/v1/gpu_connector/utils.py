@@ -77,23 +77,12 @@ class LayoutHints(TypedDict, total=False):
             on a SGLang registration is what triggers the daemon-side
             depth-1 → depth-2 un-flatten + 3-D → 4-D reshape.
         head_dim: Per-head dimension. Used by TRT-LLM (same).
-        inference_engine_logical_block_size: Inference-engine-side block
-            size (logical tokens per engine block; for vLLM this is
-            ``cache_config.block_size``). Carried inside
-            ``LayoutHints`` (instead of as a standalone
-            ``REGISTER_KV_CACHE`` argument) so that engines without a
-            logical block-size concept can simply omit it. The server
-            uses it to derive per-group compression ratios when some
-            KV layer groups compress multiple logical tokens into a
-            single physical slot
-            (``shape_desc.bs < inference_engine_logical_block_size``).
     """
 
     kv_layout: Literal["NHD", "HND"]
     num_kv_heads: int
     tokens_per_block: int
     head_dim: int
-    inference_engine_logical_block_size: int
 
 
 def attempt_permute_to_contiguous_view(

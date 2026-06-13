@@ -73,7 +73,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
 
     def fake_create_cache_context(
         kv_caches: object,
-        lmcache_logical_chunk_size: int,
+        lmcache_tokens_per_chunk: int,
         layout_hints: object = None,
         engine_group_infos: object = (),
         engine_type: object = None,

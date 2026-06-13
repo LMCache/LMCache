@@ -33,7 +33,7 @@ The ``lmcache`` CLI ships in two packages:
    * - ``lmcache-cli``
      - ``pip install lmcache-cli``
      - CLI only: ``ping``, ``query``, ``describe``, ``kvcache``,
-       ``bench engine``. No GPU required, any OS.
+       ``quota``, ``bench engine``. No GPU required, any OS.
 
 .. note::
 
@@ -65,6 +65,8 @@ Available Commands
        adapter (``l2``).
    * - :doc:`kvcache`
      - Manage KV cache state (e.g. clear L1 cache) on a running server.
+   * - :doc:`quota`
+     - Manage per-salt cache quotas (set, get, list, delete).
    * - :doc:`trace`
      - Inspect and replay storage-level trace files.
    * - :doc:`tool`
@@ -100,5 +102,6 @@ See :doc:`/developer_guide/cli` for details.
    query
    bench
    kvcache
+   quota
    trace
    tool

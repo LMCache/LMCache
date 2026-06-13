@@ -135,7 +135,7 @@ var _ = Describe("CacheBlendEngine Controller", func() {
 			Expect(podSpec.Containers).To(HaveLen(1))
 			engineContainer := podSpec.Containers[0]
 
-			Expect(argsContainFlagValue(engineContainer.Args, "--engine-type", "blend_v3")).To(BeTrue())
+			Expect(argsContainFlagValue(engineContainer.Args, "--engine-type", "blend")).To(BeTrue())
 			Expect(argsContainFlagValue(engineContainer.Args, "--l1-align-bytes", "16777216")).To(BeTrue())
 
 			By("Verifying there is no GPU resource claim")
