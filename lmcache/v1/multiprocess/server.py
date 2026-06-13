@@ -202,11 +202,19 @@ def _build_modules(
                 f"'auto', got '{mp_config.supported_transfer_mode}'"
             )
         # First Party
+        from lmcache.v1.mp_coordinator.blend_client import (
+            BlendCoordinatorClient,
+        )
         from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
 
         gpu_transfer = next(m for m in modules if isinstance(m, GPUTransferModule))
         lookup_module = next(m for m in modules if isinstance(m, LookupModule))
-        modules.append(BlendV3Module(ctx, gpu_transfer, lookup_module))
+        # Opt-in: enabled only when LMCACHE_COORDINATOR_URL is set; otherwise
+        # None and the blend module matches purely locally.
+        coordinator = BlendCoordinatorClient.maybe_from_env()
+        modules.append(
+            BlendV3Module(ctx, gpu_transfer, lookup_module, coordinator=coordinator)
+        )
 
     return modules
 

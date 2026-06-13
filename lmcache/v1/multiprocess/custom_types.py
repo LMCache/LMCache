@@ -386,9 +386,11 @@ class CBUnifiedLookupResult:
             tokens — what the standard LOOKUP would report.
         non_prefix_segments: Fingerprint matches outside the prefix coverage
             (cur_st order), each carrying ``(old_st, old_ed, cur_st, cur_ed,
-            hash)``. Token-aligned (any offset, not block-aligned): the per-token
-            slot scatter handles them. Already resident in L1, so the retrieve
-            set equals the prefetched set.
+            hash)``. Already sparse-prefetched, so the retrieve set equals the
+            prefetched set. Includes fleet-coordinator (shared-L2) matches:
+            those are merged in before the sparse prefetch -- prefix-covered and
+            locally-duplicated ones dropped -- so they ride the identical
+            prefetch + retrieve path and need no separate handling.
     """
 
     prefix_coverage_tokens: int
