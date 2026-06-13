@@ -25,6 +25,7 @@ or wait for the existing L1 eviction controller.
 # Standard
 from dataclasses import dataclass
 from typing import Any
+import asyncio
 
 # Third Party
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -119,7 +120,12 @@ async def delete_l2(body: DeleteRequest, request: Request) -> dict[str, object]:
             raise HTTPException(status_code=400, detail=f"keys[{i}]: {exc}") from None
 
     try:
-        report = sm.delete_l2(parsed)
+        # ``delete_l2`` is synchronous and blocks on adapter I/O (the
+        # S3 adapter bounces the call through
+        # ``run_coroutine_threadsafe(...).result(timeout=30.0)``).
+        # Off-load to a worker thread so the FastAPI event loop stays
+        # free for other requests.
+        report = await asyncio.to_thread(sm.delete_l2, parsed)
     except ValueError as exc:
         # Surfaced when no L2 adapters are configured — operationally
         # equivalent to "engine isn't ready to serve this endpoint."
@@ -156,7 +162,12 @@ async def list_l2_keys(
     sm = _get_storage_manager(request)
 
     try:
-        return sm.list_l2_keys(
+        # Same rationale as ``delete_l2``: ``list_l2_keys`` is a
+        # synchronous adapter call that issues blocking S3
+        # ``ListObjectsV2`` requests, so off-load it to a worker
+        # thread to keep the event loop responsive.
+        return await asyncio.to_thread(
+            sm.list_l2_keys,
             model_name=model_name,
             page_size=page_size,
             page_token=page_token,
