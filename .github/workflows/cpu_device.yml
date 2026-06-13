@@ -107,7 +107,11 @@ jobs:
         run: bash .github/scripts/install_lmcache_cpu.sh
 
       - name: Download facebook/opt-125m
-        run: bash .github/scripts/download_model.sh facebook/opt-125m
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          HF_DOWNLOAD_FAIL_ON_ERROR=1 \
+            bash .github/scripts/download_model.sh facebook/opt-125m
 
       - name: Server bench — Data
         run: |
@@ -124,6 +128,8 @@ jobs:
             bash .github/scripts/cpu_device_test.sh server_bench
 
       - name: vLLM e2e — Data (pickle)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=pickle \
           LMCACHE_HTTP_PORT_E2E=18082 \
@@ -134,6 +140,8 @@ jobs:
       # POSIX SHM transport is Linux-only.
       - name: vLLM e2e — Data (shm)
         if: runner.os == 'Linux'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=shm \
           LMCACHE_HTTP_PORT_E2E=18083 \
@@ -142,6 +150,8 @@ jobs:
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
       - name: vLLM e2e — Handle
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           LMCACHE_E2E_TRANSPORT_MODE=handle \
           LMCACHE_HTTP_PORT_E2E=18084 \
