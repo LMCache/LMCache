@@ -41,7 +41,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
-    CudaIPCWrapper,
+    DeviceIPCWrapper,
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
@@ -441,7 +441,7 @@ class BlendV3Module(InstanceLivenessTarget):
     def cb_register_rope(
         self,
         instance_id: int,
-        cos_sin_cache_ipc: CudaIPCWrapper,
+        cos_sin_cache_ipc: DeviceIPCWrapper,
         head_size: int,
         is_neox_style: bool,
     ) -> None:
@@ -453,7 +453,7 @@ class BlendV3Module(InstanceLivenessTarget):
 
         Args:
             instance_id (int): KV-cache instance to attach rope state to.
-            cos_sin_cache_ipc (CudaIPCWrapper): IPC handle to vLLM's cos/sin
+            cos_sin_cache_ipc (DeviceIPCWrapper): IPC handle to vLLM's cos/sin
                 rope cache.
             head_size (int): Rotary head dimension.
             is_neox_style (bool): True for NeoX (contiguous halves), else GPT-J.

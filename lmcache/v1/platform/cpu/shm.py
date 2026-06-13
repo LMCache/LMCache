@@ -26,7 +26,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
+from lmcache.v1.multiprocess.custom_types import DeviceIPCWrapper
 from lmcache.v1.multiprocess.posix_shm import (
     shm_create_readwrite,
     shm_map_readwrite,
@@ -54,7 +54,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-class CpuShmTensorWrapper(CudaIPCWrapper):
+class CpuShmTensorWrapper(DeviceIPCWrapper):
     """IPC wrapper for CPU tensors backed by POSIX shared memory.
 
     Used by the ``lmcache bench kvcache --mode cpu`` path and the
@@ -62,11 +62,11 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
     map the **same** physical pages for the KV cache, mirroring the
     GPU-mode CUDA-IPC zero-copy semantics.
 
-    Subclassing :class:`CudaIPCWrapper` is load-bearing for the same
+    Subclassing :class:`DeviceIPCWrapper` is load-bearing for the same
     reason :class:`RawCudaIPCWrapper` does it: msgspec does not
     support unions of custom ext-encoded types, so all wire-level
     KV-cache wrappers must share the single ext code (1) registered
-    for ``CudaIPCWrapper``. Pickle preserves the subclass identity
+    for ``DeviceIPCWrapper``. Pickle preserves the subclass identity
     so ``to_tensor`` dispatches correctly on both sides.
     """
 
@@ -87,8 +87,8 @@ class CpuShmTensorWrapper(CudaIPCWrapper):
         # underlying storage may be larger when the tensor is a view.
         self.nbytes = tensor.numel() * tensor.element_size()
 
-        # CudaIPCWrapper interface fields. ``handle`` / ``device_uuid``
-        # are unused on the CPU path but kept to satisfy the parent
+        # DeviceIPCWrapper interface fields. ``handle`` / ``device_uuid``
+        # are unused on the CPU path but kept to satisfy the base
         # contract used by equality checks.
         self.handle = None
         self.dtype = tensor.dtype
