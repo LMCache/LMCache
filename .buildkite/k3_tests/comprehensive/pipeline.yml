@@ -2,7 +2,7 @@
 # Each step gets its own K8s pod with the exact GPU count it needs.
 # 2-GPU group is listed first so these heavier jobs get scheduled before 1-GPU jobs.
 
-perf_retry: &perf-retry
+x-perf-retry: &perf-retry
   automatic:
     - exit_status: -1
       limit: 2
