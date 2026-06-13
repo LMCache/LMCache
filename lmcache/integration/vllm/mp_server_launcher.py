@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Helpers for auto-starting the LMCache multiprocess server."""
 
+# Future
+from __future__ import annotations
+
 # Standard
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 from urllib.parse import urlparse
 import shlex
 import subprocess
@@ -17,19 +20,31 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 
+MessageQueueClient: object | None
+RequestType: object | None
+get_response_class: object | None
 try:
     # Import at module load time to follow the repo import convention. Some
     # config-only tests import this launcher without installing torch; keep that
     # import path available and fail only when MQ health probing is actually used.
     # First Party
-    from lmcache.v1.multiprocess.mq import MessageQueueClient
-    from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+    from lmcache.v1.multiprocess.mq import (
+        MessageQueueClient as _ImportedMessageQueueClient,
+    )
+    from lmcache.v1.multiprocess.protocol import RequestType as _ImportedRequestType
+    from lmcache.v1.multiprocess.protocol import (
+        get_response_class as _imported_get_response_class,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "torch":
         raise
     MessageQueueClient = None
     RequestType = None
     get_response_class = None
+else:
+    MessageQueueClient = _ImportedMessageQueueClient
+    RequestType = _ImportedRequestType
+    get_response_class = _imported_get_response_class
 
 logger = init_logger(__name__)
 
@@ -47,73 +62,30 @@ _POLL_INTERVAL_SECONDS = 0.5
 _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
-class _MessagingFuture(Protocol):
-    def result(self, timeout: float | None = None) -> object:
-        """Return the completed result, or raise if unavailable."""
-
-
-class _MessageQueueClient(Protocol):
-    def submit_request(
-        self,
-        request_type: object,
-        request_payloads: list[object],
-        response_cls: object | None = None,
-    ) -> _MessagingFuture:
-        """Submit an MQ request and return its future."""
-
-    def close(self) -> None:
-        """Close the MQ client."""
-
-
 def _create_message_queue_client(
     server_url: str,
     zmq_context: zmq.Context,
 ) -> _MessageQueueClient:
-    if MessageQueueClient is None:
+    message_queue_client = MessageQueueClient
+    if message_queue_client is None:
         raise RuntimeError("MessageQueueClient requires torch to be installed")
-    return MessageQueueClient(server_url, zmq_context)
+    factory = cast(_MessageQueueClientFactory, message_queue_client)
+    return factory(server_url, zmq_context)
 
 
 def _submit_ping(client: _MessageQueueClient) -> _MessagingFuture:
-    if RequestType is None or get_response_class is None:
+    request_type = RequestType
+    response_class_getter = get_response_class
+    if request_type is None or response_class_getter is None:
         raise RuntimeError("MP health probing requires torch to be installed")
+    ping_request_type = cast(_RequestTypeNamespace, request_type).PING
     return client.submit_request(
-        RequestType.PING,
+        ping_request_type,
         [],
-        get_response_class(RequestType.PING),
+        cast(Callable[[object], object | None], response_class_getter)(
+            ping_request_type
+        ),
     )
-
-
-def is_mp_server_healthy(
-    server_url: str,
-    zmq_context: zmq.Context,
-    timeout: float = _PING_TIMEOUT_SECONDS,
-) -> bool:
-    """Return whether the MP server responds to a ZMQ PING request.
-
-    Args:
-        server_url: ZMQ URL of the LMCache MP server.
-        zmq_context: ZMQ context used to create a temporary MQ client.
-        timeout: Maximum seconds to wait for the PING response.
-
-    Returns:
-        ``True`` if the server returns a successful PING response, otherwise
-        ``False``.
-    """
-    client: _MessageQueueClient | None = None
-    try:
-        client = _create_message_queue_client(server_url, zmq_context)
-        future = _submit_ping(client)
-        return bool(future.result(timeout=timeout))
-    except Exception:
-        logger.debug("LMCache MP server ZMQ PING failed", exc_info=True)
-        return False
-    finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                logger.debug("Failed to close LMCache MP health client", exc_info=True)
 
 
 def _build_autostart_config_from_url(
@@ -142,7 +114,12 @@ def _build_autostart_config_from_url(
         )
 
     server_host = _get_extra_config_value(extra_config, _HOST_KEY)
-    server_port = _get_extra_config_value(extra_config, _PORT_KEY)
+    server_port_value = _get_extra_config_value(extra_config, _PORT_KEY)
+    if server_port_value is not None and not isinstance(server_port_value, (int, str)):
+        raise ValueError(
+            f"LMCache MP server port must be an integer: {server_port_value!r}"
+        )
+    server_port = server_port_value
     if server_host is None or server_port is None:
         parsed = urlparse(server_url if "://" in server_url else f"tcp://{server_url}")
         if parsed.hostname is None or parsed.port is None:
@@ -154,77 +131,6 @@ def _build_autostart_config_from_url(
         extra_config=extra_config,
         server_host=str(server_host),
         server_port=server_port,
-    )
-
-
-def maybe_start_mp_server_from_url(
-    *,
-    extra_config: object | None,
-    server_url: str,
-    zmq_context: zmq.Context,
-) -> "MPServerLauncher | None":
-    """Start the connector's local LMCache MP server when auto-start is enabled.
-
-    Args:
-        extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_url: ZMQ URL used by the connector to reach the MP server.
-        zmq_context: ZMQ context used for health probing.
-
-    Returns:
-        A launcher for the enabled auto-start configuration, or ``None`` when
-        auto-start is disabled. The launcher owns a process only when it had to
-        start one.
-
-    Raises:
-        ValueError: If an auto-start configuration value or server URL is
-            invalid.
-        ConnectionError: If auto-start is enabled and the server does not
-            become reachable before the configured timeout.
-    """
-    config = _build_autostart_config_from_url(
-        extra_config=extra_config,
-        server_url=server_url,
-    )
-    if not config.enabled:
-        return None
-
-    launcher = MPServerLauncher(config)
-    launcher.start(server_url=server_url, zmq_context=zmq_context)
-    return launcher
-
-
-def wait_for_mp_server_from_url(
-    *,
-    extra_config: object | None,
-    server_url: str,
-    zmq_context: zmq.Context,
-) -> None:
-    """Wait for the connector's local LMCache MP server when auto-start is enabled.
-
-    Args:
-        extra_config: vLLM ``kv_connector_extra_config`` mapping.
-        server_url: ZMQ URL used by the connector to reach the MP server.
-        zmq_context: ZMQ context used for health probing.
-
-    Returns:
-        None.
-
-    Raises:
-        ValueError: If an auto-start configuration value or server URL is
-            invalid.
-        ConnectionError: If auto-start is enabled and the server does not
-            become reachable before the configured timeout.
-    """
-    config = _build_autostart_config_from_url(
-        extra_config=extra_config,
-        server_url=server_url,
-    )
-    if not config.enabled:
-        return
-
-    MPServerLauncher(config).wait_until_healthy(
-        server_url=server_url,
-        zmq_context=zmq_context,
     )
 
 
@@ -327,6 +233,33 @@ def _normalize_local_host(server_host: str) -> str:
             f"{sorted(_LOCAL_HOSTS)}, got {server_host!r}"
         )
     return host
+
+
+class _MessagingFuture(Protocol):
+    def result(self, timeout: float | None = None) -> object:
+        """Return the completed result, or raise if unavailable."""
+
+
+class _MessageQueueClient(Protocol):
+    def submit_request(
+        self,
+        request_type: object,
+        request_payloads: list[object],
+        response_cls: object | None = None,
+    ) -> _MessagingFuture:
+        """Submit an MQ request and return its future."""
+
+    def close(self) -> None:
+        """Close the MQ client."""
+
+
+class _MessageQueueClientFactory(Protocol):
+    def __call__(self, server_url: str, context: zmq.Context) -> _MessageQueueClient:
+        """Create a message queue client."""
+
+
+class _RequestTypeNamespace(Protocol):
+    PING: object
 
 
 @dataclass(frozen=True)
@@ -548,3 +481,106 @@ class MPServerLauncher:
         if require_owned_process:
             message += f", command={self.config.command()}"
         raise ConnectionError(message)
+
+
+def is_mp_server_healthy(
+    server_url: str,
+    zmq_context: zmq.Context,
+    timeout: float = _PING_TIMEOUT_SECONDS,
+) -> bool:
+    """Return whether the MP server responds to a ZMQ PING request.
+
+    Args:
+        server_url: ZMQ URL of the LMCache MP server.
+        zmq_context: ZMQ context used to create a temporary MQ client.
+        timeout: Maximum seconds to wait for the PING response.
+
+    Returns:
+        ``True`` if the server returns a successful PING response, otherwise
+        ``False``.
+    """
+    client: _MessageQueueClient | None = None
+    try:
+        client = _create_message_queue_client(server_url, zmq_context)
+        future = _submit_ping(client)
+        return bool(future.result(timeout=timeout))
+    except Exception:
+        logger.debug("LMCache MP server ZMQ PING failed", exc_info=True)
+        return False
+    finally:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                logger.debug("Failed to close LMCache MP health client", exc_info=True)
+
+
+def maybe_start_mp_server_from_url(
+    *,
+    extra_config: object | None,
+    server_url: str,
+    zmq_context: zmq.Context,
+) -> MPServerLauncher | None:
+    """Start the connector's local LMCache MP server when auto-start is enabled.
+
+    Args:
+        extra_config: vLLM ``kv_connector_extra_config`` mapping.
+        server_url: ZMQ URL used by the connector to reach the MP server.
+        zmq_context: ZMQ context used for health probing.
+
+    Returns:
+        A launcher for the enabled auto-start configuration, or ``None`` when
+        auto-start is disabled. The launcher owns a process only when it had to
+        start one.
+
+    Raises:
+        ValueError: If an auto-start configuration value or server URL is
+            invalid.
+        ConnectionError: If auto-start is enabled and the server does not
+            become reachable before the configured timeout.
+    """
+    config = _build_autostart_config_from_url(
+        extra_config=extra_config,
+        server_url=server_url,
+    )
+    if not config.enabled:
+        return None
+
+    launcher = MPServerLauncher(config)
+    launcher.start(server_url=server_url, zmq_context=zmq_context)
+    return launcher
+
+
+def wait_for_mp_server_from_url(
+    *,
+    extra_config: object | None,
+    server_url: str,
+    zmq_context: zmq.Context,
+) -> None:
+    """Wait for the connector's local LMCache MP server when auto-start is enabled.
+
+    Args:
+        extra_config: vLLM ``kv_connector_extra_config`` mapping.
+        server_url: ZMQ URL used by the connector to reach the MP server.
+        zmq_context: ZMQ context used for health probing.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If an auto-start configuration value or server URL is
+            invalid.
+        ConnectionError: If auto-start is enabled and the server does not
+            become reachable before the configured timeout.
+    """
+    config = _build_autostart_config_from_url(
+        extra_config=extra_config,
+        server_url=server_url,
+    )
+    if not config.enabled:
+        return
+
+    MPServerLauncher(config).wait_until_healthy(
+        server_url=server_url,
+        zmq_context=zmq_context,
+    )

@@ -284,8 +284,8 @@ def test_maybe_start_mp_server_from_url_starts_when_enabled(monkeypatch) -> None
             self.config = config
             self.started = False
             self.waited = False
-            self.server_url = None
-            self.zmq_context = None
+            self.server_url: str | None = None
+            self.zmq_context: object | None = None
             instances.append(self)
 
         def start(self, server_url: str, zmq_context: object) -> None:
@@ -592,7 +592,8 @@ def test_shutdown_kills_process_after_terminate_timeout(monkeypatch) -> None:
         def wait(self, timeout: float | None = None) -> int:
             self.wait_calls.append(timeout)
             if not self.kill_called:
-                raise subprocess.TimeoutExpired(cmd="server", timeout=timeout)
+                timeout_value = 0.0 if timeout is None else timeout
+                raise subprocess.TimeoutExpired(cmd="server", timeout=timeout_value)
             self.returncode = 0
             return self.returncode
 
