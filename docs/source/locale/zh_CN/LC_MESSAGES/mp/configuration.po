@@ -939,10 +939,11 @@ msgstr "``lmcache.mp.mp_transfer_mode``"
 #: ../../source/mp/configuration.rst:479
 msgid ""
 "Routing mode for the worker -> server transfer context. One of ``auto`` "
-"(CUDA -> handle, others -> data), ``handle`` (force IPC / SHM zero-copy),"
-" or ``data`` (force worker-side gather/scatter copy). Overrides the "
-"``LMCACHE_MP_TRANSFER_MODE`` env var when set."
-msgstr "用于工作者与服务器传输上下文的路由模式。可以是 ``auto``（CUDA -> 句柄，其他 -> 数据）、``handle``（强制 IPC / SHM 零拷贝）或 ``data``（强制工作者端聚合/分散拷贝）。当设置时，将覆盖 ``LMCACHE_MP_TRANSFER_MODE`` 环境变量。"
+"(CUDA -> engine_driven, others -> lmcache_driven), ``engine_driven`` "
+"(force IPC / SHM zero-copy), or ``lmcache_driven`` (force worker-side "
+"gather/scatter copy). Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var"
+" when set."
+msgstr "用于工作者与服务器传输上下文的路由模式。可以是 ``auto``（CUDA -> engine_driven，其他 -> lmcache_driven）、``engine_driven``（强制 IPC / SHM 零拷贝）或 ``lmcache_driven``（强制工作者端聚合/分散拷贝）。当设置时，将覆盖 ``LMCACHE_MP_TRANSFER_MODE`` 环境变量。"
 
 #: ../../source/mp/configuration.rst:485
 msgid "Environment Variables"
