@@ -38,10 +38,14 @@ from lmcache.v1.multiprocess.engine_module import (
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -115,7 +119,7 @@ class MPCacheServer:
     def gpu_contexts(self) -> dict[int, GPUCacheContext] | None:
         """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
-            if isinstance(module, GPUTransferModule):
+            if isinstance(module, EngineDrivenTransferModule):
                 return {i: e.cache_context for i, e in module.cache_contexts.items()}
         return None
 
@@ -170,12 +174,12 @@ def _build_modules(
     ]
 
     if mp_config.supported_transfer_mode == "gpu":
-        modules.append(GPUTransferModule(ctx))
+        modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "non_gpu":
-        modules.append(NonGPUTransferModule(ctx))
+        modules.append(LMCacheDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
-        modules.append(GPUTransferModule(ctx))
-        modules.append(NonGPUTransferModule(ctx))
+        modules.append(EngineDrivenTransferModule(ctx))
+        modules.append(LMCacheDrivenTransferModule(ctx))
     else:
         raise ValueError(
             f"Unsupported supported_transfer_mode '{mp_config.supported_transfer_mode}'"
@@ -207,7 +211,9 @@ def _build_modules(
         )
         from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
 
-        gpu_transfer = next(m for m in modules if isinstance(m, GPUTransferModule))
+        gpu_transfer = next(
+            m for m in modules if isinstance(m, EngineDrivenTransferModule)
+        )
         lookup_module = next(m for m in modules if isinstance(m, LookupModule))
         # Opt-in: enabled only when LMCACHE_COORDINATOR_URL is set; otherwise
         # None and the blend module matches purely locally.

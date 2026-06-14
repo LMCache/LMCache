@@ -51,13 +51,13 @@ msgstr "所有服务器入口点共享相同的 ``MPCacheServer`` 和 ``StorageM
 msgid ""
 "**``server.py``** -- The default ZMQ-only server.  Creates an "
 "``MPCacheServer``, assembles the engine modules (``LookupModule`` + "
-"``ManagementModule`` + ``GPUTransferModule`` and/or "
-"``NonGPUTransferModule`` depending on ``--supported-transfer-mode`` — "
+"``ManagementModule`` + ``EngineDrivenTransferModule`` and/or "
+"``LMCacheDrivenTransferModule`` depending on ``--supported-transfer-mode`` — "
 "``gpu`` or ``non_gpu`` loads just one, ``auto`` (default) loads both — "
 "plus ``BlendModule`` when ``--engine-type blend``), starts a "
 "``MessageQueueServer``, registers handlers for every ``RequestType`` "
 "exposed by the loaded modules, and blocks in a keep-alive loop."
-msgstr "**``server.py``** -- 默认的仅 ZMQ 服务器。创建一个 ``MPCacheServer``，组装引擎模块（``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule`` 和/或 ``NonGPUTransferModule``，具体取决于 ``--supported-transfer-mode`` — ``gpu`` 或 ``non_gpu`` 仅加载一个，``auto``（默认）加载两个 — 当 ``--engine-type blend`` 时还会加载 ``BlendModule``），启动 ``MessageQueueServer``，为加载的模块暴露的每个 ``RequestType`` 注册处理程序，并在保持活动的循环中阻塞。"
+msgstr "**``server.py``** -- 默认的仅 ZMQ 服务器。创建一个 ``MPCacheServer``，组装引擎模块（``LookupModule`` + ``ManagementModule`` + ``EngineDrivenTransferModule`` 和/或 ``LMCacheDrivenTransferModule``，具体取决于 ``--supported-transfer-mode`` — ``gpu`` 或 ``non_gpu`` 仅加载一个，``auto``（默认）加载两个 — 当 ``--engine-type blend`` 时还会加载 ``BlendModule``），启动 ``MessageQueueServer``，为加载的模块暴露的每个 ``RequestType`` 注册处理程序，并在保持活动的循环中阻塞。"
 
 #: ../../source/mp/architecture.rst:61
 msgid ""
@@ -723,11 +723,11 @@ msgstr "``lmcache/v1/multiprocess/modules/``"
 #: ../../source/mp/architecture.rst:431
 msgid ""
 "Engine module implementations: ``lookup.py`` (``LookupModule``), "
-"``management.py`` (``ManagementModule``), ``gpu_transfer.py`` "
-"(``GPUTransferModule``), ``non_gpu_transfer.py`` "
-"(``NonGPUTransferModule``), and ``blend.py`` (``BlendModule`` / "
+"``management.py`` (``ManagementModule``), ``engine_driven_transfer.py`` "
+"(``EngineDrivenTransferModule``), ``lmcache_driven_transfer.py`` "
+"(``LMCacheDrivenTransferModule``), and ``blend.py`` (``BlendModule`` / "
 "``BlendEngineV2``)."
-msgstr "引擎模块实现：``lookup.py`` (``LookupModule``)、``management.py`` (``ManagementModule``)、``gpu_transfer.py`` (``GPUTransferModule``)、``non_gpu_transfer.py`` (``NonGPUTransferModule``) 和 ``blend.py`` (``BlendModule`` / ``BlendEngineV2``)。"
+msgstr "引擎模块实现：``lookup.py`` (``LookupModule``)、``management.py`` (``ManagementModule``)、``engine_driven_transfer.py`` (``EngineDrivenTransferModule``)、``lmcache_driven_transfer.py`` (``LMCacheDrivenTransferModule``) 和 ``blend.py`` (``BlendModule`` / ``BlendEngineV2``)。"
 
 #: ../../source/mp/architecture.rst:436
 msgid "``lmcache/v1/multiprocess/http_server.py``"

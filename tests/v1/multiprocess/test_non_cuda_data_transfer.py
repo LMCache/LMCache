@@ -42,8 +42,8 @@ if TYPE_CHECKING:
         RegisterNonGpuContextPayload,
     )
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import (
-        NonGPUTransferModule,
+    from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+        LMCacheDrivenTransferModule,
     )
 
 
@@ -57,7 +57,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: Optional storage mock; defaults to a new ``MagicMock``.
         mock_session: Optional session mock; defaults to a new ``MagicMock``.
 
-    Returns a tuple of ``(NonGPUTransferModule, storage MagicMock,
+    Returns a tuple of ``(LMCacheDrivenTransferModule, storage MagicMock,
     session MagicMock, MPCacheServerContext)``.
     """
 
@@ -70,7 +70,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
     ) -> tuple[
-        "NonGPUTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
+        "LMCacheDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
     ]: ...
 
 
@@ -644,7 +644,9 @@ def server_module_factory(
 
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
+    from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+        LMCacheDrivenTransferModule,
+    )
 
     stack = ExitStack()
 
@@ -655,7 +657,9 @@ def server_module_factory(
         object_keys: list[str] | None = None,
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
-    ) -> tuple["NonGPUTransferModule", MagicMock, MagicMock, "MPCacheServerContext"]:
+    ) -> tuple[
+        "LMCacheDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
+    ]:
         """Create a patched module/context plus storage/session mocks.
 
         Args:
@@ -703,7 +707,7 @@ def server_module_factory(
             storage_manager_config=storage_manager_config,
             chunk_size=chunk_size,
         )
-        module = NonGPUTransferModule(ctx)
+        module = LMCacheDrivenTransferModule(ctx)
 
         return module, mock_storage, mock_session, ctx
 

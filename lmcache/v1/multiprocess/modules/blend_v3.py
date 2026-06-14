@@ -47,7 +47,9 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
@@ -313,14 +315,14 @@ def _unique_token_coverage(results: list[CBMatchResult]) -> int:
 
 
 class BlendV3Module:
-    """Paged-aware V3 CacheBlend. Wraps GPUTransfer STORE to register
+    """Paged-aware V3 CacheBlend. Wraps EngineDrivenTransfer STORE to register
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
-    GPU state via :class:`GPUTransferModule.gpu_contexts`."""
+    GPU state via :class:`EngineDrivenTransferModule.cache_contexts`."""
 
     def __init__(
         self,
         ctx: MPCacheServerContext,
-        gpu_transfer: GPUTransferModule,
+        gpu_transfer: EngineDrivenTransferModule,
         lookup_module: LookupModule,
         coordinator: "BlendCoordinatorClient | None" = None,
     ):
@@ -376,7 +378,7 @@ class BlendV3Module:
         return self._ctx
 
     def get_handlers(self) -> list[HandlerSpec]:
-        # STORE shadows GPUTransfer's; compositor registers V3 last.
+        # STORE shadows EngineDrivenTransfer's; compositor registers V3 last.
         return [
             HandlerSpec(RequestType.STORE, self.store, ThreadPoolType.AFFINITY),
             HandlerSpec(
@@ -922,7 +924,7 @@ class BlendV3Module:
     ) -> tuple[bytes, bool]:
         """Paged store, then register the stored chunks as match fingerprints.
 
-        Delegates the KV write to ``GPUTransfer.store``, then (worker 0 only)
+        Delegates the KV write to ``EngineDrivenTransfer.store``, then (worker 0 only)
         enqueues the chunk hashes for async fingerprint registration ordered
         after the L1 commit. Chunk 0 of a position-0 store is skipped (owned by
         the standard prefix path). Fingerprint failures are logged, never
@@ -935,7 +937,7 @@ class BlendV3Module:
             event_ipc_handle (bytes): IPC handle to the producer's CUDA event.
 
         Returns:
-            tuple[bytes, bool]: The underlying ``GPUTransfer.store`` result
+            tuple[bytes, bool]: The underlying ``EngineDrivenTransfer.store`` result
             (event handle, success).
         """
         result = self._gpu_transfer.store(

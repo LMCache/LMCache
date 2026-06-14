@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Non-GPU KV cache transfer operations for the MPCacheServer."""
+"""LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
 from dataclasses import dataclass
@@ -57,8 +57,8 @@ class NonGPUContextEntry:
     world_size: int
 
 
-class NonGPUTransferModule:
-    """Handles non-GPU KV cache transfer operations.
+class LMCacheDrivenTransferModule:
+    """Handles LMCache-driven KV cache transfer operations.
 
     Owns non-GPU context registrations and provides handlers for
     register, unregister, prepare/commit store, and prepare/commit retrieve

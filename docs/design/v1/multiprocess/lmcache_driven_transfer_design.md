@@ -1,4 +1,4 @@
-# Non-GPU Context Design (Multiprocess Mode)
+# LMCache-Driven Transfer Design (Multiprocess Mode)
 
 ## 1. Motivation
 
@@ -35,7 +35,7 @@ MPCacheServer (server)
 │    ├─ EventBus
 │    ├─ LayoutDescRegistry
 │    └─ shm_pool_info (pre-computed once)
-└─ NonGPUTransferModule (modules/non_gpu_transfer.py)
+└─ LMCacheDrivenTransferModule (modules/lmcache_driven_transfer.py)
      └─ TransferStrategy (modules/server_transfer.py)
           ├─ PickleTransferStrategy
           └─ ShmTransferStrategy
@@ -132,7 +132,7 @@ mixed-device configurations by raising an error.
 
 - **GPU Context (existing path):** server uses CUDA IPC handles to access worker
   device memory directly.
-- **Non-GPU Context:** server uses `NonGPUTransferModule`, which stores
+- **Non-GPU Context:** server uses `LMCacheDrivenTransferModule`, which stores
   per-instance `NonGPUContextEntry` metadata and delegates transfer logic to a
   `TransferStrategy`.
 
@@ -176,7 +176,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 ### 2.5 Current File Layout (Key Components)
 
-- `lmcache/v1/multiprocess/modules/non_gpu_transfer.py`: `NonGPUTransferModule`
+- `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`: `LMCacheDrivenTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
 - `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `LMCacheDrivenTransferContext`, `EngineDrivenTransferContext`
 - `lmcache/v1/multiprocess/transfer_context/base.py`: `NonGpuContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`

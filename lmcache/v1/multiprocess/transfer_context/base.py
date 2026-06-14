@@ -604,7 +604,7 @@ def scatter_cpu_to_paged_kv(
 
     # Block-level transfer can only skip whole blocks. A non-aligned prefix is
     # rounded down to the nearest block (matching the GPU transfer path in
-    # gpu_transfer.py) rather than raising, so a slightly misaligned skip
+    # engine_driven_transfer.py) rather than raising, so a slightly misaligned skip
     # degrades gracefully instead of failing the whole retrieve.
     if skip_first_n_tokens % block_size != 0:
         logger.error(
