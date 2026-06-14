@@ -84,7 +84,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
         VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             'vllm[runai,tensorizer,flashinfer]' \
             --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
-            --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} ; \
+            --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+            --index-strategy unsafe-first-match ; \
     else \
         VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
