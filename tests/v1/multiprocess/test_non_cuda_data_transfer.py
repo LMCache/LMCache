@@ -499,7 +499,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
         [0, 1],
         blocks_per_chunk,
         layout_hints=layout_hints,
-        gpu_kv_format=detected_kv_format,
+        engine_kv_format=detected_kv_format,
     )
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
     scatter_cpu_to_paged_kv(
@@ -508,7 +508,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
         gathered,
         blocks_per_chunk,
         layout_hints=layout_hints,
-        gpu_kv_format=detected_kv_format,
+        engine_kv_format=detected_kv_format,
     )
 
     for name in source:

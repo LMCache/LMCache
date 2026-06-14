@@ -159,14 +159,14 @@ async def kvcache_check(
             content={"error": "kv_caches empty"},
         )
 
-    gpu_kv_format = ctx.gpu_kv_format_
-    block_axis = _BLOCK_AXIS_BY_FORMAT.get(gpu_kv_format)
+    engine_kv_format = ctx.engine_kv_format_
+    block_axis = _BLOCK_AXIS_BY_FORMAT.get(engine_kv_format)
     if block_axis is None:
         return JSONResponse(
             status_code=501,
             content={
                 "error": "checksum not supported for GPU KV format %s"
-                % gpu_kv_format.name
+                % engine_kv_format.name
             },
         )
 

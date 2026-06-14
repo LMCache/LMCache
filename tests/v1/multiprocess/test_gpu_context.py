@@ -97,7 +97,7 @@ def _build_manager(
     """Build a real :class:`KVLayerGroupsManager` from synthetic tensors."""
     return KVLayerGroupsManager(
         tensors,
-        gpu_kv_format=gpu_kv_format,
+        engine_kv_format=gpu_kv_format,
         num_blocks=num_blocks,
         engine_group_infos=engine_group_infos,
         lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
@@ -501,10 +501,10 @@ class TestGPUCacheContextReportStatus:
         "tokens_per_block",
         "slots_per_block",
         "dtype",
-        "gpu_kv_concrete_shape",
+        "engine_kv_concrete_shape",
         "is_mla",
-        "gpu_kv_format",
-        "gpu_kv_shape",
+        "engine_kv_format",
+        "engine_kv_shape",
         "attention_backend",
     }
 
@@ -523,7 +523,7 @@ class TestGPUCacheContextReportStatus:
         assert group["num_layers"] == 4
         assert group["layer_indices"] == [0, 1, 2, 3]
         assert group["is_mla"] is False
-        assert group["gpu_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
+        assert group["engine_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
         assert group["dtype"] == str(ctx.dtype)
 
     def test_report_status_multi_group(self) -> None:

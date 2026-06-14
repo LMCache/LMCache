@@ -142,13 +142,13 @@ def test_vllm_paged_connector_v2_with_gpu_and_mla(use_gpu, gpu_kv_format):
         num_blocks=num_blocks,
         device=device,
         block_size=block_size,
-        gpu_kv_format=gpu_kv_format,
+        engine_kv_format=gpu_kv_format,
     )
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(
         num_blocks=num_blocks,
         device=device,
         block_size=block_size,
-        gpu_kv_format=gpu_kv_format,
+        engine_kv_format=gpu_kv_format,
     )
     dtype = get_dtype(gpu_kv_src, gpu_kv_format)
 
@@ -274,7 +274,7 @@ def test_vllm_paged_connector_v3_with_gpu_and_mla(use_gpu, num_groups, gpu_kv_fo
                 dtype=dtypes[i],
                 num_layers=8,
                 head_size=head_sizes[i],
-                gpu_kv_format=gpu_kv_format,
+                engine_kv_format=gpu_kv_format,
             )
             groups.append(kv_group)
             for j, layer_tensor in enumerate(kv_group):
@@ -397,13 +397,13 @@ def test_layerwise_vllm_paged_connector_with_gpu(use_gpu, gpu_kv_format):
         num_blocks=num_blocks,
         device=device,
         block_size=block_size,
-        gpu_kv_format=gpu_kv_format,
+        engine_kv_format=gpu_kv_format,
     )
     gpu_kv_dst = generate_kv_cache_paged_list_tensors(
         num_blocks=num_blocks,
         device=device,
         block_size=block_size,
-        gpu_kv_format=gpu_kv_format,
+        engine_kv_format=gpu_kv_format,
     )
     dtype = get_dtype(gpu_kv_src, gpu_kv_format)
 
@@ -952,7 +952,7 @@ def _create_metadata(use_mla, kv_caches, gpu_kv_format):
     kv_list = list(kv_caches.values())
     metadata.kv_layer_groups_manager = KVLayerGroupsManager(
         kv_list,
-        gpu_kv_format=gpu_kv_format,
+        engine_kv_format=gpu_kv_format,
         num_blocks=get_num_blocks(kv_list, gpu_kv_format),
     )
     return metadata
