@@ -20,8 +20,8 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.cli.commands.trace.driver import ReplayResult
-    from lmcache.cli.commands.trace.stats import ReplayStatsCollector
+    from lmcache.cli.commands.trace._driver import ReplayResult
+    from lmcache.cli.commands.trace._stats import ReplayStatsCollector
 
 
 class ReplayCommand(BaseCommand):
@@ -116,7 +116,7 @@ def run_trace_replay(args: argparse.Namespace) -> None:
         args: Parsed CLI arguments.
     """
     # First Party
-    from lmcache.cli.commands.trace.driver import StorageReplayDriver
+    from lmcache.cli.commands.trace._driver import StorageReplayDriver
     from lmcache.v1.distributed.config import StorageManagerConfig, parse_args_to_config
     from lmcache.v1.mp_observability.config import parse_args_to_observability_config
     from lmcache.v1.mp_observability.trace.reader import TraceReader

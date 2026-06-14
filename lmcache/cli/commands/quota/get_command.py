@@ -6,7 +6,7 @@ import argparse
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.commands.quota.helpers import (
+from lmcache.cli.commands.quota._helpers import (
     escape_salt,
     http_request,
     normalize_url,

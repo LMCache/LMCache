@@ -6,7 +6,7 @@ import argparse
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.commands.quota.helpers import http_request, normalize_url
+from lmcache.cli.commands.quota._helpers import http_request, normalize_url
 
 
 class ListCommand(BaseCommand):

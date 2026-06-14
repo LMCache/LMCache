@@ -7,8 +7,8 @@ import sys
 
 # First Party
 from lmcache.cli.commands.base import BaseCommand
-from lmcache.cli.commands.query.prompt import PromptBuilder
-from lmcache.cli.commands.query.request import Request
+from lmcache.cli.commands.query._prompt import PromptBuilder
+from lmcache.cli.commands.query._request import Request
 
 
 class EngineCommand(BaseCommand):
