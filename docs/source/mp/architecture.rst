@@ -1,5 +1,5 @@
-Architecture & Developer Guide
-===============================
+Architecture
+============
 
 This page describes the internal architecture of LMCache multiprocess mode.
 It is aimed at developers who want to understand, debug, or extend the system.

@@ -41,7 +41,7 @@ configuration. Examples:
      - Single attention type
      - Supported
 
-Just point vLLM at the LMCache server as usual (see :doc:`quickstart`); LMCache
+Just point vLLM at the LMCache server as usual (see :doc:`/getting_started/quickstart`); LMCache
 detects the model's KV cache groups automatically at registration time.
 
 .. note::
@@ -205,6 +205,6 @@ The project ships this as the ``hma_lm_eval`` continuous-integration test (see
 See Also
 --------
 
-- :doc:`quickstart` — launching the LMCache server and a vLLM client.
+- :doc:`/getting_started/quickstart` — launching the LMCache server and a vLLM client.
 - Design notes on how groups are detected and addressed:
   ``docs/design/integration/vllm/hybrid-kv-cache-groups.md`` in the source tree.

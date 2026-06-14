@@ -92,3 +92,17 @@ New CLI subcommands are added by creating a ``BaseCommand`` subclass under
 ``lmcache/cli/commands/``; they are discovered and registered automatically.
 See :doc:`/developer_guide/cli` for details.
 
+.. toctree::
+   :maxdepth: 1
+
+   server
+   coordinator
+   describe
+   ping
+   query
+   bench
+   kvcache
+   quota
+   trace
+   tool
+

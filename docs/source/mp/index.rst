@@ -1,5 +1,5 @@
-Multiprocess Mode
-=================
+Overview
+========
 
 LMCache multiprocess (MP) mode runs LMCache as a **standalone service** that
 vLLM instances connect to over ZMQ.  One LMCache server per node can serve
@@ -51,5 +51,5 @@ LMCache ships two server entry points:
 Next Steps
 ----------
 
-Continue with :doc:`quickstart` to launch your first ``lmcache server``, or
+Continue with :doc:`/getting_started/quickstart` to launch your first ``lmcache server``, or
 jump to :doc:`configuration` for the full server and connector reference.

@@ -312,7 +312,7 @@ L2 Storage
    * - ``l2Backends``
      - --
      - List of L2 backends (``type`` + ``config``).
-       See :doc:`l2_storage`.
+       See :doc:`l2_storage/index`.
 
 Scheduling
 ~~~~~~~~~~

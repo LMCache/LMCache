@@ -26,7 +26,7 @@ Each recipe page is intentionally minimal:
 - **Caveats** -- known limitations, if any.
 
 For the generic LMCache + engine wiring (ports, remote hosts,
-sending a first request), see :doc:`../mp/quickstart`. Recipes assume that
+sending a first request), see :doc:`../getting_started/quickstart`. Recipes assume that
 page as a prerequisite.
 
 Supported architectures

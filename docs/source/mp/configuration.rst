@@ -383,7 +383,7 @@ Example:
 
 S3-backed L2 adapter using the AWS CRT (Common Runtime) for high-throughput
 transfers to AWS S3 or any S3-compatible endpoint. See
-:doc:`l2_storage` for details.
+:doc:`l2_storage/index` for details.
 
 Fields:
 

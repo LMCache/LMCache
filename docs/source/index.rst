@@ -67,45 +67,15 @@ Documentation
    self
 
 .. toctree::
-   :maxdepth: 1
-   :caption: Contributing
-
-   developer_guide/contributing
-
-:raw-html:`<br />`
-
-.. toctree::
    :maxdepth: 2
    :caption: Getting Started
 
+   mp/index
    getting_started/installation
    getting_started/quickstart
+   mp/configuration
    getting_started/benchmarking
    getting_started/kv_cache_calculator
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Multiprocess Mode
-
-   mp/index
-   mp/quickstart
-   mp/configuration
-   mp/hybrid_models
-   mp/l2_storage
-   mp/serde
-   mp/deployment
-   mp/operator
-   mp/coordinator
-   mp/http_api
-   mp/observability
-   mp/tracing_and_debugging
-   mp/architecture
-   mp/frontend_dashboard
-   mp/disaggregated_prefill
-   mp/kv_cache_management
-   mp/p2p
 
 :raw-html:`<br />`
 
@@ -114,6 +84,15 @@ Documentation
    :caption: Recipes
 
    recipes/index
+   mp/hybrid_models
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+   :caption: L2 Storage
+
+   mp/l2_storage/index
 
 :raw-html:`<br />`
 
@@ -121,7 +100,43 @@ Documentation
    :maxdepth: 2
    :caption: KV Cache Optimizations
 
-   kv_cache_optimizations/blending
+   kv_cache_optimizations/cacheblend
+   mp/serde
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Non-KV Caching
+
+   non_kv_cache/encodings
+   non_kv_cache/hidden_states
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Disaggregated Prefill
+
+   mp/disaggregated_prefill
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 1
+   :caption: KV Cache Management
+
+   mp/coordinator
+   mp/observability
+   mp/kv_cache_management
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 1
+   :caption: P2P KV Cache Sharing
+
+   mp/p2p
 
 :raw-html:`<br />`
 
@@ -129,29 +144,22 @@ Documentation
    :maxdepth: 2
    :caption: Use LMCache in production
 
-   production/docker_deployment
+   mp/deployment
    production/kubernetes_deployment
-   production/kv_cache_events
-   production/observability/index
-   production/performance_tuning
+   mp/operator
+   production/kv_cache_events_mp
+   mp/tracing_and_debugging
+   mp/frontend_dashboard
+   production/dynamo_coordination
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: CLI
 
    cli/index
-   cli/server
-   cli/coordinator
-   cli/describe
-   cli/ping
-   cli/query
-   cli/bench
-   cli/kvcache
-   cli/quota
-   cli/trace
-   cli/tool
+   mp/http_api
 
 :raw-html:`<br />`
 
@@ -159,8 +167,7 @@ Documentation
    :caption: Developer Guide
 
    developer_guide/docker_file
-   developer_guide/architecture
-   developer_guide/integration
+   mp/architecture
    developer_guide/extending_lmcache/index
    developer_guide/cli
    developer_guide/usage/index
@@ -169,16 +176,9 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: API Reference
-
-   api_reference/configurations
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
    :caption: Community
 
+   developer_guide/contributing
    community/meetings
    community/blogs
 
@@ -205,5 +205,15 @@ Documentation
    api_reference/dynamic_connector
    internal_api_server/internal_api_server
    controller/index
+   production/observability/index
+   developer_guide/architecture
+   api_reference/configurations
+   developer_guide/usage/basic_check
+   developer_guide/extending_lmcache/storage_plugins
+   kv_cache_optimizations/blending
+   developer_guide/integration
+   production/docker_deployment
+   production/performance_tuning
+   production/kv_cache_events
 
 :raw-html:`<br />`

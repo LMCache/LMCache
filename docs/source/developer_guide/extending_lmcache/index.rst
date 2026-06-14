@@ -124,7 +124,6 @@ Together, these extension points – custom storage backends, remote storage con
 
    native_connectors
    runtime_plugins
-   storage_plugins
    remote_storage_plugins
 
 

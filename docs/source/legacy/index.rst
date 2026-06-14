@@ -38,6 +38,6 @@ The pages below describe the in-process configuration. For MP, the equivalent
 lives under the :doc:`../mp/index` section:
 
 - **Storage backends** -- in MP these are **L2 adapters**; see
-  :doc:`../mp/l2_storage`.
+  :doc:`../mp/l2_storage/index`.
 - **Eviction (LRU / noop)** -- configured on the ``lmcache server``; see
   :doc:`../mp/configuration`.
