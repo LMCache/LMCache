@@ -181,6 +181,63 @@ A subcommand group appears as ``lmcache <group> <subcommand>``.
 
    lmcache mygroup foo --value 5
 
+Level 2: Adding a Subcommand to an Existing Group
+---------------------------------------------------
+
+If a ``CompositeCommand`` group already exists (e.g. ``bench``, ``quota``,
+``trace``), you can extend it by simply adding **one new file** — no other
+changes are required.
+
+For example, to add a new ``lmcache bench l2`` subcommand under the
+existing ``bench`` group:
+
+**Step 1**: Create a single file (or sub-package) in the existing group's
+package directory:
+
+.. code-block:: python
+
+   # lmcache/cli/commands/bench/l2_adapter_bench/__init__.py
+   """``lmcache bench l2`` subpackage."""
+
+   import argparse
+
+   from lmcache.cli.commands.base import BaseCommand
+
+
+   class L2AdapterBenchCommand(BaseCommand):
+       """Benchmark an L2 adapter (store / lookup / load)."""
+
+       def name(self) -> str:
+           return "l2"
+
+       def help(self) -> str:
+           return "Benchmark an L2 adapter (store / lookup / load)."
+
+       def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+           from lmcache.cli.commands.bench.l2_adapter_bench.command import (
+               add_l2_arguments,
+           )
+           add_l2_arguments(parser)
+
+       def execute(self, args: argparse.Namespace) -> None:
+           from lmcache.cli.commands.bench.l2_adapter_bench.command import (
+               run_l2_adapter_bench,
+           )
+           run_l2_adapter_bench(self, args)
+
+**Step 2**: Done! The parent ``CompositeCommand`` (``BenchCommand``)
+auto-discovers the new subcommand at startup. No registration code, no
+imports to add, no ``__init__.py`` edits in the parent.
+
+.. note::
+
+   This works because ``CompositeCommand.register()`` scans all direct
+   submodules of its package each time the CLI starts. A new file (or
+   sub-package) is automatically picked up as long as:
+
+   - It does **not** start with ``_``.
+   - It contains a concrete ``BaseCommand`` subclass.
+
 Level N: Arbitrary Nesting
 --------------------------
 
