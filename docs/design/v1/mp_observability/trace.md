@@ -495,7 +495,7 @@ file format:
 1. **`level` header field** — the same `Header` carries the
    discriminator; replay dispatches on it.
 2. **Reusable decorator** — apply `@enable_tracing` to MQ handlers or
-`MPCacheServer` methods. No new event type, no format change. The
+   `MPCacheServer` methods. No new event type, no format change. The
    `qualname` string differentiates them.
 3. **Polymorphic recorder** — `TraceRecorder` ABC accepts new
    subclasses with different `get_subscriptions()` mappings (or, more
