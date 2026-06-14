@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <sycl/sycl.hpp>
 #include <torch/all.h>
 #include <ATen/ATen.h>
 #include <c10/util/Exception.h>

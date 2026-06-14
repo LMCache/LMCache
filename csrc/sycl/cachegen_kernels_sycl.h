@@ -6,6 +6,7 @@
 //
 #pragma once
 
+#include <sycl/sycl.hpp>
 #include <torch/all.h>
 
 // CacheGen ---------------------------------------------------------------
