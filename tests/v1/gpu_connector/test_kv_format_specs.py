@@ -14,9 +14,9 @@ import torch
 
 # First Party
 from lmcache.v1.gpu_connector.kv_format import (
-    KVFormatSpec,
     get_spec,
     get_spec_class,
+    shape_desc,
 )
 import lmcache.c_ops as lmc_ops
 
@@ -47,6 +47,7 @@ def _build(name: str):
             [_t(NB, BS, NH, HS) for _ in range(NL)] for _ in range(2)
         ],
         "NL_X_NBBS_ONE_HS": lambda: [_t(PBS, 1, HS) for _ in range(NL)],
+        "NL_X_NB_NH_BS_TWO_HS": lambda: [_t(NB, NH, BS, 2, HS) for _ in range(NL)],
     }
     return builders[name]()
 
@@ -215,6 +216,22 @@ GOLDEN = {
         elements_per_layer=PBS * HS,
         concrete="5 x [21, 1, 4]",
     ),
+    "NL_X_NB_NH_BS_TWO_HS": dict(
+        is_mla=False,
+        is_hnd=True,
+        is_cross_layer=False,
+        shape_desc="NL x [NB, NH, BS, 2, HS]",
+        num_layers=NL,
+        num_blocks=NB,
+        block_size=BS,
+        page_buffer_size=PBS,
+        num_heads=NH,
+        hidden_dim=NH * HS,
+        head_size=HS,
+        tokens_per_layer=PBS,
+        elements_per_layer=NB * NH * BS * HS * 2,
+        concrete="5 x [7, 2, 3, 2, 4]",
+    ),
 }
 
 # Only formats the installed extension actually exposes.
@@ -233,7 +250,7 @@ def test_static_metadata(case):
     assert cls.is_mla == gold["is_mla"], name
     assert cls.is_hnd == gold["is_hnd"], name
     assert cls.is_cross_layer == gold["is_cross_layer"], name
-    assert cls.shape_desc == gold["shape_desc"], name
+    assert shape_desc(fmt) == gold["shape_desc"], name
 
 
 def test_scalar_geometry(case):
@@ -286,11 +303,16 @@ def test_all_extension_formats_registered():
         assert get_spec_class(getattr(lmc_ops.EngineKVFormat, name)) is not None, name
 
 
-def test_spec_has_no_engine_identity():
-    # The geometry spec must not carry engine/backend identity; that lives
-    # in the utils facade (a higher-level concern), not on EngineKVFormat.
-    assert not hasattr(KVFormatSpec, "backend_label")
-    assert not hasattr(KVFormatSpec, "engine")
+def test_spec_carries_attention_backends(case):
+    # First Party
+    from lmcache.v1.gpu_connector import utils
+
+    name, fmt, _ = case
+    cls = get_spec_class(fmt)
+    # Backend labels are colocated on the spec (one format -> many backends).
+    assert isinstance(cls.attention_backends, tuple) and cls.attention_backends, name
+    # The facade returns the first (canonical/representative) one.
+    assert utils.get_attention_backend(fmt) == cls.attention_backends[0], name
 
 
 def test_facade_diagnostic_labels(case):

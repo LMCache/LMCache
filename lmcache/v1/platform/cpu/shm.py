@@ -201,7 +201,9 @@ def migrate_to_shm_and_wrap(tensor: torch.Tensor) -> CpuShmTensorWrapper:
     when the migrated tensor is garbage-collected.
     """
     # First Party
-    from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
+    from lmcache.v1.gpu_connector.kv_format.contiguity import (
+        attempt_permute_to_contiguous_view,
+    )
 
     # Validate and normalise the tensor *before* touching the registry
     # or mutating storage, so a bad input never leaves things half-done.

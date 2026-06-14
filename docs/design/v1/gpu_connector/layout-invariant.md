@@ -7,11 +7,11 @@
 > of the kv_caches alongside the format, so callers never need a
 > separate normalization step. Every other module queries KV-cache
 > information via helpers in `lmcache/v1/gpu_connector/utils.py` that
-> accept a `GPUKVFormat` argument.
+> accept a `EngineKVFormat` argument.
 
 "Layout parsing" means: list-nesting depth, tensor-dimension ordering,
 HND vs NHD, MLA vs MHA, per-layer vs cross-layer. All of that is
-encoded in `GPUKVFormat`; downstream code must never re-derive it from
+encoded in `EngineKVFormat`; downstream code must never re-derive it from
 raw shapes.
 
 ## Canonical type
@@ -37,56 +37,75 @@ into it, so the single-source-of-truth surface is unchanged for callers.
 
 ```
 kv_format/
-├── base.py        # KVFormatSpec ABC: the per-format geometry interface
-├── specs.py       # one concrete spec per GPUKVFormat + the registry dict
-└── detection.py   # detect_format() + per-engine _normalize_/_detect_ helpers
+├── types.py       # DiscoverableKVCache, LayoutHints (foundational types)
+├── contiguity.py  # attempt_permute_to_contiguous_view (zero-copy view recovery)
+├── detection.py   # detect_format() orchestration
+├── specs/         # geometry layer
+│   ├── base.py    #   KVFormatSpec ABC + shape_desc/concrete_shape rendering
+│   ├── registry.py #  auto-discovers the spec files; get_spec/get_spec_class
+│   └── <engine_kv_format>.py  #   one file per format
+└── detectors/     # per-engine detection layer
+    ├── base.py    #   EngineDetector ABC + measure_structure()
+    ├── registry.py #  auto-discovers the detector files; get_detector
+    └── <engine>.py            #   one file per engine (a single discover())
 ```
 
-- **One spec class per format — pure geometry.** Each `GPUKVFormat`
+- **One spec class per format — pure geometry.** Each `EngineKVFormat`
   maps to exactly one `KVFormatSpec` subclass that knows how to index a
-  value of that format. A spec describes *only* layout geometry; its
-  class is named by that geometry (`CrossLayerNhdSpec`,
-  `PerLayerKvFirstNhdSpec`, `TwoListFusedPbsSpec`, …), never by an
-  engine. `get_spec(kv, fmt)` returns an instance for geometry;
-  `get_spec_class(fmt)` returns the class for static facts (`is_mla`,
-  `is_hnd`, `is_cross_layer`, `shape_desc`).
-- **Engine/backend is a higher-level concern, not a format property.**
-  A single `GPUKVFormat` can be produced by many (engine,
-  attention-backend) combinations — the relationship is many-to-one — so
-  engine identity never lives on the geometry layer. If an
-  engine/backend abstraction is ever needed it is a higher-level type
-  that *owns* a `GPUKVFormat`. Today the only such thing is the
-  diagnostic `get_attention_backend(fmt)` logging label, which lives in
-  the `utils` facade as a representative map.
+  value of that format. A spec describes *only* layout geometry; both the
+  class and its file are named after the format member (e.g.
+  `NB_NL_TWO_BS_NH_HS_Spec` in `nb_nl_two_bs_nh_hs.py`) — a geometry
+  encoding, never an engine. `get_spec(kv, fmt)` returns an instance for
+  geometry; `get_spec_class(fmt)` returns the class for static facts
+  (`is_mla`, `is_hnd`, `is_cross_layer`, `attention_backends`).
+- **Backend labels are diagnostic, colocated on the spec.** A single
+  `EngineKVFormat` can be produced by several (engine, attention-backend)
+  combinations, so each spec lists them in `attention_backends` (a tuple),
+  first entry = canonical representative. `get_attention_backend(fmt)` (the
+  `utils` facade) returns that first entry for logging. These labels are
+  diagnostic only — they never drive geometry decisions, and they replace
+  the old hand-maintained `EngineKVFormat → label` dict.
 - **The enum is the single identity.** Each spec declares its
-  `gpu_kv_format` in its class body; the registry is derived from it.
-  No separate string id, no engine attribute. The C++ `GPUKVFormat`
-  enum is the one authority for which formats exist.
-- **A flat dict is the registry.** `specs._ALL_SPECS` lists the spec
-  classes and `_SPECS` maps `cls.gpu_kv_format → cls` — no inheritance
-  taxonomy, no auto-discovery, and no plugin machinery. The set of formats is closed and in-tree, so explicit
-  beats clever. Deliberately *not* introduced: "family" base classes
-  (formats vary on ≥5 orthogonal axes — engine, per-/cross-layer,
-  MLA/MHA, NHD/HND, fused/separate PBS — which a single inheritance
-  spine cannot model without orphans) and a runtime plugin registry
-  (there is no out-of-tree registrant). Add structure only when a
-  concrete need appears.
-- **Detection is the one engine-aware layer.** `detect_format`
-  consults `EngineType`; the spec layer never does. Engine-specific
-  reshape/detection lives in `_normalize_<engine>` / `_detect_<engine>`.
+  `engine_kv_format` in its class body; the registry is derived from it.
+  No separate string id, no engine attribute. The C++ `EngineKVFormat`
+  enum is the one authority for which formats exist. Its **member name is
+  the layout legend** — a `_`-joined token sequence where `X` marks a
+  list-nesting boundary (`TWO_X_NL_X_NBBS_NH_HS` → `2 x NL x [PBS, NH, HS]`).
+  The symbolic `shape_desc(fmt)` and numeric `concrete_shape(fmt, size)` are
+  both *rendered* from that name (`specs/base.py`), so they cannot drift from
+  the enum or from each other.
+- **One file per spec; auto-discovered in one place.** Each spec lives in its
+  own `specs/<engine_kv_format>.py` (named after the format it implements).
+  `specs/registry.py` imports every file in the folder and indexes each spec by
+  the `engine_kv_format` it declares, into the `SPECS` table that `get_spec` /
+  `get_spec_class` look up. Adding a format = just drop a new file; the
+  discovery is one readable loop in `registry.py` (no `__init_subclass__`, no
+  registration scattered across files). There is no inheritance taxonomy:
+  "family" base classes are avoided (formats vary on ≥5 orthogonal axes —
+  engine, per-/cross-layer, MLA/MHA, NHD/HND, fused/separate PBS — which a
+  single inheritance spine cannot model without orphans). Add structure only
+  when a concrete need appears.
+- **Detection is the one engine-aware layer.** `detect_format` does the
+  engine-agnostic contiguous-view recovery, then dispatches to the
+  `EngineDetector` for the `EngineType`. Each `detectors/<engine>.py` is one
+  `discover(kv, hints)` that reshapes the engine's raw layout into canonical
+  form *and* identifies the format in one step (returning `(format, kv)`);
+  `detectors/registry.py` auto-discovers them the same way `specs/` does. The
+  spec layer never sees `EngineType`. Adding an engine = just drop a new
+  detector file.
 
 ## Adding a new format
 
 1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
-2. Add a detection branch. `detect_format` keys off
-   `(list_depth, tensor_ndim)` — both computed once via the private
-   `_list_depth_tensor_dim` probe — so a new branch only adds a shape
-   check in the engine's `_detect_<engine>` helper. If the engine needs
-   reshape-via-hints (e.g. TRT-LLM's 4-D bare tensor `view`'d to 6-D),
-   put it in that engine's `_normalize_<engine>` helper.
-3. Write a `KVFormatSpec` subclass in `specs.py` (named by its geometry,
-   declaring its `gpu_kv_format`) and add it to `_ALL_SPECS`. The ABC
-   makes the required accessors explicit.
+2. Add a branch in the engine's `detectors/<engine>.py` `discover()`. It keys
+   off `(list_depth, tensor_ndim)` from `measure_structure`, returning
+   `(format, kv)`; any reshape-via-hints (e.g. TRT-LLM's 4-D `view`'d to 6-D)
+   happens in the same method before the shape checks.
+3. Add a `KVFormatSpec` subclass as a new `specs/<engine_kv_format>.py` file
+   (named after the format, declaring its `engine_kv_format`). `registry.py`
+   discovers it automatically — no other file changes. The ABC makes the
+   required accessors explicit (a spec missing one raises `TypeError` on first
+   `get_spec`, which the golden test triggers).
 4. Add a row to the golden table in
    `tests/v1/gpu_connector/test_kv_format_specs.py` and a detection
    case in `test_kv_format_detection.py`.
@@ -98,17 +117,17 @@ consumer for a new layout — the branching belongs in a spec.
 ## Helper surface
 
 Every helper below takes `DiscoverableKVCache` and (where layout matters)
-a `GPUKVFormat`. Nothing else may index raw shapes.
+a `EngineKVFormat`. Nothing else may index raw shapes.
 
 ### Discovery
 
 | Helper | Returns |
 |---|---|
-| `normalize_kv_and_discover_format(kv_caches, engine, layout_hints)` | `tuple[GPUKVFormat, DiscoverableKVCache]` — the one parser. Returns the canonical (permuted-to-contiguous) kv_caches alongside the detected format; callers must use the returned tensor structure for subsequent operations. |
+| `normalize_kv_and_discover_format(kv_caches, engine, layout_hints)` | `tuple[EngineKVFormat, DiscoverableKVCache]` — the one parser. Returns the canonical (permuted-to-contiguous) kv_caches alongside the detected format; callers must use the returned tensor structure for subsequent operations. |
 
 ### Format → engine map
 
-| `GPUKVFormat` | Engine | Layout | Structure |
+| `EngineKVFormat` | Engine | Layout | Structure |
 |---|---|---|---|
 | `NB_NL_TWO_BS_NH_HS` | vLLM cross-layer | NHD | bare 6-D tensor `[NB, NL, 2, BS, NH, HS]` |
 | `NB_NL_TWO_NH_BS_HS` | TRT-LLM cross-layer | HND | bare 6-D tensor `[NB, NL, 2, NH, BS, HS]` |
@@ -120,6 +139,7 @@ a `GPUKVFormat`. Nothing else may index raw shapes.
 | `TWO_X_NL_X_NBBS_NH_HS` | SGLang MHA | NHD | `[K_list, V_list]`, each `NL × [PBS, NH, HS]` |
 | `TWO_X_NL_X_NB_BS_NH_HS` | SGLang MHA via MP daemon | NHD | `[K_list, V_list]`, each `NL × [NB, BS, NH, HS]` |
 | `NL_X_NBBS_ONE_HS` | SGLang MLA | — | `NL × [PBS, 1, HS]` |
+| `NL_X_NB_NH_BS_TWO_HS` | vLLM blocks-first fused (CPU) | HND | `NL × [NB, NH, BS, 2, HS]`, split from raw `[NB, NH, BS, 2·HS]` |
 
 The two cross-layer formats (`NB_NL_TWO_*`) share a single base
 pointer, the kernel walks layers internally via `shape_desc.nl`. Use
@@ -139,7 +159,7 @@ either the 4-D bare tensor or `[4-D]`; the function handles both.
 
 ### Scalar accessors
 
-All of these dispatch on `GPUKVFormat`. The ones that can vary per layer
+All of these dispatch on `EngineKVFormat`. The ones that can vary per layer
 take an optional `layer_idx: int = 0`; passing an explicit index enables
 per-layer queries (for heterogeneous groups) without any intermediate
 helper.
@@ -172,7 +192,11 @@ helper.
 |---|---|---|
 | `attempt_permute_to_contiguous_view(kv)` | `DiscoverableKVCache` | Recursive, metadata-only. No-op if already contiguous; raises `ValueError` for non-permutation-recoverable cases (slicing, `as_strided`). **Never copies.** Walks the full structure and permutes every tensor leaf. Called internally by `normalize_kv_and_discover_format`; remains public only for callers that handle a tensor *outside* the discover flow (`GPUConnectorInterface.initialize_kvcaches_ptr`, `CudaIPCWrapper.__init__`). |
 
-## Forbidden outside `utils.py`
+## Forbidden in consumer code
+
+Raw-shape indexing belongs inside the `kv_format` layer (the spec classes);
+consumer code must never do any of the following — it queries via the
+`utils.py` facade instead:
 
 - `isinstance(kv_cache, (tuple, list))` to distinguish layouts.
 - Indexing raw shapes (`tensor.shape[3]`, `len(shape) == 5`) to derive
@@ -181,7 +205,7 @@ helper.
   1; x = x[0]`). There is no public depth helper and there shouldn't
   be one — `normalize_kv_and_discover_format` encapsulates the
   descent, and downstream code only ever needs the resulting
-  `GPUKVFormat`.
+  `EngineKVFormat`.
 - Wrapping a tensor with `[tensor]` to adapt to a helper's list-depth
   expectation — the accessors take `layer_idx` directly.
 - Hand-rolled pointer assembly (`[t.data_ptr() for t in kv_caches]`) —
@@ -192,7 +216,7 @@ helper.
   use `attempt_permute_to_contiguous_view` which refuses to copy.
 - "Canonicalize" functions that rewrite `kv_caches` to a uniform shape
   before passing to helpers. The helpers already canonicalize by
-  accepting `GPUKVFormat`, and any reshape/normalize step that *is*
+  accepting `EngineKVFormat`, and any reshape/normalize step that *is*
   needed lives inside `normalize_kv_and_discover_format` — callers
   receive the canonical form back from that one call.
 
@@ -230,11 +254,14 @@ permutation from strides and needs no hints.
 
 ## Implementation note: mypy and the recursive union
 
-`utils.py` sets `# mypy: disable-error-code="union-attr,call-overload"`
-at the file level. This is the **one module** that does format-
-dispatched raw indexing on `DiscoverableKVCache` (`kv_caches.shape[i]`,
-`kv_caches[0][j]`) — the `gpu_kv_format` argument is the proof the
-indexing is well-defined, but mypy can't carry that proof through a
-recursive Union without per-line casts. The file-level directive
-replaces 50+ `# type: ignore` comments scattered through the
-accessors. All other type checks remain live.
+Format-dispatched raw indexing on `DiscoverableKVCache`
+(`kv_caches.shape[i]`, `kv_caches[0][j]`) is concentrated in the
+`kv_format` layer: each `specs/<format>.py` sets
+`# mypy: disable-error-code="union-attr,call-overload"` at the file level
+(the `detectors/` and `contiguity.py` files use `union-attr` alone, and the
+`utils.py` facade keeps the directive for its remaining structural helpers). The
+`engine_kv_format` — or, in a spec, the class identity itself — is the
+proof the indexing is well-defined, but mypy can't carry that proof
+through a recursive Union without per-line casts. The file-level directive
+replaces scattered `# type: ignore` comments; all other type checks remain
+live.

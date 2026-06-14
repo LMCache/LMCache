@@ -14,17 +14,17 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.python_ops_fallback import set_shape_desc_dtype
 from lmcache.utils import EngineType
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.kv_format import (
+    concrete_shape,
     detect_format,
     get_spec,
     get_spec_class,
+    shape_desc,
 )
-from lmcache.v1.gpu_connector.kv_format.detection import (
-    attempt_permute_to_contiguous_view,
-)
-from lmcache.v1.gpu_connector.types import DiscoverableKVCache, LayoutHints
+from lmcache.v1.gpu_connector.kv_format.types import DiscoverableKVCache, LayoutHints
 
 if TYPE_CHECKING:
     # First Party
@@ -34,41 +34,6 @@ if TYPE_CHECKING:
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
-
-# Re-exported so existing ``from ...utils import DiscoverableKVCache,
-# LayoutHints, attempt_permute_to_contiguous_view`` call sites keep working.
-__all__ = [
-    "DiscoverableKVCache",
-    "LayoutHints",
-    "attempt_permute_to_contiguous_view",
-    "assert_contiguous",
-    "assert_is_vllm_flash_attn_or_flash_infer",
-    "assert_is_vllm_mla_or_flash_attn_or_flash_infer",
-    "assert_layerwise_gpu_connector",
-    "get_attention_backend",
-    "get_block_size",
-    "get_concrete_engine_kv_shape",
-    "get_device",
-    "get_dtype",
-    "get_elements_per_layer",
-    "get_engine_kv_shape_description",
-    "get_group_data_ptrs",
-    "get_head_size",
-    "get_hidden_dim_size",
-    "get_num_blocks",
-    "get_num_heads",
-    "get_num_layers",
-    "get_page_buffer_size",
-    "get_tokens_per_layer",
-    "is_cross_layer_format",
-    "is_hnd",
-    "is_mla",
-    "legible_print_engine_kv_format",
-    "make_page_buffer_shape_desc",
-    "need_gpu_interm_buffer",
-    "normalize_kv_and_discover_format",
-    "resolve_block_stride_and_log_layout",
-]
 
 
 def assert_contiguous(tensor: torch.Tensor) -> None:
@@ -114,6 +79,7 @@ def assert_layerwise_gpu_connector(gpu_connector: "GPUConnectorInterface"):
         gpu_connectors.SGLangLayerwiseGPUConnector,
         xpu_connectors.VLLMPagedMemLayerwiseXPUConnector,
         xpu_connectors.VLLMBufferLayerwiseXPUConnector,
+        xpu_connectors.SGLangLayerwiseXPUConnector,
     )
 
     assert isinstance(gpu_connector, valid_connectors)
@@ -131,62 +97,40 @@ def is_cross_layer_format(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
 
 
 def is_hnd(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
-    """Return ``True`` if the GPU KV Format uses an HND physical layout."""
+    """Return ``True`` if the Engine KV Format uses an HND physical layout."""
     return get_spec_class(engine_kv_format).is_hnd
 
 
 def is_mla(engine_kv_format: "lmc_ops.EngineKVFormat") -> bool:
-    """Return ``True`` if the GPU KV Format is a Multi-head Latent Attention layout."""
+    """Return ``True`` for a Multi-head Latent Attention (MLA) layout."""
     return get_spec_class(engine_kv_format).is_mla
 
 
 def get_engine_kv_shape_description(engine_kv_format: "lmc_ops.EngineKVFormat") -> str:
-    """Return a human-readable symbolic shape legend for the GPU KV format.
+    """Return a human-readable symbolic shape legend for the Engine KV format.
 
     Uses short names matching the ``EngineKVFormat`` enum convention:
     NB=num_blocks, NL=num_layers, BS=block_size, NH=num_heads,
     HS=head_size, PBS=page_buffer_size (NB*BS).
     """
     try:
-        return get_spec_class(engine_kv_format).shape_desc
-    except ValueError:
+        return shape_desc(engine_kv_format)
+    except KeyError:
         return f"Unknown ({engine_kv_format})"
-
-
-# Representative, diagnostic-only labels. ``EngineKVFormat`` is engine- and
-# backend-agnostic geometry; these strings name *a* backend that produces
-# each format today, for human-readable logging only. A real engine/backend
-# abstraction (if ever needed) would be a higher-level type that owns a
-# ``EngineKVFormat``, never a field on the geometry layer.
-_ATTENTION_BACKEND_LABELS: dict["lmc_ops.EngineKVFormat", str] = {
-    lmc_ops.EngineKVFormat.NB_NL_TWO_BS_NH_HS: "vLLM CROSS_LAYER",
-    lmc_ops.EngineKVFormat.NB_NL_TWO_NH_BS_HS: "TRT-LLM cross-layer (HND layout)",
-    lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS: "vLLM non-MLA flash attention",
-    lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS: "vLLM non-MLA flash infer",
-    lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS: (
-        "vLLM non-MLA flash attention (HND layout)"
-    ),
-    lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS: ("vLLM non-MLA flash infer (HND layout)"),
-    lmc_ops.EngineKVFormat.NL_X_NB_BS_HS: "vLLM MLA",
-    lmc_ops.EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS: (
-        "SGLang MHA (flash attention and flash infer)"
-    ),
-    lmc_ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS: (
-        "SGLang MHA via MP daemon (4-D inner)"
-    ),
-    lmc_ops.EngineKVFormat.NL_X_NBBS_ONE_HS: "SGLang MLA",
-}
 
 
 def get_attention_backend(engine_kv_format: "lmc_ops.EngineKVFormat") -> str:
     """Return a representative attention-backend label for the format.
 
-    Diagnostic only. ``EngineKVFormat`` is pure geometry and may be produced
-    by several (engine, attention-backend) combinations, so this returns a
-    single representative label for logging -- it is deliberately not a
-    property of the geometry spec.
+    Diagnostic only. A format may be produced by several (engine,
+    attention-backend) combinations; the spec lists them in
+    ``attention_backends`` and this returns the first (canonical) one.
     """
-    return _ATTENTION_BACKEND_LABELS.get(engine_kv_format, f"Unknown ({engine_kv_format})")
+    try:
+        backends = get_spec_class(engine_kv_format).attention_backends
+    except ValueError:
+        return f"Unknown ({engine_kv_format})"
+    return backends[0] if backends else f"Unknown ({engine_kv_format})"
 
 
 def get_concrete_engine_kv_shape(
@@ -203,16 +147,55 @@ def get_concrete_engine_kv_shape(
         return f"Unknown ({engine_kv_format})"
 
 
+def get_concrete_engine_kv_shape_from_shape_desc(
+    shape_desc: "lmc_ops.PageBufferShapeDesc",
+    engine_kv_format: "lmc_ops.EngineKVFormat",
+) -> str:
+    """Return the concrete shape for a single kernel group's ``shape_desc``.
+
+    Like :func:`get_concrete_engine_kv_shape`, but the numeric values are
+    read from a per-group :class:`PageBufferShapeDesc` rather than from the
+    whole ``kv_caches`` structure. This makes the result *group-accurate*:
+    ``shape_desc.nl`` is the layer count of the group (not the model total),
+    so each kernel group of a hybrid model reports its own shape.
+
+    For example, instead of ``NL x [2, NB, BS, NH, HS]`` this returns
+    ``80 x [2, 2048, 128, 8, 128]``.
+
+    Args:
+        shape_desc: The kernel group's shape descriptor. Sizes are read
+            from its ``nl``/``nb``/``bs``/``nh``/``hs`` fields; fused
+            page-buffer (``NBBS``) formats use ``nb * bs``.
+        engine_kv_format: The format whose member name is the shape template.
+
+    Returns:
+        The shape string with numeric values substituted, or
+        ``"Unknown (<format>)"`` for an unrecognised format.
+    """
+    sizes = {
+        "NB": shape_desc.nb,
+        "NL": shape_desc.nl,
+        "BS": shape_desc.bs,
+        "NH": shape_desc.nh,
+        "HS": shape_desc.hs,
+        "PBS": shape_desc.nb * shape_desc.bs,
+    }
+    try:
+        return concrete_shape(engine_kv_format, lambda label: sizes[label])
+    except KeyError:
+        return f"Unknown ({engine_kv_format})"
+
+
 def legible_print_engine_kv_format(engine_kv_format: "lmc_ops.EngineKVFormat"):
     """
-    Print the GPU KV Format in a legible way
+    Print the Engine KV Format in a legible way
     """
     shape = get_engine_kv_shape_description(engine_kv_format)
     backend = get_attention_backend(engine_kv_format)
     if shape.startswith("Unknown"):
-        logger.warning(f"Unknown GPU KV Format: {engine_kv_format}")
+        logger.warning(f"Unknown Engine KV Format: {engine_kv_format}")
     else:
-        logger.info("GPU KV Format: %s", shape)
+        logger.info("Engine KV Format: %s", shape)
         logger.info("Currently used by:\n  - %s", backend)
 
 
@@ -221,7 +204,7 @@ def normalize_kv_and_discover_format(
     serving_engine: EngineType,
     layout_hints: "LayoutHints | None" = None,
 ) -> tuple["lmc_ops.EngineKVFormat", DiscoverableKVCache]:
-    """Normalize ``kv_caches`` into canonical form and discover its GPU KV format.
+    """Normalize ``kv_caches`` into canonical form and discover its Engine KV format.
 
     Thin wrapper over
     :func:`lmcache.v1.gpu_connector.kv_format.detect_format`; see that
@@ -357,9 +340,11 @@ def get_group_data_ptrs(
     return get_spec(kv_caches, engine_kv_format).data_ptrs(layer_indices)
 
 
-def assert_is_vllm_flash_attn_or_flash_infer(engine_kv_format: "lmc_ops.EngineKVFormat"):
+def assert_is_vllm_flash_attn_or_flash_infer(
+    engine_kv_format: "lmc_ops.EngineKVFormat",
+):
     """
-    Ensure that we have a GPU KV Cache Format
+    Ensure that we have an Engine KV Cache Format
     that is either vLLM's flash attention or flash infer.
     """
     assert engine_kv_format in (
@@ -367,6 +352,9 @@ def assert_is_vllm_flash_attn_or_flash_infer(engine_kv_format: "lmc_ops.EngineKV
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
         lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
         lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS,
+        # Blocks-first fused K/V (vLLM CPU): a per-layer non-MLA layout that
+        # shares this transfer path even though it is not literally flash-*.
+        lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS,
     )
 
 
@@ -374,7 +362,7 @@ def assert_is_vllm_mla_or_flash_attn_or_flash_infer(
     engine_kv_format: "lmc_ops.EngineKVFormat",
 ) -> None:
     """
-    Ensure that we have a GPU KV Cache Format that is either
+    Ensure that we have an Engine KV Cache Format that is either
     vLLM's MLA, flash attention, or flash infer.
 
     Accepted formats:
@@ -603,7 +591,12 @@ def make_page_buffer_shape_desc(
         else get_num_heads(kv_caches, engine_kv_format, layer_idx)
     )
     desc.hs = get_head_size(kv_caches, engine_kv_format, layer_idx)
-    desc.element_size = get_dtype(kv_caches, engine_kv_format, layer_idx).itemsize
+    dtype = get_dtype(kv_caches, engine_kv_format, layer_idx)
+    desc.element_size = dtype.itemsize
+    # The C++ PageBufferShapeDesc has no ``dtype`` field, but the pure-Python
+    # CPU fallback does -- and needs it to disambiguate float16 vs bfloat16
+    # (both have itemsize 2, so element_size alone is not enough). Best-effort.
+    set_shape_desc_dtype(desc, dtype)
 
     resolved_stride = int(block_stride_elems) if block_stride_elems else 0
     desc.block_stride_elems = resolved_stride
@@ -694,8 +687,9 @@ def _get_head_size_view(
         else:
             # Other formats are either MLA-only or require upstream normalization.
             raise NotImplementedError(
-                f"engine_kv_format={engine_kv_format} not supported in non-MLA path here. "
-                "Normalize to (k,v) tuple [NB,BS,NH,HS] per-layer before calling."
+                f"engine_kv_format={engine_kv_format} not supported in non-MLA "
+                "path here. Normalize to (k,v) tuple [NB,BS,NH,HS] per-layer "
+                "before calling."
             )
 
     else:

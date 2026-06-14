@@ -68,7 +68,9 @@ class CudaIPCWrapper:
 
     def __init__(self, tensor: torch.Tensor):
         # First Party
-        from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
+        from lmcache.v1.gpu_connector.kv_format.contiguity import (
+            attempt_permute_to_contiguous_view,
+        )
 
         # Permute any non-contiguous view (e.g. vLLM's NHD-over-HND) so the
         # shape/stride we encode across IPC reflects the physical layout.

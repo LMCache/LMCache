@@ -33,7 +33,13 @@ def test_vllm_cross_layer():
     assert out is kv
 
 
-def test_vllm_flash_attn_nhd_vs_hnd():
+# The CPU-HND safeguard forces HND regardless of hint when running on a CPU
+# host; bypass it so the hint-driven NHD/HND branch is exercised on any host.
+_VLLM_DEV = "lmcache.v1.gpu_connector.kv_format.detectors.vllm.torch_device_type"
+
+
+def test_vllm_flash_attn_nhd_vs_hnd(monkeypatch):
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
     kv = [_t(2, NB, BS, NH, HS) for _ in range(NL)]
     fmt_nhd, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt_nhd == F.NL_X_TWO_NB_BS_NH_HS
@@ -43,7 +49,8 @@ def test_vllm_flash_attn_nhd_vs_hnd():
     assert fmt_hnd == F.NL_X_TWO_NB_NH_BS_HS
 
 
-def test_vllm_flash_infer_nhd():
+def test_vllm_flash_infer_nhd(monkeypatch):
+    monkeypatch.setattr(_VLLM_DEV, "cuda")
     kv = [_t(NB, 2, BS, NH, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt == F.NL_X_NB_TWO_BS_NH_HS
@@ -53,6 +60,17 @@ def test_vllm_mla():
     kv = [_t(NB, BS, HS) for _ in range(NL)]
     fmt, _ = detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
     assert fmt == F.NL_X_NB_BS_HS
+
+
+def test_vllm_blocks_first_fused_num_heads_2():
+    # Raw 4-D [NB, NH, BS, 2*HS] with NH == 2 (a common GQA config): after the
+    # fused split the K/V axis and the head axis both equal 2, so the 5-D shape
+    # is ambiguous with flash-infer. Detection must use the rank-4 split, not
+    # the post-split shape, to land on the fused format.
+    raw = [_t(NB, 2, BS, 2 * HS) for _ in range(NL)]
+    fmt, out = detect_format(raw, EngineType.VLLM, {"kv_layout": "HND"})
+    assert fmt == F.NL_X_NB_NH_BS_TWO_HS
+    assert tuple(out[0].shape) == (NB, 2, BS, 2, HS)
 
 
 def test_sglang_mla_depth1():
@@ -87,7 +105,8 @@ def test_trtllm_cross_layer_6d():
 
 
 def test_unsupported_structure_raises():
-    # vLLM depth-1 list of 4-D tensors matches no branch (needs 5-D or 3-D).
-    kv = [_t(NB, BS, NH, HS) for _ in range(NL)]
+    # vLLM depth-1 list of 2-D tensors matches no branch (needs 5-D, 4-D, or
+    # 3-D). (4-D is now the blocks-first fused layout, so it no longer raises.)
+    kv = [_t(NB, HS) for _ in range(NL)]
     with pytest.raises(ValueError):
         detect_format(kv, EngineType.VLLM, {"kv_layout": "NHD"})
