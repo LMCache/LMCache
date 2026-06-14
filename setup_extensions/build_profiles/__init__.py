@@ -60,6 +60,13 @@ class BuildProfile(ABC):
         When ``True``, all native C++ extensions are skipped — including
         both common extensions (Redis, filesystem, storage manager)
         and GPU backend extensions.
+
+        ``NO_CUDA_EXT`` is the legacy alias kept for backwards
+        compatibility (widely used by CI / packaging); it has always
+        controlled all native extensions, not just CUDA ones, and is
+        therefore treated as equivalent to ``NO_NATIVE_EXT``.
+        Use ``NO_GPU_EXT=1`` instead when only the GPU backend should
+        be skipped.
         """
         # Standard
         import os
@@ -70,7 +77,10 @@ class BuildProfile(ABC):
                 "warning: NO_CUDA_EXT is deprecated; use NO_NATIVE_EXT=1 instead.",
                 file=sys.stderr,
             )
-        return os.environ.get("NO_NATIVE_EXT", "0") == "1"
+        return (
+            os.environ.get("NO_NATIVE_EXT", "0") == "1"
+            or os.environ.get("NO_CUDA_EXT", "0") == "1"
+        )
 
     @classmethod
     def is_gpu_ext_disabled(cls) -> bool:
