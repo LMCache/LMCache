@@ -37,10 +37,10 @@ else:
     # First Party
     lmc_ops = None
 
-# Define mock GPUKVFormat enum if c_ops is not available
+# Define mock EngineKVFormat enum if c_ops is not available
 if lmc_ops is None:
 
-    class MockGPUKVFormat:
+    class MockEngineKVFormat:
         NL_X_TWO_NB_BS_NH_HS = 0
         NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
@@ -49,7 +49,8 @@ if lmc_ops is None:
         NL_X_NB_NH_BS_TWO_HS = 5
 
     class MockCOps:
-        GPUKVFormat = MockGPUKVFormat
+        EngineKVFormat = MockEngineKVFormat
+        GPUKVFormat = MockEngineKVFormat
 
     lmc_ops = MockCOps()
 

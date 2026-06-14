@@ -29,7 +29,7 @@ else:
 # Mock c_ops when not available
 if lmc_ops is None:
 
-    class MockGPUKVFormat:
+    class MockEngineKVFormat:
         NL_X_TWO_NB_BS_NH_HS = 0
         NL_X_NB_TWO_BS_NH_HS = 1
         NL_X_NB_BS_HS = 2
@@ -41,7 +41,8 @@ if lmc_ops is None:
         D2H = 1
 
     class MockCOps:
-        GPUKVFormat = MockGPUKVFormat
+        EngineKVFormat = MockEngineKVFormat
+        GPUKVFormat = MockEngineKVFormat
         TransferDirection = MockTransferDirection
 
     lmc_ops = MockCOps()
