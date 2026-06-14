@@ -30,8 +30,8 @@ logger = init_logger(__name__)
 
 
 _SUPPORTED_MUSA_KV_FORMATS = (
-    lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-    lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
+    lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
 )
 
 

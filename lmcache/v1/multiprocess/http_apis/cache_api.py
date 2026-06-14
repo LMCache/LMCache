@@ -33,11 +33,11 @@ router = APIRouter()
 # semantics don't map cleanly onto a single layer tensor, and the diagnostic
 # API declines them with HTTP 501 until a real need appears.
 _BLOCK_AXIS_BY_FORMAT: dict[Any, int] = {
-    lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS: 1,  # [2, NB, BS, NH, HS]
-    lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS: 0,  # [NB, 2, BS, NH, HS]
-    lmc_ops.GPUKVFormat.NL_X_NB_BS_HS: 0,  # MLA: [NB, BS, HS]
-    lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS: 1,  # [2, NB, NH, BS, HS]
-    lmc_ops.GPUKVFormat.NL_X_NB_TWO_NH_BS_HS: 0,  # [NB, 2, NH, BS, HS]
+    lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS: 1,  # [2, NB, BS, NH, HS]
+    lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS: 0,  # [NB, 2, BS, NH, HS]
+    lmc_ops.EngineKVFormat.NL_X_NB_BS_HS: 0,  # MLA: [NB, BS, HS]
+    lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS: 1,  # [2, NB, NH, BS, HS]
+    lmc_ops.EngineKVFormat.NL_X_NB_TWO_NH_BS_HS: 0,  # [NB, 2, NH, BS, HS]
 }
 
 

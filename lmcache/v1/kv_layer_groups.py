@@ -69,7 +69,7 @@ EXCLUDED_ENGINE_GROUP = -1
 
 def group_layers_by_identity(
     kv_caches: "DiscoverableKVCache",
-    engine_kv_format: "lmc_ops.GPUKVFormat",
+    engine_kv_format: "lmc_ops.EngineKVFormat",
     num_layers: int,
     per_layer_engine_group_idx: Sequence[int] | None = None,
 ) -> list[tuple[LayerGroupIdentity, list[int]]]:
@@ -277,7 +277,7 @@ class KVLayerGroupsManager:
     def __init__(
         self,
         kv_caches: "DiscoverableKVCache",
-        engine_kv_format: "lmc_ops.GPUKVFormat",
+        engine_kv_format: "lmc_ops.EngineKVFormat",
         num_blocks: int,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),
         lmcache_tokens_per_chunk: int = 256,
@@ -659,7 +659,7 @@ def parse_kvcache_shape_spec(
         dtype       := "float16" | "float32" | "bfloat16" | "uint8"
         layer_count := positive integer
 
-    **Field semantics** (names aligned with ``GPUKVFormat``; see
+    **Field semantics** (names aligned with ``EngineKVFormat``; see
     :func:`lmcache.v1.gpu_connector.utils.get_engine_kv_shape_description`):
 
     * ``kv_size`` -- leading dim (``2`` for standard K/V, ``1`` for MLA).

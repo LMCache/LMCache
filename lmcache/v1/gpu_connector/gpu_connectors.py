@@ -1980,7 +1980,7 @@ class TRTLLMGPUConnector(GPUConnectorInterface):
         self.kv_cache_tensor: Optional[torch.Tensor] = None
         self.paged_buffer_ptrs: Optional[torch.Tensor] = None
         self.shape_desc: Optional["lmc_ops.PageBufferShapeDesc"] = None
-        self._kv_format: Optional["lmc_ops.GPUKVFormat"] = None
+        self._kv_format: Optional["lmc_ops.EngineKVFormat"] = None
         self.tokens_per_block: Optional[int] = None
         self.blocks_per_chunk: Optional[int] = None
 

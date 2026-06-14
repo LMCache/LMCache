@@ -549,7 +549,7 @@ def multi_layer_kv_transfer(
     paged_memory_device: torch.device,
     page_buffer_size: int,
     direction: TransferDirection,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     block_size: int = 0,
     head_size: int = 0,
     skip_prefix_n_tokens: int = 0,
@@ -566,8 +566,8 @@ def multi_layer_kv_transfer(
     # TODO: Implement head_size support for HND layouts (NL_X_TWO_NB_NH_BS_HS,
     # NL_X_NB_TWO_NH_BS_HS) as next step.
     if int(engine_kv_format) in (
-        int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS),
-        int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS),
+        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
+        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
     ):
         raise NotImplementedError(
             "HND layouts (NL_X_TWO_NB_NH_BS_HS, NL_X_NB_TWO_NH_BS_HS) "
@@ -596,10 +596,10 @@ def multi_layer_kv_transfer(
 
     # 2. Determine architecture variant and tensor dimensions.
     is_mla = int(engine_kv_format) in (
-        int(GPUKVFormat.NL_X_NB_BS_HS),
-        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
     )
-    is_flash_infer = int(engine_kv_format) == int(GPUKVFormat.NL_X_NB_TWO_BS_NH_HS)
+    is_flash_infer = int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_BS_NH_HS)
 
     num_layers = key_value.size(1)
     hidden_size = key_value.size(3)
@@ -683,7 +683,7 @@ def multi_layer_kv_transfer_unilateral(
     paged_memory_device: torch.device,
     page_buffer_size: int,
     direction: TransferDirection,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
 ):
     """
     Python fallback for multi_layer_kv_transfer_unilateral
@@ -707,8 +707,8 @@ def multi_layer_kv_transfer_unilateral(
         D2H = PagedBuffer -> LMCache
     """
     is_mla = int(engine_kv_format) in (
-        int(GPUKVFormat.NL_X_NB_BS_HS),
-        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
     )
 
     # MLA case collapses back to multi_layer_kv_transfer
@@ -758,36 +758,36 @@ def multi_layer_kv_transfer_unilateral(
                 key_value[kv_idx, layer_id, valid_mask_kv, :] = gathered.to(kv_device)
 
 
-def _is_cross_layer_format(engine_kv_format: GPUKVFormat) -> bool:
+def _is_cross_layer_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a KV format uses a single cross-layer tensor."""
     return int(engine_kv_format) in (
-        int(GPUKVFormat.NB_NL_TWO_BS_NH_HS),
-        int(GPUKVFormat.NB_NL_TWO_NH_BS_HS),
+        int(EngineKVFormat.NB_NL_TWO_BS_NH_HS),
+        int(EngineKVFormat.NB_NL_TWO_NH_BS_HS),
     )
 
 
-def _is_sglang_mha_format(engine_kv_format: GPUKVFormat) -> bool:
+def _is_sglang_mha_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a KV format uses SGLang MHA layout (2*NL tensors)."""
     return int(engine_kv_format) in (
-        int(GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS),
-        int(GPUKVFormat.TWO_X_NL_X_NB_BS_NH_HS),
+        int(EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS),
+        int(EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS),
     )
 
 
-def _is_hnd_format(engine_kv_format: GPUKVFormat) -> bool:
+def _is_hnd_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a per-layer KV format stores heads before block tokens (HND)."""
     return int(engine_kv_format) in (
-        int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS),
-        int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS),
-        int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS),
+        int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS),
+        int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS),
+        int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS),
     )
 
 
-def _is_mla_format(engine_kv_format: GPUKVFormat) -> bool:
+def _is_mla_format(engine_kv_format: EngineKVFormat) -> bool:
     """Return True when a KV format uses MLA paged layout."""
     return int(engine_kv_format) in (
-        int(GPUKVFormat.NL_X_NB_BS_HS),
-        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
     )
 
 
@@ -813,7 +813,7 @@ def _is_ptr_tensor(x: object) -> bool:
 
 
 def _per_layer_paged_shape(
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     nb: int,
     bs: int,
     nh: int,
@@ -833,21 +833,21 @@ def _per_layer_paged_shape(
         from a raw pointer via :func:`_tensor_from_ptr`.
     """
     fmt = int(engine_kv_format)
-    if fmt == int(GPUKVFormat.NL_X_NBBS_ONE_HS):
+    if fmt == int(EngineKVFormat.NL_X_NBBS_ONE_HS):
         return (nb * bs, 1, hs)
-    if fmt == int(GPUKVFormat.NL_X_NB_BS_HS):
+    if fmt == int(EngineKVFormat.NL_X_NB_BS_HS):
         return (nb, bs, hs)
-    if fmt == int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS):
+    if fmt == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
         return (2, nb, nh, bs, hs)
-    if fmt == int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS):
+    if fmt == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
         return (nb, 2, nh, bs, hs)
-    if fmt == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
+    if fmt == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
         # vLLM CPU blocks-first fused KV: K and V interleaved at the
         # second-to-last dim so each layer is [NB, NH, BS, 2, HS].
         return (nb, nh, bs, 2, hs)
-    if fmt == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
+    if fmt == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
         return (2, nb, bs, nh, hs)
-    if fmt == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
+    if fmt == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
         return (nb, nh, bs, 2, hs)
     # Covers NL_X_NB_TWO_BS_NH_HS and any future NHD variants.
     return (nb, 2, bs, nh, hs)
@@ -905,7 +905,7 @@ def _infer_kv_dtype(
 
 def _normalize_paged_layers(
     paged_buffer_ptrs_tensor: "torch.Tensor | list",
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     shape_desc: "PageBufferShapeDesc | None" = None,
     device: "torch.device | str | None" = None,
     dtype: "torch.dtype | None" = None,
@@ -936,7 +936,7 @@ def _normalize_paged_layers(
                 bs = int(shape_desc.bs)
                 nh = int(shape_desc.nh)
                 hs = int(shape_desc.hs)
-                if int(engine_kv_format) == int(GPUKVFormat.NB_NL_TWO_NH_BS_HS):
+                if int(engine_kv_format) == int(EngineKVFormat.NB_NL_TWO_NH_BS_HS):
                     shape: tuple[int, ...] = (nb, nl, 2, nh, bs, hs)
                 else:
                     shape = (nb, nl, 2, bs, nh, hs)
@@ -960,7 +960,7 @@ def _normalize_paged_layers(
             bs = int(shape_desc.bs)
             nh = int(shape_desc.nh)
             hs = int(shape_desc.hs)
-            is_flat = int(engine_kv_format) == int(GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS)
+            is_flat = int(engine_kv_format) == int(EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS)
             per_layer_shape: tuple[int, ...] = (
                 (nb * bs, nh, hs) if is_flat else (nb, bs, nh, hs)
             )
@@ -1035,7 +1035,7 @@ def _normalize_lmcache_objects(
     lmcache_objects_ptrs: "list[int] | list[torch.Tensor]",
     shape_desc: "PageBufferShapeDesc | None" = None,
     lmcache_chunk_size: "int | None" = None,
-    engine_kv_format: "GPUKVFormat | None" = None,
+    engine_kv_format: "EngineKVFormat | None" = None,
     dtype: "torch.dtype | None" = None,
 ) -> list[torch.Tensor]:
     """Normalize LMCache object inputs to chunk tensors.
@@ -1102,7 +1102,7 @@ def multi_layer_block_kv_transfer(
     direction: TransferDirection,
     shape_desc: PageBufferShapeDesc,
     lmcache_chunk_size: int,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     skip_prefix_n_blocks: int,
 ) -> None:
     """Python fallback implementation of block-based multi-layer KV transfer.
@@ -1284,13 +1284,13 @@ def _transfer_cross_layer(
     n_block_ids: int,
     blocks_per_object: int,
     block_size: int,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
     """Handle cross-layer formats: single tensor [NB, NL, 2, ...]."""
     # NHD: [NB, NL, 2, BS, NH, HS]  HND: [NB, NL, 2, NH, BS, HS]
-    is_hnd = int(engine_kv_format) == int(GPUKVFormat.NB_NL_TWO_NH_BS_HS)
+    is_hnd = int(engine_kv_format) == int(EngineKVFormat.NB_NL_TWO_NH_BS_HS)
     num_layers = paged_tensor.shape[1]
 
     if is_hnd:
@@ -1366,14 +1366,14 @@ def _transfer_sglang_mha(
     n_block_ids: int,
     blocks_per_object: int,
     block_size: int,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
     """Handle SGLang MHA formats: 2*NL tensors (list[list[Tensor]])."""
     # TWO_X_NL_X_NBBS_NH_HS: each tensor [NB*BS, NH, HS]
     # TWO_X_NL_X_NB_BS_NH_HS: each tensor [NB, BS, NH, HS]
-    is_flat = int(engine_kv_format) == int(GPUKVFormat.TWO_X_NL_X_NBBS_NH_HS)
+    is_flat = int(engine_kv_format) == int(EngineKVFormat.TWO_X_NL_X_NBBS_NH_HS)
     num_layers = len(paged_tensors[0])
 
     # Determine target device from first tensor
@@ -1446,7 +1446,7 @@ def _transfer_per_layer_mla(
     n_block_ids: int,
     blocks_per_object: int,
     block_size: int,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
@@ -1454,7 +1454,7 @@ def _transfer_per_layer_mla(
     if not layer_tensors or not object_tensors:
         return
 
-    is_flat = int(engine_kv_format) == int(GPUKVFormat.NL_X_NBBS_ONE_HS)
+    is_flat = int(engine_kv_format) == int(EngineKVFormat.NL_X_NBBS_ONE_HS)
     target_device = layer_tensors[0].device
     if is_flat:
         token_offsets = torch.arange(block_size, dtype=torch.long, device=target_device)
@@ -1520,7 +1520,7 @@ def _transfer_per_layer_hnd(
     n_block_ids: int,
     blocks_per_object: int,
     block_size: int,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
@@ -1532,9 +1532,9 @@ def _transfer_per_layer_hnd(
     block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
 
     first_layer = layer_tensors[0]
-    if int(engine_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS):
+    if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
         first_k = first_layer[0]
-    elif int(engine_kv_format) == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
+    elif int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
         first_k = first_layer[:, :, :, 0]
     else:
         first_k = first_layer[:, 0]
@@ -1573,7 +1573,7 @@ def _transfer_per_layer_hnd(
                 device=target_device,
             )
             for layer_idx, layer in enumerate(layer_tensors):
-                if int(engine_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS):
+                if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
                     k_t, v_t = layer[0], layer[1]
                     torch.index_select(k_t, 0, eff_idx, out=scratch)
                     chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
@@ -1583,7 +1583,7 @@ def _transfer_per_layer_hnd(
                     chunk_gpu[1, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
                         scratch.permute(0, 2, 1, 3)
                     )
-                elif int(engine_kv_format) == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
+                elif int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
                     k_t, v_t = layer[:, :, :, 0], layer[:, :, :, 1]
                     torch.index_select(k_t, 0, eff_idx, out=scratch)
                     chunk_gpu[0, layer_idx].view(n_valid, block_size, nh0, hs0).copy_(
@@ -1611,9 +1611,9 @@ def _transfer_per_layer_hnd(
                 target_device, non_blocking=True
             )
             for layer_idx, layer in enumerate(layer_tensors):
-                if int(engine_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_NH_BS_HS):
+                if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_NH_BS_HS):
                     k_t, v_t = layer[0], layer[1]
-                elif int(engine_kv_format) == int(GPUKVFormat.NL_X_NB_NH_BS_TWO_HS):
+                elif int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_NH_BS_TWO_HS):
                     k_t, v_t = layer[:, :, :, 0], layer[:, :, :, 1]
                 else:
                     k_t, v_t = layer[:, 0], layer[:, 1]
@@ -1628,7 +1628,7 @@ def _transfer_per_layer_hnd(
                     .reshape(n_valid, block_size, nh, hs)
                     .permute(0, 2, 1, 3)
                 )
-                if int(engine_kv_format) == int(GPUKVFormat.NL_X_NB_TWO_NH_BS_HS):
+                if int(engine_kv_format) == int(EngineKVFormat.NL_X_NB_TWO_NH_BS_HS):
                     layer.index_copy_(
                         0, eff_idx, torch.stack([k_blocks, v_blocks], dim=1)
                     )
@@ -1644,7 +1644,7 @@ def _transfer_per_layer_nhd(
     n_block_ids: int,
     blocks_per_object: int,
     block_size: int,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     is_d2h: bool,
     skip_prefix_n_blocks: int,
 ) -> None:
@@ -1656,7 +1656,7 @@ def _transfer_per_layer_nhd(
     block_ids_dev = torch.as_tensor(block_ids, dtype=torch.long, device=target_device)
 
     first_layer = layer_tensors[0]
-    if int(engine_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
+    if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
         first_k = first_layer[0]
     else:
         first_k = first_layer[:, 0]
@@ -1687,7 +1687,7 @@ def _transfer_per_layer_nhd(
                 device=target_device,
             )
             for layer_idx, layer in enumerate(layer_tensors):
-                if int(engine_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
+                if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
                     k_t, v_t = layer[0], layer[1]
                     torch.index_select(
                         k_t,
@@ -1719,7 +1719,7 @@ def _transfer_per_layer_nhd(
                 target_device, non_blocking=True
             )
             for layer_idx, layer in enumerate(layer_tensors):
-                if int(engine_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS):
+                if int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS):
                     k_t, v_t = layer[0], layer[1]
                     k_t.index_copy_(
                         0,
@@ -1748,7 +1748,7 @@ def single_layer_kv_transfer(
     vllm_key_value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     direction: TransferDirection,
-    engine_kv_format: GPUKVFormat,
+    engine_kv_format: EngineKVFormat,
     token_major: bool = False,
 ):
     """
@@ -1787,8 +1787,8 @@ def single_layer_kv_transfer(
     valid_slots = slots_kv[valid_mask_kv].to(paged_memory_device)
 
     is_mla = int(engine_kv_format) in (
-        int(GPUKVFormat.NL_X_NB_BS_HS),
-        int(GPUKVFormat.NL_X_NBBS_ONE_HS),
+        int(EngineKVFormat.NL_X_NB_BS_HS),
+        int(EngineKVFormat.NL_X_NBBS_ONE_HS),
     )
 
     if is_mla:
@@ -1813,7 +1813,7 @@ def single_layer_kv_transfer(
     else:
         # ── Non-MLA format ──
         # Determine vLLM layout and block_size
-        is_two_major = int(engine_kv_format) == int(GPUKVFormat.NL_X_TWO_NB_BS_NH_HS)
+        is_two_major = int(engine_kv_format) == int(EngineKVFormat.NL_X_TWO_NB_BS_NH_HS)
         # flash attn:
         #   [2, num_blocks, block_size, num_heads, head_size]
         #   -> dim2 = block_size

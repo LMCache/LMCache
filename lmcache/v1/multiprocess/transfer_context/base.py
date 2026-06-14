@@ -263,7 +263,7 @@ def create_non_gpu_context(
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
     layout_hints: LayoutHints | None = None,
-) -> tuple[int, int, int, str, "lmc_ops.GPUKVFormat"]:
+) -> tuple[int, int, int, str, "lmc_ops.EngineKVFormat"]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
@@ -304,7 +304,7 @@ def gather_paged_kv_to_cpu(
     block_ids: list[int],
     blocks_per_chunk: int,
     layout_hints: LayoutHints | None = None,
-    engine_kv_format: "lmc_ops.GPUKVFormat" | None = None,
+    engine_kv_format: "lmc_ops.EngineKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
 ) -> list[torch.Tensor]:
@@ -545,7 +545,7 @@ def scatter_cpu_to_paged_kv(
     blocks_per_chunk: int,
     skip_first_n_tokens: int = 0,
     layout_hints: LayoutHints | None = None,
-    engine_kv_format: "lmc_ops.GPUKVFormat" | None = None,
+    engine_kv_format: "lmc_ops.EngineKVFormat" | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
