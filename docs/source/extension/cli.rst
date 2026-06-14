@@ -103,6 +103,17 @@ A top-level command appears directly under ``lmcache <command>``.
 
    lmcache hello --name LMCache
 
+.. note::
+
+   This works because the top-level ``lmcache/cli/commands/__init__.py``
+   calls ``discover_subclasses`` on its own package at import time. It
+   uses ``pkgutil.iter_modules`` to find all direct submodules (files and
+   sub-packages), imports each one, and collects every concrete
+   ``BaseCommand`` subclass. The resulting list is stored in
+   ``ALL_COMMANDS`` and registered with the argument parser in
+   ``main.py``. So adding a new ``.py`` file with a ``BaseCommand``
+   subclass is all that is needed — no edits to any other file.
+
 Level 2: Adding a Subcommand Group
 -----------------------------------
 
