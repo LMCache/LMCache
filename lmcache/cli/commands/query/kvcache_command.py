@@ -2,45 +2,24 @@
 """``lmcache query kvcache`` — query KV-cache endpoints (placeholder)."""
 
 # Standard
-from typing import TYPE_CHECKING
 import argparse
 
 # First Party
-from lmcache.cli.commands.base import _add_output_args
-
-if TYPE_CHECKING:
-    # First Party
-    from lmcache.cli.commands.base import BaseCommand
+from lmcache.cli.commands.base import BaseCommand
 
 
-def register_kvcache_parser(
-    subparsers: argparse._SubParsersAction,
-    dispatch_func,
-) -> argparse.ArgumentParser:
-    """Register the ``lmcache query kvcache`` subcommand parser.
+class KVCacheCommand(BaseCommand):
+    """Query KV-cache endpoints (not implemented yet)."""
 
-    Args:
-        subparsers: The ``query`` subparsers action.
-        dispatch_func: Function to bind via ``set_defaults(func=...)``.
+    def name(self) -> str:
+        return "kvcache"
 
-    Returns:
-        The created ``ArgumentParser``.
-    """
-    parser = subparsers.add_parser(
-        "kvcache",
-        help="Query KV-cache endpoints (not implemented yet).",
-    )
-    _add_output_args(parser)
-    parser.set_defaults(func=dispatch_func)
-    return parser
+    def help(self) -> str:
+        return "Query KV-cache endpoints (not implemented yet)."
 
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        pass  # TODO: add kvcache query arguments
 
-def run_query_kvcache(cmd: "BaseCommand", args: argparse.Namespace) -> None:
-    """Execute the ``lmcache query kvcache`` subcommand.
-
-    Args:
-        cmd: The parent command instance (for metrics creation).
-        args: Parsed CLI arguments.
-    """
-    # TODO: implement kvcache query logic
-    pass
+    def execute(self, args: argparse.Namespace) -> None:
+        # TODO: implement kvcache query logic
+        pass
