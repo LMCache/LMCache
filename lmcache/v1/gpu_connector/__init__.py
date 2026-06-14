@@ -90,30 +90,56 @@ def CreateGPUConnector(
         device = torch.device(f"{torch_device_type}:{local_worker_id}")
         kv_dtype = metadata.kv_dtype
 
-        # First Party
-        from lmcache.v1.gpu_connector.gpu_connectors import (
-            SGLangGPUConnector,
-            SGLangLayerwiseGPUConnector,
-        )
+        if torch_device_type == "xpu":
+            # First Party
+            from lmcache.v1.gpu_connector.xpu_connectors import (
+                SGLangLayerwiseXPUConnector,
+                SGLangXPUConnector,
+            )
 
-        if config.use_layerwise:
-            return SGLangLayerwiseGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
+            if config.use_layerwise:
+                return SGLangLayerwiseXPUConnector(
+                    hidden_dim_size,
+                    num_layer,
+                    use_gpu=use_gpu,
+                    chunk_size=chunk_size,
+                    dtype=kv_dtype,
+                    device=device,
+                )
+            else:
+                return SGLangXPUConnector(
+                    hidden_dim_size,
+                    num_layer,
+                    use_gpu=use_gpu,
+                    chunk_size=chunk_size,
+                    dtype=kv_dtype,
+                    device=device,
+                )
+        else:  # GPU for SGLang
+            # First Party
+            from lmcache.v1.gpu_connector.gpu_connectors import (
+                SGLangGPUConnector,
+                SGLangLayerwiseGPUConnector,
             )
-        else:
-            return SGLangGPUConnector(
-                hidden_dim_size,
-                num_layer,
-                use_gpu=use_gpu,
-                chunk_size=chunk_size,
-                dtype=kv_dtype,
-                device=device,
-            )
+
+            if config.use_layerwise:
+                return SGLangLayerwiseGPUConnector(
+                    hidden_dim_size,
+                    num_layer,
+                    use_gpu=use_gpu,
+                    chunk_size=chunk_size,
+                    dtype=kv_dtype,
+                    device=device,
+                )
+            else:
+                return SGLangGPUConnector(
+                    hidden_dim_size,
+                    num_layer,
+                    use_gpu=use_gpu,
+                    chunk_size=chunk_size,
+                    dtype=kv_dtype,
+                    device=device,
+                )
     elif engine == EngineType.VLLM:
         _validate_vllm_device_features(config)
 
