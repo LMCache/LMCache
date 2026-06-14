@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Blend V3: paged-aware CacheBlend as an EngineModule.
 
-Plugs into the unified MPCacheEngine; standard REGISTER_KV_CACHE +
+Plugs into the unified MPCacheServer; standard REGISTER_KV_CACHE +
 CB_REGISTER_ROPE_V3 for setup; STORE wrapper registers fingerprints;
 retrieve scatters into the request's paged blocks.
 """
@@ -42,9 +42,9 @@ from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
@@ -319,7 +319,7 @@ class BlendV3Module:
 
     def __init__(
         self,
-        ctx: MPCacheEngineContext,
+        ctx: MPCacheServerContext,
         gpu_transfer: GPUTransferModule,
         lookup_module: LookupModule,
         coordinator: "BlendCoordinatorClient | None" = None,
@@ -372,7 +372,7 @@ class BlendV3Module:
     # ------------------------------------------------------------------
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         return self._ctx
 
     def get_handlers(self) -> list[HandlerSpec]:
@@ -534,7 +534,7 @@ class BlendV3Module:
             except Exception:
                 logger.exception("CB fingerprint registration failed (sync drain)")
 
-    def _match_fingerprints(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
+    def _match_fingerprints(self, key: IPCCacheServerKey) -> list[CBMatchResult]:
         """Drain pending registrations and fingerprint-match sub-sequences.
 
         Returns the raw matches (any order, possibly overlapping); the caller
@@ -598,7 +598,7 @@ class BlendV3Module:
 
     def _sparse_prefetch_submit(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         layout_desc: "MemoryLayoutDesc",
         matches: list[CBMatchResult],
     ) -> "tuple[PrefetchHandle, dict[bytes, list], list[int]]":
@@ -610,7 +610,7 @@ class BlendV3Module:
         with the found set.
 
         Args:
-            key (IPCCacheEngineKey): The request key.
+            key (IPCCacheServerKey): The request key.
             layout_desc (MemoryLayoutDesc): CB KV buffer layout for L1 alloc.
             matches (list[CBMatchResult]): Non-prefix matches to prefetch.
 
@@ -651,7 +651,7 @@ class BlendV3Module:
 
     def _sparse_classify(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         matches: list[CBMatchResult],
         found_uidx: set[int],
         per_hash_obj_keys: dict[bytes, list],
@@ -664,7 +664,7 @@ class BlendV3Module:
         Stashes the found chunks' obj_keys for the retrieve path.
 
         Args:
-            key (IPCCacheEngineKey): The request key.
+            key (IPCCacheServerKey): The request key.
             matches (list[CBMatchResult]): The submitted non-prefix matches.
             found_uidx (set[int]): Deduped-key indices that loaded.
             per_hash_obj_keys (dict[bytes, list]): Per-hash TP-expanded keys.
@@ -723,7 +723,7 @@ class BlendV3Module:
         return found_cb_match_result
 
     def cb_unified_lookup(
-        self, key: IPCCacheEngineKey, tp_size: int
+        self, key: IPCCacheServerKey, tp_size: int
     ) -> CBUnifiedLookupResult | None:
         """Non-blocking single-RPC CB lookup (submit-once, poll-on-recall).
 
@@ -734,7 +734,7 @@ class BlendV3Module:
         the retrieve.
 
         Args:
-            key (IPCCacheEngineKey): Request key (token IDs, request_id, model,
+            key (IPCCacheServerKey): Request key (token IDs, request_id, model,
                 world_size).
             tp_size (int): Tensor-parallel size for the prefix lookup.
 
@@ -915,7 +915,7 @@ class BlendV3Module:
 
     def store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
@@ -929,7 +929,7 @@ class BlendV3Module:
         raised — they do not affect store correctness.
 
         Args:
-            key (IPCCacheEngineKey): Store key (token IDs + ``[start, end)``).
+            key (IPCCacheServerKey): Store key (token IDs + ``[start, end)``).
             instance_id (int): Target KV-cache instance.
             gpu_block_ids (list[list[int]]): Per-layer-group paged block IDs.
             event_ipc_handle (bytes): IPC handle to the producer's CUDA event.
@@ -984,7 +984,7 @@ class BlendV3Module:
 
     def _publish_fingerprints(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         chunk_hashes: list[bytes],
         tokens_in_range: list[int],
     ) -> None:
@@ -1020,7 +1020,7 @@ class BlendV3Module:
                 key.request_id,
             )
 
-    def _submit_coordinator_match(self, key: IPCCacheEngineKey) -> bool:
+    def _submit_coordinator_match(self, key: IPCCacheServerKey) -> bool:
         """Issue a fleet directory match query for this request (best-effort).
 
         Args:
@@ -1204,7 +1204,7 @@ class BlendV3Module:
 
     def cb_retrieve_pre_computed(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         cb_match_result: list[CBMatchResult],
         gpu_block_ids: list[int],
         instance_id: int,
@@ -1220,7 +1220,7 @@ class BlendV3Module:
         call this twice: partial- then full-block alloc).
 
         Args:
-            key (IPCCacheEngineKey): The request key.
+            key (IPCCacheServerKey): The request key.
             cb_match_result (list[CBMatchResult]): Matched ranges to scatter
                 (prefix-hit and shifted), any order.
             gpu_block_ids (list[int]): This request's full paged block table.

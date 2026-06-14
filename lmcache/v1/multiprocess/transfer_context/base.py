@@ -31,7 +31,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 
 if TYPE_CHECKING:
@@ -150,7 +150,7 @@ class NonGpuContext(ABC):
 
     @abstractmethod
     def prepare_store(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         """Prepare SHM buffers for a store operation.
 
@@ -172,20 +172,20 @@ class NonGpuContext(ABC):
 
     @abstractmethod
     def commit_store(
-        self, key: IPCCacheEngineKey, instance_id: int, chunks: list[torch.Tensor]
+        self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
         """Commit store. Pickle: serialize and send. Shm: notify server."""
         ...
 
     @abstractmethod
     def prepare_retrieve(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> list[torch.Tensor] | None:
         """Prepare retrieve. Returns chunks or shm views, or None on miss."""
         ...
 
     @abstractmethod
-    def commit_retrieve(self, key: IPCCacheEngineKey, instance_id: int) -> bool:
+    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Commit retrieve. Pickle: no-op. Shm: release read locks."""
         ...
 

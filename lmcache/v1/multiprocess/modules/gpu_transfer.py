@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GPU-based KV cache transfer operations for the MPCacheEngine."""
+"""GPU-based KV cache transfer operations for the MPCacheServer."""
 
 # Standard
 from dataclasses import dataclass
@@ -30,10 +30,10 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
@@ -413,7 +413,7 @@ class GPUTransferModule:
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheEngineContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
 
@@ -433,7 +433,7 @@ class GPUTransferModule:
         self._device_host_func_dispatcher.start()
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
@@ -587,7 +587,7 @@ class GPUTransferModule:
     @_lmcache_nvtx_annotate
     def store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
@@ -797,7 +797,7 @@ class GPUTransferModule:
     @_lmcache_nvtx_annotate
     def retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,

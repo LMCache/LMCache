@@ -36,10 +36,10 @@ msgstr ""
 #: ../../source/mp/observability.rst:9
 msgid ""
 "All three modes are powered by an internal **EventBus** that decouples "
-"producers (L1Manager, StorageManager, MPCacheEngine) from subscribers."
+"producers (L1Manager, StorageManager, MPCacheServer) from subscribers."
 msgstr ""
 "这三种模式都由一个内部 **EventBus** "
-"驱动，该总线将生产者（L1Manager、StorageManager、MPCacheEngine）与订阅者解耦。"
+"驱动，该总线将生产者（L1Manager、StorageManager、MPCacheServer）与订阅者解耦。"
 
 #: ../../source/mp/observability.rst:17
 msgid "Quick Start"
@@ -768,12 +768,12 @@ msgstr ""
 #: ../../source/mp/observability.rst:368
 msgid ""
 "The ``model_name`` and ``cache_salt`` attributes are captured at lookup "
-"time from ``IPCCacheEngineKey`` so dashboards can compute per-model or "
+"time from ``IPCCacheServerKey`` so dashboards can compute per-model or "
 "per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry "
 "per tenant or isolation domain); drop it at scrape time with "
 "``metric_relabel_configs`` if storage cost matters."
 msgstr ""
-"``model_name`` 和 ``cache_salt`` 属性在查找时从 ``IPCCacheEngineKey`` "
+"``model_name`` 和 ``cache_salt`` 属性在查找时从 ``IPCCacheServerKey`` "
 "中捕获，以便仪表板可以计算每个模型或每个租户的命中率。``cache_salt`` "
 "可能具有高基数（每个租户或隔离域一个条目）；如果存储成本重要，请在抓取时通过 ``metric_relabel_configs`` 丢弃它。"
 
@@ -1541,9 +1541,9 @@ msgstr "KV 张量字节。重放练习的记账和控制逻辑；重放时的有
 
 #: ../../source/mp/observability.rst:829
 msgid ""
-"Calls inside the ``MPCacheEngine``, the message queue, or any GPU-copy "
+"Calls inside the ``MPCacheServer``, the message queue, or any GPU-copy "
 "code. These layers are **out of scope** for the storage trace level."
-msgstr "在 ``MPCacheEngine``、消息队列或任何 GPU 复制代码中的调用。这些层级在存储跟踪级别中是 **超出范围** 的。"
+msgstr "在 ``MPCacheServer``、消息队列或任何 GPU 复制代码中的调用。这些层级在存储跟踪级别中是 **超出范围** 的。"
 
 #: ../../source/mp/observability.rst:834
 msgid "File format"

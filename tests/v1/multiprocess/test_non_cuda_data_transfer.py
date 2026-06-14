@@ -38,11 +38,13 @@ if TYPE_CHECKING:
     from lmcache.v1.distributed.config import StorageManagerConfig
     from lmcache.v1.gpu_connector.utils import LayoutHints
     from lmcache.v1.multiprocess.custom_types import (
-        IPCCacheEngineKey,
+        IPCCacheServerKey,
         RegisterNonGpuContextPayload,
     )
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+    from lmcache.v1.multiprocess.modules.non_gpu_transfer import (
+        NonGPUTransferModule,
+    )
 
 
 class ServerModuleFactory(Protocol):
@@ -56,7 +58,7 @@ class ServerModuleFactory(Protocol):
         mock_session: Optional session mock; defaults to a new ``MagicMock``.
 
     Returns a tuple of ``(NonGPUTransferModule, storage MagicMock,
-    session MagicMock, MPCacheEngineContext)``.
+    session MagicMock, MPCacheServerContext)``.
     """
 
     def __call__(
@@ -68,7 +70,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
     ) -> tuple[
-        "NonGPUTransferModule", MagicMock, MagicMock, "MPCacheEngineContext"
+        "NonGPUTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
     ]: ...
 
 
@@ -196,7 +198,7 @@ def _default_register_payload(instance_id: int = 1) -> "RegisterNonGpuContextPay
     )
 
 
-def _default_key(tokens: int = 8) -> "IPCCacheEngineKey":
+def _default_key(tokens: int = 8) -> "IPCCacheServerKey":
     """Build a default IPC cache key with ``tokens`` contiguous token IDs.
 
     Args:
@@ -207,9 +209,9 @@ def _default_key(tokens: int = 8) -> "IPCCacheEngineKey":
     and ``request_id="req"``.
     """
     # First Party
-    from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
-    return IPCCacheEngineKey.from_token_ids(
+    return IPCCacheServerKey.from_token_ids(
         "m",
         1,
         0,
@@ -248,15 +250,15 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
 
 
 def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
-    """Ensure transfer context factory returns DataTransferContext for CPU KV."""
+    """Ensure factory returns LMCacheDrivenTransferContext for CPU KV."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-        DataTransferContext,
+        LMCacheDrivenTransferContext,
         create_transfer_context,
     )
 
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})
-    assert isinstance(context, DataTransferContext)
+    assert isinstance(context, LMCacheDrivenTransferContext)
 
 
 def test_resolve_extra_config_default_mp_transfer_mode_is_auto() -> None:
@@ -279,8 +281,8 @@ def test_resolve_extra_config_overrides_mp_transfer_mode() -> None:
         _resolve_extra_config,
     )
 
-    cfg = _resolve_extra_config({"lmcache.mp.mp_transfer_mode": "data"})
-    assert cfg[ExtraConfigDefault.mp_transfer_mode.name] == "data"
+    cfg = _resolve_extra_config({"lmcache.mp.mp_transfer_mode": "lmcache_driven"})
+    assert cfg[ExtraConfigDefault.mp_transfer_mode.name] == "lmcache_driven"
 
 
 def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
@@ -299,7 +301,7 @@ def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
         ExtraConfigDefault,
     )
     from lmcache.v1.multiprocess.transfer_context import (
-        HandleTransferContext,
+        EngineDrivenTransferContext,
         create_transfer_context,
     )
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
@@ -312,42 +314,47 @@ def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
     resolved_mode = extra_config[mp_mode_key] if mp_mode_key in extra_config else None
     assert resolved_mode is None
 
-    # With env=handle and mode=None, CPU KV must pick HandleTransferContext.
-    monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "handle")
+    # With env=engine_driven and mode=None, CPU KV must pick
+    # EngineDrivenTransferContext.
+    monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "engine_driven")
     context = create_transfer_context(
         {"layer_0": torch.randn(2, 2)}, mode=resolved_mode
     )
-    assert isinstance(context, HandleTransferContext)
+    assert isinstance(context, EngineDrivenTransferContext)
 
 
-def test_create_transfer_context_force_data_mode() -> None:
-    """``mode='data'`` must always pick DataTransferContext, even for CUDA."""
+def test_create_transfer_context_force_lmcache_driven_mode() -> None:
+    """``mode='lmcache_driven'`` must always pick
+    LMCacheDrivenTransferContext, even for CUDA."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
-        DataTransferContext,
+        LMCacheDrivenTransferContext,
         MPTransferMode,
         create_transfer_context,
     )
 
     context = create_transfer_context(
-        {"layer_0": torch.randn(2, 2)}, mode=MPTransferMode.DATA
+        {"layer_0": torch.randn(2, 2)}, mode=MPTransferMode.LMCACHE_DRIVEN
     )
-    assert isinstance(context, DataTransferContext)
+    assert isinstance(context, LMCacheDrivenTransferContext)
 
 
-def test_create_transfer_context_force_handle_mode_on_cpu() -> None:
-    """``mode='handle'`` on CPU works because the CPU SHM wrapper is registered."""
+def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
+    """``mode='engine_driven'`` on CPU works because the CPU SHM
+    wrapper is registered."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
-        HandleTransferContext,
+        EngineDrivenTransferContext,
         create_transfer_context,
     )
 
     # Importing the CPU sub-package self-registers its KV-wrapper factory.
     import lmcache.v1.platform.cpu  # noqa: F401
 
-    context = create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="handle")
-    assert isinstance(context, HandleTransferContext)
+    context = create_transfer_context(
+        {"layer_0": torch.randn(2, 2)}, mode="engine_driven"
+    )
+    assert isinstance(context, EngineDrivenTransferContext)
 
 
 def test_create_transfer_context_invalid_mode_raises() -> None:
@@ -372,7 +379,9 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         # Drop every registered factory so 'cpu' can never be resolved.
         platform_registry.restore({"kv_wrapper": {}, "availability": {}})
         with pytest.raises(ValueError, match="not supported for device type"):
-            create_transfer_context({"layer_0": torch.randn(2, 2)}, mode="handle")
+            create_transfer_context(
+                {"layer_0": torch.randn(2, 2)}, mode="engine_driven"
+            )
     finally:
         platform_registry.restore(snapshot)
 
@@ -380,19 +389,20 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
 def test_create_transfer_context_env_var_overrides_default(
     monkeypatch: Any,
 ) -> None:
-    """``LMCACHE_MP_TRANSFER_MODE=data`` must force the data path."""
+    """``LMCACHE_MP_TRANSFER_MODE=lmcache_driven`` must force the
+    LMCache-driven path."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
-        DataTransferContext,
+        LMCacheDrivenTransferContext,
         create_transfer_context,
     )
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
         ENV_MP_TRANSFER_MODE,
     )
 
-    monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "data")
+    monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "lmcache_driven")
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})
-    assert isinstance(context, DataTransferContext)
+    assert isinstance(context, LMCacheDrivenTransferContext)
 
 
 @pytest.mark.parametrize(
@@ -633,7 +643,7 @@ def server_module_factory(
     from contextlib import ExitStack
 
     # First Party
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
     from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
 
     stack = ExitStack()
@@ -645,7 +655,7 @@ def server_module_factory(
         object_keys: list[str] | None = None,
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
-    ) -> tuple["NonGPUTransferModule", MagicMock, MagicMock, "MPCacheEngineContext"]:
+    ) -> tuple["NonGPUTransferModule", MagicMock, MagicMock, "MPCacheServerContext"]:
         """Create a patched module/context plus storage/session mocks.
 
         Args:
@@ -686,10 +696,10 @@ def server_module_factory(
         if storage_manager_config is None:
             storage_manager_config = MagicMock()
             # GDS L1 is off in these tests. A bare MagicMock would auto-vivify
-            # gds_l1_config to a truthy mock, making MPCacheEngineContext attempt
+            # gds_l1_config to a truthy mock, making MPCacheServerContext attempt
             # real cuFile init; pin it to None so GDS init stays a no-op.
             storage_manager_config.l1_manager_config.gds_l1_config = None
-        ctx = MPCacheEngineContext(
+        ctx = MPCacheServerContext(
             storage_manager_config=storage_manager_config,
             chunk_size=chunk_size,
         )
@@ -727,7 +737,7 @@ def test_engine_context_shm_pool_info(
 ) -> None:
     """Ensure engine context computes SHM pool metadata for lazy and non-lazy modes."""
     # First Party
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
     with patch(
         "lmcache.v1.distributed.config.torch_dev",
@@ -741,7 +751,7 @@ def test_engine_context_shm_pool_info(
         patch("lmcache.v1.multiprocess.engine_context.SessionManager"),
         patch("lmcache.v1.multiprocess.engine_context.get_event_bus"),
     ):
-        ctx = MPCacheEngineContext(storage_manager_config=config, chunk_size=16)
+        ctx = MPCacheServerContext(storage_manager_config=config, chunk_size=16)
 
     assert ctx.shm_pool_info == expected_pool_info
 
