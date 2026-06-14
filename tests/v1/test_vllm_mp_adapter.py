@@ -21,6 +21,7 @@ import torch
 # First Party
 from lmcache.integration.vllm import vllm_multi_process_adapter as adapter_mod
 from lmcache.integration.vllm.vllm_multi_process_adapter import (
+    LMCacheMPSchedulerAdapter,
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
     ParallelStrategy,
@@ -93,6 +94,106 @@ def fake_adapter(monkeypatch):
     # so individual tests start with a clean call count.
     send_mock.reset_mock()
     return adapter, send_mock, future
+
+
+@pytest.fixture
+def fake_scheduler_adapter(monkeypatch):
+    """Build a scheduler adapter with the MQ boundary stubbed out."""
+    fake_client = MagicMock(name="mq_client")
+    monkeypatch.setattr(adapter_mod, "MessageQueueClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(adapter_mod, "get_lmcache_chunk_size", lambda *a, **kw: 256)
+
+    future = MagicMock(name="future")
+    future.result.return_value = None
+    send_mock = MagicMock(name="send_lmcache_request", return_value=future)
+    monkeypatch.setattr(adapter_mod, "send_lmcache_request", send_mock)
+
+    class FakeHeartbeatThread:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            self.recover_callback: object | None = None
+
+        def register_recover_callback(self, callback: object) -> None:
+            self.recover_callback = callback
+
+        def start(self) -> None:
+            return None
+
+    monkeypatch.setattr(adapter_mod, "HeartbeatThread", FakeHeartbeatThread)
+
+    parallel_strategy = ParallelStrategy(
+        use_mla=False,
+        vllm_world_size=1,
+        vllm_worker_id=0,
+        tp_size=1,
+        pp_size=1,
+    )
+    adapter = LMCacheMPSchedulerAdapter(
+        server_url="tcp://127.0.0.1:0",
+        context=MagicMock(name="zmq_context"),
+        model_name="test-model",
+        vllm_block_size=16,
+        parallel_strategy=parallel_strategy,
+        mq_timeout=5.0,
+    )
+    send_mock.reset_mock()
+    return adapter, send_mock, future
+
+
+def test_scheduler_reset_cache_submits_clear_and_clears_lookup_state(
+    fake_scheduler_adapter,
+):
+    """reset_cache sends CLEAR and drops local lookup bookkeeping."""
+    adapter, send_mock, future = fake_scheduler_adapter
+    adapter._pending_lookups.add("req-1")
+    adapter._finished_lookup_results["req-1"] = 256
+    adapter._health_event.clear()
+
+    assert adapter.reset_cache() is True
+
+    send_mock.assert_called_once_with(adapter.mq_client, RequestType.CLEAR, [])
+    future.result.assert_called_once_with(timeout=5.0)
+    assert adapter._pending_lookups == set()
+    assert adapter._finished_lookup_results == {}
+    assert adapter.is_healthy is True
+
+    send_mock.reset_mock()
+    future.result.reset_mock()
+    adapter.maybe_submit_lookup_request("req-2", list(range(512)))
+
+    assert send_mock.call_args.args[1] == RequestType.LOOKUP
+    assert adapter._pending_lookups == {"req-2"}
+
+
+def test_scheduler_reset_cache_marks_unhealthy_on_timeout(fake_scheduler_adapter):
+    """reset_cache returns False and marks server unhealthy on timeout."""
+    adapter, send_mock, future = fake_scheduler_adapter
+    adapter._pending_lookups.add("req-1")
+    adapter._finished_lookup_results["req-1"] = 256
+    future.result.side_effect = TimeoutError("server down")
+
+    assert adapter.reset_cache() is False
+
+    send_mock.assert_called_once_with(adapter.mq_client, RequestType.CLEAR, [])
+    assert adapter._pending_lookups == set()
+    assert adapter._finished_lookup_results == {}
+    assert adapter.is_healthy is False
+
+
+def test_connector_reset_cache_clears_request_trackers_on_adapter_failure():
+    """Connector reset drops request trackers even when server clear fails."""
+    connector_mod = pytest.importorskip("lmcache.integration.vllm.lmcache_mp_connector")
+    connector = connector_mod.LMCacheMPConnector.__new__(
+        connector_mod.LMCacheMPConnector
+    )
+    connector.role = connector_mod.KVConnectorRole.SCHEDULER
+    connector.scheduler_adapter = MagicMock()
+    connector.scheduler_adapter.reset_cache.return_value = False
+    connector.request_trackers = {"req-1": MagicMock()}
+
+    assert connector.reset_cache() is False
+
+    connector.scheduler_adapter.reset_cache.assert_called_once_with()
+    assert connector.request_trackers == {}
 
 
 def test_register_kv_caches_updates_kv_caches_and_submits(fake_adapter):
