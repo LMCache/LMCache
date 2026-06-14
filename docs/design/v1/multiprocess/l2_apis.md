@@ -1,4 +1,4 @@
-# L2 Keys Management HTTP API
+# L2 HTTP APIs
 
 ## Overview
 

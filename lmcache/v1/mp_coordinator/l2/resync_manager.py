@@ -54,7 +54,7 @@ class L2ResyncManager:
         paginated walk may cause individual keys to be missed or
         double-counted — the contract is best-effort, not
         snapshot-isolated. See the design doc for
-        ``l2_keys_management`` for the underlying listing semantics.
+        ``l2_apis`` for the underlying listing semantics.
     """
 
     def __init__(
