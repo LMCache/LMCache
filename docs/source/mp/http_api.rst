@@ -258,10 +258,10 @@ prefetch jobs. Intended for operators and debugging, not for monitoring
                 "tokens_per_block": 16,
                 "slots_per_block": 16,
                 "dtype": "torch.bfloat16",
-                "gpu_kv_concrete_shape": "...",
+                "engine_kv_concrete_shape": "...",
                 "is_mla": false,
-                "gpu_kv_format": "...",
-                "gpu_kv_shape": "...",
+                "engine_kv_format": "...",
+                "engine_kv_shape": "...",
                 "attention_backend": "..."
               }
             ]

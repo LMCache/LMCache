@@ -744,15 +744,15 @@ Options
    * - ``--mode {gpu,cpu}``
      - ``gpu``
      - Run mode. ``gpu`` allocates real CUDA tensors and uses CUDA IPC
-       (handle path). ``cpu`` allocates POSIX-SHM-backed tensors and
-       uses the data-transfer path (gather/scatter via slot descriptors).
-   * - ``--transfer-mode {auto,handle,data}``
+       (engine-driven path). ``cpu`` allocates POSIX-SHM-backed tensors and
+       uses the LMCache-driven (worker-side gather/scatter) path by default.
+   * - ``--transfer-mode {auto,engine_driven,lmcache_driven}``
      - ``auto``
-     - Transport routing for STORE/RETRIEVE. ``handle`` forces the
+     - Transport routing for STORE/RETRIEVE. ``engine_driven`` forces the
        single-shot path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``).
-       ``data`` forces the two-phase gather/scatter path
+       ``lmcache_driven`` forces the two-phase gather/scatter path
        (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` + ``PREPARE``/``COMMIT``).
-       ``auto`` maps gpu→handle and cpu→data.
+       ``auto`` maps gpu→engine_driven and cpu→lmcache_driven.
    * - ``--num-tokens N``
      - ``512``
      - Tokens per synthetic request.
@@ -784,9 +784,9 @@ CPU mode (no GPU)
 runs on a CPU-only host (``StubCPUDevice``); the bench tool allocates
 POSIX-SHM-backed KV tensors and exercises the full RPC path.
 
-By default ``--mode cpu`` uses the data-transfer path (``auto`` →
-``cpu→data``). To use the zero-copy SHM handle path instead, pass
-``--transfer-mode handle``:
+By default ``--mode cpu`` uses the LMCache-driven gather/scatter path
+(``auto`` → ``cpu→lmcache_driven``). To use the zero-copy SHM
+engine-driven path instead, pass ``--transfer-mode engine_driven``:
 
 .. code-block:: bash
 
@@ -795,11 +795,11 @@ By default ``--mode cpu`` uses the data-transfer path (``auto`` →
        --host localhost --port 5555 \
        --l1-size-gb 2 --eviction-policy LRU
 
-   # Terminal 2 -- run bench in CPU + handle mode
+   # Terminal 2 -- run bench in CPU + engine_driven mode
    lmcache bench server \
        --rpc-url tcp://localhost:5555 \
        --url http://localhost:8080 \
-       --mode cpu --transfer-mode handle \
+       --mode cpu --transfer-mode engine_driven \
        --start 0 --end 2
 
 
