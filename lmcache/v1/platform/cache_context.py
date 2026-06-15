@@ -19,12 +19,13 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cpu.cache_context import CpuCacheContext
 
 if TYPE_CHECKING:
@@ -38,7 +39,7 @@ def create_cache_context(
     layout_hints: LayoutHints | None = None,
     engine_group_infos: "Sequence[EngineGroupInfo]" = (),
     engine_type: EngineType = EngineType.VLLM,
-) -> Any:
+) -> BaseCacheContext:
     """Create the appropriate cache context.
 
     The signature mirrors :class:`GPUCacheContext` so callers can

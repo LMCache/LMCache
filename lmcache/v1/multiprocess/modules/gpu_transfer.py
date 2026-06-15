@@ -38,13 +38,13 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.native_completion import (
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
 
@@ -52,7 +52,7 @@ logger = init_logger(__name__)
 
 
 def get_layout_desc(
-    gpu_context: GPUCacheContext,
+    gpu_context: BaseCacheContext,
     num_tokens: int,
     object_group_id: int,
 ) -> MemoryLayoutDesc:
@@ -122,7 +122,7 @@ def batched_iteration_with_skip(
 
 
 def downsample_and_stage_block_ids(
-    cache_context: GPUCacheContext,
+    cache_context: BaseCacheContext,
     block_ids: list[list[int]],
 ) -> list[torch.Tensor]:
     """Cut the block id lists to skip the unneeded blocks in a chunk and
@@ -229,7 +229,7 @@ def _recalculate_blocks_to_skip(
 
 
 def transfer_kv_per_object_group(
-    cache_context: GPUCacheContext,
+    cache_context: BaseCacheContext,
     block_ids_gpu: list[torch.Tensor],
     memory_objs: Sequence[MemoryObj | None],
     object_group_id: int,
@@ -398,7 +398,7 @@ class ContextEntry:
         world_size: The world size associated with this KV cache.
     """
 
-    cache_context: GPUCacheContext
+    cache_context: BaseCacheContext
     model_name: str
     world_size: int
 

@@ -46,7 +46,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
-from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -56,6 +55,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -1137,7 +1137,7 @@ class BlendV3Module:
 
     def _apply_cb_rope_batched(
         self,
-        gpu_context: GPUCacheContext,
+        gpu_context: BaseCacheContext,
         rope_state: _CBRopeState,
         batch_len: int,
         slots_to_rope: list[tuple[int, int, int]],

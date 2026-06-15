@@ -37,7 +37,6 @@ from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
@@ -48,6 +47,7 @@ from lmcache.v1.multiprocess.protocol import (
     get_handler_type,
     get_payload_classes,
 )
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 
@@ -112,7 +112,7 @@ class MPCacheServer:
         return self._context.storage_manager
 
     @property
-    def gpu_contexts(self) -> dict[int, GPUCacheContext] | None:
+    def gpu_contexts(self) -> dict[int, BaseCacheContext] | None:
         """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
             if isinstance(module, GPUTransferModule):
