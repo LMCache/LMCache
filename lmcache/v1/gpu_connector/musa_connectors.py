@@ -387,6 +387,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.num_heads,
         )
 
+
 class VLLMPagedMemLayerwiseMUSAConnector(GPUConnectorInterface):
     """Layerwise paged KV connector for MUSA devices.
 
