@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
 from typing import TYPE_CHECKING, Any
+import os
 import threading
 import time
 
@@ -87,6 +88,7 @@ class _CBUnifiedJob:
     matches: list[CBMatchResult]
     num_tokens: int = 0
     prefix_chunks: int | None = None  # stashed when the prefix poll completes
+    retained_chunks: list[int] | None = None  # SEGMENTED_PREFIX: full gapped set
     sparse_started: bool = False  # prefix done -> sparse leg submitted/skipped
     handle: PrefetchHandle | None = None  # sparse handle, None if no sparse leg
     non_prefix: list[CBMatchResult] | None = None
@@ -778,10 +780,19 @@ class BlendV3Module(InstanceLivenessTarget):
                     metadata={"num_tokens": len(key.token_ids)},
                 )
             )
+            # SEGMENTED_PREFIX: request the contiguous prefix with gap-tolerant
+            # retention so a mid-prefix L2 retrieve failure leaves the post-gap
+            # chunks L1-resident (picked up by the sparse leg as L1 hits, hole
+            # recomputed) instead of truncating the prefix at the gap.
+            prefix_policy = (
+                TrimPolicy.SEGMENTED_PREFIX
+                if os.environ.get("SEGMENTED_PREFIX") == "1"
+                else TrimPolicy.PREFIX
+            )
             # Prefix leg: submit (non-blocking). Already traced upstream by
             # mp.lookup_prefetch (LookupModule self-instruments); prefix_chunks
             # lands on cb.lookup via CB_LOOKUP_END below.
-            self._lookup_module.lookup(key, tp_size)
+            self._lookup_module.lookup(key, tp_size, policy=prefix_policy)
             # Local and coordinator matching are mutually exclusive: with a
             # coordinator the fleet directory is the only source, so skip the
             # local matcher (and its span). The coordinator leg is async
@@ -812,25 +823,43 @@ class BlendV3Module(InstanceLivenessTarget):
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
+        segmented = os.environ.get("SEGMENTED_PREFIX") == "1"
+
         # --- Prefix leg: poll (consume-once) until the L1+L2 prefix lands. ---
         if job.prefix_chunks is None:
-            p = self._lookup_module.query_prefetch_status(rid)
-            if p is None:
-                return None  # prefix still loading -> defer
-            job.prefix_chunks = p
+            if segmented:
+                # Segmented: also capture the gapped retained set so the
+                # post-gap chunks are delivered through the prefix leg (below).
+                seg = self._lookup_module.query_prefetch_status_segmented(rid)
+                if seg is None:
+                    return None  # prefix still loading -> defer
+                job.prefix_chunks, job.retained_chunks = seg
+            else:
+                pf = self._lookup_module.query_prefetch_status(rid)
+                if pf is None:
+                    return None  # prefix still loading -> defer
+                job.prefix_chunks = pf
+        # Poll above set it (or we returned); narrow for the arithmetic below.
+        assert job.prefix_chunks is not None
+        prefix_chunks: int = job.prefix_chunks
 
         # Prefix done: reconcile the complement outside the prefix coverage and
         # submit one sparse prefetch for it (once). Prefix-covered chunks never
         # enter the sparse prefetch, so they cannot leak a read lock.
         if not job.sparse_started:
-            prefix_tokens = job.prefix_chunks * chunk_size
+            prefix_tokens = prefix_chunks * chunk_size
             if self._coordinator is not None:
                 candidates = self._poll_coordinator_match(job, rid)
                 if candidates is None:
                     return None  # coordinator still in flight (bounded by deadline)
             else:
                 candidates = job.matches
-            # Single prefix-filter + overlap dedup over the raw matches
+            # Under SEGMENTED_PREFIX the post-gap SAME-position chunks ride the
+            # prefix leg's gapped bitmap (the segmented tail below); keep only
+            # genuinely shifted (re-RoPE) matches here so they are not scattered
+            # twice. Then the single prefix-filter + overlap dedup over the rest.
+            if segmented:
+                candidates = [c for c in candidates if c.old_st != c.cur_st]
             job.non_prefix = self._non_overlapping_after_prefix(
                 candidates, prefix_tokens
             )
@@ -899,11 +928,35 @@ class BlendV3Module(InstanceLivenessTarget):
         else:
             found = []
 
-        prefix_tokens = job.prefix_chunks * chunk_size
+        prefix_tokens = prefix_chunks * chunk_size
         num_tokens = job.num_tokens
-        # V3 hit rate = (prefix + non-prefix) reuse. The two ranges are disjoint
-        # (non_prefix has cur_st >= prefix_tokens), so they sum without double-
-        # counting. hit_tokens carries the sum (the hit_rate numerator).
+
+        # Segmented tail: post-gap chunks the SEGMENTED_PREFIX prefix leg kept
+        # resident (retained index > the leading run). Delivered at their
+        # original positions (old_st == cur_st) so the connector tags them
+        # ``prefix`` (pure load, no recompute); only the gap is recomputed. The
+        # storage key is the same prefix-chained chunk hash the prefix leg used,
+        # so no fingerprint match is needed to retrieve them.
+        segmented_tail: list[CBMatchResult] = []
+        if segmented and job.retained_chunks:
+            chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
+                list(key.token_ids)
+            )
+            for i in job.retained_chunks:
+                if i < prefix_chunks or i >= len(chunk_hashes):
+                    continue  # leading run (already prefix) / sub-chunk tail
+                st = i * chunk_size
+                segmented_tail.append(
+                    CBMatchResult(
+                        old_st=st,
+                        old_ed=st + chunk_size,
+                        cur_st=st,
+                        cur_ed=st + chunk_size,
+                        hash=chunk_hashes[i],
+                    )
+                )
+
+        seg_tail_tokens = _unique_token_coverage(segmented_tail)
         non_prefix_hit_tokens = _unique_token_coverage(found)
         self._event_bus.publish(
             Event(
@@ -918,8 +971,10 @@ class BlendV3Module(InstanceLivenessTarget):
                     "stale_chunks": len(job.non_prefix or []) - len(found),
                     "no_gpu_context": False,
                     "prefix_hit_tokens": prefix_tokens,
+                    "segmented_prefix_hit_tokens": seg_tail_tokens,
                     "non_prefix_hit_tokens": non_prefix_hit_tokens,
-                    "hit_tokens": prefix_tokens + non_prefix_hit_tokens,
+                    "hit_tokens": prefix_tokens
+                    + _unique_token_coverage(found + segmented_tail),
                     "requested_tokens": (num_tokens // chunk_size) * chunk_size,
                 },
             )
@@ -929,6 +984,7 @@ class BlendV3Module(InstanceLivenessTarget):
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
+            segmented_prefix_segments=segmented_tail,
         )
 
     def store(

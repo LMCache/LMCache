@@ -11,6 +11,7 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     PrefetchHandle,
+    TrimPolicy,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -163,6 +164,8 @@ class LookupModule:
         self,
         key: IPCCacheServerKey,
         tp_size: int,
+        *,
+        policy: TrimPolicy = TrimPolicy.PREFIX,
     ) -> None:
         """Submit a prefix lookup.
 
@@ -173,6 +176,10 @@ class LookupModule:
         Args:
             key: Cache key with request_id embedded.
             tp_size: Tensor-parallel size for MLA multi-reader locking.
+            policy: Trim policy for the prefetch. ``PREFIX`` (default) truncates
+                at the first gap; ``SEGMENTED_PREFIX`` retains a gapped contiguous
+                request (e.g. a mid-prefix L2 retrieve failure) so the hole is
+                recomputed instead of discarding everything after it.
         """
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
@@ -273,6 +280,7 @@ class LookupModule:
             layout_desc,
             extra_count=extra_count,
             external_request_id=key.request_id,
+            policy=policy,
         )
         self._register_prefetch_job(
             _PrefetchJob(
@@ -372,6 +380,63 @@ class LookupModule:
             self._prefetch_jobs.pop(request_id, None)
 
         return found_count
+
+    def query_prefetch_status_segmented(
+        self,
+        request_id: str,
+    ) -> tuple[int, list[int]] | None:
+        """Poll a prefetch job, returning the leading prefix count and the
+        full retained chunk-index set.
+
+        Identical exactly-once semantics to :meth:`query_prefetch_status`, but
+        for ``SEGMENTED_PREFIX`` it also surfaces the gapped found-set so the
+        caller can deliver the post-gap retained chunks that
+        ``count_leading_ones`` alone discards. A chunk is reported retained when
+        its first worker-shard bit is set; the trim mask retains whole chunks,
+        so the first shard stands in for all of them.
+
+        Args:
+            request_id: The external request ID passed in the lookup key.
+
+        Returns:
+            ``(leading_count, retained_chunk_indices)`` when the prefetch is
+            complete, ``None`` while still in progress, or ``(0, [])`` if the
+            request_id is unknown.
+        """
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(request_id)
+        if job is None:
+            logger.warning(
+                "Prefetch job for request %s not found (already completed or invalid)",
+                request_id,
+            )
+            return 0, []
+
+        found = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if found is None:
+            return None
+
+        ws = job.world_size
+        leading = found.count_leading_ones() // ws
+        # Any set shard marks its chunk retained (trim keeps whole chunks).
+        retained = sorted({ki // ws for ki in found.get_indices_list()})
+
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=job.request_id,
+                metadata={
+                    "found_count": leading,
+                    "requested_tokens": job.requested_tokens,
+                    "hit_tokens": leading * self._ctx.chunk_size,
+                    "model_name": job.model_name,
+                    "cache_salt": job.cache_salt,
+                },
+            )
+        )
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(request_id, None)
+        return leading, retained
 
     def free_lookup_locks(
         self,
