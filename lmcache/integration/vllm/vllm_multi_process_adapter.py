@@ -1162,19 +1162,20 @@ class LMCacheMPWorkerAdapter:
             ) from None
 
     def _ensure_heartbeat_started(self) -> None:
-        """Lazily start the heartbeat thread on first use (pessimistic).
+        """Lazily start the heartbeat thread on first store/retrieve.
 
-        Order is normative: clear event -> construct -> wire callback ->
-        start -> assign ``self._heartbeat`` last. Starting unhealthy makes
-        the first ping take the recovery edge (re-register; server noops if
-        server not reaped yet).
+        The heartbeat starts healthy (the event was set at construction). A
+        live worker pings every interval, refreshing its server-side
+        ``last_seen``, so it is never reaped while alive -- no re-registration
+        is needed at startup, and the first store/retrieve is not gated. The
+        recover callback still re-registers on a genuine unhealthy->healthy
+        edge (server restart) and on freeze-gap recovery.
         """
         if self._heartbeat is not None:
             return
         with self._heartbeat_lock:
             if self._heartbeat is not None:
                 return
-            self._health_event.clear()
             heartbeat = HeartbeatThread(
                 mq_client=self.mq_client,
                 health_event=self._health_event,

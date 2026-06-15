@@ -53,8 +53,7 @@ class FakeHeartbeatThread:
         )
         self.interval = interval
         # Snapshot of the health event at construction time: lets tests
-        # assert the adapter cleared the event *before* building the
-        # thread (pessimistic start).
+        # assert the adapter starts the heartbeat healthy (event still set).
         self.health_event_set_at_init = self.health_event.is_set()
         self.recover_callback: Callable[[], bool] | None = None
         # Ordered record of public calls ("register_recover_callback",
@@ -404,12 +403,10 @@ def test_instance_id_logged_at_info_on_construction(fake_adapter, monkeypatch) -
     assert any(str(adapter.instance_id) in msg for msg in messages)
 
 
-def test_pessimistic_start_clears_event_once_and_wires_callback_first(
-    fake_adapter,
-) -> None:
-    """The lazy create path clears the health event before constructing
-    the heartbeat, wires the recover callback before ``start()``, and is
-    idempotent on re-entry (no second thread, no re-clear)."""
+def test_heartbeat_lazy_start_wires_callback_before_start(fake_adapter) -> None:
+    """The lazy create path starts the heartbeat healthy (no pessimistic
+    clear) and wires the recover callback before ``start()``; the first
+    store is not gated. Idempotent on re-entry (no second thread)."""
     adapter, _send_mock, _ = fake_adapter
     adapter.transfer_ctx = MagicMock()
     assert adapter.is_healthy  # the constructor leaves the event set
@@ -418,97 +415,18 @@ def test_pessimistic_start_clears_event_once_and_wires_callback_first(
 
     assert len(FakeHeartbeatThread.instances) == 1
     heartbeat = FakeHeartbeatThread.instances[0]
-    # The event was cleared before the thread was constructed...
-    assert heartbeat.health_event_set_at_init is False
-    # ...the recover callback was wired before start()...
+    # Started healthy: the event was NOT cleared before construction, so
+    # the first store is not dropped.
+    assert heartbeat.health_event_set_at_init is True
+    # The recover callback is wired before start() (for genuine recovery).
     assert heartbeat.calls == ["register_recover_callback", "start"]
-    # ...and the simulated first ping took the edge and set the event.
     assert adapter.is_healthy
+    assert adapter.transfer_ctx.submit_store.call_count == 1
 
-    # Re-entry is idempotent: no new thread, and the event is NOT
-    # re-cleared (the second submission goes through healthy).
+    # Re-entry is idempotent: no new thread.
     adapter.submit_store_request("req-2", _op([[1]]), MagicMock())
     assert len(FakeHeartbeatThread.instances) == 1
-    assert adapter.is_healthy
     assert adapter.transfer_ctx.submit_store.call_count == 2
-
-
-def test_create_race_no_submission_passes_gate_before_first_ping(
-    fake_adapter,
-) -> None:
-    """Two threads racing the lazy heartbeat create: no submission may pass
-    the ``is_healthy`` gate while the first ping is in flight. Both racing
-    retrieves must be dropped (blocks flagged, ids via ``get_finished``)."""
-    adapter, _send_mock, _ = fake_adapter
-    transfer_ctx = MagicMock()
-    adapter.transfer_ctx = transfer_ctx
-
-    start_entered = threading.Event()
-    release_start = threading.Event()
-
-    def blocked_first_ping(heartbeat: FakeHeartbeatThread) -> None:
-        start_entered.set()
-        release_start.wait(timeout=10.0)
-        # Do not simulate a ping: the first ping never completes, so
-        # the health event stays cleared.
-
-    FakeHeartbeatThread.start_hook = blocked_first_ping
-
-    thread_a = threading.Thread(
-        target=adapter.submit_retrieve_request,
-        args=("req-a", _op([[0, 1]]), MagicMock()),
-    )
-    thread_a.start()
-    assert start_entered.wait(timeout=10.0)
-
-    thread_b = threading.Thread(
-        target=adapter.submit_retrieve_request,
-        args=("req-b", _op([[2, 3]]), MagicMock()),
-    )
-    thread_b.start()
-    time.sleep(0.2)  # give thread B a window to (incorrectly) submit
-    assert not transfer_ctx.submit_retrieve.called
-    # Under correct assign-last ordering B is still blocked on the
-    # heartbeat lock; if self._heartbeat were published before start()
-    # returned, B would have completed via the unhealthy drop path.
-    assert thread_b.is_alive()
-
-    release_start.set()
-    thread_a.join(timeout=10.0)
-    thread_b.join(timeout=10.0)
-    assert not thread_a.is_alive()
-    assert not thread_b.is_alive()
-
-    assert not transfer_ctx.submit_retrieve.called
-    _ret_stores, finished_retrieves = adapter.get_finished(set())
-    assert finished_retrieves == {"req-a", "req-b"}
-    assert adapter.get_block_ids_with_load_errors() == {0, 1, 2, 3}
-
-
-def test_first_ping_edge_fires_reregister_then_sets_event(
-    fake_adapter, monkeypatch
-) -> None:
-    """With the event cleared at heartbeat start, the first successful
-    ping fires the recover callback (observed as a fresh transfer
-    context plus a REGISTER submission) before traffic flows."""
-    adapter, _send_mock, _ = fake_adapter
-    contexts = _patch_transfer_context_factory(monkeypatch)
-
-    fake_tensor = MagicMock()
-    fake_tensor.device.type = "cuda"
-    adapter.register_kv_caches({"layer.0": fake_tensor})
-    assert len(contexts) == 1
-    assert contexts[0].register.called
-
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
-
-    # The first ping took the unhealthy->healthy edge: re-register
-    # (fresh context + REGISTER) ran before the event was set, and only
-    # then did the gated store proceed.
-    assert len(contexts) == 2
-    assert contexts[1].register.called
-    assert adapter.is_healthy
-    assert contexts[1].submit_store.called
 
 
 def test_heartbeat_first_ping_runs_callback_before_setting_event(
@@ -549,7 +467,8 @@ def test_dropped_retrieve_reported_once_via_unhealthy_get_finished(
     adapter, _send_mock, _ = fake_adapter
     transfer_ctx = MagicMock()
     adapter.transfer_ctx = transfer_ctx
-    FakeHeartbeatThread.start_hook = lambda heartbeat: None  # ping never succeeds
+    # Simulate a failed first ping: the heartbeat start clears the event.
+    FakeHeartbeatThread.start_hook = lambda hb: hb.health_event.clear()
 
     adapter.submit_retrieve_request("req-1", _op([[3, 4]]), MagicMock())
 
@@ -574,7 +493,8 @@ def test_dropped_retrieve_reported_once_via_healthy_get_finished(
     recovers."""
     adapter, _send_mock, _ = fake_adapter
     adapter.transfer_ctx = MagicMock()
-    FakeHeartbeatThread.start_hook = lambda heartbeat: None  # ping never succeeds
+    # Simulate a failed first ping: the heartbeat start clears the event.
+    FakeHeartbeatThread.start_hook = lambda hb: hb.health_event.clear()
 
     adapter.submit_retrieve_request("req-1", _op([[5]]), MagicMock())
     assert not adapter.is_healthy
@@ -801,12 +721,17 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     fake_tensor = MagicMock()
     fake_tensor.device.type = "cuda"
     adapter.register_kv_caches({"layer.0": fake_tensor})  # contexts[0]
-    # First store lazily starts the heartbeat; the simulated first ping
-    # fires the recover callback, which rebuilds the context.
-    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())  # contexts[1]
+    # Start the heartbeat (healthy, no recover) so the callback is wired.
+    adapter.submit_store_request("req-1", _op([[0]]), MagicMock())
     heartbeat = FakeHeartbeatThread.instances[0]
     assert heartbeat.recover_callback is not None
+    assert len(contexts) == 1
+    assert adapter.transfer_ctx is contexts[0]
 
+    # Each recover-callback invocation rebuilds transfer_ctx without closing
+    # the previous context (known IPC leak; in-flight submissions may still
+    # hold a reference to the old context).
+    assert heartbeat.recover_callback() is True
     assert len(contexts) == 2
     assert adapter.transfer_ctx is contexts[1]
     contexts[0].close.assert_not_called()
@@ -815,8 +740,3 @@ def test_recover_callback_rebuilds_transfer_ctx_without_closing_previous(
     assert len(contexts) == 3
     assert adapter.transfer_ctx is contexts[2]
     contexts[1].close.assert_not_called()
-
-    assert heartbeat.recover_callback() is True
-    assert len(contexts) == 4
-    assert adapter.transfer_ctx is contexts[3]
-    contexts[2].close.assert_not_called()
