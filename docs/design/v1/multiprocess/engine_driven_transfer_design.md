@@ -108,7 +108,7 @@ four lifecycle and transfer operations.
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
 During `register`, worker receives `RegisterEngineDrivenContextResponse(shm_name, pool_size)`
-from server and then calls `create_non_gpu_context(...)` to construct
+from server and then calls `create_engine_driven_context(...)` to construct
 `EngineDrivenContextPickle` or `EngineDrivenContextShm`.
 
 Why `prepare → data operation → commit`:
