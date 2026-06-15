@@ -50,6 +50,12 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::arg("engine_kv_format"), py::arg("block_size") = 0,
         py::arg("head_size") = 0, py::arg("skip_prefix_n_tokens") = 0,
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_layer_block_kv_transfer", &multi_layer_block_kv_transfer,
+        py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
+        py::arg("block_ids"), py::arg("device"), py::arg("direction"),
+        py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
+        py::arg("gpu_kv_format"), py::arg("skip_prefix_n_blocks"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer,
         py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
         py::arg("slot_mapping"), py::arg("direction"),
