@@ -212,7 +212,7 @@ class _RecordingListener(L2AdapterListener):
         self.deleted: list[list[ObjectKey]] = []
         self.lock = threading.Lock()
 
-    def on_l2_keys_stored(self, keys: list[ObjectKey]) -> None:
+    def on_l2_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         with self.lock:
             self.stored.append(list(keys))
 
