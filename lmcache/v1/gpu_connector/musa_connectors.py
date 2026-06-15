@@ -30,8 +30,8 @@ logger = init_logger(__name__)
 
 
 _SUPPORTED_MUSA_KV_FORMATS = (
-    lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-    lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,
+    lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    lmc_ops.EngineKVFormat.NL_X_NB_BS_HS,
 )
 
 
@@ -298,19 +298,19 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.device = kv_caches[0].device
         assert self.device.type == "musa", "The device should be MUSA."
 
-        self.gpu_kv_format, kv_caches = normalize_kv_and_discover_format(
+        self.engine_kv_format, kv_caches = normalize_kv_and_discover_format(
             kv_caches, EngineType.VLLM
         )
-        self.num_layers = get_num_layers(kv_caches, self.gpu_kv_format)
-        self.num_blocks = get_num_blocks(kv_caches, self.gpu_kv_format)
-        self.block_size = get_block_size(kv_caches, self.gpu_kv_format)
-        self.page_buffer_size = get_page_buffer_size(kv_caches, self.gpu_kv_format)
-        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.gpu_kv_format)
-        self.head_size = get_head_size(kv_caches, self.gpu_kv_format)
-        self.use_mla = is_mla(self.gpu_kv_format)
-        self.dtype = get_dtype(kv_caches, self.gpu_kv_format)
+        self.num_layers = get_num_layers(kv_caches, self.engine_kv_format)
+        self.num_blocks = get_num_blocks(kv_caches, self.engine_kv_format)
+        self.block_size = get_block_size(kv_caches, self.engine_kv_format)
+        self.page_buffer_size = get_page_buffer_size(kv_caches, self.engine_kv_format)
+        self.hidden_dim_size = get_hidden_dim_size(kv_caches, self.engine_kv_format)
+        self.head_size = get_head_size(kv_caches, self.engine_kv_format)
+        self.use_mla = is_mla(self.engine_kv_format)
+        self.dtype = get_dtype(kv_caches, self.engine_kv_format)
         self.num_heads = (
-            1 if self.use_mla else get_num_heads(kv_caches, self.gpu_kv_format)
+            1 if self.use_mla else get_num_heads(kv_caches, self.engine_kv_format)
         )
 
         self._attributes_initialized = True
@@ -319,7 +319,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
             "num_layers: %d, num_blocks: %d, block_size: %d, "
             "page_buffer_size: %d, hidden_dim_size: %d, head_size: %d, "
             "use_mla: %s, dtype: %s, num_heads: %d",
-            self.gpu_kv_format,
+            self.engine_kv_format,
             self.num_layers,
             self.num_blocks,
             self.block_size,
@@ -333,7 +333,7 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
 
     def _validate_supported_kv_format(self) -> None:
         """Reject KV layouts that this torch-based MUSA path cannot index."""
-        if self.gpu_kv_format in _SUPPORTED_MUSA_KV_FORMATS:
+        if self.engine_kv_format in _SUPPORTED_MUSA_KV_FORMATS:
             return
 
         supported = (
@@ -342,5 +342,5 @@ class VLLMPagedMemMUSAConnectorV2(VLLMPagedMemGPUConnectorV2):
         )
         raise ValueError(
             "VLLMPagedMemMUSAConnectorV2 supports only "
-            f"{supported}; got {self.gpu_kv_format}."
+            f"{supported}; got {self.engine_kv_format}."
         )

@@ -451,8 +451,8 @@ pass ``lmcache.mp.host`` / ``lmcache.mp.port`` in
 
 **CPU-only (no GPU)** -- the server runs with a ``StubCPUDevice`` and shares
 KV tensors with vLLM over POSIX shared memory. Start ``lmcache server``
-normally, then set ``lmcache.mp.mp_transfer_mode=handle`` on the vLLM side
-to enable the zero-copy SHM path.
+normally, then set ``lmcache.mp.mp_transfer_mode=engine_driven`` on the vLLM
+side to enable the zero-copy SHM path.
 
 **Docker** -- see :doc:`../production/docker_deployment`.
 

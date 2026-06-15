@@ -182,3 +182,101 @@ class L2StatusListResponse(BaseModel):
 
     total_gb: float
     by_cache_salt: list[L2StatusResponse]
+
+
+# -- Global CacheBlend fingerprint directory ------------------------------
+
+
+class StoreRangeModel(BaseModel):
+    """Wire form of one published stored token range (see ``StoreRange``).
+
+    The coordinator chunks ``tokens`` at its chunk size and hashes each chunk;
+    chunk ``i`` maps to ``object_keys[i]`` at ``old_st_base + i * chunk_size``.
+
+    Attributes:
+        model_scope: ``f"{model_name}@{cache_salt}"`` reuse scope.
+        tokens: The stored tokens (``token_ids[start:end]``).
+        object_keys: Shared-L2 storage key (hex) per chunk, in order.
+        old_st_base: Token position of the range's first token.
+    """
+
+    model_scope: str
+    tokens: list[int] = Field(default_factory=list)
+    object_keys: list[str] = Field(default_factory=list)
+    old_st_base: int = Field(ge=0)
+
+
+class BlendFingerprintRequest(BaseModel):
+    """Body of ``POST /blend/fingerprints``: register stored ranges.
+
+    Attributes:
+        ranges: Stored token ranges to register (idempotent).
+    """
+
+    ranges: list[StoreRangeModel] = Field(default_factory=list)
+
+
+class BlendFingerprintResponse(BaseModel):
+    """Reply to ``POST /blend/fingerprints``.
+
+    Attributes:
+        inserted: Number of fingerprints newly registered.
+    """
+
+    inserted: int
+
+
+class BlendEvictRequest(BaseModel):
+    """Body of ``DELETE /blend/fingerprints``: evict by storage key.
+
+    Attributes:
+        object_keys: ``object_key`` values to evict.
+    """
+
+    object_keys: list[str] = Field(default_factory=list)
+
+
+class BlendEvictResponse(BaseModel):
+    """Reply to ``DELETE /blend/fingerprints``.
+
+    Attributes:
+        removed: Number of fingerprint entries evicted.
+    """
+
+    removed: int
+
+
+class BlendMatchRequest(BaseModel):
+    """Body of ``POST /blend/match``.
+
+    Attributes:
+        model_scope: Scope to match within.
+        tokens: The request tokens (the coordinator hashes and probes them).
+    """
+
+    model_scope: str
+    tokens: list[int] = Field(default_factory=list)
+
+
+class GlobalMatchModel(BaseModel):
+    """Wire form of one matched chunk (see ``GlobalMatch``).
+
+    Attributes:
+        object_key: Shared-L2 storage key of the matched chunk.
+        old_st: Token position in the stored sequence (re-RoPE source).
+        cur_st: Token position in the request (re-RoPE target).
+    """
+
+    object_key: str
+    old_st: int
+    cur_st: int
+
+
+class BlendMatchResponse(BaseModel):
+    """Reply to ``POST /blend/match``.
+
+    Attributes:
+        matches: Matched chunks, ascending by ``cur_st``.
+    """
+
+    matches: list[GlobalMatchModel]

@@ -29,7 +29,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -191,8 +191,8 @@ class LMCacheMPConnector:
         end: int,
         request_id: str,
         no_worker_id: bool = False,
-    ) -> IPCCacheEngineKey:
-        return IPCCacheEngineKey(
+    ) -> IPCCacheServerKey:
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.tp_size,
             worker_id=None if no_worker_id else self.worker_id,

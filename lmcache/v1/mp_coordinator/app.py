@@ -29,6 +29,7 @@ from fastapi import FastAPI
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.quota_manager import QuotaManager
+from lmcache.v1.mp_coordinator.blend_directory import GlobalBlendMatcher
 from lmcache.v1.mp_coordinator.config import MPCoordinatorConfig
 from lmcache.v1.mp_coordinator.l2.eviction_manager import (
     L2EvictionManager,
@@ -67,7 +68,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     Returns:
         A configured FastAPI application. ``app.state`` carries the shared
         collaborators (``config``, ``registry``, ``quota_manager``,
-        ``usage_manager``); all ``http_apis`` routers are registered.
+        ``usage_manager``, ``blend_directory``); all ``http_apis`` routers are
+        registered.
     """
     registry = InstanceRegistry()
     quota_manager = QuotaManager()
@@ -77,6 +79,9 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
         usage_manager=usage_manager,
         eviction_ratio=config.eviction_ratio,
         trigger_watermark=config.trigger_watermark,
+    )
+    blend_directory = GlobalBlendMatcher(
+        chunk_size=config.blend_chunk_size, probe_stride=config.blend_probe_stride
     )
 
     async def _health_loop() -> None:
@@ -119,6 +124,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     app.state.quota_manager = quota_manager
     app.state.usage_manager = usage_manager
     app.state.eviction_manager = eviction_manager
+    app.state.blend_directory = blend_directory
 
     apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"

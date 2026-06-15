@@ -182,7 +182,7 @@ know `chunk_size`:
   cannot hit at chunk granularity.
 - `hit_tokens = found_count * chunk_size`.
 - `model_name` and `cache_salt` are captured at lookup time from
-  `IPCCacheEngineKey` and surface as OTel attributes on the
+  `IPCCacheServerKey` and surface as OTel attributes on the
   `lmcache_mp.lookup_*_tokens` counters so the hit rate can be sliced
   per model and per tenant / isolation domain on the dashboard.
   `cache_salt` may have high cardinality (e.g. one entry per tenant);
@@ -227,7 +227,7 @@ request scope and guard GPU callback races.  Published via `EventBus.publish()`
 ## Blend Server Events
 
 These events use `session_id` on the `Event` dataclass (sourced from
-`IPCCacheEngineKey.request_id`) to correlate START/END pairs.
+`IPCCacheServerKey.request_id`) to correlate START/END pairs.
 
 | EventType | Metadata keys | Types |
 |---|---|---|
