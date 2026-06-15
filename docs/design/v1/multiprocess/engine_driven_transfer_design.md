@@ -21,8 +21,8 @@ across non-CUDA backends.
 ```text
 Worker adapter (vLLM MP adapter)
   └─ TransferContext (transfer_context/worker_transfer.py)
-      ├─ EngineDrivenTransferContext  (IPC path via stream/event)
-      └─ LMCacheDrivenTransferContext    (data path via data copying in adapter)
+      ├─ LMCacheDrivenTransferContext  (IPC path via stream/event)
+      └─ EngineDrivenTransferContext    (data path via data copying in adapter)
           └─ EngineDrivenContext (transfer_context/base.py)
              ├─ EngineDrivenContextPickle (transfer_context/pickle.py)
              └─ EngineDrivenContextShm    (transfer_context/shm.py)
@@ -49,7 +49,7 @@ State machine overview (worker-side):
                  +---------------+---------------+
                  |                               |
                  v                               v
-      EngineDrivenTransferContext    LMCacheDrivenTransferContext
+      LMCacheDrivenTransferContext    EngineDrivenTransferContext
           (device == CUDA)            (device != CUDA)
                  |                               |
                  v                               v
@@ -63,7 +63,7 @@ State machine overview (worker-side):
                  +---------------+-------------------------------+
                  |                                               |
                  v                                               v
-    submit_store (engine-driven path)         submit_store (LMCache-driven path)
+    submit_store (lmcache-driven path)         submit_store (engine-driven path)
     -> STORE request (async)                    -> prepare_store -> gather -> commit_store
                  |                                               |
                  +---------------+-------------------------------+
@@ -74,7 +74,7 @@ State machine overview (worker-side):
                  +---------------+-------------------------------+
                  |                                               |
                  v                                               v
-  submit_retrieve (engine-driven path)      submit_retrieve (LMCache-driven path)
+  submit_retrieve (lmcache-driven path)      submit_retrieve (engine-driven path)
   -> RETRIEVE request (async)                 -> prepare_retrieve -> scatter -> commit_retrieve
                  |                                               |
                  +---------------+-------------------------------+
@@ -98,12 +98,12 @@ Overall data flow:
 The contract is intentionally minimal so worker adapters only depend on these
 four lifecycle and transfer operations.
 
-- **EngineDrivenTransferContext** keeps the original CUDA IPC behavior:
+- **LMCacheDrivenTransferContext** keeps the original CUDA IPC behavior:
   worker sends a handle and server performs direct GPU-side transfer.
-- **LMCacheDrivenTransferContext** is the non-CUDA path:
+- **EngineDrivenTransferContext** is the non-CUDA path:
   worker transfers actual data chunks through `EngineDrivenContext`.
 
-`LMCacheDrivenTransferContext` flows:
+`EngineDrivenTransferContext` flows:
 - **submit_store**: `prepare_store` → `gather_paged_kv_to_cpu` → `commit_store`
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
@@ -119,14 +119,14 @@ Why `prepare → data operation → commit`:
 - `commit_*`: finalize and notify server to consume or release transfer state.
 
 `create_transfer_context()` selects the implementation once based on device type
-(CUDA → `EngineDrivenTransferContext`, otherwise → `LMCacheDrivenTransferContext`).
+(CUDA → `LMCacheDrivenTransferContext`, otherwise → `EngineDrivenTransferContext`).
 It also validates that all KV cache tensors share one device type and rejects
 mixed-device configurations by raising an error.
 
 | Context | What is transferred | Who performs copy work | Completion style |
 |---|---|---|---|
-| EngineDrivenTransferContext | Device handle/reference | Server pulls/pushes via IPC | Async MQ future |
-| LMCacheDrivenTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
+| LMCacheDrivenTransferContext | Device handle/reference | Server pulls/pushes via IPC | Async MQ future |
+| EngineDrivenTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
 
 ### 2.3 Server Side: GPU Context vs Non-GPU Context
 
@@ -178,7 +178,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 - `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
-- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `LMCacheDrivenTransferContext`, `EngineDrivenTransferContext`
+- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`
 - `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
 - `lmcache/v1/multiprocess/transfer_context/pickle.py`: `EngineDrivenContextPickle`
 - `lmcache/v1/multiprocess/transfer_context/shm.py`: `EngineDrivenContextShm`

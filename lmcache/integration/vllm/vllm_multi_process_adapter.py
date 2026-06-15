@@ -28,7 +28,7 @@ from lmcache.v1.multiprocess.group_view import (
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
-    LMCacheDrivenTransferContext,
+    EngineDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
@@ -53,9 +53,10 @@ class ExtraConfigDefault(enum.Enum):
     # to the server.
     heartbeat_interval = 10.0
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
-    # historical CUDA -> engine_driven / others -> lmcache_driven dispatch;
-    # ``engine_driven`` forces the IPC / SHM zero-copy path;
-    # ``lmcache_driven`` forces the worker-side gather/scatter copy path.
+    # historical CUDA -> lmcache_driven / others -> engine_driven dispatch;
+    # ``lmcache_driven`` forces the IPC / SHM zero-copy path where the
+    # LMCache server pulls data via device handles;
+    # ``engine_driven`` forces the worker-side gather/scatter copy path.
     # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
     # key wins when both are set.
     mp_transfer_mode = "auto"
@@ -1467,7 +1468,7 @@ class LMCacheMPWorkerAdapter:
         try:
             unregister_type = (
                 RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
-                if isinstance(self.transfer_ctx, LMCacheDrivenTransferContext)
+                if isinstance(self.transfer_ctx, EngineDrivenTransferContext)
                 else RequestType.UNREGISTER_KV_CACHE
             )
             send_lmcache_request(

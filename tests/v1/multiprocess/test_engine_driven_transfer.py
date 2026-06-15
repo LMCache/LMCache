@@ -252,15 +252,15 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
 
 
 def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
-    """Ensure factory returns LMCacheDrivenTransferContext for CPU KV."""
+    """Ensure factory returns EngineDrivenTransferContext for CPU KV."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-        LMCacheDrivenTransferContext,
+        EngineDrivenTransferContext,
         create_transfer_context,
     )
 
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})
-    assert isinstance(context, LMCacheDrivenTransferContext)
+    assert isinstance(context, EngineDrivenTransferContext)
 
 
 def test_resolve_extra_config_default_mp_transfer_mode_is_auto() -> None:
@@ -327,13 +327,17 @@ def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
 
 def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     """``mode='lmcache_driven'`` must always pick
-    LMCacheDrivenTransferContext, even for CUDA."""
+    LMCacheDrivenTransferContext (handle path); CPU also works because the
+    CPU SHM wrapper factory is registered on import."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
         LMCacheDrivenTransferContext,
         MPTransferMode,
         create_transfer_context,
     )
+
+    # Importing the CPU sub-package self-registers its KV-wrapper factory.
+    import lmcache.v1.platform.cpu  # noqa: F401
 
     context = create_transfer_context(
         {"layer_0": torch.randn(2, 2)}, mode=MPTransferMode.LMCACHE_DRIVEN
@@ -342,16 +346,13 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
 
 
 def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
-    """``mode='engine_driven'`` on CPU works because the CPU SHM
-    wrapper is registered."""
+    """``mode='engine_driven'`` on CPU returns EngineDrivenTransferContext
+    (data path; no wrapper-factory capability check is performed)."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
         EngineDrivenTransferContext,
         create_transfer_context,
     )
-
-    # Importing the CPU sub-package self-registers its KV-wrapper factory.
-    import lmcache.v1.platform.cpu  # noqa: F401
 
     context = create_transfer_context(
         {"layer_0": torch.randn(2, 2)}, mode="engine_driven"
@@ -371,7 +372,8 @@ def test_create_transfer_context_invalid_mode_raises() -> None:
 def test_create_transfer_context_handle_mode_unsupported_device_raises(
     monkeypatch: Any,
 ) -> None:
-    """``mode='handle'`` must raise when no wrapper factory exists for device."""
+    """``mode='lmcache_driven'`` must raise when no wrapper factory exists
+    for the device."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import create_transfer_context
     from lmcache.v1.platform import _registry as platform_registry
@@ -382,7 +384,7 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         platform_registry.restore({"kv_wrapper": {}, "availability": {}})
         with pytest.raises(ValueError, match="not supported for device type"):
             create_transfer_context(
-                {"layer_0": torch.randn(2, 2)}, mode="engine_driven"
+                {"layer_0": torch.randn(2, 2)}, mode="lmcache_driven"
             )
     finally:
         platform_registry.restore(snapshot)
@@ -401,6 +403,10 @@ def test_create_transfer_context_env_var_overrides_default(
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
         ENV_MP_TRANSFER_MODE,
     )
+
+    # Importing the CPU sub-package self-registers its KV-wrapper factory,
+    # which is required by the lmcache-driven (handle) path.
+    import lmcache.v1.platform.cpu  # noqa: F401
 
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "lmcache_driven")
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})
