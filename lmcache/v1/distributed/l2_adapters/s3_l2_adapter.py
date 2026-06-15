@@ -35,9 +35,11 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
+    KeyEntry,
+    KeyListPage,
     L2AdapterInterface,
     L2TaskId,
 )
@@ -136,7 +138,15 @@ def _parse_list_response_xml(
         raise ValueError(f"malformed ListObjectsV2 XML: {exc}") from None
 
     # S3 uses a default namespace; ElementTree includes it in tag names.
-    # Strip it in-place so simple ``findall("Contents")`` works.
+    # Strip it in-place so simple ``findall("Contents")`` works. This
+    # mutation is safe because ``root`` is local to this function: it
+    # is built here, walked once, and discarded. **Do not** cache or
+    # return the parsed tree — callers downstream would see the
+    # stripped tags and break if a different parse layered namespaces
+    # back on. The "strip whatever URI is present" approach (vs.
+    # namespace-prefixed XPath) is intentional: it tolerates the
+    # different namespace URIs S3-compatible providers (MinIO, Ceph
+    # RGW, etc.) may emit, without hard-coding AWS's URI.
     for elem in root.iter():
         if "}" in elem.tag:
             elem.tag = elem.tag.split("}", 1)[1]

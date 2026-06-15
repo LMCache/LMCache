@@ -230,33 +230,6 @@ class EncodedObjectKey:
 
 
 @dataclass(frozen=True)
-class KeyEntry:
-    """One entry in a :class:`KeyListPage` — the JSON-safe
-    :class:`EncodedObjectKey` (so it serializes cleanly when returned
-    over HTTP) and the bytes the adapter has on disk for it."""
-
-    key: EncodedObjectKey
-    size_bytes: int
-
-
-@dataclass(frozen=True)
-class KeyListPage:
-    """A page of keys returned by ``L2AdapterInterface.list_l2_keys``.
-
-    ``next_page_token`` is ``None`` when the listing is exhausted; pass
-    it verbatim to the next call to continue. The token is opaque — the
-    caller MUST NOT inspect or modify it.
-
-    Adapter-level: this type carries no adapter identification. The
-    storage manager attaches an ``adapter`` field when returning the
-    page to HTTP callers.
-    """
-
-    entries: tuple[KeyEntry, ...]
-    next_page_token: str | None
-
-
-@dataclass(frozen=True)
 class MemoryLayoutDesc:
     """
     Describes the layout of a memory object

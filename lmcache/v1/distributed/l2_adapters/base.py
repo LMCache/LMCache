@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import KeyListPage, ObjectKey
+from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
@@ -73,6 +73,33 @@ class AdapterUsage:
         if self.total_capacity_bytes <= 0:
             return -1.0
         return self.total_bytes_used / self.total_capacity_bytes
+
+
+@dataclass(frozen=True)
+class KeyEntry:
+    """One entry in a :class:`KeyListPage` — the JSON-safe
+    :class:`EncodedObjectKey` (so it serializes cleanly when returned
+    over HTTP) and the bytes the adapter has on disk for it."""
+
+    key: EncodedObjectKey
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class KeyListPage:
+    """A page of keys returned by ``L2AdapterInterface.list_l2_keys``.
+
+    ``next_page_token`` is ``None`` when the listing is exhausted; pass
+    it verbatim to the next call to continue. The token is opaque — the
+    caller MUST NOT inspect or modify it.
+
+    Adapter-level: this type carries no adapter identification. The
+    storage manager attaches an ``adapter`` field when returning the
+    page to HTTP callers.
+    """
+
+    entries: tuple[KeyEntry, ...]
+    next_page_token: str | None
 
 
 class L2AdapterInterface(ABC):

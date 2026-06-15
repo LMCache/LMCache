@@ -18,8 +18,12 @@ from typing import Optional, cast
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
-from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.l2_adapters.base import (
+    KeyEntry,
+    KeyListPage,
+    L2AdapterInterface,
+)
 from lmcache.v1.distributed.storage_controllers.store_policy import AdapterDescriptor
 from lmcache.v1.distributed.storage_manager import StorageManager
 

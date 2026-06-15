@@ -2,7 +2,6 @@
 """Tests for the coordinator eviction manager."""
 
 # Standard
-import asyncio
 import time
 
 # Third Party
@@ -243,20 +242,6 @@ def _instance(instance_id: str, ip: str = "10.0.0.1", port: int = 8000) -> MPIns
     )
 
 
-async def _drain_dispatches(ctrl: L2EvictionManager) -> None:
-    """Wait for the eviction manager's fire-and-forget DELETE tasks to
-    finish so the mock-transport handler has actually run before the
-    test asserts on its side effects (and before the client closes).
-    The eviction manager doesn't track its dispatch tasks, so we
-    drain by gathering every pending task on the loop that isn't the
-    current test coroutine."""
-    del ctrl  # Unused: kept for call-site symmetry with the API.
-    current = asyncio.current_task()
-    pending = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
-
-
 @pytest.mark.asyncio
 async def test_execute_evictions_dispatches_to_registered_instance():
     """Computed plan must DELETE /l2 to a registered MP server with
@@ -282,7 +267,7 @@ async def test_execute_evictions_dispatches_to_registered_instance():
         plan = await ctrl.execute_evictions(registry, client)
         # Dispatch is fire-and-forget — wait for the background task
         # to actually issue the HTTP call before the client closes.
-        await _drain_dispatches(ctrl)
+        await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {"alice": [k]}
     # Hit the single registered instance.
@@ -327,7 +312,7 @@ async def test_execute_evictions_no_instances_skips_dispatch_and_keeps_lru():
         )
     ) as client:
         plan = await ctrl.execute_evictions(registry, client)
-        await _drain_dispatches(ctrl)
+        await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {"alice": [k]}
     # LRU UNCHANGED — the same plan should re-emerge next cycle.
@@ -350,7 +335,7 @@ async def test_execute_evictions_http_failure_keeps_lru():
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         plan = await ctrl.execute_evictions(registry, client)
-        await _drain_dispatches(ctrl)
+        await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {"alice": [k]}
     # LRU UNCHANGED — retry on the next cycle.
@@ -370,6 +355,6 @@ async def test_execute_evictions_empty_plan_is_noop():
         )
     ) as client:
         plan = await ctrl.execute_evictions(registry, client)
-        await _drain_dispatches(ctrl)
+        await ctrl.wait_for_in_flight_dispatches()
 
     assert plan == {}

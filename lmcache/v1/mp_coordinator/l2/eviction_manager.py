@@ -74,6 +74,7 @@ class L2EvictionManager:
         self._eviction_ratio = max(0.0, min(1.0, eviction_ratio))
         self._trigger_watermark = trigger_watermark
         self._policy = IsolatedLRUEvictionPolicy()
+        self._in_flight_dispatches: set[asyncio.Task] = set()
 
     def on_store(self, key: ObjectKey) -> None:
         """Record that a key was stored — register it in the LRU policy.
@@ -212,7 +213,7 @@ class L2EvictionManager:
         all_keys: list[ObjectKey] = [k for keys in plan.values() for k in keys]
         body = {"keys": [asdict(k.to_encoded_object_key()) for k in all_keys]}
 
-        asyncio.create_task(  # noqa: RUF006
+        task = asyncio.create_task(
             self._dispatch_eviction(
                 http_client=http_client,
                 url=url,
@@ -222,7 +223,22 @@ class L2EvictionManager:
                 salt_count=len(plan),
             )
         )
+        self._in_flight_dispatches.add(task)
+        task.add_done_callback(self._in_flight_dispatches.discard)
         return plan
+
+    async def wait_for_in_flight_dispatches(self) -> None:
+        """Await every outstanding fire-and-forget dispatch.
+
+        Called from the coordinator's lifespan on shutdown so the
+        shared ``httpx.AsyncClient`` is not closed out from under an
+        in-flight DELETE. Tests use it to observe HTTP side effects
+        of :meth:`execute_evictions` deterministically. Exceptions
+        from individual dispatches are swallowed — each task already
+        logs its own outcome. ``asyncio.gather`` over an empty set is
+        a no-op, so a no-dispatch run costs nothing.
+        """
+        await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
 
     @staticmethod
     async def _dispatch_eviction(

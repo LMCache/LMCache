@@ -141,6 +141,7 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
+            await eviction_manager.wait_for_in_flight_dispatches()
             await outbound_client.aclose()
 
     app = FastAPI(title="LMCache MP Coordinator", version="1.0.0", lifespan=lifespan)

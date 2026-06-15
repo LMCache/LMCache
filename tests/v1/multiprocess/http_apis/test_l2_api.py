@@ -19,7 +19,8 @@ from fastapi.testclient import TestClient
 import pytest
 
 # First Party
-from lmcache.v1.distributed.api import KeyEntry, ObjectKey
+from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.l2_adapters.base import KeyEntry
 from lmcache.v1.multiprocess.http_apis.l2_api import router as l2_keys_router
 
 
