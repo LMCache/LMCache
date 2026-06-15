@@ -42,7 +42,7 @@ logger = init_logger(__name__)
 # MHA, deeper nesting). Engine adapters that hand us other containers
 # (e.g. vLLM's ``dict[str, torch.Tensor]``) are responsible for unwrapping
 # to this form before calling the helpers.
-DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"]]
+DiscoverableKVCache = Union[torch.Tensor, list["DiscoverableKVCache"], tuple["DiscoverableKVCache", ...]]
 
 # Error message for accessing non-existent attributes in GPU KV Cache.
 # Parenthesized so Python actually concatenates the three string literals —
@@ -521,10 +521,10 @@ def _list_depth_tensor_dim(kv_caches: DiscoverableKVCache) -> tuple[int, int]:
     """
     depth = 0
     probe: DiscoverableKVCache = kv_caches
-    while isinstance(probe, list):
+    while isinstance(probe, (list, tuple)):
         depth += 1
         if not probe:
-            raise ValueError("encountered an empty list")
+            raise ValueError("encountered an empty list or tuple")
         probe = probe[0]
     return depth, probe.ndim
 
@@ -706,6 +706,16 @@ def normalize_kv_and_discover_format(
             elif tensor_dim == 3:
                 # vllm MLA
                 detected_format = lmc_ops.EngineKVFormat.NL_X_NB_BS_HS
+        elif list_depth == 2 and tensor_dim == 4 and len(kv_caches[0]) == 2:
+            # Ascend NPU (vLLM-Ascend): per-layer (K, V) tuples converted
+            # to lists by attempt_permute_to_contiguous_view.  The layout
+            # is [num_layers][2][NB, BS, NH, HS].  Zero-copy transpose
+            # to [2][num_layers] (TWO_X_NL_X) so existing accessors work
+            # without allocating any NPU memory.
+            k_layers = [layer[0] for layer in kv_caches]
+            v_layers = [layer[1] for layer in kv_caches]
+            kv_caches = [k_layers, v_layers]
+            detected_format = lmc_ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS
     elif serving_engine == EngineType.SGLANG:
         if list_depth == 1:
             if probe.shape[1] == 1:
@@ -1283,7 +1293,7 @@ def get_device(kv_caches: DiscoverableKVCache) -> torch.device:
     current :class:`EngineKVFormat`).
     """
     probe: DiscoverableKVCache = kv_caches
-    while isinstance(probe, list):
+    while isinstance(probe, (list, tuple)):
         probe = probe[0]
     return probe.device
 

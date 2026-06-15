@@ -47,6 +47,8 @@ def _detect_device() -> tuple[Any, str]:
         return torch.xpu, "xpu"
     elif hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu, "hpu"
+    elif hasattr(torch, "npu") and torch.npu.is_available():
+        return torch.npu, "npu"
     elif torch.cuda.is_available():
         return torch.cuda, "cuda"
     else:
@@ -83,6 +85,11 @@ def _get_backend() -> Any:
             "lmcache.c_ops",
             "cuda_ops",
             lambda: torch.cuda.is_available(),
+        ),
+        (
+            "lmcache_ascend.c_ops",
+            "npu_ops",
+            lambda: torch.npu.is_available(),
         ),
         # should extend to more HWs..
     ]

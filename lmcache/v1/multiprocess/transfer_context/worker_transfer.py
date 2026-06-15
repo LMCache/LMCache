@@ -528,7 +528,16 @@ def create_transfer_context(
     """
     if not kv_caches:
         raise ValueError("kv_caches is empty")
-    device_types = {tensor.device.type for tensor in kv_caches.values()}
+
+    # Some backends (e.g. Ascend NPU via vLLM-Ascend) store each layer's
+    # KV cache as a tuple of tensors (K, V, ...) rather than a single
+    # tensor.  Unwrap tuples/lists so we can inspect the device.
+    def _unwrap(entry: Any) -> torch.Tensor:
+        if isinstance(entry, (tuple, list)):
+            return entry[0]
+        return entry
+
+    device_types = {_unwrap(v).device.type for v in kv_caches.values()}
     if len(device_types) != 1:
         raise ValueError(
             f"All KV cache tensors must share one device type, got {device_types}"
