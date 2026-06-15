@@ -51,8 +51,8 @@ based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
 ``MPCacheServer``, assembles the engine modules
-(``LookupModule`` + ``ManagementModule`` + ``EngineDrivenTransferModule``
-and/or ``LMCacheDrivenTransferModule`` depending on
+(``LookupModule`` + ``ManagementModule`` + ``LMCacheDrivenTransferModule``
+and/or ``EngineDrivenTransferModule`` depending on
 ``--supported-transfer-mode`` — ``lmcache_driven`` or ``engine_driven`` loads
 just one, ``auto`` (default) loads both — plus ``BlendModule`` when
 ``--engine-type blend``), starts a ``MessageQueueServer``, registers
@@ -438,9 +438,9 @@ Key Source Files
        (per-module handler registration)
    * - ``lmcache/v1/multiprocess/modules/``
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
-       ``management.py`` (``ManagementModule``), ``engine_driven_transfer.py``
-       (``EngineDrivenTransferModule``), ``lmcache_driven_transfer.py``
-       (``LMCacheDrivenTransferModule``), and ``blend.py``
+       ``management.py`` (``ManagementModule``), ``lmcache_driven_transfer.py``
+       (``LMCacheDrivenTransferModule``), ``engine_driven_transfer.py``
+       (``EngineDrivenTransferModule``), and ``blend.py``
        (``BlendModule`` / ``BlendEngineV2``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs

@@ -220,7 +220,7 @@ def add_mp_server_args(
         choices=["lmcache_driven", "engine_driven", "auto"],
         help="Supported transfer mode: 'lmcache_driven' for server-driven "
         "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
-        "'engine_driven' for non-GPU-based transfer (PREPARE/COMMIT), "
+        "'engine_driven' for engine-driven transfer (PREPARE/COMMIT), "
         "or 'auto' to enable both transfer paths. Default is 'auto'.",
     )
     mp_group.add_argument(
