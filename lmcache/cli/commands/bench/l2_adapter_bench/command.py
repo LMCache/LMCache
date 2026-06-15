@@ -153,42 +153,42 @@ def register_l2_parser(
         help="Run only the specified operation (default: run all).",
     )
     parser.add_argument(
-        "--profile-enabled",
-        action="store_true",
+        "--flamegraph",
+        choices=["on", "off"],
+        default="off",
         help=(
-            "Capture a flame graph of the measured phases. The benchmark "
-            "profiles itself and renders an SVG -- no second terminal or "
-            "external profiler needed. Default: off."
+            "Capture a flame graph of the measured phases if turned on. The benchmark "
+            "profiles itself and renders an SVG"
         ),
     )
     parser.add_argument(
-        "--profile-mode",
+        "--flamegraph-mode",
         choices=["on-cpu", "off-cpu"],
         default="on-cpu",
         help=(
-            "Flame-graph mode for --profile-enabled. 'on-cpu' (perf "
+            "Flame-graph mode if enabled flame graph profiling. 'on-cpu' (perf "
             "record) shows where CPU time goes; 'off-cpu' (perf off-CPU "
             "via offcputime-bpfcc) shows time blocked on I/O / locks and "
             "is best for I/O-bound adapters. Default: on-cpu."
         ),
     )
     parser.add_argument(
-        "--profile-output",
+        "--flamegraph-output",
         default="",
         metavar="PATH",
         help=(
-            "SVG output path for --profile-enabled. Default: "
+            "SVG output path for '--flamegraph on'. Default: "
             "/tmp/lmcache_bench_flames/<adapter>.<mode>.svg."
         ),
     )
     parser.add_argument(
-        "--profile-flamegraph-dir",
+        "--flamegraph-dir",
         default="",
         metavar="DIR",
         help=(
             "Directory with the FlameGraph scripts (flamegraph.pl, "
             "stackcollapse-perf.pl). Default: $FLAMEGRAPH_DIR or "
-            "~/FlameGraph."
+            "~/FlameGraph, else auto-cloned into a temp directory."
         ),
     )
 
@@ -227,6 +227,7 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     from lmcache.cli.commands.bench.l2_adapter_bench.profiling import (
         FlameProfiler,
         ProfileError,
+        check_profiling_deps,
         default_output_path,
         resolve_flamegraph_dir,
     )
@@ -307,6 +308,26 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
     l1_buffer = make_aligned_tensor(2 * keys_per_round * data_size, l1_align_bytes)
     l1_memory_desc = create_l1_memory_desc(l1_buffer, align_bytes=l1_align_bytes)
 
+    # Resolve and validate the flame-graph toolchain up front, before any
+    # adapter (and its worker threads) is created. A user who explicitly
+    # passes ``--flamegraph on`` gets a fast, actionable failure if a
+    # required tool is missing, rather than a benchmark that silently runs
+    # unprofiled. When ``--flamegraph`` is off (default), none of this runs
+    # and the benchmark behaves exactly as before.
+    flamegraph_on = getattr(args, "flamegraph", "off") == "on"
+    flamegraph_dir = ""
+    if flamegraph_on:
+        try:
+            check_profiling_deps(args.flamegraph_mode)
+            flamegraph_dir = resolve_flamegraph_dir(args.flamegraph_dir, log)
+        except ProfileError as e:
+            print(
+                "Error: --flamegraph on was requested but the profiling "
+                f"toolchain is unavailable:\n  {e}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     log("\n[Init] Creating adapter...")
     try:
         adapter = create_l2_adapter(adapter_cfg, l1_memory_desc=l1_memory_desc)
@@ -317,25 +338,35 @@ def run_l2_adapter_bench(command: "BaseCommand", args: argparse.Namespace) -> No
 
     # Optional self-profiling: record a flame graph of the measured
     # phases. Built here, after the adapter (and its worker threads)
-    # exist, so the recorder attaches to a fully-started process. On a
-    # toolchain error we warn and continue the benchmark unprofiled.
+    # exist, so the recorder attaches to a fully-started process. The
+    # toolchain was already validated above, so a ProfileError here is a
+    # late failure (e.g. the output directory is not writable); since the
+    # user explicitly requested a flame graph we fail loudly rather than
+    # downgrade, closing the adapter we just opened first.
     profiler: FlameProfiler | None = None
-    if getattr(args, "profile_enabled", False):
+    if flamegraph_on:
         adapter_name = type(adapter).__name__
         try:
             profiler = FlameProfiler(
-                mode=args.profile_mode,
+                mode=args.flamegraph_mode,
                 output=(
-                    args.profile_output
-                    or default_output_path(adapter_name, args.profile_mode)
+                    args.flamegraph_output
+                    or default_output_path(adapter_name, args.flamegraph_mode)
                 ),
-                flamegraph_dir=resolve_flamegraph_dir(args.profile_flamegraph_dir, log),
+                flamegraph_dir=flamegraph_dir,
                 pid=os.getpid(),
-                title=f"{args.profile_mode} ({adapter_name})",
+                title=f"{args.flamegraph_mode} ({adapter_name})",
             )
         except ProfileError as e:
-            print(f"[Profile] disabled: {e}", file=sys.stderr)
-            profiler = None
+            print(
+                f"Error: cannot start flame-graph profiling: {e}",
+                file=sys.stderr,
+            )
+            try:
+                adapter.close()
+            except Exception:
+                pass
+            sys.exit(2)
 
     # ------------------------------------------------------------------
     # Idx layout

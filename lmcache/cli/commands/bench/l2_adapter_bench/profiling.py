@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
+"""Profiling tools for benchmarking lmcache performance.
 
-Profiling tools for benching marking lmcache performance
-
-When ``--profile-enabled`` is set, the benchmark records a flame graph of
+When ``--flamegraph on`` is set, the benchmark records a flame graph of
 its own measured phases and renders it to an SVG, so no second terminal
 or externally attached profiler is needed.
 
@@ -48,6 +46,52 @@ class ProfileError(RuntimeError):
     """Raised when the profiling toolchain is missing or misconfigured."""
 
 
+def check_profiling_deps(mode: str) -> None:
+    """Validate that the external tools required for *mode* are present.
+
+    This is a runtime check meant to run *before* the benchmark spins up
+    any adapter, so a missing dependency fails fast with an actionable
+    message instead of producing an empty flame graph midway through a
+    run.
+
+    Args:
+        mode: ``"on-cpu"`` or ``"off-cpu"``.
+
+    Raises:
+        ProfileError: If ``mode`` is invalid or a required tool is
+            missing. The message names the missing tool and how to
+            install it or which mode to use instead.
+    """
+    if mode not in _MODE_TAG:
+        raise ProfileError(
+            f"invalid flame-graph mode: {mode!r} (expected 'on-cpu' or 'off-cpu')"
+        )
+    if mode == "on-cpu" and shutil.which("perf") is None:
+        raise ProfileError(
+            "perf not found on PATH (needed for on-cpu flame graphs). "
+            "Install it (e.g. 'apt install linux-perf' or the linux-tools "
+            "package matching your kernel) or use --flamegraph-mode off-cpu."
+        )
+    if mode == "off-cpu":
+        if shutil.which("sudo") is None:
+            raise ProfileError(
+                "sudo not found on PATH (needed for off-cpu flame graphs, "
+                "which load a BPF program). Install sudo or use "
+                "--flamegraph-mode on-cpu."
+            )
+        # offcputime-bpfcc usually lives in /usr/sbin, which is not on the
+        # user's PATH but is reachable under sudo; check both so a missing
+        # tool surfaces here instead of as an empty flame graph.
+        if shutil.which("offcputime-bpfcc") is None and not os.path.exists(
+            "/usr/sbin/offcputime-bpfcc"
+        ):
+            raise ProfileError(
+                "offcputime-bpfcc not found (needed for off-cpu flame "
+                "graphs). Install bcc / bpfcc-tools (e.g. 'apt install "
+                "bpfcc-tools') or use --flamegraph-mode on-cpu."
+            )
+
+
 # Upstream FlameGraph repo, shallow-cloned on demand when the scripts
 # are not already present locally.
 _FLAMEGRAPH_REPO = "https://github.com/brendangregg/FlameGraph"
@@ -68,7 +112,7 @@ def _clone_flamegraph(dest: str, log: Callable[[str], None]) -> None:
     if shutil.which("git") is None:
         raise ProfileError(
             "git not found; cannot auto-clone FlameGraph. Clone "
-            f"{_FLAMEGRAPH_REPO} manually and pass --profile-flamegraph-dir "
+            f"{_FLAMEGRAPH_REPO} manually and pass --flamegraph-dir "
             "or set FLAMEGRAPH_DIR."
         )
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -90,14 +134,14 @@ def _clone_flamegraph(dest: str, log: Callable[[str], None]) -> None:
 def resolve_flamegraph_dir(explicit: str, log: Callable[[str], None]) -> str:
     """Resolve the FlameGraph scripts directory, auto-cloning if needed.
 
-    Resolution order: the explicit ``--profile-flamegraph-dir`` value,
+    Resolution order: the explicit ``--flamegraph-dir`` value,
     then ``$FLAMEGRAPH_DIR``, then ``~/FlameGraph``, then the managed temp
     clone under ``/tmp/lmcache_flamegraph/FlameGraph``. When none of these
     contains ``flamegraph.pl`` and no directory was given explicitly, the
     repo is shallow-cloned into the managed temp location.
 
     Args:
-        explicit: Directory passed via ``--profile-flamegraph-dir``; may
+        explicit: Directory passed via ``--flamegraph-dir``; may
             be an empty string when the flag was not given.
         log: Progress logger (suppressed under ``--quiet``).
 
@@ -111,7 +155,7 @@ def resolve_flamegraph_dir(explicit: str, log: Callable[[str], None]) -> str:
     if explicit:
         if not _has_flamegraph(explicit):
             raise ProfileError(
-                f"flamegraph.pl not found under --profile-flamegraph-dir {explicit}"
+                f"flamegraph.pl not found under --flamegraph-dir {explicit}"
             )
         return explicit
 
@@ -172,23 +216,7 @@ class FlameProfiler:
             ProfileError: If ``mode`` is invalid or a required tool is
                 unavailable.
         """
-        if mode not in _MODE_TAG:
-            raise ProfileError(f"invalid profile mode: {mode!r}")
-        if mode == "on-cpu" and shutil.which("perf") is None:
-            raise ProfileError("perf not found on PATH (needed for on-cpu)")
-        if mode == "off-cpu":
-            if shutil.which("sudo") is None:
-                raise ProfileError("sudo not found on PATH (needed for off-cpu)")
-            # offcputime-bpfcc usually lives in /usr/sbin, which is not on
-            # the user's PATH but is reachable under sudo; check both so a
-            # missing tool surfaces here instead of as an empty flame graph.
-            if shutil.which("offcputime-bpfcc") is None and not os.path.exists(
-                "/usr/sbin/offcputime-bpfcc"
-            ):
-                raise ProfileError(
-                    "offcputime-bpfcc not found; install bcc / bpfcc-tools "
-                    "for off-cpu profiling."
-                )
+        check_profiling_deps(mode)
 
         self._mode = mode
         self._output = output
