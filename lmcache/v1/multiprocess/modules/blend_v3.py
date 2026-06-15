@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from queue import Empty as QueueEmpty
 from queue import Queue
 from typing import TYPE_CHECKING, Any
-import os
 import threading
 import time
 
@@ -331,9 +330,13 @@ class BlendV3Module(InstanceLivenessTarget):
         lmcache_driven_transfer: LMCacheDrivenTransferModule,
         lookup_module: LookupModule,
         coordinator: "BlendCoordinatorClient | None" = None,
+        enable_segmented_prefix: bool = False,
     ):
         self._ctx = ctx
         self._transfer_module = lmcache_driven_transfer
+        # Server config (--enable-segmented-prefix): retain the gapped prefix on
+        # a mid-prefix L2 retrieve failure instead of truncating at the gap.
+        self._segmented_prefix = enable_segmented_prefix
         # Reused by cb_unified_lookup to run the standard prefix lookup
         # (registers the prefix prefetch job + session state the retrieve
         # path depends on) inside the single unified RPC.
@@ -786,7 +789,7 @@ class BlendV3Module(InstanceLivenessTarget):
             # recomputed) instead of truncating the prefix at the gap.
             prefix_policy = (
                 TrimPolicy.SEGMENTED_PREFIX
-                if os.environ.get("CB_SEGMENTED_PREFIX") == "1"
+                if self._segmented_prefix
                 else TrimPolicy.PREFIX
             )
             # Prefix leg: submit (non-blocking). Already traced upstream by
@@ -823,7 +826,7 @@ class BlendV3Module(InstanceLivenessTarget):
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
-        segmented = os.environ.get("CB_SEGMENTED_PREFIX") == "1"
+        segmented = self._segmented_prefix
 
         # --- Prefix leg: poll (consume-once) until the L1+L2 prefix lands. ---
         if job.prefix_chunks is None:
