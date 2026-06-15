@@ -208,3 +208,36 @@ document.addEventListener("alpine:initialized", expandTopLevelNavSections);
 document.addEventListener("DOMContentLoaded", () =>
   setTimeout(expandTopLevelNavSections, 0),
 );
+
+/**
+ * Preserve the left sidebar's scroll position across page navigations. The
+ * sidebar (``#left-sidebar``) is an independently scrollable container, so a
+ * normal page load re-renders it at the top -- making the nav "jump" every
+ * time you click a link. We stash its scrollTop in sessionStorage before
+ * leaving and restore it on the next page.
+ *
+ * @returns {void}
+ */
+const SIDEBAR_SCROLL_KEY = "lmcacheSidebarScroll";
+
+function saveSidebarScroll() {
+  const sidebar = document.getElementById("left-sidebar");
+  if (sidebar) {
+    sessionStorage.setItem(SIDEBAR_SCROLL_KEY, String(sidebar.scrollTop));
+  }
+}
+
+function restoreSidebarScroll() {
+  const sidebar = document.getElementById("left-sidebar");
+  const saved = sessionStorage.getItem(SIDEBAR_SCROLL_KEY);
+  if (sidebar && saved !== null) {
+    sidebar.scrollTop = parseInt(saved, 10) || 0;
+  }
+}
+
+// Save right before navigating away (pagehide is bfcache-friendly).
+window.addEventListener("pagehide", saveSidebarScroll);
+// Restore after the nav has rendered and top-level sections are expanded.
+document.addEventListener("DOMContentLoaded", () =>
+  setTimeout(restoreSidebarScroll, 0),
+);
