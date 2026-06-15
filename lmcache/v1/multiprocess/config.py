@@ -46,9 +46,9 @@ class MPServerConfig:
     """
 
     supported_transfer_mode: str = "auto"
-    """Transfer mode: 'gpu' for GPU-based IPC transfer (STORE/RETRIEVE),
-    'non_gpu' for non-GPU-based transfer (PREPARE/COMMIT), or 'auto' to
-    enable both."""
+    """Transfer mode: 'lmcache_driven' for server-driven transfer
+    (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
+    engine-driven transfer (PREPARE/COMMIT), or 'auto' to enable both."""
 
     runtime_plugin_config: "RuntimePluginConfig" = field(
         default_factory=lambda: RuntimePluginConfig()
@@ -56,7 +56,7 @@ class MPServerConfig:
     """Runtime plugin configuration (locations + extra config)."""
 
     shm_name: str | None = None
-    """SHM segment name for non-GPU KV transfer.
+    """SHM segment name for engine-driven KV transfer.
     None: auto-allocate (default). "": force pickle. Other: use that name."""
 
     script_allowed_imports: list[str] = field(default_factory=list)
@@ -244,7 +244,7 @@ def add_mp_server_args(
         "--shm-name",
         type=str,
         default=None,
-        help="SHM segment name for non-GPU KV transfer. "
+        help="SHM segment name for engine-driven KV transfer. "
         "Default (not specified): auto-allocate. "
         'Set to "" to force pickle path (disable SHM). '
         "Set to a name to use that specific SHM segment.",

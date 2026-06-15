@@ -265,7 +265,8 @@ def run_cache_server(
 
     maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
-    # For non-GPU transfer: apply shm_name from mp_config and verify capacity
+    # When the engine-driven path is loaded (auto or engine_driven):
+    # apply shm_name from mp_config and verify capacity.
     if mp_config.supported_transfer_mode != "lmcache_driven":
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         if mp_config.shm_name is not None:

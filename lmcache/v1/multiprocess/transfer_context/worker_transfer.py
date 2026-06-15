@@ -102,7 +102,9 @@ SendRequest = Callable[[MessageQueueClient, RequestType, list[object]], Messagin
 def _single_group_block_ids(block_ids: list[list[int]]) -> list[int]:
     """Return the flat block-id list for transports without HMA support."""
     if len(block_ids) != 1:
-        raise RuntimeError("non-GPU transfer does not support hybrid KV cache groups")
+        raise RuntimeError(
+            "engine-driven transfer does not support hybrid KV cache groups"
+        )
     return block_ids[0]
 
 
