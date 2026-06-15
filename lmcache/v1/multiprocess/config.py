@@ -218,10 +218,10 @@ def add_mp_server_args(
         type=str,
         default="auto",
         choices=["lmcache_driven", "engine_driven", "auto"],
-        help="Supported transfer mode: 'lmcache_driven' for GPU-based IPC "
-        "transfer (STORE/RETRIEVE), 'engine_driven' for non-GPU-based "
-        "transfer (PREPARE/COMMIT), or 'auto' to enable both transfer "
-        "paths. Default is 'auto'.",
+        help="Supported transfer mode: 'lmcache_driven' for server-driven "
+        "transfer (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), "
+        "'engine_driven' for non-GPU-based transfer (PREPARE/COMMIT), "
+        "or 'auto' to enable both transfer paths. Default is 'auto'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",

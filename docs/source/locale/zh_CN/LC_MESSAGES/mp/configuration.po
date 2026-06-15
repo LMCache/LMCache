@@ -179,11 +179,12 @@ msgstr "``auto``"
 #: ../../source/mp/configuration.rst:58
 msgid ""
 "Which worker → server transfer paths the server loads. ``lmcache_driven`` enables "
-"only GPU-based IPC transfer (STORE/RETRIEVE); ``engine_driven`` enables only "
-"the non-GPU (PREPARE/COMMIT) transfer path; ``auto`` (default) loads both"
-" so workers of either device type can connect without manual "
-"configuration. Choices: ``lmcache_driven``, ``engine_driven``, ``auto``."
-msgstr "服务器加载哪些工作进程 → 服务器传输路径。``lmcache_driven`` 仅启用基于 GPU 的 IPC 传输（STORE/RETRIEVE）；``engine_driven`` 仅启用非 GPU（PREPARE/COMMIT）传输路径；``auto``（默认）加载两者，以便任一设备类型的工作进程可以在无需手动配置的情况下连接。选择：``lmcache_driven``、``engine_driven``、``auto``。"
+"only the server-driven transfer path (STORE/RETRIEVE, supports both CUDA IPC"
+" and CPU SHM); ``engine_driven`` enables only the non-GPU (PREPARE/COMMIT) "
+"transfer path; ``auto`` (default) loads both so workers of either device"
+" type can connect without manual configuration. Choices: "
+"``lmcache_driven``, ``engine_driven``, ``auto``."
+msgstr "服务器加载哪些工作进程 → 服务器传输路径。``lmcache_driven`` 仅启用 server-driven 传输路径（STORE/RETRIEVE，支持 CUDA IPC 和 CPU SHM）；``engine_driven`` 仅启用非 GPU（PREPARE/COMMIT）传输路径；``auto``（默认）加载两者，以便任一设备类型的工作进程可以在无需手动配置的情况下连接。选择：``lmcache_driven``、``engine_driven``、``auto``。"
 
 #: ../../source/mp/configuration.rst:64
 msgid "``--runtime-plugin-locations``"

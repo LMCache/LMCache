@@ -293,10 +293,10 @@ msgstr "``auto`` *(默认)* -- 加载两条路径。任一设备类型的工作�
 
 #: ../../source/mp/deployment.rst:233
 msgid ""
-"``lmcache_driven`` -- load only the GPU IPC path.  Use when every worker is a CUDA "
-"device and you want to skip allocating the non-GPU resources (SHM pool, "
-"pickle codec)."
-msgstr "``lmcache_driven`` -- 仅加载 GPU IPC 路径。当每个工作节点都是 CUDA 设备时使用，并且您希望跳过分配非 GPU 资源（SHM 池、pickle 编解码器）。"
+"``lmcache_driven`` -- load only the server-driven transfer path.  Supports "
+"CUDA devices (IPC) and CPU devices (SHM).  Use to skip allocating the non-GPU"
+" prepare/commit resources (pickle codec)."
+msgstr "``lmcache_driven`` -- 仅加载 server-driven 传输路径。支持 CUDA 设备（IPC）和 CPU 设备（SHM）。用于跳过分配非 GPU prepare/commit 资源（pickle 编解码器）。"
 
 #: ../../source/mp/deployment.rst:236
 msgid ""

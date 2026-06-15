@@ -230,9 +230,9 @@ The server picks which paths to load via ``--supported-transfer-mode``:
 - ``auto`` *(default)* -- load both paths.  Workers of either device
   type can connect without manual configuration; the server has no
   upfront knowledge of the connecting worker's device.
-- ``lmcache_driven`` -- load only the GPU IPC path.  Use when every
-  worker is a CUDA device and you want to skip allocating the non-GPU
-  resources (SHM pool, pickle codec).
+- ``lmcache_driven`` -- load only the server-driven transfer path.
+  Supports CUDA devices (IPC) and CPU devices (SHM).  Use to skip
+  allocating the non-GPU prepare/commit resources (pickle codec).
 - ``engine_driven`` -- load only the non-GPU path.  Use when serving
   CPU-only or non-CUDA accelerator workers.
 
