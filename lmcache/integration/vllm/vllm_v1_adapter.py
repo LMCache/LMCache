@@ -1846,10 +1846,10 @@ class LMCacheConnectorV1Impl:
         # Cleanup if request was aborted
         if request.status == RequestStatus.FINISHED_ABORTED:
             # Notify storage backends of aborted requests
-            assert self.lmcache_engine is not None
-            sm = self.lmcache_engine.storage_manager
-            if sm is not None:
-                sm.cancel_request(request.request_id)
+            if self.lmcache_engine is not None:
+                sm = self.lmcache_engine.storage_manager
+                if sm is not None:
+                    sm.cancel_request(request.request_id)
 
             if self.async_loading:
                 # Cancel any ongoing async lookup and prefetch tasks on workers
