@@ -53,8 +53,8 @@ based on ``--engine-type`` and ``--supported-transfer-mode``.
 ``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``EngineDrivenTransferModule``
 and/or ``LMCacheDrivenTransferModule`` depending on
-``--supported-transfer-mode`` — ``gpu`` or ``non_gpu`` loads just one,
-``auto`` (default) loads both — plus ``BlendModule`` when
+``--supported-transfer-mode`` — ``lmcache_driven`` or ``engine_driven`` loads
+just one, ``auto`` (default) loads both — plus ``BlendModule`` when
 ``--engine-type blend``), starts a ``MessageQueueServer``, registers
 handlers for every ``RequestType`` exposed by the loaded modules, and
 blocks in a keep-alive loop.
@@ -66,8 +66,8 @@ which add CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 variants). Enables non-prefix KV cache reuse across document
 paragraphs. Selected by passing ``--engine-type blend`` to
 ``lmcache server``; ``BlendModule`` requires
-``--supported-transfer-mode`` to be ``gpu`` or ``auto`` and will refuse
-to load when it is ``non_gpu``.
+``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto`` and
+will refuse to load when it is ``engine_driven``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under

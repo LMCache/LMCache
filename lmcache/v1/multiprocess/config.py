@@ -217,11 +217,11 @@ def add_mp_server_args(
         "--supported-transfer-mode",
         type=str,
         default="auto",
-        choices=["gpu", "non_gpu", "auto"],
-        help="Supported transfer mode: 'gpu' for GPU-based IPC transfer "
-        "(STORE/RETRIEVE), 'non_gpu' for non-GPU-based transfer "
-        "(PREPARE/COMMIT), or 'auto' to enable both transfer paths. "
-        "Default is 'auto'.",
+        choices=["lmcache_driven", "engine_driven", "auto"],
+        help="Supported transfer mode: 'lmcache_driven' for GPU-based IPC "
+        "transfer (STORE/RETRIEVE), 'engine_driven' for non-GPU-based "
+        "transfer (PREPARE/COMMIT), or 'auto' to enable both transfer "
+        "paths. Default is 'auto'.",
     )
     mp_group.add_argument(
         "--runtime-plugin-locations",

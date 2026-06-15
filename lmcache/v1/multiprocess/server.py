@@ -166,16 +166,17 @@ def _build_modules(
         List of initialized engine modules.
 
     Raises:
-        ValueError: If blend engine is requested with supported_transfer_mode="non_gpu".
+        ValueError: If blend engine is requested with
+        supported_transfer_mode="engine_driven".
     """
     modules: list[EngineModule] = [
         LookupModule(ctx),
         ManagementModule(ctx),
     ]
 
-    if mp_config.supported_transfer_mode == "gpu":
+    if mp_config.supported_transfer_mode == "lmcache_driven":
         modules.append(LMCacheDrivenTransferModule(ctx))
-    elif mp_config.supported_transfer_mode == "non_gpu":
+    elif mp_config.supported_transfer_mode == "engine_driven":
         modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
         modules.append(LMCacheDrivenTransferModule(ctx))
@@ -188,10 +189,11 @@ def _build_modules(
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
     if mp_config.engine_type == "blend_legacy":
-        if mp_config.supported_transfer_mode == "non_gpu":
+        if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
                 "Legacy blend engine requires supported_transfer_mode to be "
-                f"'gpu' or 'auto', got '{mp_config.supported_transfer_mode}'"
+                f"'lmcache_driven' or 'auto', got "
+                f"'{mp_config.supported_transfer_mode}'"
             )
         # First Party
         from lmcache.v1.multiprocess.modules.blend import BlendModule
@@ -200,10 +202,11 @@ def _build_modules(
 
     # "blend" selects CacheBlend V3 (the current implementation).
     if mp_config.engine_type == "blend":
-        if mp_config.supported_transfer_mode == "non_gpu":
+        if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
-                "blend (V3) engine requires supported_transfer_mode 'gpu' or "
-                f"'auto', got '{mp_config.supported_transfer_mode}'"
+                "blend (V3) engine requires supported_transfer_mode "
+                f"'lmcache_driven' or 'auto', got "
+                f"'{mp_config.supported_transfer_mode}'"
             )
         # First Party
         from lmcache.v1.mp_coordinator.blend_client import (
@@ -263,7 +266,7 @@ def run_cache_server(
     maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
     # For non-GPU transfer: apply shm_name from mp_config and verify capacity
-    if mp_config.supported_transfer_mode != "gpu":
+    if mp_config.supported_transfer_mode != "lmcache_driven":
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         if mp_config.shm_name is not None:
             mem_cfg.shm_name = mp_config.shm_name

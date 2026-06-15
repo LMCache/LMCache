@@ -230,13 +230,13 @@ The server picks which paths to load via ``--supported-transfer-mode``:
 - ``auto`` *(default)* -- load both paths.  Workers of either device
   type can connect without manual configuration; the server has no
   upfront knowledge of the connecting worker's device.
-- ``gpu`` -- load only the GPU IPC path.  Use when every worker is a
-  CUDA device and you want to skip allocating the non-GPU resources
-  (SHM pool, pickle codec).
-- ``non_gpu`` -- load only the non-GPU path.  Use when serving CPU-only
-  or non-CUDA accelerator workers.
+- ``lmcache_driven`` -- load only the GPU IPC path.  Use when every
+  worker is a CUDA device and you want to skip allocating the non-GPU
+  resources (SHM pool, pickle codec).
+- ``engine_driven`` -- load only the non-GPU path.  Use when serving
+  CPU-only or non-CUDA accelerator workers.
 
-When the non-GPU path is loaded (``auto`` or ``non_gpu``), LMCache by
+When the non-GPU path is loaded (``auto`` or ``engine_driven``), LMCache by
 default creates a shared-memory (SHM) pool for non-GPU KV transfers
 between the server and vLLM workers.  The ``--shm-name`` option lets
 you control this behavior:
