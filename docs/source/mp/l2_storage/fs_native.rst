@@ -1,5 +1,5 @@
-``fs_native``
-=============
+FS (native)
+===========
 
 A file-system L2 adapter backed by the native C++ ``LMCacheFSClient``
 wrapped with ``NativeConnectorL2Adapter``.  I/O is dispatched through a

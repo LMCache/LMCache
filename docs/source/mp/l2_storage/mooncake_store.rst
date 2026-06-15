@@ -1,5 +1,5 @@
-``mooncake_store``
-==================
+Mooncake Store
+==============
 
 An L2 adapter backed by the native C++ Mooncake Store connector.  Uses
 `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ for high-performance

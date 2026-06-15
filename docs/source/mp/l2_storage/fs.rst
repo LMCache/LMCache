@@ -1,5 +1,5 @@
-``fs``
-======
+FileSystem
+==========
 
 A pure file-system L2 adapter using async I/O (``aiofiles``).  Each KV cache
 object is stored as a raw ``.data`` file whose name encodes the full

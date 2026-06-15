@@ -5,39 +5,54 @@ Legacy (In-Process Mode)
 
 .. warning::
 
-   The pages in this section document **in-process mode**, where LMCache runs
-   *inside* the inference engine process (e.g. via ``LMCacheConnectorV1`` on
-   vLLM). This mode is **deprecated** in favor of :doc:`Multiprocess (MP) mode
-   <../mp/index>`, which is the recommended way to run LMCache.
+   These pages document LMCache's original **in-process mode**, where LMCache
+   ran *inside* the inference engine process (e.g. via ``LMCacheConnectorV1`` on
+   vLLM). In-process mode is **deprecated**; new deployments should use
+   :doc:`Multiprocess (MP) mode <../mp/index>`.
 
-   These pages are preserved because several features below are **not yet
-   available in MP mode**. As MP gains parity, the corresponding documentation
-   will graduate out of this section. If you are starting fresh, use
-   :doc:`../mp/index`.
+Background
+----------
 
-Features still exclusive to in-process mode
--------------------------------------------
+LMCache began as an in-process library embedded directly in the serving engine.
+The **multiprocess refactor** moved LMCache into a standalone ``lmcache server``
+and made an **asynchronous prefetching architecture** the default -- a
+``LOOKUP`` followed by background L2→L1 loads -- alongside process isolation,
+shared caching across engine instances, and multi-tier (L1/L2) storage.
 
-The following are documented here because they have **no MP equivalent yet**:
+MP is now the recommended mode and is on track to support essentially
+everything in-process mode did. The pages below are kept for users still on
+in-process mode and as a historical reference while MP closes any remaining
+gaps; where a feature already has an MP equivalent, prefer the MP docs.
 
-- **P2P KV cache sharing** -- :doc:`../kv_cache/p2p_sharing`
-- **Async loading** -- :doc:`../kv_cache/async_loading`
-- **Encoder cache / multimodality** -- :doc:`../non_kv_cache/encoder_cache`,
-  :doc:`../api_reference/multimodality`
-- **Disaggregated prefill** -- :doc:`../disaggregated_prefill/nixl/index`
-- **CacheGen compression** -- :doc:`../kv_cache_optimizations/compression/index`
-- **Cache management** (``move`` / ``pin`` / ``compress``) --
-  :doc:`../kv_cache_management/index`
-- **Advanced eviction policies** (MRU / LFU / FIFO) --
-  :doc:`../kv_cache/caching_policies`
+.. toctree::
+   :hidden:
+   :maxdepth: 1
 
-Features available in both modes
---------------------------------
-
-The pages below describe the in-process configuration. For MP, the equivalent
-lives under the :doc:`../mp/index` section:
-
-- **Storage backends** -- in MP these are **L2 adapters**; see
-  :doc:`../mp/l2_storage/index`.
-- **Eviction (LRU / noop)** -- configured on the ``lmcache server``; see
-  :doc:`../mp/configuration`.
+   /getting_started/quickstart/index
+   /kv_cache/storage_backends/index
+   /kv_cache/async_loading
+   /kv_cache/caching_policies
+   /kv_cache/p2p_sharing
+   /non_kv_cache/encoder_cache
+   /disaggregated_prefill/nixl/index
+   /disaggregated_prefill/shared_storage
+   /kv_cache_optimizations/compression/index
+   /kv_cache_optimizations/layerwise
+   /kv_cache_management/index
+   /kv_cache_optimizations/blending
+   /api_reference/multimodality
+   /api_reference/storage_backends
+   /api_reference/dynamic_connector
+   /api_reference/configurations
+   /internal_api_server/internal_api_server
+   /controller/index
+   /production/observability/index
+   /production/docker_deployment
+   /production/performance_tuning
+   /production/kv_cache_events
+   /developer_guide/architecture
+   /developer_guide/integration
+   /developer_guide/usage/index
+   /developer_guide/usage/basic_check
+   /developer_guide/extending_lmcache/storage_plugins
+   /developer_guide/extending_lmcache/remote_storage_plugins

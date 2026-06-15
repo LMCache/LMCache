@@ -254,15 +254,3 @@ Verify Installation
 .. code-block:: bash
 
     python -c "import lmcache.c_ops"
-
-Compatibility Matrix
-~~~~~~~~~~~~~~~~~~~~
-
-✅ compatible · ❌ API incompatible · 🕯 torch mismatch (use ``--no-build-isolation``)
-
-
-.. container:: compat-table-scroll
-
-   .. csv-table::
-      :file: Installation_compatibility_matrix.csv
-      :header-rows: 1

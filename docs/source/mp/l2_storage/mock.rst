@@ -1,5 +1,5 @@
-``mock``
-========
+Mock
+====
 
 Simulates L2 storage with configurable size and bandwidth.  Useful for testing
 the L2 pipeline without real storage hardware.

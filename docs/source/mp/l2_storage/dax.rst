@@ -1,5 +1,5 @@
-``dax``
-=======
+DAX
+===
 
 An L2 adapter that maps Device-DAX paths, such as ``/dev/daxX.X`` and
 ``/dev/daxY.Y``, and stores KV cache objects in fixed-size slots. This adapter

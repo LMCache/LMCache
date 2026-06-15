@@ -1,5 +1,5 @@
-``raw_block``
-=============
+Raw Block (Rust)
+================
 
 A built-in L2 adapter that stores KV objects in fixed-size slots on a raw block
 device or pre-sized file using the Rust raw-device I/O bindings. It reuses the

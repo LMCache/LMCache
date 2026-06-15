@@ -1,5 +1,5 @@
-``resp``
-========
+RESP (Redis/Valkey)
+===================
 
 An L2 adapter backed by a native RESP (Redis Serialization Protocol)
 connector, targeting **Redis** or **Valkey** servers. I/O is dispatched

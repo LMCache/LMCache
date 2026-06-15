@@ -62,152 +62,84 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
-   :caption: Welcome to LMCache
 
-   self
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Getting Started
-
-   mp/index
-   getting_started/installation
-   getting_started/quickstart
-   mp/configuration
-   getting_started/benchmarking
-   getting_started/kv_cache_calculator
+   getting_started/index
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Community
-
-   developer_guide/contributing
-   community/meetings
-   community/blogs
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Recipes
+   :maxdepth: 3
 
    recipes/index
-   mp/hybrid_models
 
 :raw-html:`<br />`
 
 .. toctree::
-   :maxdepth: 2
-   :caption: L2 Storage
+   :maxdepth: 4
 
    mp/l2_storage/index
-   developer_guide/extending_lmcache/native_connectors
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: KV Cache Optimizations
 
-   kv_cache_optimizations/cacheblend
-   mp/serde
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Non-KV Caching
-
-   non_kv_cache/encodings
-   non_kv_cache/hidden_states
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 1
-   :caption: Disaggregated Prefill
-
-   mp/disaggregated_prefill
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 1
-   :caption: KV Cache Management
-
-   mp/coordinator
-   mp/observability
-   mp/kv_cache_management
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 1
-   :caption: P2P KV Cache Sharing
-
-   mp/p2p
+   distributed_kv_cache
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Use LMCache in production
 
-   mp/deployment
-   production/kubernetes_deployment
-   mp/operator
-   developer_guide/extending_lmcache/runtime_plugins
-   production/kv_cache_events_mp
-   mp/tracing_and_debugging
-   mp/frontend_dashboard
-   production/dynamo_coordination
+   production/index
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: CLI
 
-   cli/index
-   mp/http_api
-   developer_guide/cli
+   mp/observability/index
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 3
+
+   interacting_with_server
 
 :raw-html:`<br />`
 
 .. toctree::
    :maxdepth: 2
-   :caption: Legacy (In-Process Mode)
+
+   community/index
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+
+   kv_cache_optimizations/index
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+
+   developer_guide/index
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
+
+   non_kv_cache/index
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
 
    legacy/index
-   getting_started/quickstart/index
-   kv_cache/storage_backends/index
-   kv_cache/async_loading
-   kv_cache/caching_policies
-   kv_cache/p2p_sharing
-   non_kv_cache/encoder_cache
-   disaggregated_prefill/nixl/index
-   disaggregated_prefill/shared_storage
-   kv_cache_optimizations/compression/index
-   kv_cache_optimizations/layerwise
-   kv_cache_management/index
-   api_reference/multimodality
-   api_reference/storage_backends
-   api_reference/dynamic_connector
-   internal_api_server/internal_api_server
-   controller/index
-   production/observability/index
-   developer_guide/architecture
-   api_reference/configurations
-   developer_guide/usage/basic_check
-   developer_guide/usage/index
-   developer_guide/extending_lmcache/storage_plugins
-   developer_guide/extending_lmcache/remote_storage_plugins
-   kv_cache_optimizations/blending
-   developer_guide/integration
-   production/docker_deployment
-   production/performance_tuning
-   production/kv_cache_events
 
 :raw-html:`<br />`

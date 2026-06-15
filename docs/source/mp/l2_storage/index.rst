@@ -1,5 +1,5 @@
-L2 Storage
-==========
+Secondary KV Storage
+====================
 
 LMCache multiprocess mode supports a two-tier storage architecture:
 
@@ -37,23 +37,14 @@ Data Flow
 Adapter Types
 -------------
 
-LMCache ships several L2 adapters; select one or more with the
-``--l2-adapter`` flag. Each adapter has its own configuration page:
+LMCache ships several L2 storage backends, grouped by medium under
+:doc:`Supported Backends <supported_storages>`. Select one or more with the
+``--l2-adapter`` flag.
 
 .. toctree::
-   :maxdepth: 1
+   :maxdepth: 2
 
-   nixl_store
-   nixl_store_dynamic
-   fs
-   dax
-   fs_native
-   raw_block
-   mooncake_store
-   s3
-   hfbucket
-   resp
-   mock
+   supported_storages
 
 Multiple Adapters (Cascade)
 ---------------------------
@@ -156,8 +147,13 @@ Serde (compression / quantization)
 
 Each adapter can optionally run a **serde** (serializer / deserializer)
 that transforms data on the way in and out of L2 — e.g. fp8 quantization
-for disk backends, or encryption for remote adapters. See :doc:`/mp/serde`
-for details and configuration.
+for disk backends, or encryption for remote adapters. See
+:doc:`Compression </mp/serde>` for details and configuration.
+
+.. toctree::
+   :maxdepth: 1
+
+   /mp/serde
 
 Eviction
 --------

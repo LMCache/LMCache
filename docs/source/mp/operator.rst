@@ -570,7 +570,7 @@ Production with Prometheus Monitoring
         prometheus.io/port: "9090"
       priorityClassName: system-node-critical
 
-See :doc:`observability` for metric names and Grafana configuration.
+See :doc:`observability/index` for metric names and Grafana configuration.
 
 Override Auto-Computed Resources
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -135,7 +135,7 @@ This guide helps you get LMCache running end-to-end in a couple of minutes. Use 
                ...
 
             For request-level statistics (hit ratio, bytes transferred) see
-            :doc:`../mp/observability`.
+            :doc:`../mp/observability/index`.
 
          .. tab-item:: In-process mode
             :sync: inproc

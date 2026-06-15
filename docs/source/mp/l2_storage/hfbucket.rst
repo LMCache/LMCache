@@ -1,5 +1,5 @@
-``hfbucket``
-============
+HF Bucket
+=========
 
 An L2 adapter that stores KV cache objects in a `Hugging Face Bucket
 <https://huggingface.co/docs/hub/storage-backends>`_ using the

@@ -1,5 +1,5 @@
-``s3``
-======
+S3
+==
 
 An L2 adapter that stores KV cache objects as S3 objects using the AWS
 Common Runtime (CRT).  Works with AWS S3, S3 Express One Zone, and any

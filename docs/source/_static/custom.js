@@ -165,3 +165,46 @@ function initializeDocsWidgets() {
 }
 
 document.addEventListener("DOMContentLoaded", initializeDocsWidgets);
+
+/**
+ * Default-expand the top-level sidebar sections so visitors can skim the full
+ * information architecture at a glance. Sections remain collapsible -- this
+ * only changes the initial Alpine ``expanded`` state of each ``.toctree-l1``
+ * (the theme starts them collapsed unless they are the current page).
+ *
+ * @returns {void}
+ */
+// Top-level sections that should start collapsed (secondary / reference /
+// deprecated material) rather than expanded-by-default.
+const COLLAPSED_BY_DEFAULT = [
+  "legacy/index",
+  "developer_guide/index",
+  "non_kv_cache/index",
+  "community/index",
+  "kv_cache_optimizations/index",
+];
+
+function expandTopLevelNavSections() {
+  document.querySelectorAll("nav .toctree-l1").forEach((li) => {
+    const link = li.querySelector(":scope > a");
+    const href = link ? link.getAttribute("href") || "" : "";
+    if (COLLAPSED_BY_DEFAULT.some((p) => href.includes(p))) {
+      return;
+    }
+    try {
+      const data =
+        window.Alpine && window.Alpine.$data ? window.Alpine.$data(li) : null;
+      if (data && "expanded" in data) {
+        data.expanded = true;
+      }
+    } catch (e) {
+      /* nav item not yet managed by Alpine */
+    }
+  });
+}
+
+// Run both on Alpine init and as a fallback, to cover either load ordering.
+document.addEventListener("alpine:initialized", expandTopLevelNavSections);
+document.addEventListener("DOMContentLoaded", () =>
+  setTimeout(expandTopLevelNavSections, 0),
+);
