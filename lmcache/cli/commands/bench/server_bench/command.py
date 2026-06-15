@@ -143,16 +143,17 @@ def register_server_parser(
     )
     parser.add_argument(
         "--transfer-mode",
-        choices=["auto", "handle", "data"],
+        choices=["auto", "engine_driven", "lmcache_driven"],
         default="auto",
         help=(
             "Transport routing for STORE/RETRIEVE (default: auto). "
-            "`handle` forces the GPU-style single-shot path "
+            "`engine_driven` forces the GPU-style single-shot path "
             "(REGISTER_KV_CACHE + STORE/RETRIEVE), which on CPU mode "
             "uses POSIX SHM to back zero-copy server-side mappings. "
-            "`data` forces the worker-side gather/scatter path "
+            "`lmcache_driven` forces the worker-side gather/scatter path "
             "(REGISTER_KV_CACHE_NON_GPU_CONTEXT + PREPARE/COMMIT). "
-            "`auto` keeps the historical mapping: gpu->handle, cpu->data."
+            "`auto` keeps the historical mapping: "
+            "gpu->engine_driven, cpu->lmcache_driven."
         ),
     )
     parser.add_argument(
@@ -268,20 +269,19 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         sys.exit(1)
 
     # Resolve transfer mode. ``auto`` reproduces the historical
-    # behaviour: gpu -> handle path, cpu -> data path. ``handle``
-    # / ``data`` are explicit overrides; ``handle`` on CPU mode is
-    # the SHM-backed zero-copy path (server-side copy).
+    # behaviour: gpu -> engine_driven path, cpu -> lmcache_driven path.
+    # ``engine_driven`` / ``lmcache_driven`` are explicit overrides.
     transfer_mode = getattr(args, "transfer_mode", "auto")
     if transfer_mode == "auto":
         use_handle = use_gpu
-    elif transfer_mode == "handle":
+    elif transfer_mode == "engine_driven":
         use_handle = True
     else:
         use_handle = False
     if use_handle and not use_gpu:
         print(
-            "  [info] --transfer-mode=handle on cpu mode: using "
-            "REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
+            "  [info] --transfer-mode=engine_driven on cpu mode: "
+            "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
         )
 
     url = args.rpc_url

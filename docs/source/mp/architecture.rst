@@ -21,7 +21,7 @@ High-Level Architecture
          |
          | dispatch by RequestType
          v
-    MPCacheEngine (server.py)
+    MPCacheServer (server.py)
          |
          |--- TokenHasher / SessionManager
          |
@@ -43,31 +43,42 @@ High-Level Architecture
 Server Variants
 ---------------
 
-All server entry points share the same ``MPCacheEngine`` and
-``StorageManager`` core. ``MPCacheEngine`` is now a thin compositor:
-it holds an ``MPCacheEngineContext`` and a list of ``EngineModule``
+All server entry points share the same ``MPCacheServer`` and
+``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
+it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``build_engine_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
-``MPCacheEngine``, assembles the engine modules
+``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule``
 and/or ``NonGPUTransferModule`` depending on
 ``--supported-transfer-mode`` — ``gpu`` or ``non_gpu`` loads just one,
-``auto`` (default) loads both — plus ``BlendModule`` when
-``--engine-type blend``), starts a ``MessageQueueServer``, registers
-handlers for every ``RequestType`` exposed by the loaded modules, and
-blocks in a keep-alive loop.
+``auto`` (default) loads both — plus a CacheBlend module when
+``--engine-type`` is set: ``blend`` appends ``BlendV3Module`` (the
+current paged-aware implementation), and ``blend_legacy`` appends
+``BlendModule`` (the original)). Starts a ``MessageQueueServer``,
+registers handlers for every ``RequestType`` exposed by the loaded
+modules, and blocks in a keep-alive loop.
 
 **``modules/blend.py``** -- Defines ``BlendModule`` and ``BlendEngineV2``,
-which add CacheBlend operations (``CB_REGISTER_KV_CACHE``,
+which add the original CacheBlend operations (``CB_REGISTER_KV_CACHE``,
 ``CB_LOOKUP_PRE_COMPUTED``, ``CB_STORE_PRE_COMPUTED``,
 ``CB_RETRIEVE_PRE_COMPUTED``, ``CB_STORE_FINAL`` and their V2
 variants). Enables non-prefix KV cache reuse across document
-paragraphs. Selected by passing ``--engine-type blend`` to
-``lmcache server``; ``BlendModule`` requires
-``--supported-transfer-mode`` to be ``gpu`` or ``auto`` and will refuse
-to load when it is ``non_gpu``.
+paragraphs. Selected by passing ``--engine-type blend_legacy`` to
+``lmcache server``.
+
+**``modules/blend_v3.py``** -- Defines ``BlendV3Module``, the
+paged-aware CacheBlend V3 pipeline that runs on the sparse-prefetch
+path. Adds the V3 RPCs (``CB_REGISTER_ROPE_V3``,
+``CB_UNREGISTER_ROPE_V3``, ``CB_RETRIEVE_PRE_COMPUTED_V3``,
+``CB_UNIFIED_LOOKUP``) and reuses the existing ``GPUTransferModule``
+and ``LookupModule``. Selected by passing ``--engine-type blend`` to
+``lmcache server``.
+
+Both blend variants require ``--supported-transfer-mode`` to be ``gpu``
+or ``auto`` and will refuse to load when it is ``non_gpu``.
 
 **``http_server.py``** -- Wraps ``run_cache_server()`` (from ``server.py``)
 inside a FastAPI application.  Endpoints are contributed by modules under
@@ -98,12 +109,47 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
    * - ``UNREGISTER_KV_CACHE``
      - SYNC
      - Unregister KV cache tensors.
+   * - ``REGISTER_KV_CACHE_NON_GPU_CONTEXT``
+     - SYNC
+     - Register a non-GPU KV cache context (CPU/accelerator workers using
+       the PREPARE/COMMIT transfer path). Loaded only when
+       ``--supported-transfer-mode`` is ``non_gpu`` or ``auto``. Returns a
+       ``RegisterNonGpuContextResponse`` carrying the SHM segment name and
+       pool size when the SHM path is in use (empty for the pickle path).
+   * - ``UNREGISTER_KV_CACHE_NON_GPU_CONTEXT``
+     - SYNC
+     - Unregister a non-GPU KV cache context.
    * - ``STORE``
      - BLOCKING
-     - Store KV cache chunks from GPU to L1 (CPU).
+     - Store KV cache chunks from GPU to L1 (CPU). GPU transfer path
+       (CUDA IPC); loaded only when ``--supported-transfer-mode`` is
+       ``gpu`` or ``auto``.
    * - ``RETRIEVE``
      - BLOCKING
-     - Copy KV cache chunks from L1 (CPU) back to GPU.
+     - Copy KV cache chunks from L1 (CPU) back to GPU. GPU transfer path
+       (CUDA IPC); loaded only when ``--supported-transfer-mode`` is
+       ``gpu`` or ``auto``.
+   * - ``PREPARE_STORE``
+     - BLOCKING
+     - (Non-GPU path) Worker asks the server to prepare store-side
+       transfer state for a key. Loaded when ``--supported-transfer-mode``
+       is ``non_gpu`` or ``auto``.
+   * - ``COMMIT_STORE``
+     - BLOCKING
+     - (Non-GPU path) Worker commits the chunk's serialized bytes (pickle
+       path) or releases the prepared SHM slot (SHM path) so the server
+       can persist into L1 storage.
+   * - ``PREPARE_RETRIEVE``
+     - BLOCKING
+     - (Non-GPU path) Worker asks the server to prepare the retrieval
+       payload for a key. The pickle path returns the bytes inline; the
+       SHM path returns slot info so the worker can read from shared
+       memory.
+   * - ``COMMIT_RETRIEVE``
+     - BLOCKING
+     - (Non-GPU path) Worker acknowledges retrieval completion so the
+       server can release the underlying read locks and reclaim any
+       transport state.
    * - ``LOOKUP``
      - BLOCKING
      - Submit a prefix lookup; the prefetch job is tracked server-side by
@@ -167,6 +213,24 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
      - BLOCKING
      - (Blend V2) Retrieve pre-computed chunks using the
        ``CBMatchResult`` list returned by ``CB_LOOKUP_PRE_COMPUTED_V2``.
+   * - ``CB_REGISTER_ROPE_V3``
+     - SYNC
+     - (Blend V3) Share the RoPE cos/sin cache onto a context already
+       registered via ``REGISTER_KV_CACHE``.
+   * - ``CB_UNREGISTER_ROPE_V3``
+     - SYNC
+     - (Blend V3) Drop the RoPE state (paged KV cache lives on; use
+       ``UNREGISTER_KV_CACHE`` to release that).
+   * - ``CB_RETRIEVE_PRE_COMPUTED_V3``
+     - BLOCKING
+     - (Blend V3) Scatter all matched chunks (prefix- and non-prefix-hit)
+       into paged KV by per-token block ID; re-RoPE only the shifted subset.
+   * - ``CB_UNIFIED_LOOKUP``
+     - BLOCKING
+     - (Blend V3) Sole live lookup path: one RPC runs prefix + non-prefix
+       match, reconciles, issues one sparse-coalesced prefetch, and
+       classifies per-TP-rank. Returns ``CBUnifiedLookupResult`` (or
+       ``None`` while the prefetch is still in flight).
 
 **Handler types:**
 
@@ -196,10 +260,12 @@ Each config module exposes a composable triple:
     add_observability_args(parser)    # from mp_observability/config.py
 
 ``http_server.py`` reuses this pattern, adding
-``add_http_frontend_args()`` for the HTTP variant. CacheBlend is no
-longer a separate entry point — it is opted into at runtime by passing
-``--engine-type blend`` to ``server.py`` (or ``lmcache server``), which
-appends ``BlendModule`` to the engine module list.
+``add_http_frontend_args()`` and ``add_coordinator_args()`` for the
+``lmcache server`` CLI. CacheBlend is no longer a separate entry point —
+it is opted into at runtime by passing ``--engine-type`` to
+``server.py`` (or ``lmcache server``). ``--engine-type blend`` appends
+``BlendV3Module`` (the current paged-aware implementation), while
+``--engine-type blend_legacy`` appends ``BlendModule`` (the original).
 
 Distributed Storage
 -------------------
@@ -293,7 +359,7 @@ LOOKUP Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager       L2 (PrefetchController)
+vLLM                MPCacheServer          StorageManager         L1Manager       L2 (PrefetchController)
      |                       |                       |                    |                    |
      |---LOOKUP(key)-------->|                       |                    |                    |
      |                       |--submit_prefetch------>|                    |                    |
@@ -311,7 +377,7 @@ STORE Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager
+    vLLM                MPCacheServer          StorageManager         L1Manager
      |                       |                       |                    |
      |---STORE(key,blocks)-->|                       |                    |
      |                       |--reserve_write-------->|                    |
@@ -330,7 +396,7 @@ RETRIEVE Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager
+    vLLM                MPCacheServer          StorageManager         L1Manager
      |                       |                       |                    |
      |---RETRIEVE(key)------>|                       |                    |
      |                       |--read_prefetched------>|                    |
@@ -346,7 +412,7 @@ Observability Internals
 
 **EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global
 singleton initialized at server startup by ``init_observability()``.
-Producers (L1Manager, StorageManager, MPCacheEngine) publish ``Event``
+Producers (L1Manager, StorageManager, MPCacheServer) publish ``Event``
 objects to a bounded queue (``--event-bus-queue-size``, default 10000,
 tail-drop on overflow).  A background drain thread dispatches each
 event to all registered subscribers.
@@ -413,10 +479,15 @@ Adding a new request type
 
 1. Add a new member to ``RequestType`` in ``protocols/base.py``.
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
-   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``, or
-   ``blend_v2``) and add the request name to that module's ``REQUEST_NAMES``.
-3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``).
-4. Register the handler in ``run_cache_server()`` via ``add_handler_helper()``.
+   (``engine``, ``controller``, ``observability``, ``debug``, ``blend``,
+   ``blend_v2``, or ``blend_v3``) and add the request name to that
+   module's ``REQUEST_NAMES``.
+3. Implement the handler method on the appropriate ``EngineModule``
+   (e.g. ``LookupModule``, ``GPUTransferModule``, ``BlendV3Module``) and
+   expose it as a ``HandlerSpec`` from that module's ``get_handlers()``.
+4. ``run_cache_server()`` registers every ``HandlerSpec`` returned by the
+   loaded modules via ``add_handler_helper()`` — no manual registration
+   step is needed.
 
 Key Source Files
 ----------------
@@ -428,11 +499,11 @@ Key Source Files
    * - File
      - Purpose
    * - ``lmcache/v1/multiprocess/server.py``
-     - MPCacheEngine + ZMQ server entry point
+- MPCacheServer + ZMQ server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
    * - ``lmcache/v1/multiprocess/engine_context.py``
-     - MPCacheEngineContext (shared state passed to every EngineModule)
+     - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
      - ``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType``
        (per-module handler registration)
@@ -440,8 +511,11 @@ Key Source Files
      - Engine module implementations: ``lookup.py`` (``LookupModule``),
        ``management.py`` (``ManagementModule``), ``gpu_transfer.py``
        (``GPUTransferModule``), ``non_gpu_transfer.py``
-       (``NonGPUTransferModule``), and ``blend.py``
-       (``BlendModule`` / ``BlendEngineV2``).
+       (``NonGPUTransferModule``), ``blend.py``
+       (``BlendModule`` / ``BlendEngineV2``, selected by
+       ``--engine-type blend_legacy``), and ``blend_v3.py``
+       (``BlendV3Module``, the paged-aware CacheBlend V3 pipeline
+       selected by ``--engine-type blend``).
    * - ``lmcache/v1/multiprocess/http_server.py``
      - FastAPI wrapper with health check and many other useful APIs
    * - ``lmcache/v1/multiprocess/http_api_registry.py``

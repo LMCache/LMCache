@@ -7,7 +7,7 @@ optional OTel log forwarding), and **tracing** (OTel spans for per-request
 latency).
 
 All three modes are powered by an internal **EventBus** that decouples
-producers (L1Manager, StorageManager, MPCacheEngine) from subscribers.
+producers (L1Manager, StorageManager, MPCacheServer) from subscribers.
 
 .. contents::
    :local:
@@ -65,13 +65,6 @@ Configuration
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` HTTP endpoint.
-   * - ``--service-instance-id``
-     - *(unset, default UUID v4)*
-     - Identifier for this MP server instance. Attached as the OTel
-       Resource attribute ``service.instance.id`` on every metric and
-       span. When the flag is not passed, defaults to a random UUID v4
-       minted at startup. Pass ``--service-instance-id=""`` to force an
-       explicit empty value. See :ref:`mp-observability-resource`.
    * - ``--metrics-sample-rate``
      - ``0.01``
      - Fraction of chunks/blocks to track for lifecycle histograms
@@ -132,7 +125,7 @@ telemetry and are orthogonal to per-metric attributes such as
      - CLI flag / config
      - Default when unset
    * - ``service.instance.id``
-     - ``--service-instance-id`` / ``ObservabilityConfig.service_instance_id``
+     - ``--instance-id`` / ``MPServerConfig.instance_id``
      - Random UUID v4 minted at startup.
 
 Resource attributes attach to the ``MeterProvider`` / ``TracerProvider``
@@ -366,7 +359,7 @@ so they always advance together per completed lookup. Early-exit lookups
 contribute ``0`` to both, and abandoned lookups contribute to neither.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
-time from ``IPCCacheEngineKey`` so dashboards can compute per-model or
+time from ``IPCCacheServerKey`` so dashboards can compute per-model or
 per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry
 per tenant or isolation domain); drop it at scrape time with
 ``metric_relabel_configs`` if storage cost matters.
@@ -826,7 +819,7 @@ What is captured (and what is not)
 
 - KV tensor bytes. Replay exercises bookkeeping and controller logic;
   payloads at replay time are zeros.
-- Calls inside the ``MPCacheEngine``, the message queue, or any
+- Calls inside the ``MPCacheServer``, the message queue, or any
   GPU-copy code. These layers are **out of scope** for the storage
   trace level.
 

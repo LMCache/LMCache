@@ -154,7 +154,7 @@ pointed at the same OTLP endpoint as the LMCache server. Gate on a single
 ## 5. Unification — linking the three processes
 
 The blocker (from the surface map): **the RPC envelope carries no trace-context**
-— `IPCCacheEngineKey` and `CBUnifiedLookupResult` have no `traceparent` field. Two
+— `IPCCacheServerKey` and `CBUnifiedLookupResult` have no `traceparent` field. Two
 ways to bridge:
 
 **Option A — propagate W3C trace-context through the RPC (recommended).**

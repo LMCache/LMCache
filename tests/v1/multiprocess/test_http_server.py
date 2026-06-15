@@ -46,7 +46,7 @@ def mock_gpu_ctx():
     )
     type(ctx).block_size = PropertyMock(return_value=4)
     # KV tensors are built as [2, NB, BS, NH, HS] -> NL_X_TWO_NB_BS_NH_HS.
-    ctx.gpu_kv_format_ = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS
+    ctx.engine_kv_format_ = lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
     return ctx
 
 
