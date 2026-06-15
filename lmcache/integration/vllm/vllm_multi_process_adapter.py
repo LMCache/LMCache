@@ -587,10 +587,10 @@ class LMCacheMPSchedulerAdapter:
         self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
-        lmcache_tokens_per_chunk: dict[str, int] = {}
+        lmcache_tokens_per_chunk_per_server: dict[str, int] = {}
         for url, client in self.mq_clients.items():
             try:
-                lmcache_tokens_per_chunk[url] = get_lmcache_chunk_size(
+                lmcache_tokens_per_chunk_per_server[url] = get_lmcache_chunk_size(
                     client, timeout=self._mq_timeout
                 )
             except TimeoutError:
@@ -600,15 +600,15 @@ class LMCacheMPSchedulerAdapter:
 
         # All servers must share chunk_size, otherwise the min() aggregation
         # over per-server hits would mix different granularities.
-        unique_sizes = set(lmcache_tokens_per_chunk.values())
+        unique_sizes = set(lmcache_tokens_per_chunk_per_server.values())
         if len(unique_sizes) != 1:
             raise ValueError(
-                f"All LMCache servers must share the same chunk_size, got {chunk_sizes}"
+                "All LMCache servers must share the same chunk_size, "
+                f"got {lmcache_tokens_per_chunk_per_server}"
             )
         self.lmcache_tokens_per_chunk = unique_sizes.pop()
 
         assert self.lmcache_tokens_per_chunk % vllm_block_size == 0, (
-
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
@@ -815,7 +815,9 @@ class LMCacheMPSchedulerAdapter:
                 for url, hit_chunks in per_server.items():
                     if hit_chunks <= min_chunks:
                         continue
-                    tail_end = min(hit_chunks * self.lmcache_tokens_per_chunk, len(token_ids_l))
+                    tail_end = min(
+                        hit_chunks * self.lmcache_tokens_per_chunk, len(token_ids_l)
+                    )
                     tail_key = self._create_key(
                         token_ids=token_ids_l,
                         start=min_chunks * self.lmcache_tokens_per_chunk,
