@@ -322,12 +322,12 @@ class BlendV3Module:
     def __init__(
         self,
         ctx: MPCacheServerContext,
-        gpu_transfer: LMCacheDrivenTransferModule,
+        lmcache_driven_transfer: LMCacheDrivenTransferModule,
         lookup_module: LookupModule,
         coordinator: "BlendCoordinatorClient | None" = None,
     ):
         self._ctx = ctx
-        self._gpu_transfer = gpu_transfer
+        self._transfer_module = lmcache_driven_transfer
         # Reused by cb_unified_lookup to run the standard prefix lookup
         # (registers the prefix prefetch job + session state the retrieve
         # path depends on) inside the single unified RPC.
@@ -406,7 +406,7 @@ class BlendV3Module:
     def report_status(self) -> dict:
         # Meta is derived live from MP server gpu_transfe
 
-        cache_contexts = self._gpu_transfer.cache_contexts
+        cache_contexts = self._transfer_module.cache_contexts
 
         def _meta(iid: int) -> "tuple[str, int] | None":
             entry = cache_contexts.get(iid)
@@ -453,7 +453,7 @@ class BlendV3Module:
         Raises:
             ValueError: If ``instance_id`` has no registered KV cache.
         """
-        cache_contexts = self._gpu_transfer.cache_contexts
+        cache_contexts = self._transfer_module.cache_contexts
         if instance_id not in cache_contexts:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
@@ -506,7 +506,7 @@ class BlendV3Module:
                 ``UNREGISTER_KV_CACHE`` to free the KV cache itself).
         """
         self._cb_rope_state.pop(instance_id, None)
-        if instance_id not in self._gpu_transfer.cache_contexts:
+        if instance_id not in self._transfer_module.cache_contexts:
             logger.warning(
                 "cb_unregister_rope: instance %d not registered", instance_id
             )
@@ -583,10 +583,10 @@ class BlendV3Module:
         """Find the CB KV buffer layout for ``(model_name, world_size)``.
 
         Reads the thread-safe ``layout_desc_registry`` (populated by
-        ``gpu_transfer`` on KV-cache registration) rather than iterating
-        ``cache_contexts``: iteration races concurrent register/unregister, and
-        the registry holds the complete multi-group descriptor instead of a
-        single-group manual reconstruction.
+        ``lmcache_driven_transfer`` on KV-cache registration) rather than
+        iterating ``cache_contexts``: iteration races concurrent
+        register/unregister, and the registry holds the complete multi-group
+        descriptor instead of a single-group manual reconstruction.
 
         Args:
             model_name (str): Model name to match.
@@ -940,7 +940,7 @@ class BlendV3Module:
             tuple[bytes, bool]: The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        result = self._gpu_transfer.store(
+        result = self._transfer_module.store(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
 
@@ -964,7 +964,7 @@ class BlendV3Module:
             job = (tokens_in_range, chunk_hashes, start_chunk_idx, key.start)
             with self._pending_fp_lock:
                 self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
-            entry = self._gpu_transfer.cache_contexts.get(instance_id)
+            entry = self._transfer_module.cache_contexts.get(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
             if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
                 gpu_ctx.cupy_stream.launch_host_func(
@@ -1237,7 +1237,7 @@ class BlendV3Module:
             ValueError: If the instance has no registered KV cache or rope
                 state. MLA layouts are unsupported (raised during re-RoPE).
         """
-        cache_contexts = self._gpu_transfer.cache_contexts
+        cache_contexts = self._transfer_module.cache_contexts
         if instance_id not in cache_contexts:
             raise ValueError(
                 f"Instance {instance_id} not registered for paged KV cache"

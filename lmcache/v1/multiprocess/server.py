@@ -214,7 +214,7 @@ def _build_modules(
         )
         from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
 
-        gpu_transfer = next(
+        transfer_module = next(
             m for m in modules if isinstance(m, LMCacheDrivenTransferModule)
         )
         lookup_module = next(m for m in modules if isinstance(m, LookupModule))
@@ -222,7 +222,12 @@ def _build_modules(
         # None and the blend module matches purely locally.
         coordinator = BlendCoordinatorClient.maybe_from_env()
         modules.append(
-            BlendV3Module(ctx, gpu_transfer, lookup_module, coordinator=coordinator)
+            BlendV3Module(
+                ctx,
+                transfer_module,
+                lookup_module,
+                coordinator=coordinator,
+            )
         )
 
     return modules
