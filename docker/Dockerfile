@@ -71,10 +71,7 @@ ARG LMCACHE_COMMIT_ID=1
 COPY . /workspace/LMCache
 WORKDIR /workspace/LMCache
 
-# Build LMCache.
-# As we are installing vLLM before LMCache, we will implicitly use
-# the same torch version as the vLLM build when running the LMCache build.
-# This means that LMCache is in sync with the vLLM torch version.
+ 
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     --mount=type=cache,target=/root/.cache/uv,id=uv-cache,sharing=locked \
     . /opt/venv/bin/activate && \
@@ -90,9 +87,12 @@ RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
         VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
             "vllm[runai,tensorizer,flashinfer]==${VLLM_VERSION}" ; \
     fi && \
-    python3 -c 'import vllm._C; import torch; print("TORCH=", torch.__version__)' && \
+    python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     python3 setup.py bdist_wheel --dist-dir=dist_lmcache && \
-    uv pip install ./dist_lmcache/*.whl --verbose
+    uv pip install ./dist_lmcache/*.whl --verbose && \
+  
+    uv pip install --reinstall-package "nixl-cu${LMCACHE_CUDA_MAJOR}" \
+        "nixl-cu${LMCACHE_CUDA_MAJOR}"
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
@@ -108,40 +108,44 @@ ARG CUDA_VERSION
 
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
     uv pip install lmcache \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
-        --index-strategy unsafe-best-match --verbose
+        --index-strategy unsafe-best-match --verbose && \
+  
+    uv pip install --reinstall-package "nixl-cu${CUDA_MAJOR}" "nixl-cu${CUDA_MAJOR}"
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
 
 #################### vLLM IMAGE & LMCache (Release, cu129) ######################
-# Installs nightly cu129 vLLM (no stable cu129 channel exists upstream) and
+# Installs nightly cu129 vLLM  
 # lmcache from the v{tag}-cu129 GitHub Release.
 
 FROM base AS image-release-cu129
-
-# Override the global CUDA_VERSION default (13.0) for this cu12.9 stage so local
-# builds that omit --build-arg CUDA_VERSION still resolve the correct torch index.
+ 
 ARG CUDA_VERSION=12.9
 ARG LMCACHE_VERSION
 
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
+    CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
     VER=$(echo ${LMCACHE_VERSION} | sed 's/^v//') && \
     VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} && \
-    python3 -c 'import vllm._C' && \
+    python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     uv pip install lmcache==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --find-links https://github.com/LMCache/LMCache/releases/expanded_assets/v${VER}-cu129 \
-        --index-strategy unsafe-best-match --verbose
+        --index-strategy unsafe-best-match --verbose && \
+    
+    uv pip install --reinstall-package "nixl-cu${CUDA_MAJOR}" "nixl-cu${CUDA_MAJOR}"
 
 WORKDIR /workspace
 ENTRYPOINT ["/opt/venv/bin/vllm", "serve"]
