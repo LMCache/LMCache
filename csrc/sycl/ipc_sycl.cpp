@@ -8,9 +8,16 @@
 #include <c10/core/DeviceGuard.h>
 
 #include <cstddef>
+#include <cerrno>
+#include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 namespace {
 
@@ -20,6 +27,51 @@ struct SyclIpcContext {
   sycl::context context;
   sycl::device device;
 };
+
+struct RetainedSyclIpcHandle {
+  ipc_memory::handle handle;
+  sycl::context context;
+};
+
+class SyclIpcHandleRegistry {
+ public:
+  void retain(ipc_memory::handle handle, const sycl::context& context) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    handles_.push_back({handle, context});
+  }
+
+  ~SyclIpcHandleRegistry() {
+    for (auto& entry : handles_) {
+      ipc_memory::put(entry.handle, entry.context);
+    }
+  }
+
+ private:
+  std::mutex mutex_;
+  std::vector<RetainedSyclIpcHandle> handles_;
+};
+
+SyclIpcHandleRegistry& sycl_ipc_handle_registry() {
+  static SyclIpcHandleRegistry registry;
+  return registry;
+}
+
+void allow_sycl_ipc_fd_duplication() {
+#ifdef __linux__
+  static std::once_flag once;
+  std::call_once(once, []() {
+    // SYCL IPC handles are opaque bytes, but the Linux runtime may need to
+    // duplicate exporter-owned fds while opening them in another process.
+    // Yama ptrace_scope=1 blocks that unless the exporter allows ptrace.
+    errno = 0;
+    if (prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0) != 0) {
+      throw std::runtime_error(
+          std::string("Failed to allow SYCL IPC fd duplication: ") +
+          std::strerror(errno));
+    }
+  });
+#endif
+}
 
 SyclIpcContext current_sycl_ipc_context(int device_index) {
   std::vector<sycl::device> ipc_devices;
@@ -45,6 +97,7 @@ SyclIpcContext current_sycl_ipc_context(int device_index) {
 std::string xpu_get_ipc_handle(uintptr_t data_ptr, int device_index) {
   const c10::OptionalDeviceGuard device_guard(
       at::Device(at::kXPU, device_index));
+  allow_sycl_ipc_fd_duplication();
   SyclIpcContext sycl_ipc = current_sycl_ipc_context(device_index);
 
   auto ipc_handle =
@@ -52,7 +105,7 @@ std::string xpu_get_ipc_handle(uintptr_t data_ptr, int device_index) {
   auto handle_data = ipc_handle.data();
   std::string handle_bytes(
       reinterpret_cast<const char*>(handle_data.data()), handle_data.size());
-  ipc_memory::put(ipc_handle, sycl_ipc.context);
+  sycl_ipc_handle_registry().retain(ipc_handle, sycl_ipc.context);
   return handle_bytes;
 }
 
