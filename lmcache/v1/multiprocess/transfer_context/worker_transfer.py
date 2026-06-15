@@ -319,7 +319,7 @@ class LMCacheDrivenTransferContext(TransferContext):
     def __init__(self) -> None:
         self._non_gpu_context: NonGpuContext | None = None
         self._layout_hints: LayoutHints | None = None
-        self._gpu_kv_format: Any = None
+        self._engine_kv_format: Any = None
 
     def register(
         self,
@@ -349,12 +349,12 @@ class LMCacheDrivenTransferContext(TransferContext):
             num_layers,
             hidden_dim_size,
             dtype_str,
-            gpu_kv_format,
+            engine_kv_format,
         ) = compute_kv_layout(kv_caches, layout_hints=layout_hints)
         self._layout_hints = layout_hints
-        self._gpu_kv_format = gpu_kv_format
+        self._engine_kv_format = engine_kv_format
 
-        use_mla_flag = is_mla(gpu_kv_format)
+        use_mla_flag = is_mla(engine_kv_format)
         shape = (
             torch.Size([num_layers, blocks_in_chunk * block_size, hidden_dim_size])
             if use_mla_flag
@@ -436,7 +436,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             _single_group_block_ids(block_ids),
             blocks_in_chunk,
             layout_hints=self._layout_hints,
-            gpu_kv_format=self._gpu_kv_format,
+            engine_kv_format=self._engine_kv_format,
             out=out_buffers,
             chunk_indices=chunk_indices,
         )
@@ -477,7 +477,7 @@ class LMCacheDrivenTransferContext(TransferContext):
                     blocks_in_chunk,
                     skip_first_n_tokens=skip_first_n_tokens,
                     layout_hints=self._layout_hints,
-                    gpu_kv_format=self._gpu_kv_format,
+                    engine_kv_format=self._engine_kv_format,
                 )
             except (RuntimeError, ValueError, TypeError, IndexError):
                 logger.exception("Failed to scatter retrieved CPU context chunks")

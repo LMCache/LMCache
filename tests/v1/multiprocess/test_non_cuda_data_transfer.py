@@ -501,7 +501,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
     assert num_layers == 2
     assert hidden_dim == 16
     assert dtype_str == "float32"
-    assert detected_kv_format == getattr(lmc_ops.GPUKVFormat, expected_format)
+    assert detected_kv_format == getattr(lmc_ops.EngineKVFormat, expected_format)
 
     blocks_per_chunk = 2
     gathered = gather_paged_kv_to_cpu(
@@ -509,7 +509,7 @@ def test_gather_scatter_roundtrip_hnd_layout(
         [0, 1],
         blocks_per_chunk,
         layout_hints=layout_hints,
-        gpu_kv_format=detected_kv_format,
+        engine_kv_format=detected_kv_format,
     )
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
     scatter_cpu_to_paged_kv(
@@ -518,11 +518,11 @@ def test_gather_scatter_roundtrip_hnd_layout(
         gathered,
         blocks_per_chunk,
         layout_hints=layout_hints,
-        gpu_kv_format=detected_kv_format,
+        engine_kv_format=detected_kv_format,
     )
 
     for name in source:
-        if detected_kv_format == lmc_ops.GPUKVFormat.NL_X_TWO_NB_NH_BS_HS:
+        if detected_kv_format == lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS:
             assert torch.allclose(source[name][:, 0], destination[name][:, 4])
             assert torch.allclose(source[name][:, 1], destination[name][:, 5])
         else:

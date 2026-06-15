@@ -47,10 +47,10 @@ SAMPLE_STATUS = {
                         "tokens_per_block": 16,
                         "slots_per_block": 16,
                         "dtype": "torch.float16",
-                        "gpu_kv_concrete_shape": "32 x [2, 2048, 16, 8, 128]",
+                        "engine_kv_concrete_shape": "32 x [2, 2048, 16, 8, 128]",
                         "is_mla": False,
-                        "gpu_kv_format": "NL_X_TWO_NB_BS_NH_HS",
-                        "gpu_kv_shape": "NL x [2, NB, BS, NH, HS]",
+                        "engine_kv_format": "NL_X_TWO_NB_BS_NH_HS",
+                        "engine_kv_shape": "NL x [2, NB, BS, NH, HS]",
                         "attention_backend": "vLLM non-MLA flash attention",
                     },
                 ],
@@ -208,8 +208,8 @@ class TestDescribeKvcacheFields:
         assert kg["dtype"] == "torch.float16"
         assert kg["is_mla"] is False
         assert kg["attention_backend"] == "vLLM non-MLA flash attention"
-        assert kg["gpu_kv_shape"] == "NL x [2, NB, BS, NH, HS]"
-        assert kg["gpu_kv_concrete_shape"] == "32 x [2, 2048, 16, 8, 128]"
+        assert kg["engine_kv_shape"] == "NL x [2, NB, BS, NH, HS]"
+        assert kg["engine_kv_concrete_shape"] == "32 x [2, 2048, 16, 8, 128]"
 
     def test_unhealthy(self):
         """Verify health shows UNHEALTHY when is_healthy is False."""

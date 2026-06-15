@@ -365,7 +365,7 @@ def transfer_kv_per_object_group(
                 direction,
                 cache_context.get_shape_desc(kernel_group_id),
                 group_lmcache_chunk_size,
-                cache_context.gpu_kv_format_,
+                cache_context.engine_kv_format_,
                 recalculated_skip_blocks,
             )
 
@@ -388,7 +388,7 @@ class ContextEntry:
     for the wrapper list at registration time -- a
     :class:`GPUCacheContext` for CUDA-IPC wrappers, a
     :class:`CpuCacheContext` for POSIX-SHM wrappers. Both expose
-    the same ``kv_tensors`` / ``gpu_kv_format_`` / ``num_layers`` / ...
+    the same ``kv_tensors`` / ``engine_kv_format_`` / ``num_layers`` / ...
     duck-typed surface, so downstream consumers stay agnostic.
 
     Args:

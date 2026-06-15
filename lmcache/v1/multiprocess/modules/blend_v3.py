@@ -1461,7 +1461,7 @@ class BlendV3Module:
                                     gpu_context.device,
                                     page_buffer_size,
                                     lmc_ops.TransferDirection.H2D,
-                                    gpu_context.gpu_kv_format_,
+                                    gpu_context.engine_kv_format_,
                                     block_size=bs,
                                     head_size=rope_state.head_size,
                                 )
