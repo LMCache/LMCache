@@ -28,7 +28,7 @@ msgid ""
 "This section lists model architectures that have been validated end-to-"
 "end with LMCache, with a recipe page per architecture covering only the "
 "LMCache-specific configuration that diverges from defaults."
-msgstr "本节列出了经过 LMCache 端到端验证的模型架构，每个架构都有一个配方页面，涵盖与默认设置不同的仅 LMCache 特定配置。"
+msgstr "本节列出了经过 LMCache 端到端验证的模型架构，每个架构都有一个使用指南页面，涵盖与默认设置不同的 LMCache 特定配置。"
 
 #: ../../source/recipes/index.rst:10
 msgid ""
@@ -169,7 +169,7 @@ msgstr "``google/gemma-3-4b-it``"
 
 #: ../../source/recipes/index.rst:66
 msgid ":doc:`gemma3`"
-msgstr "`:doc:`gemma3``"
+msgstr ":doc:`gemma3`"
 
 #: ../../source/recipes/index.rst:68
 msgid "``MistralForCausalLM``"
@@ -193,7 +193,7 @@ msgstr "``openai/gpt-oss-120b``"
 
 #: ../../source/recipes/index.rst:80
 msgid ":doc:`gpt_oss`"
-msgstr ":gpt_oss:"
+msgstr ":doc:`gpt_oss`"
 
 #: ../../source/recipes/index.rst:82
 msgid "``Qwen3MoeForCausalLM``"
@@ -205,7 +205,7 @@ msgstr "``Qwen/Qwen3-235B-A22B``"
 
 #: ../../source/recipes/index.rst:87
 msgid ":doc:`qwen3`"
-msgstr "：doc:`qwen3`"
+msgstr ":doc:`qwen3`"
 
 #: ../../source/recipes/index.rst:89
 msgid "``LlamaForCausalLM``"
@@ -217,7 +217,7 @@ msgstr "``meta-llama/Meta-Llama-3.1-70B-Instruct``"
 
 #: ../../source/recipes/index.rst:94
 msgid ":doc:`llama`"
-msgstr "`:doc:`llama`"
+msgstr ":doc:`llama`"
 
 #: ../../source/recipes/index.rst:96
 msgid "``Phi3ForCausalLM``"
