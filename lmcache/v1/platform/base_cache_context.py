@@ -211,7 +211,7 @@ class BaseCacheContext(ABC):
         Returns one non-overlapping view per LMCache group.
         """
         offsets = [0]
-        flat: array.array = array.array("l")
+        flat: array.array = array.array("q")
         for view_block_ids in block_ids_per_group:
             flat.extend(view_block_ids)
             offsets.append(len(flat))
