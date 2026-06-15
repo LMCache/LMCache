@@ -147,13 +147,14 @@ def register_server_parser(
         default="auto",
         help=(
             "Transport routing for STORE/RETRIEVE (default: auto). "
-            "`engine_driven` forces the GPU-style single-shot path "
-            "(REGISTER_KV_CACHE + STORE/RETRIEVE), which on CPU mode "
-            "uses POSIX SHM to back zero-copy server-side mappings. "
-            "`lmcache_driven` forces the worker-side gather/scatter path "
-            "(REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT + PREPARE/COMMIT). "
+            "`lmcache_driven` forces the server-driven handle path "
+            "(REGISTER_KV_CACHE + STORE/RETRIEVE), which supports "
+            "both CUDA IPC and CPU SHM for zero-copy transfers. "
+            "`engine_driven` forces the worker-side gather/scatter "
+            "data path (REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT + "
+            "PREPARE/COMMIT). "
             "`auto` keeps the historical mapping: "
-            "gpu->engine_driven, cpu->lmcache_driven."
+            "gpu->lmcache_driven, cpu->engine_driven."
         ),
     )
     parser.add_argument(
@@ -269,18 +270,18 @@ def run_server_bench(  # noqa: ARG001  (command kept for symmetry with siblings)
         sys.exit(1)
 
     # Resolve transfer mode. ``auto`` reproduces the historical
-    # behaviour: gpu -> engine_driven path, cpu -> lmcache_driven path.
-    # ``engine_driven`` / ``lmcache_driven`` are explicit overrides.
+    # behaviour: gpu -> lmcache_driven path, cpu -> engine_driven path.
+    # ``lmcache_driven`` / ``engine_driven`` are explicit overrides.
     transfer_mode = getattr(args, "transfer_mode", "auto")
     if transfer_mode == "auto":
         use_handle = use_gpu
-    elif transfer_mode == "engine_driven":
+    elif transfer_mode == "lmcache_driven":
         use_handle = True
     else:
         use_handle = False
     if use_handle and not use_gpu:
         print(
-            "  [info] --transfer-mode=engine_driven on cpu mode: "
+            "  [info] --transfer-mode=lmcache_driven on cpu mode: "
             "using REGISTER_KV_CACHE + STORE/RETRIEVE over POSIX SHM"
         )
 
