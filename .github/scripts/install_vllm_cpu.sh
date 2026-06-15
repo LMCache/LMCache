@@ -34,6 +34,13 @@ ${PIP_BIN} install vllm-cpu-nightly \
   --extra-index-url https://download.pytorch.org/whl/cpu \
   ${PIP_INSTALL_EXTRA_ARGS}
 
+# FastAPI 0.137 wraps included routers as `_IncludedRouter` (no `.path`), which
+# prometheus-fastapi-instrumentator (vLLM metrics) 500s on. Temp pin until fix:
+# https://github.com/trallnag/prometheus-fastapi-instrumentator/issues/370
+# shellcheck disable=SC2086
+${PIP_BIN} install "fastapi<0.137" \
+  ${PIP_INSTALL_EXTRA_ARGS}
+
 python - <<'PY'
 import importlib.metadata as md
 import pathlib
