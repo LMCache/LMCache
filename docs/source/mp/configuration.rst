@@ -353,6 +353,12 @@ Fields:
 - ``relative_tmp_dir`` *(optional)*: Relative sub-dir for temp files.
 - ``read_ahead_size`` *(optional)*: Trigger read-ahead by reading this many bytes first.
 - ``use_odirect`` *(optional)*: Bypass page cache via ``O_DIRECT`` (default ``false``).
+- ``max_capacity_gb`` *(optional, default ``0.0``)*: Aggregate filesystem
+  capacity used by ``get_usage()``. A value of ``0`` keeps FS L2 aggregate
+  eviction disabled.
+- ``eviction`` *(optional)*: Per-adapter L2 eviction config. FS L2 capacity
+  governance requires both ``max_capacity_gb > 0`` and this sub-object. The
+  top-level ``--eviction-policy`` flag controls L1 only.
 
 Examples:
 
@@ -363,6 +369,17 @@ Examples:
 
     # With temp directory
     --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "relative_tmp_dir": ".tmp"}'
+
+    # With FS L2 capacity governance
+    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "max_capacity_gb": 200, "eviction": {"eviction_policy": "LRU", "trigger_watermark": 0.8, "eviction_ratio": 0.2}}'
+
+FS L2 stores raw tensor bytes in ``.data`` files. The filename encodes the
+``ObjectKey`` and is used for lookup; the file content has no metadata header.
+When capacity governance is enabled, LMCache accounts file sizes and deletes
+whole ``.data`` files selected by the adapter's LRU state. Existing legacy
+filenames that do not include ``object_group_id`` remain readable as
+``object_group_id=0`` entries, so old cache directories do not need to be
+renamed before enabling the limit.
 
 ``mock`` -- Mock adapter for testing
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

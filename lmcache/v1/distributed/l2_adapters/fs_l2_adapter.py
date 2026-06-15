@@ -3,14 +3,16 @@
 File-system based L2 adapter using aiofiles for async I/O.
 
 Stores KV cache objects as raw tensor bytes on disk (no metadata
-header).  Each ObjectKey maps to a separate ``.data`` file whose
-name encodes all key fields so it can be reversed on startup.
+header). New ``.data`` filenames encode all ObjectKey fields so they
+can be reversed on startup; legacy filenames without ``object_group_id``
+are treated as ``object_group_id == 0`` for backward-compatible hits.
 """
 
 # Future
 from __future__ import annotations
 
 # Standard
+from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
@@ -20,6 +22,7 @@ import threading
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import (
         L1MemoryDesc,
+        L2AdapterListener,
     )
 
 # Third Party
@@ -120,28 +123,34 @@ def _object_key_to_filename(key: ObjectKey) -> str:
     return f"{base}{_FILE_EXT}"
 
 
-def _filename_to_object_key(
-    filename: str,
-) -> Optional[ObjectKey]:
-    """Reverse ``_object_key_to_filename``.
+def _legacy_object_key_to_filename(key: ObjectKey) -> Optional[str]:
+    """Build the pre-``object_group_id`` filesystem filename.
 
-    Accepts both the 4-field unsalted shape and the 5-field salted
-    shape (trailing ``cache_salt``). Returns ``None`` for anything
-    else. Since ``model_name`` is guaranteed not to contain ``@``,
-    plain ``split`` suffices — no marker, no rsplit.
+    Older FS L2 files used:
+
+        <safe_model>@0x<kv_rank_hex>@<chunk_hash_hex>.data
+
+    and, after ``cache_salt`` was added, optionally appended the salt.
+    Those names did not encode ``object_group_id``. They can only be
+    mapped safely to ``object_group_id == 0``.
     """
-    if not filename.endswith(_FILE_EXT):
+    if key.object_group_id != 0:
         return None
-    stem = filename[: -len(_FILE_EXT)]
-    parts = stem.split(_KEY_SEP)
-    if len(parts) == 4:
-        safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
-        cache_salt = ""
-    elif len(parts) == 5:
-        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
-    else:
-        return None
+    safe_model = key.model_name.replace("/", _PATH_SLASH_REPLACEMENT)
+    base = f"{safe_model}{_KEY_SEP}{key.kv_rank:#010x}{_KEY_SEP}{key.chunk_hash.hex()}"
+    if key.cache_salt:
+        return f"{base}{_KEY_SEP}{key.cache_salt}{_FILE_EXT}"
+    return f"{base}{_FILE_EXT}"
 
+
+def _build_object_key(
+    safe_model: str,
+    kv_rank_str: str,
+    object_group_str: str,
+    chunk_hash_hex: str,
+    cache_salt: str,
+) -> Optional[ObjectKey]:
+    """Build an ``ObjectKey`` from decoded filename fields."""
     model_name = safe_model.replace(_PATH_SLASH_REPLACEMENT, "/")
     try:
         chunk_hash = bytes.fromhex(chunk_hash_hex)
@@ -163,6 +172,67 @@ def _filename_to_object_key(
         return None
 
 
+def _filename_to_object_key(
+    filename: str,
+) -> Optional[ObjectKey]:
+    """Reverse ``_object_key_to_filename``.
+
+    Accepts both the 4-field unsalted shape and the 5-field salted
+    shape (trailing ``cache_salt``). It also accepts the legacy
+    3-field unsalted shape and maps it to ``object_group_id == 0`` so
+    existing ``.data`` directories remain readable after the filename
+    format gained an explicit object group field. Returns ``None`` for
+    anything else. Since ``model_name`` is guaranteed not to contain
+    ``@``, plain ``split`` suffices — no marker, no rsplit.
+    """
+    if not filename.endswith(_FILE_EXT):
+        return None
+    stem = filename[: -len(_FILE_EXT)]
+    parts = stem.split(_KEY_SEP)
+    if len(parts) == 3:
+        safe_model, kv_rank_str, chunk_hash_hex = parts
+        return _build_object_key(
+            safe_model=safe_model,
+            kv_rank_str=kv_rank_str,
+            object_group_str="0",
+            chunk_hash_hex=chunk_hash_hex,
+            cache_salt="",
+        )
+    if len(parts) == 4:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex = parts
+        parsed = _build_object_key(
+            safe_model=safe_model,
+            kv_rank_str=kv_rank_str,
+            object_group_str=object_group_str,
+            chunk_hash_hex=chunk_hash_hex,
+            cache_salt="",
+        )
+        if parsed is not None:
+            return parsed
+
+        # Best-effort compatibility for legacy salted files:
+        # <model>@0x<rank>@<chunk_hash>@<cache_salt>.data.
+        return _build_object_key(
+            safe_model=safe_model,
+            kv_rank_str=kv_rank_str,
+            object_group_str="0",
+            chunk_hash_hex=object_group_str,
+            cache_salt=chunk_hash_hex,
+        )
+    elif len(parts) == 5:
+        safe_model, kv_rank_str, object_group_str, chunk_hash_hex, cache_salt = parts
+    else:
+        return None
+
+    return _build_object_key(
+        safe_model=safe_model,
+        kv_rank_str=kv_rank_str,
+        object_group_str=object_group_str,
+        chunk_hash_hex=chunk_hash_hex,
+        cache_salt=cache_salt,
+    )
+
+
 class FSL2AdapterConfig(L2AdapterConfigBase):
     """
     Config for the filesystem-backed L2 adapter.
@@ -171,6 +241,8 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
     - base_path: directory for storing KV cache files.
     - relative_tmp_dir: optional relative sub-dir for
       temp files (same as fs_connector_relative_tmp_dir).
+    - max_capacity_gb: aggregate capacity used by get_usage();
+      0 disables aggregate eviction.
     """
 
     def __init__(
@@ -179,7 +251,8 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         relative_tmp_dir: Optional[str] = None,
         read_ahead_size: Optional[int] = None,
         use_odirect: bool = False,
-    ):
+        max_capacity_gb: float = 0.0,
+    ) -> None:
         """Initialize FSL2AdapterConfig.
 
         Args:
@@ -193,14 +266,31 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
                 using O_DIRECT for both reads and writes.
                 Requires buffer sizes aligned to the
                 filesystem block size.
+            max_capacity_gb: Maximum aggregate L2 capacity in
+                GiB for usage tracking and eviction. A value of
+                0 keeps aggregate eviction disabled.
         """
         self.base_path = base_path
         self.relative_tmp_dir = relative_tmp_dir
         self.read_ahead_size = read_ahead_size
         self.use_odirect = use_odirect
+        self.max_capacity_gb = max_capacity_gb
 
     @classmethod
     def from_dict(cls, d: dict) -> "FSL2AdapterConfig":
+        """Build an FS L2 adapter config from a JSON object.
+
+        Args:
+            d: Adapter JSON dict. Must include ``base_path`` and may
+                include ``relative_tmp_dir``, ``read_ahead_size``,
+                ``use_odirect``, and ``max_capacity_gb``.
+
+        Returns:
+            Parsed ``FSL2AdapterConfig``.
+
+        Raises:
+            ValueError: If a field is missing or has an invalid type.
+        """
         base_path = d.get("base_path")
         if not isinstance(base_path, str) or not base_path:
             raise ValueError("base_path must be a non-empty string")
@@ -215,15 +305,26 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
         use_odirect = d.get("use_odirect", False)
         if not isinstance(use_odirect, bool):
             raise ValueError("use_odirect must be a boolean")
-        return cls(
+        max_capacity_gb = d.get("max_capacity_gb", 0.0)
+        if (
+            not isinstance(max_capacity_gb, (int, float))
+            or isinstance(max_capacity_gb, bool)
+            or max_capacity_gb < 0
+        ):
+            raise ValueError("max_capacity_gb must be a non-negative number")
+        cfg = cls(
             base_path=base_path,
             relative_tmp_dir=relative_tmp_dir,
             read_ahead_size=read_ahead_size,
             use_odirect=use_odirect,
+            max_capacity_gb=float(max_capacity_gb),
         )
+        cfg.eviction_config = cls._parse_eviction_config(d)
+        return cfg
 
     @classmethod
     def help(cls) -> str:
+        """Return CLI help text for FS L2 adapter JSON fields."""
         return (
             "FS L2 adapter config fields:\n"
             "- base_path (str): directory for KV cache "
@@ -235,7 +336,10 @@ class FSL2AdapterConfig(L2AdapterConfigBase):
             "readahead by reading this many bytes first "
             "(optional)\n"
             "- use_odirect (bool): bypass page cache "
-            "via O_DIRECT (optional, default false)"
+            "via O_DIRECT (optional, default false)\n"
+            "- max_capacity_gb (float): max L2 capacity "
+            "in GB for usage tracking / eviction "
+            "(default 0 = disabled)"
         )
 
 
@@ -244,16 +348,17 @@ class FSL2Adapter(L2AdapterInterface):
     File-system backed L2 adapter with async I/O via *aiofiles*.
 
     Each file stores **only** the raw tensor bytes (no metadata
-    header), which gives maximum I/O throughput.  The file name
-    itself encodes the full ``ObjectKey`` so it is reversible.
+    header), which gives maximum I/O throughput. New filenames encode
+    the full ``ObjectKey``; legacy filenames without ``object_group_id``
+    are still recognized as ``object_group_id == 0``.
 
     Thread safety is ensured via a lock for shared bookkeeping
     and an asyncio event loop running on a dedicated daemon
     thread.
     """
 
-    def __init__(self, config: FSL2AdapterConfig):
-        super().__init__()
+    def __init__(self, config: FSL2AdapterConfig) -> None:
+        super().__init__(max_capacity_bytes=int(config.max_capacity_gb * (1024**3)))
         self._config = config
         base = config.base_path
         self._base_path = Path(base)
@@ -293,6 +398,22 @@ class FSL2Adapter(L2AdapterInterface):
         self._completed_load_tasks: dict[L2TaskId, Bitmap] = {}
         self._lock = threading.Lock()
 
+        # Per-key and per-file byte tracking. ``_key_sizes`` stores the
+        # aggregate bytes accounted for each ObjectKey; ``_key_file_sizes``
+        # preserves the concrete data files backing that key. The latter is
+        # needed for legacy filenames and for migration windows where both
+        # legacy and current filenames exist for object_group_id=0.
+        self._key_sizes: dict[ObjectKey, int] = {}
+        self._key_file_sizes: dict[ObjectKey, dict[Path, int]] = {}
+
+        # Refcounted locks held between lookup hit and submit_unlock().
+        # Lookup pre-locks requested keys to close the small race where
+        # eviction deletes a file after lookup starts but before the hit is
+        # recorded. Misses are released before the lookup task completes.
+        self._locked_keys: dict[ObjectKey, int] = defaultdict(int)
+
+        self._recover_existing_files()
+
         # Background asyncio event loop
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
@@ -301,11 +422,14 @@ class FSL2Adapter(L2AdapterInterface):
         logger.info(
             "Initialized FSL2Adapter with base_path=%s, "
             "relative_tmp_dir=%s, "
-            "read_ahead_size=%s, use_odirect=%s",
+            "read_ahead_size=%s, use_odirect=%s, max_capacity_gb=%.2f, "
+            "recovered_objects=%d",
             self._base_path,
             self._relative_tmp_dir,
             self._read_ahead_size,
             self._use_odirect,
+            config.max_capacity_gb,
+            len(self._key_sizes),
         )
 
     # ------------------------------------------------------------------
@@ -320,6 +444,26 @@ class FSL2Adapter(L2AdapterInterface):
 
     def get_load_event_fd(self) -> int:
         return self._load_efd.fileno()
+
+    # ------------------------------------------------------------------
+    # Listener Interface
+    # ------------------------------------------------------------------
+
+    def register_listener(self, listener: "L2AdapterListener") -> None:
+        """Register a listener and replay currently tracked keys.
+
+        ``FSL2Adapter`` restores existing ``.data`` files during
+        construction, before ``StorageManager`` creates the L2 eviction
+        state. Replaying the current key snapshot lets a newly registered
+        eviction listener initialize its LRU state from recovered files
+        without touching base-class byte accounting again.
+        """
+        super().register_listener(listener)
+        with self._lock:
+            keys = list(self._key_sizes)
+            sizes = [self._key_sizes[key] for key in keys]
+        if keys:
+            listener.on_l2_keys_stored(keys, sizes)
 
     # ------------------------------------------------------------------
     # Store Interface
@@ -361,6 +505,8 @@ class FSL2Adapter(L2AdapterInterface):
     def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
         with self._lock:
             task_id = self._get_next_task_id()
+            for key in keys:
+                self._locked_keys[key] += 1
 
         asyncio.run_coroutine_threadsafe(
             self._execute_lookup(keys, task_id),
@@ -373,9 +519,9 @@ class FSL2Adapter(L2AdapterInterface):
             return self._completed_lookup_tasks.pop(task_id, None)
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
-        # No-op: FS adapter has no eviction, so locking
-        # between lookup and load is unnecessary.
-        pass
+        with self._lock:
+            for key in keys:
+                self._unlock_key_locked(key)
 
     # ------------------------------------------------------------------
     # Load Interface
@@ -405,12 +551,25 @@ class FSL2Adapter(L2AdapterInterface):
 
     def report_status(self) -> dict:
         """Return a status dict for the FS L2 adapter."""
+        usage = self.get_usage()
+        with self._lock:
+            stored_object_count = len(self._key_sizes)
+            stored_file_count = sum(
+                len(file_sizes) for file_sizes in self._key_file_sizes.values()
+            )
+            locked_object_count = len(self._locked_keys)
         return {
             "is_healthy": self._loop_thread.is_alive(),
             "type": "FSL2Adapter",
             "base_path": str(self._base_path),
             "use_odirect": self._use_odirect,
             "event_loop_alive": self._loop_thread.is_alive(),
+            "max_capacity_bytes": usage.total_capacity_bytes,
+            "total_bytes_used": usage.total_bytes_used,
+            "usage_fraction": usage.usage_fraction,
+            "stored_object_count": stored_object_count,
+            "stored_file_count": stored_file_count,
+            "locked_object_count": locked_object_count,
         }
 
     # ------------------------------------------------------------------
@@ -418,14 +577,40 @@ class FSL2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def delete(self, keys: list[ObjectKey]) -> None:
-        # Not implemented for the filesystem adapter.
-        pass
+        """Delete unlocked keys from filesystem L2 storage.
 
-    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The FS
-    # adapter declares no max capacity (default 0) so ``supports_global_eviction``
-    # returns ``False`` and ``usage_fraction == -1.0`` — the eviction
-    # controller treats this as "no eviction signal" and skips the
-    # adapter entirely.
+        Args:
+            keys: Object keys to delete.
+
+        Note:
+            Keys locked by lookup/load are skipped for this eviction
+            cycle. The controller may retry them in a later cycle.
+        """
+        if not keys:
+            return
+
+        with self._lock:
+            deletable = [key for key in keys if self._locked_keys.get(key, 0) == 0]
+
+        if not deletable:
+            return
+
+        fut = asyncio.run_coroutine_threadsafe(
+            self._execute_delete(deletable),
+            self._loop,
+        )
+        try:
+            deleted_keys, deleted_sizes = fut.result(timeout=30.0)
+        except Exception as e:
+            logger.warning("FSL2Adapter delete failed: %s", e)
+            return
+
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
+
+    # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
+    # class maintains aggregate and per-cache_salt byte totals from
+    # ``_notify_keys_stored`` / ``_notify_keys_deleted``.
 
     # ------------------------------------------------------------------
     # Cleanup
@@ -472,8 +657,153 @@ class FSL2Adapter(L2AdapterInterface):
         self._next_task_id += 1
         return tid
 
+    def _unlock_key_locked(self, key: ObjectKey) -> None:
+        """Decrease one lock refcount. Must be called under ``_lock``."""
+        if key not in self._locked_keys:
+            return
+        if self._locked_keys[key] <= 1:
+            del self._locked_keys[key]
+        else:
+            self._locked_keys[key] -= 1
+
     def _key_to_path(self, key: ObjectKey) -> Path:
         return self._base_path / _object_key_to_filename(key)
+
+    def _key_to_legacy_path(self, key: ObjectKey) -> Optional[Path]:
+        filename = _legacy_object_key_to_filename(key)
+        if filename is None:
+            return None
+        return self._base_path / filename
+
+    def _key_candidate_paths(self, key: ObjectKey) -> list[Path]:
+        """Return known and compatible paths for ``key``.
+
+        The current filename is always included. For ``object_group_id=0``,
+        the legacy pre-object-group filename is included as a fallback so
+        existing cache directories continue to hit.
+        """
+        candidates: list[Path] = []
+        with self._lock:
+            candidates.extend(self._key_file_sizes.get(key, {}).keys())
+
+        candidates.append(self._key_to_path(key))
+        legacy_path = self._key_to_legacy_path(key)
+        if legacy_path is not None:
+            candidates.append(legacy_path)
+
+        deduped: list[Path] = []
+        seen: set[Path] = set()
+        for path in candidates:
+            if path in seen:
+                continue
+            seen.add(path)
+            deduped.append(path)
+        return deduped
+
+    def _record_key_file_locked(
+        self,
+        key: ObjectKey,
+        path: Path,
+        size: int,
+    ) -> bool:
+        """Record a file for ``key``. Must be called under ``_lock``.
+
+        Returns:
+            ``True`` when this file was newly accounted, ``False`` if it
+            was already tracked.
+        """
+        file_sizes = self._key_file_sizes.setdefault(key, {})
+        if path in file_sizes:
+            return False
+        file_sizes[path] = size
+        self._key_sizes[key] = self._key_sizes.get(key, 0) + size
+        return True
+
+    async def _track_existing_file(
+        self,
+        key: ObjectKey,
+        path: Path,
+    ) -> Optional[int]:
+        """Account an existing on-disk file if this adapter has not seen it."""
+        try:
+            stat_result = await aiofiles.os.stat(path)
+        except OSError:
+            return None
+
+        size = stat_result.st_size
+        if size <= 0:
+            return None
+
+        with self._lock:
+            if not self._record_key_file_locked(key, path, size):
+                return None
+        return size
+
+    async def _find_existing_path(
+        self,
+        key: ObjectKey,
+    ) -> Optional[Path]:
+        """Return the first existing current or legacy file for ``key``."""
+        for path in self._key_candidate_paths(key):
+            try:
+                if await aiofiles.os.path.exists(path):
+                    return path
+            except OSError:
+                logger.debug("Failed to check path existence: %s", path)
+        return None
+
+    def _recover_existing_files(self) -> None:
+        """Scan ``base_path`` and restore usage accounting from ``.data`` files."""
+        recovered: list[tuple[float, ObjectKey, Path, int]] = []
+        try:
+            entries = list(self._base_path.iterdir())
+        except OSError:
+            logger.exception("Failed to scan FS L2 directory %s", self._base_path)
+            return
+
+        for entry in entries:
+            try:
+                if not entry.is_file() or not entry.name.endswith(_FILE_EXT):
+                    continue
+                key = _filename_to_object_key(entry.name)
+                if key is None:
+                    logger.warning(
+                        "Skipping unparsable FS L2 data file during recovery: %s",
+                        entry.name,
+                    )
+                    continue
+                stat_result = entry.stat()
+                size = stat_result.st_size
+                if size <= 0:
+                    logger.warning(
+                        "Skipping empty FS L2 data file during recovery: %s",
+                        entry.name,
+                    )
+                    continue
+                recovered.append((stat_result.st_mtime, key, entry, size))
+            except OSError:
+                logger.warning(
+                    "Skipping FS L2 data file that could not be stat'ed: %s",
+                    entry,
+                )
+
+        recovered.sort(key=lambda item: item[0])
+        recovered_keys: list[ObjectKey] = []
+        recovered_sizes: list[int] = []
+        with self._lock:
+            for _, key, path, size in recovered:
+                if self._record_key_file_locked(key, path, size):
+                    recovered_keys.append(key)
+                    recovered_sizes.append(size)
+
+        if recovered_keys:
+            self._notify_keys_stored(recovered_keys, recovered_sizes)
+            logger.info(
+                "Recovered %d FS L2 data files (%d bytes) from %s",
+                len(recovered_keys),
+                sum(recovered_sizes),
+                self._base_path,
+            )
 
     async def _key_exists_on_disk(
         self,
@@ -485,8 +815,7 @@ class FSL2Adapter(L2AdapterInterface):
         non-blocking and always reflects the real FS state,
         which is critical for multi-node shared-FS setups.
         """
-        path = self._key_to_path(key)
-        return await aiofiles.os.path.exists(path)
+        return await self._find_existing_path(key) is not None
 
     def _key_to_file_and_tmp_path(self, key: ObjectKey) -> tuple[Path, Path]:
         """Return ``(final_path, tmp_path)``.
@@ -578,12 +907,27 @@ class FSL2Adapter(L2AdapterInterface):
     ) -> None:
         success = True
         bytes_written = 0
+        stored_keys: list[ObjectKey] = []
+        stored_sizes: list[int] = []
+        accessed_keys: list[ObjectKey] = []
         try:
             for key, obj in zip(keys, objects, strict=True):
                 file_path, tmp_path = self._key_to_file_and_tmp_path(key)
 
-                # Skip if already stored on disk
-                if await aiofiles.os.path.exists(file_path):
+                # Skip if already stored on disk, including legacy
+                # pre-object_group_id filenames. Track the file if it
+                # appeared after startup so usage accounting remains
+                # conservative.
+                existing_path = await self._find_existing_path(key)
+                if existing_path is not None:
+                    tracked_size = await self._track_existing_file(
+                        key,
+                        existing_path,
+                    )
+                    if tracked_size is not None:
+                        stored_keys.append(key)
+                        stored_sizes.append(tracked_size)
+                    accessed_keys.append(key)
                     continue
                 buf = obj.byte_array
                 size = len(buf)
@@ -617,6 +961,17 @@ class FSL2Adapter(L2AdapterInterface):
 
                     await aiofiles.os.replace(tmp_path, file_path)
                     bytes_written += size
+                    with self._lock:
+                        is_new_file = self._record_key_file_locked(
+                            key,
+                            file_path,
+                            size,
+                        )
+                    if is_new_file:
+                        stored_keys.append(key)
+                        stored_sizes.append(size)
+                    else:
+                        accessed_keys.append(key)
                     logger.debug(
                         "FSL2Adapter stored key %s (%d bytes)",
                         file_path.name,
@@ -639,6 +994,10 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_store_tasks[task_id] = L2StoreResult(success, bytes_written)
+        if stored_keys:
+            self._notify_keys_stored(stored_keys, stored_sizes)
+        if accessed_keys:
+            self._notify_keys_accessed(accessed_keys)
         self._store_efd.notify()
 
     # ---- lookup ---------------------------------------------------------
@@ -649,13 +1008,30 @@ class FSL2Adapter(L2AdapterInterface):
         task_id: L2TaskId,
     ) -> None:
         bitmap = Bitmap(len(keys))
+        hit_keys: list[ObjectKey] = []
+        missed_keys: list[ObjectKey] = []
+        tracked_keys: list[ObjectKey] = []
+        tracked_sizes: list[int] = []
         for i, key in enumerate(keys):
-            if not await self._key_exists_on_disk(key):
+            path = await self._find_existing_path(key)
+            if path is None:
+                missed_keys.append(key)
                 continue
             bitmap.set(i)
+            hit_keys.append(key)
+            tracked_size = await self._track_existing_file(key, path)
+            if tracked_size is not None:
+                tracked_keys.append(key)
+                tracked_sizes.append(tracked_size)
 
         with self._lock:
+            for key in missed_keys:
+                self._unlock_key_locked(key)
             self._completed_lookup_tasks[task_id] = bitmap
+        if tracked_keys:
+            self._notify_keys_stored(tracked_keys, tracked_sizes)
+        if hit_keys:
+            self._notify_keys_accessed(hit_keys)
         self._lookup_efd.notify()
 
     # ---- load -----------------------------------------------------------
@@ -667,8 +1043,17 @@ class FSL2Adapter(L2AdapterInterface):
         task_id: L2TaskId,
     ) -> None:
         bitmap = Bitmap(len(keys))
+        loaded_keys: list[ObjectKey] = []
+        tracked_keys: list[ObjectKey] = []
+        tracked_sizes: list[int] = []
         for i, key in enumerate(keys):
-            file_path = self._key_to_path(key)
+            file_path = await self._find_existing_path(key)
+            if file_path is None:
+                continue
+            tracked_size = await self._track_existing_file(key, file_path)
+            if tracked_size is not None:
+                tracked_keys.append(key)
+                tracked_sizes.append(tracked_size)
             try:
                 dst_buf = objects[i].byte_array
                 expected = len(dst_buf)
@@ -691,6 +1076,7 @@ class FSL2Adapter(L2AdapterInterface):
                         )
                     else:
                         bitmap.set(i)
+                        loaded_keys.append(key)
                         logger.debug(
                             "FSL2Adapter loaded key %s (%d bytes, O_DIRECT)",
                             file_path.name,
@@ -727,6 +1113,7 @@ class FSL2Adapter(L2AdapterInterface):
                         continue
 
                     bitmap.set(i)
+                    loaded_keys.append(key)
                     logger.debug(
                         "FSL2Adapter loaded key %s (%d bytes)",
                         file_path.name,
@@ -743,7 +1130,76 @@ class FSL2Adapter(L2AdapterInterface):
 
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
+        if tracked_keys:
+            self._notify_keys_stored(tracked_keys, tracked_sizes)
+        if loaded_keys:
+            self._notify_keys_accessed(loaded_keys)
         self._load_efd.notify()
+
+    # ---- delete ---------------------------------------------------------
+
+    async def _execute_delete(
+        self,
+        keys: list[ObjectKey],
+    ) -> tuple[list[ObjectKey], list[int]]:
+        deleted_keys: list[ObjectKey] = []
+        deleted_sizes: list[int] = []
+
+        for key in keys:
+            with self._lock:
+                if self._locked_keys.get(key, 0) > 0:
+                    continue
+                tracked_files = dict(self._key_file_sizes.get(key, {}))
+
+            candidate_paths = self._key_candidate_paths(key)
+            accounted_deleted_size = 0
+            removed_any_path = False
+            paths_to_forget: list[Path] = []
+            failed_tracked_delete = False
+            for path in candidate_paths:
+                tracked_size = tracked_files.get(path)
+                try:
+                    await aiofiles.os.unlink(path)
+                    removed_any_path = True
+                    if tracked_size is not None:
+                        accounted_deleted_size += tracked_size
+                        paths_to_forget.append(path)
+                    logger.debug("FSL2Adapter deleted key file %s", path.name)
+                except FileNotFoundError:
+                    if tracked_size is not None:
+                        accounted_deleted_size += tracked_size
+                        paths_to_forget.append(path)
+                    continue
+                except OSError:
+                    logger.warning("FSL2Adapter failed to delete %s", path)
+                    if tracked_size is not None:
+                        failed_tracked_delete = True
+                    continue
+
+            if not removed_any_path and accounted_deleted_size == 0:
+                continue
+            if failed_tracked_delete:
+                continue
+
+            with self._lock:
+                file_sizes = self._key_file_sizes.get(key)
+                if file_sizes is not None:
+                    for path in paths_to_forget:
+                        file_sizes.pop(path, None)
+                    if not file_sizes:
+                        self._key_file_sizes.pop(key, None)
+
+                if accounted_deleted_size > 0:
+                    remaining = self._key_sizes.get(key, 0) - accounted_deleted_size
+                    if remaining > 0:
+                        self._key_sizes[key] = remaining
+                    else:
+                        self._key_sizes.pop(key, None)
+
+            deleted_keys.append(key)
+            deleted_sizes.append(accounted_deleted_size)
+
+        return deleted_keys, deleted_sizes
 
 
 # Self-register config type and adapter factory

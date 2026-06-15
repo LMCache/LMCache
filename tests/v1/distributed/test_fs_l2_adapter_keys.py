@@ -99,9 +99,16 @@ class TestFilenameRoundtrip:
     def test_too_few_fields_returns_none(self):
         assert _filename_to_object_key("just-one-field.data") is None
 
-    def test_old_three_field_format_returns_none(self):
-        """The pre-object_group_id 3-field shape is no longer accepted."""
-        assert _filename_to_object_key("llama@0x0000002a@deadbeef.data") is None
+    def test_legacy_three_field_format_maps_to_object_group_zero(self) -> None:
+        """The pre-object_group_id 3-field shape remains readable."""
+        parsed = _filename_to_object_key("llama@0x0000002a@deadbeef.data")
+        assert parsed == ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="llama",
+            kv_rank=42,
+            object_group_id=0,
+            cache_salt="",
+        )
 
     def test_too_many_fields_returns_none(self):
         assert _filename_to_object_key("a@b@c@d@e@f.data") is None
