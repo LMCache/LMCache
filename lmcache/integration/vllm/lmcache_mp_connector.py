@@ -942,18 +942,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 if condition
                 else LMCacheMPRequestState.READY
             )
-            # Release per-server over-hit tails before cleanup discards
-            # the per-server hit map.
-            self.scheduler_adapter.free_per_server_overhit_locks(
-                token_ids=list(tracker.all_token_ids),
-                request_id=request.request_id,
-                cache_salt=tracker.cache_salt,
-            )
-            logger.debug(
-                "[req=%s] Released per-server over-hit tail locks "
-                "(no-op when all servers reported the same hit count).",
-                request.request_id,
-            )
             # Clean up lookup future in scheduler adapter
             self.scheduler_adapter.cleanup_lookup_result(request.request_id)
 

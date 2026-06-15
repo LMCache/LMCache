@@ -581,6 +581,7 @@ class LMCacheMPSchedulerAdapter:
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
+        self._lookup_params: dict[str, tuple[list[int], str]] = {}
 
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
@@ -731,6 +732,7 @@ class LMCacheMPSchedulerAdapter:
                 return
 
         self._pending_lookups.add(request_id)
+        self._lookup_params[request_id] = (token_ids, cache_salt)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
@@ -804,6 +806,25 @@ class LMCacheMPSchedulerAdapter:
                 dict(per_server),
                 min_chunks,
             )
+            # Release over-hit tail locks on servers that reported more than min.
+            token_ids_l, cs = self._lookup_params.pop(request_id, (None, None))
+            if token_ids_l is not None:
+                for url, hit_chunks in per_server.items():
+                    if hit_chunks <= min_chunks:
+                        continue
+                    tail_end = min(hit_chunks * self.chunk_size, len(token_ids_l))
+                    tail_key = self._create_key(
+                        token_ids=token_ids_l,
+                        start=min_chunks * self.chunk_size,
+                        end=tail_end,
+                        request_id=request_id,
+                        cache_salt=cs or "",
+                    ).no_worker_id_version()
+                    send_lmcache_request(
+                        self.mq_clients[url],
+                        RequestType.FREE_LOOKUP_LOCKS,
+                        [tail_key, self.tp_size],
+                    )
 
         token_count = min_chunks * self.chunk_size
         self._finished_lookup_results[request_id] = token_count
@@ -825,6 +846,7 @@ class LMCacheMPSchedulerAdapter:
         self._pending_lookups.discard(request_id)
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
+        self._lookup_params.pop(request_id, None)
 
     def shutdown(self) -> None:
         """Shutdown the scheduler adapter and its resources."""
@@ -874,60 +896,11 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         ).no_worker_id_version()
         for url in self._server_urls:
-            try:
-                send_lmcache_request(
-                    self.mq_clients[url],
-                    RequestType.FREE_LOOKUP_LOCKS,
-                    [base_key, self.tp_size],
-                )
-            except Exception as e:
-                logger.warning(
-                    "[req=%s] FREE_LOOKUP_LOCKS to %s failed: %s "
-                    "(rely on server-side GC for any residual lock)",
-                    request_id,
-                    url,
-                    e,
-                )
-
-    def free_per_server_overhit_locks(
-        self,
-        token_ids: list[int],
-        request_id: str,
-        cache_salt: str = "",
-    ) -> None:
-        """Release the per-server tail locks that exceed the global min hit."""
-        if not self.is_healthy:
-            return
-        per_server = self._per_server_hits.get(request_id)
-        if not per_server:
-            return
-        min_hit_chunks = min(per_server.values())
-        min_hit_end = min_hit_chunks * self.chunk_size
-        for url, hit_chunks in per_server.items():
-            if hit_chunks <= min_hit_chunks:
-                continue
-            tail_end = min(hit_chunks * self.chunk_size, len(token_ids))
-            tail_key = self._create_key(
-                token_ids=token_ids,
-                start=min_hit_end,
-                end=tail_end,
-                request_id=request_id,
-                cache_salt=cache_salt,
-            ).no_worker_id_version()
-            try:
-                send_lmcache_request(
-                    self.mq_clients[url],
-                    RequestType.FREE_LOOKUP_LOCKS,
-                    [tail_key, self.tp_size],
-                )
-            except Exception as e:
-                logger.warning(
-                    "[req=%s] FREE_LOOKUP_LOCKS (tail) to %s failed: %s "
-                    "(rely on server-side GC for any residual lock)",
-                    request_id,
-                    url,
-                    e,
-                )
+            send_lmcache_request(
+                self.mq_clients[url],
+                RequestType.FREE_LOOKUP_LOCKS,
+                [base_key, self.tp_size],
+            )
 
     def end_session(self, request_id: str) -> None:
         """
@@ -1140,18 +1113,23 @@ class LMCacheMPWorkerAdapter:
 
     @property
     def is_healthy(self) -> bool:
-        """Whether the LMCache server is healthy."""
+        """Whether the LMCache server is healthy.
+
+        Reflects the most recent heartbeat result. KV cache
+        re-registration on the unhealthy->healthy transition is handled
+        by the heartbeat thread itself via ``register_recover_callback``,
+        so this property only reads the shared event.
+        """
         return self._health_event.is_set()
 
     @property
     def world_size(self) -> int:
-        """How many KV-cache pieces a single LMCache server is responsible for."""
+        """Get the kv world size."""
         return self.parallel_strategy.kv_world_size
 
     @property
     def worker_id(self) -> int:
-        """This worker's KV-cache piece index within its LMCache server,
-        in ``[0, world_size)``."""
+        """Get the kv worker id."""
         return self.parallel_strategy.kv_worker_id
 
     @property
