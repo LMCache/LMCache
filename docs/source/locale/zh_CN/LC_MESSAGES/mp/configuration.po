@@ -165,8 +165,8 @@ msgid ""
 "Cache engine backend type. ``default`` uses standard prefix caching; "
 "``blend`` enables CacheBlend non-prefix KV reuse (composes a "
 "``BlendModule`` into the engine, which requires ``--supported-transfer-"
-"mode`` to be ``gpu`` or ``auto``). Choices: ``default``, ``blend``."
-msgstr "缓存引擎后端类型。``default`` 使用标准前缀缓存；``blend`` 启用 CacheBlend 非前缀 KV 重用（将 ``BlendModule`` 组合到引擎中，这需要 ``--supported-transfer-mode`` 为 ``gpu`` 或 ``auto``）。可选项：``default``，``blend``。"
+"mode`` to be ``lmcache_driven`` or ``auto``). Choices: ``default``, ``blend``."
+msgstr "缓存引擎后端类型。``default`` 使用标准前缀缓存；``blend`` 启用 CacheBlend 非前缀 KV 重用（将 ``BlendModule`` 组合到引擎中，这需要 ``--supported-transfer-mode`` 为 ``lmcache_driven`` 或 ``auto``）。可选项：``default``，``blend``。"
 
 #: ../../source/mp/configuration.rst:56
 msgid "``--supported-transfer-mode``"
@@ -178,12 +178,12 @@ msgstr "``auto``"
 
 #: ../../source/mp/configuration.rst:58
 msgid ""
-"Which worker → server transfer paths the server loads. ``gpu`` enables "
-"only GPU-based IPC transfer (STORE/RETRIEVE); ``non_gpu`` enables only "
+"Which worker → server transfer paths the server loads. ``lmcache_driven`` enables "
+"only GPU-based IPC transfer (STORE/RETRIEVE); ``engine_driven`` enables only "
 "the non-GPU (PREPARE/COMMIT) transfer path; ``auto`` (default) loads both"
 " so workers of either device type can connect without manual "
-"configuration. Choices: ``gpu``, ``non_gpu``, ``auto``."
-msgstr "服务器加载哪些工作进程 → 服务器传输路径。``gpu`` 仅启用基于 GPU 的 IPC 传输（STORE/RETRIEVE）；``non_gpu`` 仅启用非 GPU（PREPARE/COMMIT）传输路径；``auto``（默认）加载两者，以便任一设备类型的工作进程可以在无需手动配置的情况下连接。选择：``gpu``、``non_gpu``、``auto``。"
+"configuration. Choices: ``lmcache_driven``, ``engine_driven``, ``auto``."
+msgstr "服务器加载哪些工作进程 → 服务器传输路径。``lmcache_driven`` 仅启用基于 GPU 的 IPC 传输（STORE/RETRIEVE）；``engine_driven`` 仅启用非 GPU（PREPARE/COMMIT）传输路径；``auto``（默认）加载两者，以便任一设备类型的工作进程可以在无需手动配置的情况下连接。选择：``lmcache_driven``、``engine_driven``、``auto``。"
 
 #: ../../source/mp/configuration.rst:64
 msgid "``--runtime-plugin-locations``"
@@ -247,10 +247,10 @@ msgstr "*(未设置)*"
 msgid ""
 "SHM segment name for non-GPU KV transfer (only used when the non-GPU path"
 " is loaded, i.e. ``--supported-transfer-mode`` is ``auto`` or "
-"``non_gpu``). Not set (default): auto-allocate a shared-memory pool. "
+"``engine_driven``). Not set (default): auto-allocate a shared-memory pool. "
 "``\"\"`` (empty string): disable SHM and force the pickle transfer path."
 "  Any other value: use that exact name for the SHM pool segment."
-msgstr "非 GPU KV 传输的 SHM 段名称（仅在加载非 GPU 路径时使用，即 ``--supported-transfer-mode`` 为 ``auto`` 或 ``non_gpu``）。未设置（默认）：自动分配共享内存池。``\\\"\\\"``（空字符串）：禁用 SHM 并强制使用 pickle 传输路径。任何其他值：将该确切名称用于 SHM 池段。"
+msgstr "非 GPU KV 传输的 SHM 段名称（仅在加载非 GPU 路径时使用，即 ``--supported-transfer-mode`` 为 ``auto`` 或 ``engine_driven``）。未设置（默认）：自动分配共享内存池。``\\\"\\\"``（空字符串）：禁用 SHM 并强制使用 pickle 传输路径。任何其他值：将该确切名称用于 SHM 池段。"
 
 #: ../../source/mp/configuration.rst:91
 msgid "Lookup Hash Logging"

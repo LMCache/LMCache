@@ -293,24 +293,24 @@ msgstr "``auto`` *(默认)* -- 加载两条路径。任一设备类型的工作�
 
 #: ../../source/mp/deployment.rst:233
 msgid ""
-"``gpu`` -- load only the GPU IPC path.  Use when every worker is a CUDA "
+"``lmcache_driven`` -- load only the GPU IPC path.  Use when every worker is a CUDA "
 "device and you want to skip allocating the non-GPU resources (SHM pool, "
 "pickle codec)."
-msgstr "``gpu`` -- 仅加载 GPU IPC 路径。当每个工作节点都是 CUDA 设备时使用，并且您希望跳过分配非 GPU 资源（SHM 池、pickle 编解码器）。"
+msgstr "``lmcache_driven`` -- 仅加载 GPU IPC 路径。当每个工作节点都是 CUDA 设备时使用，并且您希望跳过分配非 GPU 资源（SHM 池、pickle 编解码器）。"
 
 #: ../../source/mp/deployment.rst:236
 msgid ""
-"``non_gpu`` -- load only the non-GPU path.  Use when serving CPU-only or "
+"``engine_driven`` -- load only the non-GPU path.  Use when serving CPU-only or "
 "non-CUDA accelerator workers."
-msgstr "``non_gpu`` -- 仅加载非 GPU 路径。用于服务仅 CPU 或非 CUDA 加速器的工作节点。"
+msgstr "``engine_driven`` -- 仅加载非 GPU 路径。用于服务仅 CPU 或非 CUDA 加速器的工作节点。"
 
 #: ../../source/mp/deployment.rst:239
 msgid ""
-"When the non-GPU path is loaded (``auto`` or ``non_gpu``), LMCache by "
+"When the non-GPU path is loaded (``auto`` or ``engine_driven``), LMCache by "
 "default creates a shared-memory (SHM) pool for non-GPU KV transfers "
 "between the server and vLLM workers.  The ``--shm-name`` option lets you "
 "control this behavior:"
-msgstr "当加载非 GPU 路径（``auto`` 或 ``non_gpu``）时，LMCache 默认会为服务器和 vLLM 工作节点之间的非 GPU KV 传输创建一个共享内存（SHM）池。``--shm-name`` 选项允许您控制此行为："
+msgstr "当加载非 GPU 路径（``auto`` 或 ``engine_driven``）时，LMCache 默认会为服务器和 vLLM 工作节点之间的非 GPU KV 传输创建一个共享内存（SHM）池。``--shm-name`` 选项允许您控制此行为："
 
 #: ../../source/mp/deployment.rst:248
 msgid "Value"
