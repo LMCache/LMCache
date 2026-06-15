@@ -16,6 +16,13 @@ import pytest
 import torch
 
 # First Party
+from lmcache import torch_device_type
+from lmcache.python_ops_fallback import (
+    multi_layer_block_kv_transfer as fallback_multi_layer_block_kv_transfer,
+)
+from lmcache.python_ops_fallback import (
+    set_shape_desc_dtype,
+)
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector import utils as U
 from lmcache.v1.multiprocess.transfer_context.base import (
@@ -23,6 +30,11 @@ from lmcache.v1.multiprocess.transfer_context.base import (
     scatter_cpu_to_paged_kv,
 )
 import lmcache.c_ops as lmc_ops
+
+pytestmark = pytest.mark.skipif(
+    torch_device_type != "cpu",
+    reason="vLLM blocks-first fused format (Format 10) is strictly CPU-only.",
+)
 
 NB, NH, BS, HS, NL = 16, 4, 128, 64, 3
 HINTS = {"kv_layout": "HND"}
@@ -38,7 +50,7 @@ def test_discovery_splits_fused_axis():
     fmt, norm = U.normalize_kv_and_discover_format(
         _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )
-    assert fmt == lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS
+    assert fmt == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
     # 4D [NB, NH, BS, 2*HS] -> canonical 5D [NB, NH, BS, 2, HS]
     assert tuple(norm[0].shape) == (NB, NH, BS, 2, HS)
 
@@ -98,3 +110,73 @@ def test_mp_gather_scatter_roundtrip():
     untouched = torch.tensor([b for b in range(NB) if b not in block_ids])
     for k in dst:
         assert torch.equal(dst[k][untouched], ref[k][untouched])
+
+
+def test_multi_layer_block_kv_transfer_roundtrip():
+    """Server-side copy (handle mode) D2H + H2D round-trip.
+
+    Regression for the CI ``cpu_e2e_validation (server-side copy)`` failure:
+    ``GPUTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
+    this format, so the per-layer HND fallback must recognize it and split
+    K/V at dim 3.
+    """
+    # Use canonical 5D layers so the fallback exercises the HND split path.
+    fmt, norm = U.normalize_kv_and_discover_format(
+        _raw_blocks_first_caches(), EngineType.VLLM, HINTS
+    )
+    chunk_tokens = NB * BS
+    obj = torch.zeros((2, NL, chunk_tokens, NH * HS), dtype=norm[0].dtype)
+
+    sd = lmc_ops.PageBufferShapeDesc()
+    sd.kv_size = 2
+    sd.nl = NL
+    sd.nb = NB
+    sd.bs = BS
+    sd.nh = NH
+    sd.hs = HS
+    sd.element_size = norm[0].element_size()
+    sd.block_stride_elems = NH * BS * 2 * HS
+    set_shape_desc_dtype(sd, norm[0].dtype)
+
+    block_ids = torch.tensor(list(range(NB)), dtype=torch.long)
+
+    # Match the C++ binding's strict signature: 1D int64 tensor of paged
+    # buffer ``data_ptr()`` values, and a list of int ``data_ptr()`` for
+    # the lmcache objects (the fallback also accepts tensors directly,
+    # but the compiled extension does not).
+    norm_ptrs = torch.tensor([t.data_ptr() for t in norm], dtype=torch.long)
+    obj_ptrs = [obj.data_ptr()]
+
+    # Drive the python fallback directly: this regression specifically
+    # targets the CPU handle-mode path. ``lmc_ops.multi_layer_block_kv_transfer``
+    # is replaced by the CUDA C++ extension when CUDA is available, and that
+    # extension rejects ``torch.device("cpu")`` with a CUDAGuard error.
+    fallback_multi_layer_block_kv_transfer(
+        norm_ptrs,
+        obj_ptrs,
+        block_ids,
+        torch.device("cpu"),
+        lmc_ops.TransferDirection.D2H,
+        sd,
+        chunk_tokens,
+        fmt,
+        0,
+    )
+
+    # H2D into a fresh per-layer buffer set; round-trip must be bit-exact.
+    out = [torch.zeros_like(layer) for layer in norm]
+    out_ptrs = torch.tensor([t.data_ptr() for t in out], dtype=torch.long)
+    fallback_multi_layer_block_kv_transfer(
+        out_ptrs,
+        obj_ptrs,
+        block_ids,
+        torch.device("cpu"),
+        lmc_ops.TransferDirection.H2D,
+        sd,
+        chunk_tokens,
+        fmt,
+        0,
+    )
+
+    for original, recovered in zip(norm, out, strict=True):
+        assert torch.equal(original, recovered)

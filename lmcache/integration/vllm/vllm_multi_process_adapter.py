@@ -18,7 +18,7 @@ from lmcache.integration.vllm.utils import vllm_layout_hints
 from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.group_view import (
@@ -28,7 +28,7 @@ from lmcache.v1.multiprocess.group_view import (
 from lmcache.v1.multiprocess.mq import MessageQueueClient, MessagingFuture
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context import (
-    DataTransferContext,
+    LMCacheDrivenTransferContext,
     TransferContext,
     create_transfer_context,
 )
@@ -53,11 +53,11 @@ class ExtraConfigDefault(enum.Enum):
     # to the server.
     heartbeat_interval = 10.0
     # Routing mode for ``create_transfer_context``: ``auto`` keeps the
-    # historical CUDA -> handle / others -> data dispatch; ``handle``
-    # forces the IPC / SHM zero-copy path; ``data`` forces the
-    # worker-side gather/scatter copy path. Mirrors the
-    # ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config key wins
-    # when both are set.
+    # historical CUDA -> engine_driven / others -> lmcache_driven dispatch;
+    # ``engine_driven`` forces the IPC / SHM zero-copy path;
+    # ``lmcache_driven`` forces the worker-side gather/scatter copy path.
+    # Mirrors the ``LMCACHE_MP_TRANSFER_MODE`` env var; this extra_config
+    # key wins when both are set.
     mp_transfer_mode = "auto"
 
 
@@ -227,8 +227,8 @@ def get_lmcache_chunk_size(
         An integer representing the LMCache chunk size
     """
     future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
-    chunk_size = future.result(timeout=timeout)
-    return chunk_size
+    lmcache_tokens_per_chunk = future.result(timeout=timeout)
+    return lmcache_tokens_per_chunk
 
 
 def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
@@ -587,10 +587,10 @@ class LMCacheMPSchedulerAdapter:
         self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
-        chunk_sizes: dict[str, int] = {}
+        lmcache_tokens_per_chunk: dict[str, int] = {}
         for url, client in self.mq_clients.items():
             try:
-                chunk_sizes[url] = get_lmcache_chunk_size(
+                lmcache_tokens_per_chunk[url] = get_lmcache_chunk_size(
                     client, timeout=self._mq_timeout
                 )
             except TimeoutError:
@@ -600,17 +600,18 @@ class LMCacheMPSchedulerAdapter:
 
         # All servers must share chunk_size, otherwise the min() aggregation
         # over per-server hits would mix different granularities.
-        unique_sizes = set(chunk_sizes.values())
+        unique_sizes = set(lmcache_tokens_per_chunk.values())
         if len(unique_sizes) != 1:
             raise ValueError(
                 f"All LMCache servers must share the same chunk_size, got {chunk_sizes}"
             )
-        self.chunk_size = unique_sizes.pop()
+        self.lmcache_tokens_per_chunk = unique_sizes.pop()
 
-        assert self.chunk_size % vllm_block_size == 0, (
+        assert self.lmcache_tokens_per_chunk % vllm_block_size == 0, (
+
             "LMCache chunk size should be a multiple of vLLM block size"
         )
-        self.blocks_in_chunk = self.chunk_size // vllm_block_size
+        self.blocks_in_chunk = self.lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state: one Event per server. The adapter is considered healthy
         # only if ALL per-server events are set (any unhealthy server taints
@@ -699,7 +700,9 @@ class LMCacheMPSchedulerAdapter:
             # Skip if there is already a lookup request
             return
 
-        aligned_end = (len(token_ids) // self.chunk_size) * self.chunk_size
+        aligned_end = (
+            len(token_ids) // self.lmcache_tokens_per_chunk
+        ) * self.lmcache_tokens_per_chunk
 
         key = self._create_key(
             token_ids,
@@ -812,10 +815,10 @@ class LMCacheMPSchedulerAdapter:
                 for url, hit_chunks in per_server.items():
                     if hit_chunks <= min_chunks:
                         continue
-                    tail_end = min(hit_chunks * self.chunk_size, len(token_ids_l))
+                    tail_end = min(hit_chunks * self.lmcache_tokens_per_chunk, len(token_ids_l))
                     tail_key = self._create_key(
                         token_ids=token_ids_l,
-                        start=min_chunks * self.chunk_size,
+                        start=min_chunks * self.lmcache_tokens_per_chunk,
                         end=tail_end,
                         request_id=request_id,
                         cache_salt=cs or "",
@@ -826,7 +829,8 @@ class LMCacheMPSchedulerAdapter:
                         [tail_key, self.tp_size],
                     )
 
-        token_count = min_chunks * self.chunk_size
+        token_count = min_chunks * self.lmcache_tokens_per_chunk
+
         self._finished_lookup_results[request_id] = token_count
         return token_count
 
@@ -949,7 +953,7 @@ class LMCacheMPSchedulerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
-    ) -> IPCCacheEngineKey:
+    ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
         Args:
@@ -960,11 +964,11 @@ class LMCacheMPSchedulerAdapter:
             cache_salt: Per-user isolation salt.
 
         Returns:
-            IPCCacheEngineKey: The constructed key.
+            IPCCacheServerKey: The constructed key.
         """
         # NOTE: for the scheduler adapter, we don't have a worker id,
         # so we set it to None in the key.
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,
@@ -1023,9 +1027,19 @@ class LMCacheMPWorkerAdapter:
             cfg = _resolve_extra_config(extra_config)
             mq_timeout = cfg[ExtraConfigDefault.mq_timeout.name]
             heartbeat_interval = cfg[ExtraConfigDefault.heartbeat_interval.name]
-            self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
+            # Only treat ``mp_transfer_mode`` as an explicit override when
+            # the user actually set it in extra_config; otherwise leave it
+            # as ``None`` so ``create_transfer_context`` can still consult
+            # the ``LMCACHE_MP_TRANSFER_MODE`` env var.
+            mp_mode_key = (
+                _EXTRA_CONFIG_KEY_PREFIX + ExtraConfigDefault.mp_transfer_mode.name
+            )
+            if mp_mode_key in extra_config:
+                self._mp_transfer_mode = cfg[ExtraConfigDefault.mp_transfer_mode.name]
+            else:
+                self._mp_transfer_mode = None
         else:
-            self._mp_transfer_mode = ExtraConfigDefault.mp_transfer_mode.value
+            self._mp_transfer_mode = None
         self.mq_client = MessageQueueClient(server_url, context)
         self._mq_timeout = mq_timeout
 
@@ -1067,24 +1081,17 @@ class LMCacheMPWorkerAdapter:
 
         # Read chunk size from lmcache
         try:
-            chunk_size = get_lmcache_chunk_size(
+            lmcache_tokens_per_chunk = get_lmcache_chunk_size(
                 self.mq_client, timeout=self._mq_timeout
             )
         except TimeoutError:
             self.mq_client.close()
             _raise_server_unreachable(server_url, self._mq_timeout)
-        assert chunk_size % vllm_block_size == 0, (
+        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        assert lmcache_tokens_per_chunk % vllm_block_size == 0, (
             "LMCache chunk size should be a multiple of vLLM block size"
         )
-        self.blocks_in_chunk = chunk_size // vllm_block_size
-        # Retain the vLLM logical block size so we can ship it to the
-        # LMCache server in ``register_kv_caches`` — the server uses it
-        # (as ``layout_hints["inference_engine_logical_block_size"]``)
-        # to derive per-group compression ratios when some KV layer
-        # groups compress multiple logical tokens into a single physical
-        # slot (``shape_desc.bs <
-        # inference_engine_logical_block_size``).
-        self.vllm_logical_block_size = vllm_block_size
+        self.blocks_in_chunk = lmcache_tokens_per_chunk // vllm_block_size
 
         # Health state (shared with heartbeat thread)
         self._health_event = threading.Event()
@@ -1153,8 +1160,21 @@ class LMCacheMPWorkerAdapter:
         Raises:
             ConnectionError: if the server does not respond within
                 mq_timeout.
+            ValueError: if the LMCache chunk size is not a multiple of an
+                engine group's ``tokens_per_block`` (chunk boundaries would
+                not align with that group's paged-chunk boundaries).
         """
         logger.info("Registering kv caches")
+        for info in engine_group_infos:
+            if (
+                info.tokens_per_block > 0
+                and self.lmcache_tokens_per_chunk % info.tokens_per_block
+            ):
+                raise ValueError(
+                    f"LMCache chunk size {self.lmcache_tokens_per_chunk} must be a "
+                    f"multiple of engine group {info.engine_group_id} "
+                    f"tokens_per_block {info.tokens_per_block}"
+                )
         self.kv_caches = kv_caches
         self.engine_group_infos = list(engine_group_infos)
         self._send_register_kv_caches_request(kv_caches)
@@ -1182,9 +1202,6 @@ class LMCacheMPWorkerAdapter:
             kv_caches, mode=self._mp_transfer_mode
         )
         layout_hints = vllm_layout_hints()
-        layout_hints["inference_engine_logical_block_size"] = (
-            self.vllm_logical_block_size
-        )
         try:
             self.transfer_ctx.register(
                 self.instance_id,
@@ -1556,7 +1573,7 @@ class LMCacheMPWorkerAdapter:
         try:
             unregister_type = (
                 RequestType.UNREGISTER_KV_CACHE_NON_GPU_CONTEXT
-                if isinstance(self.transfer_ctx, DataTransferContext)
+                if isinstance(self.transfer_ctx, LMCacheDrivenTransferContext)
                 else RequestType.UNREGISTER_KV_CACHE
             )
             send_lmcache_request(
@@ -1598,7 +1615,7 @@ class LMCacheMPWorkerAdapter:
         end: int,
         request_id: str,
         cache_salt: str = "",
-    ) -> IPCCacheEngineKey:
+    ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
         Args:
@@ -1609,9 +1626,9 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
 
         Returns:
-            IPCCacheEngineKey: The constructed key.
+            IPCCacheServerKey: The constructed key.
         """
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=self.worker_id,

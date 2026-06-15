@@ -41,8 +41,7 @@ Kernel group index:                      0
 Engine group index:                      0
 Object group index:                      0
 Num layers:                              80
-Physical block size:                     128
-Compress ratio:                          1
+Slots per block:                         128
 Dtype:                                   torch.float16
 MLA:                                     False
 Attention backend:         vLLM non-MLA flash attention
@@ -85,8 +84,7 @@ programmatic access:
         "engine_group_idx": 0,
         "object_group_idx": 0,
         "num_layers": 80,
-        "physical_block_size": 128,
-        "compress_ratio": 1,
+        "slots_per_block": 128,
         "dtype": "torch.float16",
         "is_mla": false,
         "attention_backend": "vLLM non-MLA flash attention",
@@ -119,9 +117,8 @@ Each kernel group section includes:
   `kernel_group_idx` enumerates the manager's kernel groups, `engine_group_idx`
   is the paged-block address space (0 for non-hybrid), and `object_group_idx` is
   the owning object group.
-- **Num layers** and **Physical block size** — the group's layer count and
+- **Num layers** and **Slots per block** — the group's layer count and
   `shape_desc.bs`.
-- **Compress ratio** — logical tokens per physical slot (1 for non-compressed).
 - **Dtype** and **MLA** — the group's torch dtype and MLA flag.
 - **Attention backend** — which attention implementation is active (e.g.,
   `vLLM non-MLA flash attention`, `vLLM MLA`, `SGLang MHA`), derived from the
@@ -205,11 +202,11 @@ existing `lmcache/tools/mp_status_viewer/__main__.py`.
 Three fields in the design doc's `describe kvcache` output are **not currently
 available** from `/status`. The following changes surface them.
 
-### 1. Add `start_time` to `MPCacheEngine` → expose `uptime_seconds`
+### 1. Add `start_time` to `MPCacheServer` → expose `uptime_seconds`
 
 **File:** `lmcache/v1/multiprocess/server.py`
 
-`MPCacheEngine.__init__()` (line 147) records `self._start_time = time.monotonic()`
+`MPCacheServer.__init__()` (line 147) records `self._start_time = time.monotonic()`
 at construction. `report_status()` (line 696) includes a new field:
 
 ```python
@@ -218,16 +215,16 @@ at construction. `report_status()` (line 696) includes a new field:
 
 The CLI formats this as a human-readable string (e.g., `2h 14m 32s`).
 
-### 2. Pass endpoint addresses into `MPCacheEngine` → expose in status
+### 2. Pass endpoint addresses into `MPCacheServer` → expose in status
 
 **File:** `lmcache/v1/multiprocess/server.py`
 
-Currently `MPCacheEngine` does not know the ZMQ or HTTP addresses — those live in
+Currently `MPCacheServer` does not know the ZMQ or HTTP addresses — those live in
 `MPServerConfig` and `HTTPFrontendConfig`, which are only available in
 `run_cache_server()` / `run_http_server()`.
 
 **Option A — engine constructor params:** Add optional `zmq_endpoint: str | None`
-and `http_endpoint: str | None` kwargs to `MPCacheEngine.__init__()`. Callers
+and `http_endpoint: str | None` kwargs to `MPCacheServer.__init__()`. Callers
 (`run_cache_server` at line 787, and the blend variant) pass these when available.
 `report_status()` includes them.
 
@@ -239,7 +236,7 @@ returning it. This avoids changing the constructor signature.
 
 ```python
 # In run_cache_server() (line 787):
-engine = MPCacheEngine(
+engine = MPCacheServer(
     storage_manager_config=storage_manager_config,
     chunk_size=mp_config.chunk_size,
     hash_algorithm=mp_config.hash_algorithm,
@@ -272,14 +269,14 @@ endpoint is only known in `run_http_server()`. Since `run_http_server()` calls
 
 Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 `BlendCacheEngine` has its own `report_status()`. If it delegates to
-`MPCacheEngine`, no separate change is needed.
+`MPCacheServer`, no separate change is needed.
 
 ### Summary of server-side changes
 
 | Field | Where | Change |
 |---|---|---|
-| `uptime_seconds` | `MPCacheEngine.__init__` + `report_status()` | Record `time.monotonic()` at init, compute delta in status |
-| `zmq_endpoint` | `MPCacheEngine.__init__` + `run_cache_server()` | New constructor kwarg, passed from `MPServerConfig` |
+| `uptime_seconds` | `MPCacheServer.__init__` + `report_status()` | Record `time.monotonic()` at init, compute delta in status |
+| `zmq_endpoint` | `MPCacheServer.__init__` + `run_cache_server()` | New constructor kwarg, passed from `MPServerConfig` |
 | `http_endpoint` | `run_http_server()` lifespan + `report_status()` | Set on engine after construction when HTTP is enabled |
 
 ### 4. Expose GPU KV format, shape, and attention backend in `kv_cache_layout`
@@ -301,7 +298,6 @@ live inside each group:
 ```python
 "kv_cache_layout": {
     "num_layers": 80,
-    "inference_engine_logical_block_size": 128,
     "num_blocks": 2048,
     "cache_size_per_token": 327680,
     "kernel_groups": [
@@ -311,8 +307,8 @@ live inside each group:
             "object_group_idx": 0,
             "num_layers": 80,
             "layer_indices": [0, 1, ...],
-            "physical_block_size": 128,
-            "compress_ratio": 1,
+            "tokens_per_block": 128,
+            "slots_per_block": 128,
             "dtype": "torch.float16",
             "gpu_kv_concrete_shape": "80 x [2, 2048, 128, 8, 128]",
             "is_mla": false,

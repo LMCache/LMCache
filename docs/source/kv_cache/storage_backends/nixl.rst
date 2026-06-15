@@ -47,12 +47,13 @@ Key settings:
 
 - ``nixl_pool_size``: number of descriptors opened at init time for nixl backend. Set to 0 for dynamic mode.
 
-- ``nixl_path``: directory under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file.
+- ``nixl_path``: directory (or list of directories) under which the storage files will be saved (e.g. /mnt/nixl/). Needed for NIXL backends that store to file. When using a list of paths with ``path_sharding``, paths will be selected based on the sharding strategy.
 
 - ``nixl_buffer_device``: dictates where the memory managed by NIXL should be on. "cpu" or "cuda" is supported for "GDS", "GDS_MT", and "OBJ" backends - for "POSIX", "HF3FS", "AZURE_BLOB" & "DOCA_MEMOS", must be "cpu". In CPU mode, NIXL shares ``LocalCPUBackend``'s pinned buffer; ``LocalCPUBackend`` is always created when ``nixl_buffer_device: cpu``, regardless of the ``local_cpu`` setting. ``local_cpu: false`` still suppresses hot-cache promotions — the backend acts as a staging buffer only, mirroring how ``local_disk`` already uses ``LocalCPUBackend``.
 
 - ``nixl_backend``: configuration of which nixl backend to use for storage.
 
+- ``nixl_path_sharding``: strategy for selecting path when multiple paths are provided. Currently only "by_gpu" is supported, which selects paths based on GPU device ID.
 - ``local_cpu_use_hugepages``: whether to use Linux hugepages (2 MiB) for ``LocalCPUBackend``'s pinned pool (which NIXL shares in CPU mode). Requires pre-allocated hugepages (``sysctl vm.nr_hugepages``). Default: ``false``. **Deprecated alias:** ``extra_config.nixl_use_hugepages`` — accepted with a warning and copied into this field; will be removed in a future release.
 
 .. note::
@@ -68,6 +69,24 @@ Key settings:
     Supported backends are: ["GDS", "GDS_MT", "POSIX", "HF3FS", "OBJ", "AZURE_BLOB", "DOCA_MEMOS"].
 
     Backend specific params should be provided via ``extra_config.nixl_backend_params``. Please refer to NIXL documentation for specifics.
+
+Example ``lmcache-config.yaml`` for POSIX backend with multipath support:
+
+.. code-block:: yaml
+
+    chunk_size: 256
+    nixl_buffer_size: 1073741824 # 1GB
+    nixl_buffer_device: cpu
+    extra_config:
+      enable_nixl_storage: true
+      nixl_backend: POSIX
+      nixl_pool_size: 64
+      nixl_path: 
+        - /mnt/nixl/cache0/
+        - /mnt/nixl/cache1/
+        - /mnt/nixl/cache2/
+      nixl_path_sharding: by_gpu
+      use_direct_io: True
 
 Example ``lmcache-config.yaml`` for OBJ backend using S3 API:
 

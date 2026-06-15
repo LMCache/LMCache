@@ -7,7 +7,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import (
     EXCLUDED_ENGINE_GROUP,
     KernelGroupIdentity,
@@ -30,7 +29,6 @@ def _build_manager(
     tensors: list[torch.Tensor],
     *,
     num_blocks: int,
-    layout_hints: LayoutHints | None = None,
     engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> KVLayerGroupsManager:
     """Build a manager using the per-layer NHD format.
@@ -45,9 +43,8 @@ def _build_manager(
 
     return KVLayerGroupsManager(
         tensors,
-        gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        engine_kv_format=lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
         num_blocks=num_blocks,
-        layout_hints=layout_hints,
         engine_group_infos=engine_group_infos,
     )
 
@@ -117,6 +114,21 @@ class TestKVLayerGroupsManager:
                 tensors,
                 num_blocks=32,
                 engine_group_infos=[EngineGroupInfo(0, (2,))],
+            )
+
+    def test_build_rejects_coarse_engine_group_infos(self):
+        # One info covering two layers that split into two kernel groups
+        # (different num_heads) violates the one-info-per-kernel-group
+        # contract.
+        tensors = [
+            torch.randn(2, 32, 256, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 256, 16, 64, dtype=torch.float16),
+        ]
+        with pytest.raises(ValueError, match="engine group info"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                engine_group_infos=[EngineGroupInfo(0, (0, 1))],
             )
 
     def test_build_different_shapes(self):
@@ -281,34 +293,49 @@ class TestFormatKvcacheShapeSpec:
             format_kvcache_shape_spec([])
 
 
-class TestDeriveCompressionMetadata:
-    """``(compress_ratio, physical_chunk_size)`` derivation: ``1`` when there is
-    no engine block size, else ``ie_logical_block_size // bs`` (e.g. DeepSeek V4
-    compression where ``bs < logical``), with divisibility enforced.
+class TestValidateBlockChunkSizeConfig:
+    """Construction-time validation of the block/chunk size configuration:
+    ``tokens_per_block`` (engine KV cache spec) must pack whole
+    ``slots_per_block`` (registered tensor batch dimension), an LMCache chunk
+    must span whole paged blocks, and a sub-chunk sliding window must cover
+    whole paged blocks.
     """
 
-    def _derive(self, bs: int, logical: "int | None", chunk: int = 256):
-        return KVLayerGroupsManager._derive_compression_metadata(
+    def _validate(
+        self, slots: int, tokens: int, chunk: int = 256, sw: int = -1
+    ) -> None:
+        KVLayerGroupsManager._validate_block_chunk_size_config(
             group_idx=0,
-            bs=bs,
-            ie_logical_block_size=logical,
-            lmcache_logical_chunk_size=chunk,
+            slots_per_block=slots,
+            tokens_per_block=tokens,
+            lmcache_tokens_per_chunk=chunk,
+            sw_size_tokens=sw,
         )
 
-    def test_one_to_one(self):
-        assert self._derive(bs=16, logical=16) == (1, 256)
-
-    def test_no_block_size_info(self):
-        assert self._derive(bs=16, logical=None) == (1, 256)
-
-    def test_compression_bs_lt_logical(self):
-        # bs=8 packs 2 logical tokens per physical slot (DeepSeek V4 style).
-        assert self._derive(bs=8, logical=16) == (2, 128)
+    def test_valid_configs_pass(self):
+        self._validate(slots=16, tokens=16)
+        # slots=8 packs 2 logical tokens per physical slot (DeepSeek V4 style).
+        self._validate(slots=8, tokens=16)
+        # Sub-chunk window aligned to whole paged blocks.
+        self._validate(slots=16, tokens=16, sw=64)
+        # Big window (>= chunk) needs no sub-chunk alignment.
+        self._validate(slots=16, tokens=16, sw=1000)
 
     def test_not_divisible_raises(self):
-        # Divisibility is enforced loudly (e.g. bs=6 does not divide 16).
+        # Divisibility is enforced loudly (e.g. slots=6 does not divide 16).
         with pytest.raises(ValueError, match="must be a multiple of"):
-            self._derive(bs=6, logical=16)
+            self._validate(slots=6, tokens=16)
+
+    def test_chunk_not_divisible_by_ratio_raises(self):
+        with pytest.raises(ValueError, match="lmcache_tokens_per_chunk"):
+            self._validate(slots=1, tokens=96, chunk=256)
+
+    def test_subchunk_window_not_block_aligned_raises(self):
+        # A sub-chunk window of 100 tokens does not cover whole 16-token
+        # blocks, so the transfer slot count would disagree with the kept
+        # block IDs.
+        with pytest.raises(ValueError, match="sliding window"):
+            self._validate(slots=16, tokens=16, sw=100)
 
 
 class TestKernelGroupIdentity:
@@ -369,6 +396,83 @@ class TestKernelAndObjectGroups:
         obj = manager.object_groups[0]
         assert isinstance(obj, ObjectGroupInfo)
         assert obj.kernel_group_indices == list(range(manager.num_kernel_groups))
+        assert obj.sw_size_chunks == -1
+        assert manager.get_sw_size_chunks(0) == -1
+
+    def test_kernel_groups_carry_sw_size_tokens(self):
+        # Same-shape layers split by engine group; the sliding-window group's
+        # window size lands on its kernel group, the other stays -1.
+        tensors = [torch.randn(2, 32, 32, 8, 64, dtype=torch.float16) for _ in range(2)]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(1, (1,), sw_size_tokens=64),
+            ],
+        )
+        assert [g.sw_size_tokens for g in manager.kernel_groups] == [-1, 64]
+
+    def test_subchunk_window_not_block_aligned_rejected(self):
+        # A 64-token window over 256-slot blocks does not cover whole blocks;
+        # construction fails loudly instead of mistransferring.
+        tensors = [torch.randn(2, 32, 256, 8, 64, dtype=torch.float16)]
+        with pytest.raises(ValueError, match="sliding window"):
+            _build_manager(
+                tensors,
+                num_blocks=32,
+                engine_group_infos=[EngineGroupInfo(0, (0,), sw_size_tokens=64)],
+            )
+
+    def test_subchunk_sw_size_tokens(self):
+        # lmcache chunk size is 256 (default), 32-slot blocks. Sub-chunk
+        # window (64) is returned as-is; non-SW (-1) and big-SW (512) return
+        # the chunk size.
+        tensors = [
+            torch.randn(2, 32, 32, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 32, 16, 64, dtype=torch.float16),
+            torch.randn(2, 32, 32, 32, 64, dtype=torch.float16),
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(0, (1,), sw_size_tokens=64),
+                EngineGroupInfo(0, (2,), sw_size_tokens=512),
+            ],
+        )
+        assert manager.get_subchunk_sw_size_tokens(0) == 256
+        assert manager.get_subchunk_sw_size_tokens(1) == 64
+        assert manager.get_subchunk_sw_size_tokens(2) == 256
+        # Transfer slots follow the sub-chunk window (ratio 1 here).
+        assert manager.get_slots_per_chunk_in_sw(0) == 256
+        assert manager.get_slots_per_chunk_in_sw(1) == 64
+        assert manager.get_slots_per_chunk_in_sw(2) == 256
+
+    def test_mixed_sw_kernel_groups_share_single_object_group(self):
+        # Object-level bucketing by sliding window size is not enabled yet:
+        # kernel groups with differing window sizes still land in ONE object
+        # group and get_sw_size_chunks stays -1.
+        tensors = [
+            torch.randn(2, 32, 32, 8, 64, dtype=torch.float16),
+            torch.randn(2, 32, 32, 16, 64, dtype=torch.float16),
+            torch.randn(2, 32, 32, 32, 64, dtype=torch.float16),
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=32,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,)),
+                EngineGroupInfo(0, (1,), sw_size_tokens=64),
+                EngineGroupInfo(0, (2,), sw_size_tokens=512),
+            ],
+        )
+        assert manager.num_object_groups == 1
+        obj = manager.object_groups[0]
+        assert obj.kernel_group_indices == list(range(manager.num_kernel_groups))
+        assert obj.sw_size_chunks == -1
+        assert manager.get_sw_size_chunks(0) == -1
 
     def test_empty_manager_has_no_groups(self):
         # Empty registration returns early in __init__; both group lists must
@@ -400,15 +504,51 @@ class TestKernelAndObjectGroups:
         manager = _build_manager(tensors, num_blocks=32)
         assert manager.calculate_num_blocks(0, 256) == 16
 
+    def test_dsv4_flash_style_mixed_compression(self):
+        # Mirrors DeepSeek-V4-Flash: one 256-token engine group whose layers
+        # have 64- and 2-slot pages (declared compress ratios 4 and 128), one
+        # 64-token SWA group and one 4-token compressor-state group (ratio 1).
+        tensors = [
+            torch.randn(2, 8, 64, 1, 64, dtype=torch.float16),
+            torch.randn(2, 8, 2, 1, 64, dtype=torch.float16),
+            torch.randn(2, 8, 64, 1, 32, dtype=torch.float16),
+            torch.randn(2, 8, 4, 1, 128, dtype=torch.float32),
+        ]
+        manager = _build_manager(
+            tensors,
+            num_blocks=8,
+            engine_group_infos=[
+                EngineGroupInfo(0, (0,), tokens_per_block=256),
+                EngineGroupInfo(0, (1,), tokens_per_block=256),
+                EngineGroupInfo(1, (2,), tokens_per_block=64),
+                EngineGroupInfo(2, (3,), tokens_per_block=4),
+            ],
+        )
+        by_layer = {g.layer_indices[0]: g for g in manager.kernel_groups}
+        assert by_layer[0].tokens_per_block // by_layer[0].slots_per_block == 4
+        assert by_layer[1].tokens_per_block // by_layer[1].slots_per_block == 128
+        assert by_layer[2].tokens_per_block // by_layer[2].slots_per_block == 1
+        assert by_layer[3].tokens_per_block // by_layer[3].slots_per_block == 1
+        # 256-token LMCache chunk -> 2 physical slots in the ratio-128 group.
+        assert by_layer[1].calculate_slots(256) == 2
+        assert by_layer[0].calculate_slots(256) == 64
+
     def test_calculate_num_blocks_compressed(self):
-        # bs=8, ie_logical_block_size=16 -> compress_ratio=2;
-        # 256 logical tokens -> 128 physical slots -> 128 // 8 = 16 blocks.
+        # slots_per_block=8 (tensor), tokens_per_block=16 (engine spec) ->
+        # compress_ratio=2; 256 logical tokens -> 128 physical slots ->
+        # 128 // 8 = 16 blocks.
         tensors = [torch.randn(2, 32, 8, 8, 64, dtype=torch.float16) for _ in range(2)]
         manager = _build_manager(
             tensors,
             num_blocks=32,
-            layout_hints={"inference_engine_logical_block_size": 16},
+            engine_group_infos=[
+                EngineGroupInfo(0, (0, 1), tokens_per_block=16),
+            ],
         )
+        group = manager.kernel_groups[0]
+        assert group.tokens_per_block == 16
+        assert group.slots_per_block == 8
+        assert group.tokens_per_block // group.slots_per_block == 2
         assert manager.calculate_num_blocks(0, 256) == 16
 
 

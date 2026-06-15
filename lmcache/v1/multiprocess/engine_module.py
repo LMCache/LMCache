@@ -14,7 +14,7 @@ from lmcache.v1.multiprocess.protocol import RequestType
 
 if TYPE_CHECKING:
     # First Party
-    from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 
 
 class ThreadPoolType(Enum):
@@ -48,7 +48,7 @@ class EngineModule(Protocol):
     """
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         ...
 

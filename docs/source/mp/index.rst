@@ -18,8 +18,9 @@ Key Benefits
   share a single L1 cache, maximizing KV reuse.
 - **Independent resource scaling** -- Allocate CPU memory for caching
   independently of GPU memory for inference.
-- **Multi-tier storage (L1 + L2)** -- In-memory L1 cache backed by persistent
-  L2 storage via NIXL (GDS, POSIX, HF3FS, and more).
+- **Multi-tier storage (L1 + L2)** -- An L1 cache (in CPU DRAM, or an NVMe
+  slab via GPUDirect Storage) backed by persistent L2 storage via NIXL (GDS,
+  POSIX, HF3FS, and more).
 - **Built-in observability** -- Prometheus metrics and a telemetry event system
   out of the box.
 

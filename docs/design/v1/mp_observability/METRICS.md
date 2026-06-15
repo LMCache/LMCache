@@ -5,7 +5,7 @@
 The observability system uses an **EventBus with pub/sub dispatch** and
 **OpenTelemetry** for metrics instrumentation.
 
-- **Producers** (`L1Manager`, `StorageManager`, `MPCacheEngine`) publish `Event` objects
+- **Producers** (`L1Manager`, `StorageManager`, `MPCacheServer`) publish `Event` objects
   to the EventBus.
 - **Metrics subscribers** (e.g. `L1MetricsSubscriber`, `L2MetricsSubscriber`) subscribe to
   specific event types and update OTel counters.
@@ -179,7 +179,7 @@ either L1 or L2.  L0 (GPU prefix cache) is intentionally excluded — it is
 vLLM-owned and not observable from LMCache.
 
 Both counters carry `model_name` and `cache_salt` OTel attributes (captured
-at lookup time from `IPCCacheEngineKey`), enabling per-model and per-tenant
+at lookup time from `IPCCacheServerKey`), enabling per-model and per-tenant
 slicing of the hit rate.  `cache_salt` can be high-cardinality; drop it at
 scrape time with `metric_relabel_configs` if storage cost matters.
 
@@ -353,7 +353,7 @@ scrape.
 
 ---
 
-## MPCacheEngine Observable Gauges
+## MPCacheServer Observable Gauges
 
 These metrics are registered directly via `register_gauge` (pull-based OTel
 observable gauges) rather than through the EventBus, because they represent
@@ -361,7 +361,7 @@ point-in-time state snapshots that do not correspond to discrete events.
 
 | OTel metric name | Prometheus name | Type | Source | Calculation |
 |---|---|---|---|---|
-| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheEngine._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
+| `lmcache_mp.active_prefetch_jobs` | `lmcache_mp_active_prefetch_jobs` | ObservableGauge | `MPCacheServer._prefetch_jobs` | `len(_prefetch_jobs)` at scrape time |
 
 **What it answers:** How many prefetch jobs are currently in-flight? A sustained high value may indicate slow L2 backends or client-side polling delays.
 

@@ -15,7 +15,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 
@@ -55,6 +55,9 @@ class ObjectKey:
     kv_rank: int
     """ The rank that uniquely identifies the slice of the KV cache """
 
+    object_group_id: int = 0
+    """ Index of the object group this chunk belongs to. """
+
     cache_salt: str = ""
     """ Per-user isolation salt. Same content from different users with
     different cache_salt values produces different ObjectKeys, giving
@@ -78,6 +81,10 @@ class ObjectKey:
         if "@" in self.model_name:
             raise ValueError(
                 f"model_name must not contain '@' (got {self.model_name!r})"
+            )
+        if self.object_group_id < 0:
+            raise ValueError(
+                f"object_group_id must be >= 0 (got {self.object_group_id})"
             )
         bad = self._SALT_FORBIDDEN_CHARS & set(self.cache_salt)
         if bad:
@@ -200,11 +207,13 @@ class PrefetchHandle:
 
 
 def ipc_key_to_object_keys(
-    ipc_key: IPCCacheEngineKey,
+    ipc_key: IPCCacheServerKey,
     chunk_hashes: list[bytes],
-) -> list[ObjectKey]:
+    object_group_ids: list[int],
+) -> list[list[ObjectKey]]:
     """
-    Convert a single IPCCacheEngineKey and its chunk hashes to a list of ObjectKey.
+    Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
+    lists of ObjectKey.
 
     When the ipc_key's worker_id is None, each chunk hash is exploded into
     multiple ObjectKeys (one per worker in world_size).
@@ -219,48 +228,50 @@ def ipc_key_to_object_keys(
         ipc_key: The IPC key providing model_name, world_size, worker_id,
             and cache_salt.
         chunk_hashes: List of chunk hash bytes, one per chunk.
+        object_group_ids: Object group ids to produce keys for.
 
     Returns:
-        list[ObjectKey]: The converted list of ObjectKey.
+        list[list[ObjectKey]]: The i-th element is the list of ObjectKeys
+        for ``object_group_ids[i]``.
     """
     cache_salt = ipc_key.cache_salt
-    storage_keys = []
-    for chunk_hash in chunk_hashes:
-        if ipc_key.worker_id is None:
-            # For look up request, we want to expand to all workers
-            for worker_id in range(ipc_key.world_size):
-                # TODO (ApostaC): include local world size/rank info
-                # in the future once it's in IPCCacheEngineKey
-                kv_rank = ObjectKey.ComputeKVRank(
-                    world_size=ipc_key.world_size,
-                    global_rank=worker_id,
-                    local_world_size=ipc_key.world_size,
-                    local_rank=worker_id,
-                )
 
-                storage_keys.append(
-                    ObjectKey(
-                        chunk_hash=chunk_hash,
-                        model_name=ipc_key.model_name,
-                        kv_rank=kv_rank,
-                        cache_salt=cache_salt,
-                    )
-                )
-        else:
-            kv_rank = ObjectKey.ComputeKVRank(
+    # The (chunk_hash, kv_rank) expansion is independent of the object group,
+    # so compute it once and reuse it for every group.
+    if ipc_key.worker_id is None:
+        # For look up request, we want to expand to all workers
+        # TODO (ApostaC): include local world size/rank info
+        # in the future once it's in IPCCacheServerKey
+        kv_ranks = [
+            ObjectKey.ComputeKVRank(
+                world_size=ipc_key.world_size,
+                global_rank=worker_id,
+                local_world_size=ipc_key.world_size,
+                local_rank=worker_id,
+            )
+            for worker_id in range(ipc_key.world_size)
+        ]
+    else:
+        kv_ranks = [
+            ObjectKey.ComputeKVRank(
                 world_size=ipc_key.world_size,
                 global_rank=ipc_key.worker_id,
                 local_world_size=ipc_key.world_size,
                 local_rank=ipc_key.worker_id,
             )
+        ]
 
-            storage_keys.append(
-                ObjectKey(
-                    chunk_hash=chunk_hash,
-                    model_name=ipc_key.model_name,
-                    kv_rank=kv_rank,
-                    cache_salt=cache_salt,
-                )
+    return [
+        [
+            ObjectKey(
+                chunk_hash=chunk_hash,
+                model_name=ipc_key.model_name,
+                kv_rank=kv_rank,
+                object_group_id=object_group_id,
+                cache_salt=cache_salt,
             )
-
-    return storage_keys
+            for chunk_hash in chunk_hashes
+            for kv_rank in kv_ranks
+        ]
+        for object_group_id in object_group_ids
+    ]

@@ -7,7 +7,7 @@ optional OTel log forwarding), and **tracing** (OTel spans for per-request
 latency).
 
 All three modes are powered by an internal **EventBus** that decouples
-producers (L1Manager, StorageManager, MPCacheEngine) from subscribers.
+producers (L1Manager, StorageManager, MPCacheServer) from subscribers.
 
 .. contents::
    :local:
@@ -366,7 +366,7 @@ so they always advance together per completed lookup. Early-exit lookups
 contribute ``0`` to both, and abandoned lookups contribute to neither.
 
 The ``model_name`` and ``cache_salt`` attributes are captured at lookup
-time from ``IPCCacheEngineKey`` so dashboards can compute per-model or
+time from ``IPCCacheServerKey`` so dashboards can compute per-model or
 per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry
 per tenant or isolation domain); drop it at scrape time with
 ``metric_relabel_configs`` if storage cost matters.
@@ -826,7 +826,7 @@ What is captured (and what is not)
 
 - KV tensor bytes. Replay exercises bookkeeping and controller logic;
   payloads at replay time are zeros.
-- Calls inside the ``MPCacheEngine``, the message queue, or any
+- Calls inside the ``MPCacheServer``, the message queue, or any
   GPU-copy code. These layers are **out of scope** for the storage
   trace level.
 

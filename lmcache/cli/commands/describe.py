@@ -241,13 +241,13 @@ class KVCacheDescriber:
                 ("engine_group_idx", "Engine group index"),
                 ("object_group_idx", "Object group index"),
                 ("num_layers", "Num layers"),
-                ("physical_block_size", "Physical block size"),
-                ("compress_ratio", "Compress ratio"),
+                ("tokens_per_block", "Tokens per block"),
+                ("slots_per_block", "Slots per block"),
                 ("dtype", "Dtype"),
                 ("is_mla", "MLA"),
                 ("attention_backend", "Attention backend"),
-                ("gpu_kv_shape", "GPU KV shape"),
-                ("gpu_kv_concrete_shape", "GPU KV tensor shape"),
+                ("engine_kv_shape", "Engine KV shape"),
+                ("engine_kv_concrete_shape", "Engine KV tensor shape"),
             ):
                 if _key in group:
                     sec.add(_key, _label, group[_key])

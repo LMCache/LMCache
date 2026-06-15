@@ -117,10 +117,32 @@ steps:
         plugins: [{ kubernetes: { podSpec: *pod-1gpu } }]
         artifact_paths: ["*.log"]
 
+      - label: ":compression: gds_smoke_test"
+        command: .buildkite/k3_tests/multiprocess/run.sh gds_smoke_test
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources: { limits: { "nvidia.com/gpu": "1" } }
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: scratch, mountPath: /scratch }
+                      - { name: udev, mountPath: /run/udev, readOnly: true }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: scratch, hostPath: { path: /data/gds-scratch, type: DirectoryOrCreate } }
+                  - { name: udev, hostPath: { path: /run/udev, type: Directory } }
+        artifact_paths: ["*.log"]
+
   - group: ":compression: Multiprocess (CPU-only)"
     steps:
       - label: ":compression: cpu_e2e_validation (shm)"
-        command: bash .buildkite/k3_tests/multiprocess/scripts/run-cpu-e2e-validation.sh
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -145,9 +167,36 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
 
       - label: ":compression: cpu_e2e_validation (pickle)"
-        command: bash .buildkite/k3_tests/multiprocess/scripts/run-cpu-e2e-validation.sh
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
         env:
           LMCACHE_SHM_NAME: ""
+        timeout_in_minutes: 30
+        agents: { queue: "k8s" }
+        plugins:
+          - kubernetes:
+              podSpec:
+                containers:
+                  - name: container-0
+                    image: lmcache/ci-base:latest
+                    imagePullPolicy: Never
+                    resources:
+                      requests:
+                        cpu: "8"
+                        memory: "256Gi"
+                      limits:
+                        cpu: "8"
+                        memory: "256Gi"
+                    volumeMounts:
+                      - { name: hf-cache, mountPath: /root/.cache/huggingface }
+                      - { name: dshm, mountPath: /dev/shm }
+                volumes:
+                  - { name: hf-cache, hostPath: { path: /data/huggingface, type: DirectoryOrCreate } }
+                  - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
+
+      - label: ":compression: cpu_e2e_validation (server-side copy)"
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
+        env:
+          LMCACHE_MP_TRANSFER_MODE: "engine_driven"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:

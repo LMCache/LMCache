@@ -49,7 +49,7 @@ Validated models
       ``google/gemma-3-4b-it`` is a gated model; authenticate with the Hugging
       Face Hub (e.g. set ``HF_TOKEN``) before serving. Adjust
       ``--tensor-parallel-size`` to match your hardware. For the generic LMCache
-      + vLLM wiring (ports, remote hosts, in-process mode), see
+      + vLLM wiring (ports, remote hosts), see
       :doc:`../mp/quickstart`.
 
       If there are any issues with vLLM setup, please refer to the

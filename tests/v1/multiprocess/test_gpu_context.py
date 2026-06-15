@@ -30,12 +30,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 # First Party
-from lmcache.v1.gpu_connector.utils import LayoutHints  # noqa: E402
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
 from lmcache.v1.multiprocess.gpu_context import (  # noqa: E402
     GPUCacheContext,
     _TempGPUBuffer,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
 _DEVICE = torch.device("cuda")
@@ -90,15 +90,19 @@ def _make_kv_tensors(
 def _build_manager(
     tensors: list[torch.Tensor],
     num_blocks: int = 4,
-    gpu_kv_format: "lmc_ops.GPUKVFormat" = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
-    layout_hints: LayoutHints | None = None,
+    engine_kv_format: "lmc_ops.EngineKVFormat" = (
+        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    ),
+    engine_group_infos: Sequence[EngineGroupInfo] = (),
+    lmcache_tokens_per_chunk: int = 256,
 ) -> KVLayerGroupsManager:
     """Build a real :class:`KVLayerGroupsManager` from synthetic tensors."""
     return KVLayerGroupsManager(
         tensors,
-        gpu_kv_format=gpu_kv_format,
+        engine_kv_format=engine_kv_format,
         num_blocks=num_blocks,
-        layout_hints=layout_hints,
+        engine_group_infos=engine_group_infos,
+        lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
     )
 
 
@@ -107,14 +111,19 @@ def _make_temp_buffer(
     chunk_size: int = 256,
     max_batch_size: int = 4,
     num_blocks: int = 4,
-    layout_hints: LayoutHints | None = None,
+    engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> _TempGPUBuffer:
     """Build a ``_TempGPUBuffer`` backed by a real manager."""
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
-    manager = _build_manager(tensors, num_blocks=num_blocks, layout_hints=layout_hints)
+    manager = _build_manager(
+        tensors,
+        num_blocks=num_blocks,
+        engine_group_infos=engine_group_infos,
+        lmcache_tokens_per_chunk=chunk_size,
+    )
     return _TempGPUBuffer(
         kv_layer_groups_manager=manager,
-        lmcache_logical_chunk_size=chunk_size,
+        lmcache_tokens_per_chunk=chunk_size,
         device=_DEVICE,
         max_batch_size=max_batch_size,
     )
@@ -126,7 +135,7 @@ def _expected_kernel_group_shape(
     """Compute the expected kernel-group buffer shape from the manager's
     public metadata (kv_size, num_layers, slots, hidden_dim)."""
     group = manager.kernel_groups[kernel_group_idx]
-    num_slots = num_tokens // group.compress_ratio
+    num_slots = num_tokens * group.slots_per_block // group.tokens_per_block
     return torch.Size(
         (
             group.shape_desc.kv_size,
@@ -182,15 +191,15 @@ def _make_context(
     specs: Sequence[_GroupSpec],
     chunk_size: int = 256,
     num_blocks: int = 4,
-    layout_hints: LayoutHints | None = None,
+    engine_group_infos: Sequence[EngineGroupInfo] = (),
 ) -> GPUCacheContext:
     """Build a real ``GPUCacheContext`` via its public constructor."""
     tensors = _make_kv_tensors(specs, num_blocks=num_blocks)
     kv_caches = [_FakeIPCWrapper(t) for t in tensors]
     return GPUCacheContext(
         kv_caches,  # type: ignore
-        lmcache_logical_chunk_size=chunk_size,
-        layout_hints=layout_hints,
+        lmcache_tokens_per_chunk=chunk_size,
+        engine_group_infos=engine_group_infos,
     )
 
 
@@ -316,8 +325,8 @@ class TestTempGPUBufferObjectGroupBuffer:
         """Bytes written through kernel-group views are visible through the
         object-group flat view at matching offsets."""
         tensors = _make_kv_tensors(_MULTI_GROUP)
-        manager = _build_manager(tensors)
         chunk_size = 64
+        manager = _build_manager(tensors, lmcache_tokens_per_chunk=chunk_size)
         buf = _TempGPUBuffer(manager, chunk_size, _DEVICE)
         obj_group = manager.object_groups[0]
 
@@ -351,10 +360,12 @@ class TestTempGPUBufferObjectGroupBuffer:
 
 class TestTempGPUBufferShapeDtype:
     def test_shape_scales_with_num_tokens(self) -> None:
+        # num_tokens must be a whole number of chunks; the shape scales
+        # linearly with the chunk count.
         tensors = _make_kv_tensors(_SINGLE_GROUP)
         manager = _build_manager(tensors)
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
-        for num_tokens in (16, 128, 256):
+        for num_tokens in (256, 512, 768):
             shape, dtype = buf.get_kernel_group_shape_dtype(num_tokens, 0)
             assert shape == _expected_kernel_group_shape(manager, num_tokens, 0)
             assert dtype == manager.kernel_groups[0].dtype
@@ -363,20 +374,23 @@ class TestTempGPUBufferShapeDtype:
         """For a compressed group, the token dim is divided by compress_ratio."""
         tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
         manager = _build_manager(
-            tensors, layout_hints={"inference_engine_logical_block_size": 16}
+            tensors,
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
-        assert manager.kernel_groups[0].compress_ratio == 2
+        kg = manager.kernel_groups[0]
+        assert kg.tokens_per_block // kg.slots_per_block == 2
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
         shape, _ = buf.get_kernel_group_shape_dtype(256, 0)
         assert shape[2] == 256 // 2
 
-    def test_not_divisible_by_compress_ratio_raises(self) -> None:
+    def test_not_whole_chunks_raises(self) -> None:
         tensors = _make_kv_tensors([_GroupSpec(num_layers=2, block_size=8)])
         manager = _build_manager(
-            tensors, layout_hints={"inference_engine_logical_block_size": 16}
+            tensors,
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
         buf = _TempGPUBuffer(manager, 256, _DEVICE)
-        with pytest.raises(ValueError, match="not a multiple of"):
+        with pytest.raises(ValueError, match="must be a multiple of"):
             buf.get_kernel_group_shape_dtype(255, 0)
 
 
@@ -401,7 +415,7 @@ class TestTempGPUBufferCacheSize:
         uncompressed = _make_temp_buffer([_GroupSpec(num_layers=2, block_size=16)])
         compressed = _make_temp_buffer(
             [_GroupSpec(num_layers=2, block_size=8)],
-            layout_hints={"inference_engine_logical_block_size": 16},
+            engine_group_infos=[EngineGroupInfo(0, (0, 1), tokens_per_block=16)],
         )
         assert (
             compressed.get_cache_size_per_token() * 2
@@ -442,8 +456,8 @@ class TestGPUCacheContextBuffers:
     def test_get_kernel_group_shape_dtype(self) -> None:
         ctx = _make_context(_SINGLE_GROUP)
         manager = ctx.kv_layer_groups_manager
-        shape, dtype = ctx.get_kernel_group_shape_dtype(128, 0)
-        assert shape == _expected_kernel_group_shape(manager, 128, 0)
+        shape, dtype = ctx.get_kernel_group_shape_dtype(256, 0)
+        assert shape == _expected_kernel_group_shape(manager, 256, 0)
         assert dtype == manager.kernel_groups[0].dtype
 
 
@@ -476,7 +490,6 @@ class TestGPUCacheContextBlocks:
 class TestGPUCacheContextReportStatus:
     _TOP_LEVEL_KEYS = {
         "num_layers",
-        "inference_engine_logical_block_size",
         "num_blocks",
         "cache_size_per_token",
         "kernel_groups",
@@ -487,13 +500,13 @@ class TestGPUCacheContextReportStatus:
         "object_group_idx",
         "num_layers",
         "layer_indices",
-        "physical_block_size",
-        "compress_ratio",
+        "tokens_per_block",
+        "slots_per_block",
         "dtype",
-        "gpu_kv_concrete_shape",
+        "engine_kv_concrete_shape",
         "is_mla",
-        "gpu_kv_format",
-        "gpu_kv_shape",
+        "engine_kv_format",
+        "engine_kv_shape",
         "attention_backend",
     }
 
@@ -512,8 +525,7 @@ class TestGPUCacheContextReportStatus:
         assert group["num_layers"] == 4
         assert group["layer_indices"] == [0, 1, 2, 3]
         assert group["is_mla"] is False
-        assert group["compress_ratio"] == 1
-        assert group["gpu_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
+        assert group["engine_kv_format"] == "NL_X_TWO_NB_BS_NH_HS"
         assert group["dtype"] == str(ctx.dtype)
 
     def test_report_status_multi_group(self) -> None:
@@ -532,8 +544,8 @@ class TestGPUCacheContextReportStatus:
             assert group["kernel_group_idx"] == kg_idx
             assert group["engine_group_idx"] == kernel_group.engine_group_idx
             assert group["num_layers"] == kernel_group.num_layers
-            assert group["physical_block_size"] == kernel_group.shape_desc.bs
-            assert group["compress_ratio"] == kernel_group.compress_ratio
+            assert group["slots_per_block"] == kernel_group.slots_per_block
+            assert group["tokens_per_block"] == kernel_group.tokens_per_block
             assert 0 <= group["object_group_idx"] < manager.num_object_groups
 
 

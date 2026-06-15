@@ -21,7 +21,7 @@ High-Level Architecture
          |
          | dispatch by RequestType
          v
-    MPCacheEngine (server.py)
+    MPCacheServer (server.py)
          |
          |--- TokenHasher / SessionManager
          |
@@ -29,7 +29,8 @@ High-Level Architecture
     StorageManager (distributed/storage_manager.py)
          |
          |--- L1Manager (l1_manager.py)
-         |       |--- L1MemoryManager (memory allocator)
+         |       |--- L1MemoryManager (CPU DRAM) or
+         |       |    GDSL1MemoryManager (NVMe slab via cuFile)
          |       |--- TTLLock per object (read/write)
          |
          |--- StoreController  -----> L2 Adapter(s) (async L1->L2 push)
@@ -42,14 +43,14 @@ High-Level Architecture
 Server Variants
 ---------------
 
-All server entry points share the same ``MPCacheEngine`` and
-``StorageManager`` core. ``MPCacheEngine`` is now a thin compositor:
-it holds an ``MPCacheEngineContext`` and a list of ``EngineModule``
+All server entry points share the same ``MPCacheServer`` and
+``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
+it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
 instances assembled by ``build_engine_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
-``MPCacheEngine``, assembles the engine modules
+``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule``
 and/or ``NonGPUTransferModule`` depending on
 ``--supported-transfer-mode`` — ``gpu`` or ``non_gpu`` loads just one,
@@ -235,8 +236,16 @@ Manages objects in CPU memory with a state machine:
 Each object has two ``TTLLock`` instances (read and write) with configurable
 timeouts to prevent deadlocks from crashed clients.
 
-The ``L1MemoryManager`` handles the underlying memory allocation (lazy growth
-up to ``--l1-size-gb``).
+The underlying memory allocation is handled by one of two interchangeable
+tiers selected at startup (both satisfy ``L1ManagerProtocol``):
+
+- ``L1MemoryManager`` (default) -- pinned CPU DRAM, with lazy growth up to
+  ``--l1-size-gb``.
+- ``GDSL1MemoryManager`` -- an NVMe slab file when ``--gds-l1-path`` is set.
+  The bytes live on disk; reads/writes DMA directly between the GPU staging
+  buffer and the slab via cuFile, driven by the process-global ``GDSContext``
+  (``gpu_connector/gds_context.py``) and dispatched from ``gpu_ops``. The CPU
+  tier is disabled in this mode.
 
 L2 Adapters
 ~~~~~~~~~~~
@@ -284,7 +293,7 @@ LOOKUP Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager       L2 (PrefetchController)
+vLLM                MPCacheServer          StorageManager         L1Manager       L2 (PrefetchController)
      |                       |                       |                    |                    |
      |---LOOKUP(key)-------->|                       |                    |                    |
      |                       |--submit_prefetch------>|                    |                    |
@@ -302,7 +311,7 @@ STORE Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager
+    vLLM                MPCacheServer          StorageManager         L1Manager
      |                       |                       |                    |
      |---STORE(key,blocks)-->|                       |                    |
      |                       |--reserve_write-------->|                    |
@@ -321,7 +330,7 @@ RETRIEVE Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager
+    vLLM                MPCacheServer          StorageManager         L1Manager
      |                       |                       |                    |
      |---RETRIEVE(key)------>|                       |                    |
      |                       |--read_prefetched------>|                    |
@@ -337,7 +346,7 @@ Observability Internals
 
 **EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global
 singleton initialized at server startup by ``init_observability()``.
-Producers (L1Manager, StorageManager, MPCacheEngine) publish ``Event``
+Producers (L1Manager, StorageManager, MPCacheServer) publish ``Event``
 objects to a bounded queue (``--event-bus-queue-size``, default 10000,
 tail-drop on overflow).  A background drain thread dispatches each
 event to all registered subscribers.
@@ -406,7 +415,7 @@ Adding a new request type
 2. Create a ``ProtocolDefinition`` in the appropriate ``protocols/*.py`` file
    (``engine``, ``controller``, ``observability``, ``debug``, ``blend``, or
    ``blend_v2``) and add the request name to that module's ``REQUEST_NAMES``.
-3. Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``).
+3. Implement the handler method on ``MPCacheServer`` (or ``BlendEngineV2``).
 4. Register the handler in ``run_cache_server()`` via ``add_handler_helper()``.
 
 Key Source Files
@@ -419,11 +428,11 @@ Key Source Files
    * - File
      - Purpose
    * - ``lmcache/v1/multiprocess/server.py``
-     - MPCacheEngine + ZMQ server entry point
+- MPCacheServer + ZMQ server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
    * - ``lmcache/v1/multiprocess/engine_context.py``
-     - MPCacheEngineContext (shared state passed to every EngineModule)
+     - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
      - ``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType``
        (per-module handler registration)
