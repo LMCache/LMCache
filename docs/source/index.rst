@@ -81,6 +81,16 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
+   :caption: Community
+
+   developer_guide/contributing
+   community/meetings
+   community/blogs
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 2
    :caption: Recipes
 
    recipes/index
@@ -93,6 +103,7 @@ Documentation
    :caption: L2 Storage
 
    mp/l2_storage/index
+   developer_guide/extending_lmcache/native_connectors
 
 :raw-html:`<br />`
 
@@ -147,6 +158,7 @@ Documentation
    mp/deployment
    production/kubernetes_deployment
    mp/operator
+   developer_guide/extending_lmcache/runtime_plugins
    production/kv_cache_events_mp
    mp/tracing_and_debugging
    mp/frontend_dashboard
@@ -160,27 +172,7 @@ Documentation
 
    cli/index
    mp/http_api
-
-:raw-html:`<br />`
-
-.. toctree::
-   :caption: Developer Guide
-
-   developer_guide/docker_file
-   mp/architecture
-   developer_guide/extending_lmcache/index
    developer_guide/cli
-   developer_guide/usage/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Community
-
-   developer_guide/contributing
-   community/meetings
-   community/blogs
 
 :raw-html:`<br />`
 
@@ -209,7 +201,9 @@ Documentation
    developer_guide/architecture
    api_reference/configurations
    developer_guide/usage/basic_check
+   developer_guide/usage/index
    developer_guide/extending_lmcache/storage_plugins
+   developer_guide/extending_lmcache/remote_storage_plugins
    kv_cache_optimizations/blending
    developer_guide/integration
    production/docker_deployment
