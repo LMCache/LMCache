@@ -161,7 +161,7 @@ class BaseCacheContext(ABC):
         """Returns hidden dimension sizes per KV layer group."""
         return [
             group.hidden_dim_size
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
+            for group in self.kv_layer_groups_manager.kv_layer_groups
         ]
 
     @property
@@ -172,24 +172,24 @@ class BaseCacheContext(ABC):
     def calculate_num_blocks(self, num_tokens: int, kernel_group_idx: int) -> int:
         """Calculate the number of blocks for *num_tokens* in a kernel
         group."""
-        return self.kv_layer_groups_manager_.calculate_num_blocks(
+        return self.kv_layer_groups_manager.calculate_num_blocks(
             kernel_group_idx, num_tokens
         )
 
     def get_shape_desc(self, group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
         """Returns the PageBufferShapeDesc for *group_idx*."""
-        return self.kv_layer_groups_manager_.get_shape_desc(group_idx)
+        return self.kv_layer_groups_manager.get_shape_desc(group_idx)
 
     def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
         """Returns the number of slots per lmcache chunk for D/H
         transfer."""
-        return self.kv_layer_groups_manager_.get_slots_per_chunk_in_sw(kernel_group_idx)
+        return self.kv_layer_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
 
     def get_kv_buffer_shape(
         self, logical_num_tokens: int, group_idx: int = 0
     ) -> torch.Size:
         """Returns the KV buffer shape for *logical_num_tokens*."""
-        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
+        group = self.kv_layer_groups_manager.kv_layer_groups[group_idx]
         compress_ratio = group.tokens_per_block // group.slots_per_block
         if logical_num_tokens % compress_ratio != 0:
             raise ValueError(
@@ -238,19 +238,19 @@ class BaseCacheContext(ABC):
     @property
     def engine_kv_shape(self) -> str:
         """Returns the symbolic KV cache layout description."""
-        return get_engine_kv_shape_description(self._engine_kv_format)
+        return get_engine_kv_shape_description(self.engine_kv_format_)
 
     @property
     def attention_backend(self) -> str:
         """Returns the attention backend name."""
-        return get_attention_backend(self._engine_kv_format)
+        return get_attention_backend(self.engine_kv_format_)
 
     @property
     def concrete_engine_kv_shape(self) -> str:
         """Returns the engine KV shape with actual numeric values."""
-        group = self.kv_layer_groups_manager_.kv_layer_groups[0]
+        group = self.kv_layer_groups_manager.kv_layer_groups[0]
         return get_concrete_engine_kv_shape_from_shape_desc(
-            group.shape_desc, self._engine_kv_format
+            group.shape_desc, self.engine_kv_format_
         )
 
     # ------------------------------------------------------------------
@@ -259,7 +259,7 @@ class BaseCacheContext(ABC):
 
     def report_status(self) -> dict:
         """Return this context's KV cache layout metadata."""
-        manager = self.kv_layer_groups_manager_
+        manager = self.kv_layer_groups_manager
         kernel_groups = manager.kernel_groups
 
         kernel_group_to_object_group: dict[int, int] = {
@@ -268,7 +268,7 @@ class BaseCacheContext(ABC):
             for kg_idx in og.kernel_group_indices
         }
 
-        engine_kv_format = self._engine_kv_format
+        engine_kv_format = self.engine_kv_format_
         group_reports: list[dict] = []
         for kernel_group_idx, group in enumerate(kernel_groups):
             group_reports.append(
@@ -298,8 +298,8 @@ class BaseCacheContext(ABC):
             )
 
         return {
-            "num_layers": self.num_layers_,
-            "num_blocks": self.num_blocks_,
+            "num_layers": self.num_layers,
+            "num_blocks": self.num_blocks,
             "cache_size_per_token": self.cache_size_per_token(),
             "kernel_groups": group_reports,
         }
