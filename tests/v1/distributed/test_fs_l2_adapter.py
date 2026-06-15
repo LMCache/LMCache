@@ -6,6 +6,7 @@ Unit tests for FSL2Adapter capacity accounting and deletion.
 # Standard
 from collections.abc import Callable, Generator
 from pathlib import Path
+import asyncio
 import select
 import time
 
@@ -18,6 +19,7 @@ from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import EvictionConfig
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
+from lmcache.v1.distributed.l2_adapters import fs_l2_adapter as fs_module
 from lmcache.v1.distributed.l2_adapters.fs_l2_adapter import (
     FSL2Adapter,
     FSL2AdapterConfig,
@@ -199,6 +201,39 @@ class TestUsageAndDelete:
 
         assert not data_path.exists()
         assert adapter.get_usage().total_bytes_used == 0
+
+    def test_delete_timeout_still_notifies_after_background_completion(
+        self,
+        adapter: FSL2Adapter,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        key = create_object_key(1)
+        obj = create_memory_obj()
+        store(adapter, key, obj)
+
+        original_unlink = fs_module.aiofiles.os.unlink
+
+        async def slow_unlink(path: Path) -> None:
+            await asyncio.sleep(0.05)
+            await original_unlink(path)
+
+        monkeypatch.setattr(fs_module, "_DELETE_WAIT_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(fs_module.aiofiles.os, "unlink", slow_unlink)
+
+        listener = RecordingListener()
+        adapter.register_listener(listener)
+        data_path = tmp_path / _object_key_to_filename(key)
+
+        adapter.delete([key])
+
+        assert wait_until(
+            lambda: (
+                not data_path.exists()
+                and adapter.get_usage().total_bytes_used == 0
+                and any(key in batch for batch in listener.deleted)
+            )
+        )
 
     def test_lookup_lock_blocks_delete_until_unlock(
         self,

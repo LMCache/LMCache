@@ -16,6 +16,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote as url_quote
 import asyncio
@@ -50,6 +51,7 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
+_DELETE_WAIT_TIMEOUT_SECONDS = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +561,17 @@ class S3L2Adapter(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     def delete(self, keys: list[ObjectKey]) -> None:
+        """Delete unlocked keys from S3-backed L2 storage.
+
+        Args:
+            keys: Object keys to delete.
+
+        Note:
+            The event-loop delete task emits ``_notify_keys_deleted``
+            after S3 confirms deletion and local size tracking is
+            updated. This wrapper waits for completion, but a timeout
+            does not cancel the task or drop the eventual notification.
+        """
         if not keys:
             return
 
@@ -576,13 +589,16 @@ class S3L2Adapter(L2AdapterInterface):
             self._loop,
         )
         try:
-            deleted_keys, deleted_sizes = fut.result(timeout=30.0)
+            fut.result(timeout=_DELETE_WAIT_TIMEOUT_SECONDS)
+        except FutureTimeoutError:
+            logger.warning(
+                "S3L2Adapter delete did not complete within %.1fs for %d keys; "
+                "the event-loop task is still running",
+                _DELETE_WAIT_TIMEOUT_SECONDS,
+                len(deletable),
+            )
         except Exception as e:
             logger.warning("S3L2Adapter delete failed: %s", e)
-            return
-
-        if deleted_keys:
-            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
     # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
     # class maintains the aggregate and per-``cache_salt`` byte totals
@@ -1005,42 +1021,49 @@ class S3L2Adapter(L2AdapterInterface):
             self._completed_load_tasks[task_id] = bitmap
         self._load_efd.notify()
 
-    async def _execute_delete(
-        self, keys: list[ObjectKey]
-    ) -> tuple[list[ObjectKey], list[int]]:
+    async def _execute_delete(self, keys: list[ObjectKey]) -> None:
         """Run DELETE for each key and drop its size-tracking entry.
 
-        Returns parallel lists of successfully deleted keys and their
-        stored sizes, suitable for passing straight to
-        ``_notify_keys_deleted``. Keys whose size we never learned
+        Successfully deleted keys are notified from this coroutine after
+        local tracking is updated. Keys whose size we never learned
         (delete of an unknown key) are reported with size ``0`` so
         listener fanout still fires while base-class byte accounting
         stays balanced.
         """
         futures = []
         indexed = []
-        for key in keys:
-            try:
-                key_str = _object_key_to_string(key)
-                s3_req = self._delete_request(key_str)
-                futures.append(asyncio.wrap_future(s3_req.finished_future))
-                indexed.append((key, key_str))
-            except Exception:
-                logger.exception("S3L2Adapter failed to launch DELETE")
-
-        results = await asyncio.gather(*futures, return_exceptions=True)
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
-        for (key, key_str), result in zip(indexed, results, strict=True):
-            if isinstance(result, Exception):
-                logger.warning("S3L2Adapter DELETE failed for %s: %s", key_str, result)
-                continue
-            with self._lock:
-                sz = self._key_sizes.pop(key, None)
-                self._object_size_cache.pop(key_str, None)
-            deleted_keys.append(key)
-            deleted_sizes.append(sz if sz is not None else 0)
-        return deleted_keys, deleted_sizes
+
+        try:
+            for key in keys:
+                try:
+                    key_str = _object_key_to_string(key)
+                    s3_req = self._delete_request(key_str)
+                    futures.append(asyncio.wrap_future(s3_req.finished_future))
+                    indexed.append((key, key_str))
+                except Exception:
+                    logger.exception("S3L2Adapter failed to launch DELETE")
+
+            results = await asyncio.gather(*futures, return_exceptions=True)
+            for (key, key_str), result in zip(indexed, results, strict=True):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        "S3L2Adapter DELETE failed for %s: %s",
+                        key_str,
+                        result,
+                    )
+                    continue
+                with self._lock:
+                    sz = self._key_sizes.pop(key, None)
+                    self._object_size_cache.pop(key_str, None)
+                deleted_keys.append(key)
+                deleted_sizes.append(sz if sz is not None else 0)
+        except Exception:
+            logger.exception("S3L2Adapter delete task failed")
+
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
 
 # ---------------------------------------------------------------------------

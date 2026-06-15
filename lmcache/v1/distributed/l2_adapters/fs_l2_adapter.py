@@ -13,6 +13,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 import asyncio
@@ -57,6 +58,7 @@ _KEY_SEP = "@"
 # csrc/storage_backends/fs/connector.cpp.
 _PATH_SLASH_REPLACEMENT = "-SEP-"
 _FILE_EXT = ".data"
+_DELETE_WAIT_TIMEOUT_SECONDS = 30.0
 
 
 def _readinto_full(
@@ -585,6 +587,9 @@ class FSL2Adapter(L2AdapterInterface):
         Note:
             Keys locked by lookup/load are skipped for this eviction
             cycle. The controller may retry them in a later cycle.
+            Listener notification is emitted by the event-loop delete
+            task after files are removed, so timeout in this synchronous
+            wrapper does not drop the eventual deletion event.
         """
         if not keys:
             return
@@ -600,13 +605,16 @@ class FSL2Adapter(L2AdapterInterface):
             self._loop,
         )
         try:
-            deleted_keys, deleted_sizes = fut.result(timeout=30.0)
+            fut.result(timeout=_DELETE_WAIT_TIMEOUT_SECONDS)
+        except FutureTimeoutError:
+            logger.warning(
+                "FSL2Adapter delete did not complete within %.1fs for %d keys; "
+                "the event-loop task is still running",
+                _DELETE_WAIT_TIMEOUT_SECONDS,
+                len(deletable),
+            )
         except Exception as e:
             logger.warning("FSL2Adapter delete failed: %s", e)
-            return
-
-        if deleted_keys:
-            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
     # ``get_usage()`` is inherited from ``L2AdapterInterface``. The base
     # class maintains aggregate and per-cache_salt byte totals from
@@ -1141,65 +1149,71 @@ class FSL2Adapter(L2AdapterInterface):
     async def _execute_delete(
         self,
         keys: list[ObjectKey],
-    ) -> tuple[list[ObjectKey], list[int]]:
+    ) -> None:
         deleted_keys: list[ObjectKey] = []
         deleted_sizes: list[int] = []
 
-        for key in keys:
-            with self._lock:
-                if self._locked_keys.get(key, 0) > 0:
+        try:
+            for key in keys:
+                with self._lock:
+                    if self._locked_keys.get(key, 0) > 0:
+                        continue
+                    tracked_files = dict(self._key_file_sizes.get(key, {}))
+
+                candidate_paths = self._key_candidate_paths(key)
+                accounted_deleted_size = 0
+                removed_any_path = False
+                paths_to_forget: list[Path] = []
+                failed_tracked_delete = False
+                for path in candidate_paths:
+                    tracked_size = tracked_files.get(path)
+                    try:
+                        await aiofiles.os.unlink(path)
+                        removed_any_path = True
+                        if tracked_size is not None:
+                            accounted_deleted_size += tracked_size
+                            paths_to_forget.append(path)
+                        logger.debug("FSL2Adapter deleted key file %s", path.name)
+                    except FileNotFoundError:
+                        if tracked_size is not None:
+                            accounted_deleted_size += tracked_size
+                            paths_to_forget.append(path)
+                        continue
+                    except OSError:
+                        logger.warning("FSL2Adapter failed to delete %s", path)
+                        if tracked_size is not None:
+                            failed_tracked_delete = True
+                        continue
+
+                if not removed_any_path and accounted_deleted_size == 0:
                     continue
-                tracked_files = dict(self._key_file_sizes.get(key, {}))
-
-            candidate_paths = self._key_candidate_paths(key)
-            accounted_deleted_size = 0
-            removed_any_path = False
-            paths_to_forget: list[Path] = []
-            failed_tracked_delete = False
-            for path in candidate_paths:
-                tracked_size = tracked_files.get(path)
-                try:
-                    await aiofiles.os.unlink(path)
-                    removed_any_path = True
-                    if tracked_size is not None:
-                        accounted_deleted_size += tracked_size
-                        paths_to_forget.append(path)
-                    logger.debug("FSL2Adapter deleted key file %s", path.name)
-                except FileNotFoundError:
-                    if tracked_size is not None:
-                        accounted_deleted_size += tracked_size
-                        paths_to_forget.append(path)
-                    continue
-                except OSError:
-                    logger.warning("FSL2Adapter failed to delete %s", path)
-                    if tracked_size is not None:
-                        failed_tracked_delete = True
+                if failed_tracked_delete:
                     continue
 
-            if not removed_any_path and accounted_deleted_size == 0:
-                continue
-            if failed_tracked_delete:
-                continue
+                with self._lock:
+                    file_sizes = self._key_file_sizes.get(key)
+                    if file_sizes is not None:
+                        for path in paths_to_forget:
+                            file_sizes.pop(path, None)
+                        if not file_sizes:
+                            self._key_file_sizes.pop(key, None)
 
-            with self._lock:
-                file_sizes = self._key_file_sizes.get(key)
-                if file_sizes is not None:
-                    for path in paths_to_forget:
-                        file_sizes.pop(path, None)
-                    if not file_sizes:
-                        self._key_file_sizes.pop(key, None)
+                    if accounted_deleted_size > 0:
+                        remaining = (
+                            self._key_sizes.get(key, 0) - accounted_deleted_size
+                        )
+                        if remaining > 0:
+                            self._key_sizes[key] = remaining
+                        else:
+                            self._key_sizes.pop(key, None)
 
-                if accounted_deleted_size > 0:
-                    remaining = self._key_sizes.get(key, 0) - accounted_deleted_size
-                    if remaining > 0:
-                        self._key_sizes[key] = remaining
-                    else:
-                        self._key_sizes.pop(key, None)
+                deleted_keys.append(key)
+                deleted_sizes.append(accounted_deleted_size)
+        except Exception:
+            logger.exception("FSL2Adapter delete task failed")
 
-            deleted_keys.append(key)
-            deleted_sizes.append(accounted_deleted_size)
-
-        return deleted_keys, deleted_sizes
+        if deleted_keys:
+            self._notify_keys_deleted(deleted_keys, deleted_sizes)
 
 
 # Self-register config type and adapter factory
