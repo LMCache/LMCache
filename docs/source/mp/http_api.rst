@@ -236,7 +236,7 @@ prefetch jobs. Intended for operators and debugging, not for monitoring
 
     {
       "is_healthy": true,
-      "engine_type": "MPCacheEngine",
+"engine_type": "MPCacheServer",
       "chunk_size": 256,
       "hash_algorithm": "builtin-hash",
       "registered_gpu_ids": [0, 1],

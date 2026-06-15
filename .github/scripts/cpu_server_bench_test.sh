@@ -6,11 +6,12 @@
 # then tears down.
 #
 # Transfer modes (LMCACHE_BENCH_TRANSFER_MODE):
-#   data    - worker-side gather/scatter via POSIX SHM pool
-#   handle  - server-side copy via POSIX SHM IPC (shm_open/mmap)
+#   lmcache_driven - worker-side gather/scatter via POSIX SHM pool
+#   engine_driven  - server-side copy via POSIX SHM IPC (shm_open/mmap)
 #
 # Environment variables (all optional, defaults shown):
-#   LMCACHE_BENCH_TRANSFER_MODE  data|handle          (default: handle)
+#   LMCACHE_BENCH_TRANSFER_MODE  lmcache_driven|engine_driven
+#                                (default: engine_driven)
 #   LMCACHE_HTTP_PORT            HTTP port            (default: 18080)
 #   LMCACHE_ZMQ_PORT             ZMQ RPC port         (default: 15555)
 #   LMCACHE_LOG_FILE             server log path      (default: /tmp/...)
@@ -24,7 +25,7 @@ OS="$(uname -s)"
 echo "==> CPU server bench test (OS: ${OS})"
 echo "    Python: $(python3 --version 2>&1 || true)"
 
-TRANSFER_MODE="${LMCACHE_BENCH_TRANSFER_MODE:-handle}"
+TRANSFER_MODE="${LMCACHE_BENCH_TRANSFER_MODE:-engine_driven}"
 HTTP_PORT="${LMCACHE_HTTP_PORT:-18080}"
 ZMQ_PORT="${LMCACHE_ZMQ_PORT:-15555}"
 LOG_FILE="${LMCACHE_LOG_FILE:-/tmp/cpu_server_bench_lmcache.log}"
@@ -33,10 +34,10 @@ BENCH_NUM_REQUESTS="${BENCH_NUM_REQUESTS:-3}"
 BENCH_NUM_TOKENS="${BENCH_NUM_TOKENS:-512}"
 
 case "${TRANSFER_MODE}" in
-  data|handle) ;;
+  lmcache_driven|engine_driven) ;;
   *)
     echo "!! Unknown LMCACHE_BENCH_TRANSFER_MODE='${TRANSFER_MODE}'"
-    echo "   Valid values: data, handle"
+    echo "   Valid values: lmcache_driven, engine_driven"
     exit 1
     ;;
 esac

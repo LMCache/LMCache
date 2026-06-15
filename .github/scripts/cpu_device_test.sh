@@ -8,15 +8,16 @@
 #   mode: server_bench, vllm_e2e, or all (default)
 #
 # Environment variables:
-#   LMCACHE_BENCH_TRANSFER_MODE  data|handle (default: handle)
-#   LMCACHE_E2E_TRANSPORT_MODE  handle|data|shm|pickle (default: handle)
-#     shm/pickle are user-friendly aliases for data mode with corresponding sub-mode
-#   LMCACHE_E2E_DATA_MODE       shm|pickle (default: shm, data transport sub-mode)
-#   LMCACHE_HTTP_PORT_BENCH     HTTP port for bench (default: 18080)
-#   LMCACHE_ZMQ_PORT_BENCH      ZMQ port for bench (default: 15555)
-#   LMCACHE_HTTP_PORT_E2E       HTTP port for e2e (default: 18081)
-#   LMCACHE_ZMQ_PORT_E2E        ZMQ port for e2e (default: 15557)
-#   VLLM_PORT_E2E               HTTP port for vLLM (default: 18000)
+#   LMCACHE_BENCH_TRANSFER_MODE  engine_driven|lmcache_driven
+#                                (default: engine_driven)
+#   LMCACHE_E2E_TRANSPORT_MODE   engine_driven|lmcache_driven|shm|pickle
+#                                (default: engine_driven)
+#   LMCACHE_E2E_DATA_MODE        shm|pickle (default: shm)
+#   LMCACHE_HTTP_PORT_BENCH      HTTP port for bench (default: 18080)
+#   LMCACHE_ZMQ_PORT_BENCH       ZMQ port for bench (default: 15555)
+#   LMCACHE_HTTP_PORT_E2E        HTTP port for e2e (default: 18081)
+#   LMCACHE_ZMQ_PORT_E2E         ZMQ port for e2e (default: 15557)
+#   VLLM_PORT_E2E                HTTP port for vLLM (default: 18000)
 
 set -euo pipefail
 
@@ -28,8 +29,8 @@ echo "==> CPU device test (OS: ${OS}, Mode: ${TEST_MODE})"
 echo "    Python: $(python3 --version 2>&1 || true)"
 
 # Configuration
-BENCH_TRANSFER_MODE="${LMCACHE_BENCH_TRANSFER_MODE:-handle}"
-E2E_TRANSPORT_MODE="${LMCACHE_E2E_TRANSPORT_MODE:-handle}"
+BENCH_TRANSFER_MODE="${LMCACHE_BENCH_TRANSFER_MODE:-engine_driven}"
+E2E_TRANSPORT_MODE="${LMCACHE_E2E_TRANSPORT_MODE:-engine_driven}"
 E2E_DATA_MODE="${LMCACHE_E2E_DATA_MODE:-shm}"
 HTTP_PORT_BENCH="${LMCACHE_HTTP_PORT_BENCH:-18080}"
 ZMQ_PORT_BENCH="${LMCACHE_ZMQ_PORT_BENCH:-15555}"
@@ -39,7 +40,7 @@ VLLM_PORT_E2E="${VLLM_PORT_E2E:-18000}"
 
 # Validate modes
 case "${BENCH_TRANSFER_MODE}" in
-  data|handle) ;;
+  lmcache_driven|engine_driven) ;;
   *)
     echo "!! Unknown LMCACHE_BENCH_TRANSFER_MODE='${BENCH_TRANSFER_MODE}'"
     exit 1
@@ -47,24 +48,23 @@ case "${BENCH_TRANSFER_MODE}" in
 esac
 
 # Map user-facing LMCACHE_E2E_TRANSPORT_MODE to internal representation.
-# shm/pickle are aliases for data mode with corresponding sub-mode selection,
-# preserved for backward compatibility with CI yaml and user convenience.
+# shm/pickle are aliases for lmcache_driven mode with sub-mode selection.
 case "${E2E_TRANSPORT_MODE}" in
-  data|handle)
+  lmcache_driven|engine_driven)
     MAPPED_TRANSPORT_MODE="${E2E_TRANSPORT_MODE}"
-    MAPPED_DATA_MODE="${E2E_DATA_MODE}"   # keep user override if any
+    MAPPED_DATA_MODE="${E2E_DATA_MODE}"
     ;;
   shm)
-    MAPPED_TRANSPORT_MODE="data"
+    MAPPED_TRANSPORT_MODE="lmcache_driven"
     MAPPED_DATA_MODE="shm"
     ;;
   pickle)
-    MAPPED_TRANSPORT_MODE="data"
+    MAPPED_TRANSPORT_MODE="lmcache_driven"
     MAPPED_DATA_MODE="pickle"
     ;;
   *)
     echo "!! Unknown LMCACHE_E2E_TRANSPORT_MODE='${E2E_TRANSPORT_MODE}'"
-    echo "   Valid values: handle, data, shm, pickle"
+    echo "   Valid values: engine_driven, lmcache_driven, shm, pickle"
     exit 1
     ;;
 esac

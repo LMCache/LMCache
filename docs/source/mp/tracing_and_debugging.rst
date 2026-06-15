@@ -67,7 +67,7 @@ the EventBus stop path — no ``--stop-tracing`` command needed.
 - **KV tensor bytes.** Replay exercises bookkeeping and controller
   logic; payloads at replay time are zeros. The trace file stays
   bounded even for long runs.
-- Calls inside ``MPCacheEngine``, the message queue, or GPU-copy code.
+- Calls inside ``MPCacheServer``, the message queue, or GPU-copy code.
   Those layers are out of scope for the ``storage`` trace level.
 
 **Overhead:**

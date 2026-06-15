@@ -34,7 +34,7 @@ kv_cache[0][0].shape = (C, D, E)
 The logic for identifying the format currently lives in
 `lmcache/v1/gpu_connector/utils.py`
 */
-enum class GPUKVFormat : int {
+enum class EngineKVFormat : int {
   NB_NL_TWO_BS_NH_HS = 0,
   /*
   used by:
@@ -114,7 +114,7 @@ void multi_layer_kv_transfer(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
-    const GPUKVFormat gpu_kv_format, const int block_size = 0,
+    const EngineKVFormat engine_kv_format, const int block_size = 0,
     const int head_size = 0, const int skip_prefix_n_tokens = 0);
 
 // collapses to multi_layer_kv_transfer for MLA
@@ -122,13 +122,13 @@ void multi_layer_kv_transfer_unilateral(
     torch::Tensor& key_value, const torch::Tensor& key_value_ptrs,
     const torch::Tensor& slot_mapping, const torch::Device& paged_memory_device,
     const int page_buffer_size, const TransferDirection direction,
-    const GPUKVFormat gpu_kv_format);
+    const EngineKVFormat engine_kv_format);
 
 void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
                               torch::Tensor& vllm_key_value_cache,
                               torch::Tensor& slot_mapping,
                               const TransferDirection direction,
-                              const GPUKVFormat gpu_kv_format,
+                              const EngineKVFormat engine_kv_format,
                               const bool token_major = false);
 
 void single_layer_kv_transfer_sgl(torch::Tensor& lmc_key_value_cache,
