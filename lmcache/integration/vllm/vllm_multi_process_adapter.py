@@ -308,9 +308,7 @@ class ParallelStrategy:
         """Number of pieces a single token chunk's KV cache is split into
         on the LMCache server storage."""
         if self.use_mla:
-            if self.pp_size == 1:
-                return self.vllm_world_size // self.tp_size
-            return self.vllm_world_size // (self.tp_size * self.n_servers)
+            return self.vllm_world_size // self.tp_size
         return self.vllm_world_size // self.n_servers
 
     @property
@@ -319,19 +317,13 @@ class ParallelStrategy:
         that the current worker is responsible for,
         in ``[0, kv_world_size)``."""
         if self.use_mla:
-            if self.pp_size == 1:
-                return self.vllm_worker_id // self.tp_size
-            pp_per_server = self.pp_size // self.n_servers
-            global_pp_rank = self.vllm_worker_id // self.tp_size
-            return global_pp_rank % pp_per_server
+            return self.vllm_worker_id // self.tp_size
         return self.vllm_worker_id % (self.vllm_world_size // self.n_servers)
 
     @property
     def kv_tp_size(self) -> int:
         """Tensor-parallel size as seen from a single LMCache server."""
-        if self.pp_size == 1 and self.n_servers > 1:
-            return self.tp_size // self.n_servers
-        return self.tp_size
+        return self.tp_size // self.n_servers
 
     @property
     def is_kv_writer(self) -> bool:
@@ -339,14 +331,8 @@ class ParallelStrategy:
         if not self.use_mla:
             # Non-MLA: every rank owns a distinct KV shard and must write it.
             return True
-        if self.pp_size == 1:
-            return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
-        # MLA: KV is identical across all TP ranks within a PP stage, so each
-        # PP stage only needs one writer. The connector enforces that a PP
-        # stage never spans nodes (tp_size divides ranks_per_node), so the
-        # first TP rank of every PP stage is always co-located with that
-        # stage's LMCache server and is the natural single writer.
-        return self.vllm_worker_id % self.tp_size == 0
+        # MLA: only first rank per node is a writer.
+        return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
 
 
 def _normalize_adapter_init_args(
@@ -587,11 +573,12 @@ class LMCacheMPSchedulerAdapter:
         self._mq_timeout = mq_timeout
 
         # Lookup state tracking:
-        # - _pending_lookups: request_ids submitted but not yet resolved.
+        # - _pending_lookups: request_ids submitted but not yet resolved
+        # - _finished_lookup_results: cached chunk count keyed by request_id,
+        #   so that repeated calls to check_lookup_result return the same value
+        #   even after the server has already popped the job (exactly-once).
         # - _per_server_hits: {request_id: {server_url: hit_chunks}}.
-        # - _finished_lookup_results: cached token count keyed by request_id,
-        #   so that repeated calls to check_lookup_result return the same
-        #   value until cleanup_lookup_result is invoked.
+        #   Per-server hit counts, used to detect disagreement and free tail locks.
         self._pending_lookups: set[str] = set()
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
@@ -599,30 +586,29 @@ class LMCacheMPSchedulerAdapter:
         self.model_name = model_name
         self.parallel_strategy = parallel_strategy
 
-        # Fetch chunk_size from every server and verify they all agree.
+        # Read chunk size from lmcache
         chunk_sizes: dict[str, int] = {}
         for url, client in self.mq_clients.items():
             try:
-                chunk_sizes[url] = get_lmcache_chunk_size(client)
+                chunk_sizes[url] = get_lmcache_chunk_size(
+                    client, timeout=self._mq_timeout
+                )
             except TimeoutError:
                 for c in self.mq_clients.values():
                     c.close()
-                raise ConnectionError(
-                    f"LMCache server {url} did not respond within {mq_timeout}s"
-                ) from None
+                _raise_server_unreachable(url, self._mq_timeout)
 
         # All servers must share chunk_size, otherwise the min() aggregation
         # over per-server hits would mix different granularities.
         unique_sizes = set(chunk_sizes.values())
-        assert len(unique_sizes) == 1, (
-            f"All LMCache servers must share the same chunk_size, got {chunk_sizes}"
-        )
+        if len(unique_sizes) != 1:
+            raise ValueError(
+                f"All LMCache servers must share the same chunk_size, got {chunk_sizes}"
+            )
         self.chunk_size = unique_sizes.pop()
 
-        # chunk_size must align to vLLM block_size; relied on by lookup / load.
         assert self.chunk_size % vllm_block_size == 0, (
-            f"chunk_size ({self.chunk_size}) must be a multiple of "
-            f"vllm_block_size ({vllm_block_size})"
+            "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = self.chunk_size // vllm_block_size
 
@@ -632,34 +618,30 @@ class LMCacheMPSchedulerAdapter:
         self._health_events: dict[str, threading.Event] = {}
         for url in self._server_urls:
             ev = threading.Event()
-            ev.set()  # start optimistic; heartbeat will clear on failure
+            ev.set()
             self._health_events[url] = ev
 
-        # Heartbeats: one thread per server so a slow/dead node cannot block
-        # the others. Threads are NOT created here -- they are lazily started
-        # on the first lookup (by then vLLM is fully ready).
+        # Heartbeat thread is created but NOT started yet.
+        # It will be lazily started on the first lookup
+        # request, by which time vLLM is fully ready.
         self._heartbeat_interval = heartbeat_interval
         self._heartbeats: dict[str, HeartbeatThread] = {}
         self._heartbeat_lock = threading.Lock()
 
     @property
     def world_size(self) -> int:
-        """How many KV-cache pieces a single LMCache server is responsible for."""
+        """Get the kv world size."""
         return self.parallel_strategy.kv_world_size
 
     @property
     def tp_size(self) -> int:
-        """Tensor-parallel size as seen from a single LMCache server."""
+        """The tensor parallel size."""
         return self.parallel_strategy.kv_tp_size
 
     @property
     def is_healthy(self) -> bool:
         """True iff every backing LMCache server is healthy."""
         return all(ev.is_set() for ev in self._health_events.values())
-
-    def healthy_urls(self) -> list[str]:
-        """Return the list of server URLs that are currently healthy."""
-        return [u for u, ev in self._health_events.items() if ev.is_set()]
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first use."""
@@ -988,7 +970,7 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy:
             return
 
-        for url in self.healthy_urls():
+        for url in self._server_urls:
             send_lmcache_request(
                 self.mq_clients[url],
                 RequestType.END_SESSION,
@@ -1011,7 +993,7 @@ class LMCacheMPSchedulerAdapter:
         if not self.is_healthy or not records:
             return
 
-        for url in self.healthy_urls():
+        for url in self._server_urls:
             send_lmcache_request(
                 self.mq_clients[url],
                 RequestType.REPORT_BLOCK_ALLOCATION,
