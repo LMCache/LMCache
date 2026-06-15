@@ -1466,7 +1466,7 @@ class LMCacheMPWorkerAdapter:
         logger.info("Unregistering kv caches")
         try:
             unregister_type = (
-                RequestType.UNREGISTER_KV_CACHE_NON_GPU_CONTEXT
+                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT
                 if isinstance(self.transfer_ctx, LMCacheDrivenTransferContext)
                 else RequestType.UNREGISTER_KV_CACHE
             )

@@ -751,7 +751,7 @@ Options
      - Transport routing for STORE/RETRIEVE. ``handle`` forces the
        single-shot path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``).
        ``data`` forces the two-phase gather/scatter path
-       (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` + ``PREPARE``/``COMMIT``).
+       (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``).
        ``auto`` maps gpu→handle and cpu→data.
    * - ``--num-tokens N``
      - ``512``

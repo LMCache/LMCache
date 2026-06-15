@@ -151,7 +151,7 @@ def register_server_parser(
             "(REGISTER_KV_CACHE + STORE/RETRIEVE), which on CPU mode "
             "uses POSIX SHM to back zero-copy server-side mappings. "
             "`lmcache_driven` forces the worker-side gather/scatter path "
-            "(REGISTER_KV_CACHE_NON_GPU_CONTEXT + PREPARE/COMMIT). "
+            "(REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT + PREPARE/COMMIT). "
             "`auto` keeps the historical mapping: "
             "gpu->engine_driven, cpu->lmcache_driven."
         ),

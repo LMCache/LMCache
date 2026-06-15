@@ -16,17 +16,17 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, is_mla
-from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
+from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.protocols.engine import RegisterNonGpuContextResponse
+from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
-    NonGpuContext,
-    NonGpuContextMetadata,
+    EngineDrivenContext,
+    EngineDrivenContextMetadata,
     compute_kv_layout,
-    create_non_gpu_context,
+    create_engine_driven_context,
     gather_paged_kv_to_cpu,
     scatter_cpu_to_paged_kv,
 )
@@ -317,7 +317,7 @@ class LMCacheDrivenTransferContext(TransferContext):
     """
 
     def __init__(self) -> None:
-        self._non_gpu_context: NonGpuContext | None = None
+        self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
 
@@ -367,9 +367,9 @@ class LMCacheDrivenTransferContext(TransferContext):
 
         future = send_request(
             mq_client,
-            RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT,
+            RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
             [
-                RegisterNonGpuContextPayload(
+                RegisterEngineDrivenContextPayload(
                     instance_id=instance_id,
                     model_name=model_name,
                     world_size=world_size,
@@ -384,16 +384,16 @@ class LMCacheDrivenTransferContext(TransferContext):
         response = future.result(timeout=mq_timeout)
         shm_name = ""
         pool_size = 0
-        if isinstance(response, RegisterNonGpuContextResponse):
+        if isinstance(response, RegisterEngineDrivenContextResponse):
             shm_name = response.shm_name
             pool_size = response.pool_size
 
-        metadata = NonGpuContextMetadata(
+        metadata = EngineDrivenContextMetadata(
             layout_desc=layout_desc,
             block_size=block_size,
             use_mla=use_mla_flag,
         )
-        self._non_gpu_context = create_non_gpu_context(
+        self._engine_driven_context = create_engine_driven_context(
             metadata,
             mq_client,
             mq_timeout,
@@ -417,14 +417,14 @@ class LMCacheDrivenTransferContext(TransferContext):
         _event: IPCEvent,
         blocks_in_chunk: int,
     ) -> MessagingFuture:
-        if self._non_gpu_context is None:
+        if self._engine_driven_context is None:
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_store()."
             )
 
         torch_dev.synchronize()
-        result = self._non_gpu_context.prepare_store(key, instance_id)
+        result = self._engine_driven_context.prepare_store(key, instance_id)
         out_buffers, chunk_indices = result if result is not None else (None, None)
         # All chunks already in cache — nothing to gather or commit.
         if chunk_indices is not None and len(chunk_indices) == 0:
@@ -443,7 +443,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         if out_buffers is not None:
             # SHM path uses async device->CPU copies; complete them before commit.
             torch_dev.synchronize()
-        ok = self._non_gpu_context.commit_store(key, instance_id, cpu_chunks)
+        ok = self._engine_driven_context.commit_store(key, instance_id, cpu_chunks)
 
         future = MessagingFuture()
         future.set_result(ok)
@@ -460,13 +460,13 @@ class LMCacheDrivenTransferContext(TransferContext):
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
     ) -> MessagingFuture:
-        if self._non_gpu_context is None:
+        if self._engine_driven_context is None:
             raise RuntimeError(
                 "LMCache-driven transfer context is not registered. "
                 "Call register() before submit_retrieve()."
             )
 
-        src_buffers = self._non_gpu_context.prepare_retrieve(key, instance_id)
+        src_buffers = self._engine_driven_context.prepare_retrieve(key, instance_id)
         ok = src_buffers is not None
         if src_buffers is not None:
             try:
@@ -485,16 +485,16 @@ class LMCacheDrivenTransferContext(TransferContext):
             # SHM path: ensure all device writes are complete before releasing
             # the SHM slot (server may immediately reuse it after commit_retrieve).
             torch_dev.synchronize()
-        self._non_gpu_context.commit_retrieve(key, instance_id)
+        self._engine_driven_context.commit_retrieve(key, instance_id)
 
         future: MessagingFuture[bool] = MessagingFuture()
         future.set_result(ok)
         return future
 
     def close(self) -> None:
-        if self._non_gpu_context is not None:
-            self._non_gpu_context.close()
-            self._non_gpu_context = None
+        if self._engine_driven_context is not None:
+            self._engine_driven_context.close()
+            self._engine_driven_context = None
 
 
 def create_transfer_context(

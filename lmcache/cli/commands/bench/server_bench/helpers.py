@@ -56,7 +56,7 @@ try:
     from lmcache.v1.multiprocess.custom_types import (
         CudaIPCWrapper,
         IPCCacheServerKey,
-        RegisterNonGpuContextPayload,
+        RegisterEngineDrivenContextPayload,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
     from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -64,7 +64,7 @@ try:
     from lmcache.v1.multiprocess.posix_shm import shm_open_pool_as_mmap
     from lmcache.v1.multiprocess.protocols.base import RequestType
     from lmcache.v1.multiprocess.protocols.engine import (
-        RegisterNonGpuContextResponse,
+        RegisterEngineDrivenContextResponse,
     )
     from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
     from lmcache.v1.platform.cpu.shm import (
@@ -324,15 +324,15 @@ def _send_register_kv_cache(
     use_gpu: bool = True,
     use_handle: bool | None = None,
     engine_group_infos: "list[EngineGroupInfo] | None" = None,
-) -> "bool | RegisterNonGpuContextResponse":
+) -> "bool | RegisterEngineDrivenContextResponse":
     """Register a KV cache context with the MP server.
 
     Dispatches to the correct protocol based on ``use_handle``:
 
     * Handle mode: ``REGISTER_KV_CACHE`` with a wrapper list
       (``CudaIPCWrapper`` for GPU, ``CpuShmTensorWrapper`` for CPU).
-    * Data mode: ``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` with a
-      ``RegisterNonGpuContextPayload`` derived from ``layout_hints``.
+    * Data mode: ``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` with a
+      ``RegisterEngineDrivenContextPayload`` derived from ``layout_hints``.
 
     ``use_handle`` defaults to ``use_gpu`` for backwards compatibility:
     GPU always goes through the handle path, CPU defaults to data.
@@ -383,7 +383,7 @@ def _send_register_kv_cache(
     if not isinstance(head_size, int):
         head_size = 128
     hidden_dim_size = int(num_heads) * int(head_size)
-    payload = RegisterNonGpuContextPayload(
+    payload = RegisterEngineDrivenContextPayload(
         instance_id=instance_id,
         model_name=model_name,
         world_size=world_size,
@@ -393,7 +393,9 @@ def _send_register_kv_cache(
         dtype_str=dtype_str,
         use_mla=False,
     )
-    result = _call(client, RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT, [payload])
+    result = _call(
+        client, RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT, [payload]
+    )
     if result is _TIMEOUT:
         return False
     # The data-mode register reply carries the server's SHM pool name
@@ -497,7 +499,7 @@ def _gather_paged_to_flat_chunks(
 
     Output layout matches the server's expected ``commit_store``
     payload (set up at register time by
-    ``register_kv_cache_non_gpu_context``):
+    ``register_kv_cache_engine_driven_context``):
     each chunk is ``[2, num_layers, chunk_size, hidden_dim]``,
     where ``hidden_dim = NH * HS``. Assumes a homogeneous group
     (same NH/HS/dtype across all layers); heterogeneous specs

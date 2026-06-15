@@ -38,7 +38,7 @@ def test_gpu_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
     assert engine.gpu_contexts == {0: gpu0, 7: gpu1}
 
 
-def test_gpu_contexts_returns_none_in_non_gpu_mode() -> None:
+def test_gpu_contexts_returns_none_in_engine_driven_mode() -> None:
     engine = MPCacheServer(MagicMock(), modules=[MagicMock()])
     assert engine.gpu_contexts is None
 

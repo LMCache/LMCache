@@ -1106,9 +1106,9 @@ msgstr "``auto``"
 msgid ""
 "Transport routing for STORE/RETRIEVE. ``handle`` forces the single-shot "
 "path (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``). ``data`` forces "
-"the two-phase gather/scatter path (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` "
+"the two-phase gather/scatter path (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` "
 "+ ``PREPARE``/``COMMIT``). ``auto`` maps gpu→handle and cpu→data."
-msgstr "STORE/RETRIEVE 的传输路由。``handle`` 强制执行单次路径 (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``)。``data`` 强制执行两阶段的收集/散布路径 (``REGISTER_KV_CACHE_NON_GPU_CONTEXT`` + ``PREPARE``/``COMMIT``)。``auto`` 将 gpu 映射到 handle，将 cpu 映射到 data。"
+msgstr "STORE/RETRIEVE 的传输路由。``handle`` 强制执行单次路径 (``REGISTER_KV_CACHE`` + ``STORE``/``RETRIEVE``)。``data`` 强制执行两阶段的收集/散布路径 (``REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`` + ``PREPARE``/``COMMIT``)。``auto`` 将 gpu 映射到 handle，将 cpu 映射到 data。"
 
 #: ../../source/cli/bench.rst:756
 msgid "``--num-tokens N``"
