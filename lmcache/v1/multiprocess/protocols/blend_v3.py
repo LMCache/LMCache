@@ -6,7 +6,7 @@ from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
@@ -42,7 +42,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: (event_ipc_handle: bytes, success: bool).
         "CB_RETRIEVE_PRE_COMPUTED_V3": ProtocolDefinition(
             payload_classes=[
-                IPCCacheEngineKey,
+                IPCCacheServerKey,
                 list[CBMatchResult],
                 list[int],
                 int,
@@ -54,13 +54,13 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Unified lookup: server runs prefix lookup + non-prefix fingerprint
         # match in one RPC, reconciles, and prefetches only the complement.
         # Payload:
-        #   - key: IPCCacheEngineKey carrying the query token IDs.
+        #   - key: IPCCacheServerKey carrying the query token IDs.
         #   - tp_size: tensor-parallel size (for MLA multi-reader locking,
         #     mirrors LOOKUP).
         # Returns: CBUnifiedLookupResult(prefix_coverage_tokens,
         #          non_prefix_segments).
         "CB_UNIFIED_LOOKUP": ProtocolDefinition(
-            payload_classes=[IPCCacheEngineKey, int],
+            payload_classes=[IPCCacheServerKey, int],
             # Nullable: handler returns None to defer until both the prefix and
             # the sparse chunks are in L1 (mirrors dense QUERY_PREFETCH_STATUS).
             response_class=CBUnifiedLookupResult | None,

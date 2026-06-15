@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "mem_kernels.cuh"  // TransferDirection, GPUKVFormat
+#include "mem_kernels.cuh"  // TransferDirection, EngineKVFormat
 
 #include <c10/cuda/CUDAGuard.h>
 #include <vector>
@@ -79,7 +79,7 @@ struct MemoryObj4 {
  * @param direction                 H2D (LMCache->vLLM) or D2H (vLLM->LMCache)
  * @param shape_desc                Shape descriptor for the paged buffer
  * @param lmcache_chunk_size        Tokens per LMCache memory object
- * @param gpu_kv_format             GPUKVFormat identifier
+ * @param engine_kv_format             EngineKVFormat identifier
  * @param skip_prefix_n_blocks      Number of blocks to skip at the beginning
  */
 void multi_layer_block_kv_transfer(
@@ -87,4 +87,4 @@ void multi_layer_block_kv_transfer(
     std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    GPUKVFormat gpu_kv_format, int skip_prefix_n_blocks);
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks);

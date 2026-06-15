@@ -21,24 +21,24 @@ across non-CUDA backends.
 ```text
 Worker adapter (vLLM MP adapter)
   └─ TransferContext (transfer_context/worker_transfer.py)
-      ├─ HandleTransferContext  (IPC path via stream/event)
-      └─ DataTransferContext    (data path via data copying in adapter)
+      ├─ EngineDrivenTransferContext  (IPC path via stream/event)
+      └─ LMCacheDrivenTransferContext    (data path via data copying in adapter)
           └─ NonGpuContext (transfer_context/base.py)
              ├─ NonGpuContextPickle (transfer_context/pickle.py)
              └─ NonGpuContextShm    (transfer_context/shm.py)
 
-MPCacheEngine (server)
-  └─ MPCacheEngineContext (engine_context.py)
-      ├─ StorageManager
-      ├─ TokenHasher
-      ├─ SessionManager
-      ├─ EventBus
-      ├─ LayoutDescRegistry
-      └─ shm_pool_info (pre-computed once)
-  └─ NonGPUTransferModule (modules/non_gpu_transfer.py)
-      └─ TransferStrategy (modules/server_transfer.py)
-         ├─ PickleTransferStrategy
-         └─ ShmTransferStrategy
+MPCacheServer (server)
+├─ MPCacheServerContext (engine_context.py)
+│    ├─ StorageManager
+│    ├─ TokenHasher
+│    ├─ SessionManager
+│    ├─ EventBus
+│    ├─ LayoutDescRegistry
+│    └─ shm_pool_info (pre-computed once)
+└─ NonGPUTransferModule (modules/non_gpu_transfer.py)
+     └─ TransferStrategy (modules/server_transfer.py)
+          ├─ PickleTransferStrategy
+          └─ ShmTransferStrategy
 ```
 
 State machine overview (worker-side):
@@ -49,7 +49,7 @@ State machine overview (worker-side):
                  +---------------+---------------+
                  |                               |
                  v                               v
-      HandleTransferContext            DataTransferContext
+      EngineDrivenTransferContext    LMCacheDrivenTransferContext
           (device == CUDA)            (device != CUDA)
                  |                               |
                  v                               v
@@ -63,7 +63,7 @@ State machine overview (worker-side):
                  +---------------+-------------------------------+
                  |                                               |
                  v                                               v
-    submit_store (handle path)                  submit_store (data path)
+    submit_store (engine-driven path)         submit_store (LMCache-driven path)
     -> STORE request (async)                    -> prepare_store -> gather -> commit_store
                  |                                               |
                  +---------------+-------------------------------+
@@ -74,7 +74,7 @@ State machine overview (worker-side):
                  +---------------+-------------------------------+
                  |                                               |
                  v                                               v
-  submit_retrieve (handle path)               submit_retrieve (data path)
+  submit_retrieve (engine-driven path)      submit_retrieve (LMCache-driven path)
   -> RETRIEVE request (async)                 -> prepare_retrieve -> scatter -> commit_retrieve
                  |                                               |
                  +---------------+-------------------------------+
@@ -98,12 +98,12 @@ Overall data flow:
 The contract is intentionally minimal so worker adapters only depend on these
 four lifecycle and transfer operations.
 
-- **HandleTransferContext** keeps the original CUDA IPC behavior:
+- **EngineDrivenTransferContext** keeps the original CUDA IPC behavior:
   worker sends a handle and server performs direct GPU-side transfer.
-- **DataTransferContext** is the non-CUDA path:
+- **LMCacheDrivenTransferContext** is the non-CUDA path:
   worker transfers actual data chunks through `NonGpuContext`.
 
-`DataTransferContext` flows:
+`LMCacheDrivenTransferContext` flows:
 - **submit_store**: `prepare_store` → `gather_paged_kv_to_cpu` → `commit_store`
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
@@ -119,14 +119,14 @@ Why `prepare → data operation → commit`:
 - `commit_*`: finalize and notify server to consume or release transfer state.
 
 `create_transfer_context()` selects the implementation once based on device type
-(CUDA → `HandleTransferContext`, otherwise → `DataTransferContext`).
+(CUDA → `EngineDrivenTransferContext`, otherwise → `LMCacheDrivenTransferContext`).
 It also validates that all KV cache tensors share one device type and rejects
 mixed-device configurations by raising an error.
 
 | Context | What is transferred | Who performs copy work | Completion style |
 |---|---|---|---|
-| HandleTransferContext | Device handle/reference | Server pulls/pushes via IPC | Async MQ future |
-| DataTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
+| EngineDrivenTransferContext | Device handle/reference | Server pulls/pushes via IPC | Async MQ future |
+| LMCacheDrivenTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
 
 ### 2.3 Server Side: GPU Context vs Non-GPU Context
 
@@ -144,7 +144,7 @@ Server transfer strategy implementations:
 This mirrors the worker split (`NonGpuContextPickle` / `NonGpuContextShm`):
 both sides keep common request flow while isolating transport-specific logic.
 
-`MPCacheEngineContext` is the shared container injected into modules at init.
+`MPCacheServerContext` is the shared container injected into modules at init.
 It also computes `shm_pool_info` once from `StorageManagerConfig`:
 - disable SHM when `shm_name` is empty or `use_lazy=True`
 - normalize name (`lstrip("/")` and enforce `lmcache_l1_pool_` prefix)
@@ -156,7 +156,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 | Transport | Copies | Data flow |
 |---|---|---|
-| Handle (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
+| Engine-driven (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
 | Pickle | 4 | GPU KV → CPU chunk → serialize → deserialize → CPU memory object |
 | SHM | 1 | GPU KV → CPU memory object (SHM mapped) |
 
@@ -164,13 +164,13 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 | Transport | Copies | Data flow |
 |---|---|---|
-| Handle (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
+| Engine-driven (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
 | Pickle | 4 | CPU memory object → serialize → deserialize → CPU chunk → GPU KV |
 | SHM | 1 | CPU memory object (SHM mapped) → GPU KV |
 
 | Transport | Pros | Cons | Best fit |
 |---|---|---|---|
-| Handle (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
+| Engine-driven (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
 | Pickle | Works everywhere, no SHM setup | Extra serialization + copy overhead | Universal fallback |
 | SHM | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput non-CUDA setups |
 
@@ -178,7 +178,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 - `lmcache/v1/multiprocess/modules/non_gpu_transfer.py`: `NonGPUTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
-- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `DataTransferContext`, `HandleTransferContext`
+- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `LMCacheDrivenTransferContext`, `EngineDrivenTransferContext`
 - `lmcache/v1/multiprocess/transfer_context/base.py`: `NonGpuContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
 - `lmcache/v1/multiprocess/transfer_context/pickle.py`: `NonGpuContextPickle`
 - `lmcache/v1/multiprocess/transfer_context/shm.py`: `NonGpuContextShm`
@@ -256,5 +256,5 @@ Retrieve:
 4. Worker `commit_retrieve` releases/read-completes SHM state.
 
 Notes:
-- SHM pool metadata is computed once in `MPCacheEngineContext` init, not per registration.
+- SHM pool metadata is computed once in `MPCacheServerContext` init, not per registration.
 - `chunk_indices` optimization reduces unnecessary gather/copy work on partial cache hits.

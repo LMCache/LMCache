@@ -32,12 +32,12 @@ VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-4}"
 LMCACHE_HEALTHCHECK_TIMEOUT="${LMCACHE_HEALTHCHECK_TIMEOUT:-30}"
 VLLM_READY_TIMEOUT="${VLLM_READY_TIMEOUT:-120}"
 # Transport mode selection:
-#   LMCACHE_MP_TRANSFER_MODE=handle  -> handle mode (POSIX SHM server-side copy)
-#   LMCACHE_MP_TRANSFER_MODE=data    -> data mode, sub-selected by LMCACHE_SHM_NAME:
+#   LMCACHE_MP_TRANSFER_MODE=engine_driven  -> engine-driven (POSIX SHM server-side copy)
+#   LMCACHE_MP_TRANSFER_MODE=lmcache_driven -> LMCache-driven, sub-selected by LMCACHE_SHM_NAME:
 #       LMCACHE_SHM_NAME=""              -> pickle transport
 #       LMCACHE_SHM_NAME=__default__     -> shm transport (default)
 LMCACHE_SHM_NAME="${LMCACHE_SHM_NAME-__default__}"
-LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-data}"
+LMCACHE_MP_TRANSFER_MODE="${LMCACHE_MP_TRANSFER_MODE:-lmcache_driven}"
 # Set SKIP_INSTALL=1 to skip Phase 1 (install) — useful when the caller
 # has already installed everything (e.g. macOS CI workflow steps).
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
@@ -359,20 +359,20 @@ LMCACHE_ARGS=(
   --eviction-policy "${LMCACHE_EVICTION_POLICY}"
   --chunk-size "${LMCACHE_CHUNK_SIZE}"
 )
-# `data` handle look identical here (both leave SHM_NAME at
-# default) but resolve to different worker-side TransferContexts:
-#   handle -> HandleTransferContext (server-side copy via POSIX SHM IPC)
-#   data   -> DataTransferContext on non-CUDA devices
+# `engine_driven` / `lmcache_driven` look identical here (both leave
+# SHM_NAME at default) but resolve to different worker-side TransferContexts:
+#   engine_driven -> EngineDrivenTransferContext (server-side copy via SHM IPC)
+#   lmcache_driven -> LMCacheDrivenTransferContext on non-CUDA devices
 # Step 5.5 verifies which one the worker actually entered.
-if [ "${LMCACHE_MP_TRANSFER_MODE}" = "handle" ]; then
-  echo "Transport mode: server-side copy (handle via POSIX SHM IPC)"
-  EXPECTED_TRANSPORT="handle"
-elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "data" ]; then
+if [ "${LMCACHE_MP_TRANSFER_MODE}" = "engine_driven" ]; then
+  echo "Transport mode: engine-driven (server-side copy via POSIX SHM IPC)"
+  EXPECTED_TRANSPORT="engine_driven"
+elif [ "${LMCACHE_MP_TRANSFER_MODE}" = "lmcache_driven" ]; then
   if [ "${LMCACHE_SHM_NAME}" = "__default__" ]; then
-    echo "Transport mode: data/shm (shared memory)"
+    echo "Transport mode: LMCache-driven/shm (shared memory)"
     EXPECTED_TRANSPORT="shm"
   else
-    echo "Transport mode: data/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
+    echo "Transport mode: LMCache-driven/pickle (--shm-name '${LMCACHE_SHM_NAME}')"
     LMCACHE_ARGS+=(--shm-name "${LMCACHE_SHM_NAME}")
     EXPECTED_TRANSPORT="pickle"
   fi
@@ -458,13 +458,13 @@ echo "[Phase 2 / Step 5.5] Verifying transport mode: expecting '${EXPECTED_TRANS
 # VLLM_LOG (vllm's stdout), not in LMCACHE_LOG (lmcache server's stdout).
 # The shm/pickle branches still grep LMCACHE_LOG because the strategy
 # line is emitted by the lmcache server itself.
-if [ "${EXPECTED_TRANSPORT}" = "handle" ]; then
-  if ! grep -q "Creating transfer context.*mode=handle" "${VLLM_LOG}" 2>/dev/null; then
-    echo "❌ Expected handle worker context but 'mode=handle' not found in vLLM log"
+if [ "${EXPECTED_TRANSPORT}" = "engine_driven" ]; then
+  if ! grep -q "Creating transfer context.*mode=engine_driven" "${VLLM_LOG}" 2>/dev/null; then
+    echo "❌ Expected engine-driven worker context but 'mode=engine_driven' not found in vLLM log"
     tail -50 "${VLLM_LOG}"
     false
   fi
-  echo "✅ Transport mode confirmed: handle (server-side copy)"
+  echo "✅ Transport mode confirmed: engine-driven (server-side copy)"
 elif [ "${EXPECTED_TRANSPORT}" = "shm" ]; then
   if ! grep -q "Using shm non-GPU transfer strategy" "${LMCACHE_LOG}" 2>/dev/null; then
     echo "❌ Expected shm transport but server strategy line not found in log"
