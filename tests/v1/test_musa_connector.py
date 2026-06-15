@@ -101,13 +101,15 @@ def _patch_musa_connector_attrs(
     block_size: int,
     num_heads: int,
     head_size: int,
-    gpu_kv_format: lmc_ops.GPUKVFormat = lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,
+    engine_kv_format: lmc_ops.EngineKVFormat = (
+        lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS
+    ),
 ) -> None:
     """Patch connector layout discovery so transfer logic can run on CPU."""
 
     def _initialize_attributes(_kv_caches: list[torch.Tensor]) -> None:
         conn.device = torch.device("cpu")
-        conn.gpu_kv_format = gpu_kv_format
+        conn.engine_kv_format = engine_kv_format
         conn.num_layers = num_layers
         conn.num_blocks = num_blocks
         conn.block_size = block_size
@@ -230,7 +232,7 @@ def test_musa_connector_rejects_unsupported_kv_layout(
         block_size=block_size,
         num_heads=num_heads,
         head_size=head_size,
-        gpu_kv_format=lmc_ops.GPUKVFormat.NL_X_NB_TWO_BS_NH_HS,
+        engine_kv_format=lmc_ops.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS,
     )
 
     kvcaches_dst = [

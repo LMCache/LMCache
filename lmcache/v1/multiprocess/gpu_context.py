@@ -27,10 +27,10 @@ from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
     get_attention_backend,
-    get_concrete_gpu_kv_shape_from_shape_desc,
+    get_concrete_engine_kv_shape_from_shape_desc,
     get_device,
     get_dtype,
-    get_gpu_kv_shape_description,
+    get_engine_kv_shape_description,
     get_group_data_ptrs,
     get_num_blocks,
     get_num_layers,
@@ -362,20 +362,20 @@ class GPUCacheContext:
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        self.gpu_kv_format_, self.kv_caches_ = normalize_kv_and_discover_format(
+        self.engine_kv_format_, self.kv_caches_ = normalize_kv_and_discover_format(
             unwrapped,
             engine_type,
             layout_hints=layout_hints,
         )
         self.device_ = get_device(self.kv_caches_)
-        self.is_mla_ = is_mla(self.gpu_kv_format_)
-        self.num_layers_ = get_num_layers(self.kv_caches_, self.gpu_kv_format_)
-        self.num_blocks_ = get_num_blocks(self.kv_caches_, self.gpu_kv_format_)
+        self.is_mla_ = is_mla(self.engine_kv_format_)
+        self.num_layers_ = get_num_layers(self.kv_caches_, self.engine_kv_format_)
+        self.num_blocks_ = get_num_blocks(self.kv_caches_, self.engine_kv_format_)
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
 
         self.kv_layer_groups_manager_ = KVLayerGroupsManager(
             self.kv_caches_,
-            gpu_kv_format=self.gpu_kv_format_,
+            engine_kv_format=self.engine_kv_format_,
             num_blocks=self.num_blocks_,
             engine_group_infos=engine_group_infos,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
@@ -384,7 +384,7 @@ class GPUCacheContext:
         self.group_kv_pointers_: list[torch.Tensor] = []
         for group in self.kv_layer_groups_manager_.kv_layer_groups:
             ptrs = get_group_data_ptrs(
-                self.kv_caches_, self.gpu_kv_format_, group.layer_indices
+                self.kv_caches_, self.engine_kv_format_, group.layer_indices
             )
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
 
@@ -436,7 +436,7 @@ class GPUCacheContext:
 
     @property
     def dtype(self) -> torch.dtype:
-        return get_dtype(self.kv_caches_, self.gpu_kv_format_)
+        return get_dtype(self.kv_caches_, self.engine_kv_format_)
 
     @property
     def device(self) -> torch.device:
@@ -697,8 +697,8 @@ class GPUCacheContext:
               - ``dtype`` (str): stringified torch dtype.
               - ``gpu_kv_concrete_shape`` (str): group-accurate numeric shape.
               - ``is_mla`` (bool)
-              - ``gpu_kv_format`` (str): GPU KV format enum name.
-              - ``gpu_kv_shape`` (str): symbolic shape description.
+              - ``engine_kv_format`` (str): engine KV format enum name.
+              - ``engine_kv_shape`` (str): symbolic shape description.
               - ``attention_backend`` (str)
         """
         manager = self.kv_layer_groups_manager
@@ -711,7 +711,7 @@ class GPUCacheContext:
             for kg_idx in og.kernel_group_indices
         }
 
-        gpu_kv_format = self.gpu_kv_format_
+        engine_kv_format = self.engine_kv_format_
         group_reports: list[dict] = []
         for kernel_group_idx, group in enumerate(kernel_groups):
             group_reports.append(
@@ -726,13 +726,17 @@ class GPUCacheContext:
                     "tokens_per_block": group.tokens_per_block,
                     "slots_per_block": group.slots_per_block,
                     "dtype": str(group.dtype),
-                    "gpu_kv_concrete_shape": get_concrete_gpu_kv_shape_from_shape_desc(
-                        group.shape_desc, gpu_kv_format
+                    "engine_kv_concrete_shape": (
+                        get_concrete_engine_kv_shape_from_shape_desc(
+                            group.shape_desc, engine_kv_format
+                        )
                     ),
-                    "is_mla": is_mla(gpu_kv_format),
-                    "gpu_kv_format": gpu_kv_format.name,
-                    "gpu_kv_shape": get_gpu_kv_shape_description(gpu_kv_format),
-                    "attention_backend": get_attention_backend(gpu_kv_format),
+                    "is_mla": is_mla(engine_kv_format),
+                    "engine_kv_format": engine_kv_format.name,
+                    "engine_kv_shape": get_engine_kv_shape_description(
+                        engine_kv_format
+                    ),
+                    "attention_backend": get_attention_backend(engine_kv_format),
                 }
             )
 

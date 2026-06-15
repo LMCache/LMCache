@@ -55,7 +55,7 @@ try:
     )
     from lmcache.v1.multiprocess.custom_types import (
         CudaIPCWrapper,
-        IPCCacheEngineKey,
+        IPCCacheServerKey,
         RegisterNonGpuContextPayload,
     )
     from lmcache.v1.multiprocess.futures import MessagingFuture
@@ -173,9 +173,9 @@ def _make_key(
     start: int = 0,
     end: int = 0,
     worker_id: int | None = None,
-) -> IPCCacheEngineKey:
-    """Build an IPCCacheEngineKey."""
-    return IPCCacheEngineKey(
+) -> IPCCacheServerKey:
+    """Build an IPCCacheServerKey."""
+    return IPCCacheServerKey(
         model_name=_MODEL_NAME,
         world_size=_WORLD_SIZE,
         worker_id=worker_id,
@@ -405,7 +405,7 @@ def _send_register_kv_cache(
 
 def _send_lookup(
     client: MessageQueueClient,
-    key: IPCCacheEngineKey,
+    key: IPCCacheServerKey,
 ) -> bool:
     """LOOKUP — submit a prefix lookup.
 
@@ -630,7 +630,7 @@ def _zero_fill_client_blocks(
 
 def _send_store(
     client: MessageQueueClient,
-    key: IPCCacheEngineKey,
+    key: IPCCacheServerKey,
     block_offset: int = 0,
     block_size: int = 16,
     num_engine_group_infos: int = 1,
@@ -698,7 +698,7 @@ def _send_store(
 
 def _send_retrieve(
     client: MessageQueueClient,
-    key: IPCCacheEngineKey,
+    key: IPCCacheServerKey,
     chunk_size: int,
     hit_chunks: int,
     block_offset: int = 0,

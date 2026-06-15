@@ -5,7 +5,7 @@ Distributed multi-tier storage manager for MP mode
 
 # Standard
 from contextlib import contextmanager
-from typing import Iterator, Literal
+from typing import Iterator, Literal, Optional
 import time
 
 # First Party
@@ -23,6 +23,10 @@ from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.reconfiguration import (
+    L2ReconfigurableAdapter,
+    L2ReconfigureError,
+)
 from lmcache.v1.distributed.l2_adapters.serde_wrapper import SerdeL2AdapterWrapper
 from lmcache.v1.distributed.quota_manager import QuotaManager
 from lmcache.v1.distributed.serde import create_serde_processor
@@ -722,6 +726,54 @@ class StorageManager:
                 totals[salt] = totals.get(salt, 0) + used
         return totals
 
+    def get_l2_adapter_reconfigure_status(self) -> dict:
+        """Return status for all runtime-reconfigurable L2 adapters.
+
+        Returns:
+            JSON-serializable status. If no reconfigurable adapter is configured,
+            ``enabled`` is ``False`` and the adapter list is empty.
+        """
+        adapters = []
+        for adapter_index, (
+            l2_adapter_index,
+            adapter,
+        ) in enumerate(self._list_reconfigurable_l2_adapters()):
+            status = dict(adapter.reconfigure_status())
+            if l2_adapter_index < len(getattr(self, "_adapter_descriptors", [])):
+                status["backend"] = self._adapter_descriptors[
+                    l2_adapter_index
+                ].type_name
+            status["adapter_index"] = adapter_index
+            status["l2_adapter_index"] = l2_adapter_index
+            adapters.append(status)
+
+        return {
+            "enabled": bool(adapters),
+            "num_adapters": len(adapters),
+            "adapters": adapters,
+        }
+
+    def reconfigure_l2_adapter(
+        self,
+        adapter_index: int,
+        operation: str,
+        payload: dict[str, object],
+    ) -> dict:
+        """Route a runtime reconfiguration request to one L2 adapter.
+
+        Args:
+            adapter_index: Zero-based reconfigurable-adapter index.
+            operation: Adapter-specific operation name.
+            payload: Adapter-specific operation payload.
+
+        Returns:
+            JSON-serializable operation result.
+        """
+        adapter = self._get_reconfigurable_l2_adapter(adapter_index)
+        result = adapter.reconfigure(operation, payload)
+        result["adapter_index"] = adapter_index
+        return result
+
     def clear(self, force: bool = False):
         """
         Clear data in the storage manager.
@@ -788,3 +840,35 @@ class StorageManager:
             True if memory is consistent, False otherwise.
         """
         return self._l1_manager.memcheck()
+
+    def _unwrap_reconfigurable_l2_adapter(
+        self,
+        adapter: L2AdapterInterface,
+    ) -> Optional[L2ReconfigurableAdapter]:
+        if isinstance(adapter, L2ReconfigurableAdapter):
+            return adapter
+
+        inner = getattr(adapter, "inner_adapter", None)
+        if inner is not None and isinstance(inner, L2ReconfigurableAdapter):
+            return inner
+
+        return None
+
+    def _list_reconfigurable_l2_adapters(
+        self,
+    ) -> list[tuple[int, L2ReconfigurableAdapter]]:
+        adapters: list[tuple[int, L2ReconfigurableAdapter]] = []
+        for l2_adapter_index, adapter in enumerate(self._l2_adapters):
+            reconfigurable_adapter = self._unwrap_reconfigurable_l2_adapter(adapter)
+            if reconfigurable_adapter is not None:
+                adapters.append((l2_adapter_index, reconfigurable_adapter))
+        return adapters
+
+    def _get_reconfigurable_l2_adapter(
+        self,
+        adapter_index: int,
+    ) -> L2ReconfigurableAdapter:
+        adapters = self._list_reconfigurable_l2_adapters()
+        if adapter_index < 0 or adapter_index >= len(adapters):
+            raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
+        return adapters[adapter_index][1]

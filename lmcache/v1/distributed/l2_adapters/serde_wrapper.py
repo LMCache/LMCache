@@ -296,6 +296,11 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     @property
+    def inner_adapter(self) -> L2AdapterInterface:
+        """Return the wrapped L2 adapter."""
+        return self._inner
+
+    @property
     def supports_global_eviction(self) -> bool:
         return self._inner.supports_global_eviction
 

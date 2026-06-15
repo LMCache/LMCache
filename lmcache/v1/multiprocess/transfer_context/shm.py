@@ -11,7 +11,7 @@ from typing import Any
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
@@ -143,7 +143,7 @@ class NonGpuContextShm(NonGpuContext):
         ]
 
     def prepare_store(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         future = self.mq_client.submit_request(
             RequestType.PREPARE_STORE,
@@ -168,7 +168,7 @@ class NonGpuContextShm(NonGpuContext):
         return self._build_slot_tensors(slots), chunk_indices
 
     def commit_store(
-        self, key: IPCCacheEngineKey, instance_id: int, _chunks: list[torch.Tensor]
+        self, key: IPCCacheServerKey, instance_id: int, _chunks: list[torch.Tensor]
     ) -> bool:
         future = self.mq_client.submit_request(
             RequestType.COMMIT_STORE,
@@ -181,7 +181,7 @@ class NonGpuContextShm(NonGpuContext):
             return False
 
     def prepare_retrieve(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> list[torch.Tensor] | None:
         future = self.mq_client.submit_request(
             RequestType.PREPARE_RETRIEVE,
@@ -197,7 +197,7 @@ class NonGpuContextShm(NonGpuContext):
         slots = response.context.get("slots", [])
         return self._build_slot_tensors(slots) if slots else None
 
-    def commit_retrieve(self, key: IPCCacheEngineKey, instance_id: int) -> bool:
+    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         future = self.mq_client.submit_request(
             RequestType.COMMIT_RETRIEVE,
             [key, instance_id],

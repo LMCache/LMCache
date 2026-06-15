@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
     RegisterNonGpuContextPayload,
 )
@@ -76,7 +76,7 @@ REQUEST_NAMES = [
 ]
 
 # Type alias for cache keys
-KeyType = IPCCacheEngineKey
+KeyType = IPCCacheServerKey
 
 
 def get_protocol_definitions() -> dict[str, ProtocolDefinition]:

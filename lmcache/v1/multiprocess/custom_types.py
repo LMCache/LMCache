@@ -17,7 +17,7 @@ Defines the types and the customized encoder/decoders for inter-process
 communications.
 
 Key Types:
-- IPCCacheEngineKey: Token-based cache key
+- IPCCacheServerKey: Token-based cache key
   - Contains token_ids, start, end, request_id (all required)
   - Converted to ObjectKey for storage operations via ipc_key_to_object_keys()
 """
@@ -219,7 +219,7 @@ class RawCudaIPCWrapper(CudaIPCWrapper):
 
 
 @dataclass(order=True, frozen=True)
-class IPCCacheEngineKey:
+class IPCCacheServerKey:
     """Cache key for the IPC (multiprocess) protocol.
 
     This key type is sent by the client over ZMQ (serialized via msgspec).
@@ -256,7 +256,7 @@ class IPCCacheEngineKey:
     cache_salt: str = ""
 
     # Duplicated from ObjectKey — cannot import ObjectKey here due to
-    # circular dependency (api.py imports IPCCacheEngineKey).
+    # circular dependency (api.py imports IPCCacheServerKey).
     _SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
     _SALT_MAX_LEN = 128
 
@@ -284,7 +284,7 @@ class IPCCacheEngineKey:
         end: int = 0,
         request_id: str = "",
         cache_salt: str = "",
-    ) -> "IPCCacheEngineKey":
+    ) -> "IPCCacheServerKey":
         """Create a key from token ids. Only used by the tests."""
         return cls(
             model_name=model_name,
@@ -297,9 +297,9 @@ class IPCCacheEngineKey:
             cache_salt=cache_salt,
         )
 
-    def no_worker_id_version(self) -> "IPCCacheEngineKey":
+    def no_worker_id_version(self) -> "IPCCacheServerKey":
         """Create a copy with worker_id=None for lookup requests."""
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self.model_name,
             world_size=self.world_size,
             worker_id=None,

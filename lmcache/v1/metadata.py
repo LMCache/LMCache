@@ -23,19 +23,19 @@ class LMCacheMetadata:
 
     """name of the LLM model"""
     model_name: str
-    """ global world size when running under a distributed setting 
+    """ global world size when running under a distributed setting
     (total number of workers)"""
     world_size: int
     """ host world size (workers on active localhost)
     This information can be useful for multi-node
-    deployment. Will be the same as world_size 
+    deployment. Will be the same as world_size
     in single-node deployments.
     """
     local_world_size: int
     """ worker id when running under a distributed setting """
     worker_id: int
     """ host worker id (a gpu bound worker id on active localhost)
-    This information can be useful for multi-node deployment. 
+    This information can be useful for multi-node deployment.
     Will be the same as worker_id in single-node deployments.
     """
     local_worker_id: int

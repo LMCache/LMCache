@@ -203,9 +203,9 @@ Expected log output:
     LMCache INFO: torch_dev=StubCPUDevice(device_type=cpu), ...
     LMCache INFO: LMCache cache server is running...
 
-**Step 2: Start vLLM with the handle transfer mode**
+**Step 2: Start vLLM with the engine-driven transfer mode**
 
-Pass ``lmcache.mp.mp_transfer_mode=handle`` in
+Pass ``lmcache.mp.mp_transfer_mode=engine_driven`` in
 ``kv_connector_extra_config`` to enable the POSIX-SHM zero-copy path.
 At startup the vLLM worker migrates each KV cache tensor to a shared
 memory segment (``/lmcache_kv_<pid>_<idx>``) so the LMCache server can
@@ -224,21 +224,21 @@ map the same physical pages directly.
           "kv_connector_extra_config": {
             "lmcache.mp.host": "tcp://localhost",
             "lmcache.mp.port": 5555,
-            "lmcache.mp.mp_transfer_mode": "handle"
+            "lmcache.mp.mp_transfer_mode": "engine_driven"
           }}'
 
 Expected log output on the vLLM side:
 
 .. code-block:: text
 
-    LMCache INFO: lmcache.mp.mp_transfer_mode = handle (overridden, ...)
-    LMCache INFO: Creating transfer context (device_type=cpu, mode=handle)
+    LMCache INFO: lmcache.mp.mp_transfer_mode = engine_driven (overridden, ...)
+    LMCache INFO: Creating transfer context (device_type=cpu, mode=engine_driven)
     LMCache INFO: Migrated CPU KV cache tensor (nbytes=...) to SHM /lmcache_kv_...
 
 **Step 3: Send requests** the same way as in the local quick start.
 
 .. note::
    The default ``auto`` transfer mode routes CPU tensors to the
-   ``data`` path (worker-side gather/scatter). Use
-   ``mp_transfer_mode=handle`` explicitly to get the zero-copy SHM
-   path described above.
+   ``lmcache_driven`` path (worker-side gather/scatter). Use
+   ``mp_transfer_mode=engine_driven`` explicitly to get the zero-copy
+   SHM path described above.
