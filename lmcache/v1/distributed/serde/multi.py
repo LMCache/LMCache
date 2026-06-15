@@ -271,16 +271,20 @@ def single_to_multi_deserializer(inner: Deserializer) -> MultiDeserializer:
 
 
 def validate_group_size(
-    group: Sequence[Optional[MemoryObj]],
+    group: Sequence[object],
     expected: int,
     *,
     role: str,
 ) -> None:
     """Validation helper used by callers and implementations alike.
 
+    Pure arity check: the element type is irrelevant, so ``group`` is
+    typed ``Sequence[object]`` to accept both a ``MemoryObjGroup`` and a
+    ``LayoutDescGroup`` (``role`` may be "src", "dst", or "layout").
+
     Raises ``ValueError`` if ``group`` is not exactly ``expected``
-    long. ``role`` appears in the error message ("src" / "dst") so
-    test failures and runtime errors point at the offending side.
+    long. ``role`` appears in the error message so test failures and
+    runtime errors point at the offending side.
     """
     if len(group) != expected:
         raise ValueError(

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Optional
+from typing import cast
 import struct
 
 # Third Party
@@ -59,7 +59,7 @@ class _FakeMemoryObj:
     tests stay GPU-free and L1Manager-free.
     """
 
-    tensor: Optional[torch.Tensor]
+    tensor: torch.Tensor
 
 
 def _byte_buffer(num_bytes: int) -> _FakeMemoryObj:
@@ -270,7 +270,7 @@ def test_two_slot_roundtrip_all_present() -> None:
 
     k = _bf16_tensor_obj(2, 4, 8, seed=1)
     v = _bf16_tensor_obj(2, 4, 8, seed=2)
-    src: MemoryObjGroup = (k, v)
+    src: MemoryObjGroup = cast(MemoryObjGroup, (k, v))
 
     layout = (
         MemoryLayoutDesc(shapes=[k.tensor.shape], dtypes=[k.tensor.dtype]),
@@ -283,7 +283,7 @@ def test_two_slot_roundtrip_all_present() -> None:
 
     k_out = _FakeMemoryObj(tensor=torch.zeros_like(k.tensor))
     v_out = _FakeMemoryObj(tensor=torch.zeros_like(v.tensor))
-    d.deserialize(buf, (k_out, v_out))
+    d.deserialize(buf, (k_out, v_out))  # type: ignore[arg-type]
 
     assert torch.equal(k_out.tensor, k.tensor)
     assert torch.equal(v_out.tensor, v.tensor)
@@ -299,7 +299,7 @@ def test_serialize_with_none_slot_skips_payload() -> None:
     d = ConcatMultiDeserializer(group_size=2)
 
     v = _bf16_tensor_obj(2, 4, 8, seed=3)
-    src: MemoryObjGroup = (None, v)
+    src: MemoryObjGroup = cast(MemoryObjGroup, (None, v))
 
     layout: LayoutDescGroup = (
         None,
@@ -317,7 +317,7 @@ def test_serialize_with_none_slot_skips_payload() -> None:
 
     # Round-trip into matching dst group: K slot left None to mirror.
     v_out = _FakeMemoryObj(tensor=torch.zeros_like(v.tensor))
-    d.deserialize(buf, (None, v_out))
+    d.deserialize(buf, (None, v_out))  # type: ignore[arg-type]
 
     assert torch.equal(v_out.tensor, v.tensor)
 
@@ -339,13 +339,13 @@ def test_deserialize_with_none_slot_leaves_caller_buffer_untouched() -> None:
     )
     capacity = s.estimate_serialized_size(layout)
     buf = _byte_buffer(capacity)
-    s.serialize((k, v), buf)
+    s.serialize((k, v), buf)  # type: ignore[arg-type]
 
     # Deserialize, but skip the K slot.
     sentinel = torch.full_like(k.tensor, fill_value=42.0)
     k_out_unused = _FakeMemoryObj(tensor=sentinel.clone())
     v_out = _FakeMemoryObj(tensor=torch.zeros_like(v.tensor))
-    d.deserialize(buf, (None, v_out))
+    d.deserialize(buf, (None, v_out))  # type: ignore[arg-type]
 
     # k_out_unused must still equal the sentinel: deserialize did not
     # touch a None dst slot.
@@ -411,7 +411,7 @@ def test_single_to_multi_serializer_round_trip_equivalence() -> None:
     direct_n = inner_s.serialize(src, direct_buf)
 
     multi_buf = _byte_buffer(multi_s.estimate_serialized_size((layout,)))
-    multi_n = multi_s.serialize((src,), multi_buf)
+    multi_n = multi_s.serialize((src,), multi_buf)  # type: ignore[arg-type]
 
     assert direct_n == multi_n
     assert torch.equal(direct_buf.tensor, multi_buf.tensor)
@@ -420,7 +420,7 @@ def test_single_to_multi_serializer_round_trip_equivalence() -> None:
     inner_d.deserialize(direct_buf, direct_out)
 
     multi_out = _FakeMemoryObj(tensor=torch.zeros_like(src.tensor))
-    multi_d.deserialize(multi_buf, (multi_out,))
+    multi_d.deserialize(multi_buf, (multi_out,))  # type: ignore[arg-type]
 
     assert torch.equal(direct_out.tensor, multi_out.tensor)
 
@@ -431,14 +431,14 @@ def test_single_to_multi_serializer_rejects_non_unit_group() -> None:
     src_b = _bf16_tensor_obj(2, 2, seed=8)
     buf = _byte_buffer(64)
     with pytest.raises(ValueError, match="size 1"):
-        multi_s.serialize((src_a, src_b), buf)
+        multi_s.serialize((src_a, src_b), buf)  # type: ignore[arg-type]
 
 
 def test_single_to_multi_serializer_rejects_none_slot() -> None:
     multi_s = single_to_multi_serializer(_IdentitySerializer())
     buf = _byte_buffer(64)
     with pytest.raises(ValueError, match="None src"):
-        multi_s.serialize((None,), buf)
+        multi_s.serialize((None,), buf)  # type: ignore[arg-type]
 
 
 def test_single_to_multi_deserializer_treats_none_slot_as_skip() -> None:
@@ -446,4 +446,4 @@ def test_single_to_multi_deserializer_treats_none_slot_as_skip() -> None:
     multi_d = single_to_multi_deserializer(_IdentityDeserializer())
     src = _byte_buffer(8)
     # Deliberately skip the only output: must not raise.
-    multi_d.deserialize(src, (None,))
+    multi_d.deserialize(src, (None,))  # type: ignore[arg-type]

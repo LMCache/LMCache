@@ -13,7 +13,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Optional
+from typing import cast
 
 # Third Party
 import pytest
@@ -26,6 +26,7 @@ from lmcache.v1.distributed.serde.asym_k16_v8 import (
     AsymK16V8MultiSerializer,
 )
 from lmcache.v1.distributed.serde.multi import MemoryObjGroup
+from lmcache.v1.memory_management import MemoryObj
 
 # =============================================================================
 # Test scaffolding (mirrors the _FakeMemoryObj in test_multi.py / test_fp8.py)
@@ -34,7 +35,7 @@ from lmcache.v1.distributed.serde.multi import MemoryObjGroup
 
 @dataclass
 class _FakeMemoryObj:
-    tensor: Optional[torch.Tensor]
+    tensor: torch.Tensor
 
 
 def _bf16_tensor(*shape: int, seed: int) -> torch.Tensor:
@@ -42,8 +43,15 @@ def _bf16_tensor(*shape: int, seed: int) -> torch.Tensor:
     return torch.randn(*shape, dtype=torch.bfloat16, generator=g).contiguous()
 
 
-def _byte_buffer(num_bytes: int) -> _FakeMemoryObj:
-    return _FakeMemoryObj(tensor=torch.zeros(num_bytes, dtype=torch.uint8))
+def _byte_buffer(num_bytes: int) -> MemoryObj:
+    return cast(
+        MemoryObj, _FakeMemoryObj(tensor=torch.zeros(num_bytes, dtype=torch.uint8))
+    )
+
+
+def _grp(*objs: object) -> MemoryObjGroup:
+    """Cast a tuple of test fakes to the production MemoryObjGroup type."""
+    return cast(MemoryObjGroup, objs)
 
 
 # Llama-3.1-8B-Instruct-shaped chunk: (n_layers=32, seq=64, n_kv_heads=8,
@@ -70,11 +78,11 @@ def test_validate_group_size_rejects_wrong_arity() -> None:
     buf = _byte_buffer(64)
 
     with pytest.raises(ValueError, match="src group length 1"):
-        s.serialize((_FakeMemoryObj(tensor=torch.zeros(8)),), buf)
+        s.serialize(_grp(_FakeMemoryObj(tensor=torch.zeros(8))), buf)
     with pytest.raises(ValueError, match="dst group length 3"):
         d.deserialize(
             buf,
-            (
+            _grp(
                 _FakeMemoryObj(tensor=torch.zeros(8)),
                 _FakeMemoryObj(tensor=torch.zeros(8)),
                 _FakeMemoryObj(tensor=torch.zeros(8)),
@@ -88,7 +96,7 @@ def test_serialize_rejects_none_slot_in_storage_only_mode() -> None:
     buf = _byte_buffer(64)
     v = _FakeMemoryObj(tensor=_bf16_tensor(2, 4, seed=0))
     with pytest.raises(ValueError, match="both K and V must be provided"):
-        s.serialize((None, v), buf)
+        s.serialize(_grp(None, v), buf)
 
 
 # =============================================================================
@@ -103,10 +111,7 @@ def test_storage_only_round_trip_k_bit_exact_v_within_fp8_noise() -> None:
     n_layers, seq, n_heads, head_dim = _LLAMA_KV_SHAPE
     k = _bf16_tensor(n_layers, seq, n_heads, head_dim, seed=1)
     v = _bf16_tensor(n_layers, seq, n_heads, head_dim, seed=2)
-    src: MemoryObjGroup = (
-        _FakeMemoryObj(tensor=k),
-        _FakeMemoryObj(tensor=v),
-    )
+    src = _grp(_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v))
 
     layout = (
         MemoryLayoutDesc(shapes=[k.shape], dtypes=[k.dtype]),
@@ -119,7 +124,7 @@ def test_storage_only_round_trip_k_bit_exact_v_within_fp8_noise() -> None:
 
     k_out = _FakeMemoryObj(tensor=torch.zeros_like(k))
     v_out = _FakeMemoryObj(tensor=torch.zeros_like(v))
-    d.deserialize(buf, (k_out, v_out))
+    d.deserialize(buf, _grp(k_out, v_out))
 
     # K must be bit-exact.
     assert torch.equal(k_out.tensor, k), "K must round-trip bit-exact"
@@ -145,12 +150,12 @@ def test_storage_only_round_trip_with_skipped_v_dst_leaves_buf_untouched() -> No
         MemoryLayoutDesc(shapes=[v.shape], dtypes=[v.dtype]),
     )
     buf = _byte_buffer(s.estimate_serialized_size(layout))
-    s.serialize((_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v)), buf)
+    s.serialize(_grp(_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v)), buf)
 
     sentinel = torch.full_like(v, fill_value=42.0)
     v_unused = _FakeMemoryObj(tensor=sentinel.clone())
     k_out = _FakeMemoryObj(tensor=torch.zeros_like(k))
-    d.deserialize(buf, (k_out, None))
+    d.deserialize(buf, _grp(k_out, None))
 
     assert torch.equal(k_out.tensor, k)
     assert torch.equal(v_unused.tensor, sentinel), (
@@ -183,7 +188,7 @@ def test_estimate_serialized_size_meets_actual_blob_length() -> None:
     )
     capacity = s.estimate_serialized_size(layout)
     buf = _byte_buffer(capacity)
-    n = s.serialize((_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v)), buf)
+    n = s.serialize(_grp(_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v)), buf)
     assert n <= capacity, (
         f"actual blob {n} bytes exceeded estimate {capacity}; "
         f"estimate must be a true upper bound"

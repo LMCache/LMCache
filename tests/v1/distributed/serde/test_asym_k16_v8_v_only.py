@@ -28,7 +28,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass
-from typing import Optional
+from typing import cast
 
 # Third Party
 import pytest
@@ -41,6 +41,8 @@ from lmcache.v1.distributed.serde.asym_k16_v8 import (
     AsymK16V8VOnlyMultiDeserializer,
     AsymK16V8VOnlyMultiSerializer,
 )
+from lmcache.v1.distributed.serde.multi import MemoryObjGroup
+from lmcache.v1.memory_management import MemoryObj
 
 # Mirror the _FakeMemoryObj used elsewhere; lets the test stay GPU-free
 # and L1Manager-free.
@@ -48,7 +50,7 @@ from lmcache.v1.distributed.serde.asym_k16_v8 import (
 
 @dataclass
 class _FakeMemoryObj:
-    tensor: Optional[torch.Tensor]
+    tensor: torch.Tensor
 
 
 def _bf16_tensor(*shape: int, seed: int) -> torch.Tensor:
@@ -56,8 +58,15 @@ def _bf16_tensor(*shape: int, seed: int) -> torch.Tensor:
     return torch.randn(*shape, dtype=torch.bfloat16, generator=g).contiguous()
 
 
-def _byte_buffer(num_bytes: int) -> _FakeMemoryObj:
-    return _FakeMemoryObj(tensor=torch.zeros(num_bytes, dtype=torch.uint8))
+def _byte_buffer(num_bytes: int) -> MemoryObj:
+    return cast(
+        MemoryObj, _FakeMemoryObj(tensor=torch.zeros(num_bytes, dtype=torch.uint8))
+    )
+
+
+def _grp(*objs: object) -> MemoryObjGroup:
+    """Cast a tuple of test fakes to the production MemoryObjGroup type."""
+    return cast(MemoryObjGroup, objs)
 
 
 # Llama-3.1-8B-Instruct-shaped chunk; same dimensions as the
@@ -84,16 +93,17 @@ def test_serialize_rejects_k_present() -> None:
     v = _FakeMemoryObj(tensor=_bf16_tensor(2, 4, seed=1))
     buf = _byte_buffer(64)
     with pytest.raises(ValueError, match="K slot must be None"):
-        s.serialize((k, v), buf)
+        s.serialize(_grp(k, v), buf)
 
 
 def test_serialize_requires_v() -> None:
     s = AsymK16V8VOnlyMultiSerializer()
     buf = _byte_buffer(64)
     with pytest.raises(ValueError, match="V slot is required"):
-        s.serialize((None, None), buf)
+        s.serialize(_grp(None, None), buf)
+    v_no_tensor = _FakeMemoryObj(tensor=None)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="V slot is required"):
-        s.serialize((None, _FakeMemoryObj(tensor=None)), buf)
+        s.serialize(_grp(None, v_no_tensor), buf)
 
 
 def test_estimate_serialized_size_rejects_k_layout_present() -> None:
@@ -123,11 +133,11 @@ def test_v_only_round_trip_v_within_fp8_noise() -> None:
     )
     capacity = s.estimate_serialized_size(layout)
     buf = _byte_buffer(capacity)
-    n = s.serialize((None, _FakeMemoryObj(tensor=v)), buf)
+    n = s.serialize(_grp(None, _FakeMemoryObj(tensor=v)), buf)
     assert 0 < n <= capacity
 
     v_out = _FakeMemoryObj(tensor=torch.zeros_like(v))
-    d.deserialize(buf, (None, v_out))
+    d.deserialize(buf, _grp(None, v_out))
 
     v_diff = (v_out.tensor.float() - v.float()).abs()
     rel = v_diff / (v.float().abs() + 1e-6)
@@ -145,12 +155,12 @@ def test_v_only_deserialize_ignores_k_slot() -> None:
     v = _bf16_tensor(2, 4, 8, 64, seed=3)
     layout = (None, MemoryLayoutDesc(shapes=[v.shape], dtypes=[v.dtype]))
     buf = _byte_buffer(s.estimate_serialized_size(layout))
-    s.serialize((None, _FakeMemoryObj(tensor=v)), buf)
+    s.serialize(_grp(None, _FakeMemoryObj(tensor=v)), buf)
 
     sentinel = torch.full((2, 4, 8, 64), fill_value=42.0, dtype=torch.bfloat16)
     k_unused = _FakeMemoryObj(tensor=sentinel.clone())
     v_out = _FakeMemoryObj(tensor=torch.zeros_like(v))
-    d.deserialize(buf, (k_unused, v_out))
+    d.deserialize(buf, _grp(k_unused, v_out))
 
     # K must be untouched.
     assert torch.equal(k_unused.tensor, sentinel)
@@ -188,9 +198,9 @@ def test_v_only_blob_is_one_third_of_storage_only_blob() -> None:
     )
     v_only_buf = _byte_buffer(v_only_s.estimate_serialized_size(v_only_layout))
     storage_only_n = storage_only_s.serialize(
-        (_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v)), storage_only_buf
+        _grp(_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v)), storage_only_buf
     )
-    v_only_n = v_only_s.serialize((None, _FakeMemoryObj(tensor=v)), v_only_buf)
+    v_only_n = v_only_s.serialize(_grp(None, _FakeMemoryObj(tensor=v)), v_only_buf)
 
     ratio = v_only_n / storage_only_n
     # Tolerance for header overhead.
@@ -218,8 +228,10 @@ def test_v_only_deserializer_refuses_storage_only_blob() -> None:
         MemoryLayoutDesc(shapes=[v.shape], dtypes=[v.dtype]),
     )
     buf = _byte_buffer(storage_only_s.estimate_serialized_size(layout))
-    storage_only_s.serialize((_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v)), buf)
+    storage_only_s.serialize(
+        _grp(_FakeMemoryObj(tensor=k), _FakeMemoryObj(tensor=v)), buf
+    )
 
     v_out = _FakeMemoryObj(tensor=torch.zeros_like(v))
     with pytest.raises(ValueError, match="storage-only-dequant"):
-        v_only_d.deserialize(buf, (None, v_out))
+        v_only_d.deserialize(buf, _grp(None, v_out))
