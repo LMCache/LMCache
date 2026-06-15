@@ -732,10 +732,25 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        """Load each found key from its file via dynamic DMA read."""
+        """Load all found keys from their files via dynamic DMA reads.
+
+        The per-key reads are issued **concurrently** (``asyncio.gather``)
+        rather than awaited one at a time. Each ``dynamic_load_file`` still
+        registers/transfers/deregisters its own file, but the transfers now
+        overlap instead of serializing, so a single multi-chunk request no
+        longer pays (chunks x per-file latency) in series. This is the
+        dominant cost of single-request KV loads.
+
+        TODO: register a request's files in a single ``register_memory``
+        call (one transfer / one deregister), like the static adapter's
+        flat-index path. The consideration is one large per-request
+        registration list instead of many small ones.
+        """
         bitmap = Bitmap(len(keys))
         accessed_keys: list[ObjectKey] = []
         try:
+            coros = []
+            found_positions: list[int] = []
             for i, key in enumerate(keys):
                 with self._lock:
                     storage_obj = self._memory_objects.get(key)
@@ -747,12 +762,28 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
                 file_path = self.nixl_agent.get_file_path_for_key(key)
 
-                await self.nixl_agent.dynamic_load_file(
-                    mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                coros.append(
+                    self.nixl_agent.dynamic_load_file(
+                        mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                    )
                 )
+                found_positions.append(i)
 
-                bitmap.set(i)
-                accessed_keys.append(key)
+            if coros:
+                # return_exceptions=True so one chunk's failure doesn't
+                # discard the chunks that loaded successfully: mark each
+                # key by its own result rather than all-or-nothing.
+                results = await asyncio.gather(*coros, return_exceptions=True)
+                for pos, result in zip(found_positions, results, strict=True):
+                    if isinstance(result, BaseException):
+                        logger.error(
+                            "Dynamic NIXL load failed for key %s: %r",
+                            keys[pos],
+                            result,
+                        )
+                        continue
+                    bitmap.set(pos)
+                    accessed_keys.append(keys[pos])
 
         except Exception:
             logger.exception("Dynamic NIXL load task %d failed", task_id)
