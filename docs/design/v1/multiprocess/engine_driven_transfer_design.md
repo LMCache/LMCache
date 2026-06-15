@@ -2,17 +2,19 @@
 
 ## 1. Motivation
 
-LMCache multiprocess mode originally depended on CUDA IPC: workers send IPC handles,
-and the server reads/writes worker GPU memory directly. That path works well on
-CUDA, but the required primitives are CUDA-specific (IPC memory handles,
-interprocess CUDA events, CUDA stream semantics).
+LMCache multiprocess mode originally depended on CUDA IPC: workers send IPC
+handles, and the server reads/writes worker GPU memory directly. That path
+(now exposed as the **lmcache-driven** transfer mode) works well on CUDA, but
+the required primitives are CUDA-specific (IPC memory handles, interprocess
+CUDA events, CUDA stream semantics).
 
-For **CPU, XPU, HPU, and other non-CUDA devices**, those primitives do not exist.
-The non-GPU context design introduces a device-agnostic path where workers move KV
-data through CPU chunks instead of CUDA IPC handles.
+For **CPU, XPU, HPU, and other non-CUDA devices**, those primitives do not
+exist. The **engine-driven** transfer mode introduces a device-agnostic path
+where the engine side (worker adapter) gathers/scatters KV through CPU chunks
+instead of CUDA IPC handles, then commits the bytes to the server.
 
-Goal: keep the existing CUDA path unchanged while adding a second path that works
-across non-CUDA backends.
+Goal: keep the existing lmcache-driven (CUDA IPC) path unchanged while adding
+a second engine-driven path that works across non-CUDA backends.
 
 ## 2. Design
 
@@ -87,9 +89,11 @@ State machine overview (worker-side):
 ```
 
 Overall data flow:
-- **CUDA path**: worker sends a handle, server pulls/pushes data directly.
-- **Non-CUDA path**: worker gathers/scatters paged KV and exchanges CPU-side data
-  via a transport-specific `EngineDrivenContext` implementation.
+- **lmcache-driven path** (CUDA IPC): worker sends a handle, server pulls/pushes
+  data directly via device memory.
+- **engine-driven path** (CPU/SHM/pickle): worker gathers/scatters paged KV and
+  exchanges CPU-side data via a transport-specific `EngineDrivenContext`
+  implementation.
 
 ### 2.2 Worker Side: TransferContext
 
@@ -100,7 +104,7 @@ four lifecycle and transfer operations.
 
 - **LMCacheDrivenTransferContext** keeps the original CUDA IPC behavior:
   worker sends a handle and server performs direct GPU-side transfer.
-- **EngineDrivenTransferContext** is the non-CUDA path:
+- **EngineDrivenTransferContext** is the engine-driven (non-CUDA) path:
   worker transfers actual data chunks through `EngineDrivenContext`.
 
 `EngineDrivenTransferContext` flows:
@@ -128,13 +132,13 @@ mixed-device configurations by raising an error.
 | LMCacheDrivenTransferContext | Device handle/reference | Server pulls/pushes via IPC | Async MQ future |
 | EngineDrivenTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
 
-### 2.3 Server Side: GPU Context vs Non-GPU Context
+### 2.3 Server Side: LMCache-Driven Module vs Engine-Driven Module
 
-- **GPU Context (existing path):** server uses CUDA IPC handles to access worker
-  device memory directly.
-- **Non-GPU Context:** server uses `EngineDrivenTransferModule`, which stores
-  per-instance `EngineDrivenContextEntry` metadata and delegates transfer logic to a
-  `TransferStrategy`.
+- **LMCache-driven module (existing path):** server uses `LMCacheDrivenTransferModule`
+  with CUDA IPC handles to access worker device memory directly.
+- **Engine-driven module:** server uses `EngineDrivenTransferModule`, which
+  stores per-instance `EngineDrivenContextEntry` metadata and delegates transfer
+  logic to a `TransferStrategy`.
 
 Server transfer strategy implementations:
 - **PickleTransferStrategy**: pure pickle prepare/commit behavior.
@@ -156,7 +160,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 | Transport | Copies | Data flow |
 |---|---|---|
-| Engine-driven (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
+| LMCache-driven (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
 | Pickle | 4 | GPU KV → CPU chunk → serialize → deserialize → CPU memory object |
 | SHM | 1 | GPU KV → CPU memory object (SHM mapped) |
 
@@ -164,15 +168,15 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 | Transport | Copies | Data flow |
 |---|---|---|
-| Engine-driven (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
+| LMCache-driven (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
 | Pickle | 4 | CPU memory object → serialize → deserialize → CPU chunk → GPU KV |
 | SHM | 1 | CPU memory object (SHM mapped) → GPU KV |
 
 | Transport | Pros | Cons | Best fit |
 |---|---|---|---|
-| Engine-driven (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
+| LMCache-driven (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
 | Pickle | Works everywhere, no SHM setup | Extra serialization + copy overhead | Universal fallback |
-| SHM | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput non-CUDA setups |
+| SHM | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput engine-driven setups |
 
 ### 2.5 Current File Layout (Key Components)
 
@@ -185,12 +189,12 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 ## 3. Protocol & Data Flow
 
-### 3.1 MQ Request Types Used by Non-GPU Path
+### 3.1 MQ Request Types Used by Engine-Driven Path
 
-The non-GPU path uses five request types:
+The engine-driven path uses five request types:
 
 1. `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`  
-   Worker registers non-CUDA KV layout metadata. Server then:
+   Worker registers engine-driven KV layout metadata. Server then:
    - stores `EngineDrivenContextEntry` (metadata + model/world info)
    - registers `MemoryLayoutDesc` in `LayoutDescRegistry`
    - creates `TransferStrategy` from engine-level `shm_pool_info`
