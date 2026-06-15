@@ -23,6 +23,7 @@ Supported Backends
    mooncake
    nixl
    redis
+   bigtable
    resp
    s3
    sagemaker_hyperpod

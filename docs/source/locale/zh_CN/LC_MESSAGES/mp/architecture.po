@@ -40,24 +40,24 @@ msgstr "服务器变体"
 
 #: ../../source/mp/architecture.rst:45
 msgid ""
-"All server entry points share the same ``MPCacheEngine`` and "
-"``StorageManager`` core. ``MPCacheEngine`` is now a thin compositor: it "
-"holds an ``MPCacheEngineContext`` and a list of ``EngineModule`` "
+"All server entry points share the same ``MPCacheServer`` and "
+"``StorageManager`` core. ``MPCacheServer`` is now a thin compositor: it "
+"holds an ``MPCacheServerContext`` and a list of ``EngineModule`` "
 "instances assembled by ``build_engine_modules()`` (in ``server.py``) "
 "based on ``--engine-type`` and ``--supported-transfer-mode``."
-msgstr "所有服务器入口点共享相同的 ``MPCacheEngine`` 和 ``StorageManager`` 核心。 ``MPCacheEngine`` 现在是一个轻量级合成器：它持有一个 ``MPCacheEngineContext`` 和一个由 ``build_engine_modules()``（在 ``server.py`` 中）基于 ``--engine-type`` 和 ``--supported-transfer-mode`` 组装的 ``EngineModule`` 实例列表。"
+msgstr "所有服务器入口点共享相同的 ``MPCacheServer`` 和 ``StorageManager`` 核心。 ``MPCacheServer`` 现在是一个轻量级合成器：它持有一个 ``MPCacheServerContext`` 和一个由 ``build_engine_modules()``（在 ``server.py`` 中）基于 ``--engine-type`` 和 ``--supported-transfer-mode`` 组装的 ``EngineModule`` 实例列表。"
 
 #: ../../source/mp/architecture.rst:51
 msgid ""
 "**``server.py``** -- The default ZMQ-only server.  Creates an "
-"``MPCacheEngine``, assembles the engine modules (``LookupModule`` + "
+"``MPCacheServer``, assembles the engine modules (``LookupModule`` + "
 "``ManagementModule`` + ``GPUTransferModule`` and/or "
 "``NonGPUTransferModule`` depending on ``--supported-transfer-mode`` — "
 "``gpu`` or ``non_gpu`` loads just one, ``auto`` (default) loads both — "
 "plus ``BlendModule`` when ``--engine-type blend``), starts a "
 "``MessageQueueServer``, registers handlers for every ``RequestType`` "
 "exposed by the loaded modules, and blocks in a keep-alive loop."
-msgstr "**``server.py``** -- 默认的仅 ZMQ 服务器。创建一个 ``MPCacheEngine``，组装引擎模块（``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule`` 和/或 ``NonGPUTransferModule``，具体取决于 ``--supported-transfer-mode`` — ``gpu`` 或 ``non_gpu`` 仅加载一个，``auto``（默认）加载两个 — 当 ``--engine-type blend`` 时还会加载 ``BlendModule``），启动 ``MessageQueueServer``，为加载的模块暴露的每个 ``RequestType`` 注册处理程序，并在保持活动的循环中阻塞。"
+msgstr "**``server.py``** -- 默认的仅 ZMQ 服务器。创建一个 ``MPCacheServer``，组装引擎模块（``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule`` 和/或 ``NonGPUTransferModule``，具体取决于 ``--supported-transfer-mode`` — ``gpu`` 或 ``non_gpu`` 仅加载一个，``auto``（默认）加载两个 — 当 ``--engine-type blend`` 时还会加载 ``BlendModule``），启动 ``MessageQueueServer``，为加载的模块暴露的每个 ``RequestType`` 注册处理程序，并在保持活动的循环中阻塞。"
 
 #: ../../source/mp/architecture.rst:61
 msgid ""
@@ -522,14 +522,14 @@ msgstr "可观察性内部实现"
 msgid ""
 "**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global "
 "singleton initialized at server startup by ``init_observability()``. "
-"Producers (L1Manager, StorageManager, MPCacheEngine) publish ``Event`` "
+"Producers (L1Manager, StorageManager, MPCacheServer) publish ``Event`` "
 "objects to a bounded queue (``--event-bus-queue-size``, default 10000, "
 "tail-drop on overflow).  A background drain thread dispatches each event "
 "to all registered subscribers."
 msgstr ""
 "**EventBus** (``lmcache/v1/mp_observability/event_bus.py``) 是一个在服务器启动时由 "
 "``init_observability()`` "
-"初始化的全局单例。生产者（L1Manager、StorageManager、MPCacheEngine）将 ``Event`` "
+"初始化的全局单例。生产者（L1Manager、StorageManager、MPCacheServer）将 ``Event`` "
 "对象发布到一个有界队列中 (``--event-bus-queue-size``, 默认 "
 "10000，溢出时尾部丢弃)。一个后台排空线程将每个事件分发给所有注册的订阅者。"
 
@@ -661,8 +661,8 @@ msgstr ""
 " 或 ``blend_v2``），并将请求名称添加到该模块的 ``REQUEST_NAMES`` 中。"
 
 #: ../../source/mp/architecture.rst:409
-msgid "Implement the handler method on ``MPCacheEngine`` (or ``BlendEngineV2``)."
-msgstr "在 ``MPCacheEngine`` （或 ``BlendEngineV2``）上实现处理程序方法。"
+msgid "Implement the handler method on ``MPCacheServer`` (or ``BlendEngineV2``)."
+msgstr "在 ``MPCacheServer`` （或 ``BlendEngineV2``）上实现处理程序方法。"
 
 #: ../../source/mp/architecture.rst:410
 msgid ""
@@ -687,8 +687,8 @@ msgid "``lmcache/v1/multiprocess/server.py``"
 msgstr "``lmcache/v1/multiprocess/server.py``"
 
 #: ../../source/mp/architecture.rst:422
-msgid "MPCacheEngine + ZMQ server entry point"
-msgstr "MPCacheEngine + ZMQ 服务器入口点"
+msgid "MPCacheServer + ZMQ server entry point"
+msgstr "MPCacheServer + ZMQ 服务器入口点"
 
 #: ../../source/mp/architecture.rst:423
 msgid "``lmcache/v1/multiprocess/config.py``"
@@ -703,8 +703,8 @@ msgid "``lmcache/v1/multiprocess/engine_context.py``"
 msgstr "``lmcache/v1/multiprocess/engine_context.py``"
 
 #: ../../source/mp/architecture.rst:426
-msgid "MPCacheEngineContext (shared state passed to every EngineModule)"
-msgstr "MPCacheEngineContext（传递给每个 EngineModule 的共享状态）"
+msgid "MPCacheServerContext (shared state passed to every EngineModule)"
+msgstr "MPCacheServerContext（传递给每个 EngineModule 的共享状态）"
 
 #: ../../source/mp/architecture.rst:427
 msgid "``lmcache/v1/multiprocess/engine_module.py``"

@@ -15,7 +15,7 @@ import torch
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
 
@@ -207,12 +207,12 @@ class PrefetchHandle:
 
 
 def ipc_key_to_object_keys(
-    ipc_key: IPCCacheEngineKey,
+    ipc_key: IPCCacheServerKey,
     chunk_hashes: list[bytes],
     object_group_ids: list[int],
 ) -> list[list[ObjectKey]]:
     """
-    Convert a single IPCCacheEngineKey and its chunk hashes to per-object-group
+    Convert a single IPCCacheServerKey and its chunk hashes to per-object-group
     lists of ObjectKey.
 
     When the ipc_key's worker_id is None, each chunk hash is exploded into
@@ -241,7 +241,7 @@ def ipc_key_to_object_keys(
     if ipc_key.worker_id is None:
         # For look up request, we want to expand to all workers
         # TODO (ApostaC): include local world size/rank info
-        # in the future once it's in IPCCacheEngineKey
+        # in the future once it's in IPCCacheServerKey
         kv_ranks = [
             ObjectKey.ComputeKVRank(
                 world_size=ipc_key.world_size,

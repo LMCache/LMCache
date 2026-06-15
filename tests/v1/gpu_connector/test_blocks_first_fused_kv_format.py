@@ -50,7 +50,7 @@ def test_discovery_splits_fused_axis():
     fmt, norm = U.normalize_kv_and_discover_format(
         _raw_blocks_first_caches(), EngineType.VLLM, HINTS
     )
-    assert fmt == lmc_ops.GPUKVFormat.NL_X_NB_NH_BS_TWO_HS
+    assert fmt == lmc_ops.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
     # 4D [NB, NH, BS, 2*HS] -> canonical 5D [NB, NH, BS, 2, HS]
     assert tuple(norm[0].shape) == (NB, NH, BS, 2, HS)
 

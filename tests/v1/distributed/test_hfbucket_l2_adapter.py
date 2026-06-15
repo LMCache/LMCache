@@ -195,7 +195,7 @@ class _RecordingListener(L2AdapterListener):
         self.accessed: list[list[ObjectKey]] = []
         self.deleted: list[list[ObjectKey]] = []
 
-    def on_l2_keys_stored(self, keys):
+    def on_l2_keys_stored(self, keys, sizes):
         self.stored.append(list(keys))
 
     def on_l2_keys_accessed(self, keys):

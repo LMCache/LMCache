@@ -61,7 +61,7 @@ Validated models
       required for this model; ``--enable-expert-parallel`` distributes the MoE
       experts across the tensor-parallel ranks. Adjust
       ``--tensor-parallel-size`` to match your hardware. For the generic
-      LMCache + vLLM wiring (ports, remote hosts, in-process mode), see
+      LMCache + vLLM wiring (ports, remote hosts), see
       :doc:`../mp/quickstart`.
 
       If there are any issues with vLLM setup, please refer to the

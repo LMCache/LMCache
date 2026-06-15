@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Management and utility operations for the MPCacheEngine."""
+"""Management and utility operations for the MPCacheServer."""
 
 # Standard
 import threading
@@ -8,7 +8,7 @@ import threading
 from lmcache.logging import init_logger
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import BlockAllocationRecord
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
@@ -28,12 +28,12 @@ class ManagementModule:
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheEngineContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
