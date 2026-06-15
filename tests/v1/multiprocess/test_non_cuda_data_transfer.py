@@ -42,8 +42,8 @@ if TYPE_CHECKING:
         RegisterNonGpuContextPayload,
     )
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
-        LMCacheDrivenTransferModule,
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+        EngineDrivenTransferModule,
     )
 
 
@@ -57,7 +57,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: Optional storage mock; defaults to a new ``MagicMock``.
         mock_session: Optional session mock; defaults to a new ``MagicMock``.
 
-    Returns a tuple of ``(LMCacheDrivenTransferModule, storage MagicMock,
+    Returns a tuple of ``(EngineDrivenTransferModule, storage MagicMock,
     session MagicMock, MPCacheServerContext)``.
     """
 
@@ -70,7 +70,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
     ) -> tuple[
-        "LMCacheDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
+        "EngineDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
     ]: ...
 
 
@@ -644,8 +644,8 @@ def server_module_factory(
 
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
-        LMCacheDrivenTransferModule,
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+        EngineDrivenTransferModule,
     )
 
     stack = ExitStack()
@@ -658,7 +658,7 @@ def server_module_factory(
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
     ) -> tuple[
-        "LMCacheDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
+        "EngineDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
     ]:
         """Create a patched module/context plus storage/session mocks.
 
@@ -707,7 +707,7 @@ def server_module_factory(
             storage_manager_config=storage_manager_config,
             chunk_size=chunk_size,
         )
-        module = LMCacheDrivenTransferModule(ctx)
+        module = EngineDrivenTransferModule(ctx)
 
         return module, mock_storage, mock_session, ctx
 

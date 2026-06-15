@@ -47,8 +47,8 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
-    EngineDrivenTransferModule,
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.protocol import RequestType
@@ -317,12 +317,12 @@ def _unique_token_coverage(results: list[CBMatchResult]) -> int:
 class BlendV3Module:
     """Paged-aware V3 CacheBlend. Wraps EngineDrivenTransfer STORE to register
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
-    GPU state via :class:`EngineDrivenTransferModule.cache_contexts`."""
+    GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
     def __init__(
         self,
         ctx: MPCacheServerContext,
-        gpu_transfer: EngineDrivenTransferModule,
+        gpu_transfer: LMCacheDrivenTransferModule,
         lookup_module: LookupModule,
         coordinator: "BlendCoordinatorClient | None" = None,
     ):
