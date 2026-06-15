@@ -239,6 +239,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter._pending_lookups = set()
     adapter._per_server_hits = {}
     adapter._finished_lookup_results = {}
+    adapter._lookup_params = {}
 
     token_ids = list(range(512))
 
