@@ -83,6 +83,23 @@ class DeleteRequest:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_primary_l2(request: Request):
+    """Look up the primary L2 adapter or raise the right ``HTTPException``.
+
+    Wraps ``StorageManager.primary_l2()``: maps the "no L2 adapters
+    configured" ``ValueError`` to HTTP 503 so handlers don't repeat
+    the try/except boilerplate.
+
+    Returns:
+        ``(descriptor, adapter)``.
+    """
+    sm = _get_storage_manager(request)
+    try:
+        return sm.primary_l2()
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+
 @router.delete("/l2", response_model=None)
 async def delete_l2(body: DeleteRequest, request: Request) -> dict[str, object]:
     """Delete a caller-supplied list of keys from the primary L2 adapter.
@@ -110,8 +127,6 @@ async def delete_l2(body: DeleteRequest, request: Request) -> dict[str, object]:
             ),
         )
 
-    sm = _get_storage_manager(request)
-
     parsed = []
     for i, cache_key in enumerate(body.keys):
         try:
@@ -119,19 +134,28 @@ async def delete_l2(body: DeleteRequest, request: Request) -> dict[str, object]:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"keys[{i}]: {exc}") from None
 
+    desc, adapter = _resolve_primary_l2(request)
+
+    response: dict[str, object] = {
+        "requested": len(parsed),
+        "adapter": desc.type_name,
+    }
     try:
-        # ``delete_l2`` is synchronous and blocks on adapter I/O (the
-        # S3 adapter bounces the call through
+        # ``adapter.delete`` is synchronous and blocks on adapter I/O
+        # (the S3 adapter bounces the call through
         # ``run_coroutine_threadsafe(...).result(timeout=30.0)``).
         # Off-load to a worker thread so the FastAPI event loop stays
         # free for other requests.
-        report = await asyncio.to_thread(sm.delete_l2, parsed)
-    except ValueError as exc:
-        # Surfaced when no L2 adapters are configured — operationally
-        # equivalent to "engine isn't ready to serve this endpoint."
-        raise HTTPException(status_code=503, detail=str(exc)) from None
-
-    return {"requested": len(parsed), **report}
+        await asyncio.to_thread(adapter.delete, parsed)
+    except Exception as exc:
+        # Best-effort contract: adapter exceptions are reported in the
+        # 200 body so operators see the failure cleanly, not as a 500
+        # with a stack trace.
+        response["ok"] = False
+        response["error"] = str(exc)
+        return response
+    response["ok"] = True
+    return response
 
 
 @router.get("/l2/keys", response_model=None)
@@ -159,28 +183,30 @@ async def list_l2_keys(
         501: primary adapter does not implement listing.
         503: engine not initialized OR no L2 adapters configured.
     """
-    sm = _get_storage_manager(request)
+    desc, adapter = _resolve_primary_l2(request)
 
     try:
         # Same rationale as ``delete_l2``: ``list_l2_keys`` is a
         # synchronous adapter call that issues blocking S3
         # ``ListObjectsV2`` requests, so off-load it to a worker
         # thread to keep the event loop responsive.
-        return await asyncio.to_thread(
-            sm.list_l2_keys,
+        page = await asyncio.to_thread(
+            adapter.list_l2_keys,
             model_name=model_name,
             page_size=page_size,
-            page_token=page_token,
+            cursor=page_token,
         )
     except ValueError as exc:
-        msg = str(exc)
-        # ``no L2 adapters configured`` → 503 (server-side state). All
-        # other ``ValueError``s from this code path are adapter-level
-        # validation failures (e.g. malformed page_token) → 400.
-        status_code = 503 if msg.startswith("no L2 adapters") else 400
-        raise HTTPException(status_code=status_code, detail=msg) from None
+        # Adapter-level validation failure (e.g. malformed page_token).
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     except NotImplementedError as exc:
         raise HTTPException(
             status_code=501,
             detail=f"primary L2 adapter does not support listing: {exc}",
         ) from None
+
+    return {
+        "adapter": desc.type_name,
+        "entries": page.entries,
+        "next_page_token": page.next_page_token,
+    }

@@ -3,10 +3,12 @@
 HTTP-level tests for ``l2_api`` — the ``DELETE /l2`` and
 ``GET /l2/keys`` endpoints.
 
-The endpoints reach into ``request.app.state.engine.storage_manager``;
-these tests inject a fake storage manager that records calls and
-serves canned responses, so the HTTP layer can be exercised without
-spinning up a real cache engine.
+The endpoints reach into ``request.app.state.engine.storage_manager``
+and call ``storage_manager.primary_l2()`` to obtain the
+``(descriptor, adapter)`` pair, then invoke the adapter's own methods.
+These tests inject a fake storage manager that records calls and serves
+canned responses, so the HTTP layer can be exercised without spinning
+up a real cache engine.
 """
 
 # Standard
@@ -20,44 +22,62 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
-from lmcache.v1.distributed.l2_adapters.base import KeyEntry
+from lmcache.v1.distributed.l2_adapters.base import KeyEntry, KeyListPage
 from lmcache.v1.multiprocess.http_apis.l2_api import router as l2_keys_router
 
 
 @dataclass
-class _FakeStorageManager:
-    """Records calls and serves staged responses for the endpoints."""
+class _FakeDescriptor:
+    """Minimal descriptor — only ``type_name`` is read by the handler."""
+
+    type_name: str = "s3"
+
+
+@dataclass
+class _FakeAdapter:
+    """Records calls and serves canned responses for adapter methods."""
 
     delete_calls: list[list[ObjectKey]] = field(default_factory=list)
-    delete_response: Optional[dict[str, object]] = None
     delete_raises: Optional[BaseException] = None
 
-    list_page: Optional[dict[str, object]] = None
+    list_page: Optional[KeyListPage] = None
     list_raises: Optional[BaseException] = None
     last_list_kwargs: dict[str, object] = field(default_factory=dict)
 
-    def delete_l2(self, keys: list[ObjectKey]) -> dict[str, object]:
+    def delete(self, keys: list[ObjectKey]) -> None:
         self.delete_calls.append(list(keys))
         if self.delete_raises is not None:
             raise self.delete_raises
-        return self.delete_response or {"adapter": "s3", "ok": True}
 
     def list_l2_keys(
         self,
         model_name: Optional[str] = None,
         page_size: int = 500,
-        page_token: Optional[str] = None,
-    ) -> dict[str, object]:
+        cursor: Optional[str] = None,
+    ) -> KeyListPage:
         self.last_list_kwargs = {
             "model_name": model_name,
             "page_size": page_size,
-            "page_token": page_token,
+            "cursor": cursor,
         }
         if self.list_raises is not None:
             raise self.list_raises
-        if self.list_page is None:
-            return {"adapter": "", "entries": (), "next_page_token": None}
-        return self.list_page
+        return self.list_page or KeyListPage(entries=(), next_page_token=None)
+
+
+@dataclass
+class _FakeStorageManager:
+    """Implements ``primary_l2()``. ``adapter=None`` makes the call
+    raise ``ValueError("no L2 adapters configured")`` — the way a real
+    SM signals an empty adapter list."""
+
+    adapter: Optional[_FakeAdapter] = None
+    descriptor_type_name: str = "s3"
+
+    def primary_l2(self) -> tuple[_FakeDescriptor, _FakeAdapter]:
+        if self.adapter is None:
+            raise ValueError("no L2 adapters configured")
+        return _FakeDescriptor(type_name=self.descriptor_type_name), self.adapter
 
 
 class _FakeEngine:
@@ -86,7 +106,8 @@ def _hex(n: int, width: int = 4) -> str:
 
 class TestDeleteEndpoint:
     def test_happy_path(self):
-        sm = _FakeStorageManager()
+        adapter = _FakeAdapter()
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
 
         resp = client.request(
@@ -111,7 +132,7 @@ class TestDeleteEndpoint:
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body == {"requested": 2, "adapter": "s3", "ok": True}
-        forwarded = sm.delete_calls[0]
+        forwarded = adapter.delete_calls[0]
         assert forwarded[0] == ObjectKey(
             chunk_hash=b"\x00\x00\x00\x01",
             model_name="llama",
@@ -120,20 +141,22 @@ class TestDeleteEndpoint:
         )
         assert forwarded[1].cache_salt == ""  # default for omitted field
 
-    def test_propagates_storage_manager_failure_in_body(self):
-        sm = _FakeStorageManager(
-            delete_response={"adapter": "s3", "ok": False, "error": "s3 down"}
-        )
+    def test_propagates_adapter_failure_in_body(self):
+        adapter = _FakeAdapter(delete_raises=RuntimeError("s3 down"))
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
 
         resp = client.request("DELETE", "/l2", json={"keys": []})
+        # Adapter exceptions are surfaced as a 200 body with ok=false +
+        # error, NOT as a 500 — operators want a structured failure.
         assert resp.status_code == 200, resp.text
         body = resp.json()
+        assert body["adapter"] == "s3"
         assert body["ok"] is False
-        assert body["error"] == "s3 down"
+        assert "s3 down" in body["error"]
 
     def test_503_when_no_adapters_configured(self):
-        sm = _FakeStorageManager(delete_raises=ValueError("no L2 adapters configured"))
+        sm = _FakeStorageManager(adapter=None)
         client = TestClient(_make_app(sm))
         resp = client.request("DELETE", "/l2", json={"keys": []})
         assert resp.status_code == 503
@@ -165,7 +188,8 @@ class TestDeleteEndpoint:
     def test_422_on_pydantic_validation_failure(self, body):
         """Pydantic-level body-shape errors surface as 422 (FastAPI's
         default for request validation)."""
-        sm = _FakeStorageManager()
+        adapter = _FakeAdapter()
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
         if isinstance(body, str):
             resp = client.request(
@@ -177,7 +201,7 @@ class TestDeleteEndpoint:
         else:
             resp = client.request("DELETE", "/l2", json=body)
         assert resp.status_code == 422, resp.text
-        assert sm.delete_calls == []
+        assert adapter.delete_calls == []
 
     @pytest.mark.parametrize(
         "body",
@@ -200,11 +224,12 @@ class TestDeleteEndpoint:
     def test_400_on_object_key_invariant_violation(self, body):
         """Bodies that type-check but violate ``ObjectKey`` invariants
         surface as 400 from our handler."""
-        sm = _FakeStorageManager()
+        adapter = _FakeAdapter()
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
         resp = client.request("DELETE", "/l2", json=body)
         assert resp.status_code == 400, resp.text
-        assert sm.delete_calls == []
+        assert adapter.delete_calls == []
 
     def test_400_when_batch_exceeds_cap(self):
         """The handler enforces the ``_MAX_DELETE_BATCH`` cap (the
@@ -213,7 +238,8 @@ class TestDeleteEndpoint:
         # First Party
         from lmcache.v1.multiprocess.http_apis.l2_api import _MAX_DELETE_BATCH
 
-        sm = _FakeStorageManager()
+        adapter = _FakeAdapter()
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
         oversized = [
             {"chunk_hash_hex": _hex(i), "model_name": "m", "kv_rank": 0}
@@ -222,7 +248,7 @@ class TestDeleteEndpoint:
         resp = client.request("DELETE", "/l2", json={"keys": oversized})
         assert resp.status_code == 400, resp.text
         assert "too many keys" in resp.json()["detail"]
-        assert sm.delete_calls == []
+        assert adapter.delete_calls == []
 
 
 # =============================================================================
@@ -238,13 +264,13 @@ class TestListEndpoint:
             kv_rank=2,
             cache_salt="alice",
         )
-        sm = _FakeStorageManager(
-            list_page={
-                "adapter": "s3",
-                "entries": (KeyEntry(key=k1.to_encoded_object_key(), size_bytes=4096),),
-                "next_page_token": "opaque-cursor",
-            }
+        adapter = _FakeAdapter(
+            list_page=KeyListPage(
+                entries=(KeyEntry(key=k1.to_encoded_object_key(), size_bytes=4096),),
+                next_page_token="opaque-cursor",
+            )
         )
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
 
         resp = client.get(
@@ -270,41 +296,47 @@ class TestListEndpoint:
             }
         ]
         assert body["next_page_token"] == "opaque-cursor"
-        assert sm.last_list_kwargs == {
+        assert adapter.last_list_kwargs == {
             "model_name": "llama",
             "page_size": 100,
-            "page_token": None,
+            "cursor": None,
         }
 
-    def test_no_filter_passes_none_to_storage_manager(self):
-        sm = _FakeStorageManager()
+    def test_no_filter_passes_none_to_adapter(self):
+        adapter = _FakeAdapter()
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
         client.get("/l2/keys")
-        assert sm.last_list_kwargs["model_name"] is None
+        assert adapter.last_list_kwargs["model_name"] is None
 
-    def test_page_token_threads_through(self):
-        sm = _FakeStorageManager()
+    def test_page_token_threads_through_as_cursor(self):
+        adapter = _FakeAdapter()
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
         client.get("/l2/keys", params={"page_token": "abc"})
-        assert sm.last_list_kwargs["page_token"] == "abc"
+        # The HTTP query param ``page_token`` is forwarded to the
+        # adapter under its native name ``cursor``.
+        assert adapter.last_list_kwargs["cursor"] == "abc"
 
     def test_503_when_no_adapters_configured(self):
-        sm = _FakeStorageManager(list_raises=ValueError("no L2 adapters configured"))
+        sm = _FakeStorageManager(adapter=None)
         client = TestClient(_make_app(sm))
         resp = client.get("/l2/keys")
         assert resp.status_code == 503
 
     def test_501_when_primary_adapter_does_not_support_listing(self):
-        sm = _FakeStorageManager(
+        adapter = _FakeAdapter(
             list_raises=NotImplementedError("FsL2Adapter has no listing")
         )
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
         resp = client.get("/l2/keys")
         assert resp.status_code == 501
         assert "does not support listing" in resp.json()["detail"]
 
     def test_400_on_invalid_page_size(self):
-        sm = _FakeStorageManager()
+        adapter = _FakeAdapter()
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
         # Below floor — FastAPI Query ge=1 → 422 from validation layer.
         resp = client.get("/l2/keys", params={"page_size": 0})
@@ -319,11 +351,12 @@ class TestListEndpoint:
         assert resp.status_code == 503
 
     def test_400_on_malformed_page_token_from_adapter(self):
-        # Adapter-level "malformed cursor" ValueError → 400 (the
-        # endpoint distinguishes from "no adapters" by message prefix).
-        sm = _FakeStorageManager(
+        # Adapter-level "malformed cursor" ValueError → 400 (distinct
+        # path from "no adapters" which the SM owns and maps to 503).
+        adapter = _FakeAdapter(
             list_raises=ValueError("malformed S3 list cursor: invalid literal")
         )
+        sm = _FakeStorageManager(adapter=adapter)
         client = TestClient(_make_app(sm))
         resp = client.get("/l2/keys", params={"page_token": "garbage"})
         assert resp.status_code == 400

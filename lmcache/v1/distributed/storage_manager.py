@@ -774,93 +774,35 @@ class StorageManager:
         result["adapter_index"] = adapter_index
         return result
 
-    def delete_l2(self, keys: list[ObjectKey]) -> dict[str, object]:
-        """Delete ``keys`` from the primary (first-configured) L2 adapter.
+    def primary_l2(self) -> tuple[AdapterDescriptor, L2AdapterInterface]:
+        """Return the primary (first-configured) L2 adapter and its descriptor.
 
-        Args:
-            keys: keys to delete. An empty list is forwarded to the
-                adapter unchanged; the adapter decides whether to no-op.
+        Callers that need to operate on the primary L2 adapter — the
+        ``DELETE /l2`` and ``GET /l2/keys`` HTTP handlers, the
+        coordinator's resync flow, ad-hoc admin tooling — pick the pair
+        up via this method and invoke the adapter's methods directly
+        rather than going through a per-operation facade on the storage
+        manager. The descriptor's ``type_name`` is what HTTP responses
+        surface as the ``"adapter"`` field.
 
         Returns:
-            ``{"adapter": <type_name>, "ok": True}`` on success, or
-            ``{"adapter": <type_name>, "ok": False, "error": <str>}``
-            when the adapter's ``delete`` raised. Best-effort:
-            underlying adapter exceptions are caught and reported, not
-            re-raised, so the HTTP layer can return a structured 200
-            response even when a downstream call fails.
+            ``(descriptor, adapter)`` for the first configured L2
+            adapter.
 
         Raises:
-            ValueError: when no L2 adapters are configured.
+            ValueError: when no L2 adapters are configured (callers
+                typically map this to HTTP 503).
 
         Note:
-            The adapter is responsible for honoring its own in-flight
-            locks and firing ``on_l2_keys_deleted`` on listeners.
-
-            L1 is intentionally NOT touched — see the module docstring
-            of ``http_apis/l2_api.py`` for rationale.
+            Do NOT cache the returned reference across awaits or
+            request boundaries: ``reconfigure_l2_adapter`` may swap
+            adapters in/out at runtime, after which a held reference
+            points at a closed adapter. Re-call ``primary_l2`` on every
+            operation.
         """
         if not self._l2_adapters:
             raise ValueError("no L2 adapters configured")
-        target = self._l2_adapters[0]
-        desc = self._adapter_descriptors[0]
-        try:
-            target.delete(keys)
-        except Exception as exc:
-            logger.exception(
-                "L2 adapter %s delete(%d keys) failed", desc.type_name, len(keys)
-            )
-            return {"adapter": desc.type_name, "ok": False, "error": str(exc)}
-        return {"adapter": desc.type_name, "ok": True}
-
-    def list_l2_keys(
-        self,
-        model_name: str | None = None,
-        page_size: int = 500,
-        page_token: str | None = None,
-    ) -> dict[str, object]:
-        """Paginate keys resident on the primary (first-configured) L2
-        adapter.
-
-        Args:
-            model_name: filter by ``ObjectKey.model_name``. ``None``
-                means no filter.
-            page_size: maximum entries per page. Must be positive.
-            page_token: opaque cursor returned by the previous call.
-                Forwarded to the adapter verbatim (the adapter owns the
-                cursor format; ``StorageManager`` does no wrapping).
-                ``None`` on the first call.
-
-        Returns:
-            ``{"adapter": <type_name>, "entries": tuple[KeyEntry, ...],
-            "next_page_token": <opaque> | None}``. ``next_page_token``
-            is ``None`` iff the underlying adapter signaled exhaustion.
-            ``entries`` are :class:`KeyEntry` dataclasses; FastAPI /
-            ``jsonable_encoder`` serializes them via ``asdict``.
-
-        Raises:
-            ValueError: when no L2 adapters are configured, when
-                ``page_size`` is non-positive, or when the
-                ``page_token`` is malformed (adapter-defined).
-            NotImplementedError: when the primary adapter does not
-                implement listing (e.g. when ``fs`` is configured
-                first in v1).
-        """
-        if page_size <= 0:
-            raise ValueError(f"page_size must be positive (got {page_size})")
-        if not self._l2_adapters:
-            raise ValueError("no L2 adapters configured")
-        target = self._l2_adapters[0]
-        desc = self._adapter_descriptors[0]
-        page = target.list_l2_keys(
-            model_name=model_name,
-            page_size=page_size,
-            cursor=page_token,
-        )
-        return {
-            "adapter": desc.type_name,
-            "entries": page.entries,
-            "next_page_token": page.next_page_token,
-        }
+        return self._adapter_descriptors[0], self._l2_adapters[0]
 
     def clear(self, force: bool = False):
         """
