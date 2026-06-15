@@ -327,9 +327,8 @@ class ParallelStrategy:
 
     @property
     def is_kv_writer(self) -> bool:
-        """Whether this rank is responsible for storing KV to LMCache."""
+        """Whether this rank is responsible for storing KV."""
         if not self.use_mla:
-            # Non-MLA: every rank owns a distinct KV shard and must write it.
             return True
         # MLA: only first rank per node is a writer.
         return self.vllm_worker_id % (self.tp_size // self.n_servers) == 0
@@ -645,10 +644,10 @@ class LMCacheMPSchedulerAdapter:
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first use."""
-        if self._heartbeats:
+        if self._heartbeats is not None:
             return
         with self._heartbeat_lock:
-            if self._heartbeats:
+            if self._heartbeats is not None:
                 return
             for url, client in self.mq_clients.items():
                 hb = HeartbeatThread(
@@ -718,44 +717,29 @@ class LMCacheMPSchedulerAdapter:
             for url in self._server_urls
         }
 
-        results: list[tuple[str, bool]] = []
+        # Any one server failure means the whole lookup fails.
         for url, fut in futures.items():
             try:
                 fut.result(timeout=self._mq_timeout)
-                results.append((url, True))
             except TimeoutError:
                 logger.warning(
-                    "LOOKUP to %s timed out after %ss; marking unhealthy.",
+                    "LOOKUP to %s timed out after %ss. Marking server as unhealthy.",
                     url,
                     self._mq_timeout,
                 )
                 self._health_events[url].clear()
-                results.append((url, False))
-            except Exception as e:
-                logger.error("LOOKUP to %s failed: %s", url, e, exc_info=True)
-                self._health_events[url].clear()
-                results.append((url, False))
+                return
 
-        # Only track as pending when every server accepted the job.
-        if all(ok for _, ok in results):
-            self._pending_lookups.add(request_id)
-        else:
-            failed = [u for u, ok in results if not ok]
-            logger.error(
-                "[req=%s] LOOKUP failed on servers %s -- fall back to no-hit",
-                request_id,
-                failed,
-            )
+        self._pending_lookups.add(request_id)
 
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         """
         Check the result of a previously submitted lookup request.
 
-        Returns the matched token count when the lookup is complete, or
-        ``None`` if it is still in progress.  Once a non-``None`` result
-        has been returned, repeated calls keep returning the same value
-        until ``cleanup_lookup_result`` is invoked.
+        Sends a QUERY_PREFETCH_STATUS request to the servers and blocks
+        until the server responds.  Returns the matched token count
+        when the prefetch is complete, or None if still in progress.
 
         Args:
             request_id: The ID of the lookup request submitted in
@@ -803,16 +787,7 @@ class LMCacheMPSchedulerAdapter:
                     url,
                 )
                 self._health_events[url].clear()
-                continue
-            except Exception as e:
-                logger.error(
-                    "QUERY_PREFETCH_STATUS to %s failed: %s",
-                    url,
-                    e,
-                    exc_info=True,
-                )
-                self._health_events[url].clear()
-                continue
+                return 0
             if r is None:
                 continue
             per_server[url] = int(r)
@@ -832,7 +807,6 @@ class LMCacheMPSchedulerAdapter:
 
         token_count = min_chunks * self.chunk_size
         self._finished_lookup_results[request_id] = token_count
-        self._pending_lookups.discard(request_id)
         return token_count
 
     def num_blocks_per_chunk(self) -> int:
@@ -900,12 +874,9 @@ class LMCacheMPSchedulerAdapter:
             cache_salt=cache_salt,
         ).no_worker_id_version()
         for url in self._server_urls:
-            client = self.mq_clients.get(url)
-            if client is None:
-                continue
             try:
                 send_lmcache_request(
-                    client,
+                    self.mq_clients[url],
                     RequestType.FREE_LOOKUP_LOCKS,
                     [base_key, self.tp_size],
                 )
@@ -943,12 +914,9 @@ class LMCacheMPSchedulerAdapter:
                 request_id=request_id,
                 cache_salt=cache_salt,
             ).no_worker_id_version()
-            client = self.mq_clients.get(url)
-            if client is None:
-                continue
             try:
                 send_lmcache_request(
-                    client,
+                    self.mq_clients[url],
                     RequestType.FREE_LOOKUP_LOCKS,
                     [tail_key, self.tp_size],
                 )
