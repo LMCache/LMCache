@@ -3,7 +3,6 @@
 from pathlib import Path
 from typing import Iterable, List, Optional
 import importlib
-import pkgutil
 
 # Third Party
 from fastapi import APIRouter
@@ -40,7 +39,10 @@ def discover_api_routers(
     """
     excluded = set(exclude or ())
     routers: List[APIRouter] = []
-    for _, module_name, _ in pkgutil.iter_modules([str(search_path)]):
+    for entry in sorted(Path(search_path).iterdir()):
+        module_name = entry.stem
+        if entry.suffix != ".py" or module_name == "__init__":
+            continue
         if not module_name.endswith(suffix):
             continue
         if module_name in excluded:
