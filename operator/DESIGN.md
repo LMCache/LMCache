@@ -391,7 +391,7 @@ l2Backend, scheduling, overrides, imagePullSecrets) and adds:
 ### The blend engine (controller)
 
 `CacheBlendEngineReconciler` mirrors `LMCacheEngineReconciler` and reconciles a
-DaemonSet running `lmcache server --engine-type blend_v3` (plus
+DaemonSet running `lmcache server --engine-type blend` (plus
 `--l1-align-bytes 16777216`), a node-local lookup Service, a metrics Service, and
 a `<name>-connection` ConfigMap. **GPU model is identical to `LMCacheEngine`**:
 `privileged` + `runtimeClassName: nvidia` + `NVIDIA_VISIBLE_DEVICES=all` +
@@ -469,7 +469,7 @@ user-supplied `--flag=value`.
 
 | Resource | Name | Purpose |
 |---|---|---|
-| DaemonSet | `cb` | `lmcache server --engine-type blend_v3` on GPU nodes |
+| DaemonSet | `cb` | `lmcache server --engine-type blend` on GPU nodes |
 | Service (node-local) | `cb` | same-node discovery for vLLM (`CBKVConnector`) |
 | Service (headless) | `cb-metrics` | Prometheus scrape target |
 | ConfigMap | `cb-connection` | `CBKVConnector` kv-transfer-config |
@@ -492,7 +492,7 @@ user-supplied `--flag=value`.
 |---|---|
 | `lmcache/v1/distributed/config.py` | `L1MemoryManagerConfig`, `L1ManagerConfig`, `EvictionConfig`, `StorageManagerConfig`, argparse |
 | `lmcache/v1/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
-| `lmcache/v1/multiprocess/server.py` | `MPCacheEngine`, server CLI entry point, argparse (lines 629–653) |
+| `lmcache/v1/multiprocess/server.py` | `MPCacheServer`, server CLI entry point, argparse (lines 629–653) |
 | `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/healthcheck` endpoint (FastAPI + ZMQ) |
 | `lmcache/v1/distributed/l2_adapters/config.py` | L2 adapter registry pattern, `L2AdapterConfigBase`, `L2AdaptersConfig` |
 | `examples/multi_process/lmcache-daemonset.yaml` | Reference DaemonSet manifest |

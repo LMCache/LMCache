@@ -198,15 +198,16 @@ object is stored as a raw ``.data`` file whose name encodes the full
 ``dax`` -- Device-DAX fixed-slot storage
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-An L2 adapter that maps a single Device-DAX path, such as ``/dev/dax1.0``,
-and stores KV cache objects in fixed-size slots.  This adapter is intended for
-byte-addressable memory devices such as persistent memory or CXL memory.
+An L2 adapter that maps Device-DAX paths, such as ``/dev/daxX.X`` and
+``/dev/daxY.Y``, and stores KV cache objects in fixed-size slots. This adapter
+is intended for byte-addressable memory devices such as persistent memory or
+CXL memory.
 
 The MP ``dax`` adapter is volatile in this release.  It keeps the key index in
 server memory and rebuilds an empty index on restart.  Old bytes may remain on
 the DAX device, but they are unreachable after the LMCache server restarts.
 
-**Required fields:**
+**Required fields for the legacy single-device form:**
 
 - ``device_path``: Path to the mmap-able DAX device or test file.
 - ``max_dax_size_gb``: Number of GiB to map from ``device_path``.
@@ -214,8 +215,18 @@ the DAX device, but they are unreachable after the LMCache server restarts.
   full LMCache chunk because MP memory descriptors do not expose the
   non-MP full-chunk size.
 
+**Required fields for the multi-device form:**
+
+- ``devices``: List of objects with ``device_path`` and ``max_dax_size_gb``.
+  The list may be empty only when ``hotplug_enabled`` is ``true``.
+- ``slot_bytes``: Fixed slot size in bytes shared by every DAX device in the
+  adapter facade.
+
 **Optional fields:**
 
+- ``hotplug_enabled`` (bool, default ``false``): Enables runtime
+  ``/reconfigure/dax/status``, ``/reconfigure/dax/add``,
+  ``/reconfigure/dax/remove``, and ``/reconfigure/dax/resize``.
 - ``num_store_workers`` (int, default ``1``): Store worker threads.
 - ``num_lookup_workers`` (int, default ``1``): Lookup worker threads.
 - ``num_load_workers`` (int, default ``min(4, os.cpu_count())``): Load worker
@@ -227,6 +238,7 @@ the DAX device, but they are unreachable after the LMCache server restarts.
 
 .. code-block:: bash
 
+    # Backward-compatible single-device form.
     --l2-adapter '{
       "type": "dax",
       "device_path": "/dev/dax1.0",
@@ -242,15 +254,50 @@ the DAX device, but they are unreachable after the LMCache server restarts.
       }
     }'
 
+.. code-block:: bash
+
+    # Multi-device hotplug-ready form.
+    --l2-adapter '{
+      "type": "dax",
+      "devices": [
+        {"device_path": "/dev/daxX.X", "max_dax_size_gb": 100},
+        {"device_path": "/dev/daxY.Y", "max_dax_size_gb": 100}
+      ],
+      "slot_bytes": 268435456,
+      "hotplug_enabled": true,
+      "num_store_workers": 1,
+      "num_lookup_workers": 1,
+      "num_load_workers": 4
+    }'
+
+Runtime management uses JSON bodies because DAX paths contain slashes. See the
+:doc:`Device-DAX backend guide </kv_cache/storage_backends/dax>` for complete
+examples.
+These routes use StorageManager's generic L2 adapter reconfiguration API; the
+HTTP path selects the backend and operation, the DAX adapter interprets the
+operation payload, and the same interface can be reused by future adapters such
+as P2P.
+
+.. code-block:: bash
+
+    curl http://127.0.0.1:9000/reconfigure/dax/status
+    curl -X POST http://127.0.0.1:9000/reconfigure/dax/add \
+      -H 'Content-Type: application/json' \
+      -d '{"device_path": "/dev/daxX.X", "size": "100GiB"}'
+
 **Current limits:**
 
-- Uses one server-owned mapped DAX path. Per-TP partitions and multi-device
-  striping are not implemented.
+- Runtime hotplug changes only LMCache mappings and metadata. It does not
+  create, destroy, or reconfigure kernel CXL or DAX devices.
+- Per-TP partitions and on-device restart metadata are not implemented.
 - Only single-buffer objects are supported. Multi-tensor objects are rejected.
 - Capacity is slot-based, not payload-byte-based. L2 eviction and usage
   metrics count occupied slots.
 - Lookups acquire DAX-side external locks. ``submit_unlock`` releases those
   locks after load/retrieve completes, making entries evictable again.
+- Remove ``mode="evict"`` is destructive for the DAX tier. Remove
+  ``mode="migrate"`` requires enough capacity on another active DAX device.
+
 ``fs_native`` -- Native C++ file-system connector
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -522,6 +569,70 @@ etc.), see `Mooncake <https://github.com/kvcache-ai/Mooncake>`_ .
 - If Mooncake RDMA initialization fails at adapter creation time, verify that
   LMCache L1 memory is enabled and that the descriptor has a non-zero pointer
   and size.
+
+``aerospike`` -- Aerospike native connector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An L2 adapter backed by the native C++ Aerospike connector (the same
+``ConnectorBase`` worker-pool harness used by ``fs_native``), wrapped with
+``NativeConnectorL2Adapter``.  KV objects are stored under a meta record plus
+optional payload segments so values larger than the server record cap are
+transparently sharded.
+
+**Prerequisites -- Building with Aerospike support:**
+
+The Aerospike extension is **not** built by default.  Install the Aerospike C
+client, then build with ``BUILD_AEROSPIKE=1`` (or set ``AEROSPIKE_INCLUDE_DIR``):
+
+.. code-block:: bash
+
+    BUILD_AEROSPIKE=1 pip install -e .
+
+See :doc:`/developer_guide/extending_lmcache/native_connectors` (section
+"Built-in Aerospike backend") for installing the C client into ``.deps/`` and
+the ``aerospike-client-c.env`` example.
+
+**Required fields:**
+
+- ``hosts``: Seed hosts as ``host:port[,host:port...]``.
+
+**Optional fields:**
+
+- ``namespace`` (str, default ``"lmcache"``): Aerospike namespace.  Must exist
+  on the server and have ``nsup-period > 0`` if you rely on TTL expiry.
+- ``set_name`` / ``set`` (str, default ``"kv_chunks"``): Aerospike set name.
+- ``num_workers`` (int, default ``8``, > 0): C++ worker threads for I/O.  This
+  is the real I/O queue depth -- raise it to push throughput.
+- ``read_timeout_ms`` (int, default ``1000``): Client read timeout.
+- ``write_timeout_ms`` (int, default ``2000``): Client write timeout.
+- ``default_ttl_seconds`` (int, default ``86400``): Record TTL.  ``0`` uses the
+  namespace default TTL.
+- ``target_segment_bytes`` (int, default ``0``): Target shard size.  ``0`` uses
+  the discovered server record cap.
+- ``max_record_bytes`` (int, default ``0``): Override the server record cap.
+  ``0`` discovers it at construction time.
+- ``username`` / ``password`` (str, default ``""``): Optional Enterprise
+  Edition authentication.
+- ``max_capacity_gb`` (float, default ``0``): Maximum L2 capacity in GB for
+  client-side usage tracking / eviction.  ``0`` disables tracking.
+
+**Environment variable fallbacks.**  When the corresponding config value is
+empty, these environment variables are used: ``LMCACHE_AEROSPIKE_HOSTS``,
+``LMCACHE_AEROSPIKE_NAMESPACE``, ``LMCACHE_AEROSPIKE_SET``,
+``LMCACHE_AEROSPIKE_USERNAME``, ``LMCACHE_AEROSPIKE_PASSWORD``.
+
+**Configuration examples:**
+
+.. code-block:: bash
+
+    # Basic single-node Community Edition
+    --l2-adapter '{"type": "aerospike", "hosts": "127.0.0.1:3000", "namespace": "lmcache", "set_name": "kv_chunks", "num_workers": 8}'
+
+    # Multi-node seed list with capacity tracking for eviction
+    --l2-adapter '{"type": "aerospike", "hosts": "10.0.0.1:3000,10.0.0.2:3000", "namespace": "lmcache", "num_workers": 16, "max_capacity_gb": 512}'
+
+    # Enterprise Edition with authentication
+    --l2-adapter '{"type": "aerospike", "hosts": "as.internal:3000", "namespace": "lmcache", "username": "lmcache", "password": "secret"}'
 
 ``s3`` -- S3-compatible object store
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

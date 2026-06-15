@@ -54,45 +54,126 @@ detects the model's KV cache groups automatically at registration time.
 Mamba / Linear-Attention Hybrids
 --------------------------------
 
-Models that interleave **Mamba / Gated-DeltaNet layers** with full attention
-(e.g. ``Qwen/Qwen3.5-0.8B``) are supported. Their recurrent state caches are
-reinterpreted as opaque pages at registration time, so prefix caching and KV
-reuse work end to end. They need three extra flags:
+Models that interleave **Mamba / Gated-DeltaNet (GDN) linear-attention layers**
+with full attention — the Qwen3.5 and Qwen3.6 series (``Qwen/Qwen3.5-0.8B``,
+``Qwen/Qwen3.6-27B``, …), Qwen3-Next, and other GDN hybrids — are supported.
+Unlike a paged key/value cache, their linear-attention layers keep a recurrent
+**state cache** (a convolution + SSM state). LMCache reinterprets that state as
+an opaque page at registration time, so prefix caching and KV reuse work end to
+end without any model-specific transfer code.
 
-#. vLLM must run with prefix caching and the ``align`` Mamba cache mode::
+This section is the **general procedure for any such model**. The only
+per-model variable is the *unified block size* ``N`` (step 1); everything else
+is identical across models.
 
-       vllm serve Qwen/Qwen3.5-0.8B \
+.. _mamba-block-size:
+
+Step 1 — find the model's unified block size ``N``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``N`` is the **single number** that drives every other setting: the LMCache
+server's ``--chunk-size`` and vLLM's ``--max-num-batched-tokens`` are both
+derived from it (step 2). Get it wrong and LMCache raises at engine startup.
+
+For a Mamba / GDN hybrid, vLLM forces **one** block size across all KV cache
+groups, chosen large enough that an attention page is at least as big as a
+Mamba state page. It depends on the model's head dimensions and GDN state size,
+so it is **model-specific — never assume a value, read it from the model**.
+vLLM prints it once at startup::
+
+    INFO ... interface.py:670] Setting attention block size to 784 tokens to
+    ensure that attention page size is >= mamba page size.
+
+You do not need LMCache, a full serving run, or the weights to be quantized to
+read it — just launch vLLM until the line appears, then stop. The snippet below
+does exactly that and prints ``N``:
+
+.. code-block:: bash
+
+   MODEL=Qwen/Qwen3.6-27B
+   LOG=$(mktemp)
+
+   # Launch vLLM just far enough to size the KV cache; cheap settings only.
+   vllm serve "$MODEL" \
+       --mamba-cache-mode align --enable-prefix-caching \
+       --max-model-len 8192 --gpu-memory-utilization 0.5 \
+       --port 8011 > "$LOG" 2>&1 &
+   VLLM_PID=$!
+
+   # Wait for the block-size line (or a fatal error), then stop vLLM.
+   until grep -qiE "Setting attention block size|Error|Traceback" "$LOG"; do
+       sleep 3
+   done
+   grep -i "Setting attention block size" "$LOG"
+   kill "$VLLM_PID"
+
+The number in ``to N tokens`` is your ``N``. Values grow with model size; for
+example:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 50 25 25
+
+   * - Model
+     - Unified block size ``N``
+     - GPUs
+   * - ``Qwen/Qwen3.6-27B``
+     - 784
+     - 1
+   * - ``Qwen/Qwen3.5-0.8B``
+     - 544
+     - 1
+
+Step 2 — derive the three required flags from ``N``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+#. **LMCache server** ``--chunk-size`` **= N** (or any multiple of ``N``). This
+   is the rule the connector enforces: LMCache's chunk size must be a multiple
+   of vLLM's unified block size, or registration fails::
+
+       lmcache server --chunk-size 784 --l1-size-gb 100 --eviction-policy LRU
+
+#. **vLLM** ``--max-num-batched-tokens`` **in [N, 2·N)** — setting it equal to
+   ``N`` is the simple, always-valid choice. Outside this range LMCache raises
+   at engine startup. ``align`` mode snapshots the Mamba state only at the
+   *end* of each scheduler step, so each prefill step must advance exactly one
+   block; a larger budget would let a step skip block boundaries, leaving no
+   snapshot for LMCache to store at those prefixes.
+
+#. **vLLM** ``--mamba-cache-mode align --enable-prefix-caching`` — ``align`` is
+   mandatory (GDN backends do not support the ``all`` mode)::
+
+       vllm serve <model> \
            --enable-prefix-caching --mamba-cache-mode align \
+           --max-num-batched-tokens 784 \
            --kv-transfer-config \
            '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
-#. The LMCache server's ``--chunk-size`` must be a multiple of vLLM's unified
-   block size for the model (vLLM logs ``Setting attention block size to N
-   tokens`` at startup; for Qwen3.5-0.8B, ``N = 544``)::
+So for a freshly-probed model the whole derivation is just: read ``N`` (step 1),
+then pass ``--chunk-size N`` to the server and ``--max-num-batched-tokens N`` to
+vLLM.
 
-       lmcache server --chunk-size 544 --l1-size-gb 100 --eviction-policy LRU
+No ``--no-disable-hybrid-kv-cache-manager`` or attention-backend flag is needed;
+``LMCacheMPConnector`` advertises hybrid support and vLLM auto-selects the GDN
+backend.
 
-#. ``--max-num-batched-tokens`` must be at least the unified block size and
-   below twice it (LMCache raises at engine startup otherwise; setting it
-   equal to the block size is the simple choice)::
-
-       vllm serve ... --max-num-batched-tokens 544
-
-   ``align`` mode snapshots the Mamba state only at the *end* of each
-   scheduler step; a larger budget would let one step skip block boundaries,
-   leaving no snapshot for LMCache to store at those prefixes.
-
-Caveats:
+Caveats
+^^^^^^^
 
 - Generation is **not bit-exact** between a cached and a fresh run: GDN
-  backends do not support vLLM's batch-invariant mode. Expect score-level
-  equivalence, not token-level.
-- The cached pages are byte-opaque, so content-aware features (CacheGen
+  backends do not support vLLM's batch-invariant mode. Validate with a
+  **score-level** comparison (see `Verifying Correctness`_), not a token-level
+  diff.
+- The cached pages are **byte-opaque**, so content-aware features (CacheGen
   compression, CacheBlend) do not apply, and cache entries must not be shared
   across engines with different attention backends or kernel block sizes.
+- Several of these models are **vision-language** (they load a vision tower).
+  The validated, supported path is **text** KV caching; image/video KV caching
+  is not validated.
+- vLLM's Mamba prefix caching in ``align`` mode is marked experimental upstream.
 
-See the :doc:`Qwen3.5 recipe <../recipes/qwen3_5>` for the validated
-end-to-end commands.
+See the :doc:`Qwen3.5 / Qwen3.6 recipe <../recipes/qwen3_5>` for the validated
+end-to-end commands and the per-model block sizes.
 
 What Is Not Supported Yet
 -------------------------

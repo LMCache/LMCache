@@ -21,7 +21,7 @@ High-Level Architecture
          |
          | dispatch by RequestType
          v
-    MPCacheEngine (server.py)
+    MPCacheServer (server.py)
          |
          |--- TokenHasher / SessionManager
          |
@@ -43,14 +43,14 @@ High-Level Architecture
 Server Variants
 ---------------
 
-All server entry points share the same ``MPCacheEngine`` and
-``StorageManager`` core. ``MPCacheEngine`` is now a thin compositor:
-it holds an ``MPCacheEngineContext`` and a list of ``EngineModule``
-instances assembled by ``_build_modules()`` (in ``server.py``)
+All server entry points share the same ``MPCacheServer`` and
+``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
+it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
+instances assembled by ``build_engine_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
-``MPCacheEngine``, assembles the engine modules
+``MPCacheServer``, assembles the engine modules
 (``LookupModule`` + ``ManagementModule`` + ``GPUTransferModule``
 and/or ``NonGPUTransferModule`` depending on
 ``--supported-transfer-mode`` — ``gpu`` or ``non_gpu`` loads just one,
@@ -359,7 +359,7 @@ LOOKUP Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager       L2 (PrefetchController)
+vLLM                MPCacheServer          StorageManager         L1Manager       L2 (PrefetchController)
      |                       |                       |                    |                    |
      |---LOOKUP(key)-------->|                       |                    |                    |
      |                       |--submit_prefetch------>|                    |                    |
@@ -377,7 +377,7 @@ STORE Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager
+    vLLM                MPCacheServer          StorageManager         L1Manager
      |                       |                       |                    |
      |---STORE(key,blocks)-->|                       |                    |
      |                       |--reserve_write-------->|                    |
@@ -396,7 +396,7 @@ RETRIEVE Flow
 
 .. code-block:: text
 
-    vLLM                MPCacheEngine          StorageManager         L1Manager
+    vLLM                MPCacheServer          StorageManager         L1Manager
      |                       |                       |                    |
      |---RETRIEVE(key)------>|                       |                    |
      |                       |--read_prefetched------>|                    |
@@ -412,7 +412,7 @@ Observability Internals
 
 **EventBus** (``lmcache/v1/mp_observability/event_bus.py``) is a global
 singleton initialized at server startup by ``init_observability()``.
-Producers (L1Manager, StorageManager, MPCacheEngine) publish ``Event``
+Producers (L1Manager, StorageManager, MPCacheServer) publish ``Event``
 objects to a bounded queue (``--event-bus-queue-size``, default 10000,
 tail-drop on overflow).  A background drain thread dispatches each
 event to all registered subscribers.
@@ -499,11 +499,11 @@ Key Source Files
    * - File
      - Purpose
    * - ``lmcache/v1/multiprocess/server.py``
-     - MPCacheEngine + ZMQ server entry point
+- MPCacheServer + ZMQ server entry point
    * - ``lmcache/v1/multiprocess/config.py``
      - MPServerConfig, HTTPFrontendConfig
    * - ``lmcache/v1/multiprocess/engine_context.py``
-     - MPCacheEngineContext (shared state passed to every EngineModule)
+     - MPCacheServerContext (shared state passed to every EngineModule)
    * - ``lmcache/v1/multiprocess/engine_module.py``
      - ``EngineModule`` protocol, ``HandlerSpec``, ``ThreadPoolType``
        (per-module handler registration)

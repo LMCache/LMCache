@@ -16,7 +16,7 @@ The protocol definitions are loaded and validated during initialization.
 from typing import Any, Optional
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.protocols import initialize_protocols
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 
@@ -26,7 +26,7 @@ _PROTOCOL_DEFINITIONS = initialize_protocols()
 
 # Type aliases for backwards compatibility
 InstanceID = int
-KeyType = IPCCacheEngineKey
+KeyType = IPCCacheServerKey
 
 
 def get_payload_classes(req_type: RequestType) -> list[Any]:

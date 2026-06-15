@@ -122,6 +122,13 @@ class CoordinatorConfig:
     """Seconds between heartbeats. Must be strictly positive and kept well below
     the coordinator's ``INSTANCE_TIMEOUT``."""
 
+    l2_event_reporting: bool = False
+    """When ``True``, report L2 store/lookup events to the coordinator for
+    fleet-wide usage tracking and eviction."""
+
+    l2_event_flush_interval: float = 1.0
+    """Seconds between L2 event flush attempts to the coordinator."""
+
 
 DEFAULT_COORDINATOR_CONFIG = CoordinatorConfig()
 
@@ -380,6 +387,21 @@ def add_coordinator_args(
         help="Seconds between heartbeats (must be > 0). Defaults to "
         "LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL, then 5.0.",
     )
+    group.add_argument(
+        "--coordinator-l2-event-reporting",
+        action="store_true",
+        default=None,
+        help="Report L2 store/lookup events to the coordinator for "
+        "fleet-wide usage tracking and eviction. Defaults to "
+        "LMCACHE_COORDINATOR_L2_EVENT_REPORTING; unset disables.",
+    )
+    group.add_argument(
+        "--coordinator-l2-event-flush-interval",
+        type=float,
+        default=None,
+        help="Seconds between L2 event flush attempts (must be > 0). "
+        "Defaults to LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL, then 1.0.",
+    )
     return parser
 
 
@@ -431,8 +453,37 @@ def parse_args_to_coordinator_config(
             "coordinator heartbeat interval must be a finite number > 0, "
             "got %s" % heartbeat_interval
         )
+    if args.coordinator_l2_event_reporting is not None:
+        l2_event_reporting = args.coordinator_l2_event_reporting
+    else:
+        l2_event_reporting = os.getenv(
+            "LMCACHE_COORDINATOR_L2_EVENT_REPORTING", ""
+        ).lower() in ("1", "true", "yes")
+
+    if args.coordinator_l2_event_flush_interval is not None:
+        l2_event_flush_interval = args.coordinator_l2_event_flush_interval
+    else:
+        raw = os.getenv("LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL")
+        if raw:
+            try:
+                l2_event_flush_interval = float(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    "LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL is not a number: %r"
+                    % raw
+                ) from exc
+        else:
+            l2_event_flush_interval = 1.0
+    if not math.isfinite(l2_event_flush_interval) or l2_event_flush_interval <= 0:
+        raise ValueError(
+            "coordinator L2 event flush interval must be a finite number > 0, "
+            "got %s" % l2_event_flush_interval
+        )
+
     return CoordinatorConfig(
         url=url,
         advertise_ip=advertise_ip,
         heartbeat_interval=heartbeat_interval,
+        l2_event_reporting=l2_event_reporting,
+        l2_event_flush_interval=l2_event_flush_interval,
     )

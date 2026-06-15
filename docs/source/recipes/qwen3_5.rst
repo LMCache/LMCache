@@ -4,13 +4,16 @@ Qwen3_5ForConditionalGeneration
 ===============================
 
 A hybrid architecture interleaving Mamba / Gated-DeltaNet (GDN) linear-attention
-layers with full-attention layers. LMCache reinterprets the recurrent state
-caches as opaque pages at registration time; see :doc:`../mp/hybrid_models`.
+layers with full-attention layers, shared by the **Qwen3.5 and Qwen3.6**
+series. LMCache reinterprets the recurrent state caches as opaque pages at
+registration time; see :doc:`../mp/hybrid_models` for the general handling of
+Mamba / linear-attention models.
 
 Validated models
 ----------------
 
-- `Qwen/Qwen3.5-0.8B <https://huggingface.co/Qwen/Qwen3.5-0.8B>`_
+- `Qwen/Qwen3.6-27B <https://huggingface.co/Qwen/Qwen3.6-27B>`_ (1 GPU)
+- `Qwen/Qwen3.5-0.8B <https://huggingface.co/Qwen/Qwen3.5-0.8B>`_ (1 GPU)
 
 .. tab-set::
    :sync-group: engine
@@ -24,26 +27,48 @@ Validated models
 
       **Status:** Validated with LMCache.
 
-      Start the LMCache MP server. ``--chunk-size`` must be a multiple of
-      vLLM's unified block size for the model — vLLM logs ``Setting attention
-      block size to N tokens`` at startup; for Qwen3.5-0.8B, ``N = 544``:
+      Every model in this family needs the same three settings: the ``align``
+      Mamba cache mode, prefix caching, and a chunk size matched to vLLM's
+      *unified block size*. That block size is model-specific — vLLM logs
+      ``Setting attention block size to N tokens`` at startup:
+
+      .. list-table::
+         :header-rows: 1
+         :widths: 50 25 25
+
+         * - Model
+           - Unified block size ``N``
+           - GPUs
+         * - ``Qwen/Qwen3.6-27B``
+           - 784
+           - 1
+         * - ``Qwen/Qwen3.5-0.8B``
+           - 544
+           - 1
+
+      Set the LMCache server's ``--chunk-size`` to that ``N`` (or a multiple of
+      it) and vLLM's ``--max-num-batched-tokens`` to ``N``.
+
+      **Qwen3.6-27B** (1 GPU, ``N = 784``):
 
       .. code-block:: bash
 
-         lmcache server --chunk-size 544 --l1-size-gb 100 --eviction-policy LRU
+         lmcache server --chunk-size 784 --l1-size-gb 100 --eviction-policy LRU
+
+      .. code-block:: bash
+
+         vllm serve Qwen/Qwen3.6-27B \
+             --enable-prefix-caching \
+             --mamba-cache-mode align \
+             --max-num-batched-tokens 784 \
+             --kv-transfer-config \
+             '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
 
       |
 
-      **Qwen3.5-0.8B** (1 GPU):
-
-      .. code-block:: bash
-
-         vllm serve Qwen/Qwen3.5-0.8B \
-             --enable-prefix-caching \
-             --mamba-cache-mode align \
-             --max-num-batched-tokens 544 \
-             --kv-transfer-config \
-             '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both"}'
+      **Qwen3.5-0.8B** (1 GPU, ``N = 544``): identical to the above, with
+      ``784`` replaced by ``544`` in both ``--chunk-size`` and
+      ``--max-num-batched-tokens``.
 
       ``--mamba-cache-mode align`` is required (GDN does not support the
       ``all`` mode). ``--max-num-batched-tokens`` must be at least the unified
@@ -52,8 +77,8 @@ Validated models
       ends, so each prefill step must advance exactly one block for every
       block boundary to hold a reusable snapshot.
 
-      For the generic LMCache + vLLM wiring (ports, remote hosts, in-process
-      mode), see :doc:`../mp/quickstart`.
+      For the generic LMCache + vLLM wiring (ports, remote hosts), see
+      :doc:`../mp/quickstart`.
 
    .. tab-item:: SGLang
 
@@ -94,3 +119,6 @@ Caveats
   shared across engines with different attention backends or kernel block
   sizes.
 - vLLM's Mamba prefix caching in ``align`` mode is experimental.
+- ``Qwen/Qwen3.6-27B`` is a vision-language model (it loads a vision tower);
+  the LMCache validation covers **text** generation (the ``hma_lm_eval_qwen3_5``
+  gsm8k store-vs-retrieve gate). Caching of image/video KV is not validated.
