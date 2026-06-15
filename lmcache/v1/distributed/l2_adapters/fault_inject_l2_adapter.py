@@ -115,18 +115,15 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(inner_type, str):
             raise ValueError("'inner' adapter spec must include a string 'type'")
 
-        # Build the inner adapter config via the registry (lazy-importing its
-        # module if needed), mirroring parse_args_to_l2_adapters_config.
+        # Build the inner adapter config via the public registry accessor
+        # (lazy-importing its module if needed), mirroring
+        # parse_args_to_l2_adapters_config.
         # First Party
         from lmcache.v1.distributed.l2_adapters.config import (  # noqa: PLC0415
-            _L2_ADAPTER_CONFIG_REGISTRY,
-            _ensure_config_loaded,
+            get_l2_adapter_config_class,
         )
 
-        _ensure_config_loaded(inner_type)
-        if inner_type not in _L2_ADAPTER_CONFIG_REGISTRY:
-            raise ValueError(f"unknown inner adapter type {inner_type!r}")
-        inner_cls = _L2_ADAPTER_CONFIG_REGISTRY[inner_type]
+        inner_cls = get_l2_adapter_config_class(inner_type)
         inner_config = inner_cls.from_dict(inner)
         inner_config.eviction_config = cls._parse_eviction_config(inner)
         inner_config.persist_config = cls._parse_persist_config(inner)
@@ -248,7 +245,14 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         """
         if self._rate <= 0.0:
             return False
-        h = hashlib.blake2b(f"{self._seed}:{key!r}".encode(), digest_size=8).digest()
+        # Hash the key's stable identity fields directly — never ``repr(key)``,
+        # whose format is for debugging and may change or carry non-deterministic
+        # fields, breaking the lookup-vs-load drop consistency this relies on.
+        ident = (
+            f"{self._seed}:{key.chunk_hash.hex()}:{key.model_name}:"
+            f"{key.kv_rank}:{key.object_group_id}:{key.cache_salt}"
+        )
+        h = hashlib.blake2b(ident.encode(), digest_size=8).digest()
         bucket = int.from_bytes(h, "big") % _HASH_DENOM
         return bucket < int(self._rate * _HASH_DENOM)
 

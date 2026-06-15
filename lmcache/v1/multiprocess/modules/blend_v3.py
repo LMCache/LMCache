@@ -786,7 +786,7 @@ class BlendV3Module(InstanceLivenessTarget):
             # recomputed) instead of truncating the prefix at the gap.
             prefix_policy = (
                 TrimPolicy.SEGMENTED_PREFIX
-                if os.environ.get("SEGMENTED_PREFIX") == "1"
+                if os.environ.get("CB_SEGMENTED_PREFIX") == "1"
                 else TrimPolicy.PREFIX
             )
             # Prefix leg: submit (non-blocking). Already traced upstream by
@@ -823,7 +823,7 @@ class BlendV3Module(InstanceLivenessTarget):
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
-        segmented = os.environ.get("SEGMENTED_PREFIX") == "1"
+        segmented = os.environ.get("CB_SEGMENTED_PREFIX") == "1"
 
         # --- Prefix leg: poll (consume-once) until the L1+L2 prefix lands. ---
         if job.prefix_chunks is None:
