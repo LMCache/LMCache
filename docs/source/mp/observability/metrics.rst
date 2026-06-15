@@ -28,7 +28,7 @@ telemetry and are orthogonal to per-metric attributes such as
      - CLI flag / config
      - Default when unset
    * - ``service.instance.id``
-     - ``--service-instance-id`` / ``ObservabilityConfig.service_instance_id``
+     - ``--instance-id`` / ``MPServerConfig.instance_id``
      - Random UUID v4 minted at startup.
 
 Resource attributes attach to the ``MeterProvider`` / ``TracerProvider``

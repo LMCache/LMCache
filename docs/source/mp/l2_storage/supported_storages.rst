@@ -37,6 +37,9 @@ target.
    * - :doc:`RESP (Redis/Valkey) <resp>`
      - ``resp``
      - Remote & Distributed
+   * - :doc:`Aerospike <aerospike>`
+     - ``aerospike``
+     - Remote & Distributed
    * - :doc:`DAX <dax>`
      - ``dax``
      - Byte-addressable memory

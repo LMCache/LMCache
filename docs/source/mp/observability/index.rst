@@ -65,13 +65,6 @@ Configuration
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` HTTP endpoint.
-   * - ``--service-instance-id``
-     - *(unset, default UUID v4)*
-     - Identifier for this MP server instance. Attached as the OTel
-       Resource attribute ``service.instance.id`` on every metric and
-       span. When the flag is not passed, defaults to a random UUID v4
-       minted at startup. Pass ``--service-instance-id=""`` to force an
-       explicit empty value. See :ref:`mp-observability-resource`.
    * - ``--metrics-sample-rate``
      - ``0.01``
      - Fraction of chunks/blocks to track for lifecycle histograms
