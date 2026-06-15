@@ -169,7 +169,7 @@ msgstr "另请参阅"
 
 #: ../../source/mp/hybrid_models.rst:86
 msgid ":doc:`quickstart` — launching the LMCache server and a vLLM client."
-msgstr "：doc:`quickstart` — 启动 LMCache 服务器和 vLLM 客户端。"
+msgstr ":doc:`quickstart` — 启动 LMCache 服务器和 vLLM 客户端。"
 
 #: ../../source/mp/hybrid_models.rst:87
 msgid ""
