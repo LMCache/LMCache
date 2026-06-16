@@ -5,7 +5,6 @@ message-queue round-trip, server handler, and client-side adapter API.
 """
 
 # Standard
-from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 import threading
 
@@ -180,8 +179,6 @@ def test_adapter_free_lookup_locks_sends_request():
     mock_client.submit_request.return_value = mock_future
     adapter.mq_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
-    adapter._per_server_hits = {}
-    adapter._finished_lookup_results = {}
 
     token_ids = list(range(512))
     adapter.free_lookup_locks(
@@ -226,10 +223,7 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter._health_events = {"tcp://test:0": threading.Event()}
     adapter._health_events["tcp://test:0"].set()
     adapter._server_urls = ["tcp://test:0"]
-    adapter._heartbeat_lock = threading.Lock()
-    adapter._heartbeat_interval = 5.0
     adapter._mq_timeout = 30.0
-    adapter._executor = ThreadPoolExecutor(max_workers=1)
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
@@ -237,9 +231,6 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     mock_client.submit_request.return_value = mock_future
     adapter.mq_clients = {"tcp://test:0": mock_client}
     adapter._pending_lookups = set()
-    adapter._per_server_hits = {}
-    adapter._finished_lookup_results = {}
-    adapter._lookup_params = {}
 
     token_ids = list(range(512))
 
