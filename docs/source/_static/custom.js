@@ -184,7 +184,21 @@ const COLLAPSED_BY_DEFAULT = [
   "kv_cache_optimizations/index",
 ];
 
+let didInitialNavExpand = false;
+
 function expandTopLevelNavSections() {
+  // Run the default expansion exactly once. Without this guard it fires on
+  // both `alpine:initialized` and the DOMContentLoaded fallback, and if the
+  // user collapses a section between the two calls the second one re-opens it.
+  if (didInitialNavExpand) {
+    return;
+  }
+  // Need Alpine ready to set the reactive `expanded` state; bail without
+  // marking done so a later trigger can retry.
+  if (!(window.Alpine && window.Alpine.$data)) {
+    return;
+  }
+  let expandedAny = false;
   document.querySelectorAll("nav .toctree-l1").forEach((li) => {
     const link = li.querySelector(":scope > a");
     const href = link ? link.getAttribute("href") || "" : "";
@@ -192,15 +206,18 @@ function expandTopLevelNavSections() {
       return;
     }
     try {
-      const data =
-        window.Alpine && window.Alpine.$data ? window.Alpine.$data(li) : null;
+      const data = window.Alpine.$data(li);
       if (data && "expanded" in data) {
         data.expanded = true;
+        expandedAny = true;
       }
     } catch (e) {
       /* nav item not yet managed by Alpine */
     }
   });
+  if (expandedAny) {
+    didInitialNavExpand = true;
+  }
 }
 
 // Run both on Alpine init and as a fallback, to cover either load ordering.
