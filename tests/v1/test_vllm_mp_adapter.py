@@ -313,6 +313,20 @@ def test_load_store_op_accepts_per_group_block_ids():
     assert op.flat_block_ids == [0, 1, 10, 11]
 
 
+def test_load_store_op_flat_block_ids_tolerates_flat_single_group():
+    """flat_block_ids must not crash on the flat list[int] some single-group
+    connectors emit after scheduler->worker transport (regression: previously
+    raised TypeError: 'int' object is not iterable)."""
+    op = LoadStoreOp(
+        token_ids=[1, 2, 3, 4],
+        block_ids=[0, 1, 10, 11],
+        start=0,
+        end=4,
+    )
+
+    assert op.flat_block_ids == [0, 1, 10, 11]
+
+
 def test_store_keeps_event_until_future_finishes(fake_adapter):
     """Store requests keep the exported CUDA event alive while pending."""
     adapter, _send_mock, _future = fake_adapter
