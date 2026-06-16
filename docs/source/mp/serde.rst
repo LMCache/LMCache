@@ -1,5 +1,5 @@
-Compression
-===========
+KV Cache Compression
+====================
 
 LMCache supports a **per-adapter serde** that transforms KV cache data on
 its way to and from an L2 adapter. Typical uses: quantization (shrink

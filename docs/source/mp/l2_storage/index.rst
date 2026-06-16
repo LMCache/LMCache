@@ -148,7 +148,7 @@ Serde (compression / quantization)
 Each adapter can optionally run a **serde** (serializer / deserializer)
 that transforms data on the way in and out of L2 — e.g. fp8 quantization
 for disk backends, or encryption for remote adapters. See
-:doc:`Compression </mp/serde>` for details and configuration.
+:doc:`KV Cache Compression </mp/serde>` for details and configuration.
 
 .. toctree::
    :maxdepth: 1

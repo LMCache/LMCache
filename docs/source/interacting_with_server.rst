@@ -1,5 +1,5 @@
-Interacting with the lmcache server
-===================================
+KV Cache Operations
+===================
 
 Ways to inspect, manage, and observe a running ``lmcache server`` -- from the
 command line, over HTTP, or through the web frontend.

@@ -230,14 +230,37 @@ function saveSidebarScroll() {
 function restoreSidebarScroll() {
   const sidebar = document.getElementById("left-sidebar");
   const saved = sessionStorage.getItem(SIDEBAR_SCROLL_KEY);
-  if (sidebar && saved !== null) {
-    sidebar.scrollTop = parseInt(saved, 10) || 0;
+  if (!sidebar || saved === null) {
+    return;
   }
+  const target = parseInt(saved, 10) || 0;
+  // Sections expand asynchronously (Alpine reveals the child <ul> via x-show),
+  // so the sidebar starts short and scrollTop gets clamped near the top.
+  // Re-apply the target across several animation frames until it sticks.
+  let tries = 0;
+  const apply = () => {
+    sidebar.scrollTop = target;
+    tries += 1;
+    if (tries < 20 && Math.abs(sidebar.scrollTop - target) > 1) {
+      requestAnimationFrame(apply);
+    }
+  };
+  requestAnimationFrame(apply);
 }
 
-// Save right before navigating away (pagehide is bfcache-friendly).
+// Save the position whenever a sidebar link is clicked (captures it exactly
+// at click time) and as a fallback right before the page is hidden.
+document.addEventListener("DOMContentLoaded", () => {
+  const sidebar = document.getElementById("left-sidebar");
+  if (sidebar) {
+    sidebar.addEventListener("click", (e) => {
+      if (e.target.closest("a")) {
+        saveSidebarScroll();
+      }
+    });
+  }
+});
 window.addEventListener("pagehide", saveSidebarScroll);
-// Restore after the nav has rendered and top-level sections are expanded.
-document.addEventListener("DOMContentLoaded", () =>
-  setTimeout(restoreSidebarScroll, 0),
-);
+// Restore on initial load and on bfcache restore (pageshow).
+document.addEventListener("DOMContentLoaded", restoreSidebarScroll);
+window.addEventListener("pageshow", restoreSidebarScroll);
