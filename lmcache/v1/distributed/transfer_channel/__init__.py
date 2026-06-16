@@ -17,7 +17,6 @@ from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelReadResult,
 )
 from lmcache.v1.distributed.transfer_channel.factory import (
-    TransferChannelType,
     create_transfer_channel_context,
 )
 
@@ -34,7 +33,6 @@ __all__ = [
     "TransferChannelContext",
     "TransferChannelServer",
     "TransferChannelClient",
-    "TransferChannelType",
     "initialize_transfer_channel_context",
     "get_transfer_channel_context",
     "delete_transfer_channel_context",
@@ -45,7 +43,7 @@ _context_lock = threading.Lock()
 
 
 def initialize_transfer_channel_context(
-    transfer_channel_type: TransferChannelType,
+    transfer_channel_type: str,
     l1_memory_desc: "L1MemoryDesc",
     listen_url: str,
     advertise_url: str,

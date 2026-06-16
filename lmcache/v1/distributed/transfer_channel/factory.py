@@ -11,7 +11,7 @@ type name and invokes it.
 from __future__ import annotations
 
 # Standard
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Callable
 
 # First Party
 from lmcache.logging import init_logger
@@ -25,9 +25,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# The set of supported transfer-channel type identifiers.
-TransferChannelType = Literal["nixl"]
-
 # A factory creates a ``TransferChannelContext``. It is always called with the
 # keyword arguments ``l1_memory_desc``, ``listen_url`` and ``advertise_url``,
 # plus any implementation-specific keyword arguments forwarded by the caller.
@@ -38,7 +35,7 @@ _TRANSFER_CHANNEL_FACTORY_REGISTRY: dict[str, TransferChannelFactory] = {}
 
 
 def register_transfer_channel_factory(
-    transfer_channel_type: TransferChannelType,
+    transfer_channel_type: str,
     factory: TransferChannelFactory,
 ) -> None:
     """Register a factory that creates a context for ``transfer_channel_type``.
@@ -64,7 +61,7 @@ def register_transfer_channel_factory(
 
 
 def create_transfer_channel_context(
-    transfer_channel_type: TransferChannelType,
+    transfer_channel_type: str,
     l1_memory_desc: "L1MemoryDesc",
     listen_url: str,
     advertise_url: str,
