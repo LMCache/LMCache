@@ -110,17 +110,9 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          if [ -z "${HF_TOKEN:-}" ]; then
-            echo "::warning::HF_TOKEN not available (fork PR?), "\
-              "skipping model download and dependent tests"
-            echo "skip_model_tests=true" >> "${GITHUB_ENV}"
-            exit 0
-          fi
-          HF_DOWNLOAD_FAIL_ON_ERROR=1 \
-            bash .github/scripts/download_model.sh facebook/opt-125m
+          bash .github/scripts/download_model.sh facebook/opt-125m
 
       - name: Server bench — LMCache-driven
-        if: env.skip_model_tests != 'true'
         run: |
           LMCACHE_BENCH_TRANSFER_MODE=lmcache_driven \
           LMCACHE_HTTP_PORT_BENCH=18080 \
@@ -128,7 +120,6 @@ jobs:
             bash .github/scripts/cpu_device_test.sh server_bench
 
       - name: Server bench — Engine-driven
-        if: env.skip_model_tests != 'true'
         run: |
           LMCACHE_BENCH_TRANSFER_MODE=engine_driven \
           LMCACHE_HTTP_PORT_BENCH=18081 \
@@ -136,7 +127,6 @@ jobs:
             bash .github/scripts/cpu_device_test.sh server_bench
 
       - name: vLLM e2e — Engine-driven (pickle)
-        if: env.skip_model_tests != 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -148,7 +138,7 @@ jobs:
 
       # POSIX SHM transport is Linux-only.
       - name: vLLM e2e — Engine-driven (shm)
-        if: runner.os == 'Linux' && env.skip_model_tests != 'true'
+        if: runner.os == 'Linux'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -159,7 +149,6 @@ jobs:
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
       - name: vLLM e2e — Engine-driven
-        if: env.skip_model_tests != 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
