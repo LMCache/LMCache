@@ -956,3 +956,75 @@ class TestHugepageAllocation:
         assert total > 0
         assert free >= 0
         assert page_mb == 2
+
+
+class TestPagedTensorMemoryAllocatorClose:
+    """Tests for the close() lifecycle on PagedTensorMemoryAllocator."""
+
+    def _make_allocator(self) -> PagedTensorMemoryAllocator:
+        shape = torch.Size([2, 32, 16, 128])
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_2LTD
+        chunk_bytes = shape.numel() * dtype.itemsize
+        tensor_buffer = torch.zeros(chunk_bytes * 4, dtype=torch.uint8, device="cpu")
+        return PagedTensorMemoryAllocator(tensor_buffer, [shape], [dtype], fmt)
+
+    def test_close_sets_closed_flag(self):
+        """close() marks the allocator as closed."""
+        allocator = self._make_allocator()
+        assert not allocator._closed
+        allocator.close()
+        assert allocator._closed
+
+    def test_close_idempotent(self):
+        """Calling close() twice does not raise."""
+        allocator = self._make_allocator()
+        allocator.close()
+        allocator.close()
+
+    def test_del_warns_if_close_not_called(self):
+        """__del__ emits a warning when close() was never called."""
+        from unittest.mock import patch
+
+        import lmcache.v1.memory_management as mm_module
+
+        allocator = self._make_allocator()
+        with patch.object(mm_module.logger, "warning") as mock_warn:
+            allocator.__del__()
+        messages = " ".join(str(a) for call in mock_warn.call_args_list for a in call[0])
+        assert "close() was never called" in messages
+
+    def test_del_silent_after_close(self):
+        """__del__ is silent when close() was already called."""
+        from unittest.mock import patch
+
+        import lmcache.v1.memory_management as mm_module
+
+        allocator = self._make_allocator()
+        allocator.close()
+        with patch.object(mm_module.logger, "warning") as mock_warn:
+            allocator.__del__()
+        messages = " ".join(str(a) for call in mock_warn.call_args_list for a in call[0])
+        assert "close() was never called" not in messages
+
+    def test_mixed_allocator_close_calls_pin_allocator_close(self):
+        """MixedMemoryAllocator.close() propagates close() to its PagedTensorMemoryAllocator."""
+        LMCStatsMonitor.GetOrCreate()
+        total_size = 1024 * 1024 * 16  # 16 MB
+        shape = torch.Size([2, 32, 16, 128])
+        dtype = torch.bfloat16
+        fmt = MemoryFormat.KV_2LTD
+        allocator = MixedMemoryAllocator(
+            total_size,
+            use_paging=True,
+            shapes=[shape],
+            dtypes=[dtype],
+            fmt=fmt,
+        )
+        pin_alloc = allocator.pin_allocator
+        assert isinstance(pin_alloc, PagedTensorMemoryAllocator)
+        assert not pin_alloc._closed
+
+        allocator.close()
+
+        assert pin_alloc._closed

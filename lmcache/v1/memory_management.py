@@ -1805,6 +1805,7 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         self.shapes = shapes
         self.dtypes = dtypes
         self.fmt = fmt
+        self._closed = False
 
         # full chunk size bytes
         self.align_bytes = get_size_bytes(shapes, dtypes)
@@ -2054,9 +2055,28 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         """
         return self.paged_buffers
 
+    def close(self):
+        """
+        Release the underlying buffer.
+
+        Must be called only after any NIXL agent that registered this buffer
+        has already called ``deregister_memory`` (i.e. after the agent's own
+        ``close()``). Calling ``close()`` in the wrong order leaves NIXL
+        holding a stale registration against freed memory.
+        """
+        if not self._closed:
+            del self.buffer
+            self._closed = True
+
     def __del__(self):
-        # FIXME: NIXL-related memory leak should be handled somewhere (else).
-        del self.buffer
+        if not self._closed:
+            logger.warning(
+                "PagedTensorMemoryAllocator.close() was never called. "
+                "Any NIXL agent that registered this buffer may have leaked "
+                "its memory registration. Always call close() explicitly "
+                "after the NIXL agent has been closed."
+            )
+            del self.buffer
 
 
 class BufferAllocator(MemoryAllocatorInterface):
@@ -2452,6 +2472,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 torch_dev.synchronize()
             if self.buffer.numel() == 0:
                 return
+            # Close the paged sub-allocator before freeing the backing buffer so
+            # that any NIXL agent registered against its pages is already gone.
+            self.pin_allocator.close()
             _free_cpu_memory(
                 self.buffer,
                 self.size,
