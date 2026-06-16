@@ -308,7 +308,7 @@ def test_uring_cmd_explicit_transfer_limit_must_be_block_aligned():
     with pytest.raises(
         ValueError,
         match=r"max_data_transfer_size \(5000\) must be a multiple of "
-        "block_align \(4096\)",
+        r"block_align \(4096\)",
     ):
         _build_transfer_limit_backend(
             TEST_DEVICES["char_device"], max_data_transfer_size=5000
