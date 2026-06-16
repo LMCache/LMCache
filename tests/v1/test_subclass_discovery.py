@@ -518,6 +518,72 @@ class TestLevels:
         )
         assert _names(result) == ["DeepShadow", "MidChild"]
 
+    def test_discovers_class_in_subpackage_init(
+        self, temp_pkg: Tuple[str, Path]
+    ) -> None:
+        """A class defined directly in a sub-package ``__init__.py``
+        must be discovered at the sub-package's depth (depth 1).  This
+        matches the pre-levels legacy behaviour where sub-packages were
+        treated identically to leaf modules."""
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        # Place a class inside mid/__init__.py (depth 1 sub-package).
+        (pkg_dir / "mid" / "__init__.py").write_text(
+            textwrap.dedent(
+                """
+                from ..base import Base
+
+                class InitChild(Base):
+                    def name(self) -> str:
+                        return "init"
+                """
+            )
+        )
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        # Default levels [1, 1] -- depth 1, should see InitChild in
+        # mid/__init__.py at depth 1 + TopChild in leaf_top.py.
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                module_filter=lambda n: n != "base",
+            )
+        )
+        assert _names(result) == ["InitChild", "TopChild"]
+
+    def test_subpackage_init_not_found_at_deeper_level(
+        self, temp_pkg: Tuple[str, Path]
+    ) -> None:
+        """A class in a sub-package ``__init__.py`` at depth 1 must not
+        appear when the scan window excludes depth 1."""
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        (pkg_dir / "mid" / "__init__.py").write_text(
+            textwrap.dedent(
+                """
+                from ..base import Base
+
+                class InitChild(Base):
+                    def name(self) -> str:
+                        return "init"
+                """
+            )
+        )
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        # levels=[2, 2] only inspects depth-2 leaf modules.
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                levels=[2, 2],
+            )
+        )
+        # InitChild lives at depth 1, MidChild (mid/leaf_mid.py) at
+        # depth 2.
+        assert _names(result) == ["MidChild"]
+
     @pytest.mark.parametrize(
         "bad_levels",
         [

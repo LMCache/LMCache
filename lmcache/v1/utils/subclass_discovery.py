@@ -115,10 +115,10 @@ def discover_subclasses(
             historical behavior.  ``[1, 2]`` inspects direct children
             and grand-children, ``[2, 2]`` only the grand-children, and
             ``[]`` / ``[0, 0]`` recurse without any depth limit.
-            Sub-packages outside the window are still traversed when
-            ``max_depth`` (or unlimited) allows reaching deeper layers,
-            but their own ``__init__`` is never scanned for classes:
-            sub-packages act purely as descent points.
+            A sub-package's ``__init__.py`` is scanned at the depth
+            where the sub-package itself sits (e.g. ``bench/__init__.py``
+            is depth 1), matching the pre-levels behavior where
+            sub-packages were treated as ordinary modules.
 
     Raises:
         TypeError: If *package* is not a real package (no ``__path__``).
@@ -143,15 +143,33 @@ def discover_subclasses(
         if max_depth != _UNLIMITED and depth > max_depth:
             return
 
+        def _scan_module(module: ModuleType) -> Iterator[type[T]]:
+            """Yield classes from *module* that match all filters."""
+            for _, obj in inspect.getmembers(module, inspect.isclass):
+                if not issubclass(obj, base_class) or obj is base_class:
+                    continue
+                if not include_abstract and inspect.isabstract(obj):
+                    continue
+                if require_defined_in_module and (obj.__module__ != module.__name__):
+                    continue
+                if obj in seen:
+                    continue
+                seen.add(obj)
+                yield obj
+
         for _, short_name, is_pkg in pkgutil.iter_modules(current_path):
             full_name = "%s.%s" % (current_pkg.__name__, short_name)
             if is_pkg:
                 # Recurse into sub-packages so their leaf modules can
-                # still be reached, but never scan their ``__init__``
-                # for classes -- that keeps the semantics aligned with
-                # ``require_defined_in_module=True`` and avoids
-                # surprising re-export hits.
-                if max_depth != _UNLIMITED and depth + 1 > max_depth:
+                # still be reached.  The sub-package ``__init__.py`` is
+                # also scanned at the current depth -- this preserves
+                # the pre-levels behaviour where sub-package init files
+                # were treated just like ordinary leaf modules.
+                can_scan_init = depth >= min_depth and (
+                    max_depth == _UNLIMITED or depth <= max_depth
+                )
+                can_recurse = max_depth == _UNLIMITED or depth + 1 <= max_depth
+                if not can_scan_init and not can_recurse:
                     continue
                 try:
                     sub_pkg = importlib.import_module(full_name)
@@ -161,7 +179,11 @@ def discover_subclasses(
                 sub_path = getattr(sub_pkg, "__path__", None)
                 if sub_path is None:
                     continue
-                yield from _walk(sub_pkg, sub_path, depth + 1)
+                if can_scan_init:
+                    if module_filter is None or module_filter(short_name):
+                        yield from _scan_module(sub_pkg)
+                if can_recurse:
+                    yield from _walk(sub_pkg, sub_path, depth + 1)
                 continue
 
             # Leaf module: apply depth window + caller's name filter.
@@ -176,18 +198,7 @@ def discover_subclasses(
             except Exception as exc:
                 _report_import_error(full_name, exc)
                 continue
-
-            for _, obj in inspect.getmembers(module, inspect.isclass):
-                if not issubclass(obj, base_class) or obj is base_class:
-                    continue
-                if not include_abstract and inspect.isabstract(obj):
-                    continue
-                if require_defined_in_module and obj.__module__ != module.__name__:
-                    continue
-                if obj in seen:
-                    continue
-                seen.add(obj)
-                yield obj
+            yield from _scan_module(module)
 
     def _report_import_error(full_name: str, exc: Exception) -> None:
         if on_import_error is not None:
