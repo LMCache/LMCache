@@ -8,7 +8,7 @@ the vLLM multiprocess adapter.
 When a vLLM worker dies without sending `UNREGISTER_KV_CACHE` (SIGKILL, OOM-kill,
 node loss), its per-instance state leaks on the MP server forever: the GPU
 `ContextEntry` (a `GPUCacheContext` holding CUDA IPC handles), the
-`NonGPUContextEntry` + `TransferStrategy` pair, and any blend-mode per-instance
+`EngineDrivenContextEntry` + `TransferStrategy` pair, and any blend-mode per-instance
 state (e.g. CB rope caches). Nothing observes worker death; on a shared server,
 leaked contexts accumulate until device memory is exhausted.
 
@@ -41,9 +41,10 @@ vLLM worker adapter                              MP server
 |   -> re-register callback |   REGISTER        |   -> drop_instance_state(id) fan-out |
 |  freeze-gap detection ->  +------------------>|        |                |            |
 |   force 1 unhealthy cycle |   STORE/RETRIEVE  |        v                v            |
-|                           |   (refresh too)   | GPU / NonGPU            BlendV3      |
-| register_kv_caches        |                   |  TransferModule         (CB rope     |
-|  (no pings until traffic) |                   |  Entry{.., last_seen,    dropped)    |
+|                           |   (refresh too)   | LMCacheDriven /         BlendV3      |
+| register_kv_caches        |                   |  EngineDriven           (CB rope     |
+|  (no pings until traffic) |                   |  TransferModule.Entry    dropped)    |
+|                           |                   |  {.., last_seen,                     |
 |                           |                   |   has_liveness_signal}               |
 +---------------------------+                   |  _lock (leaf); pop -> cleanup        |
                                                 +--------------------------------------+
@@ -73,7 +74,7 @@ Every id-carrying request reads the same field, so no other payloads change.
 
 ### 5.1 Liveness state and two-tier windows
 
-`ContextEntry` (GPU) and `NonGPUContextEntry` gain `last_seen: float`
+`ContextEntry` (lmcache-driven) and `EngineDrivenContextEntry` gain `last_seen: float`
 (`time.monotonic()`) and `has_liveness_signal: bool`, latched only by PING. The
 flag selects the staleness window: an entry that has pinged provably runs the
 heartbeat protocol and is judged on the reap timeout; one that never pinged (e.g.
@@ -88,7 +89,7 @@ The reaper runs on its own thread, so the per-instance dicts are now mutated off
 the MQ handler threads. Each transfer module gains one `threading.Lock` so the
 reaper's scan-and-pop cannot race a concurrent register/unregister/transfer (which
 would otherwise corrupt the dict or hand out a half-removed entry). In
-`NonGPUTransferModule` the context and strategy dicts mutate as a pair under that
+`EngineDrivenTransferModule` the context and strategy dicts mutate as a pair under that
 lock, so a reap racing a re-register can never strand a fresh context without its
 strategy. It is a leaf lock — never held across context construction, storage
 calls, or any other component — so no thread ever holds two locks. External
