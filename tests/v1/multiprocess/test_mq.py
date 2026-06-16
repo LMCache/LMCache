@@ -16,7 +16,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.mq import (
     BlockingRequestHandler,
@@ -38,13 +38,13 @@ from tests.v1.multiprocess import test_mq_handler_helpers
 # ==============================================================================
 
 
-def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
+def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
     """
     Create a cache key for testing.
     """
     chunk_size = 256
     token_ids = [index] * chunk_size
-    return IPCCacheEngineKey.from_token_ids(
+    return IPCCacheServerKey.from_token_ids(
         model,
         1,
         0,

@@ -9,11 +9,12 @@
 #   SKIP_INSTALL=1              (install done by CI workflow steps)
 #
 # Transport mode is selected via LMCACHE_TRANSPORT_MODE:
-#   handle -> LMCACHE_MP_TRANSFER_MODE=handle (POSIX SHM server-side copy)
-#   data   -> LMCACHE_DATA_MODE selects shm (default) or pickle
+#   engine_driven -> LMCACHE_MP_TRANSFER_MODE=engine_driven (server-side copy)
+#   lmcache_driven -> LMCACHE_DATA_MODE selects shm (default) or pickle
 #
 # Environment variables (all optional, defaults shown):
-#   LMCACHE_TRANSPORT_MODE   Transport mode: handle|data (default: handle)
+#   LMCACHE_TRANSPORT_MODE   Transport: engine_driven|lmcache_driven
+#                             (default: engine_driven)
 #   LMCACHE_DATA_MODE        Data transfer mode: shm|pickle (default: shm)
 #   LMCACHE_HTTP_PORT        HTTP port for LMCache server  (default: 8080)
 #   VLLM_PORT                HTTP port for vLLM server     (default: 8000)
@@ -40,15 +41,15 @@ if [ ! -f "${SHARED_SCRIPT}" ]; then
     exit 1
 fi
 
-LMCACHE_TRANSPORT_MODE="${LMCACHE_TRANSPORT_MODE:-handle}"
+LMCACHE_TRANSPORT_MODE="${LMCACHE_TRANSPORT_MODE:-engine_driven}"
 
-# When LMCACHE_TRANSPORT_MODE=data, LMCACHE_DATA_MODE selects the
+# When LMCACHE_TRANSPORT_MODE=engine_driven, LMCACHE_DATA_MODE selects the
 # specific data transfer mechanism: shm (default) or pickle.
 LMCACHE_DATA_MODE="${LMCACHE_DATA_MODE:-shm}"
 
 # Map LMCACHE_TRANSPORT_MODE to the vars expected by the shared script.
 case "${LMCACHE_TRANSPORT_MODE}" in
-  data)
+  engine_driven)
     case "${LMCACHE_DATA_MODE}" in
       shm)
         export LMCACHE_SHM_NAME="__default__"
@@ -56,20 +57,15 @@ case "${LMCACHE_TRANSPORT_MODE}" in
       pickle)
         export LMCACHE_SHM_NAME=""
         ;;
-      *)
-        echo "!! Unknown LMCACHE_DATA_MODE='${LMCACHE_DATA_MODE}'"
-        echo "   Valid values: shm, pickle"
-        exit 1
-        ;;
     esac
-    export LMCACHE_MP_TRANSFER_MODE="data"
+    export LMCACHE_MP_TRANSFER_MODE="engine_driven"
     ;;
-  handle)
-    export LMCACHE_MP_TRANSFER_MODE="handle"
+  lmcache_driven)
+    export LMCACHE_MP_TRANSFER_MODE="lmcache_driven"
     ;;
   *)
     echo "!! Unknown LMCACHE_TRANSPORT_MODE='${LMCACHE_TRANSPORT_MODE}'"
-    echo "   Valid values: handle, data"
+    echo "   Valid values: engine_driven, lmcache_driven"
     exit 1
     ;;
 esac

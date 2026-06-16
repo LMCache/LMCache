@@ -228,7 +228,7 @@ Returns a detailed snapshot of the MP engine's internal state: L1 cache,
 L2 adapters, registered GPU contexts, active sessions, and in-flight
 prefetch jobs. Intended for operators and debugging, not for monitoring
 (use Prometheus metrics for time-series data — see
-:doc:`observability`).
+:doc:`observability/index`).
 
 **Response** (``200 OK``):
 
@@ -236,11 +236,11 @@ prefetch jobs. Intended for operators and debugging, not for monitoring
 
     {
       "is_healthy": true,
-      "engine_type": "MPCacheEngine",
+      "engine_type": "MPCacheServer",
       "chunk_size": 256,
       "hash_algorithm": "builtin-hash",
       "registered_gpu_ids": [0, 1],
-      "gpu_context_meta": {
+      "cache_context_meta": {
         "0": {
           "model_name": "meta-llama/Llama-3.1-8B-Instruct",
           "world_size": 1,
@@ -413,7 +413,7 @@ When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
   non-positive.
 - ``404``: ``instance_id`` not registered, or the registered KV tensors
   are empty.
-- ``501``: engine has no ``gpu_contexts``, or the GPU KV format is not
+- ``501``: engine has no ``cache_contexts``, or the KV format is not
   supported by this endpoint (page-buffer-fused and cross-layer layouts
   are declined until a real need appears).
 - ``503``: engine not yet initialized on ``app.state``.
@@ -669,7 +669,7 @@ Inspect or mutate Python logger levels at runtime. All responses are
 
 Prometheus exposition format for every metric registered on the default
 ``prometheus_client`` registry. Scrape this directly from Prometheus.
-See :doc:`observability` for the list of exported metrics.
+See :doc:`observability/index` for the list of exported metrics.
 
 **Example:**
 

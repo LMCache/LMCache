@@ -127,12 +127,12 @@ def create_engine_group_infos_from_vllm(
     )
 
     # Inspect the real registered tensors for physical layout and dtype.
-    gpu_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
+    engine_kv_format, normalized_kv_caches = normalize_kv_and_discover_format(
         list(kv_caches.values()),
         EngineType.VLLM,
         layout_hints=layout_hints,
     )
-    num_layers = get_num_layers(normalized_kv_caches, gpu_kv_format)
+    num_layers = get_num_layers(normalized_kv_caches, engine_kv_format)
 
     # vLLM-specific field access (confined to this function): map each
     # registered KV tensor to its vLLM engine KV cache group index. vLLM places
@@ -183,7 +183,7 @@ def create_engine_group_infos_from_vllm(
         )
         for identity, indices in group_layers_by_identity(
             normalized_kv_caches,
-            gpu_kv_format,
+            engine_kv_format,
             num_layers,
             per_layer_group_idx,
         )

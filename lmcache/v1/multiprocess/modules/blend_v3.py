@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Blend V3: paged-aware CacheBlend as an EngineModule.
 
-Plugs into the unified MPCacheEngine; standard REGISTER_KV_CACHE +
+Plugs into the unified MPCacheServer; standard REGISTER_KV_CACHE +
 CB_REGISTER_ROPE_V3 for setup; STORE wrapper registers fingerprints;
 retrieve scatters into the request's paged blocks.
 """
@@ -42,12 +42,13 @@ from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     CBUnifiedLookupResult,
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
-from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
@@ -56,6 +57,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -313,19 +315,19 @@ def _unique_token_coverage(results: list[CBMatchResult]) -> int:
 
 
 class BlendV3Module:
-    """Paged-aware V3 CacheBlend. Wraps GPUTransfer STORE to register
+    """Paged-aware V3 CacheBlend. Wraps LMCacheDrivenTransfer STORE to register
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
-    GPU state via :class:`GPUTransferModule.gpu_contexts`."""
+    GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
 
     def __init__(
         self,
-        ctx: MPCacheEngineContext,
-        gpu_transfer: GPUTransferModule,
+        ctx: MPCacheServerContext,
+        lmcache_driven_transfer: LMCacheDrivenTransferModule,
         lookup_module: LookupModule,
         coordinator: "BlendCoordinatorClient | None" = None,
     ):
         self._ctx = ctx
-        self._gpu_transfer = gpu_transfer
+        self._transfer_module = lmcache_driven_transfer
         # Reused by cb_unified_lookup to run the standard prefix lookup
         # (registers the prefix prefetch job + session state the retrieve
         # path depends on) inside the single unified RPC.
@@ -372,11 +374,11 @@ class BlendV3Module:
     # ------------------------------------------------------------------
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         return self._ctx
 
     def get_handlers(self) -> list[HandlerSpec]:
-        # STORE shadows GPUTransfer's; compositor registers V3 last.
+        # STORE shadows LMCacheDrivenTransfer's; compositor registers V3 last.
         return [
             HandlerSpec(RequestType.STORE, self.store, ThreadPoolType.AFFINITY),
             HandlerSpec(
@@ -404,7 +406,7 @@ class BlendV3Module:
     def report_status(self) -> dict:
         # Meta is derived live from MP server gpu_transfe
 
-        cache_contexts = self._gpu_transfer.cache_contexts
+        cache_contexts = self._transfer_module.cache_contexts
 
         def _meta(iid: int) -> "tuple[str, int] | None":
             entry = cache_contexts.get(iid)
@@ -451,7 +453,7 @@ class BlendV3Module:
         Raises:
             ValueError: If ``instance_id`` has no registered KV cache.
         """
-        cache_contexts = self._gpu_transfer.cache_contexts
+        cache_contexts = self._transfer_module.cache_contexts
         if instance_id not in cache_contexts:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
@@ -504,7 +506,7 @@ class BlendV3Module:
                 ``UNREGISTER_KV_CACHE`` to free the KV cache itself).
         """
         self._cb_rope_state.pop(instance_id, None)
-        if instance_id not in self._gpu_transfer.cache_contexts:
+        if instance_id not in self._transfer_module.cache_contexts:
             logger.warning(
                 "cb_unregister_rope: instance %d not registered", instance_id
             )
@@ -534,7 +536,7 @@ class BlendV3Module:
             except Exception:
                 logger.exception("CB fingerprint registration failed (sync drain)")
 
-    def _match_fingerprints(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
+    def _match_fingerprints(self, key: IPCCacheServerKey) -> list[CBMatchResult]:
         """Drain pending registrations and fingerprint-match sub-sequences.
 
         Returns the raw matches (any order, possibly overlapping); the caller
@@ -581,10 +583,10 @@ class BlendV3Module:
         """Find the CB KV buffer layout for ``(model_name, world_size)``.
 
         Reads the thread-safe ``layout_desc_registry`` (populated by
-        ``gpu_transfer`` on KV-cache registration) rather than iterating
-        ``cache_contexts``: iteration races concurrent register/unregister, and
-        the registry holds the complete multi-group descriptor instead of a
-        single-group manual reconstruction.
+        ``lmcache_driven_transfer`` on KV-cache registration) rather than
+        iterating ``cache_contexts``: iteration races concurrent
+        register/unregister, and the registry holds the complete multi-group
+        descriptor instead of a single-group manual reconstruction.
 
         Args:
             model_name (str): Model name to match.
@@ -598,7 +600,7 @@ class BlendV3Module:
 
     def _sparse_prefetch_submit(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         layout_desc: "MemoryLayoutDesc",
         matches: list[CBMatchResult],
     ) -> "tuple[PrefetchHandle, dict[bytes, list], list[int]]":
@@ -610,7 +612,7 @@ class BlendV3Module:
         with the found set.
 
         Args:
-            key (IPCCacheEngineKey): The request key.
+            key (IPCCacheServerKey): The request key.
             layout_desc (MemoryLayoutDesc): CB KV buffer layout for L1 alloc.
             matches (list[CBMatchResult]): Non-prefix matches to prefetch.
 
@@ -651,7 +653,7 @@ class BlendV3Module:
 
     def _sparse_classify(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         matches: list[CBMatchResult],
         found_uidx: set[int],
         per_hash_obj_keys: dict[bytes, list],
@@ -664,7 +666,7 @@ class BlendV3Module:
         Stashes the found chunks' obj_keys for the retrieve path.
 
         Args:
-            key (IPCCacheEngineKey): The request key.
+            key (IPCCacheServerKey): The request key.
             matches (list[CBMatchResult]): The submitted non-prefix matches.
             found_uidx (set[int]): Deduped-key indices that loaded.
             per_hash_obj_keys (dict[bytes, list]): Per-hash TP-expanded keys.
@@ -723,7 +725,7 @@ class BlendV3Module:
         return found_cb_match_result
 
     def cb_unified_lookup(
-        self, key: IPCCacheEngineKey, tp_size: int
+        self, key: IPCCacheServerKey, tp_size: int
     ) -> CBUnifiedLookupResult | None:
         """Non-blocking single-RPC CB lookup (submit-once, poll-on-recall).
 
@@ -734,7 +736,7 @@ class BlendV3Module:
         the retrieve.
 
         Args:
-            key (IPCCacheEngineKey): Request key (token IDs, request_id, model,
+            key (IPCCacheServerKey): Request key (token IDs, request_id, model,
                 world_size).
             tp_size (int): Tensor-parallel size for the prefix lookup.
 
@@ -915,30 +917,30 @@ class BlendV3Module:
 
     def store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         instance_id: int,
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
     ) -> tuple[bytes, bool]:
         """Paged store, then register the stored chunks as match fingerprints.
 
-        Delegates the KV write to ``GPUTransfer.store``, then (worker 0 only)
+        Delegates the KV write to ``LMCacheDrivenTransfer.store``, then (worker 0 only)
         enqueues the chunk hashes for async fingerprint registration ordered
         after the L1 commit. Chunk 0 of a position-0 store is skipped (owned by
         the standard prefix path). Fingerprint failures are logged, never
         raised — they do not affect store correctness.
 
         Args:
-            key (IPCCacheEngineKey): Store key (token IDs + ``[start, end)``).
+            key (IPCCacheServerKey): Store key (token IDs + ``[start, end)``).
             instance_id (int): Target KV-cache instance.
             gpu_block_ids (list[list[int]]): Per-layer-group paged block IDs.
             event_ipc_handle (bytes): IPC handle to the producer's CUDA event.
 
         Returns:
-            tuple[bytes, bool]: The underlying ``GPUTransfer.store`` result
+            tuple[bytes, bool]: The underlying ``LMCacheDrivenTransfer.store`` result
             (event handle, success).
         """
-        result = self._gpu_transfer.store(
+        result = self._transfer_module.store(
             key, instance_id, gpu_block_ids, event_ipc_handle
         )
 
@@ -962,7 +964,7 @@ class BlendV3Module:
             job = (tokens_in_range, chunk_hashes, start_chunk_idx, key.start)
             with self._pending_fp_lock:
                 self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
-            entry = self._gpu_transfer.cache_contexts.get(instance_id)
+            entry = self._transfer_module.cache_contexts.get(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
             if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
                 gpu_ctx.cupy_stream.launch_host_func(
@@ -984,7 +986,7 @@ class BlendV3Module:
 
     def _publish_fingerprints(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         chunk_hashes: list[bytes],
         tokens_in_range: list[int],
     ) -> None:
@@ -1020,7 +1022,7 @@ class BlendV3Module:
                 key.request_id,
             )
 
-    def _submit_coordinator_match(self, key: IPCCacheEngineKey) -> bool:
+    def _submit_coordinator_match(self, key: IPCCacheServerKey) -> bool:
         """Issue a fleet directory match query for this request (best-effort).
 
         Args:
@@ -1137,7 +1139,7 @@ class BlendV3Module:
 
     def _apply_cb_rope_batched(
         self,
-        gpu_context: GPUCacheContext,
+        gpu_context: BaseCacheContext,
         rope_state: _CBRopeState,
         batch_len: int,
         slots_to_rope: list[tuple[int, int, int]],
@@ -1204,7 +1206,7 @@ class BlendV3Module:
 
     def cb_retrieve_pre_computed(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         cb_match_result: list[CBMatchResult],
         gpu_block_ids: list[int],
         instance_id: int,
@@ -1220,7 +1222,7 @@ class BlendV3Module:
         call this twice: partial- then full-block alloc).
 
         Args:
-            key (IPCCacheEngineKey): The request key.
+            key (IPCCacheServerKey): The request key.
             cb_match_result (list[CBMatchResult]): Matched ranges to scatter
                 (prefix-hit and shifted), any order.
             gpu_block_ids (list[int]): This request's full paged block table.
@@ -1235,7 +1237,7 @@ class BlendV3Module:
             ValueError: If the instance has no registered KV cache or rope
                 state. MLA layouts are unsupported (raised during re-RoPE).
         """
-        cache_contexts = self._gpu_transfer.cache_contexts
+        cache_contexts = self._transfer_module.cache_contexts
         if instance_id not in cache_contexts:
             raise ValueError(
                 f"Instance {instance_id} not registered for paged KV cache"
@@ -1321,9 +1323,7 @@ class BlendV3Module:
             event = torch_dev.Event(interprocess=True)
 
             # Staged once (single group), sliced per chunk inside the loop.
-            all_block_ids_gpu = gpu_context.copy_view_block_ids_to_gpu([gpu_block_ids])[
-                0
-            ]
+            all_block_ids_gpu = gpu_context.stage_block_ids([gpu_block_ids])[0]
 
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -1461,7 +1461,7 @@ class BlendV3Module:
                                     gpu_context.device,
                                     page_buffer_size,
                                     lmc_ops.TransferDirection.H2D,
-                                    gpu_context.gpu_kv_format_,
+                                    gpu_context.engine_kv_format,
                                     block_size=bs,
                                     head_size=rope_state.head_size,
                                 )

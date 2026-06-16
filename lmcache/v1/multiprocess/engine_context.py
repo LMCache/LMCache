@@ -20,7 +20,7 @@ from lmcache.v1.gpu_connector.gds_context import (
     initialize_gds_context,
 )
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -125,7 +125,7 @@ class LayoutDescRegistry:
             return entry.layout_desc
 
 
-class MPCacheEngineContext:
+class MPCacheServerContext:
     """Shared infrastructure for all engine modules.
 
     Holds the storage manager, token hasher, session manager, event bus,
@@ -200,7 +200,7 @@ class MPCacheEngineContext:
         return self._layout_desc_registry
 
     def resolve_obj_keys(
-        self, key: IPCCacheEngineKey, object_group_ids: list[int]
+        self, key: IPCCacheServerKey, object_group_ids: list[int]
     ) -> list[list[ObjectKey]]:
         """Resolve per-object-group object keys from an IPC cache key.
 
