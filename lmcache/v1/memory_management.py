@@ -2596,7 +2596,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self._mmap_buffer: Any | None = None
         self._cuda_registered_ptr: int | None = None
         self._cuda_runtime: Any | None = None
-        self._devdax_state = "active"
         self._unregistered = False
 
         self.devdax_buffer = self._map_devdax()
@@ -2803,245 +2802,6 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 if isinstance(memory_obj, TensorMemoryObj):
                     memory_obj.raw_data = torch.empty(0, dtype=torch.uint8)
 
-    def _devdax_usage_locked(self) -> tuple[int, int, int]:
-        if self.devdax_allocator is None:
-            return 0, 0, 0
-
-        manager = self.devdax_allocator.address_manager
-        total = manager.get_heap_size()
-        used = total - manager.get_free_size()
-        active_allocations = self.devdax_allocator.num_active_allocations
-        return used, total, active_allocations
-
-    def _devdax_device_status_locked(self) -> dict[str, object]:
-        used, total, active_allocations = self._devdax_usage_locked()
-        return {
-            "index": 0,
-            "device_path": self.device_path,
-            "state": self._devdax_state,
-            "max_dax_size_bytes": self.size,
-            "memory_used_bytes": used,
-            "memory_total_bytes": total,
-            "memory_free_bytes": total - used,
-            "active_allocation_count": active_allocations,
-            "supports_restart_recovery": False,
-        }
-
-    def _reconfigure_error(
-        self,
-        status_code: int,
-        message: str,
-        *,
-        payload: dict[str, object] | None = None,
-    ) -> Exception:
-        # First Party
-        from lmcache.v1.distributed.l2_adapters.reconfiguration import (
-            L2ReconfigureError,
-        )
-
-        return L2ReconfigureError(status_code, message, payload=payload)
-
-    def reconfigure_status(self) -> dict:
-        """Return runtime reconfiguration status for the L1 Device-DAX arena."""
-        with self.host_mem_lock:
-            used, total, _ = self._devdax_usage_locked()
-            capacity = total if self._devdax_state in {"active", "draining"} else 0
-            return {
-                "backend": "dax",
-                "supported_operations": ["status", "add", "remove", "resize"],
-                "status": {
-                    "tier": "l1",
-                    "hotplug_enabled": True,
-                    "total_capacity_bytes": capacity,
-                    "total_used_bytes": used,
-                    "devices": [self._devdax_device_status_locked()],
-                    "num_devices": 1,
-                },
-            }
-
-    def _reconfigure_size_bytes(self, payload: dict[str, object]) -> int:
-        size_bytes = payload.get("size_bytes")
-        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
-            raise self._reconfigure_error(
-                400,
-                "size_bytes must be a positive integer",
-            )
-        if size_bytes <= 0:
-            raise self._reconfigure_error(400, "size_bytes must be > 0")
-        return size_bytes
-
-    def _reconfigure_device_path(self, payload: dict[str, object]) -> str:
-        device_path = payload.get("device_path")
-        if not isinstance(device_path, str) or not device_path.strip():
-            raise self._reconfigure_error(400, "device_path must be non-empty")
-        return device_path.strip()
-
-    def _ensure_no_active_devdax_allocations_locked(self) -> None:
-        _, _, active_allocations = self._devdax_usage_locked()
-        if active_allocations:
-            raise self._reconfigure_error(
-                409,
-                "L1 Device-DAX has active allocations",
-                payload={
-                    "status": "blocked",
-                    "reason": "L1 Device-DAX has active allocations",
-                    "active_allocation_count": active_allocations,
-                },
-            )
-
-    def _install_devdax_mapping_locked(
-        self,
-        device_path: str,
-        size_bytes: int,
-        fd: int,
-        mmap_obj: mmap.mmap,
-        mmap_buffer: Any,
-        buffer: torch.Tensor,
-    ) -> None:
-        self.device_path = device_path
-        self.size = size_bytes
-        self._fd = fd
-        self._mmap_obj = mmap_obj
-        self._mmap_buffer = mmap_buffer
-        self.devdax_buffer = buffer
-        self.devdax_allocator = TensorMemoryAllocator(
-            self.devdax_buffer,
-            align_bytes=self.align_bytes,
-        )
-        self.address_manager = self.devdax_allocator.address_manager
-        self._devdax_state = "active"
-        self._register_cuda_host_memory()
-
-    def _reconfigure_add(self, payload: dict[str, object]) -> dict:
-        device_path = self._reconfigure_device_path(payload)
-        size_bytes = self._reconfigure_size_bytes(payload)
-
-        with self.host_mem_lock:
-            if self.devdax_allocator is not None and self._devdax_state == "active":
-                if self.device_path == device_path and self.size == size_bytes:
-                    return {
-                        "status": "ok",
-                        "operation": "add",
-                        "device": self._devdax_device_status_locked(),
-                    }
-                raise self._reconfigure_error(
-                    409,
-                    "L1 Device-DAX mapping is already active",
-                )
-
-            fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(
-                device_path,
-                size_bytes,
-            )
-            self._close_devdax_mapping_locked()
-            self._install_devdax_mapping_locked(
-                device_path,
-                size_bytes,
-                fd,
-                mmap_obj,
-                mmap_buffer,
-                buffer,
-            )
-            return {
-                "status": "ok",
-                "operation": "add",
-                "device": self._devdax_device_status_locked(),
-            }
-
-    def _reconfigure_remove(self, payload: dict[str, object]) -> dict:
-        device_path = self._reconfigure_device_path(payload)
-        mode = payload.get("mode", "migrate")
-        if not isinstance(mode, str) or mode not in {"migrate", "evict", "drain"}:
-            raise self._reconfigure_error(
-                400,
-                "mode must be migrate, evict, or drain",
-            )
-
-        with self.host_mem_lock:
-            if self.device_path != device_path:
-                raise self._reconfigure_error(404, "DAX device not found")
-
-            if mode == "drain":
-                self._devdax_state = "draining"
-                return {
-                    "status": "ok",
-                    "operation": "drain",
-                    "device_path": self.device_path,
-                    "state": self._devdax_state,
-                }
-
-            self._ensure_no_active_devdax_allocations_locked()
-            self._close_devdax_mapping_locked()
-            self._devdax_state = "removed"
-            return {
-                "status": "ok",
-                "operation": "remove",
-                "device_path": self.device_path,
-                "state": self._devdax_state,
-            }
-
-    def _reconfigure_resize(self, payload: dict[str, object]) -> dict:
-        device_path = self._reconfigure_device_path(payload)
-        size_bytes = self._reconfigure_size_bytes(payload)
-        mode = payload.get("mode", "migrate")
-        if not isinstance(mode, str) or mode not in {"migrate", "evict"}:
-            raise self._reconfigure_error(400, "mode must be migrate or evict")
-
-        with self.host_mem_lock:
-            if self.device_path != device_path or self.devdax_allocator is None:
-                raise self._reconfigure_error(404, "DAX device not found")
-            if self._devdax_state not in {"active", "draining"}:
-                raise self._reconfigure_error(409, "DAX device is not active")
-
-            old_size_bytes = self.size
-            if old_size_bytes == size_bytes:
-                return {
-                    "status": "ok",
-                    "operation": "resize",
-                    "device_path": self.device_path,
-                    "old_size_bytes": old_size_bytes,
-                    "new_size_bytes": size_bytes,
-                    "state": self._devdax_state,
-                }
-
-            self._ensure_no_active_devdax_allocations_locked()
-            fd, mmap_obj, mmap_buffer, buffer = self._open_devdax_mapping(
-                device_path,
-                size_bytes,
-            )
-            self._close_devdax_mapping_locked()
-            self._install_devdax_mapping_locked(
-                device_path,
-                size_bytes,
-                fd,
-                mmap_obj,
-                mmap_buffer,
-                buffer,
-            )
-            return {
-                "status": "ok",
-                "operation": "resize",
-                "device_path": self.device_path,
-                "old_size_bytes": old_size_bytes,
-                "new_size_bytes": size_bytes,
-                "state": self._devdax_state,
-            }
-
-    def reconfigure(self, operation: str, payload: dict[str, object]) -> dict:
-        """Apply a runtime reconfiguration operation to the L1 DAX arena."""
-        if operation == "status":
-            return dict(self.reconfigure_status())
-        if operation == "add":
-            return self._reconfigure_add(payload)
-        if operation == "remove":
-            return self._reconfigure_remove(payload)
-        if operation == "resize":
-            return self._reconfigure_resize(payload)
-        raise self._reconfigure_error(
-            400,
-            f"unsupported DAX reconfigure operation: {operation}",
-        )
-
     @_lmcache_nvtx_annotate
     def allocate(
         self,
@@ -3063,7 +2823,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
                 obj = self.local_allocator.allocate(shapes, dtypes, fmt, str(self))
                 if obj is not None:
                     return obj
-            if self.devdax_allocator is None or self._devdax_state != "active":
+            if self.devdax_allocator is None:
                 return None
             return self._allocate_from_devdax(shapes, dtypes, fmt)
         else:
@@ -3106,7 +2866,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             if remaining == 0:
                 return local_objs
 
-            if self.devdax_allocator is None or self._devdax_state != "active":
+            if self.devdax_allocator is None:
                 if local_objs and self.local_allocator is not None:
                     self.local_allocator.batched_free(local_objs, update_stats=False)
                 return None
