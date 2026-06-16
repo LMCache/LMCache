@@ -88,6 +88,7 @@ def test_match_malformed_tokens_b64_returns_422():
         assert resp.status_code == 422
 
         # Valid base64 but not a whole number of uint32 tokens (3 bytes).
+        # Standard
         import base64
 
         resp = client.post(
