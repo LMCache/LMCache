@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Non-GPU KV cache transfer operations for the MPCacheServer."""
+"""Engine-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
 from dataclasses import dataclass
@@ -18,7 +18,7 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
-    RegisterNonGpuContextPayload,
+    RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext, ShmPoolInfo
 from lmcache.v1.multiprocess.engine_module import (
@@ -29,9 +29,9 @@ from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
-    RegisterNonGpuContextResponse,
+    RegisterEngineDrivenContextResponse,
 )
-from lmcache.v1.multiprocess.transfer_context.base import NonGpuContextMetadata
+from lmcache.v1.multiprocess.transfer_context.base import EngineDrivenContextMetadata
 
 # Local
 from .server_transfer import (
@@ -43,7 +43,7 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class NonGPUContextEntry:
+class EngineDrivenContextEntry:
     """Registered non-GPU context metadata for a single worker instance.
 
     Attributes:
@@ -52,13 +52,13 @@ class NonGPUContextEntry:
         world_size: The world size associated with this context.
     """
 
-    metadata: NonGpuContextMetadata
+    metadata: EngineDrivenContextMetadata
     model_name: str
     world_size: int
 
 
-class NonGPUTransferModule:
-    """Handles non-GPU KV cache transfer operations.
+class EngineDrivenTransferModule:
+    """Handles Engine-driven KV cache transfer operations.
 
     Owns non-GPU context registrations and provides handlers for
     register, unregister, prepare/commit store, and prepare/commit retrieve
@@ -70,7 +70,7 @@ class NonGPUTransferModule:
 
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
-        self._non_gpu_contexts: dict[int, NonGPUContextEntry] = {}
+        self._engine_driven_contexts: dict[int, EngineDrivenContextEntry] = {}
         self._strategies: dict[int, TransferStrategy] = {}
         self._pending_shm_writes: dict[
             tuple[int, IPCCacheServerKey], list[ObjectKey]
@@ -95,12 +95,12 @@ class NonGPUTransferModule:
         """
         return [
             HandlerSpec(
-                RequestType.REGISTER_KV_CACHE_NON_GPU_CONTEXT,
-                self.register_kv_cache_non_gpu_context,
+                RequestType.REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
+                self.register_kv_cache_engine_driven_context,
                 ThreadPoolType.SYNC,
             ),
             HandlerSpec(
-                RequestType.UNREGISTER_KV_CACHE_NON_GPU_CONTEXT,
+                RequestType.UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT,
                 self.unregister_kv_cache,
                 ThreadPoolType.SYNC,
             ),
@@ -136,7 +136,7 @@ class NonGPUTransferModule:
         registered_non_cuda_ids: list[int] = []
         non_cuda_context_meta: dict[str, dict] = {}
 
-        for instance_id, entry in self._non_gpu_contexts.items():
+        for instance_id, entry in self._engine_driven_contexts.items():
             registered_non_cuda_ids.append(instance_id)
             non_cuda_context_meta[str(instance_id)] = {
                 "model_name": entry.model_name,
@@ -152,7 +152,7 @@ class NonGPUTransferModule:
 
     def close(self) -> None:
         """Release resources owned by this module."""
-        self._non_gpu_contexts.clear()
+        self._engine_driven_contexts.clear()
         self._strategies.clear()
 
     @staticmethod
@@ -166,10 +166,10 @@ class NonGPUTransferModule:
         non-GPU transfers."""
         return self._ctx.resolve_obj_keys(key, [0])[0]
 
-    def register_kv_cache_non_gpu_context(
+    def register_kv_cache_engine_driven_context(
         self,
-        payload: RegisterNonGpuContextPayload,
-    ) -> RegisterNonGpuContextResponse:
+        payload: RegisterEngineDrivenContextPayload,
+    ) -> RegisterEngineDrivenContextResponse:
         """Register non-CUDA KV layout metadata for non-GPU context mode.
 
         Args:
@@ -183,13 +183,15 @@ class NonGPUTransferModule:
         shm_name = self._shm_pool_info["shm_name"]
         pool_size = self._shm_pool_info["pool_size"]
 
-        if payload.instance_id in self._non_gpu_contexts:
+        if payload.instance_id in self._engine_driven_contexts:
             logger.warning(
                 "Instance %s's KV cache is already registered, "
                 "skipping the new registration",
                 payload.instance_id,
             )
-            return RegisterNonGpuContextResponse(shm_name=shm_name, pool_size=pool_size)
+            return RegisterEngineDrivenContextResponse(
+                shm_name=shm_name, pool_size=pool_size
+            )
 
         dtype = getattr(torch, payload.dtype_str, None)
         if dtype is None or not isinstance(dtype, torch.dtype):
@@ -209,12 +211,12 @@ class NonGPUTransferModule:
             )
         )
         layout_desc = MemoryLayoutDesc(shapes=[shape], dtypes=[dtype])
-        metadata = NonGpuContextMetadata(
+        metadata = EngineDrivenContextMetadata(
             layout_desc=layout_desc,
             block_size=payload.block_size,
             use_mla=payload.use_mla,
         )
-        self._non_gpu_contexts[payload.instance_id] = NonGPUContextEntry(
+        self._engine_driven_contexts[payload.instance_id] = EngineDrivenContextEntry(
             metadata=metadata,
             model_name=payload.model_name,
             world_size=payload.world_size,
@@ -240,7 +242,9 @@ class NonGPUTransferModule:
         self._ctx.layout_desc_registry.register(
             payload.model_name, payload.world_size, layout_desc
         )
-        return RegisterNonGpuContextResponse(shm_name=shm_name, pool_size=pool_size)
+        return RegisterEngineDrivenContextResponse(
+            shm_name=shm_name, pool_size=pool_size
+        )
 
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister a non-GPU KV cache context for the given instance ID.
@@ -248,7 +252,7 @@ class NonGPUTransferModule:
         Args:
             instance_id: The worker instance identifier.
         """
-        entry = self._non_gpu_contexts.pop(instance_id, None)
+        entry = self._engine_driven_contexts.pop(instance_id, None)
         if entry is None:
             logger.warning(
                 "No registered non-GPU context found for instance ID %d",
@@ -301,7 +305,7 @@ class NonGPUTransferModule:
         Returns:
             PrepareStoreResponse with empty slots for pickle mode.
         """
-        entry = self._non_gpu_contexts.get(instance_id)
+        entry = self._engine_driven_contexts.get(instance_id)
         if entry is None:
             raise ValueError(
                 f"non-CUDA context not registered for instance ID {instance_id}"
@@ -342,7 +346,7 @@ class NonGPUTransferModule:
             ValueError: If no non-GPU context is registered for the given
                 instance ID.
         """
-        entry = self._non_gpu_contexts.get(instance_id)
+        entry = self._engine_driven_contexts.get(instance_id)
         if entry is None:
             raise ValueError(
                 f"non-CUDA context not registered for instance ID {instance_id}"

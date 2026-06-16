@@ -384,7 +384,7 @@ class CpuCacheContext:
         number of tokens.
 
         Mirrors :meth:`GPUCacheContext.get_kernel_group_shape_dtype` so
-        callers such as ``gpu_transfer.get_layout_desc`` can duck-type
+        callers such as ``lmcache_driven_transfer.get_layout_desc`` can duck-type
         across GPU and CPU backends.
 
         Args:
@@ -584,7 +584,7 @@ class CpuCacheContext:
         """Return this context's KV cache layout metadata.
 
         Mirrors :meth:`GPUCacheContext.report_status` so
-        ``GPUTransferModule.report_status`` can duck-type across backends.
+        ``LMCacheDrivenTransferModule.report_status`` can duck-type across backends.
         """
         manager = self.kv_layer_groups_manager_
         kernel_groups = manager.kernel_groups

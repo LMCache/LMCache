@@ -956,3 +956,167 @@ class TestHugepageAllocation:
         assert total > 0
         assert free >= 0
         assert page_mb == 2
+
+
+# ---------------------------------------------------------------------------
+# set_used_size: narrowing logical size after a partial write
+# ---------------------------------------------------------------------------
+
+
+class TestSetUsedSize:
+    """``TensorMemoryObj.set_used_size`` narrows the logical view after a
+    write that did not fill the whole allocated buffer (e.g. when a serde
+    sizes its destination from ``estimate_serialized_size`` -- an upper
+    bound -- and then writes fewer bytes).  The override must survive
+    until the block is recycled by the paged allocator, at which point it
+    resets to ``None`` so the fresh allocation returns its layout-derived
+    size.
+    """
+
+    @staticmethod
+    def _make_byte_buffer(n_bytes: int) -> TensorMemoryObj:
+        """Construct a flat uint8 TensorMemoryObj of capacity ``n_bytes``
+        directly (no allocator), suitable for set_used_size mechanics
+        tests where allocator reuse isn't the focus."""
+        raw = torch.zeros(n_bytes, dtype=torch.uint8)
+        shape = torch.Size([n_bytes])
+        meta = MemoryObjMetadata(
+            shape=shape,
+            dtype=torch.uint8,
+            address=0,
+            phy_size=n_bytes,
+            ref_count=1,
+            pin_count=0,
+            fmt=MemoryFormat.BINARY_BUFFER,
+            shapes=[shape],
+            dtypes=[torch.uint8],
+        )
+        return TensorMemoryObj(raw_data=raw, metadata=meta, parent_allocator=None)
+
+    def test_default_get_size_is_layout_derived(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        assert obj.get_size() == 1024
+        # No override set yet.
+        assert obj._used_size_override is None
+
+    def test_set_used_size_narrows_get_size_and_byte_array(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        obj.set_used_size(213)
+        assert obj.get_size() == 213
+        # byte_array honors get_size, not the allocated capacity.
+        assert len(obj.byte_array) == 213
+
+    def test_set_used_size_keeps_tensor_and_shm_length_consistent(self) -> None:
+        """A narrowed buffer must expose ``tensor``, ``shm_byte_length``,
+        ``get_size`` and ``byte_array`` at the same length.  The SHM
+        transport builds a slot from ``tensor.shape`` plus
+        ``shm_byte_length`` and the worker rebuilds a view from both, so
+        any disagreement -- e.g. ``tensor`` reshaping to the original
+        (wider) layout while ``shm_byte_length`` reports the narrowed
+        length -- raises ``shape is invalid for input of size`` on one
+        side.  Accessing ``tensor`` must not raise.
+        """
+        obj = self._make_byte_buffer(1024)
+        obj.set_used_size(213)
+        t = obj.tensor
+        assert t is not None
+        # Flat uint8 view of exactly the used bytes -- not the 1024-wide
+        # layout that would fail to reshape.
+        assert t.dtype == torch.uint8
+        assert tuple(t.shape) == (213,)
+        assert obj.shm_byte_length == 213
+        assert t.numel() == obj.shm_byte_length == obj.get_size()
+
+    def test_set_used_size_zero_is_allowed(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        obj.set_used_size(0)
+        assert obj.get_size() == 0
+        assert len(obj.byte_array) == 0
+
+    def test_set_used_size_at_physical_size_is_allowed(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        obj.set_used_size(obj.get_physical_size())
+        assert obj.get_size() == obj.get_physical_size()
+
+    def test_set_used_size_rejects_out_of_range(self) -> None:
+        obj = self._make_byte_buffer(1024)
+        with pytest.raises(ValueError):
+            obj.set_used_size(-1)
+        with pytest.raises(ValueError):
+            obj.set_used_size(obj.get_physical_size() + 1)
+
+    def _paged_byte_allocator(
+        self, n_pages: int, page_bytes: int
+    ) -> "PagedTensorMemoryAllocator":
+        """Build a paged uint8 allocator with ``n_pages`` pages of
+        ``page_bytes`` each, suitable for testing block-recycle resets.
+        """
+        # The paged allocator splits a flat tensor into equal-sized
+        # pages; the page shape is what allocate/batched_allocate hand
+        # back per block.
+        shape = torch.Size([page_bytes])
+        buffer = torch.zeros(n_pages * page_bytes, dtype=torch.uint8)
+        return PagedTensorMemoryAllocator(
+            tensor=buffer,
+            shapes=[shape],
+            dtypes=[torch.uint8],
+            fmt=MemoryFormat.BINARY_BUFFER,
+        )
+
+    def test_used_size_override_resets_on_paged_allocator_reuse(self) -> None:
+        """After a free + re-allocate from the paged allocator, a
+        recycled block must return its layout-derived size, not the
+        previous owner's narrowed size. The reset is what makes
+        ``set_used_size`` safe to use on temp buffers that pass through
+        the L1 pool repeatedly."""
+        allocator = self._paged_byte_allocator(n_pages=2, page_bytes=1024)
+        shape = torch.Size([1024])
+
+        obj_a = allocator.allocate(shape, torch.uint8, fmt=MemoryFormat.BINARY_BUFFER)
+        assert obj_a is not None
+        assert obj_a.get_size() == 1024
+        obj_a.set_used_size(213)
+        assert obj_a.get_size() == 213
+
+        # Free returns the block to the free_blocks deque; the next
+        # allocate will hand it back, and the recycle path must clear
+        # _used_size_override.
+        allocator.free(obj_a)
+        obj_b = allocator.allocate(shape, torch.uint8, fmt=MemoryFormat.BINARY_BUFFER)
+        assert obj_b is not None
+        assert obj_b._used_size_override is None
+        assert obj_b.get_size() == 1024
+
+    def test_used_size_override_resets_on_paged_batched_reuse(self) -> None:
+        """Same contract as the single-allocate test but via
+        ``batched_allocate``, which has its own copy of the per-block
+        metadata-reset logic."""
+        allocator = self._paged_byte_allocator(n_pages=4, page_bytes=1024)
+        shape = torch.Size([1024])
+
+        batch = allocator.batched_allocate(
+            shape, torch.uint8, batch_size=2, fmt=MemoryFormat.BINARY_BUFFER
+        )
+        assert batch is not None and len(batch) == 2
+        for blk in batch:
+            blk.set_used_size(100)
+        for blk in batch:
+            allocator.free(blk)
+
+        batch2 = allocator.batched_allocate(
+            shape, torch.uint8, batch_size=2, fmt=MemoryFormat.BINARY_BUFFER
+        )
+        assert batch2 is not None and len(batch2) == 2
+        for blk in batch2:
+            assert blk._used_size_override is None
+            assert blk.get_size() == 1024
+
+    def test_bytes_buffer_memory_obj_set_used_size_is_noop(self) -> None:
+        """``BytesBufferMemoryObj`` does not distinguish "used" from
+        "allocated"; ``set_used_size`` is the base-class no-op so the
+        size stays the raw buffer length."""
+        buf = BytesBufferMemoryObj(b"abc")
+        assert buf.get_size() == 3
+        # Should not raise; should not change get_size.
+        buf.set_used_size(1)
+        assert buf.get_size() == 3

@@ -27,11 +27,11 @@ from lmcache.v1.multiprocess.protocols.engine import (
     PrepareStoreResponse,
 )
 from lmcache.v1.multiprocess.transfer_context.base import (
-    NonGpuContextMetadata,
-    create_non_gpu_context,
+    EngineDrivenContextMetadata,
+    create_engine_driven_context,
 )
-from lmcache.v1.multiprocess.transfer_context.pickle import NonGpuContextPickle
-from lmcache.v1.multiprocess.transfer_context.shm import NonGpuContextShm
+from lmcache.v1.multiprocess.transfer_context.pickle import EngineDrivenContextPickle
+from lmcache.v1.multiprocess.transfer_context.shm import EngineDrivenContextShm
 
 if TYPE_CHECKING:
     # First Party
@@ -39,11 +39,11 @@ if TYPE_CHECKING:
     from lmcache.v1.gpu_connector.utils import LayoutHints
     from lmcache.v1.multiprocess.custom_types import (
         IPCCacheServerKey,
-        RegisterNonGpuContextPayload,
+        RegisterEngineDrivenContextPayload,
     )
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import (
-        NonGPUTransferModule,
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+        EngineDrivenTransferModule,
     )
 
 
@@ -57,7 +57,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: Optional storage mock; defaults to a new ``MagicMock``.
         mock_session: Optional session mock; defaults to a new ``MagicMock``.
 
-    Returns a tuple of ``(NonGPUTransferModule, storage MagicMock,
+    Returns a tuple of ``(EngineDrivenTransferModule, storage MagicMock,
     session MagicMock, MPCacheServerContext)``.
     """
 
@@ -70,7 +70,7 @@ class ServerModuleFactory(Protocol):
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
     ) -> tuple[
-        "NonGPUTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
+        "EngineDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
     ]: ...
 
 
@@ -173,7 +173,9 @@ def _make_storage_manager_config(
     )
 
 
-def _default_register_payload(instance_id: int = 1) -> "RegisterNonGpuContextPayload":
+def _default_register_payload(
+    instance_id: int = 1,
+) -> "RegisterEngineDrivenContextPayload":
     """Build a default non-GPU registration payload for server-side tests.
 
     Args:
@@ -184,9 +186,9 @@ def _default_register_payload(instance_id: int = 1) -> "RegisterNonGpuContextPay
     ``use_mla=False`` for a compact baseline scenario used by most tests.
     """
     # First Party
-    from lmcache.v1.multiprocess.custom_types import RegisterNonGpuContextPayload
+    from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 
-    return RegisterNonGpuContextPayload(
+    return RegisterEngineDrivenContextPayload(
         instance_id=instance_id,
         model_name="m",
         world_size=1,
@@ -250,15 +252,15 @@ def test_wrap_kv_caches_wraps_all_tensors() -> None:
 
 
 def test_create_transfer_context_uses_non_cuda_context_on_cpu() -> None:
-    """Ensure factory returns LMCacheDrivenTransferContext for CPU KV."""
+    """Ensure factory returns EngineDrivenTransferContext for CPU KV."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
-        LMCacheDrivenTransferContext,
+        EngineDrivenTransferContext,
         create_transfer_context,
     )
 
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})
-    assert isinstance(context, LMCacheDrivenTransferContext)
+    assert isinstance(context, EngineDrivenTransferContext)
 
 
 def test_resolve_extra_config_default_mp_transfer_mode_is_auto() -> None:
@@ -325,13 +327,17 @@ def test_extra_config_default_lets_env_var_select_mp_transfer_mode(
 
 def test_create_transfer_context_force_lmcache_driven_mode() -> None:
     """``mode='lmcache_driven'`` must always pick
-    LMCacheDrivenTransferContext, even for CUDA."""
+    LMCacheDrivenTransferContext (handle path); CPU also works because the
+    CPU SHM wrapper factory is registered on import."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
         LMCacheDrivenTransferContext,
         MPTransferMode,
         create_transfer_context,
     )
+
+    # Importing the CPU sub-package self-registers its KV-wrapper factory.
+    import lmcache.v1.platform.cpu  # noqa: F401
 
     context = create_transfer_context(
         {"layer_0": torch.randn(2, 2)}, mode=MPTransferMode.LMCACHE_DRIVEN
@@ -340,16 +346,13 @@ def test_create_transfer_context_force_lmcache_driven_mode() -> None:
 
 
 def test_create_transfer_context_force_engine_driven_mode_on_cpu() -> None:
-    """``mode='engine_driven'`` on CPU works because the CPU SHM
-    wrapper is registered."""
+    """``mode='engine_driven'`` on CPU returns EngineDrivenTransferContext
+    (data path; no wrapper-factory capability check is performed)."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import (
         EngineDrivenTransferContext,
         create_transfer_context,
     )
-
-    # Importing the CPU sub-package self-registers its KV-wrapper factory.
-    import lmcache.v1.platform.cpu  # noqa: F401
 
     context = create_transfer_context(
         {"layer_0": torch.randn(2, 2)}, mode="engine_driven"
@@ -369,7 +372,8 @@ def test_create_transfer_context_invalid_mode_raises() -> None:
 def test_create_transfer_context_handle_mode_unsupported_device_raises(
     monkeypatch: Any,
 ) -> None:
-    """``mode='handle'`` must raise when no wrapper factory exists for device."""
+    """``mode='lmcache_driven'`` must raise when no wrapper factory exists
+    for the device."""
     # First Party
     from lmcache.v1.multiprocess.transfer_context import create_transfer_context
     from lmcache.v1.platform import _registry as platform_registry
@@ -380,7 +384,7 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         platform_registry.restore({"kv_wrapper": {}, "availability": {}})
         with pytest.raises(ValueError, match="not supported for device type"):
             create_transfer_context(
-                {"layer_0": torch.randn(2, 2)}, mode="engine_driven"
+                {"layer_0": torch.randn(2, 2)}, mode="lmcache_driven"
             )
     finally:
         platform_registry.restore(snapshot)
@@ -399,6 +403,10 @@ def test_create_transfer_context_env_var_overrides_default(
     from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
         ENV_MP_TRANSFER_MODE,
     )
+
+    # Importing the CPU sub-package self-registers its KV-wrapper factory,
+    # which is required by the lmcache-driven (handle) path.
+    import lmcache.v1.platform.cpu  # noqa: F401
 
     monkeypatch.setenv(ENV_MP_TRANSFER_MODE, "lmcache_driven")
     context = create_transfer_context({"layer_0": torch.randn(2, 2)})
@@ -644,7 +652,9 @@ def server_module_factory(
 
     # First Party
     from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-    from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+        EngineDrivenTransferModule,
+    )
 
     stack = ExitStack()
 
@@ -655,7 +665,9 @@ def server_module_factory(
         object_keys: list[str] | None = None,
         mock_storage: MagicMock | None = None,
         mock_session: MagicMock | None = None,
-    ) -> tuple["NonGPUTransferModule", MagicMock, MagicMock, "MPCacheServerContext"]:
+    ) -> tuple[
+        "EngineDrivenTransferModule", MagicMock, MagicMock, "MPCacheServerContext"
+    ]:
         """Create a patched module/context plus storage/session mocks.
 
         Args:
@@ -703,7 +715,7 @@ def server_module_factory(
             storage_manager_config=storage_manager_config,
             chunk_size=chunk_size,
         )
-        module = NonGPUTransferModule(ctx)
+        module = EngineDrivenTransferModule(ctx)
 
         return module, mock_storage, mock_session, ctx
 
@@ -762,7 +774,7 @@ def test_server_register_and_find_non_cuda_context_layout(
 ) -> None:
     """Ensure non-CUDA registration stores metadata and lookup finds layout."""
     module, _, _, ctx = server_module_factory(chunk_size=16)
-    response = module.register_kv_cache_non_gpu_context(
+    response = module.register_kv_cache_engine_driven_context(
         _default_register_payload(instance_id=1)
     )
     assert response.shm_name == ""
@@ -795,7 +807,9 @@ def test_server_store_and_retrieve_cpu_chunks(
         mock_storage=mock_storage,
         mock_session=mock_session,
     )
-    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=2))
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=2)
+    )
     payload = torch.ones(2, 2, 8, 16)
     key = _default_key()
     store_ok = module.commit_store(key, 2, pickle.dumps([payload]))
@@ -836,7 +850,9 @@ def test_server_shm_commit_store_allows_noop_when_all_keys_exist(
         mock_storage=mock_storage,
         mock_session=mock_session,
     )
-    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=3))
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=3)
+    )
     key = _default_key()
     prepare_response = module.prepare_store(key, 3)
     # Server signals all-cached via empty slots list (not missing "slots" key).
@@ -870,7 +886,9 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
         mock_storage=mock_storage,
         mock_session=mock_session,
     )
-    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=5))
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=5)
+    )
     key = _default_key()
     prepare_response = module.prepare_store(key, 5)
     assert isinstance(prepare_response, PrepareStoreResponse)
@@ -902,15 +920,19 @@ def test_server_shm_transport_uses_engine_level_config(
         mock_storage=mock_storage,
         mock_session=mock_session,
     )
-    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=6))
-    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=7))
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=6)
+    )
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=7)
+    )
     key = _default_key()
     assert module.prepare_store(key, 6).context.get("slots")
     assert module.prepare_store(key, 7).context.get("slots")
     assert mock_storage.reserve_write.call_count == 2
 
 
-def test_server_non_gpu_reregister_returns_existing_shm_response(
+def test_server_engine_driven_reregister_returns_existing_shm_response(
     stub_native_storage_ops: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
@@ -921,8 +943,8 @@ def test_server_non_gpu_reregister_returns_existing_shm_response(
         ),
     )
     payload = _default_register_payload(instance_id=8)
-    first_response = module.register_kv_cache_non_gpu_context(payload)
-    second_response = module.register_kv_cache_non_gpu_context(payload)
+    first_response = module.register_kv_cache_engine_driven_context(payload)
+    second_response = module.register_kv_cache_engine_driven_context(payload)
 
     assert first_response.shm_name == "lmcache_l1_pool_lmcache_test_pool"
     assert first_response.pool_size == 2048
@@ -930,7 +952,7 @@ def test_server_non_gpu_reregister_returns_existing_shm_response(
     assert second_response.pool_size == 2048
 
 
-def test_server_unregister_non_gpu_context_releases_pending_shm_locks(
+def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
     stub_native_storage_ops: Any,
     server_module_factory: ServerModuleFactory,
 ) -> None:
@@ -957,7 +979,9 @@ def test_server_unregister_non_gpu_context_releases_pending_shm_locks(
         mock_storage=mock_storage,
         mock_session=mock_session,
     )
-    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=4))
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=4)
+    )
     key = _default_key()
     assert module.prepare_store(key, 4).context.get("slots")
     assert module.prepare_retrieve(key, 4).success is True
@@ -1043,7 +1067,9 @@ def test_server_prepare_store_includes_chunk_indices(
         mock_storage=mock_storage,
         mock_session=mock_session,
     )
-    module.register_kv_cache_non_gpu_context(_default_register_payload(instance_id=10))
+    module.register_kv_cache_engine_driven_context(
+        _default_register_payload(instance_id=10)
+    )
     key = _default_key(tokens=16)
     response = module.prepare_store(key, 10)
     response_context = response.context
@@ -1072,7 +1098,7 @@ def _create_shm_segment(shm_name: str, size: int) -> int:
     return shm_create_readwrite(shm_name, size)
 
 
-def test_non_gpu_context_shm_tensor_view_from_buffer() -> None:
+def test_engine_driven_context_shm_tensor_view_from_buffer() -> None:
     shm_name = f"lmcache_test_view_{os.getpid()}"
     addr = _create_shm_segment(shm_name, 4096)
     try:
@@ -1083,8 +1109,8 @@ def test_non_gpu_context_shm_tensor_view_from_buffer() -> None:
         finally:
             mm.close()
 
-        context = NonGpuContextShm(
-            metadata=NonGpuContextMetadata(
+        context = EngineDrivenContextShm(
+            metadata=EngineDrivenContextMetadata(
                 layout_desc=MemoryLayoutDesc(
                     shapes=[torch.Size([2, 4])],
                     dtypes=[torch.float32],
@@ -1112,7 +1138,7 @@ def test_non_gpu_context_shm_tensor_view_from_buffer() -> None:
         shm_unlink(shm_name)
 
 
-def test_non_gpu_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
+def test_engine_driven_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
     shm_name = f"lmcache_test_flow_{os.getpid()}"
     addr = _create_shm_segment(shm_name, 4096)
     slots = [
@@ -1147,8 +1173,8 @@ def test_non_gpu_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
 
     mq_client.submit_request.side_effect = _submit_request
 
-    context = NonGpuContextShm(
-        metadata=NonGpuContextMetadata(
+    context = EngineDrivenContextShm(
+        metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
                 shapes=[torch.Size([2, 2])],
                 dtypes=[torch.float32],
@@ -1184,10 +1210,10 @@ def test_non_gpu_context_shm_store_retrieve_flow_with_mocked_mq() -> None:
         shm_unlink(shm_name)
 
 
-def test_non_gpu_context_shm_init_raises_when_segment_missing() -> None:
+def test_engine_driven_context_shm_init_raises_when_segment_missing() -> None:
     with pytest.raises(FileNotFoundError, match="No such file or directory"):
-        NonGpuContextShm(
-            metadata=NonGpuContextMetadata(
+        EngineDrivenContextShm(
+            metadata=EngineDrivenContextMetadata(
                 layout_desc=MemoryLayoutDesc(
                     shapes=[torch.Size([2, 2])],
                     dtypes=[torch.float32],
@@ -1202,9 +1228,9 @@ def test_non_gpu_context_shm_init_raises_when_segment_missing() -> None:
         )
 
 
-def test_create_non_gpu_context_falls_back_to_pickle_without_shm_info() -> None:
-    context = create_non_gpu_context(
-        metadata=NonGpuContextMetadata(
+def test_create_engine_driven_context_falls_back_to_pickle_without_shm_info() -> None:
+    context = create_engine_driven_context(
+        metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
                 shapes=[torch.Size([2, 2])],
                 dtypes=[torch.float32],
@@ -1217,12 +1243,12 @@ def test_create_non_gpu_context_falls_back_to_pickle_without_shm_info() -> None:
         shm_name="",
         pool_size=0,
     )
-    assert isinstance(context, NonGpuContextPickle)
+    assert isinstance(context, EngineDrivenContextPickle)
 
 
-def test_create_non_gpu_context_use_pickle_ignores_valid_shm_info() -> None:
-    context = create_non_gpu_context(
-        metadata=NonGpuContextMetadata(
+def test_create_engine_driven_context_use_pickle_ignores_valid_shm_info() -> None:
+    context = create_engine_driven_context(
+        metadata=EngineDrivenContextMetadata(
             layout_desc=MemoryLayoutDesc(
                 shapes=[torch.Size([2, 2])],
                 dtypes=[torch.float32],
@@ -1236,15 +1262,15 @@ def test_create_non_gpu_context_use_pickle_ignores_valid_shm_info() -> None:
         pool_size=4096,
         use_pickle=True,
     )
-    assert isinstance(context, NonGpuContextPickle)
+    assert isinstance(context, EngineDrivenContextPickle)
 
 
-def test_non_gpu_context_shm_close_is_idempotent() -> None:
+def test_engine_driven_context_shm_close_is_idempotent() -> None:
     shm_name = f"lmcache_test_close_{os.getpid()}"
     addr = _create_shm_segment(shm_name, 4096)
     try:
-        context = NonGpuContextShm(
-            metadata=NonGpuContextMetadata(
+        context = EngineDrivenContextShm(
+            metadata=EngineDrivenContextMetadata(
                 layout_desc=MemoryLayoutDesc(
                     shapes=[torch.Size([2, 2])],
                     dtypes=[torch.float32],

@@ -8,9 +8,9 @@ from unittest.mock import MagicMock
 import pytest
 
 # First Party
-from lmcache.v1.multiprocess.modules.gpu_transfer import (
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     ContextEntry,
-    GPUTransferModule,
+    LMCacheDrivenTransferModule,
 )
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.server import MPCacheServer
@@ -27,7 +27,7 @@ def test_storage_manager_returns_context_storage_manager() -> None:
 
 def test_gpu_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
     gpu0, gpu1 = MagicMock(name="gpu_ctx_0"), MagicMock(name="gpu_ctx_1")
-    gpu_transfer = MagicMock(spec=GPUTransferModule)
+    gpu_transfer = MagicMock(spec=LMCacheDrivenTransferModule)
     gpu_transfer.cache_contexts = {
         0: ContextEntry(cache_context=gpu0, model_name="m", world_size=1),
         7: ContextEntry(cache_context=gpu1, model_name="m", world_size=1),
@@ -38,7 +38,7 @@ def test_gpu_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
     assert engine.gpu_contexts == {0: gpu0, 7: gpu1}
 
 
-def test_gpu_contexts_returns_none_in_non_gpu_mode() -> None:
+def test_gpu_contexts_returns_none_in_engine_driven_mode() -> None:
     engine = MPCacheServer(MagicMock(), modules=[MagicMock()])
     assert engine.gpu_contexts is None
 

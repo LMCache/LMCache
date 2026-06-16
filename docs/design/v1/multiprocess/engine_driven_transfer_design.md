@@ -1,18 +1,20 @@
-# Non-GPU Context Design (Multiprocess Mode)
+# Engine-Driven Transfer Design (Multiprocess Mode)
 
 ## 1. Motivation
 
-LMCache multiprocess mode originally depended on CUDA IPC: workers send IPC handles,
-and the server reads/writes worker GPU memory directly. That path works well on
-CUDA, but the required primitives are CUDA-specific (IPC memory handles,
-interprocess CUDA events, CUDA stream semantics).
+LMCache multiprocess mode originally depended on CUDA IPC: workers send IPC
+handles, and the server reads/writes worker GPU memory directly. That path
+(now exposed as the **lmcache-driven** transfer mode) works well on CUDA, but
+the required primitives are CUDA-specific (IPC memory handles, interprocess
+CUDA events, CUDA stream semantics).
 
-For **CPU, XPU, HPU, and other non-CUDA devices**, those primitives do not exist.
-The non-GPU context design introduces a device-agnostic path where workers move KV
-data through CPU chunks instead of CUDA IPC handles.
+For **CPU, XPU, HPU, and other non-CUDA devices**, those primitives do not
+exist. The **engine-driven** transfer mode introduces a device-agnostic path
+where the engine side (worker adapter) gathers/scatters KV through CPU chunks
+instead of CUDA IPC handles, then commits the bytes to the server.
 
-Goal: keep the existing CUDA path unchanged while adding a second path that works
-across non-CUDA backends.
+Goal: keep the existing lmcache-driven (CUDA IPC) path unchanged while adding
+a second engine-driven path that works across non-CUDA backends.
 
 ## 2. Design
 
@@ -21,11 +23,11 @@ across non-CUDA backends.
 ```text
 Worker adapter (vLLM MP adapter)
   └─ TransferContext (transfer_context/worker_transfer.py)
-      ├─ EngineDrivenTransferContext  (IPC path via stream/event)
-      └─ LMCacheDrivenTransferContext    (data path via data copying in adapter)
-          └─ NonGpuContext (transfer_context/base.py)
-             ├─ NonGpuContextPickle (transfer_context/pickle.py)
-             └─ NonGpuContextShm    (transfer_context/shm.py)
+      ├─ LMCacheDrivenTransferContext  (IPC path via stream/event)
+      └─ EngineDrivenTransferContext    (data path via data copying in adapter)
+          └─ EngineDrivenContext (transfer_context/base.py)
+             ├─ EngineDrivenContextPickle (transfer_context/pickle.py)
+             └─ EngineDrivenContextShm    (transfer_context/shm.py)
 
 MPCacheServer (server)
 ├─ MPCacheServerContext (engine_context.py)
@@ -35,7 +37,7 @@ MPCacheServer (server)
 │    ├─ EventBus
 │    ├─ LayoutDescRegistry
 │    └─ shm_pool_info (pre-computed once)
-└─ NonGPUTransferModule (modules/non_gpu_transfer.py)
+└─ EngineDrivenTransferModule (modules/engine_driven_transfer.py)
      └─ TransferStrategy (modules/server_transfer.py)
           ├─ PickleTransferStrategy
           └─ ShmTransferStrategy
@@ -49,7 +51,7 @@ State machine overview (worker-side):
                  +---------------+---------------+
                  |                               |
                  v                               v
-      EngineDrivenTransferContext    LMCacheDrivenTransferContext
+      LMCacheDrivenTransferContext    EngineDrivenTransferContext
           (device == CUDA)            (device != CUDA)
                  |                               |
                  v                               v
@@ -63,7 +65,7 @@ State machine overview (worker-side):
                  +---------------+-------------------------------+
                  |                                               |
                  v                                               v
-    submit_store (engine-driven path)         submit_store (LMCache-driven path)
+    submit_store (lmcache-driven path)         submit_store (engine-driven path)
     -> STORE request (async)                    -> prepare_store -> gather -> commit_store
                  |                                               |
                  +---------------+-------------------------------+
@@ -74,7 +76,7 @@ State machine overview (worker-side):
                  +---------------+-------------------------------+
                  |                                               |
                  v                                               v
-  submit_retrieve (engine-driven path)      submit_retrieve (LMCache-driven path)
+  submit_retrieve (lmcache-driven path)      submit_retrieve (engine-driven path)
   -> RETRIEVE request (async)                 -> prepare_retrieve -> scatter -> commit_retrieve
                  |                                               |
                  +---------------+-------------------------------+
@@ -87,9 +89,11 @@ State machine overview (worker-side):
 ```
 
 Overall data flow:
-- **CUDA path**: worker sends a handle, server pulls/pushes data directly.
-- **Non-CUDA path**: worker gathers/scatters paged KV and exchanges CPU-side data
-  via a transport-specific `NonGpuContext` implementation.
+- **lmcache-driven path** (CUDA IPC): worker sends a handle, server pulls/pushes
+  data directly via device memory.
+- **engine-driven path** (CPU/SHM/pickle): worker gathers/scatters paged KV and
+  exchanges CPU-side data via a transport-specific `EngineDrivenContext`
+  implementation.
 
 ### 2.2 Worker Side: TransferContext
 
@@ -98,18 +102,18 @@ Overall data flow:
 The contract is intentionally minimal so worker adapters only depend on these
 four lifecycle and transfer operations.
 
-- **EngineDrivenTransferContext** keeps the original CUDA IPC behavior:
+- **LMCacheDrivenTransferContext** keeps the original CUDA IPC behavior:
   worker sends a handle and server performs direct GPU-side transfer.
-- **LMCacheDrivenTransferContext** is the non-CUDA path:
-  worker transfers actual data chunks through `NonGpuContext`.
+- **EngineDrivenTransferContext** is the engine-driven (non-CUDA) path:
+  worker transfers actual data chunks through `EngineDrivenContext`.
 
-`LMCacheDrivenTransferContext` flows:
+`EngineDrivenTransferContext` flows:
 - **submit_store**: `prepare_store` → `gather_paged_kv_to_cpu` → `commit_store`
 - **submit_retrieve**: `prepare_retrieve` → `scatter_cpu_to_paged_kv` → `commit_retrieve`
 
-During `register`, worker receives `RegisterNonGpuContextResponse(shm_name, pool_size)`
-from server and then calls `create_non_gpu_context(...)` to construct
-`NonGpuContextPickle` or `NonGpuContextShm`.
+During `register`, worker receives `RegisterEngineDrivenContextResponse(shm_name, pool_size)`
+from server and then calls `create_engine_driven_context(...)` to construct
+`EngineDrivenContextPickle` or `EngineDrivenContextShm`.
 
 Why `prepare → data operation → commit`:
 - `prepare_*`: set up transport state (for SHM this allocates/returns shared buffers;
@@ -119,29 +123,29 @@ Why `prepare → data operation → commit`:
 - `commit_*`: finalize and notify server to consume or release transfer state.
 
 `create_transfer_context()` selects the implementation once based on device type
-(CUDA → `EngineDrivenTransferContext`, otherwise → `LMCacheDrivenTransferContext`).
+(CUDA → `LMCacheDrivenTransferContext`, otherwise → `EngineDrivenTransferContext`).
 It also validates that all KV cache tensors share one device type and rejects
 mixed-device configurations by raising an error.
 
 | Context | What is transferred | Who performs copy work | Completion style |
 |---|---|---|---|
-| EngineDrivenTransferContext | Device handle/reference | Server pulls/pushes via IPC | Async MQ future |
-| LMCacheDrivenTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
+| LMCacheDrivenTransferContext | Device handle/reference | Server pulls/pushes via IPC | Async MQ future |
+| EngineDrivenTransferContext | Actual CPU chunk data | Worker gather/scatter + transport commit | Synchronous worker-side flow |
 
-### 2.3 Server Side: GPU Context vs Non-GPU Context
+### 2.3 Server Side: LMCache-Driven Module vs Engine-Driven Module
 
-- **GPU Context (existing path):** server uses CUDA IPC handles to access worker
-  device memory directly.
-- **Non-GPU Context:** server uses `NonGPUTransferModule`, which stores
-  per-instance `NonGPUContextEntry` metadata and delegates transfer logic to a
-  `TransferStrategy`.
+- **LMCache-driven module (existing path):** server uses `LMCacheDrivenTransferModule`
+  with CUDA IPC handles to access worker device memory directly.
+- **Engine-driven module:** server uses `EngineDrivenTransferModule`, which
+  stores per-instance `EngineDrivenContextEntry` metadata and delegates transfer
+  logic to a `TransferStrategy`.
 
 Server transfer strategy implementations:
 - **PickleTransferStrategy**: pure pickle prepare/commit behavior.
 - **ShmTransferStrategy**: SHM slot-based prepare/commit behavior, with pickle
   fallback when inline bytes are provided.
 
-This mirrors the worker split (`NonGpuContextPickle` / `NonGpuContextShm`):
+This mirrors the worker split (`EngineDrivenContextPickle` / `EngineDrivenContextShm`):
 both sides keep common request flow while isolating transport-specific logic.
 
 `MPCacheServerContext` is the shared container injected into modules at init.
@@ -156,7 +160,7 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 | Transport | Copies | Data flow |
 |---|---|---|
-| Engine-driven (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
+| LMCache-driven (CUDA IPC) | 2 | GPU KV → GPU staging buffer → CPU memory object |
 | Pickle | 4 | GPU KV → CPU chunk → serialize → deserialize → CPU memory object |
 | SHM | 1 | GPU KV → CPU memory object (SHM mapped) |
 
@@ -164,37 +168,37 @@ It also computes `shm_pool_info` once from `StorageManagerConfig`:
 
 | Transport | Copies | Data flow |
 |---|---|---|
-| Engine-driven (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
+| LMCache-driven (CUDA IPC) | 2 | CPU memory object → GPU staging buffer → GPU KV |
 | Pickle | 4 | CPU memory object → serialize → deserialize → CPU chunk → GPU KV |
 | SHM | 1 | CPU memory object (SHM mapped) → GPU KV |
 
 | Transport | Pros | Cons | Best fit |
 |---|---|---|---|
-| Engine-driven (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
+| LMCache-driven (CUDA IPC) | Mature path, good async overlap | CUDA-only | NVIDIA CUDA deployments |
 | Pickle | Works everywhere, no SHM setup | Extra serialization + copy overhead | Universal fallback |
-| SHM | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput non-CUDA setups |
+| SHM | Lowest copy count, no serialization | Requires enough `/dev/shm` and synchronization | High-throughput engine-driven setups |
 
 ### 2.5 Current File Layout (Key Components)
 
-- `lmcache/v1/multiprocess/modules/non_gpu_transfer.py`: `NonGPUTransferModule`
+- `lmcache/v1/multiprocess/modules/engine_driven_transfer.py`: `EngineDrivenTransferModule`
 - `lmcache/v1/multiprocess/modules/server_transfer.py`: `TransferStrategy`, `PickleTransferStrategy`, `ShmTransferStrategy`
-- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `LMCacheDrivenTransferContext`, `EngineDrivenTransferContext`
-- `lmcache/v1/multiprocess/transfer_context/base.py`: `NonGpuContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
-- `lmcache/v1/multiprocess/transfer_context/pickle.py`: `NonGpuContextPickle`
-- `lmcache/v1/multiprocess/transfer_context/shm.py`: `NonGpuContextShm`
+- `lmcache/v1/multiprocess/transfer_context/worker_transfer.py`: `EngineDrivenTransferContext`, `LMCacheDrivenTransferContext`
+- `lmcache/v1/multiprocess/transfer_context/base.py`: `EngineDrivenContext`, `gather_paged_kv_to_cpu`, `scatter_cpu_to_paged_kv`, `compute_kv_layout`
+- `lmcache/v1/multiprocess/transfer_context/pickle.py`: `EngineDrivenContextPickle`
+- `lmcache/v1/multiprocess/transfer_context/shm.py`: `EngineDrivenContextShm`
 
 ## 3. Protocol & Data Flow
 
-### 3.1 MQ Request Types Used by Non-GPU Path
+### 3.1 MQ Request Types Used by Engine-Driven Path
 
-The non-GPU path uses five request types:
+The engine-driven path uses five request types:
 
-1. `REGISTER_KV_CACHE_NON_GPU_CONTEXT`  
-   Worker registers non-CUDA KV layout metadata. Server then:
-   - stores `NonGPUContextEntry` (metadata + model/world info)
+1. `REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT`  
+   Worker registers engine-driven KV layout metadata. Server then:
+   - stores `EngineDrivenContextEntry` (metadata + model/world info)
    - registers `MemoryLayoutDesc` in `LayoutDescRegistry`
    - creates `TransferStrategy` from engine-level `shm_pool_info`
-   - returns `shm_name/pool_size` so worker creates matching `NonGpuContext`
+   - returns `shm_name/pool_size` so worker creates matching `EngineDrivenContext`
 
 2. `PREPARE_STORE`  
    Worker asks server/transport to prepare store-side transfer state.

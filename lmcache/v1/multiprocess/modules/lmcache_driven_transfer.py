@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GPU-based KV cache transfer operations for the MPCacheServer."""
+"""LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
 from dataclasses import dataclass
@@ -403,8 +403,8 @@ class ContextEntry:
     world_size: int
 
 
-class GPUTransferModule:
-    """Handles GPU-based KV cache transfer operations.
+class LMCacheDrivenTransferModule:
+    """Handles LMCache-driven KV cache transfer operations.
 
     Owns GPU context registrations and provides handlers for
     register, unregister, store, and retrieve of GPU KV caches.

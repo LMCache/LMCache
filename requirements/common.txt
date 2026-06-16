@@ -4,11 +4,7 @@ blake3
 aiohttp
 awscrt
 cufile-python
-# Keep FastAPI on the pre-Starlette-1 route tree. Starlette 1.x exposes
-# included routers differently, which breaks current route introspection and
-# prometheus-fastapi-instrumentator's route naming middleware.
-fastapi==0.115.14
-starlette==0.46.2
+fastapi
 httpx
 huggingface_hub>=1.5.0
 msgspec
