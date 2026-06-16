@@ -70,6 +70,13 @@ Documentation
 .. toctree::
    :maxdepth: 3
 
+   interacting_with_server
+
+:raw-html:`<br />`
+
+.. toctree::
+   :maxdepth: 3
+
    recipes/index
 
 :raw-html:`<br />`
@@ -99,13 +106,6 @@ Documentation
    :maxdepth: 2
 
    mp/observability/index
-
-:raw-html:`<br />`
-
-.. toctree::
-   :maxdepth: 3
-
-   interacting_with_server
 
 :raw-html:`<br />`
 
