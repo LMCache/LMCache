@@ -1,25 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
-from pathlib import Path
-
 # Third Party
 from fastapi import APIRouter, FastAPI
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.utils.router_discovery import discover_api_routers
+from lmcache.v1.multiprocess.http_apis.cache_api import router as cache_router
+from lmcache.v1.multiprocess.http_apis.common_api import router as common_router
+from lmcache.v1.multiprocess.http_apis.conf_api import router as conf_router
+from lmcache.v1.multiprocess.http_apis.healthcheck_api import (
+    router as healthcheck_router,
+)
+from lmcache.v1.multiprocess.http_apis.quota_api import router as quota_router
+from lmcache.v1.multiprocess.http_apis.reconfigure_api import (
+    router as reconfigure_router,
+)
+from lmcache.v1.multiprocess.http_apis.root_api import router as root_router
+from lmcache.v1.multiprocess.http_apis.status_api import router as status_router
+from lmcache.v1.multiprocess.http_apis.version_api import router as version_router
 
-logger = init_logger(__name__)
+# Every multiprocess HTTP API router, registered in import order. Add a new
+# ``http_apis`` module's router here to expose it. Routers are imported
+# explicitly rather than discovered from the filesystem so that registration
+# does not depend on the on-disk package layout, which differs between source
+# checkouts and editable/wheel installs.
+_MP_HTTP_ROUTERS: tuple[APIRouter, ...] = (
+    cache_router,
+    common_router,
+    conf_router,
+    healthcheck_router,
+    quota_router,
+    reconfigure_router,
+    root_router,
+    status_router,
+    version_router,
+)
 
 
 class HTTPAPIRegistry:
-    """
-    Automatically discovers and registers HTTP API routes
-    from the ``http_apis`` sub-package.
+    """Registers the multiprocess HTTP API routers on a FastAPI app.
 
-    Any module whose name ends with ``_api`` and exposes a
-    module-level ``router`` (:class:`~fastapi.APIRouter`) will
-    be picked up automatically.
+    The routers exposed on the multiprocess HTTP server are the ones listed
+    in :data:`_MP_HTTP_ROUTERS`.
     """
 
     def __init__(self, app: FastAPI):
@@ -27,18 +47,8 @@ class HTTPAPIRegistry:
         self.router = APIRouter()
 
     def register_all_apis(self) -> None:
-        """
-        Discover and register all ``*_api`` modules under
-        the ``http_apis`` directory.
-        """
-        apis_path = Path(__file__).parent / "http_apis"
-        if not apis_path.exists():
-            logger.warning("http_apis directory not found")
-            return
-
-        apis_package = f"{__package__}.http_apis"
-
-        for r in discover_api_routers(apis_path, apis_package):
-            self.router.include_router(r)
+        """Register every router in :data:`_MP_HTTP_ROUTERS` on the app."""
+        for router in _MP_HTTP_ROUTERS:
+            self.router.include_router(router)
 
         self.app.include_router(self.router)
