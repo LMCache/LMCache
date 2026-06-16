@@ -84,6 +84,11 @@ class RequestType(enum.Enum):
     CB_RETRIEVE_PRE_COMPUTED_V3 = enum.auto()
     CB_UNIFIED_LOOKUP = enum.auto()
 
+    # P2P operations
+    P2P_LOOKUP_AND_LOCK = enum.auto()
+    P2P_QUERY_LOOKUP_RESULTS = enum.auto()
+    P2P_UNLOCK_OBJECTS = enum.auto()
+
 
 @dataclass
 class ProtocolDefinition:
