@@ -17,9 +17,7 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     TrimPolicy,
 )
-from lmcache.v1.distributed.config import (
-    StorageManagerConfig,
-)
+from lmcache.v1.distributed.config import StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -729,31 +727,23 @@ class StorageManager:
         return totals
 
     def get_l2_adapter_reconfigure_status(self) -> dict:
-        """Return status for all runtime-reconfigurable storage backends.
+        """Return status for all runtime-reconfigurable L2 adapters.
 
         Returns:
-            JSON-serializable status. If no reconfigurable backend is configured,
+            JSON-serializable status. If no reconfigurable adapter is configured,
             ``enabled`` is ``False`` and the adapter list is empty.
         """
-        adapters: list[dict[str, object]] = []
-        l1_devdax_status = self._get_l1_devdax_reconfigure_status()
-        if l1_devdax_status is not None:
-            status = dict(l1_devdax_status)
-            status["adapter_index"] = len(adapters)
-            status["tier"] = "l1"
-            adapters.append(status)
-
-        for (
+        adapters = []
+        for adapter_index, (
             l2_adapter_index,
             adapter,
-        ) in self._list_reconfigurable_l2_adapters():
+        ) in enumerate(self._list_reconfigurable_l2_adapters()):
             status = dict(adapter.reconfigure_status())
             if l2_adapter_index < len(getattr(self, "_adapter_descriptors", [])):
                 status["backend"] = self._adapter_descriptors[
                     l2_adapter_index
                 ].type_name
-            status["adapter_index"] = len(adapters)
-            status["tier"] = "l2"
+            status["adapter_index"] = adapter_index
             status["l2_adapter_index"] = l2_adapter_index
             adapters.append(status)
 
@@ -769,7 +759,7 @@ class StorageManager:
         operation: str,
         payload: dict[str, object],
     ) -> dict:
-        """Route a runtime reconfiguration request to one storage backend.
+        """Route a runtime reconfiguration request to one L2 adapter.
 
         Args:
             adapter_index: Zero-based reconfigurable-adapter index.
@@ -779,17 +769,9 @@ class StorageManager:
         Returns:
             JSON-serializable operation result.
         """
-        requested_adapter_index = adapter_index
-        if self._get_l1_devdax_reconfigure_status() is not None:
-            if adapter_index == 0:
-                result = self._l1_manager.reconfigure_devdax(operation, payload)
-                result["adapter_index"] = requested_adapter_index
-                return result
-            adapter_index -= 1
-
         adapter = self._get_reconfigurable_l2_adapter(adapter_index)
         result = adapter.reconfigure(operation, payload)
-        result["adapter_index"] = requested_adapter_index
+        result["adapter_index"] = adapter_index
         return result
 
     def clear(self, force: bool = False):
@@ -881,12 +863,6 @@ class StorageManager:
             if reconfigurable_adapter is not None:
                 adapters.append((l2_adapter_index, reconfigurable_adapter))
         return adapters
-
-    def _get_l1_devdax_reconfigure_status(self) -> dict | None:
-        l1_manager = getattr(self, "_l1_manager", None)
-        if l1_manager is None:
-            return None
-        return l1_manager.get_devdax_reconfigure_status()
 
     def _get_reconfigurable_l2_adapter(
         self,

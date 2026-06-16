@@ -10,11 +10,6 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L1MemoryDesc
-from lmcache.v1.distributed.l2_adapters.reconfiguration import (
-    L2ReconfigurableAdapter,
-    L2ReconfigureError,
-    L2ReconfigureStatus,
-)
 from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import (
     DevDaxMemoryAllocator,
@@ -242,22 +237,6 @@ class L1MemoryManager:
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
         )
-
-    def get_devdax_reconfigure_status(self) -> L2ReconfigureStatus | None:
-        """Return L1 Device-DAX reconfiguration status when this L1 uses DAX."""
-        if isinstance(self._allocator, L2ReconfigurableAdapter):
-            return self._allocator.reconfigure_status()
-        return None
-
-    def reconfigure_devdax(
-        self,
-        operation: str,
-        payload: dict[str, object],
-    ) -> dict:
-        """Apply a runtime operation to the L1 Device-DAX mapping."""
-        if not isinstance(self._allocator, L2ReconfigurableAdapter):
-            raise L2ReconfigureError(404, "L1 Device-DAX is not configured")
-        return self._allocator.reconfigure(operation, payload)
 
     def close(self) -> None:
         """

@@ -87,10 +87,10 @@ compatibility with the vLLM-embedded API server.
      - List backend strings accepted by runtime reconfiguration routes.
    * - GET
      - ``/reconfigure/{backend}/status``
-     - Report runtime-manageable storage entries for one backend type.
+     - Report runtime-manageable L2 adapters for one backend type.
    * - POST
      - ``/reconfigure/{backend}/{operation}``
-     - Apply one runtime reconfiguration operation to a backend entry.
+     - Apply one runtime reconfiguration operation to a backend adapter.
    * - GET
      - ``/kvcache/check``
      - Compute MD5 checksums over the GPU KV cache for a set of block IDs.
@@ -329,15 +329,15 @@ The request body is ignored.
 
 .. _mp-http-dax-api:
 
-``/reconfigure/{backend}`` — runtime backend reconfiguration
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+``/reconfigure/{backend}`` — runtime L2 adapter reconfiguration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These endpoints are available when the server has a runtime-reconfigurable
-storage backend. They only change LMCache runtime mappings and metadata; backend
+These endpoints are available when the server has a runtime-reconfigurable L2
+adapter. They only change LMCache runtime mappings and metadata; backend
 resources such as DAX device paths must already exist and be readable and
 writable by the server. The endpoint routes ``backend``, ``operation``, and the
-JSON request body into the generic reconfiguration API, while backend-specific
-validation and migration semantics stay inside the backend implementation.
+JSON request body into the generic L2 adapter reconfiguration API, while
+backend-specific validation and migration semantics stay inside the adapter.
 
 Use ``GET /reconfigure/backends`` to list the backend strings that can be used
 in ``/reconfigure/{backend}/status`` and
@@ -345,13 +345,11 @@ in ``/reconfigure/{backend}/status`` and
 If an L2 adapter is wrapped by serde, the backend string is still the configured
 L2 adapter type, not the serde wrapper type.
 
-For Device-DAX, use ``backend=dax``. This can address a DAX L2 adapter or the
-Device-DAX overflow arena inside L1. DAX operations use JSON request bodies
-because DAX paths contain slashes. ``add`` and ``resize`` accept ``size`` as an
-integer byte count or a string such as ``"100GiB"``. ``remove`` supports
-``migrate``, ``evict``, and ``drain``; ``resize`` supports ``migrate`` and
-``evict``. For L1 Device-DAX, live DAX allocations must be freed or evicted
-before destructive remove or resize operations can remap the arena.
+For Device-DAX, use ``backend=dax``. This addresses DAX L2 adapters. DAX
+operations use JSON request bodies because DAX paths contain slashes. ``add``
+and ``resize`` accept ``size`` as an integer byte count or a string such as
+``"100GiB"``. ``remove`` supports ``migrate``, ``evict``, and ``drain``;
+``resize`` supports ``migrate`` and ``evict``.
 
 See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
 mode semantics, and validation guidance.
