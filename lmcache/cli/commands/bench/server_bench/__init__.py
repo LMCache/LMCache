@@ -29,34 +29,6 @@ class ServerBenchCommand(BaseCommand):
 
         add_server_arguments(parser)
 
-    def register(self, subparsers: argparse._SubParsersAction) -> None:
-        """Register with slim-install stub fallback.
-
-        On a slim install (missing torch/zmq), registers a stub parser
-        with a helpful message instead of the full argument set.
-        """
-        # First Party
-        from lmcache.cli.commands.bench.server_bench.helpers import (
-            _IMPORT_ERROR,
-        )
-
-        if _IMPORT_ERROR is not None:
-            # Slim install — register a stub parser only.
-            stub = subparsers.add_parser(
-                self.name(),
-                help="(requires full lmcache install)",
-                description=(
-                    "End-to-end sanity test for the LMCache MP cache server. "
-                    "Requires the full `lmcache` package; not available in "
-                    "the `lmcache-cli` install."
-                ),
-            )
-            stub.set_defaults(func=self.execute)
-            return
-
-        # Full install — use standard BaseCommand.register() flow
-        super().register(subparsers)
-
     def execute(self, args: argparse.Namespace) -> None:
         # First Party
         from lmcache.cli.commands.bench.server_bench.command import (

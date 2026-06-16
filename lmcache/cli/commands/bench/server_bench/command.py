@@ -49,7 +49,6 @@ from lmcache import torch_dev
 # time. On a slim install these symbols are placeholders; the
 # ``_require_full_install`` guard inside the helpers module keeps
 # orchestration safe.
-from lmcache.cli.commands.base import _add_output_args
 from lmcache.cli.commands.bench.server_bench.helpers import (
     _DEFAULT_SHAPE_SPEC,
     DTYPE_MAP,
