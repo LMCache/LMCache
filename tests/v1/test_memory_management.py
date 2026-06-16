@@ -1028,3 +1028,107 @@ class TestPagedTensorMemoryAllocatorClose:
         allocator.close()
 
         assert pin_alloc._closed
+
+
+class TestPinMemoryAllocatorCpuOom:
+    """Tests for PinMemoryAllocator graceful handling of CPU RAM exhaustion."""
+
+    def test_oom_sets_flag(self):
+        """_cpu_oom is True when _allocate_cpu_memory raises RuntimeError."""
+        from unittest.mock import patch
+
+        LMCStatsMonitor.GetOrCreate()
+        with patch(
+            "lmcache.v1.memory_management._allocate_cpu_memory",
+            side_effect=RuntimeError("mmap failed: out of memory"),
+        ):
+            allocator = PinMemoryAllocator(1024 * 1024 * 64)
+
+        assert allocator._cpu_oom
+
+    def test_oom_allocate_returns_none(self):
+        """allocate() returns None after CPU OOM — same contract as a full pool."""
+        from unittest.mock import patch
+
+        LMCStatsMonitor.GetOrCreate()
+        with patch(
+            "lmcache.v1.memory_management._allocate_cpu_memory",
+            side_effect=RuntimeError("mmap failed: out of memory"),
+        ):
+            allocator = PinMemoryAllocator(1024 * 1024 * 64)
+
+        result = allocator.allocate(torch.Size([128, 128]), torch.float16)
+        assert result is None
+
+    def test_oom_close_does_not_raise(self):
+        """close() is safe to call when the allocator OOM'd at init."""
+        from unittest.mock import patch
+
+        LMCStatsMonitor.GetOrCreate()
+        with patch(
+            "lmcache.v1.memory_management._allocate_cpu_memory",
+            side_effect=RuntimeError("mmap failed: out of memory"),
+        ):
+            allocator = PinMemoryAllocator(1024 * 1024 * 64)
+
+        allocator.close()
+
+
+class TestMixedMemoryAllocatorCpuOom:
+    """Tests for MixedMemoryAllocator graceful handling of CPU RAM exhaustion."""
+
+    def test_oom_sets_flag(self):
+        """_cpu_oom is True when _allocate_cpu_memory raises RuntimeError."""
+        from unittest.mock import patch
+
+        LMCStatsMonitor.GetOrCreate()
+        with patch(
+            "lmcache.v1.memory_management._allocate_cpu_memory",
+            side_effect=RuntimeError("mmap failed: out of memory"),
+        ):
+            allocator = MixedMemoryAllocator(1024 * 1024 * 64)
+
+        assert allocator._cpu_oom
+
+    def test_oom_allocate_kv_returns_none(self):
+        """allocate() returns None for KV formats after CPU OOM."""
+        from unittest.mock import patch
+
+        LMCStatsMonitor.GetOrCreate()
+        with patch(
+            "lmcache.v1.memory_management._allocate_cpu_memory",
+            side_effect=RuntimeError("mmap failed: out of memory"),
+        ):
+            allocator = MixedMemoryAllocator(1024 * 1024 * 64)
+
+        result = allocator.allocate(
+            torch.Size([2, 32, 16, 128]), torch.bfloat16, MemoryFormat.KV_2LTD
+        )
+        assert result is None
+
+    def test_oom_close_does_not_raise(self):
+        """close() is safe to call when the allocator OOM'd at init."""
+        from unittest.mock import patch
+
+        LMCStatsMonitor.GetOrCreate()
+        with patch(
+            "lmcache.v1.memory_management._allocate_cpu_memory",
+            side_effect=RuntimeError("mmap failed: out of memory"),
+        ):
+            allocator = MixedMemoryAllocator(1024 * 1024 * 64)
+
+        allocator.close()
+
+    def test_oom_close_idempotent(self):
+        """close() can be called multiple times after OOM without raising."""
+        from unittest.mock import patch
+
+        LMCStatsMonitor.GetOrCreate()
+        with patch(
+            "lmcache.v1.memory_management._allocate_cpu_memory",
+            side_effect=RuntimeError("mmap failed: out of memory"),
+        ):
+            allocator = MixedMemoryAllocator(1024 * 1024 * 64)
+
+        allocator.close()
+        allocator.close()
