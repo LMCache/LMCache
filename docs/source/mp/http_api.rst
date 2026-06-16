@@ -345,11 +345,11 @@ in ``/reconfigure/{backend}/status`` and
 If an L2 adapter is wrapped by serde, the backend string is still the configured
 L2 adapter type, not the serde wrapper type.
 
-For Device-DAX, use ``backend=dax``. This addresses DAX L2 adapters. DAX
-operations use JSON request bodies because DAX paths contain slashes. ``add``
-and ``resize`` accept ``size`` as an integer byte count or a string such as
-``"100GiB"``. ``remove`` supports ``migrate``, ``evict``, and ``drain``;
-``resize`` supports ``migrate`` and ``evict``.
+For Device-DAX, use ``backend=dax``. DAX operations use JSON request bodies
+because DAX paths contain slashes. ``add`` and ``resize`` accept ``size`` as an
+integer byte count or a string such as ``"100GiB"``. ``remove`` supports
+``migrate``, ``evict``, and ``drain``; ``resize`` supports ``migrate`` and
+``evict``.
 
 See :doc:`/kv_cache/storage_backends/dax` for detailed request examples,
 mode semantics, and validation guidance.
