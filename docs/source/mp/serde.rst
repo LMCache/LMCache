@@ -1,5 +1,5 @@
-L2 Serde (Serialization / Deserialization)
-==========================================
+KV Cache Compression
+====================
 
 LMCache supports a **per-adapter serde** that transforms KV cache data on
 its way to and from an L2 adapter. Typical uses: quantization (shrink
@@ -127,3 +127,14 @@ the L2 prefetch + fp8 deserialize path lives at
 :file:`examples/serde/fp8/`. A pytest-based filesystem round-trip test
 (no vLLM required) is at
 :file:`tests/v1/distributed/serde/test_serde_fs_e2e.py`.
+
+Compression methods
+-------------------
+
+Higher-level KV cache compression methods layered on top of the per-adapter
+serde mechanism:
+
+.. toctree::
+   :maxdepth: 1
+
+   cachegen

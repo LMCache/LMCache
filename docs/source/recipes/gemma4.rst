@@ -55,7 +55,7 @@ Validated models
 
       Adjust ``--tensor-parallel-size`` to match your hardware. For the
       generic LMCache + vLLM wiring (ports, remote hosts),
-      see :doc:`../mp/quickstart`.
+      see :doc:`../getting_started/quickstart`.
 
       If there are any issues with vLLM setup, please refer to the
       `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_
@@ -67,7 +67,7 @@ Validated models
 
    .. tab-item:: TRT-LLM
 
-      **Status:** Not supported. LMCache TRT-LLM integration is in progress.
+      **Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-LLM + LMCache setup.
 
 CacheBlend support
 ------------------
