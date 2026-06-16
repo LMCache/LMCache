@@ -64,7 +64,10 @@ def test_build_modules_rejects_blend_with_xpu_transfer_mode() -> None:
     try:
         _build_modules(MagicMock(), config)
     except ValueError as exc:
-        assert "Blend engine requires" in str(exc)
+        message = str(exc)
+        assert "requires supported_transfer_mode" in message
+        assert "'gpu'" in message
+        assert "'xpu'" in message
     else:
         raise AssertionError("Expected blend + xpu transfer mode to fail")
 
@@ -110,7 +113,7 @@ def test_xpu_store_payload_uses_grouped_block_ids(monkeypatch) -> None:
         mq_timeout=1.0,
         send_request=send_request,
         layout_hints={},
-        group_views=[],
+        engine_group_infos=[],
     )
 
     grouped_block_ids = [[3, 4]]
@@ -160,7 +163,7 @@ def test_xpu_retrieve_payload_uses_grouped_block_ids(monkeypatch) -> None:
         mq_timeout=1.0,
         send_request=send_request,
         layout_hints={},
-        group_views=[],
+        engine_group_infos=[],
     )
 
     grouped_block_ids = [[5, 6]]
