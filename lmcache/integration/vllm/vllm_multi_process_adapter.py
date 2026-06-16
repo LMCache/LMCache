@@ -606,10 +606,10 @@ class LMCacheMPSchedulerAdapter:
         self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
-        lmcache_tokens_per_chunk_per_server: dict[str, int] = {}
+        chunk_sizes: dict[str, int] = {}
         for url, client in self.mq_clients.items():
             try:
-                lmcache_tokens_per_chunk_per_server[url] = get_lmcache_chunk_size(
+                chunk_sizes[url] = get_lmcache_chunk_size(
                     client, timeout=self._mq_timeout
                 )
             except TimeoutError:
@@ -619,11 +619,10 @@ class LMCacheMPSchedulerAdapter:
 
         # All servers must share chunk_size, otherwise the min() aggregation
         # over per-server hits would mix different granularities.
-        unique_sizes = set(lmcache_tokens_per_chunk_per_server.values())
+        unique_sizes = set(chunk_sizes.values())
         if len(unique_sizes) != 1:
             raise ValueError(
-                "All LMCache servers must share the same chunk_size, "
-                f"got {lmcache_tokens_per_chunk_per_server}"
+                f"All LMCache servers must share the same chunk_size, got {chunk_sizes}"
             )
         self.lmcache_tokens_per_chunk = unique_sizes.pop()
 
