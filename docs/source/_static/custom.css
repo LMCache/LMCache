@@ -108,3 +108,19 @@ div.highlight button.copybtn + button.copybtn {
 .lmcache-language-switcher__divider {
     opacity: 0.38;
 }
+
+/* Make top-level collapsible nav items read as section headers:
+   when a section is represented as a single index page (no toctree
+   :caption:), bold its top-level entry so it still looks like a section
+   while remaining a fold-out dropdown. */
+nav .toctree-l1 > a.expandable {
+    font-weight: 700;
+}
+
+/* Separate top-level collapsible sections with spacing + a subtle divider
+   so each reads as its own section even without a :caption: header. */
+nav .toctree-l1:has(> a.expandable) {
+    margin-top: 0.85rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid rgba(128, 128, 128, 0.25);
+}

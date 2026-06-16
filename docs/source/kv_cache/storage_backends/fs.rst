@@ -169,7 +169,7 @@ Operational notes
 * Leave ``save_chunk_meta`` enabled when workers may infer different metadata
   for the same chunk. Disable it only when you need the lower overhead path and
   the workers share compatible cache metadata.
-* For MP mode L2 storage, see :doc:`../../mp/l2_storage`, which documents the
+* For MP mode L2 storage, see :doc:`../../mp/l2_storage/index`, which documents the
   ``fs`` and ``fs_native`` L2 adapters configured through ``--l2-adapter``.
 
 Minimal vLLM usage

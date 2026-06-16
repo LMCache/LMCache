@@ -34,6 +34,8 @@ class MPInstance:
         last_heartbeat_time: Monotonic-clock time of the most recent heartbeat,
             used for stale detection so an NTP step cannot skew liveness.
         metadata: Free-form string key/value pairs supplied at registration.
+        p2p_advertised_url: URL this instance advertises for peer-to-peer
+            transfers. Empty when the instance does not participate in P2P.
     """
 
     instance_id: str
@@ -42,6 +44,7 @@ class MPInstance:
     registration_time: float
     last_heartbeat_time: float
     metadata: dict[str, str] = field(default_factory=dict)
+    p2p_advertised_url: str = ""
 
 
 class InstanceRegistry:
