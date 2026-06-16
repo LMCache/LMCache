@@ -148,6 +148,15 @@ def register_engine_parser(
         help="Suppress real-time progress display.",
     )
     parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help=(
+            "Force generation to run for the full output length by ignoring "
+            "the model's EOS token (vLLM sampling extension). Makes decode "
+            "throughput reproducible regardless of when the model would stop."
+        ),
+    )
+    parser.add_argument(
         "--no-interactive",
         action="store_true",
         help=("Disable interactive mode. Errors if required arguments are missing."),
@@ -222,6 +231,15 @@ def register_engine_parser(
         type=int,
         default=3,
         help="Max concurrent in-flight requests (default: 3).",
+    )
+    group.add_argument(
+        "--ldqa-output-length",
+        type=int,
+        default=128,
+        help=(
+            "Max tokens to generate per benchmark query (default: 128). "
+            "Combine with --ignore-eos for a reproducible decode phase."
+        ),
     )
 
     # --- Multi-round-chat workload args ---
@@ -410,6 +428,7 @@ def _export_config(
     state.set("workload", config.workload)
     state.set("kv_cache_volume", config.kv_cache_volume_gb)
     state.set("tokens_per_gb_kvcache", config.tokens_per_gb_kvcache)
+    state.set("ignore_eos", config.ignore_eos)
 
     # Workload-specific args from namespace
     for item in state.get_workload_items():
@@ -546,7 +565,11 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
     )
 
     # 3. Create request sender (callbacks wired after workload creation)
-    request_sender = RequestSender(config.engine_url, config.model)
+    request_sender = RequestSender(
+        config.engine_url,
+        config.model,
+        ignore_eos=config.ignore_eos,
+    )
 
     # 4. Create workload
     workload = create_workload(

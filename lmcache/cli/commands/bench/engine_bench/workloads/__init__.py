@@ -114,6 +114,7 @@ def create_workload(
             query_per_document=args.ldqa_query_per_document,
             shuffle_policy=args.ldqa_shuffle_policy,
             num_inflight_requests=args.ldqa_num_inflight_requests,
+            output_length=args.ldqa_output_length,
         )
         return LongDocQAWorkload(
             config=ld_workload_config,

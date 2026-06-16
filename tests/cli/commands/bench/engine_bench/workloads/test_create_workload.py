@@ -52,6 +52,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         ldqa_query_per_document=2,
         ldqa_shuffle_policy="random",
         ldqa_num_inflight_requests=3,
+        ldqa_output_length=128,
         # random-prefill defaults
         rp_request_length=10000,
         rp_num_requests=50,
@@ -105,6 +106,7 @@ class TestCreateWorkload:
             ldqa_document_length=5000,
             ldqa_query_per_document=4,
             ldqa_shuffle_policy="tile",
+            ldqa_output_length=1024,
         )
         sender, collector, monitor = _make_deps()
         result = create_workload(
@@ -118,6 +120,7 @@ class TestCreateWorkload:
         assert result._config.document_length == 5000
         assert result._config.query_per_document == 4
         assert result._config.shuffle_policy == "tile"
+        assert result._config.output_length == 1024
         assert result._config.num_documents == 20  # 10 * 10000 / 5000
 
     def test_multi_round_chat(self) -> None:
