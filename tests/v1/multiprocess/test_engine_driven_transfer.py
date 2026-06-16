@@ -146,6 +146,28 @@ def _make_hnd_flashinfer_kv_caches(
     return kv_caches
 
 
+def _make_ascend_separate_kv_caches(
+    num_layers: int = 2,
+    num_blocks: int = 8,
+    block_size: int = 4,
+    num_heads: int = 2,
+    head_size: int = 8,
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Build per-layer Ascend ``(K, V)`` tuples for the SEPARATE_KV layout.
+
+    Mirrors the vLLM-Ascend registration payload: each dict value is a
+    ``(K, V)`` tuple of ``[num_blocks, block_size, num_heads, head_size]``
+    tensors (``KVCacheFormat.SEPARATE_KV``), not a bare tensor. ``compute_kv_layout``
+    must derive dtype from the *normalized* structure, not the raw tuple.
+    """
+    kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    for i in range(num_layers):
+        k = torch.randn(num_blocks, block_size, num_heads, head_size)
+        v = torch.randn(num_blocks, block_size, num_heads, head_size)
+        kv_caches[f"layer_{i}"] = (k, v)
+    return kv_caches
+
+
 def _make_storage_manager_config(
     *,
     shm_name: str = "",
@@ -545,6 +567,36 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="kv_caches is empty"):
         compute_kv_layout({})
+
+
+def test_compute_kv_layout_ascend_separate_kv_tuples() -> None:
+    """compute_kv_layout must accept per-layer ``(K, V)`` tuples (Ascend layout).
+
+    Regression test: ``compute_kv_layout`` previously read ``dtype`` from the
+    raw ``tensors[0]``, which is a ``(K, V)`` tuple on Ascend, raising
+    ``AttributeError: 'tuple' object has no attribute 'dtype'`` during worker
+    registration. It must derive dtype from the normalized structure instead
+    (consistent with ``block_size`` / ``num_layers`` / ``hidden_dim``).
+    """
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context.base import compute_kv_layout
+    import lmcache.c_ops as lmc_ops
+
+    source = _make_ascend_separate_kv_caches(
+        num_layers=2, num_blocks=8, block_size=4, num_heads=2, head_size=8
+    )
+    (
+        block_size,
+        num_layers,
+        hidden_dim,
+        dtype_str,
+        detected_kv_format,
+    ) = compute_kv_layout(source, layout_hints=None)
+    assert block_size == 4
+    assert num_layers == 2
+    assert hidden_dim == 16
+    assert dtype_str == "float32"
+    assert detected_kv_format == lmc_ops.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS
 
 
 @pytest.mark.parametrize(

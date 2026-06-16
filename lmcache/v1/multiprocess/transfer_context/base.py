@@ -280,6 +280,7 @@ def compute_kv_layout(
     # First Party
     from lmcache.v1.gpu_connector.utils import (
         get_block_size,
+        get_dtype,
         get_hidden_dim_size,
         get_num_layers,
         normalize_kv_and_discover_format,
@@ -295,7 +296,11 @@ def compute_kv_layout(
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
     hidden_dim_size = get_hidden_dim_size(normalized, engine_kv_format)
-    dtype_str = str(tensors[0].dtype).replace("torch.", "")
+    # Derive dtype from the *normalized* structure (not the raw ``tensors[0]``):
+    # on Ascend each value is a per-layer ``(K, V)`` tuple, so ``tensors[0]``
+    # is a tuple, not a tensor. ``get_dtype`` already unwraps the canonical
+    # ``[K_layers, V_layers]`` form for ``TWO_X_NL_X_NB_BS_NH_HS``.
+    dtype_str = str(get_dtype(normalized, engine_kv_format)).replace("torch.", "")
     return block_size, num_layers, hidden_dim_size, dtype_str, engine_kv_format
 
 
