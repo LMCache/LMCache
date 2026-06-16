@@ -116,7 +116,7 @@ def test_multi_layer_block_kv_transfer_roundtrip():
     """Server-side copy (handle mode) D2H + H2D round-trip.
 
     Regression for the CI ``cpu_e2e_validation (server-side copy)`` failure:
-    ``GPUTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
+    ``LMCacheDrivenTransferModule.store`` calls ``multi_layer_block_kv_transfer`` for
     this format, so the per-layer HND fallback must recognize it and split
     K/V at dim 3.
     """

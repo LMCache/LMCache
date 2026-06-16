@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared-memory NonGpuContext implementation for multiprocess mode."""
+"""Shared-memory EngineDrivenContext implementation for multiprocess mode."""
 
 # Standard
 from dataclasses import dataclass
@@ -15,8 +15,8 @@ from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.base import (
-    NonGpuContext,
-    NonGpuContextMetadata,
+    EngineDrivenContext,
+    EngineDrivenContextMetadata,
 )
 
 
@@ -73,12 +73,12 @@ class ShmSlotDescriptor:
         )
 
 
-class NonGpuContextShm(NonGpuContext):
-    """Shared-memory implementation of :class:`NonGpuContext`."""
+class EngineDrivenContextShm(EngineDrivenContext):
+    """Shared-memory implementation of :class:`EngineDrivenContext`."""
 
     def __init__(
         self,
-        metadata: NonGpuContextMetadata,
+        metadata: EngineDrivenContextMetadata,
         mq_client: MessageQueueClient,
         mq_timeout: float,
         shm_name: str,
