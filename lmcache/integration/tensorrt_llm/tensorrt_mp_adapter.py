@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import os
 import time
+import uuid
 
 # Third Party
 from tensorrt_llm._torch.pyexecutor.connectors.kv_cache_connector import (
@@ -288,7 +289,14 @@ class LMCacheMPKvConnectorWorker(KvCacheConnectorWorker):
             os.environ.get("LMCACHE_MQ_TIMEOUT", DEFAULT_MQ_TIMEOUT)
         )
 
-        self._instance_id = os.getpid()
+        # Instance id for GPU worker. uuid4-derived (OS entropy) rather
+        # than os.getpid() to avoid collision in containerized deployments.
+        # Masked to 63 bits to stay signed-int64-safe for any msgpack peer.
+        self._instance_id = uuid.uuid4().int & ((1 << 63) - 1)
+        logger.info(
+            "LMCache MP worker adapter created with instance_id=%d",
+            self._instance_id,
+        )
         self._registered = False
 
         # Third Party
