@@ -127,7 +127,7 @@ jobs:
           LMCACHE_ZMQ_PORT_BENCH=15556 \
             bash .github/scripts/cpu_device_test.sh server_bench
 
-      - name: vLLM e2e — LMCache-driven (pickle)
+      - name: vLLM e2e — Engine-driven (pickle)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -138,7 +138,7 @@ jobs:
             bash .github/scripts/cpu_device_test.sh vllm_e2e
 
       # POSIX SHM transport is Linux-only.
-      - name: vLLM e2e — LMCache-driven (shm)
+      - name: vLLM e2e — Engine-driven (shm)
         if: runner.os == 'Linux'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

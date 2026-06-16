@@ -34,6 +34,8 @@ lmcache/v1/distributed/serde/
   async_processor.py  # AsyncSerdeProcessor (thread-pool + eventfd wrapper)
   factory.py          # register_serde_factory / create_serde_processor
   fp8.py              # Fp8QuantizationSerializer / Deserializer
+  multi.py            # MultiSerializer / MultiDeserializer (tuple-shaped
+                      # extension; see "Multi-output extension" below)
   utils.py            # serialized_layout_desc, make_temp_key
 ```
 
@@ -175,3 +177,93 @@ Everything else — temp buffer allocation, eventfd plumbing, lock /
 lifecycle transitions, all-or-nothing failure handling — is provided
 by `AsyncSerdeProcessor` and the wrapper. Users never need to touch
 controllers, eventfds, or L1 locks.
+
+## Multi-output extension
+
+The `Serializer` / `Deserializer` classes above operate on one
+typed tensor at each endpoint: one tensor in, one byte buffer out
+on serialize, and the reverse on deserialize. That shape works
+when K and V share a single data type -- the serde just sees them
+as one combined tensor. It does not work in two cases:
+
+- **K and V at different data types.** A typed tensor has one
+  dtype, so a serde that wants K at one dtype (e.g. fp16/bf16) and
+  V at another (e.g. FP8) cannot carry both.
+- **One side absent.** For tier-split placements where K or V is
+  held outside this serde's data path -- e.g. K kept in L1 (CPU
+  pinned host memory) while V flows to L2 (durable storage) -- the
+  serialize input has no tensor for the absent slot and the
+  deserialize output has no destination for it.
+
+`multi.py` defines the additive contract for this case:
+
+- `MemoryObjGroup = Tuple[Optional[MemoryObj], ...]` is a
+  fixed-length tuple of optional MemoryObjs.
+- `LayoutDescGroup = Tuple[Optional[MemoryLayoutDesc], ...]` is the
+  parallel layout-descriptor tuple used by size estimators.
+- `MultiSerializer.serialize(src: MemoryObjGroup, dst: MemoryObj)`
+  takes a group whose length equals `MultiSerializer.group_size`.
+- `MultiDeserializer.deserialize(src: MemoryObj, dst: MemoryObjGroup)`
+  produces a group whose length equals
+  `MultiDeserializer.group_size`.
+- `single_to_multi_serializer(s)` and
+  `single_to_multi_deserializer(d)` adapt an existing single-tensor
+  pair to the tuple interface as a length-1 group; the adapter is
+  layout-equivalent (same on-the-wire bytes as a direct call).
+
+The single-tensor `Serializer` / `Deserializer` ABCs and all their
+existing callers — `AsyncSerdeProcessor`, the factory registry, the
+L2 adapter wrapper, the built-in `fp8` serde — are unchanged. A
+serde implementation that needs multiple tensors at an endpoint
+implements `MultiSerializer` / `MultiDeserializer` instead of (or in
+addition to) the single-tensor ABCs. The async wiring around the
+multi interface — a tuple-aware `AsyncSerdeProcessor` analog and a
+tuple-aware `submit_*` shape on the wrapper — is added in a follow-up
+once a concrete multi-output serde lands.
+
+### Per-slot semantics
+
+Implementations MUST document, at minimum:
+
+1. The fixed value of `group_size`.
+2. The semantic carried by each slot (e.g., `slot 0 = K`,
+   `slot 1 = V`).
+3. Which slots are required and which may be `None`. A slot that may
+   be `None` MUST be tolerated by `estimate_serialized_size` with a
+   `None` layout descriptor at the same index.
+
+`None` semantics, mirroring serialize input vs deserialize output:
+
+- **Serialize input.** A `None` slot means the caller is not
+  supplying that tensor; e.g., a V-only write where K is held
+  outside this serde's data path. The implementation MUST raise
+  `ValueError` when a required slot is `None`.
+- **Deserialize output.** A `None` slot means the caller does not
+  want that tensor materialized; e.g., a V-only read where K is
+  sourced elsewhere. The implementation MUST NOT touch the missing
+  slot.
+
+### Single-element bridge
+
+A length-1 `MemoryObjGroup` is the trivial bridge to the existing
+single-tensor API. `single_to_multi_serializer(inner)` wraps an
+existing `Serializer` so callers that work in groups can invoke it
+uniformly:
+
+```python
+from lmcache.v1.distributed.serde import (
+    single_to_multi_serializer,
+    single_to_multi_deserializer,
+)
+
+multi_s = single_to_multi_serializer(existing_serializer)
+multi_d = single_to_multi_deserializer(existing_deserializer)
+n = multi_s.serialize((src,), dst_buffer)         # length-1 group
+multi_d.deserialize(src_buffer, (dst,))           # length-1 group
+```
+
+The wrapper rejects non-unit groups with `ValueError`, rejects a
+`None` src slot (single-tensor serializers do not admit absence),
+and treats a `None` dst slot as a deliberate skip rather than an
+error. On-the-wire bytes are byte-for-byte identical to a direct
+call against the underlying single-tensor serde.

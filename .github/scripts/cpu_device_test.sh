@@ -55,11 +55,11 @@ case "${E2E_TRANSPORT_MODE}" in
     MAPPED_DATA_MODE="${E2E_DATA_MODE}"
     ;;
   shm)
-    MAPPED_TRANSPORT_MODE="lmcache_driven"
+    MAPPED_TRANSPORT_MODE="engine_driven"
     MAPPED_DATA_MODE="shm"
     ;;
   pickle)
-    MAPPED_TRANSPORT_MODE="lmcache_driven"
+    MAPPED_TRANSPORT_MODE="engine_driven"
     MAPPED_DATA_MODE="pickle"
     ;;
   *)

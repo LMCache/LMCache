@@ -61,7 +61,9 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     from lmcache.utils import EngineType
     from lmcache.v1.distributed.api import MemoryLayoutDesc
     from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
-    from lmcache.v1.multiprocess.modules import gpu_transfer as gpu_transfer_mod
+    from lmcache.v1.multiprocess.modules import (
+        lmcache_driven_transfer as lmcache_driven_transfer_mod,
+    )
 
     layout_desc = MemoryLayoutDesc(
         shapes=[torch.Size([2, 16, 32])],
@@ -90,22 +92,28 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         return layout_desc
 
     monkeypatch.setattr(
-        gpu_transfer_mod,
+        lmcache_driven_transfer_mod,
         "DeviceHostFuncDispatcher",
         _FakeDeviceHostFuncDispatcher,
     )
     monkeypatch.setattr(
-        gpu_transfer_mod, "create_cache_context", fake_create_cache_context
+        lmcache_driven_transfer_mod,
+        "create_cache_context",
+        fake_create_cache_context,
     )
-    monkeypatch.setattr(gpu_transfer_mod, "get_layout_desc", fake_layout_desc)
     monkeypatch.setattr(
-        gpu_transfer_mod.torch_dev,
+        lmcache_driven_transfer_mod,
+        "get_layout_desc",
+        fake_layout_desc,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod.torch_dev,
         "empty_cache",
         lambda: None,
         raising=False,
     )
 
-    module = gpu_transfer_mod.GPUTransferModule(ctx)
+    module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
     module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])
     module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {}, [])
     assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc

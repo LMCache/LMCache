@@ -196,7 +196,7 @@ steps:
       - label: ":compression: cpu_e2e_validation (server-side copy)"
         command: bash .github/scripts/run-cpu-e2e-validation.sh
         env:
-          LMCACHE_MP_TRANSFER_MODE: "engine_driven"
+          LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:

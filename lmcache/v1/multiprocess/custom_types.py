@@ -315,8 +315,8 @@ class IPCCacheServerKey:
 KVCache = list[CudaIPCWrapper]
 
 
-class RegisterNonGpuContextPayload(msgspec.Struct):
-    """Payload for the REGISTER_KV_CACHE_NON_GPU_CONTEXT protocol message.
+class RegisterEngineDrivenContextPayload(msgspec.Struct):
+    """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
     Attributes:
         instance_id: Worker instance identifier (typically PID).

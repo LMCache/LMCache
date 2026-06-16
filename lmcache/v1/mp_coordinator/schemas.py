@@ -27,12 +27,16 @@ class RegisterRequest(BaseModel):
         http_port: Port of the mp server's HTTP server, which the coordinator
             calls to push work to this instance.
         metadata: Free-form registration hints.
+        p2p_advertised_url: URL the instance advertises for peer-to-peer
+            transfers. Optional -- empty when the instance does not participate
+            in P2P.
     """
 
     instance_id: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
     ip: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     http_port: int = Field(ge=1, le=65535)
     metadata: dict[str, str] = Field(default_factory=dict)
+    p2p_advertised_url: Annotated[str, StringConstraints(strip_whitespace=True)] = ""
 
 
 class RegisterResponse(BaseModel):

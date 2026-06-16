@@ -5,7 +5,7 @@ Engine protocol definitions for core KV cache operations.
 This module defines the protocol for:
 - REGISTER_KV_CACHE: Register a KV cache instance with the server
 - UNREGISTER_KV_CACHE: Unregister a KV cache instance (GPU path)
-- UNREGISTER_KV_CACHE_NON_GPU_CONTEXT: Unregister a non-GPU KV cache context
+- UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT: Unregister a non-GPU KV cache context
 - STORE: Store KV cache blocks to the server
 - RETRIEVE: Retrieve KV cache blocks from the server
 - LOOKUP: Submit a prefix lookup and return a prefetch job ID
@@ -22,7 +22,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
-    RegisterNonGpuContextPayload,
+    RegisterEngineDrivenContextPayload,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
@@ -49,8 +49,8 @@ class PrepareRetrieveResponse:
 
 
 @dataclass
-class RegisterNonGpuContextResponse:
-    """Response for REGISTER_KV_CACHE_NON_GPU_CONTEXT."""
+class RegisterEngineDrivenContextResponse:
+    """Response for REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT."""
 
     shm_name: str = ""
     pool_size: int = 0
@@ -67,8 +67,8 @@ REQUEST_NAMES = [
     "QUERY_PREFETCH_LOOKUP_HITS",
     "FREE_LOOKUP_LOCKS",
     "END_SESSION",
-    "REGISTER_KV_CACHE_NON_GPU_CONTEXT",
-    "UNREGISTER_KV_CACHE_NON_GPU_CONTEXT",
+    "REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT",
+    "UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT",
     "PREPARE_STORE",
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
@@ -203,18 +203,18 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Payload:
         #   - instance_id: int - Unique identifier for the vLLM instance
         # Returns: None
-        "UNREGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
+        "UNREGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT": ProtocolDefinition(
             payload_classes=[int],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),
         # Register non-GPU KV cache context
         # Payload:
-        #   - RegisterNonGpuContextPayload - all metadata fields in one struct
-        # Returns: RegisterNonGpuContextResponse
-        "REGISTER_KV_CACHE_NON_GPU_CONTEXT": ProtocolDefinition(
-            payload_classes=[RegisterNonGpuContextPayload],
-            response_class=RegisterNonGpuContextResponse,
+        #   - RegisterEngineDrivenContextPayload - all metadata fields in one struct
+        # Returns: RegisterEngineDrivenContextResponse
+        "REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT": ProtocolDefinition(
+            payload_classes=[RegisterEngineDrivenContextPayload],
+            response_class=RegisterEngineDrivenContextResponse,
             handler_type=HandlerType.SYNC,
         ),
         "PREPARE_STORE": ProtocolDefinition(

@@ -44,7 +44,7 @@ Setup B: vLLM with LMCache
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Run LMCache as a standalone service and point vLLM at it with the
-``LMCacheMPConnector``. See :doc:`/mp/quickstart` for the full MP-mode
+``LMCacheMPConnector``. See :doc:`/getting_started/quickstart` for the full MP-mode
 walkthrough.
 
 **Start the LMCache server:**

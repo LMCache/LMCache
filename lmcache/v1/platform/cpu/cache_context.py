@@ -294,7 +294,7 @@ class CpuCacheContext(BaseCacheContext):
         number of tokens.
 
         Mirrors :meth:`GPUCacheContext.get_kernel_group_shape_dtype` so
-        callers such as ``gpu_transfer.get_layout_desc`` can duck-type
+        callers such as ``lmcache_driven_transfer.get_layout_desc`` can duck-type
         across GPU and CPU backends.
 
         Args:
