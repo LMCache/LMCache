@@ -265,6 +265,9 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
 
     Returns:
         None.
+
+    Raises:
+        ValueError: If more than one DAX device matches ``l1-devdax-path``.
     """
     memory_config = config.l1_manager_config.memory_config
     _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)

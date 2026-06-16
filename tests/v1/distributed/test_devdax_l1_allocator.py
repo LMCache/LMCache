@@ -34,12 +34,10 @@ from lmcache.v1.distributed.l2_adapters.config import (
     L2AdaptersConfig,
     get_type_name_for_config,
 )
-from lmcache.v1.distributed.l2_adapters.reconfiguration import L2ReconfigureError
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
-from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import DevDaxMemoryAllocator, MixedMemoryAllocator
 from lmcache.v1.multiprocess.config import add_mp_server_args
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 import lmcache.v1.memory_management as memory_management
 
 
@@ -413,110 +411,6 @@ def test_l1_memory_manager_reports_devdax_desc(tmp_path):
     manager.close()
 
 
-def test_l1_devdax_reconfigure_resize_remove_add(tmp_path):
-    path = _make_mmap_file(tmp_path, size=4 * 1024 * 1024)
-    storage_manager = StorageManager(
-        StorageManagerConfig(
-            l1_manager_config=L1ManagerConfig(
-                memory_config=L1MemoryManagerConfig(
-                    size_in_bytes=1024 * 1024,
-                    use_lazy=False,
-                    shm_name="",
-                    devdax_path=path,
-                    devdax_size_in_bytes=1024 * 1024,
-                )
-            ),
-            eviction_config=EvictionConfig(eviction_policy="LRU"),
-        )
-    )
-
-    try:
-        status = storage_manager.get_l2_adapter_reconfigure_status()
-        assert status["enabled"] is True
-        assert status["adapters"][0]["backend"] == "dax"
-        assert status["adapters"][0]["tier"] == "l1"
-        assert status["adapters"][0]["status"]["total_capacity_bytes"] == 1024 * 1024
-
-        resized = storage_manager.reconfigure_l2_adapter(
-            0,
-            "resize",
-            {
-                "device_path": path,
-                "size_bytes": 2 * 1024 * 1024,
-                "mode": "migrate",
-                "force": False,
-            },
-        )
-        assert resized["operation"] == "resize"
-        assert resized["new_size_bytes"] == 2 * 1024 * 1024
-        assert (
-            storage_manager.report_status()["l1_manager"]["memory_total_bytes"]
-            == 3 * 1024 * 1024
-        )
-
-        removed = storage_manager.reconfigure_l2_adapter(
-            0,
-            "remove",
-            {
-                "device_path": path,
-                "mode": "evict",
-                "force": False,
-            },
-        )
-        assert removed["operation"] == "remove"
-        assert removed["state"] == "removed"
-        assert (
-            storage_manager.report_status()["l1_manager"]["memory_total_bytes"]
-            == 1024 * 1024
-        )
-
-        added = storage_manager.reconfigure_l2_adapter(
-            0,
-            "add",
-            {
-                "device_path": path,
-                "size_bytes": 1024 * 1024,
-            },
-        )
-        assert added["operation"] == "add"
-        assert (
-            storage_manager.report_status()["l1_manager"]["memory_total_bytes"]
-            == 2 * 1024 * 1024
-        )
-    finally:
-        storage_manager.close()
-
-
-def test_l1_devdax_reconfigure_rejects_active_allocations(tmp_path):
-    path = _make_mmap_file(tmp_path, size=2 * 1024 * 1024)
-    manager = L1MemoryManager(
-        L1MemoryManagerConfig(
-            size_in_bytes=1024 * 1024,
-            use_lazy=False,
-            shm_name="",
-            devdax_path=path,
-        )
-    )
-    error, objs = manager.allocate(_layout(4096), count=1)
-
-    try:
-        assert error == L1Error.SUCCESS
-        with pytest.raises(L2ReconfigureError) as exc_info:
-            manager.reconfigure_devdax(
-                "resize",
-                {
-                    "device_path": path,
-                    "size_bytes": 2 * 1024 * 1024,
-                    "mode": "migrate",
-                    "force": False,
-                },
-            )
-        assert exc_info.value.status_code == 409
-    finally:
-        manager.free(objs)
-        manager.close()
-
-
 def test_cli_parses_l1_devdax_path(tmp_path):
     path = _make_mmap_file(tmp_path)
     config = _parse_mp_storage_args(
@@ -591,10 +485,6 @@ def test_cli_infers_l1_devdax_overflow_from_registered_dax_adapter(tmp_path):
 @pytest.mark.parametrize(
     ("adapter_spec", "expected_adapter_type"),
     [
-        (
-            {"type": "fs", "base_path": "fs-l2"},
-            "fs",
-        ),
         (
             {
                 "type": "raw_block",
@@ -684,14 +574,12 @@ def test_cli_hybrid_l1_splits_matching_dax_device_and_keeps_other_l2(tmp_path):
                     "num_load_workers": 4,
                 }
             ),
-            "--l2-adapter",
-            json.dumps({"type": "fs", "base_path": str(tmp_path / "fs-l2")}),
         ]
     )
 
     mem_cfg = config.l1_manager_config.memory_config
     assert mem_cfg.devdax_size_in_bytes == 2 << 30
-    assert len(config.l2_adapter_config.adapters) == 2
+    assert len(config.l2_adapter_config.adapters) == 1
 
     dax_adapter = cast(Any, config.l2_adapter_config.adapters[0])
     assert get_type_name_for_config(dax_adapter) == "dax"
@@ -701,8 +589,6 @@ def test_cli_hybrid_l1_splits_matching_dax_device_and_keeps_other_l2(tmp_path):
     assert dax_adapter.num_store_workers == 2
     assert dax_adapter.num_lookup_workers == 3
     assert dax_adapter.num_load_workers == 4
-
-    assert get_type_name_for_config(config.l2_adapter_config.adapters[1]) == "fs"
 
 
 def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):
@@ -718,7 +604,7 @@ def test_devdax_l1_does_not_advertise_shm_pool(tmp_path):
         ),
         eviction_config=EvictionConfig(eviction_policy="LRU"),
     )
-    context = MPCacheEngineContext(config)
+    context = MPCacheServerContext(config)
 
     try:
         assert context.shm_pool_info == {"shm_name": "", "pool_size": 0}
