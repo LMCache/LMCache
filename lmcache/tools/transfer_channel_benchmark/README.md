@@ -88,3 +88,23 @@ the transferred bytes against that pattern (no `--verify` needed on the server).
 - With the default (non-lazy) allocator the whole `--buffer-size` is allocated up
   front and may be CUDA-pinned; keep it within available host memory.
 - Requires a working transfer channel runtime (for `nixl`, a UCX backend).
+
+## Troubleshooting
+
+- **Client hangs after "connected" or during connect, then raises
+  `TimeoutError` after ~60s.** The transfer-channel handshake could not reach the
+  server. Check that `--url`/`--control-url` on the client point at the *server's*
+  reachable address (a common mistake is a typo such as a trailing dot:
+  `10.0.0.5.:7600`), that the server is running, and that the ports are open
+  between hosts:
+  ```bash
+  nc -vz <server-host> 7600   # transfer channel
+  nc -vz <server-host> 7610   # catalog side-channel
+  ```
+  The handshake has a fixed 60s timeout, so a misconfiguration fails with a clear
+  error instead of hanging forever.
+- **`page_size`/`object_size` mismatch error.** The client validates these against
+  the server's catalog; pass the same `--page-size` and `--object-size` on both.
+- **Allocation `RuntimeError` on the server.** The source pool
+  (`--num-source-objects` × `--object-size`) must fit in `--buffer-size`; increase
+  the buffer or reduce the pool/object size.

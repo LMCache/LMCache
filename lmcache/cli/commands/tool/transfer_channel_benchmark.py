@@ -15,13 +15,15 @@ import sys
 def register(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``transfer-channel-benchmark`` sub-subcommand.
 
-    Imports are lazy so torch / nixl are not loaded at CLI startup.
+    Only the torch-free ``config`` module is imported here, so registering this
+    tool (which happens on every ``lmcache`` invocation) does not require torch
+    or the distributed runtime. Those are imported in ``execute``.
 
     Args:
         subparsers: The subparsers action from the ``lmcache tool`` parser.
     """
     # First Party
-    from lmcache.tools.transfer_channel_benchmark.benchmark import (
+    from lmcache.tools.transfer_channel_benchmark.config import (
         add_benchmark_arguments,
     )
 

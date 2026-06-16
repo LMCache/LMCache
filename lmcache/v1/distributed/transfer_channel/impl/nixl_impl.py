@@ -34,6 +34,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Timeout for each blocking recv during the client handshake. Without it a
+# misconfigured/unreachable server url would block the connecting thread
+# forever. Hard-coded for now.
+_HANDSHAKE_TIMEOUT_MS = 60_000
+
 
 ############################################################
 # Helper functions
@@ -465,9 +470,34 @@ class NixlTransferChannelContext(TransferChannelContext):
     ############################################################
     # Helper functions
     ############################################################
+    def _recv_handshake(self, socket: "zmq.Socket", server_url: str) -> bytes:
+        """Receive one handshake reply, mapping a timeout to a clear error.
+
+        Args:
+            socket: The REQ socket awaiting the server's reply.
+            server_url: The peer url being dialed (for the error message).
+
+        Returns:
+            The raw reply bytes.
+
+        Raises:
+            TimeoutError: If no reply arrives within the handshake timeout
+                (e.g. the url is wrong/unreachable or the port is blocked).
+        """
+        try:
+            return socket.recv()
+        except zmq.Again as err:
+            raise TimeoutError(
+                f"Timed out after {_HANDSHAKE_TIMEOUT_MS / 1000:.0f}s waiting for "
+                f"a transfer-channel handshake reply from {server_url!r}. Check "
+                f"that the peer is running and that the url/port is correct and "
+                f"reachable."
+            ) from err
+
     def _connect(self, server_url: str) -> NixlTransferChannelClient:
         socket = self.zmq_context.socket(zmq.REQ)
         socket.setsockopt(zmq.LINGER, 0)
+        socket.setsockopt(zmq.RCVTIMEO, _HANDSHAKE_TIMEOUT_MS)
         host, port = _parse_url(server_url)
         socket.connect(f"tcp://{host}:{port}")
         try:
@@ -480,7 +510,9 @@ class NixlTransferChannelContext(TransferChannelContext):
                     )
                 )
             )
-            init_resp = msgspec.msgpack.decode(socket.recv(), type=HandshakeMsg)
+            init_resp = msgspec.msgpack.decode(
+                self._recv_handshake(socket, server_url), type=HandshakeMsg
+            )
             assert isinstance(init_resp, InitResp)
             server_agent_name = self.agent.add_remote_agent(init_resp.agent_meta)
 
@@ -494,7 +526,9 @@ class NixlTransferChannelContext(TransferChannelContext):
                     )
                 )
             )
-            memreg_resp = msgspec.msgpack.decode(socket.recv(), type=HandshakeMsg)
+            memreg_resp = msgspec.msgpack.decode(
+                self._recv_handshake(socket, server_url), type=HandshakeMsg
+            )
             assert isinstance(memreg_resp, MemRegResp)
             remote_xfer_dlist = self.agent.deserialize_descs(memreg_resp.xfer_descs)
             remote_handle = self.agent.prep_xfer_dlist(

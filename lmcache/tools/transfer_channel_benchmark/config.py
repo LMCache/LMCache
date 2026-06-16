@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Configuration for the transfer channel throughput benchmark."""
+"""Configuration and argument parsing for the transfer channel benchmark.
+
+This module is intentionally free of heavy/optional dependencies (torch, the
+``lmcache.v1.distributed`` runtime) so the CLI can build its argument parser
+without importing them. The runtime imports live in ``benchmark.py``.
+"""
 
 # Standard
 from dataclasses import dataclass
+import argparse
 
 _UNITS = {
     "B": 1,
@@ -115,3 +121,132 @@ class BenchmarkConfig:
                 f"num_source_objects ({self.num_source_objects}) must be >= "
                 f"num_objects ({self.num_objects})"
             )
+
+
+def add_benchmark_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add all benchmark arguments to ``parser``.
+
+    Defined here (not in ``benchmark.py``) so the CLI can build its parser
+    without importing torch or the distributed runtime.
+
+    Args:
+        parser: The argument parser (or subparser) to populate.
+    """
+    parser.add_argument(
+        "--role",
+        choices=["server", "client"],
+        required=True,
+        help="server: register a source buffer and serve its object catalog; "
+        "client: read a subset of the server's objects and report throughput.",
+    )
+    parser.add_argument(
+        "--transfer-channel-type",
+        default="nixl",
+        help="Transfer channel implementation to benchmark.",
+    )
+    parser.add_argument(
+        "--nixl-backend",
+        default="UCX",
+        help="nixl backend name (nixl-specific), e.g. UCX.",
+    )
+    parser.add_argument(
+        "--url",
+        default="127.0.0.1:7600",
+        help="server: host:port to bind the transfer-channel server; "
+        "client: the server (peer) advertise url to read from.",
+    )
+    parser.add_argument(
+        "--listen-url",
+        default="0.0.0.0:7601",
+        help="client: host:port for the client's own (mandatory) "
+        "transfer-channel server; it never receives reads here.",
+    )
+    parser.add_argument(
+        "--control-url",
+        default="0.0.0.0:7610",
+        help="benchmark catalog side-channel: server binds here, client "
+        "connects here to fetch the source object catalog.",
+    )
+    parser.add_argument(
+        "--buffer-size",
+        type=parse_size,
+        default=DEFAULT_BUFFER_SIZE,
+        help="server: total registered L1 source buffer size (e.g. 8GB).",
+    )
+    parser.add_argument(
+        "--page-size",
+        type=parse_size,
+        default=DEFAULT_PAGE_SIZE,
+        help="page / alignment size; must match on server and client.",
+    )
+    parser.add_argument(
+        "--object-size",
+        type=parse_size,
+        default=DEFAULT_OBJECT_SIZE,
+        help="size of each transferred object (multiple of --page-size).",
+    )
+    parser.add_argument(
+        "--num-objects",
+        type=int,
+        default=100,
+        help="number of objects transferred per read.",
+    )
+    parser.add_argument(
+        "--num-source-objects",
+        type=int,
+        default=0,
+        help="server source pool size; 0 means 5 * --num-objects.",
+    )
+    parser.add_argument(
+        "--use-lazy",
+        action="store_true",
+        help="use the lazy L1 allocator (experimental for registration).",
+    )
+    parser.add_argument(
+        "--iters", type=int, default=5, help="measured read iterations."
+    )
+    parser.add_argument("--warmup", type=int, default=1, help="warmup read iterations.")
+    parser.add_argument(
+        "--seed", type=int, default=0, help="RNG seed for read-subset selection."
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="verify transferred bytes against a known per-object pattern.",
+    )
+    parser.add_argument(
+        "--server-timeout",
+        type=float,
+        default=1800.0,
+        help="seconds the server serves catalog requests before exiting.",
+    )
+
+
+def build_config(args: argparse.Namespace) -> BenchmarkConfig:
+    """Build a :class:`BenchmarkConfig` from parsed arguments.
+
+    Args:
+        args: Parsed CLI arguments produced by ``add_benchmark_arguments``.
+
+    Returns:
+        The resolved, validated benchmark configuration.
+    """
+    return BenchmarkConfig(
+        role=args.role,
+        transfer_channel_type=args.transfer_channel_type,
+        nixl_backend=args.nixl_backend,
+        url=args.url,
+        listen_url=args.listen_url,
+        control_url=args.control_url,
+        buffer_size=args.buffer_size,
+        page_size=args.page_size,
+        object_size=args.object_size,
+        num_objects=args.num_objects,
+        num_source_objects=args.num_source_objects,
+        use_lazy=args.use_lazy,
+        iters=args.iters,
+        warmup=args.warmup,
+        seed=args.seed,
+        verify=args.verify,
+        server_timeout=args.server_timeout,
+    )
