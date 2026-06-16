@@ -43,7 +43,7 @@ def _wrap_sglang_kv_caches(
 ) -> list[CudaIPCWrapper]:
     """Flatten SGLang's depth-2 ``[K_layers, V_layers]`` KV layout into a
     single flat ``list[CudaIPCWrapper]`` so it fits upstream's wire
-    ``KVCache`` payload type. The daemon's
+    ``IPCKVCache`` payload type. The daemon's
     :func:`normalize_kv_and_discover_format` recognizes this shape from
     ``EngineType.SGLANG`` plus a ``tokens_per_block`` ``LayoutHints`` field
     and splits it back at its midpoint before format detection.
@@ -137,7 +137,7 @@ class LMCacheMPConnector:
         # (instance_id, kv_cache, model_name, world_size, engine_type,
         # layout_hints, engine_group_infos). SGLang's natural KV layout is depth-2
         # ([K_layers, V_layers]); we flatten it on the wire to fit
-        # ``KVCache = list[CudaIPCWrapper]``. The daemon recognizes the
+        # ``IPCKVCache = list[CudaIPCWrapper]``. The daemon recognizes the
         # SGLang-MHA flat-of-2NL pattern from ``EngineType.SGLANG`` plus the
         # ``tokens_per_block`` hint and un-flattens + reshapes per layer.
         # SGLang is non-hybrid (a single KV cache group), so engine_group_infos is the

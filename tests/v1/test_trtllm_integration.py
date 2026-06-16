@@ -370,17 +370,17 @@ class TestRawCudaIPCWrapperType:
         assert issubclass(RawCudaIPCWrapper, CudaIPCWrapper)
 
     def test_kvcache_typing_unchanged(self) -> None:
-        """``KVCache = list[CudaIPCWrapper]`` should accept subclass items
+        """``IPCKVCache = list[CudaIPCWrapper]`` should accept subclass items
         — load-bearing for msgspec ext-code reuse over ZMQ.
         """
         # First Party
         from lmcache.v1.multiprocess.custom_types import (
             CudaIPCWrapper,
-            KVCache,
+            IPCKVCache,
             RawCudaIPCWrapper,
         )
 
-        assert KVCache == list[CudaIPCWrapper]
+        assert IPCKVCache == list[CudaIPCWrapper]
         # Static check substitute: a Raw* instance fits the list type.
         assert issubclass(RawCudaIPCWrapper, CudaIPCWrapper)
 

@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 # First Party
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.custom_types import IPCKVCache
 from lmcache.v1.platform.cpu.cache_context import CpuCacheContext
 
 if TYPE_CHECKING:
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 def create_cache_context(
-    kv_caches: KVCache,
+    kv_caches: IPCKVCache,
     lmcache_tokens_per_chunk: int = 256,
     layout_hints: LayoutHints | None = None,
     engine_group_infos: "Sequence[EngineGroupInfo]" = (),

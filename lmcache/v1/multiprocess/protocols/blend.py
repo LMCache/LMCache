@@ -7,7 +7,7 @@ This module defines the protocol for:
 """
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, KVCache
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, IPCKVCache
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
 
 # Define request names for this protocol group
@@ -88,12 +88,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Register CB KV Cache
         # Payload:
         #   - instance_id: int - Unique identifier for the vLLM instance
-        #   - kv_cache: KVCache - The CB KV cache configuration
+        #   - kv_cache: IPCKVCache - The CB KV cache configuration
         #   - model_name: str - Name of the model associated with the engine
         #   - world_size: int - World size of the engine
         # Returns: None
         "CB_REGISTER_KV_CACHE": ProtocolDefinition(
-            payload_classes=[int, KVCache, str, int],
+            payload_classes=[int, IPCKVCache, str, int],
             response_class=None,
             handler_type=HandlerType.SYNC,
         ),

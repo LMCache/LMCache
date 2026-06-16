@@ -31,7 +31,7 @@ from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
-    KVCache,
+    IPCKVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -512,7 +512,7 @@ class GPUTransferModule:
     def register_kv_cache(
         self,
         instance_id: int,
-        kv_caches: KVCache,
+        kv_caches: IPCKVCache,
         model_name: str,
         world_size: int,
         engine_type: EngineType,

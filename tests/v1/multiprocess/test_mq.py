@@ -365,7 +365,7 @@ def test_mq_noop_multiple_clients():
 def test_mq_register_kv_cache():
     """
     Test MessageQueue with REGISTER_KV_CACHE request type.
-    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: KVCache) and returns None.
+    REGISTER_KV_CACHE takes (gpu_id: int, kv_cache: IPCKVCache) and returns None.
     """
     # Create test KV cache (list of CudaIPCWrapper objects)
     kv_cache = []
