@@ -220,13 +220,13 @@ def test_adapter_free_lookup_locks_key_matches_lookup():
     adapter.lmcache_tokens_per_chunk = 256
     adapter.blocks_in_chunk = 16
     adapter.parallel_strategy = ParallelStrategy(False, 1, 0, 1, 1, 1)
+    adapter._server_urls = ["tcp://test:0"]
     adapter._health_events = {"tcp://test:0": threading.Event()}
     adapter._health_events["tcp://test:0"].set()
-    adapter._server_urls = ["tcp://test:0"]
+    adapter._mq_timeout = 30.0
     adapter._heartbeats: dict[str, object] = {}
     adapter._heartbeat_lock = threading.Lock()
     adapter._heartbeat_interval = 5.0
-    adapter._mq_timeout = 30.0
 
     mock_client = MagicMock(spec=MessageQueueClient)
     mock_future = MagicMock()
