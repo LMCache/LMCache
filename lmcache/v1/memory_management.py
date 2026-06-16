@@ -2223,11 +2223,25 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         :param int size: The size of the pinned memory in bytes.
         """
         self.size = size
-        self.buffer = _allocate_cpu_memory(size)
+        self._cpu_oom = False
+        try:
+            self.buffer = _allocate_cpu_memory(size)
+        except RuntimeError:
+            logger.warning(
+                "PinMemoryAllocator: failed to allocate %d bytes of pinned CPU "
+                "memory — CPU cache will be unavailable. Reduce "
+                "local_cpu_memory_size in your LMCache config if this persists.",
+                size,
+            )
+            self._cpu_oom = True
+            self.buffer = torch.empty(0, dtype=torch.uint8)
+
         self._unregistered = False
 
         self.allocator: MemoryAllocatorInterface
-        if use_paging:
+        if self._cpu_oom:
+            self.allocator = TensorMemoryAllocator(self.buffer)
+        elif use_paging:
             assert "shapes" in kwargs, (
                 "shapes must be specified for paged memory allocator"
             )
@@ -2244,7 +2258,9 @@ class PinMemoryAllocator(MemoryAllocatorInterface):
         else:
             self.allocator = TensorMemoryAllocator(self.buffer)
 
-        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+        self.host_mem_lock = (
+            threading.Lock() if not use_paging and not self._cpu_oom else nullcontext()
+        )
 
     @_lmcache_nvtx_annotate
     def allocate(
@@ -2331,15 +2347,28 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             self.shm_name = kwargs.get("shm_name", None)
 
         self.size = size
+        self._cpu_oom = False
 
-        self.buffer = _allocate_cpu_memory(
-            size, self.numa_mapping, self.shm_name, use_hugepages=use_hugepages
-        )
+        try:
+            self.buffer = _allocate_cpu_memory(
+                size, self.numa_mapping, self.shm_name, use_hugepages=use_hugepages
+            )
+        except RuntimeError:
+            logger.warning(
+                "MixedMemoryAllocator: failed to allocate %d bytes of pinned CPU "
+                "memory — CPU cache will be unavailable. Reduce "
+                "local_cpu_memory_size in your LMCache config if this persists.",
+                size,
+            )
+            self._cpu_oom = True
+            self.buffer = torch.empty(0, dtype=torch.uint8)
 
         self._unregistered = False
 
         self.pin_allocator: MemoryAllocatorInterface
-        if use_paging:
+        if self._cpu_oom:
+            self.pin_allocator = TensorMemoryAllocator(self.buffer)
+        elif use_paging:
             assert "shapes" in kwargs, (
                 "shapes must be specified for paged memory allocator"
             )
@@ -2358,7 +2387,9 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 self.buffer, align_bytes=self.align_bytes
             )
 
-        self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
+        self.host_mem_lock = (
+            threading.Lock() if not use_paging and not self._cpu_oom else nullcontext()
+        )
 
         self.buffer_allocator = BufferAllocator("cpu")
 

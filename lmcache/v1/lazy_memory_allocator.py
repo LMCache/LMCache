@@ -117,8 +117,21 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
                 self._final_size, dtype=torch.uint8, device="cpu", pin_memory=False
             )
 
-        # Pin the first `curr_size` bytes (aligned to the internal chunk size)
-        self._pin_memory_chunk(0, self._curr_size)
+        # Pin the first `curr_size` bytes (aligned to the internal chunk size).
+        # If pinning fails at init (OS OOM), mark the allocator as OOM and skip
+        # the expansion thread — allocate() will return None for all requests.
+        self._cpu_oom = False
+        try:
+            self._pin_memory_chunk(0, self._curr_size)
+        except RuntimeError:
+            logger.warning(
+                "LazyMemoryAllocator: failed to pin %d bytes of CPU memory at init; "
+                "CPU cache will be unavailable. "
+                "Reduce local_cpu_memory_size in your LMCache config if this persists.",
+                self._curr_size,
+            )
+            self._cpu_oom = True
+            self._curr_size = 0
 
         # Create the tensor memory allocator
         self._allocator = TensorMemoryAllocator(
@@ -134,12 +147,15 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         # completely determined by the address manager.
         self._address_manager = self._allocator.address_manager
 
-        # Launch the background expansion thread
+        # Launch the background expansion thread (skipped when already OOM at init)
         self._stop_expand = threading.Event()
-        self._expand_thread = threading.Thread(
-            target=self._expand_worker, daemon=True, name="lazy-mem-expand-thread"
-        )
-        self._expand_thread.start()
+        if not self._cpu_oom:
+            self._expand_thread: Optional[threading.Thread] = threading.Thread(
+                target=self._expand_worker, daemon=True, name="lazy-mem-expand-thread"
+            )
+            self._expand_thread.start()
+        else:
+            self._expand_thread = None
 
     # Public methods
     def allocate(
@@ -149,6 +165,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[MemoryObj]:
+        if self._cpu_oom:
+            return None
         obj = self._allocator.allocate(shapes, dtypes, fmt, allocator_type)
         # HACK(ApostaC): reset the parent allocator to this lazy allocator
         # There should be a cleaner way to decouple lazy allocator and
@@ -165,6 +183,8 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         allocator_type: Optional[str] = None,
     ) -> Optional[List[MemoryObj]]:
+        if self._cpu_oom:
+            return None
         # HACK(ApostaC): reset the parent allocator to this lazy allocator
         # There should be a cleaner way to decouple lazy allocator and
         # tensor memory allocator
@@ -195,9 +215,10 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
         self._allocator.batched_free(memory_objs, allocator_type, update_stats)
 
     def close(self):
-        # Stop the background expansion thread
+        # Stop the background expansion thread (None when init-time OOM skipped it)
         self._stop_expand.set()
-        self._expand_thread.join()
+        if self._expand_thread is not None:
+            self._expand_thread.join()
 
         # Unpin all pinned memory chunks
         for ptr, size in self._pin_record:
@@ -276,7 +297,18 @@ class LazyMemoryAllocator(MemoryAllocatorInterface):
             for i in range(self.COMMIT_SIZE // self.PIN_CHUNK_SIZE):
                 if self._curr_size >= self._final_size:
                     break
-                self._pin_memory_chunk(self._curr_size, self.PIN_CHUNK_SIZE)
+                try:
+                    self._pin_memory_chunk(self._curr_size, self.PIN_CHUNK_SIZE)
+                except RuntimeError:
+                    logger.warning(
+                        "LazyMemoryAllocator: failed to pin chunk at offset %d bytes; "
+                        "CPU cache capacity capped at %d bytes. "
+                        "Reduce local_cpu_memory_size if this persists.",
+                        self._curr_size,
+                        self._curr_size,
+                    )
+                    self._cpu_oom = True
+                    return
                 self._curr_size += self.PIN_CHUNK_SIZE
 
             expand_size = self._curr_size - last_commit_size
