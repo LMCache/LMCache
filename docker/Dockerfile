@@ -138,7 +138,8 @@ RUN . /opt/venv/bin/activate && \
     VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://wheels.vllm.ai/nightly/${CUDA_TAG} \
-        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} && \
+        --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
+        --index-strategy unsafe-first-match && \
     python3 -c 'import torch; print("TORCH=", torch.__version__)' && \
     uv pip install lmcache==${VER} \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
