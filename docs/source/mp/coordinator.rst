@@ -102,8 +102,9 @@ Kubernetes downward API); an explicit flag wins over the env var.
      - ``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL``
      - Seconds between L2 event batch flushes (must be ``> 0``, default ``1``).
 
-The server registers under its telemetry identity (``--service-instance-id`` /
-OTel ``service.instance.id``); if that is unset, the coordinator assigns an id.
+The server registers under its stable identity (``--instance-id`` / OTel
+``service.instance.id``); if the flag is not passed, the server mints a
+random UUID v4 at startup and registers under that.
 
 Registration is best-effort: if the coordinator is unreachable, the MP server
 logs a warning, keeps retrying, and continues serving. A malformed

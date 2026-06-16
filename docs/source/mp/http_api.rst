@@ -240,7 +240,7 @@ prefetch jobs. Intended for operators and debugging, not for monitoring
       "chunk_size": 256,
       "hash_algorithm": "builtin-hash",
       "registered_gpu_ids": [0, 1],
-      "gpu_context_meta": {
+      "cache_context_meta": {
         "0": {
           "model_name": "meta-llama/Llama-3.1-8B-Instruct",
           "world_size": 1,
