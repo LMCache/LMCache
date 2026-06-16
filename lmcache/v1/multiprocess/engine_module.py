@@ -66,24 +66,32 @@ class EngineModule(Protocol):
 
 
 class InstanceLivenessTarget(Protocol):
-    """A module that tracks per-worker liveness and reaps stale workers.
+    """A module the periodic reaper drives, in either or both of two roles.
 
-    Implemented by transfer modules owning per-instance state keyed by
-    ``instance_id``. The management module drives these from the PING
-    handler and the periodic reaper; no caller touches the module's
-    private state directly.
+    * **Liveness owner** -- tracks per-worker registrations keyed by
+      ``instance_id``, refreshed on PING and scanned for staleness
+      (``touch_instance`` / ``reap_stale_instances`` /
+      ``tracked_instance_count``). The transfer modules fill this role.
+    * **State mirror** -- holds a second reference to a reaped instance's
+      resources and releases it on demand (``drop_instance_state``).
+      ``BlendV3Module`` fills this role for its per-instance CB state.
+
+    Every method defaults to a no-op, so an implementer subclasses this
+    protocol and overrides only the role it fills. The management module
+    drives all targets from the PING handler and the reaper; no caller
+    touches a module's private state directly.
     """
 
     def touch_instance(self, instance_id: int) -> None:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked (already reaped or never
-        registered).
+        registered), or for a target that owns no liveness state.
 
         Args:
             instance_id: The worker's opaque instance ID.
         """
-        ...
+        return
 
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
@@ -100,28 +108,23 @@ class InstanceLivenessTarget(Protocol):
                 must be >= ``reap_timeout_s``.
 
         Returns:
-            The instance IDs reaped during this scan.
+            The instance IDs reaped during this scan; empty for a target
+            that owns no liveness state.
         """
-        ...
+        return []
 
     def tracked_instance_count(self) -> int:
-        """Return the number of currently tracked instances."""
-        ...
-
-
-class InstanceReapListener(Protocol):
-    """A module notified when an instance is reaped, to drop mirrored state.
-
-    Implemented by modules holding a second reference to a reaped instance's
-    resources (e.g. blend rope mirrors of a GPU cache context).
-    """
+        """Return the number of currently tracked instances (0 if none)."""
+        return 0
 
     def drop_instance_state(self, instance_id: int) -> None:
-        """Release any state mirrored for the reaped instance.
+        """Release any state mirrored for a reaped instance.
 
-        A no-op if the listener holds nothing for the instance.
+        Called for every reaped ``instance_id``. A no-op unless the target
+        keeps a second reference to that instance's resources (only mirrors
+        such as ``BlendV3Module`` override this).
 
         Args:
             instance_id: The reaped worker's instance ID.
         """
-        ...
+        return

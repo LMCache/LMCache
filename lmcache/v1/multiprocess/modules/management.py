@@ -13,7 +13,6 @@ from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     InstanceLivenessTarget,
-    InstanceReapListener,
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
@@ -33,14 +32,14 @@ class ManagementModule:
     Owns the lock used during cache clearing and provides handlers for
     ping, chunk-size queries, clear, debug, and block-allocation reporting.
     Also owns the periodic reaper that evicts workers which have gone
-    silent, driving the injected liveness targets and reap listeners.
+    silent, driving the injected liveness targets.
 
     Args:
         ctx: The shared engine context.
-        liveness_targets: Transfer modules whose per-instance registrations
-            are refreshed on PING and scanned by the reaper.
-        reap_listeners: Modules notified (via ``drop_instance_state``) when
-            an instance is reaped, so they can drop mirrored state.
+        liveness_targets: Modules the reaper drives -- the transfer modules
+            whose per-instance registrations are refreshed on PING and scanned
+            for staleness, plus any state mirror (e.g. ``BlendV3Module``)
+            notified via ``drop_instance_state`` when an instance is reaped.
         worker_reap_timeout_seconds: Silence budget for a ping-proven worker;
             0 disables reaping (no thread is started).
         worker_registration_grace_seconds: Silence budget for a worker that
@@ -51,14 +50,12 @@ class ManagementModule:
         self,
         ctx: MPCacheServerContext,
         liveness_targets: Sequence[InstanceLivenessTarget] = (),
-        reap_listeners: Sequence[InstanceReapListener] = (),
         worker_reap_timeout_seconds: float = 0.0,
         worker_registration_grace_seconds: float = 0.0,
     ) -> None:
         self._ctx = ctx
         self._clear_lock = threading.Lock()
         self._liveness_targets = tuple(liveness_targets)
-        self._reap_listeners = tuple(reap_listeners)
         self._reap_timeout = worker_reap_timeout_seconds
         self._reap_grace = worker_registration_grace_seconds
 
@@ -145,7 +142,10 @@ class ManagementModule:
         return True
 
     def _reap_cycle(self) -> ThreadRunSummary:
-        """Run one reaper scan: reap stale workers, notify reap listeners.
+        """Run one reaper scan: reap stale workers, drop mirrored state.
+
+        Each reaped instance id is passed to ``drop_instance_state`` on every
+        target; it is a no-op for targets that mirror nothing for that id.
 
         Returns:
             A summary recording how many instances were reaped this scan.
@@ -156,8 +156,8 @@ class ManagementModule:
                 target.reap_stale_instances(self._reap_timeout, self._reap_grace)
             )
         for instance_id in reaped:
-            for listener in self._reap_listeners:
-                listener.drop_instance_state(instance_id)
+            for target in self._liveness_targets:
+                target.drop_instance_state(instance_id)
         return ThreadRunSummary(success=True, message=f"reaped={len(reaped)}")
 
     def get_chunk_size(self) -> int:

@@ -45,7 +45,11 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
+from lmcache.v1.multiprocess.engine_module import (
+    HandlerSpec,
+    InstanceLivenessTarget,
+    ThreadPoolType,
+)
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -314,7 +318,7 @@ def _unique_token_coverage(results: list[CBMatchResult]) -> int:
     return coverage
 
 
-class BlendV3Module:
+class BlendV3Module(InstanceLivenessTarget):
     """Paged-aware V3 CacheBlend. Wraps LMCacheDrivenTransfer STORE to register
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
@@ -513,7 +517,7 @@ class BlendV3Module:
         logger.info("Unregistered CB rope state for instance %d", instance_id)
 
     def drop_instance_state(self, instance_id: int) -> None:
-        """Drop blend state for a reaped instance (InstanceReapListener).
+        """Drop blend state for a reaped instance (InstanceLivenessTarget hook).
 
         Only the CB rope state is held per instance; the GPU cache context is
         owned by ``LMCacheDrivenTransferModule`` (no mirror here), so reaping

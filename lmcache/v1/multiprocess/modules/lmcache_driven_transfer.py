@@ -37,6 +37,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
+    InstanceLivenessTarget,
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -411,7 +412,7 @@ class ContextEntry:
     has_liveness_signal: bool = False
 
 
-class LMCacheDrivenTransferModule:
+class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     """Handles LMCache-driven KV cache transfer operations.
 
     Owns GPU context registrations and provides handlers for

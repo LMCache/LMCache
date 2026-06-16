@@ -178,11 +178,12 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
 
 
 class _FakeTarget:
-    """Liveness target double recording touches and yielding scripted reaps."""
+    """Liveness target double recording touches/drops and scripted reaps."""
 
     def __init__(self) -> None:
         self.touched: list[int] = []
         self.to_reap: list[int] = []
+        self.dropped: list[int] = []
         self.count = 0
 
     def touch_instance(self, instance_id: int) -> None:
@@ -197,13 +198,6 @@ class _FakeTarget:
 
     def tracked_instance_count(self) -> int:
         return self.count
-
-
-class _FakeListener:
-    """Reap listener double recording dropped instance IDs."""
-
-    def __init__(self) -> None:
-        self.dropped: list[int] = []
 
     def drop_instance_state(self, instance_id: int) -> None:
         self.dropped.append(instance_id)
@@ -227,23 +221,21 @@ def test_management_ping_touches_targets() -> None:
     assert target.touched == [42]
 
 
-def test_management_reaper_reaps_and_fans_out() -> None:
-    """The reaper scans targets and notifies listeners for reaped ids."""
+def test_management_reaper_reaps_and_drops() -> None:
+    """The reaper scans targets and calls drop_instance_state for reaped ids."""
     target = _FakeTarget()
-    listener = _FakeListener()
     mgmt = ManagementModule(
         MagicMock(),
         liveness_targets=[target],
-        reap_listeners=[listener],
         worker_reap_timeout_seconds=0.4,
         worker_registration_grace_seconds=0.8,
     )
     try:
         target.to_reap = [7]
         deadline = time.monotonic() + 2.0
-        while listener.dropped != [7] and time.monotonic() < deadline:
+        while target.dropped != [7] and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert listener.dropped == [7]
+        assert target.dropped == [7]
     finally:
         mgmt.close()
 

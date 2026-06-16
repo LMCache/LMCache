@@ -102,30 +102,33 @@ readers use the locked accessors `get_and_touch_context_entry` (get-and-refresh)
 `reap_timeout / 4`. Each scan calls `reap_stale_instances` on every target: under
 the module lock, collect ids whose staleness exceeds their window and pop them;
 outside the lock, run the same cleanup as a client unregister and log a WARNING
-per instance (repeated reaps of one id signal a too-small timeout). Reaped ids fan
-out to every `InstanceReapListener.drop_instance_state(id)`; `BlendV3Module` drops
+per instance (repeated reaps of one id signal a too-small timeout). Reaped ids are
+then passed to `drop_instance_state(id)` on every target; `BlendV3Module` drops
 the reaped instance's per-instance CB state (e.g. rope state) there. (It no longer
 mirrors the GPU cache context — that mirror was removed upstream, so reaping the
 GPU entry now frees the context directly.) Collect+pop shares the module lock with
 register's refresh, serializing every register-vs-reap race; on close, the reaper
 is stopped and joined before any module clears state.
 
-### 5.4 Public protocols and config
+### 5.4 Public protocol and config
 
 ```python
 class InstanceLivenessTarget(Protocol):
+    # All methods default to a no-op; an implementer overrides only its role.
     def touch_instance(self, instance_id: int) -> None: ...
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]: ...
     def tracked_instance_count(self) -> int: ...
-
-class InstanceReapListener(Protocol):
     def drop_instance_state(self, instance_id: int) -> None: ...
 ```
 
-Both transfer modules implement `InstanceLivenessTarget`; `BlendV3Module` is an
-`InstanceReapListener`; `ManagementModule` receives both by constructor injection.
+One protocol covers both reaper-driven roles. The transfer modules override the
+liveness methods (`touch`/`reap`/`count`); `BlendV3Module` overrides only
+`drop_instance_state` to drop its mirrored CB state. `ManagementModule` receives
+all targets in a single injected list. (Earlier a separate one-method
+`InstanceReapListener` held `drop_instance_state`; it was folded in since only
+`BlendV3Module` ever implemented it.)
 
 Config: `worker_reap_timeout_seconds` (default `120.0`; `0` disables, otherwise
 `>= 30.0`) and `worker_registration_grace_seconds` (default `3600.0`; `>=` the

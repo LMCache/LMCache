@@ -36,7 +36,6 @@ from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     HandlerSpec,
     InstanceLivenessTarget,
-    InstanceReapListener,
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -194,9 +193,16 @@ def _build_modules(
 
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
+    # Targets the reaper scans (and reap-notifies). The transfer modules own
+    # per-instance liveness; BlendV3Module is appended below as a state mirror.
+    liveness_targets: list[InstanceLivenessTarget] = [
+        m
+        for m in transfer_modules
+        if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
+    ]
+
     # At most one blend module is ever built (engine_type selects one).
     blend_module: EngineModule | None = None
-    reap_listeners: list[InstanceReapListener] = []
 
     if mp_config.engine_type == "blend_legacy":
         if mp_config.supported_transfer_mode == "engine_driven":
@@ -234,17 +240,13 @@ def _build_modules(
             ctx, transfer_module, lookup_module, coordinator=coordinator
         )
         blend_module = blend_v3
-        reap_listeners.append(blend_v3)
+        # blend_v3 mirrors per-instance CB rope state, so the reaper must
+        # notify it via drop_instance_state when an instance is reaped.
+        liveness_targets.append(blend_v3)
 
-    liveness_targets: list[InstanceLivenessTarget] = [
-        m
-        for m in transfer_modules
-        if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
-    ]
     management = ManagementModule(
         ctx,
         liveness_targets=liveness_targets,
-        reap_listeners=reap_listeners,
         worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
         worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
     )
