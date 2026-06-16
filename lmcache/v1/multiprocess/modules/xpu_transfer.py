@@ -2,35 +2,167 @@
 """XPU-based KV cache IPC transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Sequence
 import time
+
+# Third Party
+import torch
 
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.gpu_connector.gpu_ops import (
+    lmcache_memcpy_async_d2h,
+    lmcache_memcpy_async_h2d,
+)
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
-    XpuIPCWrapper,
+    RawSyclIPCWrapper,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.gpu_transfer import (
     ContextEntry,
+    batched_iteration_with_skip,
     downsample_and_stage_block_ids,
     get_layout_desc,
-    transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
+
+
+def _to_signed_i64(value: int) -> int:
+    return value if value < (1 << 63) else value - (1 << 64)
+
+
+def _recalculate_blocks_to_skip(
+    blocks_per_chunk: int,
+    blocks_per_window: int,
+    blocks_to_skip: int,
+) -> int:
+    if blocks_per_chunk == blocks_per_window:
+        return blocks_to_skip
+    full_windows_to_skip = blocks_to_skip // blocks_per_chunk
+    tail_blocks = blocks_to_skip % blocks_per_chunk
+    tail_blocks_to_skip = tail_blocks - (blocks_per_chunk - blocks_per_window)
+    return full_windows_to_skip * blocks_per_window + max(0, tail_blocks_to_skip)
+
+
+def _transfer_xpu_kv_per_object_group(
+    cache_context: object,
+    block_ids_gpu: list[torch.Tensor],
+    memory_objs: Sequence[MemoryObj | None],
+    object_group_id: int,
+    batch_size: int,
+    skip_first_n_tokens: int,
+    direction: "lmc_ops.TransferDirection",
+) -> None:
+    lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
+    kv_groups_manager = cache_context.kv_layer_groups_manager
+    object_group = kv_groups_manager.object_groups[object_group_id]
+    kernel_group_ids = object_group.kernel_group_indices
+    is_h2d = direction == lmc_ops.TransferDirection.H2D
+
+    sw_size_chunks = kv_groups_manager.get_sw_size_chunks(object_group_id)
+    num_objects_to_skip = 0
+    if sw_size_chunks >= 1 and is_h2d:
+        num_objects_to_skip = max(0, len(memory_objs) - sw_size_chunks)
+        logger.debug(
+            "Detected sliding window for XPU object group %d: skipping %d objects",
+            object_group_id,
+            num_objects_to_skip,
+        )
+
+    for start_object_idx, memory_object_batch in batched_iteration_with_skip(
+        memory_objs, batch_size, skip_count=num_objects_to_skip
+    ):
+        if any(mo is None for mo in memory_object_batch):
+            if is_h2d:
+                raise ValueError(
+                    "MemoryObj is None for some objects in the XPU H2D batch: "
+                    f"{memory_object_batch}"
+                )
+            continue
+
+        batch_len = len(memory_object_batch)
+        batch_start_token = start_object_idx * lmcache_chunk_size
+        batch_end_token = batch_start_token + batch_len * lmcache_chunk_size
+        effective_start = max(batch_start_token, skip_first_n_tokens)
+        if effective_start >= batch_end_token:
+            continue
+
+        skip_tokens_in_chunk = effective_start - batch_start_token
+        if is_h2d:
+            for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                lmcache_memcpy_async_h2d(
+                    memory_obj,
+                    cache_context.get_temp_object_group_buffer(
+                        chunk_idx, object_group_id
+                    ),
+                )
+
+        for kernel_group_id in kernel_group_ids:
+            blocks_per_chunk = cache_context.calculate_num_blocks(
+                lmcache_chunk_size, kernel_group_id
+            )
+            tokens_per_window = min(
+                lmcache_chunk_size,
+                kv_groups_manager.get_subchunk_sw_size_tokens(kernel_group_id),
+            )
+            blocks_per_window = cache_context.calculate_num_blocks(
+                tokens_per_window, kernel_group_id
+            )
+            start_block_pos = start_object_idx * blocks_per_window
+            end_block_pos = (start_object_idx + batch_len) * blocks_per_window
+            block_ids_curr_batch = block_ids_gpu[kernel_group_id][
+                start_block_pos:end_block_pos
+            ]
+            orig_skip_blocks = cache_context.calculate_num_blocks(
+                skip_tokens_in_chunk, kernel_group_id
+            )
+            recalculated_skip_blocks = _recalculate_blocks_to_skip(
+                blocks_per_chunk,
+                blocks_per_window,
+                orig_skip_blocks,
+            )
+            tmp_xpu_buffers_batched = [
+                _to_signed_i64(
+                    cache_context.get_temp_kernel_group_buffer(
+                        i, kernel_group_id
+                    ).data_ptr()
+                )
+                for i in range(batch_len)
+            ]
+            lmc_ops.multi_layer_block_kv_transfer(
+                cache_context.get_kernel_group_kv_pointers(kernel_group_id),
+                tmp_xpu_buffers_batched,
+                block_ids_curr_batch,
+                cache_context.device,
+                direction,
+                cache_context.get_shape_desc(kernel_group_id),
+                cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
+                cache_context.engine_kv_format_,
+                recalculated_skip_blocks,
+            )
+
+        if not is_h2d:
+            for chunk_idx, memory_obj in enumerate(memory_object_batch):
+                lmcache_memcpy_async_d2h(
+                    cache_context.get_temp_object_group_buffer(
+                        chunk_idx, object_group_id
+                    ),
+                    memory_obj,
+                )
 
 
 class XpuTransferModule:
@@ -98,7 +230,7 @@ class XpuTransferModule:
             entry.cache_context.close()
         self._cache_contexts.clear()
         if had_contexts:
-            XpuIPCWrapper.clear_opened_ipc_tensors()
+            RawSyclIPCWrapper.clear_opened_ipc_tensors()
             torch_dev.empty_cache()
 
     def register_kv_cache(
@@ -159,7 +291,7 @@ class XpuTransferModule:
             return
         entry.cache_context.close()
         self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
-        XpuIPCWrapper.clear_opened_ipc_tensors()
+        RawSyclIPCWrapper.clear_opened_ipc_tensors()
         torch_dev.empty_cache()
         logger.info("Unregistered KV cache for XPU ID %d", instance_id)
 
@@ -252,7 +384,7 @@ class XpuTransferModule:
                     memory_objs: list[MemoryObj | None] = [
                         reserved_dict.get(obj_key) for obj_key in obj_keys
                     ]
-                    transfer_kv_per_object_group(
+                    _transfer_xpu_kv_per_object_group(
                         cache_context,
                         block_ids_per_group_gpu,
                         memory_objs,
@@ -266,7 +398,7 @@ class XpuTransferModule:
                 logger.exception("Cannot store XPU keys due to exception")
                 return b"", False
             finally:
-                torch_dev.synchronize()
+                cache_context.stream.synchronize()
                 stored_count = len(all_dict) if store_succeeded else 0
                 if stored_count:
                     self._ctx.storage_manager.finish_write(list(all_dict.keys()))
@@ -374,7 +506,7 @@ class XpuTransferModule:
                             logger.error("Some XPU keys not found during retrieve")
                             return b"", False
                         total_bytes += sum(mo.get_size() for mo in memory_objs)
-                        transfer_kv_per_object_group(
+                        _transfer_xpu_kv_per_object_group(
                             cache_context,
                             block_ids_per_group_gpu,
                             memory_objs,
@@ -388,7 +520,7 @@ class XpuTransferModule:
                 logger.exception("Cannot retrieve XPU keys due to exception")
                 return b"", False
             finally:
-                torch_dev.synchronize()
+                cache_context.stream.synchronize()
                 if prefetched_keys:
                     self._ctx.storage_manager.finish_read_prefetched(prefetched_keys)
                 self._ctx.event_bus.publish(

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
+import array
 
 # Third Party
 import torch
@@ -15,7 +16,12 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
+    get_attention_backend,
+    get_concrete_engine_kv_shape_from_shape_desc,
+    get_device,
     get_dtype,
+    get_engine_kv_shape_description,
+    get_group_data_ptrs,
     get_num_blocks,
     get_num_layers,
     is_mla,
@@ -26,17 +32,16 @@ from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.multiprocess.gpu_context import (
     GPUCacheContext,
     _TempGPUBuffer,
-    list_to_gpu_tensor,
     unwrap_kv_cache_tensors,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-from lmcache.v1.gpu_connector.utils import (
-    get_attention_backend,
-    get_concrete_engine_kv_shape_from_shape_desc,
-    get_device,
-    get_engine_kv_shape_description,
-    get_group_data_ptrs,
-)
+
+
+def _list_to_xpu_long_tensor(values: list[int], device: torch.device) -> torch.Tensor:
+    signed_values = [value if value < (1 << 63) else value - (1 << 64) for value in values]
+    return torch.frombuffer(array.array("q", signed_values), dtype=torch.long).to(
+        device, non_blocking=True
+    )
 
 
 class XpuCacheContext(GPUCacheContext):
@@ -83,7 +88,7 @@ class XpuCacheContext(GPUCacheContext):
             ptrs = get_group_data_ptrs(
                 self.kv_caches_, self.engine_kv_format_, group.layer_indices
             )
-            self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
+            self.group_kv_pointers_.append(_list_to_xpu_long_tensor(ptrs, self.device_))
 
         max_block_ids = 1 << 20
         self.block_ids_buffer_ = torch.empty(

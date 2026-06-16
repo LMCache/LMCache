@@ -54,23 +54,12 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
         py::arg("block_ids"), py::arg("device"), py::arg("direction"),
         py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
-        py::arg("gpu_kv_format"), py::arg("skip_prefix_n_blocks"),
+        py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
         py::call_guard<py::gil_scoped_release>());
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer,
         py::arg("lmc_key_value_cache"), py::arg("vllm_key_value_cache"),
         py::arg("slot_mapping"), py::arg("direction"),
         py::arg("engine_kv_format"), py::arg("token_major") = false,
-        py::call_guard<py::gil_scoped_release>());
-  m.def("single_layer_kv_transfer_sgl", &single_layer_kv_transfer_sgl,
-        py::arg("lmc_key_value_cache"), py::arg("sgl_key_cache"),
-        py::arg("sgl_value_cache"), py::arg("slot_mapping"),
-        py::arg("direction"), py::arg("token_major") = false,
-        py::call_guard<py::gil_scoped_release>());
-  m.def("multi_layer_kv_transfer_unilateral",
-        &multi_layer_kv_transfer_unilateral, py::arg("key_value"),
-        py::arg("key_value_ptrs"), py::arg("slot_mapping"),
-        py::arg("paged_memory_device"), py::arg("page_buffer_size"),
-        py::arg("direction"), py::arg("engine_kv_format"),
         py::call_guard<py::gil_scoped_release>());
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
@@ -105,6 +94,6 @@ PYBIND11_MODULE(xpu_ops, m) {
         py::arg("bytestreams"), py::arg("lengths"), py::arg("output"));
   m.def("decode_fast_prefsum", &decode_fast_prefsum_xpu, py::arg("cdf"),
         py::arg("bytestreams"), py::arg("lengths_prefsum"), py::arg("output"));
-  // Backward-compat alias: GPUKVFormat -> EngineKVFormat
-  m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
+  // Backward-compat alias: EngineKVFormat -> EngineKVFormat
+  m.attr("EngineKVFormat") = m.attr("EngineKVFormat");
 }

@@ -665,8 +665,8 @@ void submit_multi_layer_block_kernel(
 
 #define LAUNCH_BLOCK_KERNEL_WITH_FORMAT(T, DIRECTION, FORMAT)              \
   submit_multi_layer_block_kernel<T, DIRECTION, FORMAT>(                   \
-      queue, lmcache_obj4, paged_buffer_ptrs, block_ids_ptr, total_blocks, \
-      num_blocks_per_object, shape_desc, lmcache_chunk_size,               \
+      queue, lmcache_obj4, paged_buffer_ptrs, block_ids_ptr, total_blocks,  \
+      num_blocks_per_object, shape_desc, lmcache_chunk_size,                \
       skip_prefix_n_blocks, wg_size)
 
 template <typename T>
