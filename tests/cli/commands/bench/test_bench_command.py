@@ -335,7 +335,10 @@ class TestExportConfig:
         assert data["tokens_per_gb_kvcache"] == 50000
         assert "lmcache_url" not in data
 
-    def test_max_output_length_rejected_for_unsupported_workload(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_max_output_length_rejected_for_unsupported_workload(
+        self,
+        tmp_path,  # type: ignore[no-untyped-def]
+    ) -> None:
         # Setting a non-default max output length for a workload without that
         # parameter is rejected.
         args = _make_args(
