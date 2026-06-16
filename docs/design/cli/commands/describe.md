@@ -281,7 +281,7 @@ Mirror the same `start_time`, `zmq_endpoint`, and `http_endpoint` additions if
 
 ### 4. Expose GPU KV format, shape, and attention backend in `kv_cache_layout`
 
-**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/multiprocess/gpu_context.py`, `lmcache/v1/multiprocess/server.py`
+**Files:** `lmcache/v1/gpu_connector/utils.py`, `lmcache/v1/platform/cuda/cache_context.py`, `lmcache/v1/multiprocess/server.py`
 
 Helper functions in `utils.py` (derived from `legible_print_gpu_kv_format()`):
 - `get_gpu_kv_shape_description(gpu_kv_format)` — symbolic shape (e.g., `NL x [2, NB, BS, NH, HS]`)

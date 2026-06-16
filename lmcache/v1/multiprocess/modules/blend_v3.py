@@ -46,7 +46,6 @@ from lmcache.v1.multiprocess.custom_types import (
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
-from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
@@ -58,6 +57,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -1139,7 +1139,7 @@ class BlendV3Module:
 
     def _apply_cb_rope_batched(
         self,
-        gpu_context: GPUCacheContext,
+        gpu_context: BaseCacheContext,
         rope_state: _CBRopeState,
         batch_len: int,
         slots_to_rope: list[tuple[int, int, int]],
@@ -1323,9 +1323,7 @@ class BlendV3Module:
             event = torch_dev.Event(interprocess=True)
 
             # Staged once (single group), sliced per chunk inside the loop.
-            all_block_ids_gpu = gpu_context.copy_view_block_ids_to_gpu([gpu_block_ids])[
-                0
-            ]
+            all_block_ids_gpu = gpu_context.stage_block_ids([gpu_block_ids])[0]
 
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -1463,7 +1461,7 @@ class BlendV3Module:
                                     gpu_context.device,
                                     page_buffer_size,
                                     lmc_ops.TransferDirection.H2D,
-                                    gpu_context.engine_kv_format_,
+                                    gpu_context.engine_kv_format,
                                     block_size=bs,
                                     head_size=rope_state.head_size,
                                 )

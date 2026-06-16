@@ -22,15 +22,12 @@ if TYPE_CHECKING:
 # First Party
 from lmcache import torch_dev
 from lmcache.logging import init_logger
-from lmcache.utils import EngineType, lmcache_deprecate
+from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.gds_context import get_gds_context
 from lmcache.v1.gpu_connector.utils import (
     LayoutHints,
-    get_attention_backend,
-    get_concrete_engine_kv_shape_from_shape_desc,
     get_device,
     get_dtype,
-    get_engine_kv_shape_description,
     get_group_data_ptrs,
     get_num_blocks,
     get_num_layers,
@@ -40,12 +37,7 @@ from lmcache.v1.gpu_connector.utils import (
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.multiprocess.custom_types import KVCache
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
-
-# Backend selection (c_ops when CUDA is available, otherwise a pure-Python
-# fallback) is handled once in ``lmcache/__init__.py`` via ``_get_backend``,
-# which aliases the chosen module as ``lmcache.c_ops`` in ``sys.modules``.
-# Importing it here transparently works in both CUDA and CPU-only envs.
-import lmcache.c_ops as lmc_ops
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 
@@ -59,7 +51,7 @@ def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
 
 
 def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
-    return torch.frombuffer(array.array("l", lis), dtype=torch.long).to(
+    return torch.frombuffer(array.array("q", lis), dtype=torch.long).to(
         device, non_blocking=True
     )
 
@@ -348,10 +340,12 @@ class _TempGPUBuffer:
         )
 
 
-class GPUCacheContext:
+class GPUCacheContext(BaseCacheContext):
     """
     Manages the shape and pointers to vLLM GPU KV cache tensors.
     """
+
+    device_type = "cuda"
 
     def __init__(
         self,
@@ -362,39 +356,50 @@ class GPUCacheContext:
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        self.engine_kv_format_, self.kv_caches_ = normalize_kv_and_discover_format(
+        engine_kv_format, kv_caches_norm = normalize_kv_and_discover_format(
             unwrapped,
             engine_type,
             layout_hints=layout_hints,
         )
-        self.device_ = get_device(self.kv_caches_)
-        self.is_mla_ = is_mla(self.engine_kv_format_)
-        self.num_layers_ = get_num_layers(self.kv_caches_, self.engine_kv_format_)
-        self.num_blocks_ = get_num_blocks(self.kv_caches_, self.engine_kv_format_)
-        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self.device_ = get_device(kv_caches_norm)
+        is_mla_val = is_mla(engine_kv_format)
+        num_layers_val = get_num_layers(kv_caches_norm, engine_kv_format)
+        num_blocks_val = get_num_blocks(kv_caches_norm, engine_kv_format)
 
-        self.kv_layer_groups_manager_ = KVLayerGroupsManager(
-            self.kv_caches_,
-            engine_kv_format=self.engine_kv_format_,
-            num_blocks=self.num_blocks_,
+        kv_layer_groups_manager = KVLayerGroupsManager(
+            kv_caches_norm,
+            engine_kv_format=engine_kv_format,
+            num_blocks=num_blocks_val,
             engine_group_infos=engine_group_infos,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+        )
+
+        # Pre-allocated GPU buffer for block IDs (up to 1M elements).
+        # The caller copies block_ids into this buffer before launching the
+        # block-level kernel. Single-thread assumption: no lock needed.
+        _MAX_BLOCK_IDS = 1 << 20
+        block_ids_buffer = torch.empty(
+            _MAX_BLOCK_IDS, dtype=torch.long, device=self.device_
+        )
+
+        super().__init__(
+            engine_kv_format=engine_kv_format,
+            kv_caches=kv_caches_norm,
+            device=self.device_,
+            num_layers=num_layers_val,
+            num_blocks=num_blocks_val,
+            is_mla=is_mla_val,
+            kv_layer_groups_manager=kv_layer_groups_manager,
+            block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
         for group in self.kv_layer_groups_manager_.kv_layer_groups:
             ptrs = get_group_data_ptrs(
-                self.kv_caches_, self.engine_kv_format_, group.layer_indices
+                self.kv_caches_, self.engine_kv_format, group.layer_indices
             )
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
-
-        # Pre-allocated GPU buffer for block IDs (up to 1M elements).
-        # The caller copies block_ids into this buffer before launching the
-        # block-level kernel. Single-thread assumption: no lock needed.
-        _MAX_BLOCK_IDS = 1 << 20
-        self.block_ids_buffer_ = torch.empty(
-            _MAX_BLOCK_IDS, dtype=torch.long, device=self.device_
-        )
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
         self._temp_buffer = _TempGPUBuffer(
@@ -436,15 +441,7 @@ class GPUCacheContext:
 
     @property
     def dtype(self) -> torch.dtype:
-        return get_dtype(self.kv_caches_, self.engine_kv_format_)
-
-    @property
-    def device(self) -> torch.device:
-        return self.device_
-
-    @property
-    def kv_tensors(self) -> list[torch.Tensor]:
-        return self.kv_caches_
+        return get_dtype(self.kv_caches_, self.engine_kv_format)
 
     @property
     def stream(self) -> Any:
@@ -456,60 +453,6 @@ class GPUCacheContext:
     @property
     def cupy_stream(self) -> "cupy.cuda.Stream":
         return self.cupy_stream_
-
-    @property
-    def num_layers(self) -> int:
-        """
-        Returns the number of layers in the model
-        """
-        return self.num_layers_
-
-    @property
-    def num_blocks(self) -> int:
-        """
-        Returns the number of blocks in the KV cache
-        """
-        return self.num_blocks_
-
-    @property
-    def is_mla(self) -> bool:
-        """
-        Returns whether the model uses MLA
-        """
-        return self.is_mla_
-
-    @property
-    def hidden_dim_sizes(self) -> list[int]:
-        """Returns the hidden dimension sizes for each KV layer group."""
-        return [
-            group.hidden_dim_size
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
-        ]
-
-    @property
-    def kv_layer_groups_manager(self) -> KVLayerGroupsManager:
-        """Returns the KV layer groups manager."""
-        return self.kv_layer_groups_manager_
-
-    def get_shape_desc(self, kernel_group_idx: int) -> "lmc_ops.PageBufferShapeDesc":
-        """Returns the PageBufferShapeDesc for the given KV layer group."""
-        return self.kv_layer_groups_manager_.get_shape_desc(kernel_group_idx)
-
-    def get_slots_per_chunk_in_sw(self, kernel_group_idx: int) -> int:
-        """Returns the number of slots per lmcache chunk when doing
-        D/H transfer.
-
-        This function will take into account that for subchunk sliding window
-        case, the transfer slots will be smaller than the "actual" slots per
-        chunk (which is calculated based on the lmcache chunk size).
-
-        Args:
-            kernel_group_idx: Index of the kernel group.
-
-        Returns:
-            The number of used slots per lmcache chunk when doing D/H transfer.
-        """
-        return self.kv_layer_groups_manager.get_slots_per_chunk_in_sw(kernel_group_idx)
 
     def get_kernel_group_kv_pointers(self, kernel_group_idx: int) -> torch.Tensor:
         """Returns the pre-computed GPU tensor of KV cache pointers for the
@@ -577,88 +520,6 @@ class GPUCacheContext:
             num_tokens, kernel_group_idx
         )
 
-    def copy_view_block_ids_to_gpu(
-        self, block_ids_per_group: list[list[int]]
-    ) -> list[torch.Tensor]:
-        """Copy block IDs for each LMCache KV layer group to GPU.
-
-        The outer list is indexed by LMCache KV group index. All inner lists
-        are packed into the shared GPU buffer once, and this returns one
-        non-overlapping tensor view per LMCache group.
-        """
-        offsets = [0]
-        flat: array.array = array.array("l")
-        for view_block_ids in block_ids_per_group:
-            flat.extend(view_block_ids)
-            offsets.append(len(flat))
-
-        total = offsets[-1]
-        if total > self.block_ids_buffer_.shape[0]:
-            raise ValueError(
-                f"block ID total {total} exceeds the pre-allocated buffer "
-                f"size {self.block_ids_buffer_.shape[0]}"
-            )
-        if total:
-            cpu_tensor = torch.frombuffer(flat, dtype=torch.long)
-            self.block_ids_buffer_[:total].copy_(cpu_tensor, non_blocking=True)
-
-        return [
-            self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
-            for i in range(len(block_ids_per_group))
-        ]
-
-    @lmcache_deprecate("will be refactored")
-    def get_kv_buffer_shape(
-        self, logical_num_tokens: int, group_idx: int = 0
-    ) -> torch.Size:
-        """
-        Returns the shape of the KV buffer for the given number of
-        *logical* tokens.
-
-        For a compressed group (``compress_ratio > 1``) every
-        ``compress_ratio`` logical tokens are packed into a single
-        physical slot, so the returned shape's token dimension is
-        ``num_tokens // compress_ratio``. Callers therefore always
-        pass logical-token counts and never need to know per-group
-        compression ratios.
-
-        Args:
-            logical_num_tokens: Number of *logical* tokens. Must be a multiple
-                of the group's ``compress_ratio``.
-            group_idx: Index of the KV layer group (default 0).
-        """
-        # TODO: remove this!
-        group = self.kv_layer_groups_manager_.kv_layer_groups[group_idx]
-        compress_ratio = group.tokens_per_block // group.slots_per_block
-        if logical_num_tokens % compress_ratio != 0:
-            raise ValueError(
-                f"logical_num_tokens ({logical_num_tokens}) is not a multiple of "
-                f"compress_ratio ({compress_ratio}) for group {group_idx}"
-            )
-        num_slots = logical_num_tokens // compress_ratio
-        sd = group.shape_desc
-        return torch.Size(
-            (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
-        )
-
-    def calculate_num_blocks(self, num_tokens: int, kernel_group_idx: int) -> int:
-        """Calculate the number of blocks for a given number of tokens in a
-        specified kernel group.
-
-        Args:
-            kernel_group_idx: 0-based index of the kernel group.
-            num_tokens: The total number of tokens to be processed for the group.
-
-        Returns:
-            The number of blocks.
-
-        Raises:
-            IndexError: If *kernel_group_idx* is out of range.
-        """
-        return self.kv_layer_groups_manager.calculate_num_blocks(
-            kernel_group_idx, num_tokens
-        )
-
     def cache_size_per_token(self) -> int:
         """
         Returns the cache size per *logical* token (in bytes), summed
@@ -671,81 +532,6 @@ class GPUCacheContext:
         from integer division is acceptable.
         """
         return self._temp_buffer.get_cache_size_per_token()
-
-    def report_status(self) -> dict:
-        """Return this context's KV cache layout metadata for ``/status``.
-
-        Returns:
-            A dict with these top-level fields:
-
-            - ``num_layers`` (int): total layers in the model.
-            - ``num_blocks`` (int)
-            - ``cache_size_per_token`` (int): bytes per logical token,
-              summed across groups.
-            - ``kernel_groups`` (list[dict]): one entry per kernel group,
-              each with:
-
-              - ``kernel_group_idx`` (int): index into ``manager.kernel_groups``.
-              - ``engine_group_idx`` (int): paged-block address space.
-              - ``object_group_idx`` (int): owning object group.
-              - ``num_layers`` (int): layers in this group.
-              - ``layer_indices`` (list[int]): the group's layer indices.
-              - ``tokens_per_block`` (int): logical tokens per paged chunk.
-              - ``slots_per_block`` (int): physical slots per paged
-                chunk (``slots_per_block``, i.e. ``shape_desc.bs``).
-              - ``compress_ratio`` (int)
-              - ``dtype`` (str): stringified torch dtype.
-              - ``gpu_kv_concrete_shape`` (str): group-accurate numeric shape.
-              - ``is_mla`` (bool)
-              - ``engine_kv_format`` (str): engine KV format enum name.
-              - ``engine_kv_shape`` (str): symbolic shape description.
-              - ``attention_backend`` (str)
-        """
-        manager = self.kv_layer_groups_manager
-        kernel_groups = manager.kernel_groups
-
-        # Reverse-map each kernel group to its owning object group.
-        kernel_group_to_object_group: dict[int, int] = {
-            kg_idx: og_idx
-            for og_idx, og in enumerate(manager.object_groups)
-            for kg_idx in og.kernel_group_indices
-        }
-
-        engine_kv_format = self.engine_kv_format_
-        group_reports: list[dict] = []
-        for kernel_group_idx, group in enumerate(kernel_groups):
-            group_reports.append(
-                {
-                    "kernel_group_idx": kernel_group_idx,
-                    "engine_group_idx": group.engine_group_idx,
-                    "object_group_idx": kernel_group_to_object_group.get(
-                        kernel_group_idx, 0
-                    ),
-                    "num_layers": group.num_layers,
-                    "layer_indices": list(group.layer_indices),
-                    "tokens_per_block": group.tokens_per_block,
-                    "slots_per_block": group.slots_per_block,
-                    "dtype": str(group.dtype),
-                    "engine_kv_concrete_shape": (
-                        get_concrete_engine_kv_shape_from_shape_desc(
-                            group.shape_desc, engine_kv_format
-                        )
-                    ),
-                    "is_mla": is_mla(engine_kv_format),
-                    "engine_kv_format": engine_kv_format.name,
-                    "engine_kv_shape": get_engine_kv_shape_description(
-                        engine_kv_format
-                    ),
-                    "attention_backend": get_attention_backend(engine_kv_format),
-                }
-            )
-
-        return {
-            "num_layers": self.num_layers,
-            "num_blocks": self.num_blocks,
-            "cache_size_per_token": self.cache_size_per_token(),
-            "kernel_groups": group_reports,
-        }
 
 
 class PlainGPUCacheContext:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for the temp-GPU-buffer machinery in
-``lmcache.v1.multiprocess.gpu_context``.
+``lmcache.v1.platform.cuda.cache_context``.
 
 Two layers are exercised:
 
@@ -31,11 +31,11 @@ pytestmark = pytest.mark.skipif(
 
 # First Party
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager  # noqa: E402
-from lmcache.v1.multiprocess.gpu_context import (  # noqa: E402
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
+from lmcache.v1.platform.cuda.cache_context import (  # noqa: E402
     GPUCacheContext,
     _TempGPUBuffer,
 )
-from lmcache.v1.multiprocess.group_view import EngineGroupInfo  # noqa: E402
 import lmcache.c_ops as lmc_ops  # noqa: E402
 
 _DEVICE = torch.device("cuda")

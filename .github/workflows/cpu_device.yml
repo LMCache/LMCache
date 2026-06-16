@@ -110,8 +110,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          HF_DOWNLOAD_FAIL_ON_ERROR=1 \
-            bash .github/scripts/download_model.sh facebook/opt-125m
+          bash .github/scripts/download_model.sh facebook/opt-125m
 
       - name: Server bench — LMCache-driven
         run: |
