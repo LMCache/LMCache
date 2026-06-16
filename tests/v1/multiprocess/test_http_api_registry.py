@@ -53,7 +53,7 @@ class TestDiscoverApiRouters:
 
         sys.path.insert(0, str(tmp_path.parent))
         try:
-            routers = discover_api_routers(pkg_name := tmp_path.name)
+            routers = discover_api_routers(tmp_path, pkg_name := tmp_path.name)
         finally:
             sys.path.pop(0)
             # cleanup imported modules
@@ -72,7 +72,7 @@ class TestDiscoverApiRouters:
 
         sys.path.insert(0, str(tmp_path.parent))
         try:
-            routers = discover_api_routers(pkg_name := tmp_path.name)
+            routers = discover_api_routers(tmp_path, pkg_name := tmp_path.name)
         finally:
             sys.path.pop(0)
             for key in list(sys.modules):
@@ -88,7 +88,7 @@ class TestDiscoverApiRouters:
 
         sys.path.insert(0, str(tmp_path.parent))
         try:
-            routers = discover_api_routers(pkg_name := tmp_path.name)
+            routers = discover_api_routers(tmp_path, pkg_name := tmp_path.name)
         finally:
             sys.path.pop(0)
             for key in list(sys.modules):
@@ -104,7 +104,7 @@ class TestDiscoverApiRouters:
 
         sys.path.insert(0, str(tmp_path.parent))
         try:
-            routers = discover_api_routers(pkg_name := tmp_path.name)
+            routers = discover_api_routers(tmp_path, pkg_name := tmp_path.name)
         finally:
             sys.path.pop(0)
             for key in list(sys.modules):
@@ -126,6 +126,7 @@ class TestDiscoverApiRouters:
         sys.path.insert(0, str(tmp_path.parent))
         try:
             routers = discover_api_routers(
+                tmp_path,
                 pkg_name := tmp_path.name,
                 exclude={"drop_api"},
             )
@@ -137,8 +138,8 @@ class TestDiscoverApiRouters:
 
         assert len(routers) == 1
 
-    def test_default_exclude_keeps_all(self, tmp_path):
-        """Omitting ``exclude`` keeps all discoverable modules."""
+    def test_exclude_none_is_default(self, tmp_path):
+        """Passing ``exclude=None`` keeps all discoverable modules."""
         (tmp_path / "a_api.py").write_text(
             "from fastapi import APIRouter\nrouter = APIRouter()\n"
         )
@@ -149,7 +150,11 @@ class TestDiscoverApiRouters:
 
         sys.path.insert(0, str(tmp_path.parent))
         try:
-            routers = discover_api_routers(pkg_name := tmp_path.name)
+            routers = discover_api_routers(
+                tmp_path,
+                pkg_name := tmp_path.name,
+                exclude=None,
+            )
         finally:
             sys.path.pop(0)
             for key in list(sys.modules):
@@ -185,6 +190,6 @@ class TestHTTPAPIRegistry:
 
     def test_all_expected_routes_present(self, app_with_registry):
         """All four expected routes are registered."""
-        routes = {r.path for r in app_with_registry.routes if hasattr(r, "path")}
+        routes = set(app_with_registry.openapi()["paths"])
         expected = {"/", "/healthcheck", "/clear-cache", "/status"}
         assert expected.issubset(routes)

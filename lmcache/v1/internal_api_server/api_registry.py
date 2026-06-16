@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from pathlib import Path
 from typing import List, Literal, Optional
 
 # Third Party
@@ -36,15 +37,16 @@ class APIRegistry:
         if categories is None:
             categories = ["common", "vllm", "controller"]
 
+        package_path = Path(__file__).parent
         package_name = __package__
 
         for category in categories:
-            category_package = f"{package_name}.{category}"
-            try:
-                category_routers = discover_api_routers(category_package)
-            except ModuleNotFoundError:
+            category_path = package_path / category
+            if not category_path.exists():
                 continue
-            for r in category_routers:
+
+            category_package = f"{package_name}.{category}"
+            for r in discover_api_routers(category_path, category_package):
                 self.router.include_router(r)
 
         self.app.include_router(self.router)

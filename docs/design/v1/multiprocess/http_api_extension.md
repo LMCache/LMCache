@@ -20,7 +20,7 @@ Located at `lmcache/v1/multiprocess/http_api_registry.py`.
 
 Responsible for auto-discovering and registering all API modules:
 
-1. Scans the `http_apis/` directory by listing its contents.
+1. Scans the `http_apis/` directory using `pkgutil.iter_modules`.
 2. Imports every module whose name ends with `_api`.
 3. Checks for a module-level `router` attribute of type `APIRouter`.
 4. Includes the router into the FastAPI application.
@@ -69,7 +69,7 @@ HTTPAPIRegistry(app)
   ▼
 register_all_apis()
   │
-  ├─ scan http_apis/ directory
+  ├─ pkgutil.iter_modules("http_apis/")
   │    ├─ root_api       → has router? ✓ → include
   │    ├─ healthcheck_api → has router? ✓ → include
   │    ├─ cache_api       → has router? ✓ → include
