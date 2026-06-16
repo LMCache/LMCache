@@ -18,6 +18,11 @@ on:
 env:
     LC_ALL: en_US.UTF-8
 
+# Cancel superseded runs on the same ref, but never abort a tag/release publish.
+concurrency:
+    group: publish-${{ github.ref }}
+    cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && github.event_name != 'release' }}
+
 defaults:
     run:
         shell: bash
@@ -103,8 +108,12 @@ jobs:
     # - a commit lands on dev (PR merged)
     publish-test-pypi:
         name: Publish packages to test.pypi.org
+        # Require upstream jobs to have succeeded so a cancelled/skipped build
+        # doesn't trigger a publish that fails on the missing artifact.
         if: |
-            !failure() && !cancelled() &&
+            needs.build-main.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' &&
             github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -137,7 +146,9 @@ jobs:
     publish-cli-test-pypi:
         name: Publish lmcache-cli packages to test.pypi.org
         if: |
-            !failure() && !cancelled() &&
+            needs.build-cli.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' &&
             github.event_name == 'push' && github.ref == 'refs/heads/dev'
@@ -171,7 +182,9 @@ jobs:
     publish-pypi:
         name: Publish release to pypi.org
         if: |
-            !failure() && !cancelled() &&
+            needs.build-main.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
@@ -210,7 +223,9 @@ jobs:
     publish-cli-pypi:
         name: Publish lmcache-cli release to pypi.org
         if: |
-            !failure() && !cancelled() &&
+            needs.build-cli.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
@@ -247,7 +262,9 @@ jobs:
     publish-cu129-github-release:
         name: Publish cu129 wheel to GitHub Release
         if: |
-            !failure() && !cancelled() &&
+            needs.build-cu129.result == 'success' &&
+            needs.test.result == 'success' &&
+            needs.code-quality.result == 'success' &&
             needs.changes.outputs.lmcache == 'true' &&
             github.repository_owner == 'LMCache' && github.event.action == 'published'
         permissions:
