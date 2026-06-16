@@ -78,7 +78,7 @@ Validated models
       block boundary to hold a reusable snapshot.
 
       For the generic LMCache + vLLM wiring (ports, remote hosts), see
-      :doc:`../mp/quickstart`.
+      :doc:`../getting_started/quickstart`.
 
    .. tab-item:: SGLang
 
@@ -86,7 +86,7 @@ Validated models
 
    .. tab-item:: TRT-LLM
 
-      **Status:** Not supported. LMCache TRT-LLM integration is in progress.
+      **Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-LLM + LMCache setup.
 
 CacheBlend support
 ------------------

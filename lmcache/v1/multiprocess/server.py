@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MPCacheEngine compositor and unified cache server entry point."""
+"""MPCacheServer compositor and unified cache server entry point."""
 
 # Standard
 import argparse
@@ -31,17 +31,21 @@ from lmcache.v1.multiprocess.config import (
     add_mp_server_args,
     parse_args_to_mp_server_config,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     HandlerSpec,
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
@@ -52,10 +56,10 @@ from lmcache.v1.multiprocess.protocol import (
 logger = init_logger(__name__)
 
 
-class MPCacheEngine:
+class MPCacheServer:
     """Compositor that assembles pluggable engine modules.
 
-    Holds the shared :class:`MPCacheEngineContext` and a list of
+    Holds the shared :class:`MPCacheServerContext` and a list of
     :class:`EngineModule` instances.  Provides aggregated
     ``report_status()`` and ``close()`` across all modules.
 
@@ -66,14 +70,14 @@ class MPCacheEngine:
 
     def __init__(
         self,
-        context: MPCacheEngineContext,
+        context: MPCacheServerContext,
         modules: list[EngineModule],
     ) -> None:
         self._context = context
         self._modules = modules
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context."""
         return self._context
 
@@ -102,7 +106,7 @@ class MPCacheEngine:
         for module in self._modules:
             module.close()
         self._context.close()
-        logger.info("MPCacheEngine closed")
+        logger.info("MPCacheServer closed")
 
     # HTTP-layer passthroughs lost in the engine refactor.
 
@@ -115,7 +119,7 @@ class MPCacheEngine:
     def gpu_contexts(self) -> dict[int, GPUCacheContext] | None:
         """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
-            if isinstance(module, GPUTransferModule):
+            if isinstance(module, LMCacheDrivenTransferModule):
                 return {i: e.cache_context for i, e in module.cache_contexts.items()}
         return None
 
@@ -125,7 +129,7 @@ class MPCacheEngine:
             if isinstance(module, ManagementModule):
                 module.clear()
                 return
-        raise RuntimeError("MPCacheEngine.clear: no ManagementModule registered")
+        raise RuntimeError("MPCacheServer.clear: no ManagementModule registered")
 
 
 def add_handler_helper(
@@ -149,7 +153,7 @@ def add_handler_helper(
 
 
 def _build_modules(
-    ctx: MPCacheEngineContext,
+    ctx: MPCacheServerContext,
     mp_config: MPServerConfig,
 ) -> list[EngineModule]:
     """Assemble the list of engine modules based on configuration.
@@ -162,20 +166,21 @@ def _build_modules(
         List of initialized engine modules.
 
     Raises:
-        ValueError: If blend engine is requested with supported_transfer_mode="non_gpu".
+        ValueError: If blend engine is requested with
+        supported_transfer_mode="engine_driven".
     """
     modules: list[EngineModule] = [
         LookupModule(ctx),
         ManagementModule(ctx),
     ]
 
-    if mp_config.supported_transfer_mode == "gpu":
-        modules.append(GPUTransferModule(ctx))
-    elif mp_config.supported_transfer_mode == "non_gpu":
-        modules.append(NonGPUTransferModule(ctx))
+    if mp_config.supported_transfer_mode == "lmcache_driven":
+        modules.append(LMCacheDrivenTransferModule(ctx))
+    elif mp_config.supported_transfer_mode == "engine_driven":
+        modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
-        modules.append(GPUTransferModule(ctx))
-        modules.append(NonGPUTransferModule(ctx))
+        modules.append(LMCacheDrivenTransferModule(ctx))
+        modules.append(EngineDrivenTransferModule(ctx))
     else:
         raise ValueError(
             f"Unsupported supported_transfer_mode '{mp_config.supported_transfer_mode}'"
@@ -184,10 +189,11 @@ def _build_modules(
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
     if mp_config.engine_type == "blend_legacy":
-        if mp_config.supported_transfer_mode == "non_gpu":
+        if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
                 "Legacy blend engine requires supported_transfer_mode to be "
-                f"'gpu' or 'auto', got '{mp_config.supported_transfer_mode}'"
+                f"'lmcache_driven' or 'auto', got "
+                f"'{mp_config.supported_transfer_mode}'"
             )
         # First Party
         from lmcache.v1.multiprocess.modules.blend import BlendModule
@@ -196,17 +202,33 @@ def _build_modules(
 
     # "blend" selects CacheBlend V3 (the current implementation).
     if mp_config.engine_type == "blend":
-        if mp_config.supported_transfer_mode == "non_gpu":
+        if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
-                "blend (V3) engine requires supported_transfer_mode 'gpu' or "
-                f"'auto', got '{mp_config.supported_transfer_mode}'"
+                "blend (V3) engine requires supported_transfer_mode "
+                f"'lmcache_driven' or 'auto', got "
+                f"'{mp_config.supported_transfer_mode}'"
             )
         # First Party
+        from lmcache.v1.mp_coordinator.blend_client import (
+            BlendCoordinatorClient,
+        )
         from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
 
-        gpu_transfer = next(m for m in modules if isinstance(m, GPUTransferModule))
+        transfer_module = next(
+            m for m in modules if isinstance(m, LMCacheDrivenTransferModule)
+        )
         lookup_module = next(m for m in modules if isinstance(m, LookupModule))
-        modules.append(BlendV3Module(ctx, gpu_transfer, lookup_module))
+        # Opt-in: enabled only when LMCACHE_COORDINATOR_URL is set; otherwise
+        # None and the blend module matches purely locally.
+        coordinator = BlendCoordinatorClient.maybe_from_env()
+        modules.append(
+            BlendV3Module(
+                ctx,
+                transfer_module,
+                lookup_module,
+                coordinator=coordinator,
+            )
+        )
 
     return modules
 
@@ -217,7 +239,7 @@ def run_cache_server(
     obs_config: ObservabilityConfig,
     return_engine: bool = False,
     start_prometheus_http_server: bool = True,
-) -> tuple[MessageQueueServer, MPCacheEngine] | None:
+) -> tuple[MessageQueueServer, MPCacheServer] | None:
     """Run the LMCache cache server with ZMQ message queue.
 
     Args:
@@ -232,7 +254,7 @@ def run_cache_server(
             ``/metrics`` to avoid port conflicts or redundant servers.
 
     Returns:
-        If return_engine is True: tuple of (MessageQueueServer, MPCacheEngine).
+        If return_engine is True: tuple of (MessageQueueServer, MPCacheServer).
         If return_engine is False: None (blocks until interrupted).
     """
     # mp_config.instance_id is this server's single source of identity (set via
@@ -248,8 +270,9 @@ def run_cache_server(
 
     maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
-    # For non-GPU transfer: apply shm_name from mp_config and verify capacity
-    if mp_config.supported_transfer_mode != "gpu":
+    # When the engine-driven path is loaded (auto or engine_driven):
+    # apply shm_name from mp_config and verify capacity.
+    if mp_config.supported_transfer_mode != "lmcache_driven":
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         if mp_config.shm_name is not None:
             mem_cfg.shm_name = mp_config.shm_name
@@ -272,14 +295,14 @@ def run_cache_server(
                 )
                 mem_cfg.shm_name = ""
 
-    ctx = MPCacheEngineContext(
+    ctx = MPCacheServerContext(
         storage_manager_config=storage_manager_config,
         chunk_size=mp_config.chunk_size,
         hash_algorithm=mp_config.hash_algorithm,
     )
 
     modules = _build_modules(ctx, mp_config)
-    engine = MPCacheEngine(ctx, modules)
+    engine = MPCacheServer(ctx, modules)
 
     zmq_context = zmq.Context.instance()
     server = MessageQueueServer(

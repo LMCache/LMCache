@@ -257,6 +257,28 @@ class MemoryObj(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
+    def set_used_size(self, n: int) -> None:  # noqa: B027
+        """Narrow this buffer's logical size to the first ``n`` bytes.
+
+        Optional hook for callers that have just written ``n`` bytes
+        into a buffer originally allocated with an upper-bound size
+        (e.g. the async serde processor, where the destination is sized
+        from ``estimate_serialized_size`` but ``serialize`` returns the
+        actual ``n`` it wrote). After this call, ``get_size()`` /
+        ``byte_array`` / any downstream L2 adapter that reads the
+        logical size will see exactly ``n`` bytes.
+
+        Default is a no-op so subclasses without a "used vs allocated"
+        distinction (e.g. :class:`BytesBufferMemoryObj`, where the raw
+        bytes already are the actual contents) keep working unchanged.
+
+        Args:
+            n: bytes actually used in this buffer. Subclasses that
+                implement this must validate ``n`` and raise
+                ``ValueError`` on out-of-range or unsupported layouts.
+        """
+        pass
+
     @abc.abstractmethod
     def pin(self) -> bool:
         """
@@ -591,6 +613,12 @@ class TensorMemoryObj(MemoryObj):
         self.valid = True
         self.lock = threading.Lock()
         self.parent_allocator = parent_allocator
+        # ``None`` means "use the layout-derived size from
+        # group_prefix_sum"; a non-None value narrows the logical view to
+        # exactly that many bytes (see set_used_size).  Allocator reuse
+        # paths must reset this to None along with the rest of the
+        # per-allocation metadata.
+        self._used_size_override: Optional[int] = None
         # Calculate the prefix sum of the group sizes
         # If there are two groups, the prefix sum will be
         # [0, size_of_group_1, size_of_group_1 + size_of_group_2]
@@ -628,7 +656,38 @@ class TensorMemoryObj(MemoryObj):
         return self.valid
 
     def get_size(self) -> int:
+        if self._used_size_override is not None:
+            return self._used_size_override
         return self.group_prefix_sum[-1]
+
+    def set_used_size(self, n: int) -> None:
+        """Narrow the logical size to ``n`` bytes after a write.
+
+        After this call, ``get_size()`` returns ``n`` and ``byte_array``
+        exposes exactly ``n`` bytes from the start of ``raw_data``.  The
+        physical allocation (``get_physical_size``) and ``raw_data``
+        buffer are unchanged.  Allocator reuse resets this override to
+        ``None`` so a recycled block returns to its layout-derived size.
+
+        Note: the ``tensor`` property still derives its shape from
+        ``meta.shape``, so accessing ``.tensor`` on a buffer narrowed
+        below its layout size will fail to reshape.  Use ``byte_array``
+        (or read ``raw_data[: get_size()]`` directly) for downstream
+        I/O that must honor the narrowed size.
+
+        Args:
+            n: bytes actually written.  Must satisfy
+                ``0 <= n <= get_physical_size()``.
+
+        Raises:
+            ValueError: if ``n`` is outside the allowed range.
+        """
+        if n < 0 or n > self.meta.phy_size:
+            raise ValueError(
+                f"set_used_size: n={n} out of range [0, {self.meta.phy_size}]"
+            )
+        with self.lock:
+            self._used_size_override = n
 
     # TODO(chunxiaozheng): use get_shapes and get_dtypes to replace
     #  get_shape and get_dtype
@@ -739,6 +798,16 @@ class TensorMemoryObj(MemoryObj):
             logger.warning("Trying to access an invalidated MemoryObj")
             return None
         assert self.meta.dtype is not None
+        if self._used_size_override is not None:
+            # Narrowed byte buffer (see set_used_size): expose exactly
+            # the used bytes as a flat uint8 view.  Reshaping to the
+            # original meta.shape would raise -- fewer than shape-many
+            # bytes are logically present -- so keep the view consistent
+            # with get_size()/byte_array/shm_byte_length, which all
+            # report the narrowed length.  Consumers that build SHM
+            # transport slots from ``tensor.shape`` and
+            # ``shm_byte_length`` then stay self-consistent.
+            return self.raw_data[: self._used_size_override].view(torch.uint8)
         # TODO(Jiayi): consider caching the `get_size()`
         return (
             self.raw_data[: self.get_size()].view(self.meta.dtype).view(self.meta.shape)
@@ -1887,6 +1956,10 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
         free_block.meta.dtypes = dtypes
         free_block.meta.fmt = fmt
         free_block.meta.ref_count = 1
+        # Reset any narrowed-size override left over from the previous
+        # owner of this block, so get_size() returns the layout-derived
+        # size for the fresh allocation.
+        free_block._used_size_override = None
 
         if shapes != self.shapes:
             size_in_bytes = get_size_bytes(shapes, dtypes)
@@ -1939,6 +2012,8 @@ class PagedTensorMemoryAllocator(MemoryAllocatorInterface):
             free_block.meta.dtypes = dtypes
             free_block.meta.fmt = fmt
             free_block.meta.ref_count = 1
+            # Reset narrowed-size override (see notes in ``allocate``).
+            free_block._used_size_override = None
 
             if shapes != self.shapes:
                 size_in_bytes = get_size_bytes(shapes, dtypes)

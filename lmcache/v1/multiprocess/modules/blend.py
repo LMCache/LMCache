@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Blend (context-blend / cross-request KV reuse) module for MPCacheEngine."""
+"""Blend (context-blend / cross-request KV reuse) module for MPCacheServer."""
 
 # Standard
 from typing import Any
@@ -26,10 +26,10 @@ from lmcache.v1.gpu_connector.gpu_ops import (
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
 )
-from lmcache.v1.multiprocess.engine_context import MPCacheEngineContext
+from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
     ThreadPoolType,
@@ -321,7 +321,7 @@ class BlendModule:
         ctx: The shared engine context.
     """
 
-    def __init__(self, ctx: MPCacheEngineContext) -> None:
+    def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._cb_gpu_contexts: dict[int, PlainGPUCacheContext] = {}
         self._cb_gpu_context_meta: dict[int, tuple[str, int]] = {}
@@ -329,7 +329,7 @@ class BlendModule:
         self._gpu_copy_lock = threading.Lock()
 
     @property
-    def context(self) -> MPCacheEngineContext:
+    def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
@@ -464,7 +464,7 @@ class BlendModule:
                 instance_id,
             )
 
-    def cb_lookup_pre_computed(self, key: IPCCacheEngineKey) -> list[CBMatchResult]:
+    def cb_lookup_pre_computed(self, key: IPCCacheServerKey) -> list[CBMatchResult]:
         """Lookup the pre-computed chunks in the underlying storage.
 
         Uses BlendTokenRangeMatcher for a fast local pre-filter, then submits
@@ -473,7 +473,7 @@ class BlendModule:
         storage are lazily evicted from the matcher via remove_chunks.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids to lookup.
+            key: IPCCacheServerKey containing the token ids to lookup.
 
         Returns:
             List of CBMatchResult for chunks that were actually found in storage,
@@ -767,7 +767,7 @@ class BlendModule:
 
     def cb_store_pre_computed(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         offset: int,
         instance_id: int,
         event_ipc_handle: bytes,
@@ -775,7 +775,7 @@ class BlendModule:
         """Store the pre-computed chunks in the underlying storage for later retrieval.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the
+            key: IPCCacheServerKey containing the token ids for which the
                 pre-computed chunks are stored.
             offset: The starting offset in the CB KV cache buffer where the
                 pre-computed chunks begin.
@@ -894,7 +894,7 @@ class BlendModule:
 
     def cb_retrieve_pre_computed(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         cb_match_result: list[CBMatchResult],
         offset: int,
         instance_id: int,
@@ -903,7 +903,7 @@ class BlendModule:
         """Retrieve pre-computed chunks from storage and copy them to the CB KV buffer.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the
+            key: IPCCacheServerKey containing the token ids for which the
                 pre-computed chunks are retrieved.
             cb_match_result: List of CBMatchResult returned by
                 cb_lookup_pre_computed, containing the per-chunk hashes and
@@ -1053,7 +1053,7 @@ class BlendModule:
 
     def cb_store_final(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         offset: int,
         instance_id: int,
         event_ipc_handle: bytes,
@@ -1063,7 +1063,7 @@ class BlendModule:
         The stored chunks should be accessible for normal mode LLMs.
 
         Args:
-            key: IPCCacheEngineKey containing the token ids for which the
+            key: IPCCacheServerKey containing the token ids for which the
                 final chunks are stored.
             offset: The starting offset in the CB KV cache buffer where the
                 final chunks are stored.
