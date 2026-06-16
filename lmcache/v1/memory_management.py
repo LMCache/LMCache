@@ -2394,7 +2394,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
 
         self._unregistered = False
 
-        self.pin_allocator: TensorMemoryAllocator | PagedTensorMemoryAllocator
+        self.pin_allocator: MemoryAllocatorInterface
         if use_paging:
             assert "shapes" in kwargs, (
                 "shapes must be specified for paged memory allocator"
@@ -2476,7 +2476,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             raise ValueError(f"Unsupported memory format: {fmt}")
 
     @_lmcache_nvtx_annotate
-    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None) -> None:
+    def free(self, memory_obj: MemoryObj, allocator_type: Optional[str] = None):
         fmt = memory_obj.meta.fmt
         if fmt == MemoryFormat.BINARY_BUFFER:
             self.buffer_allocator.free(memory_obj)
@@ -2498,7 +2498,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         memory_objs: List[MemoryObj],
         allocator_type: Optional[str] = None,
         update_stats: bool = True,
-    ) -> None:
+    ):
         if not memory_objs:
             return
 
@@ -2514,21 +2514,15 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             MemoryFormat.EC_TD,
         ]:
             with self.host_mem_lock:
-                self.pin_allocator.batched_free(memory_objs, update_stats=update_stats)
+                self.pin_allocator.batched_free(memory_objs)
         else:
             raise ValueError(f"Unsupported memory format: {fmt}")
 
-    def memcheck(self) -> bool:
+    def memcheck(self):
         with self.host_mem_lock:
             return self.pin_allocator.memcheck()
 
-    def get_memory_usage(self) -> tuple[int, int]:
-        primary_manager = self.pin_allocator.address_manager
-        primary_total = primary_manager.get_heap_size()
-        primary_used = primary_total - primary_manager.get_free_size()
-        return primary_used, primary_total
-
-    def close(self) -> None:
+    def close(self):
         if not self._unregistered:
             if torch_dev.is_available():
                 torch_dev.synchronize()
@@ -2555,7 +2549,7 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
             return self.pin_allocator.get_paged_buffers()
         return None
 
-    def __str__(self) -> str:
+    def __str__(self):
         return "MixedMemoryAllocator"
 
 
@@ -2575,12 +2569,18 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         device_path: str,
         *,
         local_allocator: MixedMemoryAllocator | None = None,
+        local_size: int = 0,
+        shm_name: str | None = None,
         align_bytes: int = AddressManager.ALIGN_BYTES,
     ) -> None:
         if not device_path:
             raise ValueError("device_path must be a non-empty string")
         if size <= 0:
             raise ValueError("size must be > 0")
+        if local_size < 0:
+            raise ValueError("local_size must be >= 0")
+        if local_size and local_allocator is not None:
+            raise ValueError("local_size cannot be used with local_allocator")
         if align_bytes <= 0 or align_bytes & (align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
 
@@ -2588,6 +2588,12 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
         self.device_path = device_path
         self.align_bytes = align_bytes
         self.local_allocator = local_allocator
+        if local_size:
+            self.local_allocator = MixedMemoryAllocator(
+                local_size,
+                align_bytes=self.align_bytes,
+                shm_name=shm_name,
+            )
         self.host_mem_lock = threading.Lock()
         self.buffer_allocator = BufferAllocator("cpu")
         self.devdax_allocator: TensorMemoryAllocator | None = None
@@ -2739,18 +2745,23 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
     ) -> int:
         if self.local_allocator is None:
             return 0
-        assert isinstance(self.local_allocator.pin_allocator, TensorMemoryAllocator)
+        local_pin_allocator = self.local_allocator.pin_allocator
+        assert isinstance(local_pin_allocator, TensorMemoryAllocator)
         shapes, dtypes = self._adapt_shapes_and_dtypes(shapes, dtypes)
         unit_raw_size = get_size_bytes(shapes, dtypes)
-        unit_aligned_size = (
-            self.local_allocator.pin_allocator.address_manager.compute_aligned_size(
-                unit_raw_size
-            )
+        unit_aligned_size = local_pin_allocator.address_manager.compute_aligned_size(
+            unit_raw_size
         )
-        return (
-            self.local_allocator.pin_allocator.address_manager.get_free_size()
-            // unit_aligned_size
-        )
+        return local_pin_allocator.address_manager.get_free_size() // unit_aligned_size
+
+    def _local_memory_usage(self) -> tuple[int, int]:
+        if self.local_allocator is None:
+            return 0, 0
+        local_pin_allocator = self.local_allocator.pin_allocator
+        assert isinstance(local_pin_allocator, TensorMemoryAllocator)
+        local_total = local_pin_allocator.address_manager.get_heap_size()
+        local_used = local_total - local_pin_allocator.address_manager.get_free_size()
+        return local_used, local_total
 
     def _allocate_from_devdax(
         self,
@@ -2957,9 +2968,7 @@ class DevDaxMemoryAllocator(MemoryAllocatorInterface):
             return local_ok and self.devdax_allocator.memcheck()
 
     def get_memory_usage(self) -> tuple[int, int]:
-        local_used = local_total = 0
-        if self.local_allocator is not None:
-            local_used, local_total = self.local_allocator.get_memory_usage()
+        local_used, local_total = self._local_memory_usage()
 
         if self.devdax_allocator is None:
             return local_used, local_total

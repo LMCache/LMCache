@@ -52,38 +52,23 @@ def create_memory_allocator(config: L1MemoryManagerConfig) -> MemoryAllocatorInt
     Returns:
         MemoryAllocatorInterface: An instance of a memory allocator.
     """
-    if config.devdax_path and config.devdax_size_in_bytes:
+    if config.devdax_path:
+        devdax_size = config.devdax_size_in_bytes or config.size_in_bytes
+        local_size = config.size_in_bytes if config.devdax_size_in_bytes else 0
         logger.debug(
-            "use devdax memory allocator with local DRAM overflow source, "
-            "dram size is %d bytes, devdax path is %s, "
+            "use devdax memory allocator, dram size is %d bytes, "
+            "devdax path is %s, "
             "devdax size is %d bytes, align bytes is %d bytes",
-            config.size_in_bytes,
+            local_size,
             config.devdax_path,
-            config.devdax_size_in_bytes,
+            devdax_size,
             config.align_bytes,
         )
-        local_allocator = MixedMemoryAllocator(
-            config.size_in_bytes,
-            align_bytes=config.align_bytes,
+        return DevDaxMemoryAllocator(
+            devdax_size,
+            config.devdax_path,
+            local_size=local_size,
             shm_name=config.shm_name or None,
-        )
-        return DevDaxMemoryAllocator(
-            config.devdax_size_in_bytes,
-            config.devdax_path,
-            local_allocator=local_allocator,
-            align_bytes=config.align_bytes,
-        )
-    elif config.devdax_path:
-        logger.debug(
-            "use devdax memory allocator, path is %s, total size is %d bytes, "
-            "align bytes is %d bytes",
-            config.devdax_path,
-            config.size_in_bytes,
-            config.align_bytes,
-        )
-        return DevDaxMemoryAllocator(
-            config.size_in_bytes,
-            config.devdax_path,
             align_bytes=config.align_bytes,
         )
     elif config.use_lazy:

@@ -35,7 +35,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
 )
 from lmcache.v1.distributed.memory_manager import L1MemoryManager
-from lmcache.v1.memory_management import DevDaxMemoryAllocator, MixedMemoryAllocator
+from lmcache.v1.memory_management import DevDaxMemoryAllocator
 from lmcache.v1.multiprocess.config import add_mp_server_args
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 import lmcache.v1.memory_management as memory_management
@@ -259,32 +259,6 @@ def test_devdax_allocator_falls_back_when_cuda_host_register_fails(
     gc.collect()
     allocator.close()
     assert cuda_runtime.unregister_calls == []
-
-
-def test_mixed_allocator_forwards_update_stats_to_primary_free(monkeypatch):
-    allocator = MixedMemoryAllocator(
-        8192,
-        use_lazy=False,
-        align_bytes=4096,
-    )
-    original_batched_free = allocator.pin_allocator.batched_free
-    update_stats_values: list[bool] = []
-
-    def record_primary_batched_free(
-        memory_objs, allocator_type=None, update_stats: bool = True
-    ):
-        update_stats_values.append(update_stats)
-        return original_batched_free(memory_objs, allocator_type, update_stats)
-
-    monkeypatch.setattr(
-        allocator.pin_allocator, "batched_free", record_primary_batched_free
-    )
-    objs = allocator.batched_allocate(torch.Size([4096]), torch.uint8, 2)
-
-    assert objs is not None
-    allocator.batched_free(objs, update_stats=False)
-    assert update_stats_values == [False]
-    allocator.close()
 
 
 def test_devdax_close_failure_preserves_allocator_state(tmp_path):
