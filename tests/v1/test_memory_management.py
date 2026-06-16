@@ -17,6 +17,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObjMetadata,
     MixedMemoryAllocator,
+    PagedCpuGpuMemoryAllocator,
     PagedTensorMemoryAllocator,
     PinMemoryAllocator,
     TensorMemoryAllocator,
@@ -1228,3 +1229,46 @@ class TestLazyMemoryAllocatorCpuOom:
         result = allocator.allocate(torch.Size([512, 512]), torch.float32)
         assert result is None
         allocator.close()
+
+
+class TestPagedCpuGpuMemoryAllocatorCpuOom:
+    """Tests for PagedCpuGpuMemoryAllocator graceful handling of CPU RAM exhaustion."""
+
+    _SHAPE = torch.Size([2, 32, 16, 128])
+    _DTYPE = torch.bfloat16
+    _FMT = MemoryFormat.KV_2LTD
+
+    def _make_oom_allocator(self) -> PagedCpuGpuMemoryAllocator:
+        from unittest.mock import patch
+
+        with patch(
+            "lmcache.v1.memory_management._allocate_cpu_memory",
+            side_effect=RuntimeError("mmap failed: out of memory"),
+        ):
+            alloc = PagedCpuGpuMemoryAllocator()
+            alloc.init_cpu_memory_allocator(
+                1024 * 1024 * 64,
+                [self._SHAPE],
+                [self._DTYPE],
+                self._FMT,
+            )
+        return alloc
+
+    def test_oom_sets_flag(self):
+        """_cpu_oom is True when _allocate_cpu_memory raises at init."""
+        alloc = self._make_oom_allocator()
+        assert alloc._cpu_oom
+
+    def test_oom_allocate_returns_none(self):
+        """allocate() with allocator_type='cpu' returns None after CPU OOM."""
+        alloc = self._make_oom_allocator()
+        result = alloc.allocate(self._SHAPE, self._DTYPE, self._FMT, allocator_type="cpu")
+        assert result is None
+
+    def test_oom_batched_allocate_returns_none(self):
+        """batched_allocate() with allocator_type='cpu' returns None after CPU OOM."""
+        alloc = self._make_oom_allocator()
+        result = alloc.batched_allocate(
+            self._SHAPE, self._DTYPE, 4, self._FMT, allocator_type="cpu"
+        )
+        assert result is None

@@ -2771,7 +2771,7 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
     """
 
     def __init__(self):
-        pass
+        self._cpu_oom = False
 
     def init_gpu_memory_allocator(
         self,
@@ -2801,7 +2801,19 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
         numa_mapping: Optional[NUMAMapping] = None,
     ):
-        self.cpu_buffer = _allocate_cpu_memory(size, numa_mapping)
+        try:
+            self.cpu_buffer = _allocate_cpu_memory(size, numa_mapping)
+            self._cpu_oom = False
+        except RuntimeError:
+            logger.warning(
+                "PagedCpuGpuMemoryAllocator: failed to allocate %d bytes of "
+                "CPU pinned memory — CPU cache will be unavailable. Reduce "
+                "local_cpu_memory_size in your LMCache config if this persists.",
+                size,
+            )
+            self._cpu_oom = True
+            self.cpu_buffer = torch.empty(0, dtype=torch.uint8)
+
         self.cpu_allocator = PagedTensorMemoryAllocator(
             self.cpu_buffer,
             shapes,
@@ -2820,6 +2832,8 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         if allocator_type == "gpu":
             return self.gpu_allocator.allocate(shapes, dtypes, fmt)
         elif allocator_type == "cpu":
+            if self._cpu_oom:
+                return None
             return self.cpu_allocator.allocate(shapes, dtypes, fmt)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
@@ -2835,6 +2849,8 @@ class PagedCpuGpuMemoryAllocator(MemoryAllocatorInterface):
         if allocator_type == "gpu":
             return self.gpu_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
         elif allocator_type == "cpu":
+            if self._cpu_oom:
+                return None
             return self.cpu_allocator.batched_allocate(shapes, dtypes, batch_size, fmt)
         else:
             raise ValueError(f"Unsupported allocator type: {allocator_type}")
