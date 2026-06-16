@@ -181,7 +181,7 @@ Monitoring Integration
 
 Prometheus metrics are enabled by default on port 9090.  Add a
 ``ServiceMonitor`` or Prometheus scrape annotation to collect metrics from the
-LMCache DaemonSet pods.  See :doc:`observability` for metric details.
+LMCache DaemonSet pods.  See :doc:`observability/index` for metric details.
 
 Cleanup
 ~~~~~~~

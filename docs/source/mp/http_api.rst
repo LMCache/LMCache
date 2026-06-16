@@ -228,7 +228,7 @@ Returns a detailed snapshot of the MP engine's internal state: L1 cache,
 L2 adapters, registered GPU contexts, active sessions, and in-flight
 prefetch jobs. Intended for operators and debugging, not for monitoring
 (use Prometheus metrics for time-series data — see
-:doc:`observability`).
+:doc:`observability/index`).
 
 **Response** (``200 OK``):
 
@@ -236,7 +236,7 @@ prefetch jobs. Intended for operators and debugging, not for monitoring
 
     {
       "is_healthy": true,
-"engine_type": "MPCacheServer",
+      "engine_type": "MPCacheServer",
       "chunk_size": 256,
       "hash_algorithm": "builtin-hash",
       "registered_gpu_ids": [0, 1],
@@ -667,7 +667,7 @@ Inspect or mutate Python logger levels at runtime. All responses are
 
 Prometheus exposition format for every metric registered on the default
 ``prometheus_client`` registry. Scrape this directly from Prometheus.
-See :doc:`observability` for the list of exported metrics.
+See :doc:`observability/index` for the list of exported metrics.
 
 **Example:**
 

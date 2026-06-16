@@ -47,6 +47,7 @@ help: ## Display this help.
 # variables before the targets that consume them.
 include make/tools.mk
 include make/dev.mk
+include make/unit.mk
 include make/build.mk
 include make/deploy.mk
 include make/lint.mk
