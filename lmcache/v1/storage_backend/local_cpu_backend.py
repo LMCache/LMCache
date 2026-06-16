@@ -655,6 +655,11 @@ class LocalCPUBackend(AllocatorBackendInterface):
 
         evict_keys_count = 0
         num_attempts = 0
+        # Counts consecutive iterations where eviction made no progress.
+        # Prevents an infinite busy-loop when all blocks are pinned.
+        stalled_attempts = 0
+        # TODO: make max_stalled_attempts and time_to_wait configurable
+        max_stalled_attempts = 100  # 10 seconds at 0.1s per sleep
         while True:
             # whether or not this request needs to wait or other requests
             wait_other_requests = True
@@ -671,6 +676,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                         # we can continue trying to evict from the hot_cache
                         # and don't need to wait for other requests yet
                         wait_other_requests = False
+                        stalled_attempts = 0
                         logger.debug(
                             f"Evicting {len(evict_keys)} chunks from cpu memory"
                         )
@@ -687,6 +693,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     logger.debug(
                         "Not busy looping because we are not immediately able to evict"
                     )
+                    break
+
+                stalled_attempts += 1
+                if stalled_attempts >= max_stalled_attempts:
+                    logger.warning(
+                        "CPU memory eviction made no progress after %d attempts "
+                        "(%.1f s). All blocks may be pinned. "
+                        "Giving up on allocation.",
+                        stalled_attempts,
+                        stalled_attempts * 0.1,
+                    )
+                    memory_obj = None
                     break
 
                 # TODO: make time_to_wait a config
@@ -761,10 +779,19 @@ class LocalCPUBackend(AllocatorBackendInterface):
         if memory_objs is not None or not eviction:
             return memory_objs
 
-        assert isinstance(self.memory_allocator, MixedMemoryAllocator)
+        if not isinstance(self.memory_allocator, MixedMemoryAllocator):
+            raise ValueError(
+                f"batched_allocate eviction requires MixedMemoryAllocator, "
+                f"got {type(self.memory_allocator).__name__}"
+            )
 
         evict_keys_count = 0
         num_attempts = 0
+        # Counts consecutive iterations where eviction made no progress.
+        # Prevents an infinite busy-loop when all blocks are pinned.
+        stalled_attempts = 0
+        # TODO: make max_stalled_attempts and time_to_wait configurable
+        max_stalled_attempts = 100  # 10 seconds at 0.1s per sleep
         while True:
             wait_other_requests = True
             if self.use_hot:
@@ -800,6 +827,7 @@ class LocalCPUBackend(AllocatorBackendInterface):
                                 continue
 
                             wait_other_requests = False
+                            stalled_attempts = 0
                             evict_keys_count += len(old_mem_objs)
                             for key in evict_key_all_layer:
                                 self.cache_policy.update_on_force_evict(key)
@@ -821,6 +849,18 @@ class LocalCPUBackend(AllocatorBackendInterface):
                     logger.debug(
                         "Not busy looping because we are not immediately able to evict"
                     )
+                    break
+
+                stalled_attempts += 1
+                if stalled_attempts >= max_stalled_attempts:
+                    logger.warning(
+                        "CPU memory eviction made no progress after %d attempts "
+                        "(%.1f s). All blocks may be pinned. "
+                        "Giving up on batched allocation.",
+                        stalled_attempts,
+                        stalled_attempts * 0.1,
+                    )
+                    memory_objs = None
                     break
 
                 # TODO: make time_to_wait a config

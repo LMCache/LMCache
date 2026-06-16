@@ -656,6 +656,108 @@ class TestLocalCPUBackendAllocatorRecovery:
         allocator.close()
 
 
+    def test_allocate_returns_none_after_stall_cap_when_full_and_no_candidates(
+        self, monkeypatch
+    ):
+        """allocate(busy_loop=True) must return None (not hang) when RAM is
+        exhausted and hot_cache has no eviction candidates."""
+        monkeypatch.setattr(
+            "lmcache.v1.storage_backend.local_cpu_backend.time.sleep",
+            lambda _: None,
+        )
+        chunk_bytes = 4096
+        shape = torch.Size([1, chunk_bytes])
+        config = create_test_config()
+        PinMonitor.GetOrCreate(config)
+        allocator = MixedMemoryAllocator(chunk_bytes)
+        backend = LocalCPUBackend(config=config, memory_allocator=allocator)
+
+        # Consume the only free block; do not store in hot_cache so there are
+        # no eviction candidates.
+        held = backend.allocate(shape, torch.uint8, busy_loop=False)
+        assert held is not None
+
+        result = backend.allocate(shape, torch.uint8, busy_loop=True)
+
+        assert result is None, "Expected None after stall cap, not an infinite loop"
+
+        held.ref_count_down()
+        allocator.close()
+
+    def test_batched_allocate_returns_none_after_stall_cap_when_all_blocks_pinned(
+        self, monkeypatch
+    ):
+        """batched_allocate(busy_loop=True) must return None (not hang) when
+        all cached groups are pinned and eviction can make no progress."""
+        monkeypatch.setattr(
+            "lmcache.v1.storage_backend.local_cpu_backend.time.sleep",
+            lambda _: None,
+        )
+        chunk_bytes = 4096
+        batch_size = 2
+        shape = torch.Size([1, chunk_bytes])
+        config = create_test_config()
+        PinMonitor.GetOrCreate(config)
+        allocator = MixedMemoryAllocator(chunk_bytes * batch_size)
+        backend = LocalCPUBackend(config=config, memory_allocator=allocator)
+        layer_keys = create_test_key("stall_cap_pinned").split_layers(batch_size)
+
+        objs = backend.batched_allocate(
+            shape, torch.uint8, batch_size=batch_size,
+            fmt=MemoryFormat.KV_T2D, busy_loop=False,
+        )
+        assert objs is not None
+        backend.batched_submit_put_task(layer_keys, objs)
+        for obj in objs:
+            obj.ref_count_down()
+
+        # Pin one key so the whole group is ineligible for eviction.
+        assert backend.pin(layer_keys[0])
+
+        result = backend.batched_allocate(
+            shape, torch.uint8, batch_size=batch_size,
+            fmt=MemoryFormat.KV_T2D, busy_loop=True,
+        )
+
+        assert result is None, "Expected None after stall cap, not an infinite loop"
+
+        assert backend.unpin(layer_keys[0])
+        backend.clear()
+        allocator.close()
+
+    def test_batched_allocate_raises_value_error_for_non_mixed_allocator(self):
+        """batched_allocate must raise ValueError (not AssertionError) when
+        the injected allocator is not a MixedMemoryAllocator and RAM is full."""
+
+        class _AlwaysFullAllocator:
+            """Stub that always reports allocation failure."""
+
+            align_bytes = 4096
+
+            def allocate(self, shapes, dtypes, fmt, allocator_type=None):
+                return None
+
+            def batched_allocate(self, shapes, dtypes, batch_size, fmt,
+                                 allocator_type=None):
+                return None
+
+            def close(self):
+                pass
+
+        config = create_test_config()
+        PinMonitor.GetOrCreate(config)
+        backend = LocalCPUBackend(
+            config=config, memory_allocator=_AlwaysFullAllocator()
+        )
+
+        shape = torch.Size([1, 4096])
+        with pytest.raises(ValueError, match="MixedMemoryAllocator"):
+            backend.batched_allocate(
+                shape, torch.uint8, batch_size=2,
+                fmt=MemoryFormat.KV_T2D, busy_loop=False,
+            )
+
+
 class TestLocalCPUBackendAllocatorAlignment:
     def test_rust_odirect_auto_alignment_for_mixed_allocator(self, monkeypatch):
         config = create_test_config(local_cpu=True)
