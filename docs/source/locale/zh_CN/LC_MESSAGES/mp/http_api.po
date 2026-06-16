@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-08 10:45+0000\n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -55,7 +55,11 @@ msgid ""
 " to the auto-discovery pipeline. Adding a new compatible module under "
 "``internal_api_server/common`` therefore requires no wiring changes on "
 "the MP side."
-msgstr "在 ``lmcache/v1/internal_api_server/common/`` 下定义的部分路由也会在此 HTTP 服务器上暴露。模块 ``lmcache/v1/multiprocess/http_apis/common_api.py`` 聚合了这些路由（跳过任何列在 ``_MP_INCOMPATIBLE_MODULES`` 中的模块，目前该列表为空），并将它们转发到自动发现管道。因此，在 ``internal_api_server/common`` 下添加一个新的兼容模块不需要在 MP 端进行接线更改。"
+msgstr ""
+"在 ``lmcache/v1/internal_api_server/common/`` 下定义的部分路由也会在此 HTTP 服务器上暴露。模块 "
+"``lmcache/v1/multiprocess/http_apis/common_api.py`` 聚合了这些路由（跳过任何列在 "
+"``_MP_INCOMPATIBLE_MODULES`` 中的模块，目前该列表为空），并将它们转发到自动发现管道。因此，在 "
+"``internal_api_server/common`` 下添加一个新的兼容模块不需要在 MP 端进行接线更改。"
 
 #: ../../source/mp/http_api.rst:30
 msgid "Server Configuration"
@@ -69,7 +73,7 @@ msgstr "参数"
 msgid "Default"
 msgstr "默认"
 
-#: ../../source/mp/http_api.rst:38 ../../source/mp/http_api.rst:331
+#: ../../source/mp/http_api.rst:38 ../../source/mp/http_api.rst:376
 msgid "Description"
 msgstr "描述"
 
@@ -135,13 +139,14 @@ msgstr "目的"
 
 #: ../../source/mp/http_api.rst:73 ../../source/mp/http_api.rst:76
 #: ../../source/mp/http_api.rst:79 ../../source/mp/http_api.rst:85
-#: ../../source/mp/http_api.rst:90 ../../source/mp/http_api.rst:96
-#: ../../source/mp/http_api.rst:103 ../../source/mp/http_api.rst:107
-#: ../../source/mp/http_api.rst:110 ../../source/mp/http_api.rst:113
-#: ../../source/mp/http_api.rst:116 ../../source/mp/http_api.rst:119
-#: ../../source/mp/http_api.rst:122 ../../source/mp/http_api.rst:128
-#: ../../source/mp/http_api.rst:131 ../../source/mp/http_api.rst:134
-#: ../../source/mp/http_api.rst:137
+#: ../../source/mp/http_api.rst:88 ../../source/mp/http_api.rst:94
+#: ../../source/mp/http_api.rst:99 ../../source/mp/http_api.rst:105
+#: ../../source/mp/http_api.rst:112 ../../source/mp/http_api.rst:116
+#: ../../source/mp/http_api.rst:119 ../../source/mp/http_api.rst:122
+#: ../../source/mp/http_api.rst:125 ../../source/mp/http_api.rst:128
+#: ../../source/mp/http_api.rst:131 ../../source/mp/http_api.rst:137
+#: ../../source/mp/http_api.rst:140 ../../source/mp/http_api.rst:143
+#: ../../source/mp/http_api.rst:146
 msgid "GET"
 msgstr "获取"
 
@@ -169,8 +174,8 @@ msgstr "``/status``"
 msgid "Detailed engine status for inspection and debugging."
 msgstr "详细的引擎状态以供检查和调试。"
 
-#: ../../source/mp/http_api.rst:82 ../../source/mp/http_api.rst:125
-#: ../../source/mp/http_api.rst:140
+#: ../../source/mp/http_api.rst:82 ../../source/mp/http_api.rst:91
+#: ../../source/mp/http_api.rst:134 ../../source/mp/http_api.rst:149
 msgid "POST"
 msgstr "POST"
 
@@ -183,195 +188,223 @@ msgid "Force-clear all KV data in L1 (CPU) memory."
 msgstr "强制清除 L1 (CPU) 内存中的所有 KV 数据。"
 
 #: ../../source/mp/http_api.rst:86
+msgid "``/reconfigure/backends``"
+msgstr "``/reconfigure/backends``"
+
+#: ../../source/mp/http_api.rst:87
+msgid "List backend strings accepted by runtime reconfiguration routes."
+msgstr "列出运行时重新配置路由接受的后端字符串。"
+
+#: ../../source/mp/http_api.rst:89
+#, python-brace-format
+msgid "``/reconfigure/{backend}/status``"
+msgstr "``/reconfigure/{backend}/status``"
+
+#: ../../source/mp/http_api.rst:90
+msgid "Report runtime-manageable L2 adapters for one backend type."
+msgstr "报告可运行管理的 L2 适配器，针对一种后端类型。"
+
+#: ../../source/mp/http_api.rst:92
+#, python-brace-format
+msgid "``/reconfigure/{backend}/{operation}``"
+msgstr "``/reconfigure/{backend}/{operation}``"
+
+#: ../../source/mp/http_api.rst:93
+msgid "Apply one runtime reconfiguration operation to a backend adapter."
+msgstr "对后端适配器应用一个运行时重新配置操作。"
+
+#: ../../source/mp/http_api.rst:95
 msgid "``/kvcache/check``"
 msgstr "``/kvcache/check``"
 
-#: ../../source/mp/http_api.rst:87
+#: ../../source/mp/http_api.rst:96
 msgid ""
 "Compute MD5 checksums over the GPU KV cache for a set of block IDs. "
 "Intended for diagnostics and round-trip integrity checks from ``lmcache "
 "bench server``."
-msgstr "计算一组块 ID 的 GPU KV Cache 的 MD5 校验和。用于诊断和从 ``lmcache bench server`` 进行往返完整性检查。"
+msgstr ""
+"计算一组块 ID 的 GPU KV Cache 的 MD5 校验和。用于诊断和从 ``lmcache bench server`` "
+"进行往返完整性检查。"
 
-#: ../../source/mp/http_api.rst:91
+#: ../../source/mp/http_api.rst:100
 msgid "``/quota``"
 msgstr "``/quota``"
 
-#: ../../source/mp/http_api.rst:92
+#: ../../source/mp/http_api.rst:101
 msgid "List every registered ``cache_salt`` quota with live usage."
 msgstr "列出每个注册的 ``cache_salt`` 配额及其实时使用情况。"
 
-#: ../../source/mp/http_api.rst:93
+#: ../../source/mp/http_api.rst:102
 msgid "PUT"
 msgstr "PUT"
 
-#: ../../source/mp/http_api.rst:94 ../../source/mp/http_api.rst:97
-#: ../../source/mp/http_api.rst:100
+#: ../../source/mp/http_api.rst:103 ../../source/mp/http_api.rst:106
+#: ../../source/mp/http_api.rst:109
 #, python-brace-format
 msgid "``/quota/{cache_salt}``"
 msgstr "``/quota/{cache_salt}``"
 
-#: ../../source/mp/http_api.rst:95
+#: ../../source/mp/http_api.rst:104
 msgid "Set or update the quota (in GB) for a ``cache_salt``."
 msgstr "设置或更新 ``cache_salt`` 的配额（以 GB 为单位）。"
 
-#: ../../source/mp/http_api.rst:98
+#: ../../source/mp/http_api.rst:107
 msgid "Read the quota and live usage for a single ``cache_salt``."
 msgstr "读取单个 ``cache_salt`` 的配额和实时使用情况。"
 
-#: ../../source/mp/http_api.rst:99
+#: ../../source/mp/http_api.rst:108
 msgid "DELETE"
 msgstr "删除"
 
-#: ../../source/mp/http_api.rst:101
+#: ../../source/mp/http_api.rst:110
 msgid "Remove a ``cache_salt``'s quota entry (its data is evicted next cycle)."
 msgstr "移除 ``cache_salt`` 的配额条目（其数据将在下一个周期被逐出）。"
 
-#: ../../source/mp/http_api.rst:104
+#: ../../source/mp/http_api.rst:113
 msgid "``/conf``"
 msgstr "``/conf``"
 
-#: ../../source/mp/http_api.rst:105
+#: ../../source/mp/http_api.rst:114
 msgid "Dump merged server configurations (mp, storage_manager, observability)."
 msgstr "转储合并的服务器配置（mp、存储管理器、可观察性）。"
 
-#: ../../source/mp/http_api.rst:108
+#: ../../source/mp/http_api.rst:117
 msgid "``/version``"
 msgstr "``/version``"
 
-#: ../../source/mp/http_api.rst:109
+#: ../../source/mp/http_api.rst:118
 msgid "Full version descriptor (package version + commit id)."
 msgstr "完整版本描述符（软件包版本 + 提交 ID）。"
 
-#: ../../source/mp/http_api.rst:111
+#: ../../source/mp/http_api.rst:120
 msgid "``/lmc_version``"
 msgstr "``/lmc_version``"
 
-#: ../../source/mp/http_api.rst:112
+#: ../../source/mp/http_api.rst:121
 msgid "LMCache package version string."
 msgstr "LMCache 包版本字符串。"
 
-#: ../../source/mp/http_api.rst:114
+#: ../../source/mp/http_api.rst:123
 msgid "``/commit_id``"
 msgstr "``/commit_id``"
 
-#: ../../source/mp/http_api.rst:115
+#: ../../source/mp/http_api.rst:124
 msgid "Current build commit id."
 msgstr "当前构建提交 ID。"
 
-#: ../../source/mp/http_api.rst:117
+#: ../../source/mp/http_api.rst:126
 msgid "``/env``"
 msgstr "``/env``"
 
-#: ../../source/mp/http_api.rst:118
+#: ../../source/mp/http_api.rst:127
 msgid "Dump process environment variables (JSON, plain text)."
 msgstr "转储进程环境变量（JSON，纯文本）。"
 
-#: ../../source/mp/http_api.rst:120
+#: ../../source/mp/http_api.rst:129
 msgid "``/loglevel``"
 msgstr "``/loglevel``"
 
-#: ../../source/mp/http_api.rst:121
+#: ../../source/mp/http_api.rst:130
 msgid "List or inspect logger levels; also accepts ``level`` to mutate."
 msgstr "列出或检查日志记录器级别；也接受 ``level`` 以进行修改。"
 
-#: ../../source/mp/http_api.rst:123
+#: ../../source/mp/http_api.rst:132
 msgid "``/metrics``"
 msgstr "``/metrics``"
 
-#: ../../source/mp/http_api.rst:124
+#: ../../source/mp/http_api.rst:133
 msgid "Prometheus exposition format."
 msgstr "Prometheus 展示格式。"
 
-#: ../../source/mp/http_api.rst:126
+#: ../../source/mp/http_api.rst:135
 msgid "``/metrics/reset``"
 msgstr "``/metrics/reset``"
 
-#: ../../source/mp/http_api.rst:127
+#: ../../source/mp/http_api.rst:136
 msgid "Reset all observability metrics to their initial state."
 msgstr "重置所有可观察性指标为其初始状态。"
 
-#: ../../source/mp/http_api.rst:129
+#: ../../source/mp/http_api.rst:138
 msgid "``/threads``"
 msgstr "``/threads``"
 
-#: ../../source/mp/http_api.rst:130
+#: ../../source/mp/http_api.rst:139
 msgid "Enumerate active Python threads and their stack traces."
 msgstr "列出活动的 Python 线程及其堆栈跟踪。"
 
-#: ../../source/mp/http_api.rst:132
+#: ../../source/mp/http_api.rst:141
 msgid "``/periodic-threads``"
 msgstr "``/periodic-threads``"
 
-#: ../../source/mp/http_api.rst:133
+#: ../../source/mp/http_api.rst:142
 msgid "List registered periodic threads with summary counts."
 msgstr "列出注册的周期性线程及其摘要计数。"
 
-#: ../../source/mp/http_api.rst:135
+#: ../../source/mp/http_api.rst:144
 #, python-brace-format
 msgid "``/periodic-threads/{thread_name}``"
 msgstr "``/periodic-threads/{thread_name}``"
 
-#: ../../source/mp/http_api.rst:136
+#: ../../source/mp/http_api.rst:145
 msgid "Detailed status for a single periodic thread."
 msgstr "单个周期线程的详细状态。"
 
-#: ../../source/mp/http_api.rst:138
+#: ../../source/mp/http_api.rst:147
 msgid "``/periodic-threads-health``"
 msgstr "``/periodic-threads-health``"
 
-#: ../../source/mp/http_api.rst:139
+#: ../../source/mp/http_api.rst:148
 msgid "Quick health check for critical/high-level periodic threads."
 msgstr "对关键/高层周期线程的快速健康检查。"
 
-#: ../../source/mp/http_api.rst:141
+#: ../../source/mp/http_api.rst:150
 msgid "``/run_script``"
 msgstr "``/run_script``"
 
-#: ../../source/mp/http_api.rst:142
+#: ../../source/mp/http_api.rst:151
 msgid ""
 "Execute an uploaded Python script in a restricted sandbox. Only modules "
 "listed in ``--script-allowed-imports`` can be imported."
 msgstr "在受限的沙箱中执行上传的 Python 脚本。只能导入在 ``--script-allowed-imports`` 中列出的模块。"
 
-#: ../../source/mp/http_api.rst:146
+#: ../../source/mp/http_api.rst:155
 msgid "``GET /``"
 msgstr "``GET /``"
 
-#: ../../source/mp/http_api.rst:148
+#: ../../source/mp/http_api.rst:157
 msgid ""
 "Basic liveness check. Returns a static payload indicating the HTTP server"
 " is running. Use ``/healthcheck`` instead for probes that also verify the"
 " cache engine is initialized."
 msgstr "基本的存活检查。返回一个静态负载，指示 HTTP 服务器正在运行。对于还验证缓存引擎是否初始化的探测，请使用 ``/healthcheck``。"
 
-#: ../../source/mp/http_api.rst:152 ../../source/mp/http_api.rst:175
-#: ../../source/mp/http_api.rst:224 ../../source/mp/http_api.rst:289
-#: ../../source/mp/http_api.rst:346 ../../source/mp/http_api.rst:414
-#: ../../source/mp/http_api.rst:437 ../../source/mp/http_api.rst:460
-#: ../../source/mp/http_api.rst:474 ../../source/mp/http_api.rst:495
-#: ../../source/mp/http_api.rst:534 ../../source/mp/http_api.rst:640
-#: ../../source/mp/http_api.rst:697 ../../source/mp/http_api.rst:737
+#: ../../source/mp/http_api.rst:161 ../../source/mp/http_api.rst:184
+#: ../../source/mp/http_api.rst:233 ../../source/mp/http_api.rst:307
+#: ../../source/mp/http_api.rst:391 ../../source/mp/http_api.rst:459
+#: ../../source/mp/http_api.rst:482 ../../source/mp/http_api.rst:505
+#: ../../source/mp/http_api.rst:519 ../../source/mp/http_api.rst:540
+#: ../../source/mp/http_api.rst:579 ../../source/mp/http_api.rst:685
+#: ../../source/mp/http_api.rst:742 ../../source/mp/http_api.rst:782
 msgid "**Response** (``200 OK``):"
 msgstr "**响应** (``200 OK``):"
 
-#: ../../source/mp/http_api.rst:161 ../../source/mp/http_api.rst:192
-#: ../../source/mp/http_api.rst:270 ../../source/mp/http_api.rst:306
-#: ../../source/mp/http_api.rst:374 ../../source/mp/http_api.rst:424
-#: ../../source/mp/http_api.rst:522 ../../source/mp/http_api.rst:540
-#: ../../source/mp/http_api.rst:551 ../../source/mp/http_api.rst:562
-#: ../../source/mp/http_api.rst:580 ../../source/mp/http_api.rst:627
-#: ../../source/mp/http_api.rst:646 ../../source/mp/http_api.rst:671
-#: ../../source/mp/http_api.rst:713 ../../source/mp/http_api.rst:724
-#: ../../source/mp/http_api.rst:764
+#: ../../source/mp/http_api.rst:170 ../../source/mp/http_api.rst:201
+#: ../../source/mp/http_api.rst:288 ../../source/mp/http_api.rst:324
+#: ../../source/mp/http_api.rst:419 ../../source/mp/http_api.rst:469
+#: ../../source/mp/http_api.rst:567 ../../source/mp/http_api.rst:585
+#: ../../source/mp/http_api.rst:596 ../../source/mp/http_api.rst:607
+#: ../../source/mp/http_api.rst:625 ../../source/mp/http_api.rst:672
+#: ../../source/mp/http_api.rst:691 ../../source/mp/http_api.rst:716
+#: ../../source/mp/http_api.rst:758 ../../source/mp/http_api.rst:769
+#: ../../source/mp/http_api.rst:809
 msgid "**Example:**"
 msgstr "**示例:**"
 
-#: ../../source/mp/http_api.rst:168
+#: ../../source/mp/http_api.rst:177
 msgid "``GET /healthcheck``"
 msgstr "``GET /healthcheck``"
 
-#: ../../source/mp/http_api.rst:170
+#: ../../source/mp/http_api.rst:179
 msgid ""
 "Health check endpoint suitable for Kubernetes liveness and readiness "
 "probes. A ``200`` response implies the HTTP server is alive **and** the "
@@ -381,19 +414,19 @@ msgstr ""
 "健康检查端点适用于 Kubernetes 的存活和就绪探针。``200`` 响应意味着 HTTP 服务器处于活动状态 **并且** MP "
 "缓存引擎已初始化。``503`` 响应表示引擎尚未准备好（仍在初始化中，或初始化失败）。"
 
-#: ../../source/mp/http_api.rst:183 ../../source/mp/http_api.rst:297
+#: ../../source/mp/http_api.rst:192 ../../source/mp/http_api.rst:315
 msgid "**Response** (``503 Service Unavailable``):"
 msgstr "**响应** (``503 服务不可用``):"
 
-#: ../../source/mp/http_api.rst:198
+#: ../../source/mp/http_api.rst:207
 msgid "**Kubernetes probe snippet:**"
 msgstr "**Kubernetes 探针代码片段:**"
 
-#: ../../source/mp/http_api.rst:216
+#: ../../source/mp/http_api.rst:225
 msgid "``GET /status``"
 msgstr "``GET /status``"
 
-#: ../../source/mp/http_api.rst:218
+#: ../../source/mp/http_api.rst:227
 msgid ""
 "Returns a detailed snapshot of the MP engine's internal state: L1 cache, "
 "L2 adapters, registered GPU contexts, active sessions, and in-flight "
@@ -404,36 +437,137 @@ msgstr ""
 "上下文、活动会话和正在进行的预取任务。旨在供操作员和调试使用，而非监控（请使用 Prometheus 指标获取时间序列数据 — 参见 "
 ":doc:`observability`）。"
 
-#: ../../source/mp/http_api.rst:261
+#: ../../source/mp/http_api.rst:239
+msgid "\"engine_type\": \"MPCacheServer\","
+msgstr "\"engine_type\": \"MPCacheServer\","
+
+#: ../../source/mp/http_api.rst:240
+msgid ""
+"\"chunk_size\": 256, \"hash_algorithm\": \"builtin-hash\", "
+"\"registered_gpu_ids\": [0, 1], \"gpu_context_meta\": {"
+msgstr "\"chunk_size\": 256, \"hash_algorithm\": \"builtin-hash\", \"registered_gpu_ids\": [0, 1], \"gpu_context_meta\": {"
+
+#: ../../source/mp/http_api.rst:244
+msgid "\"0\": {"
+msgstr "\\\"0\\\": {"
+
+#: ../../source/mp/http_api.rst:245
+msgid ""
+"\"model_name\": \"meta-llama/Llama-3.1-8B-Instruct\", \"world_size\": 1, "
+"\"kv_cache_layout\": {"
+msgstr "\\\"model_name\\\": \\\"meta-llama/Llama-3.1-8B-Instruct\\\", \\\"world_size\\\": 1, \\\"kv_cache_layout\\\": {"
+
+#: ../../source/mp/http_api.rst:248
+msgid ""
+"\"num_layers\": 32, \"num_blocks\": 12345, \"cache_size_per_token\": "
+"131072, \"kernel_groups\": ["
+msgstr "\\\"num_layers\\\": 32, \\\"num_blocks\\\": 12345, \\\"cache_size_per_token\\\": 131072, \\\"kernel_groups\\\": ["
+
+#: ../../source/mp/http_api.rst:252
+msgid "{"
+msgstr "{"
+
+#: ../../source/mp/http_api.rst:253
+msgid ""
+"\"kernel_group_idx\": 0, \"engine_group_idx\": 0, \"object_group_idx\": "
+"0, \"num_layers\": 32, \"layer_indices\": [0, 1, \"...\"], "
+"\"tokens_per_block\": 16, \"slots_per_block\": 16, \"dtype\": "
+"\"torch.bfloat16\", \"gpu_kv_concrete_shape\": \"...\", \"is_mla\": "
+"false, \"gpu_kv_format\": \"...\", \"gpu_kv_shape\": \"...\", "
+"\"attention_backend\": \"...\""
+msgstr "\\\"kernel_group_idx\\\": 0, \\\"engine_group_idx\\\": 0, \\\"object_group_idx\\\": 0, \\\"num_layers\\\": 32, \\\"layer_indices\\\": [0, 1, \\\"...\\\"], \\\"tokens_per_block\\\": 16, \\\"slots_per_block\\\": 16, \\\"dtype\\\": \\\"torch.bfloat16\\\", \\\"gpu_kv_concrete_shape\\\": \\\"...\\\", \\\"is_mla\\\": false, \\\"gpu_kv_format\\\": \\\"...\\\", \\\"gpu_kv_shape\\\": \\\"...\\\", \\\"attention_backend\\\": \\\"...\\\""
+
+#: ../../source/mp/http_api.rst:266 ../../source/mp/http_api.rst:268
+#: ../../source/mp/http_api.rst:269 ../../source/mp/http_api.rst:276
+#: ../../source/mp/http_api.rst:277
+msgid "}"
+msgstr "}"
+
+#: ../../source/mp/http_api.rst:267
+msgid "]"
+msgstr "]"
+
+#: ../../source/mp/http_api.rst:270
+msgid ""
+"}, \"active_sessions\": 2, \"active_prefetch_jobs\": 0, "
+"\"storage_manager\": {"
+msgstr "}, \\\"active_sessions\\\": 2, \\\"active_prefetch_jobs\\\": 0, \\\"storage_manager\\\": {"
+
+#: ../../source/mp/http_api.rst:274
+msgid "\"is_healthy\": true, \"...\": \"backend-specific fields\""
+msgstr "\\\"is_healthy\\\": true, \\\"...\\\": \\\"后端特定字段\\\""
+
+#: ../../source/mp/http_api.rst:279
 msgid ""
 "**Response** (``503 Service Unavailable``) when the engine has not yet "
 "been initialized:"
 msgstr "**响应** (``503 服务不可用``) 当引擎尚未初始化时："
 
-#: ../../source/mp/http_api.rst:277
+#: ../../source/mp/http_api.rst:295
 msgid "``POST /clear-cache``"
 msgstr "``POST /clear-cache``"
 
-#: ../../source/mp/http_api.rst:279
+#: ../../source/mp/http_api.rst:297
 msgid "Force-clears **all** KV cache data currently held in L1 (CPU) memory."
 msgstr "强制清除当前保存在 L1 (CPU) 内存中的 **所有** KV Cache 数据。"
 
-#: ../../source/mp/http_api.rst:283
+#: ../../source/mp/http_api.rst:301
 msgid ""
 "This endpoint is destructive and bypasses read/write locks. In-flight "
 "store or prefetch operations may be corrupted. Use only when the server "
 "is idle, or when recovering from a known-bad cache state."
 msgstr "此端点是破坏性的，并绕过读/写锁。正在进行的存储或预取操作可能会被损坏。仅在服务器空闲时或从已知的坏缓存状态恢复时使用。"
 
-#: ../../source/mp/http_api.rst:287
+#: ../../source/mp/http_api.rst:305
 msgid "The request body is ignored."
 msgstr "请求体将被忽略。"
 
-#: ../../source/mp/http_api.rst:313
+#: ../../source/mp/http_api.rst:333
+#, python-brace-format
+msgid "``/reconfigure/{backend}`` — runtime L2 adapter reconfiguration"
+msgstr "``/reconfigure/{backend}`` — 运行时 L2 适配器重新配置"
+
+#: ../../source/mp/http_api.rst:335
+msgid ""
+"These endpoints are available when the server has a runtime-"
+"reconfigurable L2 adapter. They only change LMCache runtime mappings and "
+"metadata; backend resources such as DAX device paths must already exist "
+"and be readable and writable by the server. The endpoint routes "
+"``backend``, ``operation``, and the JSON request body into the generic L2"
+" adapter reconfiguration API, while backend-specific validation and "
+"migration semantics stay inside the adapter."
+msgstr "这些端点在服务器具有可运行时重新配置的 L2 适配器时可用。它们仅更改 LMCache 的运行时映射和元数据；后端资源如 DAX 设备路径必须已经存在，并且服务器必须能够读取和写入。该端点将 ``backend``、``operation`` 和 JSON 请求体路由到通用 L2 适配器重新配置 API，而后端特定的验证和迁移语义则保留在适配器内部。"
+
+#: ../../source/mp/http_api.rst:342
+#, python-brace-format
+msgid ""
+"Use ``GET /reconfigure/backends`` to list the backend strings that can be"
+" used in ``/reconfigure/{backend}/status`` and "
+"``/reconfigure/{backend}/{operation}``. If an L2 adapter is wrapped by "
+"serde, the backend string is still the configured L2 adapter type, not "
+"the serde wrapper type."
+msgstr "使用 ``GET /reconfigure/backends`` 列出可以在 ``/reconfigure/{backend}/status`` 和 ``/reconfigure/{backend}/{operation}`` 中使用的后端字符串。如果 L2 适配器被 serde 包装，后端字符串仍然是配置的 L2 适配器类型，而不是 serde 包装器类型。"
+
+#: ../../source/mp/http_api.rst:348
+msgid ""
+"For Device-DAX, use ``backend=dax``. DAX operations use JSON request "
+"bodies because DAX paths contain slashes. ``add`` and ``resize`` accept "
+"``size`` as an integer byte count or a string such as ``\"100GiB\"``. "
+"``remove`` supports ``migrate``, ``evict``, and ``drain``; ``resize`` "
+"supports ``migrate`` and ``evict``."
+msgstr "对于 Device-DAX，请使用 ``backend=dax``。DAX 操作使用 JSON 请求体，因为 DAX 路径包含斜杠。``add`` 和 ``resize`` 接受 ``size`` 作为整数字节数或字符串，例如 ``\"100GiB\"``。``remove`` 支持 ``migrate``、``evict`` 和 ``drain``；``resize`` 支持 ``migrate`` 和 ``evict``。"
+
+#: ../../source/mp/http_api.rst:354
+msgid ""
+"See :doc:`/kv_cache/storage_backends/dax` for detailed request examples, "
+"mode semantics, and validation guidance."
+msgstr "有关详细的请求示例、模式语义和验证指导，请参阅 :doc:`/kv_cache/storage_backends/dax`。"
+
+#: ../../source/mp/http_api.rst:358
 msgid "``GET /kvcache/check``"
 msgstr "``GET /kvcache/check``"
 
-#: ../../source/mp/http_api.rst:315
+#: ../../source/mp/http_api.rst:360
 msgid ""
 "Compute MD5 checksums over the GPU KV cache, grouped ``chunk_size`` "
 "blocks per hashed chunk. MP mode addresses KV storage by block IDs "
@@ -442,108 +576,114 @@ msgid ""
 "blocks and ``chunk_size`` counts blocks per chunk. Intended for "
 "diagnostics and round-trip integrity checks from ``lmcache bench server``"
 " — not for the inference data path."
-msgstr "计算 GPU KV Cache 的 MD5 校验和，每个哈希块分组为 ``chunk_size`` 块。MP 模式通过块 ID 原生地处理 KV 存储（与 ``STORE`` / ``RETRIEVE`` 使用的单位相同），因此该端点完全以块为中心：``block_ids`` 列举目标块，``chunk_size`` 计算每个块的数量。旨在用于诊断和 ``lmcache bench server`` 的往返完整性检查——而非推理数据路径。"
+msgstr ""
+"计算 GPU KV Cache 的 MD5 校验和，每个哈希块分组为 ``chunk_size`` 块。MP 模式通过块 ID 原生地处理 KV "
+"存储（与 ``STORE`` / ``RETRIEVE`` 使用的单位相同），因此该端点完全以块为中心：``block_ids`` "
+"列举目标块，``chunk_size`` 计算每个块的数量。旨在用于诊断和 ``lmcache bench server`` "
+"的往返完整性检查——而非推理数据路径。"
 
-#: ../../source/mp/http_api.rst:323
+#: ../../source/mp/http_api.rst:368
 msgid "**Query parameters:**"
 msgstr "**查询参数：**"
 
-#: ../../source/mp/http_api.rst:329
+#: ../../source/mp/http_api.rst:374
 msgid "Name"
 msgstr "名称"
 
-#: ../../source/mp/http_api.rst:330
+#: ../../source/mp/http_api.rst:375
 msgid "Required"
 msgstr "必需的"
 
-#: ../../source/mp/http_api.rst:332
+#: ../../source/mp/http_api.rst:377
 msgid "``block_ids``"
 msgstr "``block_ids``"
 
-#: ../../source/mp/http_api.rst:333 ../../source/mp/http_api.rst:336
+#: ../../source/mp/http_api.rst:378 ../../source/mp/http_api.rst:381
 msgid "yes"
 msgstr "是"
 
-#: ../../source/mp/http_api.rst:334
+#: ../../source/mp/http_api.rst:379
 msgid "GPU block IDs in mixed format, e.g. ``\"0,[2,5],8\"``."
 msgstr "混合格式的 GPU 块 ID，例如 ``\"0,[2,5],8\"``。"
 
-#: ../../source/mp/http_api.rst:335
+#: ../../source/mp/http_api.rst:380
 msgid "``chunk_size``"
 msgstr "``chunk_size``"
 
-#: ../../source/mp/http_api.rst:337
+#: ../../source/mp/http_api.rst:382
 msgid "Positive integer — number of blocks per hashed chunk."
 msgstr "正整数 — 每个哈希块的块数。"
 
-#: ../../source/mp/http_api.rst:338
+#: ../../source/mp/http_api.rst:383
 msgid "``instance_id``"
 msgstr "``instance_id``"
 
-#: ../../source/mp/http_api.rst:339
+#: ../../source/mp/http_api.rst:384
 msgid "no (default ``0``)"
 msgstr "否（默认 ``0``）"
 
-#: ../../source/mp/http_api.rst:340
+#: ../../source/mp/http_api.rst:385
 msgid "Registered GPU context ID on the engine."
 msgstr "引擎上注册的 GPU 上下文 ID。"
 
-#: ../../source/mp/http_api.rst:341
+#: ../../source/mp/http_api.rst:386
 msgid "``layerwise``"
 msgstr "``layerwise``"
 
-#: ../../source/mp/http_api.rst:342
+#: ../../source/mp/http_api.rst:387
 msgid "no (default ``false``)"
 msgstr "不（默认 ``false``）"
 
-#: ../../source/mp/http_api.rst:343
+#: ../../source/mp/http_api.rst:388
 msgid ""
 "If ``true``, return per-layer checksums keyed by ``\"layer_<idx>\"``; "
 "otherwise a single aggregated digest per chunk over all layers."
 msgstr "如果为 ``true``，则返回按 ``\"layer_<idx>\"`` 键入的逐层校验和；否则返回每个块的所有层的单个聚合摘要。"
 
-#: ../../source/mp/http_api.rst:359
+#: ../../source/mp/http_api.rst:404
 msgid ""
 "When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by "
 "``\"layer_<idx>\"`` whose values are per-layer lists."
-msgstr "当 ``layerwise=true`` 时，``chunk_checksums`` 是一个以 ``\"layer_<idx>\"`` 为键的字典，其值是逐层列表。"
+msgstr ""
+"当 ``layerwise=true`` 时，``chunk_checksums`` 是一个以 ``\"layer_<idx>\"`` "
+"为键的字典，其值是逐层列表。"
 
-#: ../../source/mp/http_api.rst:362
+#: ../../source/mp/http_api.rst:407
 msgid "**HTTP status codes:**"
 msgstr "**HTTP 状态码:**"
 
-#: ../../source/mp/http_api.rst:364
+#: ../../source/mp/http_api.rst:409
 msgid "``200``: success."
 msgstr "``200``: 成功。"
 
-#: ../../source/mp/http_api.rst:365
+#: ../../source/mp/http_api.rst:410
 msgid ""
 "``400``: ``block_ids`` missing/malformed, or ``chunk_size`` missing or "
 "non-positive."
 msgstr "``400``: ``block_ids`` 缺失/格式错误，或 ``chunk_size`` 缺失或非正数。"
 
-#: ../../source/mp/http_api.rst:367
+#: ../../source/mp/http_api.rst:412
 msgid ""
 "``404``: ``instance_id`` not registered, or the registered KV tensors are"
 " empty."
 msgstr "``404``: ``instance_id`` 未注册，或者注册的 KV 张量为空。"
 
-#: ../../source/mp/http_api.rst:369
+#: ../../source/mp/http_api.rst:414
 msgid ""
 "``501``: engine has no ``gpu_contexts``, or the GPU KV format is not "
 "supported by this endpoint (page-buffer-fused and cross-layer layouts are"
 " declined until a real need appears)."
 msgstr "``501``: 引擎没有 ``gpu_contexts``，或者该端点不支持 GPU KV 格式（页面缓冲融合和跨层布局在真正需要之前被拒绝）。"
 
-#: ../../source/mp/http_api.rst:372
+#: ../../source/mp/http_api.rst:417
 msgid "``503``: engine not yet initialized on ``app.state``."
 msgstr "``503``: 引擎尚未在 ``app.state`` 上初始化。"
 
-#: ../../source/mp/http_api.rst:385
+#: ../../source/mp/http_api.rst:430
 msgid "``/quota`` — per-``cache_salt`` quota management"
 msgstr "``/quota`` — 每个``cache_salt``的配额管理"
 
-#: ../../source/mp/http_api.rst:387
+#: ../../source/mp/http_api.rst:432
 msgid ""
 "These endpoints manage the per-``cache_salt`` storage budgets consumed by"
 " the ``IsolatedLRU`` eviction policy (selected via ``--eviction-policy "
@@ -558,7 +698,7 @@ msgstr ""
 "``cache_salt`` 会在下一个逐出周期（约 1 秒）被逐出。没有注册配额的 ``cache_salt`` 有一个有效限制为 ``0`` "
 "字节，因此其数据将在下一个周期被清除（白名单语义）。"
 
-#: ../../source/mp/http_api.rst:395
+#: ../../source/mp/http_api.rst:440
 msgid ""
 "These endpoints are no-ops on engines that did not start with "
 "``--eviction-policy IsolatedLRU``: the ``QuotaManager`` is still present,"
@@ -567,7 +707,7 @@ msgstr ""
 "这些端点在未使用 ``--eviction-policy IsolatedLRU`` 启动的引擎上是无操作的：``QuotaManager`` "
 "仍然存在，但 LRU 策略会忽略注册的配额。"
 
-#: ../../source/mp/http_api.rst:399
+#: ../../source/mp/http_api.rst:444
 msgid ""
 "**URL escaping for the empty salt.** ``cache_salt=\"\"`` (un-salted / "
 "anonymous traffic) cannot appear in a URL path parameter, so the API "
@@ -582,21 +722,21 @@ msgstr ""
 " 的配额。合法存储数据的用户使用 ``cache_salt=\\\"_default\\\"``，无法通过此 HTTP API "
 "与匿名流量区分管理——两者映射到相同的路径参数；选择任何其他值（例如 ``\\\"default\\\"``）以消除歧义。"
 
-#: ../../source/mp/http_api.rst:408
+#: ../../source/mp/http_api.rst:453
 #, python-brace-format
 msgid "``PUT /quota/{cache_salt}``"
 msgstr "``PUT /quota/{cache_salt}``"
 
-#: ../../source/mp/http_api.rst:410
+#: ../../source/mp/http_api.rst:455
 msgid "Create or update a quota."
 msgstr "创建或更新配额。"
 
-#: ../../source/mp/http_api.rst:412
+#: ../../source/mp/http_api.rst:457
 #, python-brace-format
 msgid "**Body:** ``{\"limit_gb\": <float>}`` (required, finite, non-negative)."
 msgstr "**主体:** ``{\\\"limit_gb\\\": <float>}`` （必需，有限，非负）。"
 
-#: ../../source/mp/http_api.rst:420
+#: ../../source/mp/http_api.rst:465
 msgid ""
 "**Errors:** ``400`` for malformed JSON, missing ``limit_gb``, non-numeric"
 " ``limit_gb``, ``nan`` / ``inf``, or negative values; ``503`` if the "
@@ -605,16 +745,16 @@ msgstr ""
 "**错误:** ``400`` 表示 JSON 格式错误、缺少 ``limit_gb``、``limit_gb`` 不是数字、``nan`` / "
 "``inf`` 或负值；``503`` 表示引擎未初始化。"
 
-#: ../../source/mp/http_api.rst:433
+#: ../../source/mp/http_api.rst:478
 #, python-brace-format
 msgid "``GET /quota/{cache_salt}``"
 msgstr "``GET /quota/{cache_salt}``"
 
-#: ../../source/mp/http_api.rst:435
+#: ../../source/mp/http_api.rst:480
 msgid "Read the current quota and live usage for one ``cache_salt``."
 msgstr "读取当前配额和一个 ``cache_salt`` 的实时使用情况。"
 
-#: ../../source/mp/http_api.rst:448
+#: ../../source/mp/http_api.rst:493
 msgid ""
 "``exists`` is ``false`` when no quota was ever registered for this "
 "``cache_salt`` (``limit_gb`` is then ``0.0`` and ``current_usage_gb`` "
@@ -625,12 +765,12 @@ msgstr ""
 "``0.0``，而 ``current_usage_gb`` 反映当前为该盐缓存的字节数——这些字节将在下一个周期根据 "
 "``IsolatedLRU`` 被逐出）。"
 
-#: ../../source/mp/http_api.rst:454
+#: ../../source/mp/http_api.rst:499
 #, python-brace-format
 msgid "``DELETE /quota/{cache_salt}``"
 msgstr "``DELETE /quota/{cache_salt}``"
 
-#: ../../source/mp/http_api.rst:456
+#: ../../source/mp/http_api.rst:501
 msgid ""
 "Remove a ``cache_salt``'s quota entry. Any bytes still cached under this "
 "``cache_salt`` become over-budget on the next eviction cycle (effective "
@@ -639,7 +779,7 @@ msgstr ""
 "删除 ``cache_salt`` 的配额条目。任何仍然缓存于此 ``cache_salt`` 下的字节将在下一个逐出周期中超出预算（有效限制降至"
 " ``0``），并将被逐出。"
 
-#: ../../source/mp/http_api.rst:466
+#: ../../source/mp/http_api.rst:511
 #, python-brace-format
 msgid ""
 "When no quota was registered for the given ``cache_salt``, the response "
@@ -649,19 +789,19 @@ msgstr ""
 "当给定的 ``cache_salt`` 没有注册配额时，响应为 ``{\\\"cache_salt\\\": \\\"...\\\", "
 "\\\"status\\\": \\\"not_found\\\"}``（仍然是 ``200 OK``）。"
 
-#: ../../source/mp/http_api.rst:470
+#: ../../source/mp/http_api.rst:515
 msgid "``GET /quota``"
 msgstr "``GET /quota``"
 
-#: ../../source/mp/http_api.rst:472
+#: ../../source/mp/http_api.rst:517
 msgid "List every registered quota alongside its live usage."
 msgstr "列出每个注册的配额及其实时使用情况。"
 
-#: ../../source/mp/http_api.rst:486
+#: ../../source/mp/http_api.rst:531
 msgid "``GET /conf``"
 msgstr "``GET /conf``"
 
-#: ../../source/mp/http_api.rst:488
+#: ../../source/mp/http_api.rst:533
 msgid ""
 "Returns every server-side configuration object registered on "
 "``app.state.configs`` (typically ``mp``, ``storage_manager`` and "
@@ -674,47 +814,47 @@ msgstr ""
 " ``observability``），作为一个单一的缩进 JSON 文档。数据类通过 ``safe_asdict`` 序列化；其他值通过 "
 "``make_json_safe`` 处理。对于确认进程实际加载的内容（包括环境覆盖）非常有用，而无需重启。"
 
-#: ../../source/mp/http_api.rst:513
+#: ../../source/mp/http_api.rst:558
 msgid ""
 "**Response** (``503 Service Unavailable``) when configs are not wired "
 "onto ``app.state`` yet:"
 msgstr "**响应**（``503 服务不可用``），当配置尚未连接到 ``app.state`` 时："
 
-#: ../../source/mp/http_api.rst:529
+#: ../../source/mp/http_api.rst:574
 msgid "``GET /version``"
 msgstr "``GET /version``"
 
-#: ../../source/mp/http_api.rst:531
+#: ../../source/mp/http_api.rst:576
 msgid ""
 "Returns the full version descriptor (package version combined with the "
 "current commit id), formatted by ``lmcache.utils.get_version()``."
 msgstr "返回完整的版本描述符（软件包版本与当前提交 ID 的组合），格式由 ``lmcache.utils.get_version()`` 生成。"
 
-#: ../../source/mp/http_api.rst:547
+#: ../../source/mp/http_api.rst:592
 msgid "``GET /lmc_version``"
 msgstr "``GET /lmc_version``"
 
-#: ../../source/mp/http_api.rst:549
+#: ../../source/mp/http_api.rst:594
 msgid ""
 "Returns the raw LMCache package version string "
 "(``lmcache.utils.VERSION``)."
 msgstr "返回原始的 LMCache 包版本字符串 (``lmcache.utils.VERSION``)。"
 
-#: ../../source/mp/http_api.rst:558
+#: ../../source/mp/http_api.rst:603
 msgid "``GET /commit_id``"
 msgstr "``GET /commit_id``"
 
-#: ../../source/mp/http_api.rst:560
+#: ../../source/mp/http_api.rst:605
 msgid ""
 "Returns the git commit id baked into the build "
 "(``lmcache.utils.COMMIT_ID``)."
 msgstr "返回构建中嵌入的 git 提交 id (``lmcache.utils.COMMIT_ID``)。"
 
-#: ../../source/mp/http_api.rst:569
+#: ../../source/mp/http_api.rst:614
 msgid "``GET /env``"
 msgstr "``GET /env``"
 
-#: ../../source/mp/http_api.rst:571
+#: ../../source/mp/http_api.rst:616
 msgid ""
 "Dumps the process environment variables as a sorted, pretty-printed JSON "
 "document. Response ``Content-Type`` is ``text/plain`` so it can be piped "
@@ -723,53 +863,53 @@ msgstr ""
 "将进程环境变量转储为排序的、格式良好的 JSON 文档。响应的 ``Content-Type`` 为 "
 "``text/plain``，因此可以直接通过管道传输到终端。"
 
-#: ../../source/mp/http_api.rst:577
+#: ../../source/mp/http_api.rst:622
 msgid ""
 "The payload may contain secrets injected via environment variables. "
 "Restrict network access to this endpoint in production."
 msgstr "有效负载可能包含通过环境变量注入的机密。在生产环境中限制对该端点的网络访问。"
 
-#: ../../source/mp/http_api.rst:587
+#: ../../source/mp/http_api.rst:632
 msgid "``GET /loglevel``"
 msgstr "``GET /loglevel``"
 
-#: ../../source/mp/http_api.rst:589
+#: ../../source/mp/http_api.rst:634
 msgid ""
 "Inspect or mutate Python logger levels at runtime. All responses are "
 "``text/plain``. The endpoint has three modes driven by query parameters:"
 msgstr "在运行时检查或修改 Python 日志记录器级别。所有响应都是 ``text/plain``。该端点有三种模式，由查询参数驱动："
 
-#: ../../source/mp/http_api.rst:596 ../../source/mp/http_api.rst:663
-#: ../../source/mp/http_api.rst:688
+#: ../../source/mp/http_api.rst:641 ../../source/mp/http_api.rst:708
+#: ../../source/mp/http_api.rst:733
 msgid "Query"
 msgstr "查询"
 
-#: ../../source/mp/http_api.rst:597 ../../source/mp/http_api.rst:664
-#: ../../source/mp/http_api.rst:689
+#: ../../source/mp/http_api.rst:642 ../../source/mp/http_api.rst:709
+#: ../../source/mp/http_api.rst:734
 msgid "Behavior"
 msgstr "行为"
 
-#: ../../source/mp/http_api.rst:598
+#: ../../source/mp/http_api.rst:643
 msgid "(no params)"
 msgstr "(无参数)"
 
-#: ../../source/mp/http_api.rst:599
+#: ../../source/mp/http_api.rst:644
 msgid "List every logger registered with :mod:`logging` and its level."
 msgstr "列出所有在 :mod:`logging` 中注册的记录器及其级别。"
 
-#: ../../source/mp/http_api.rst:600
+#: ../../source/mp/http_api.rst:645
 msgid "``?logger_name=<name>``"
 msgstr "``?logger_name=<name>``"
 
-#: ../../source/mp/http_api.rst:601
+#: ../../source/mp/http_api.rst:646
 msgid "Return the effective level of the named logger."
 msgstr "返回指定记录器的有效级别。"
 
-#: ../../source/mp/http_api.rst:602
+#: ../../source/mp/http_api.rst:647
 msgid "``?logger_name=<name>&level=<LEVEL>``"
 msgstr "``?logger_name=<name>&level=<LEVEL>``"
 
-#: ../../source/mp/http_api.rst:603
+#: ../../source/mp/http_api.rst:648
 msgid ""
 "Set the named logger (and its handlers) to ``LEVEL`` "
 "(``DEBUG``/``INFO``/``WARNING``/``ERROR``/``CRITICAL``). Returns ``400`` "
@@ -779,15 +919,15 @@ msgstr ""
 "``LEVEL``（``DEBUG``/``INFO``/``WARNING``/``ERROR``/``CRITICAL``）。在未知级别时返回"
 " ``400``。"
 
-#: ../../source/mp/http_api.rst:607
+#: ../../source/mp/http_api.rst:652
 msgid "**Examples:**"
 msgstr "**示例：**"
 
-#: ../../source/mp/http_api.rst:621
+#: ../../source/mp/http_api.rst:666
 msgid "``GET /metrics``"
 msgstr "``GET /metrics``"
 
-#: ../../source/mp/http_api.rst:623
+#: ../../source/mp/http_api.rst:668
 msgid ""
 "Prometheus exposition format for every metric registered on the default "
 "``prometheus_client`` registry. Scrape this directly from Prometheus. See"
@@ -796,11 +936,11 @@ msgstr ""
 "默认 ``prometheus_client`` 注册表中注册的每个指标的 Prometheus 展示格式。直接从 Prometheus "
 "抓取此内容。有关导出指标的列表，请参见 :doc:`observability`。"
 
-#: ../../source/mp/http_api.rst:634
+#: ../../source/mp/http_api.rst:679
 msgid "``POST /metrics/reset``"
 msgstr "``POST /metrics/reset``"
 
-#: ../../source/mp/http_api.rst:636
+#: ../../source/mp/http_api.rst:681
 msgid ""
 "Resets all LMCache observability metrics to their initial state "
 "(``reset_observability_metrics``). Intended for test harnesses and "
@@ -809,38 +949,38 @@ msgstr ""
 "重置所有 LMCache "
 "可观察性指标到其初始状态（``reset_observability_metrics``）。旨在用于测试工具和基准测试——不适用于生产环境。"
 
-#: ../../source/mp/http_api.rst:653
+#: ../../source/mp/http_api.rst:698
 msgid "``GET /threads``"
 msgstr "``GET /threads``"
 
-#: ../../source/mp/http_api.rst:655
+#: ../../source/mp/http_api.rst:700
 msgid ""
 "Enumerate active Python threads in the server process along with their "
 "stack traces, plus a total-count summary. Useful for live debugging of "
 "hangs or runaway workers."
 msgstr "列出服务器进程中活动的 Python 线程及其堆栈跟踪，并提供总计摘要。这对于实时调试挂起或失控的工作线程非常有用。"
 
-#: ../../source/mp/http_api.rst:665
+#: ../../source/mp/http_api.rst:710
 msgid "``?name=<substr>``"
 msgstr "``?name=<substr>``"
 
-#: ../../source/mp/http_api.rst:666
+#: ../../source/mp/http_api.rst:711
 msgid "Keep only threads whose name contains ``<substr>`` (case-insensitive)."
 msgstr "仅保留名称包含 ``<substr>`` 的线程（不区分大小写）。"
 
-#: ../../source/mp/http_api.rst:668
+#: ../../source/mp/http_api.rst:713
 msgid "``?thread_id=<int>``"
 msgstr "``?thread_id=<int>``"
 
-#: ../../source/mp/http_api.rst:669
+#: ../../source/mp/http_api.rst:714
 msgid "Keep only the thread with the matching ``ident``."
 msgstr "只保留与匹配的 ``ident`` 相关的线程。"
 
-#: ../../source/mp/http_api.rst:678
+#: ../../source/mp/http_api.rst:723
 msgid "``GET /periodic-threads``"
 msgstr "``GET /periodic-threads``"
 
-#: ../../source/mp/http_api.rst:680
+#: ../../source/mp/http_api.rst:725
 msgid ""
 "Returns a JSON snapshot of the "
 ":class:`~lmcache.v1.periodic_thread.PeriodicThreadRegistry`: counts by "
@@ -849,44 +989,44 @@ msgstr ""
 "返回 :class:`~lmcache.v1.periodic_thread.PeriodicThreadRegistry` 的 JSON "
 "快照：按级别统计以及每个线程的状态（上次运行时间戳、最新摘要等）。"
 
-#: ../../source/mp/http_api.rst:690
+#: ../../source/mp/http_api.rst:735
 msgid "``?level=critical|high|medium|low``"
 msgstr "``?level=critical|high|medium|low``"
 
-#: ../../source/mp/http_api.rst:691
+#: ../../source/mp/http_api.rst:736
 msgid "Only include threads at the given level. ``400`` on unknown."
 msgstr "仅包含给定级别的线程。对未知情况返回 ``400``。"
 
-#: ../../source/mp/http_api.rst:692
+#: ../../source/mp/http_api.rst:737
 msgid "``?running_only=true``"
 msgstr "``?running_only=true``"
 
-#: ../../source/mp/http_api.rst:693
+#: ../../source/mp/http_api.rst:738
 msgid "Only include threads currently running."
 msgstr "仅包含当前正在运行的线程。"
 
-#: ../../source/mp/http_api.rst:694
+#: ../../source/mp/http_api.rst:739
 msgid "``?active_only=true``"
 msgstr "``?active_only=true``"
 
-#: ../../source/mp/http_api.rst:695
+#: ../../source/mp/http_api.rst:740
 msgid "Only include threads considered active (recent tick)."
 msgstr "仅包括被视为活动的线程（最近的滴答）。"
 
-#: ../../source/mp/http_api.rst:720
+#: ../../source/mp/http_api.rst:765
 #, python-brace-format
 msgid "``GET /periodic-threads/{thread_name}``"
 msgstr "``GET /periodic-threads/{thread_name}``"
 
-#: ../../source/mp/http_api.rst:722
+#: ../../source/mp/http_api.rst:767
 msgid "Detailed status for a single periodic thread (``404`` if not found)."
 msgstr "单个周期性线程的详细状态（如果未找到则返回 ``404``）。"
 
-#: ../../source/mp/http_api.rst:731
+#: ../../source/mp/http_api.rst:776
 msgid "``GET /periodic-threads-health``"
 msgstr "``GET /periodic-threads-health``"
 
-#: ../../source/mp/http_api.rst:733
+#: ../../source/mp/http_api.rst:778
 msgid ""
 "Fast health check covering only ``critical`` and ``high`` level periodic "
 "threads. A thread is flagged unhealthy when it is marked running but has "
@@ -895,39 +1035,39 @@ msgstr ""
 "快速健康检查仅覆盖 ``critical`` 和 ``high`` "
 "级别的周期性线程。当线程被标记为正在运行但在预期间隔内未进行滴答时，它会被标记为不健康。"
 
-#: ../../source/mp/http_api.rst:747
+#: ../../source/mp/http_api.rst:792
 msgid "When something is lagging:"
 msgstr "当某些东西滞后时："
 
-#: ../../source/mp/http_api.rst:771
+#: ../../source/mp/http_api.rst:816
 msgid "Adding New Endpoints"
 msgstr "添加新端点"
 
-#: ../../source/mp/http_api.rst:773
+#: ../../source/mp/http_api.rst:818
 msgid ""
 "Endpoints are auto-discovered from "
 "``lmcache/v1/multiprocess/http_apis/``. To add a new endpoint:"
 msgstr "端点会从 ``lmcache/v1/multiprocess/http_apis/`` 自动发现。要添加一个新端点："
 
-#: ../../source/mp/http_api.rst:776
+#: ../../source/mp/http_api.rst:821
 msgid "Create a new module in that directory named ``<name>_api.py``."
 msgstr "在该目录中创建一个名为 ``<name>_api.py`` 的新模块。"
 
-#: ../../source/mp/http_api.rst:777
+#: ../../source/mp/http_api.rst:822
 msgid "Define a module-level ``router = APIRouter()``."
 msgstr "定义一个模块级的 ``router = APIRouter()``。"
 
-#: ../../source/mp/http_api.rst:778
+#: ../../source/mp/http_api.rst:823
 msgid "Register handlers on ``router`` using FastAPI decorators."
 msgstr "使用 FastAPI 装饰器在 ``router`` 上注册处理程序。"
 
-#: ../../source/mp/http_api.rst:779
+#: ../../source/mp/http_api.rst:824
 msgid ""
 "Access the engine via ``request.app.state.engine`` and guard for the "
 "``None`` case (engine not yet initialized)."
 msgstr "通过 ``request.app.state.engine`` 访问引擎，并检查 ``None`` 情况（引擎尚未初始化）。"
 
-#: ../../source/mp/http_api.rst:782
+#: ../../source/mp/http_api.rst:827
 msgid ""
 "The :class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry` "
 "will pick the module up automatically at startup — no central "
@@ -936,7 +1076,7 @@ msgstr ""
 ":class:`~lmcache.v1.multiprocess.http_api_registry.HTTPAPIRegistry` "
 "将在启动时自动加载模块 — 无需编辑中央注册列表。"
 
-#: ../../source/mp/http_api.rst:786
+#: ../../source/mp/http_api.rst:831
 msgid ""
 "If the route is generic enough to be shared with the vLLM-embedded API "
 "server, add it under ``lmcache/v1/internal_api_server/common/`` instead. "
@@ -944,9 +1084,13 @@ msgid ""
 "module name is listed in ``_MP_INCOMPATIBLE_MODULES`` there (reserved for"
 " modules that require vLLM-specific ``app.state`` attributes; the list is"
 " currently empty)."
-msgstr "如果路由足够通用，可以与嵌入式 vLLM API 服务器共享，请将其添加到 ``lmcache/v1/internal_api_server/common/`` 下。它将在 MP 端通过 ``common_api.py`` 被加载，除非其模块名称在 ``_MP_INCOMPATIBLE_MODULES`` 中列出（保留给需要 vLLM 特定 ``app.state`` 属性的模块；该列表当前为空）。"
+msgstr ""
+"如果路由足够通用，可以与嵌入式 vLLM API 服务器共享，请将其添加到 "
+"``lmcache/v1/internal_api_server/common/`` 下。它将在 MP 端通过 ``common_api.py``"
+" 被加载，除非其模块名称在 ``_MP_INCOMPATIBLE_MODULES`` 中列出（保留给需要 vLLM 特定 "
+"``app.state`` 属性的模块；该列表当前为空）。"
 
-#: ../../source/mp/http_api.rst:793
+#: ../../source/mp/http_api.rst:838
 msgid ""
 "When adding a new endpoint, please also add a matching section to this "
 "page documenting the endpoint's purpose, request/response schema, and an "

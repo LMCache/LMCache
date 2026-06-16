@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-08 10:45+0000\n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -146,7 +146,9 @@ msgid ""
 "Register with an MP coordinator at this base URL (e.g. "
 "``http://coordinator:9300``). Opt-in; enables fleet registration. See "
 ":doc:`/mp/coordinator`."
-msgstr "在此基础 URL（例如 ``http://coordinator:9300``）注册 MP 协调器。可选；启用车队注册。请参见 :doc:`/mp/coordinator`。"
+msgstr ""
+"在此基础 URL（例如 ``http://coordinator:9300``）注册 MP 协调器。可选；启用车队注册。请参见 "
+":doc:`/mp/coordinator`。"
 
 #: ../../source/cli/server.rst:70
 msgid "``--coordinator-advertise-ip IP``"
@@ -169,23 +171,41 @@ msgid ""
 msgstr "心跳之间的秒数（``> 0``，默认值为 ``5``）。应远低于协调器的实例超时。"
 
 #: ../../source/cli/server.rst:76
+msgid "``--coordinator-l2-event-reporting``"
+msgstr "``--coordinator-l2-event-reporting``"
+
+#: ../../source/cli/server.rst:77
+msgid ""
+"Enable reporting L2 store/lookup events to the coordinator for fleet-wide"
+" usage tracking and quota-based eviction."
+msgstr "启用将 L2 存储/查找事件报告给协调器，以便进行全队列使用跟踪和基于配额的逐出。"
+
+#: ../../source/cli/server.rst:79
+msgid "``--coordinator-l2-event-flush-interval SECONDS``"
+msgstr "``--coordinator-l2-event-flush-interval SECONDS``"
+
+#: ../../source/cli/server.rst:80
+msgid "Seconds between L2 event batch flushes (``> 0``, default ``1``)."
+msgstr "L2 事件批量刷新之间的秒数（``> 0``，默认 ``1``）。"
+
+#: ../../source/cli/server.rst:81
 #, python-brace-format
 msgid "``--trace-level {storage}``"
 msgstr "``--trace-level {storage}``"
 
-#: ../../source/cli/server.rst:77
+#: ../../source/cli/server.rst:82
 msgid "Enable storage-level trace recording (see :doc:`trace`)."
 msgstr "启用存储级别的追踪记录（请参见 :doc:`trace`）。"
 
-#: ../../source/cli/server.rst:78
+#: ../../source/cli/server.rst:83
 msgid "``--trace-output PATH``"
 msgstr "``--trace-output PATH``"
 
-#: ../../source/cli/server.rst:79
+#: ../../source/cli/server.rst:84
 msgid "Destination for recorded ``.lct`` trace files."
 msgstr "记录的 ``.lct`` 跟踪文件的目标。"
 
-#: ../../source/cli/server.rst:81
+#: ../../source/cli/server.rst:86
 msgid ""
 "L2 adapters, observability, and Prometheus exporters are configured "
 "through their own flag groups; see ``lmcache server --help`` for the "

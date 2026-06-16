@@ -1,0 +1,311 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:2
+msgid "Google Cloud Bigtable"
+msgstr "谷歌云 Bigtable"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:7
+msgid "Overview"
+msgstr "概述"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:9
+msgid ""
+"Google Cloud Bigtable is a petabyte-scale, fully managed NoSQL database. "
+"Integrating Cloud Bigtable as a built-in remote storage connector inside "
+"LMCache bridges volatile high-cost in-memory tiers (Redis) and low-cost, "
+"high-latency archival object stores (S3)."
+msgstr "Google Cloud Bigtable 是一个 PB 级别的完全托管的 NoSQL 数据库。将 Cloud Bigtable 作为 LMCache 内置的远程存储连接器集成，可以桥接高成本的易失性内存层（Redis）和低成本、高延迟的归档对象存储（S3）。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:11
+msgid ""
+"For more information, see the `Cloud Bigtable Overview "
+"<https://cloud.google.com/bigtable/docs/overview>`_ and `Cloud Bigtable "
+"Pricing <https://cloud.google.com/bigtable/pricing>`_."
+msgstr "有关更多信息，请参阅 `Cloud Bigtable 概述 <https://cloud.google.com/bigtable/docs/overview>`_ 和 `Cloud Bigtable 定价 <https://cloud.google.com/bigtable/pricing>`_。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:14
+msgid "Architecture & Payload Limits"
+msgstr "架构与负载限制"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:16
+msgid ""
+"**Chunk Size Optimization**: Set LMCache's logical ``chunk_size`` to "
+"**256 tokens**. This groups payloads to minimize sequential Point-Read "
+"gRPC calls, preventing Python event-loop (GIL) bottlenecks."
+msgstr "**块大小优化**：将 LMCache 的逻辑 ``chunk_size`` 设置为 **256 个 token**。这将对有效负载进行分组，以最小化顺序 Point-Read gRPC 调用，防止 Python 事件循环 (GIL) 瓶颈。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:17
+msgid ""
+"**MutateRow Limit**: Enforces a strict **90.0 MB request limit** for a "
+"single ``MutateRow`` gRPC request."
+msgstr "**MutateRow 限制**：对单个 ``MutateRow`` gRPC 请求强制执行严格的 **90.0 MB 请求限制**。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:18
+msgid ""
+"**Storage Tier Row Limits**: The **SSD Tier** ceiling is **100 MiB per "
+"cell/row**. The **Enterprise Plus In-Memory Tier** is limited to **1.0 "
+"MiB per row**."
+msgstr "**存储层行限制**：**SSD 层**的上限为**每个单元/行 100 MiB**。**企业增强内存层**的限制为**每行 1.0 MiB**。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:19
+msgid ""
+"**TTLCache Shielding**: Embeds a thread-safe ``TTLCache`` (10-second TTL "
+"default) to shield Bigtable nodes from concurrent prefetch lookup spikes."
+msgstr "**TTLCache 保护**: 嵌入一个线程安全的 ``TTLCache``（默认 TTL 为 10 秒），以保护 Bigtable 节点免受并发预取查找峰值的影响。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:22
+msgid "Infrastructure Setup"
+msgstr "基础设施设置"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:24
+msgid "**1. Enable GCP APIs**"
+msgstr "**1. 启用 GCP API**"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:28
+msgid ""
+"gcloud services enable bigtable.googleapis.com "
+"bigtableadmin.googleapis.com --project=your-gcp-project-id"
+msgstr "gcloud services enable bigtable.googleapis.com bigtableadmin.googleapis.com --project=your-gcp-project-id"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:30
+msgid "**2. Provision Bigtable Instance**"
+msgstr "**2. 配置 Bigtable 实例**"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:32
+msgid ""
+"Refer to the `gcloud beta bigtable Reference "
+"<https://cloud.google.com/sdk/gcloud/reference/beta/bigtable>`_ for "
+"additional parameter details."
+msgstr "请参阅 `gcloud beta bigtable Reference <https://cloud.google.com/sdk/gcloud/reference/beta/bigtable>`_ 以获取更多参数详细信息。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:36
+msgid "gcloud beta bigtable instances create your-bigtable-instance-id \\"
+msgstr "gcloud beta bigtable instances create your-bigtable-instance-id \\\\"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:37
+msgid ""
+"--display-name=\"LMCache SSD Instance\" \\ --edition=ENTERPRISE \\ "
+"--cluster-storage-type=ssd \\ --cluster-config=id=your-cluster-id,zone"
+"=us-central1-a,nodes=1 \\ --project=your-gcp-project-id"
+msgstr "--display-name=\"LMCache SSD 实例\" \\\\ --edition=ENTERPRISE \\\\ --cluster-storage-type=ssd \\\\ --cluster-config=id=your-cluster-id,zone=us-central1-a,nodes=1 \\\\ --project=your-gcp-project-id"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:43
+msgid "**3. Create Database Table & Column Family**"
+msgstr "**3. 创建数据库表和列族**"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:47
+msgid "gcloud bigtable instances tables create lmcache-benchmark-v1 \\"
+msgstr "gcloud bigtable instances tables create lmcache-benchmark-v1 \\\\"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:48
+msgid ""
+"--instance=your-bigtable-instance-id \\ --column-families=cf \\ --project"
+"=your-gcp-project-id"
+msgstr "--instance=your-bigtable-instance-id \\\\ --column-families=cf \\\\ --project=your-gcp-project-id"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:52
+msgid "**4. Install LMCache & Bigtable SDK**"
+msgstr "**4. 安装 LMCache 和 Bigtable SDK**"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:56
+msgid ""
+"export NO_NATIVE_EXT=1 pip install --no-cache-dir lmcache google-cloud-"
+"bigtable"
+msgstr "export NO_NATIVE_EXT=1 pip install --no-cache-dir lmcache google-cloud-bigtable"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:60
+msgid "Configuration"
+msgstr "配置"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:62
+msgid "**Example A: Standard Bigtable SSD Integration (L2 Only)**"
+msgstr "**示例 A：标准 Bigtable SSD 集成（仅限 L2）**"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:66
+msgid "chunk_size: 256"
+msgstr "chunk_size: 256"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:68
+msgid ""
+"local_cpu: true max_local_cpu_size: 10.0 remote_url: \"bigtable://your-"
+"gcp-project-id/your-bigtable-instance-id\""
+msgstr "local_cpu: true max_local_cpu_size: 10.0 remote_url: \"bigtable://your-gcp-project-id/your-bigtable-instance-id\""
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:72
+msgid "remote_serde: \"naive\""
+msgstr "remote_serde: \"naive\""
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:74
+#: ../../source/kv_cache/storage_backends/bigtable.rst:96
+msgid "extra_config:"
+msgstr "额外配置："
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:75
+msgid ""
+"bigtable_project_id: \"your-gcp-project-id\" bigtable_instance_id: "
+"\"your-bigtable-instance-id\" bigtable_table_name: \"lmcache-"
+"benchmark-v1\""
+msgstr "bigtable_project_id: \"你的 GCP 项目 ID\" bigtable_instance_id: \"你的 Bigtable 实例 ID\" bigtable_table_name: \"lmcache-benchmark-v1\""
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:80
+msgid ""
+"Alternatively, you can set the environment variables ``BT_PROJECT_ID``, "
+"``BT_INSTANCE_ID``, and ``BT_TABLE_NAME`` instead of using "
+"``extra_config``."
+msgstr "或者，您可以设置环境变量 ``BT_PROJECT_ID``、``BT_INSTANCE_ID`` 和 ``BT_TABLE_NAME``，而不是使用 ``extra_config``。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:82
+msgid ""
+"**Example B: 3-Tier Multi-Connector Hybrid (Local CPU -> Redis L2 -> "
+"Bigtable SSD L3)**"
+msgstr "**示例 B：3 层多连接器混合（本地 CPU -> Redis L2 -> Bigtable SSD L3）**"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:84
+msgid ""
+"Deploy Redis for hot-cache loopbacks while offloading long-tail "
+"persistent storage to Bigtable SSD, using LMCache's dynamic OrderedDict "
+"routing."
+msgstr "在热缓存回路中部署 Redis，同时将长尾持久存储卸载到 Bigtable SSD，使用 LMCache 的动态有序字典路由。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:88
+msgid "chunk_size: 256 local_cpu: true max_local_cpu_size: 15.0"
+msgstr "chunk_size: 256 local_cpu: true max_local_cpu_size: 15.0"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:92
+msgid "remote_storage_plugins:"
+msgstr "远程存储插件："
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:93
+msgid "\"redis\""
+msgstr "redis"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:94
+msgid "\"bigtable\""
+msgstr "bigtable"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:97
+msgid "remote_storage_plugin.redis.redis_url: \"redis://your-redis-host:6379\""
+msgstr "remote_storage_plugin.redis.redis_url: \"redis://your-redis-host:6379\""
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:99
+msgid ""
+"remote_storage_plugin.bigtable.bigtable_project_id: \"your-gcp-project-"
+"id\" remote_storage_plugin.bigtable.bigtable_instance_id: \"your-"
+"bigtable-instance-id\" "
+"remote_storage_plugin.bigtable.bigtable_table_name: \"lmcache-"
+"benchmark-v1\" remote_storage_plugin.bigtable.bigtable_family_name: "
+"\"cf\" remote_storage_plugin.bigtable.bigtable_column_name: \"data\""
+msgstr "remote_storage_plugin.bigtable.bigtable_project_id: \\\"your-gcp-project-id\\\" remote_storage_plugin.bigtable.bigtable_instance_id: \\\"your-bigtable-instance-id\\\" remote_storage_plugin.bigtable.bigtable_table_name: \\\"lmcache-benchmark-v1\\\" remote_storage_plugin.bigtable.bigtable_family_name: \\\"cf\\\" remote_storage_plugin.bigtable.bigtable_column_name: \\\"data\\\""
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:105
+msgid "remote_storage_plugin.bigtable.credentials_path: \"/etc/gcp/key.json\""
+msgstr "remote_storage_plugin.bigtable.credentials_path: \"/etc/gcp/key.json\""
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:107
+msgid ""
+"remote_storage_plugin.bigtable.bigtable_max_chunk_size_mb: 90.0 "
+"remote_storage_plugin.bigtable.exists_cache_ttl_seconds: 10.0 "
+"remote_storage_plugin.bigtable.exists_cache_size: 10000"
+msgstr "remote_storage_plugin.bigtable.bigtable_max_chunk_size_mb: 90.0 remote_storage_plugin.bigtable.exists_cache_ttl_seconds: 10.0 remote_storage_plugin.bigtable.exists_cache_size: 10000"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:111
+msgid ""
+"remote_storage_plugin.bigtable.bigtable_write_timeout_ms: 10000.0 "
+"remote_storage_plugin.bigtable.bigtable_read_timeout_ms: 5000.0"
+msgstr "remote_storage_plugin.bigtable.bigtable_write_timeout_ms: 10000.0 remote_storage_plugin.bigtable.bigtable_read_timeout_ms: 5000.0"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:115
+msgid "Authentication"
+msgstr "身份验证"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:117
+msgid ""
+"**Application Default Credentials (ADC)**: If ``credentials_path`` is "
+"omitted or ``null``, the connector natively invokes ADC. Compatible with "
+"local development via ``gcloud auth application-default login`` or GKE "
+"Workload Identity Federation."
+msgstr "**应用默认凭据 (ADC)**：如果 ``credentials_path`` 被省略或为 ``null``，连接器将原生调用 ADC。支持通过 ``gcloud auth application-default login`` 进行本地开发或 GKE 工作负载身份联合。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:118
+msgid ""
+"**Explicit Keys**: Pass the absolute filesystem path containing a mounted"
+" GCP Service Account JSON secret to ``credentials_path``."
+msgstr "**显式密钥**：将包含挂载的 GCP 服务账户 JSON 密钥的绝对文件系统路径传递给 ``credentials_path``。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:121
+msgid "Verification"
+msgstr "验证"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:123
+msgid "Ensure you have installed the required dependencies:"
+msgstr "确保您已安装所需的依赖项："
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:127
+msgid "pip install cachetools google-cloud-bigtable"
+msgstr "pip install cachetools google-cloud-bigtable"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:129
+msgid "Run the unit tests:"
+msgstr "运行单元测试："
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:133
+msgid "pytest tests/v1/storage_backend/test_bigtable_connector.py"
+msgstr "pytest tests/v1/storage_backend/test_bigtable_connector.py"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:136
+msgid "Troubleshooting Large Payload Warnings"
+msgstr "处理大负载警告"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:138
+msgid ""
+"If you see a warning in the logs indicating that a chunk size exceeds the"
+" limit and is skipped (e.g. ``Bigtable chunk size ... MB exceeds "
+"threshold ... MB. Skipping write to prevent hard failures``), choose one "
+"of the following approaches:"
+msgstr "如果您在日志中看到警告，指示块大小超过限制并被跳过（例如 ``Bigtable chunk size ... MB exceeds threshold ... MB. Skipping write to prevent hard failures``），请选择以下方法之一："
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:140
+msgid ""
+"**Reduce the LMCache Chunk Size (Recommended)**: The serialized chunk "
+"size depends on LMCache's logical ``chunk_size`` (number of tokens per "
+"chunk) and model shape. You can reduce ``chunk_size`` (e.g., from ``256``"
+" to ``128``) in your configuration file to shrink individual chunk "
+"payloads."
+msgstr "**减少 LMCache 块大小（推荐）**：序列化块大小取决于 LMCache 的逻辑 ``chunk_size``（每块的令牌数量）和模型形状。您可以在配置文件中将 ``chunk_size``（例如，从 ``256`` 减少到 ``128``）来缩小单个块的有效负载。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:143
+msgid ""
+"**Increase the Max Chunk Size**: If your Bigtable instance uses the SSD "
+"storage tier (which supports up to 100 MB per cell/row), you can raise "
+"the maximum allowed write threshold in the configuration up to ``99.0`` "
+"MB using the ``bigtable_max_chunk_size_mb`` config key (or the "
+"``BT_MAX_CHUNK_SIZE_MB`` environment variable)."
+msgstr "**增加最大块大小**：如果您的 Bigtable 实例使用 SSD 存储层（支持每个单元/行最多 100 MB），您可以在配置中将允许的最大写入阈值提高到 ``99.0`` MB，使用 ``bigtable_max_chunk_size_mb`` 配置键（或 ``BT_MAX_CHUNK_SIZE_MB`` 环境变量）。"
+
+#: ../../source/kv_cache/storage_backends/bigtable.rst:147
+msgid ""
+"Do not set ``bigtable_max_chunk_size_mb`` higher than ``100.0`` MB. While"
+" Cloud Bigtable supports up to ``256.0`` MB for a single row, a single "
+"cell value (which LMCache uses to store the chunk payload) has a hard "
+"limit of ``100.0`` MB. Exceeding this will trigger hard gRPC exceptions."
+msgstr "请勿将 ``bigtable_max_chunk_size_mb`` 设置得高于 ``100.0`` MB。虽然 Cloud Bigtable 支持单行高达 ``256.0`` MB，但单个单元格值（LMCache 用于存储块负载的值）有一个硬限制为 ``100.0`` MB。超过此限制将触发硬 gRPC 异常。"
+
