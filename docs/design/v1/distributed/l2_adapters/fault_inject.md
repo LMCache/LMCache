@@ -29,11 +29,21 @@ of the following hold:
 
 | knob | meaning | use |
 |---|---|---|
-| `drop_chunk_hashes: list[str]` | hex chunk hashes; matched on `ObjectKey.chunk_hash`. **Content-keyed and persistent** — the same chunk fails on every leg / every run. | primary lever for segmented repros (drop one mid chunk → a stable gap) |
-| `gap_indices: list[int]` | exact task-positions to always drop | precise single-gap unit tests |
+| `gap_tail_ratios: list[float]` | positions given as **distance-from-tail ÷ load-length** in `[0,1]` (`0.0`=last, `0.5`=middle, `1.0`=first); the dropped slot `round((1-ratio)·(n-1))` is computed from the `n`-key load batch the server actually receives. **Workload-agnostic and self-scaling** — the server needs no advance knowledge of the stored content, and the same fraction picks the right chunk at any context length. | primary lever for segmented repros (drop the mid chunk → a stable gap at any length) |
+| `gap_indices: list[int]` | exact head-relative task-positions to always drop | precise single-gap unit tests |
 | `rate: float` + `seed: int` | per-key drop probability in `[0,1]` via a stable seeded hash of the key, bucketed by `rate` | randomized resilience sweeps; deterministic given the seed |
 
-Defaults are pass-through (`rate=0.0`, empty `gap_indices`/`drop_chunk_hashes`).
+Defaults are pass-through (`rate=0.0`, empty `gap_indices`/`gap_tail_ratios`).
+
+> **Why a ratio and not a chunk hash?** An earlier `drop_chunk_hashes` knob keyed
+> drops on `ObjectKey.chunk_hash` — content-addressed, so the *same* chunk failed
+> on every leg. But it forced the test author (and thus the server config) to know
+> a hash computed from a not-yet-stored workload, which inverted the dependency
+> (the server "knowing" a future workload). `gap_tail_ratios` is a positional rule
+> the server evaluates from the load batch alone, so no content needs to be known
+> in advance. Trade-off: the drop is **per-load-batch**, not content-identical
+> across legs — for the segmented-prefix repro the gap lives in the prefix leg's
+> load, which is exactly what's exercised.
 
 ## Configuration
 
@@ -46,15 +56,18 @@ eviction/persist/serde config:
 {
   "type": "fault_inject",
   "inner": { "type": "fs_native", "base_path": "/dev/shm/cb_l2" },
-  "drop_chunk_hashes": ["3f9a…"],
+  "gap_tail_ratios": [0.5],
   "rate": 0.0,
   "seed": 0,
   "gap_indices": []
 }
 ```
 
+`"gap_tail_ratios": [0.5]` drops the middle chunk of every load — the stable
+mid-prefix gap the segmented repro needs, at any context length.
+
 At startup it logs `FaultInjectL2Adapter ACTIVE (rate=… seed=… gap_indices=…
-drop_chunk_hashes=N) wrapping <inner> -- test/diagnostic use only.`
+gap_tail_ratios=[…]) wrapping <inner> -- test/diagnostic use only.`
 
 ## Data flow
 
@@ -76,12 +89,12 @@ inner adapter: store, lookup-and-lock, unlock, delete, the event fds,
 listener registration, usage, and global-eviction support. The fault layer
 holds no data of its own. `report_status()` returns the inner status annotated
 with a `fault_inject` sub-dict (`rate`, `seed`, `gap_indices`,
-`drop_chunk_hashes`) so the active fault config is visible in diagnostics.
+`gap_tail_ratios`) so the active fault config is visible in diagnostics.
 
 ## Scope and safety
 
 Test/diagnostic only — never enable in production. It silently makes reads
 fail, so any served KV is intentionally incomplete. The primary consumer is
 the CacheBlend **segmented-prefix** validation (the `ci_v3_l2_hit`
-`segmented_prefix` workload drops a mid chunk to force a gapped prefix, so V3
-loads prefix+tail and recomputes only the gap).
+`segmented_prefix` workload sets `gap_tail_ratios=[0.5]` to force a gapped
+prefix, so V3 loads prefix+tail and recomputes only the gap).

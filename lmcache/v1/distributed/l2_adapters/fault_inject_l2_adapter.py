@@ -66,12 +66,14 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
       its own "type" (e.g. {"type": "fs_native", "base_path": "/dev/shm/x"}).
     - rate (float): per-key drop probability in [0, 1]. Default 0.0 (pass-through).
     - seed (int): seed for the deterministic per-key hash. Default 0.
-    - gap_indices (list[int]): exact task-positions to always drop (in addition
-      to rate-based drops). Default [] -- mainly for precise unit tests.
-    - drop_chunk_hashes (list[str]): hex-encoded chunk hashes to always drop,
-      matched on ObjectKey.chunk_hash. Content-keyed, so the SAME chunk fails in
-      every load task (prefix + sparse legs) -- a persistent single-gap repro.
-      Default [].
+    - gap_indices (list[int]): exact task-positions (from the head) to always
+      drop. Default [] -- mainly for precise unit tests.
+    - gap_tail_ratios (list[float]): positions to always drop, given as the
+      distance-from-the-tail as a FRACTION of the load length, so the rule is
+      workload-agnostic (the server needs no advance knowledge of the content).
+      The dropped chunk index = round((1 - ratio) * (n - 1)) over the n-key load
+      batch: 0.0 = last chunk, 0.5 = middle, 1.0 = first. Self-scaling across
+      context lengths; a stable mid-prefix gap for the segmented repro. Default [].
     """
 
     def __init__(
@@ -80,13 +82,13 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
         rate: float,
         seed: int,
         gap_indices: tuple[int, ...],
-        drop_chunk_hashes: tuple[str, ...] = (),
+        gap_tail_ratios: tuple[float, ...] = (),
     ) -> None:
         self.inner_config = inner_config
         self.rate = rate
         self.seed = seed
         self.gap_indices = gap_indices
-        self.drop_chunk_hashes = drop_chunk_hashes
+        self.gap_tail_ratios = gap_tail_ratios
 
     @classmethod
     def from_dict(cls, d: dict) -> "FaultInjectL2AdapterConfig":
@@ -143,23 +145,21 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
         ):
             raise ValueError("gap_indices must be a list of non-negative integers")
 
-        raw_hashes = d.get("drop_chunk_hashes", [])
-        if not isinstance(raw_hashes, list) or any(
-            not isinstance(h, str) for h in raw_hashes
+        raw_ratios = d.get("gap_tail_ratios", [])
+        if not isinstance(raw_ratios, list) or any(
+            isinstance(x, bool)
+            or not isinstance(x, (int, float))
+            or not (0.0 <= x <= 1.0)
+            for x in raw_ratios
         ):
-            raise ValueError("drop_chunk_hashes must be a list of hex strings")
-        for h in raw_hashes:
-            try:
-                bytes.fromhex(h)
-            except ValueError as e:
-                raise ValueError(f"drop_chunk_hashes entry {h!r} is not hex") from e
+            raise ValueError("gap_tail_ratios must be a list of floats in [0, 1]")
 
         return cls(
             inner_config=inner_config,
             rate=float(rate),
             seed=seed,
             gap_indices=tuple(raw_gap),
-            drop_chunk_hashes=tuple(raw_hashes),
+            gap_tail_ratios=tuple(float(x) for x in raw_ratios),
         )
 
     @classmethod
@@ -172,9 +172,9 @@ class FaultInjectL2AdapterConfig(L2AdapterConfigBase):
             '{"type":"fs_native","base_path":"/dev/shm/x"}\n'
             "- rate (float): per-key drop probability in [0,1] (default 0.0)\n"
             "- seed (int): deterministic hash seed (default 0)\n"
-            "- gap_indices (list[int]): exact task-positions to always drop\n"
-            "- drop_chunk_hashes (list[str]): hex chunk hashes to always drop "
-            "(content-keyed; persistent across load legs)"
+            "- gap_indices (list[int]): exact head-relative positions to drop\n"
+            "- gap_tail_ratios (list[float]): distance-from-tail / load-length "
+            "in [0,1] (0=last, 0.5=middle, 1=first); workload-agnostic"
         )
 
 
@@ -196,7 +196,7 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         rate: float,
         seed: int,
         gap_indices: tuple[int, ...],
-        drop_chunk_hashes: tuple[str, ...] = (),
+        gap_tail_ratios: tuple[float, ...] = (),
     ) -> None:
         """Wrap ``inner`` with deterministic load-failure injection.
 
@@ -205,11 +205,12 @@ class FaultInjectL2Adapter(L2AdapterInterface):
             rate: Per-key drop probability in [0, 1]. ``0`` disables
                 rate-based drops (``gap_indices`` still applies).
             seed: Seed for the deterministic per-key hash, so runs reproduce.
-            gap_indices: Exact task-positions to always drop, in addition to
-                the rate-based drops.
-            drop_chunk_hashes: Hex-encoded chunk hashes to always drop, matched
-                on ``ObjectKey.chunk_hash``. Content-keyed, so the same chunk
-                fails in every load task (a persistent single-gap repro).
+            gap_indices: Exact task-positions (from the head) to always drop,
+                in addition to the rate-based drops.
+            gap_tail_ratios: Positions to always drop, given as distance-from-
+                tail / load-length in [0, 1] (0=last, 0.5=middle, 1=first).
+                Workload-agnostic and self-scaling across context lengths --
+                no advance knowledge of the stored content is needed.
         """
         # Usage and eviction are delegated to the inner adapter, so the base
         # class's byte accounting (capacity 0) is intentionally unused here.
@@ -218,18 +219,18 @@ class FaultInjectL2Adapter(L2AdapterInterface):
         self._rate = rate
         self._seed = seed
         self._gap_indices = frozenset(gap_indices)
-        self._drop_hash_bytes = frozenset(bytes.fromhex(h) for h in drop_chunk_hashes)
+        self._gap_tail_ratios = tuple(gap_tail_ratios)
         # task_id -> load keys, so query_load_result can map a dropped bit
         # position back to its key.
         self._load_keys: dict[L2TaskId, list[ObjectKey]] = {}
         self._keys_lock = threading.Lock()
         logger.warning(
             "FaultInjectL2Adapter ACTIVE (rate=%.3f seed=%d gap_indices=%s "
-            "drop_chunk_hashes=%d) wrapping %s -- test/diagnostic use only.",
+            "gap_tail_ratios=%s) wrapping %s -- test/diagnostic use only.",
             rate,
             seed,
             sorted(self._gap_indices),
-            len(self._drop_hash_bytes),
+            list(self._gap_tail_ratios),
             type(inner).__name__,
         )
 
@@ -259,18 +260,23 @@ class FaultInjectL2Adapter(L2AdapterInterface):
     def _drop_positions(self, keys: list[ObjectKey]) -> list[int]:
         """Return the positions in ``keys`` to drop, in ascending order.
 
-        A position is dropped if its key's ``chunk_hash`` is in
-        ``drop_chunk_hashes`` (content-keyed, persistent across legs), or it is
-        listed in ``gap_indices`` (an exact, always-drop position), or its key
-        falls in the rate-based bucket per ``_should_drop_key``.
+        ``keys`` is the token-ordered chunk batch of one load, so index ``i`` is
+        the chunk's sequence position and ``len(keys)`` the load's chunk count.
+        A position is dropped if it is a ``gap_tail_ratios`` slot (distance-from-
+        tail as a fraction of the load length -- workload-agnostic, computed here
+        from the batch the server received), or it is listed in ``gap_indices``
+        (an exact head-relative position), or its key falls in the rate-based
+        bucket per ``_should_drop_key``.
         """
+        n = len(keys)
+        ratio_idxs = (
+            {int(round((1.0 - ratio) * (n - 1))) for ratio in self._gap_tail_ratios}
+            if n > 0
+            else set()
+        )
         dropped = []
         for i, key in enumerate(keys):
-            if (
-                key.chunk_hash in self._drop_hash_bytes
-                or i in self._gap_indices
-                or self._should_drop_key(key)
-            ):
+            if i in ratio_idxs or i in self._gap_indices or self._should_drop_key(key):
                 dropped.append(i)
         return dropped
 
@@ -400,7 +406,7 @@ class FaultInjectL2Adapter(L2AdapterInterface):
             "rate": self._rate,
             "seed": self._seed,
             "gap_indices": sorted(self._gap_indices),
-            "drop_chunk_hashes": sorted(h.hex() for h in self._drop_hash_bytes),
+            "gap_tail_ratios": list(self._gap_tail_ratios),
         }
         return status
 
@@ -449,7 +455,7 @@ def _create_fault_inject_adapter(
         rate=config.rate,
         seed=config.seed,
         gap_indices=config.gap_indices,
-        drop_chunk_hashes=config.drop_chunk_hashes,
+        gap_tail_ratios=config.gap_tail_ratios,
     )
 
 

@@ -74,9 +74,7 @@ def _wait_fd(event_fd: int, timeout: float = 5.0) -> bool:
     return False
 
 
-def _make_adapter(
-    rate: float = 0.0, seed: int = 0, gap_indices=(), drop_chunk_hashes=()
-):
+def _make_adapter(rate: float = 0.0, seed: int = 0, gap_indices=(), gap_tail_ratios=()):
     """Build a FaultInjectL2Adapter wrapping a fresh MockL2Adapter.
 
     Returns the ``(wrapper, inner)`` pair.
@@ -87,7 +85,7 @@ def _make_adapter(
         rate=rate,
         seed=seed,
         gap_indices=tuple(gap_indices),
-        drop_chunk_hashes=tuple(drop_chunk_hashes),
+        gap_tail_ratios=tuple(gap_tail_ratios),
     )
     return wrapper, inner
 
@@ -169,28 +167,42 @@ def test_load_gap_cleared_lookup_intact():
 
 
 # =============================================================================
-# drop_chunk_hashes: content-keyed, persistent across load tasks.
+# gap_tail_ratios: distance-from-tail / load-length; workload-agnostic.
 # =============================================================================
 
 
-def test_drop_chunk_hashes_content_keyed():
-    """A hashed key is dropped at load by content, regardless of its position;
-    re-loading the same key (a different task) drops it again (persistent)."""
+def test_gap_tail_ratio_position_and_scaling():
+    """A tail-ratio drops the chunk at round((1-ratio)*(n-1)); the absolute
+    index is computed from the load batch, so it scales with length -- no
+    content or position is known in advance."""
     keys = [_object_key(i) for i in range(N_KEYS)]
-    target_hex = keys[3].chunk_hash.hex()
-    adapter, inner = _make_adapter(drop_chunk_hashes=(target_hex,))
+    adapter, inner = _make_adapter(gap_tail_ratios=(0.5,))
     try:
         _store_all(adapter, keys)
         _lookup_bitmap(adapter, keys)
-        # First load: only the targeted hash is cleared, found by content not index.
-        load1 = _load_bitmap(adapter, keys)
-        assert not load1.test(3)
-        assert all(load1.test(i) for i in range(N_KEYS) if i != 3)
-        # A second load of a DIFFERENT key order still drops the same key.
-        reordered = [keys[3], keys[0], keys[1]]
-        load2 = _load_bitmap(adapter, reordered)
-        assert not load2.test(0)  # keys[3] now at position 0
-        assert load2.test(1) and load2.test(2)
+        mid = round(0.5 * (N_KEYS - 1))
+        load = _load_bitmap(adapter, keys)
+        assert not load.test(mid)
+        assert all(load.test(i) for i in range(N_KEYS) if i != mid)
+        # Same ratio on a SHORTER load drops a proportionally-different index
+        # (relative to that batch's tail) -- self-scaling, workload-agnostic.
+        short = keys[:4]
+        load2 = _load_bitmap(adapter, short)
+        assert not load2.test(round(0.5 * (len(short) - 1)))
+    finally:
+        adapter.close()
+
+
+def test_gap_tail_ratio_endpoints():
+    """ratio=0.0 drops the last chunk; ratio=1.0 drops the first."""
+    keys = [_object_key(i) for i in range(N_KEYS)]
+    adapter, inner = _make_adapter(gap_tail_ratios=(0.0, 1.0))
+    try:
+        _store_all(adapter, keys)
+        _lookup_bitmap(adapter, keys)
+        load = _load_bitmap(adapter, keys)
+        assert not load.test(0) and not load.test(N_KEYS - 1)
+        assert all(load.test(i) for i in range(1, N_KEYS - 1))
     finally:
         adapter.close()
 
