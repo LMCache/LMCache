@@ -183,6 +183,10 @@ class L1MemoryManager:
             return self._allocator.get_memory_usage()
 
         def get_address_manager(allocator: MemoryAllocatorInterface):
+            if isinstance(allocator, MixedMemoryAllocator) and hasattr(
+                allocator.pin_allocator, "address_manager"
+            ):
+                return allocator.pin_allocator.address_manager
             if isinstance(allocator, LazyMemoryAllocator):
                 return allocator.get_address_manager()
             raise NotImplementedError(
