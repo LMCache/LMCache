@@ -600,6 +600,43 @@ _CONFIG_DEFINITIONS: dict[str, dict[str, Any]] = {
             "and environment variables."
         ),
     },
+    # Activation caching (separate pinned pool; chunk keys match KV). Generalizes
+    # the hidden-state cache: one pool holds hidden states, query (Q) projections,
+    # K/V, and MLP intermediates, keyed by (CacheEngineKey, ActivationKind, layer).
+    "enable_activation_cache": {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": (
+            "Enable caching of per-token model activations alongside KV cache "
+            "entries (hidden states, query projections, MLP intermediates, etc.). "
+            "When enabled, activations are stored in a separate CPU pinned memory "
+            "pool and share chunk keys with their corresponding KV entries."
+        ),
+    },
+    "max_activation_cpu_size": {
+        "type": float,
+        "default": 2.0,
+        "env_converter": float,
+        "description": (
+            "Maximum size in GiB of pinned CPU memory for the activation cache. "
+            "Each chunk-slot tensor is shaped [chunk_size, feature_dim] in the "
+            "activation's native dtype. If the budget is too small, activation "
+            "entries may be evicted before their KV counterparts. Required to be "
+            "> 0 when enable_activation_cache=True."
+        ),
+    },
+    "activation_layers": {
+        "type": Optional[list[int]],
+        "default": None,
+        "env_converter": _to_int_list,
+        "description": (
+            "Optional allowlist of transformer layer indices accepted by "
+            "ActivationStore.store_activation. If unset (default), every layer "
+            "index passed on store is cached. Relevant only when "
+            "enable_activation_cache=True."
+        ),
+    },
 }
 
 

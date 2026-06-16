@@ -53,6 +53,7 @@ from lmcache.v1.memory_management import (  # noqa: E501
     PagedTensorMemoryAllocator,
     TensorMemoryObj,
 )
+from lmcache.v1.activation_store import ActivationStore
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.pin_monitor import PinMonitor
 from lmcache.v1.storage_backend.storage_manager import StorageManager
@@ -173,6 +174,13 @@ class LMCacheEngine:
         # if save_only_first_rank is True, only the first rank and
         # lookup server workers will initialize the storage_manager
         self.storage_manager: Optional[StorageManager] = None
+
+        # Activation cache (logically separate from KV; lives on its own pinned
+        # pool). Bound to storage_manager in post_init for coupled eviction.
+        # None when disabled in config.
+        self.activation_store: Optional[ActivationStore] = None
+        if config.enable_activation_cache:
+            self.activation_store = ActivationStore(config, token_database)
 
         # KV events
         self.kv_events_enabled = False
@@ -314,6 +322,8 @@ class LMCacheEngine:
                     lmcache_worker=self.lmcache_worker,
                     async_lookup_server=async_lookup_server,
                 )
+                if self.activation_store is not None:
+                    self.activation_store.bind_storage_manager(self.storage_manager)
             self.post_inited = True
 
     def freeze(self, enabled: bool) -> None:
@@ -1607,6 +1617,13 @@ class LMCacheEngine:
             logger.info("storage_manager closed successfully")
         except Exception as e:
             logger.error(f"Error closing storage_manager: {e}")
+
+        if self.activation_store is not None:
+            try:
+                logger.info("Closing activation_store...")
+                self.activation_store.close()
+            except Exception as e:
+                logger.error(f"Error closing activation_store: {e}")
 
         logger.info("LMCacheEngine closed.")
 
