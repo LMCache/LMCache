@@ -40,15 +40,25 @@ Options
      - Seconds without a heartbeat after which an instance is evicted
        (default: ``30``).
    * - ``--health-check-interval SECS``
-     - Seconds between eviction sweeps; ``0`` disables the loop
+     - Seconds between health-check sweeps; ``0`` disables the loop
        (default: ``10``).
+   * - ``--eviction-check-interval SECS``
+     - Seconds between L2 eviction sweeps; ``0`` disables the loop
+       (default: ``5``).
+   * - ``--eviction-ratio RATIO``
+     - Fraction of tracked keys (by count) to evict per cycle, ``0.0`` to
+       ``1.0`` (default: ``0.2``).
+   * - ``--trigger-watermark RATIO``
+     - Eviction fires when usage reaches this fraction of the quota, ``0.0``
+       (exclusive) to ``1.0`` (default: ``1.0``).
 
 Configuration
 -------------
 
 Every flag is optional. Unset flags fall back to the
 ``LMCACHE_MP_COORDINATOR_*`` environment variables (``HOST``, ``PORT``,
-``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``), and then to the built-in
+``INSTANCE_TIMEOUT``, ``HEALTH_CHECK_INTERVAL``, ``EVICTION_CHECK_INTERVAL``,
+``EVICTION_RATIO``, ``TRIGGER_WATERMARK``), and then to the built-in
 defaults. A supplied flag always overrides the matching env-derived value, so
 env-only deployments keep working unchanged.
 

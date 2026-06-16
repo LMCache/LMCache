@@ -553,7 +553,7 @@ class RawBlockL2Adapter(L2AdapterInterface):
         if not keys:
             return
         try:
-            listener.on_l2_keys_stored(keys)
+            listener.on_l2_keys_stored(keys, [0] * len(keys))
         except Exception as e:
             logger.warning(
                 "RawBlockL2Adapter listener recovery bootstrap failed: %s", e

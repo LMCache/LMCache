@@ -982,6 +982,37 @@ class FsBackendBenchmark(RemoteBackendBenchmark):
 
 
 # ============================================================================
+# BigtableBackendBenchmark Implementation
+# ============================================================================
+class BigtableBackendBenchmark(RemoteBackendBenchmark):
+    def __init__(
+        self,
+        num_ops: int,
+        concurrency: int,
+        remote_url: str,
+        use_odirect: bool,
+        alignment: int,
+        write_bench: bool,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+        verify_integrity: bool = False,
+    ):
+        super().__init__(
+            "bigtable",
+            num_ops,
+            concurrency,
+            remote_url,
+            use_odirect,
+            alignment,
+            write_bench,
+            chunk_size,
+            verify_integrity,
+        )
+
+    @property
+    def extra_config_keys(self) -> dict:
+        return {}
+
+
 # Main Entry Point
 # ============================================================================
 def main() -> None:
@@ -1000,6 +1031,7 @@ def main() -> None:
             "both",
             "hf3fs_backend",
             "fs_backend",
+            "bigtable",
         ],
         default="both",
         help=(
@@ -1172,6 +1204,22 @@ def main() -> None:
         )
         result = fs_bench.run()
         result["fs_dir"] = args.remote_url
+        results.append(result)
+
+    # Run BigtableBackend benchmark
+    if args.backend in ("bigtable",):
+        bigtable_bench = BigtableBackendBenchmark(
+            num_ops=args.num_ops,
+            concurrency=args.concurrency,
+            remote_url=args.remote_url,
+            use_odirect=False,
+            alignment=args.alignment,
+            write_bench=write_bench,
+            chunk_size=args.chunk_size,
+            verify_integrity=args.verify_integrity,
+        )
+        result = bigtable_bench.run()
+        result["bigtable_table"] = args.remote_url
         results.append(result)
 
     # Print results

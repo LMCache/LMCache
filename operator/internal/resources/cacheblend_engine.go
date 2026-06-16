@@ -26,9 +26,10 @@ import (
 
 const (
 	// cbEngineType is the value of the --engine-type flag that selects the
-	// CacheBlend blend_v3 engine on the lmcache server binary
-	// (cacheblend-plugin/README.md:24).
-	cbEngineType = "blend_v3"
+	// CacheBlend V3 engine on the lmcache server binary. The server maps the
+	// value "blend" to BlendV3Module; "blend_v3" is no longer recognized
+	// (lmcache/v1/multiprocess/server.py).
+	cbEngineType = "blend"
 
 	// cbL1AlignBytes is the value of the --l1-align-bytes flag required by the
 	// blend server (blend_server.sh:31).
@@ -88,7 +89,7 @@ func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1al
 
 // BuildCBEngineArgs returns the server CLI args for the blend_v3 engine: the
 // proven LMCacheEngine serialization (--host/--port/--l1-size-gb/--chunk-size/
-// eviction/prometheus/L2) plus the CacheBlend-specific --engine-type blend_v3 and
+// eviction/prometheus/L2) plus the CacheBlend-specific --engine-type blend and
 // --l1-align-bytes flags. The blend flags are inserted before the user-supplied
 // extraArgs so a user can still override them.
 func BuildCBEngineArgs(spec *lmcachev1alpha1.CacheBlendEngineSpec) []string {

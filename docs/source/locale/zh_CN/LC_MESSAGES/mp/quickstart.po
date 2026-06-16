@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-06-15 11:17+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -37,7 +37,7 @@ msgstr "本地快速开始"
 msgid "**Step 1: Start the LMCache server**"
 msgstr "**步骤 1：启动 LMCache 服务器**"
 
-#: ../../source/mp/quickstart.rst:17
+#: ../../source/mp/quickstart.rst:17 ../../source/mp/quickstart.rst:199
 msgid "Expected log output:"
 msgstr "预期的日志输出："
 
@@ -46,7 +46,9 @@ msgid ""
 "The default ZMQ port is **5555** (use ``--port`` to change it). The HTTP "
 "frontend listens on **8080** by default (use ``--http-port`` to change "
 "it)."
-msgstr "默认的 ZMQ 端口是 **5555**（使用 ``--port`` 来更改）。HTTP 前端默认监听 **8080**（使用 ``--http-port`` 来更改）。"
+msgstr ""
+"默认的 ZMQ 端口是 **5555**（使用 ``--port`` 来更改）。HTTP 前端默认监听 **8080**（使用 ``--http-"
+"port`` 来更改）。"
 
 #: ../../source/mp/quickstart.rst:28
 msgid "**Step 2: Start vLLM with the LMCache connector**"
@@ -61,7 +63,9 @@ msgid ""
 "This connects to the default LMCache port (5555) on localhost.  If you "
 "changed the server port with ``--port``, pass it on the vLLM side via "
 "``kv_connector_extra_config``:"
-msgstr "这将连接到本地主机上的默认 LMCache 端口 (5555)。如果您使用 ``--port`` 更改了服务器端口，请通过 ``kv_connector_extra_config`` 在 vLLM 端传递它："
+msgstr ""
+"这将连接到本地主机上的默认 LMCache 端口 (5555)。如果您使用 ``--port`` 更改了服务器端口，请通过 "
+"``kv_connector_extra_config`` 在 vLLM 端传递它："
 
 #: ../../source/mp/quickstart.rst:49
 msgid "To connect to a remote host, also set ``lmcache.mp.host``:"
@@ -99,7 +103,9 @@ msgstr "**步骤 1：启动 LMCache 容器**"
 msgid ""
 "``--network host`` lets the vLLM container reach the LMCache server on "
 "localhost.  ``--ipc host`` is required for CUDA IPC shared memory."
-msgstr "``--network host`` 允许 vLLM 容器访问本地主机上的 LMCache 服务器。 ``--ipc host`` 是 CUDA IPC 共享内存所必需的。"
+msgstr ""
+"``--network host`` 允许 vLLM 容器访问本地主机上的 LMCache 服务器。 ``--ipc host`` 是 CUDA "
+"IPC 共享内存所必需的。"
 
 #: ../../source/mp/quickstart.rst:110
 msgid "**Step 2: Start the vLLM container**"
@@ -110,9 +116,11 @@ msgid ""
 "Use the nightly images (``lmcache/standalone:nightly`` and ``lmcache"
 "/vllm-openai:latest-nightly``) as the MP-mode interfaces are actively "
 "evolving."
-msgstr "使用夜间构建镜像（``lmcache/standalone:nightly`` 和 ``lmcache/vllm-openai:latest-nightly``），因为 MP 模式接口正在积极演进。"
+msgstr ""
+"使用夜间构建镜像（``lmcache/standalone:nightly`` 和 ``lmcache/vllm-openai:latest-"
+"nightly``），因为 MP 模式接口正在积极演进。"
 
-#: ../../source/mp/quickstart.rst:127
+#: ../../source/mp/quickstart.rst:127 ../../source/mp/quickstart.rst:238
 msgid "**Step 3: Send requests** the same way as in the local quick start."
 msgstr "**步骤 3：发送请求** 与本地快速入门相同。"
 
@@ -177,7 +185,9 @@ msgid ""
 "Force-clears all KV cache data stored in L1 (CPU) memory, including "
 "objects with active read/write locks. Returns ``{\"status\": \"ok\"}`` on"
 " success."
-msgstr "强制清除存储在 L1 (CPU) 内存中的所有 KV Cache 数据，包括具有活动读/写锁的对象。成功时返回 ``{\\\"status\\\": \\\"ok\\\"}``。"
+msgstr ""
+"强制清除存储在 L1 (CPU) 内存中的所有 KV Cache 数据，包括具有活动读/写锁的对象。成功时返回 "
+"``{\\\"status\\\": \\\"ok\\\"}``。"
 
 #: ../../source/mp/quickstart.rst:162
 msgid "``/status``"
@@ -198,4 +208,45 @@ msgid ""
 "The ZMQ server runs on the same default port (5555) and accepts vLLM "
 "connections exactly as in the local quick start."
 msgstr "ZMQ 服务器在相同的默认端口（5555）上运行，并接受 vLLM 连接，正如本地快速入门中所示。"
+
+#: ../../source/mp/quickstart.rst:185
+msgid "CPU-Only Quick Start"
+msgstr "仅 CPU 快速入门"
+
+#: ../../source/mp/quickstart.rst:187
+msgid ""
+"LMCache MP mode works on hosts without a GPU. The server runs with a "
+"``StubCPUDevice`` and vLLM uses its CPU backend. KV tensors are shared "
+"between vLLM and the LMCache server via POSIX shared memory (zero-copy, "
+"no GPU required)."
+msgstr "LMCache MP 模式在没有 GPU 的主机上运行。服务器使用 ``StubCPUDevice`` 运行，vLLM 使用其 CPU 后端。KV 张量通过 POSIX 共享内存（零拷贝，无需 GPU）在 vLLM 和 LMCache 服务器之间共享。"
+
+#: ../../source/mp/quickstart.rst:192
+msgid "**Step 1: Start the LMCache server (no GPU needed)**"
+msgstr "**步骤 1：启动 LMCache 服务器（无需 GPU）**"
+
+#: ../../source/mp/quickstart.rst:206
+msgid "**Step 2: Start vLLM with the engine-driven transfer mode**"
+msgstr "**步骤 2：启动 vLLM 以引擎驱动的传输模式**"
+
+#: ../../source/mp/quickstart.rst:208
+msgid ""
+"Pass ``lmcache.mp.mp_transfer_mode=engine_driven`` in "
+"``kv_connector_extra_config`` to enable the POSIX-SHM zero-copy path. At "
+"startup the vLLM worker migrates each KV cache tensor to a shared memory "
+"segment (``/lmcache_kv_<pid>_<idx>``) so the LMCache server can map the "
+"same physical pages directly."
+msgstr "在 ``kv_connector_extra_config`` 中传递 ``lmcache.mp.mp_transfer_mode=engine_driven`` 以启用 POSIX-SHM 零拷贝路径。在启动时，vLLM 工作进程将每个 KV Cache 张量迁移到一个共享内存段 (``/lmcache_kv_<pid>_<idx>``)，以便 LMCache 服务器可以直接映射相同的物理页面。"
+
+#: ../../source/mp/quickstart.rst:230
+msgid "Expected log output on the vLLM side:"
+msgstr "在 vLLM 端预期的日志输出："
+
+#: ../../source/mp/quickstart.rst:241
+msgid ""
+"The default ``auto`` transfer mode routes CPU tensors to the "
+"``lmcache_driven`` path (worker-side gather/scatter). Use "
+"``mp_transfer_mode=engine_driven`` explicitly to get the zero-copy SHM "
+"path described above."
+msgstr "默认的 ``auto`` 传输模式将 CPU 张量路由到 ``lmcache_driven`` 路径（工作端聚集/散布）。要显式使用上述描述的零拷贝共享内存路径，请使用 ``mp_transfer_mode=engine_driven``。"
 
