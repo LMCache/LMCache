@@ -451,7 +451,7 @@ class LMCacheDrivenTransferModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    def get_context_entry(self, instance_id: int) -> ContextEntry | None:
+    def get_and_touch_context_entry(self, instance_id: int) -> ContextEntry | None:
         """Return the entry for ``instance_id``, refreshing its last-seen time.
 
         The refresh keeps an actively transferring worker from being reaped
@@ -508,8 +508,6 @@ class LMCacheDrivenTransferModule:
 
         A ping-proven instance is judged against ``reap_timeout_s``; one
         that has never pinged against the larger ``registration_grace_s``.
-        Stale entries are collected and popped under the lock, then cleaned
-        up (layout-registry unregister, ``empty_cache``) outside it.
 
         Args:
             reap_timeout_s: Silence budget for ping-proven instances.
@@ -745,7 +743,7 @@ class LMCacheDrivenTransferModule:
         """
         st = time.perf_counter()
 
-        entry = self.get_context_entry(instance_id)
+        entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
         cache_context = entry.cache_context
@@ -949,7 +947,7 @@ class LMCacheDrivenTransferModule:
         """
         st = time.perf_counter()
 
-        entry = self.get_context_entry(instance_id)
+        entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
         cache_context = entry.cache_context

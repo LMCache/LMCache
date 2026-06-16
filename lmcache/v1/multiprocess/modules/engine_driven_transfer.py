@@ -78,12 +78,9 @@ class EngineDrivenTransferModule:
         self._ctx = ctx
         self._engine_driven_contexts: dict[int, EngineDrivenContextEntry] = {}
         self._strategies: dict[int, TransferStrategy] = {}
-        # Guards _engine_driven_contexts and _strategies together: they are
-        # inserted and popped as a pair so "strategy present iff entry
-        # present" always holds (a reap racing a re-register can never strand
-        # a context without its strategy). The reaper mutates them off the MQ
-        # main loop. Distinct from _pending_shm_lock, which is never held
-        # together with this lock.
+        # Guards _engine_driven_contexts and _strategies together (the reaper
+        # mutates them off the MQ main loop). Leaf lock, never held with
+        # _pending_shm_lock.
         self._lock = threading.Lock()
         self._pending_shm_writes: dict[
             tuple[int, IPCCacheServerKey], list[ObjectKey]
@@ -197,9 +194,7 @@ class EngineDrivenTransferModule:
         """Reap non-GPU registrations that have gone silent.
 
         A ping-proven instance is judged against ``reap_timeout_s``; one that
-        has never pinged against the larger ``registration_grace_s``. The
-        entry and its strategy are popped as a pair under the lock; cleanup
-        (pending-transfer sweep, layout-registry unregister) runs outside it.
+        has never pinged against the larger ``registration_grace_s``.
 
         Args:
             reap_timeout_s: Silence budget for ping-proven instances.

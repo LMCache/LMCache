@@ -18,32 +18,37 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.config import MPServerConfig
-from lmcache.v1.multiprocess.modules import gpu_transfer as gpu_mod
-from lmcache.v1.multiprocess.modules import non_gpu_transfer as non_gpu_mod
-from lmcache.v1.multiprocess.modules.gpu_transfer import ContextEntry, GPUTransferModule
+from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
+from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    ContextEntry,
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
 from lmcache.v1.periodic_thread import PeriodicThreadRegistry
 
 
-def _bare_gpu_module() -> GPUTransferModule:
-    """A GPUTransferModule with only the liveness state initialized.
+def _bare_gpu_module() -> LMCacheDrivenTransferModule:
+    """A LMCacheDrivenTransferModule with only the liveness state initialized.
 
     Bypasses __init__ (which starts a CUDA host-func dispatcher) so the
     liveness methods can be exercised without GPU hardware.
     """
-    module = GPUTransferModule.__new__(GPUTransferModule)
+    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module
 
 
-def _bare_non_gpu_module() -> NonGPUTransferModule:
-    """A NonGPUTransferModule with only the liveness state initialized."""
-    module = NonGPUTransferModule.__new__(NonGPUTransferModule)
+def _bare_non_gpu_module() -> EngineDrivenTransferModule:
+    """A EngineDrivenTransferModule with only the liveness state initialized."""
+    module = EngineDrivenTransferModule.__new__(EngineDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
-    module._non_gpu_contexts = {}
+    module._engine_driven_contexts = {}
     module._strategies = {}
     module._lock = threading.Lock()
     module._pending_shm_writes = {}
@@ -63,7 +68,7 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
 
     assert module.tracked_instance_count() == 1
-    entry = module.get_context_entry(1)
+    entry = module.get_and_touch_context_entry(1)
     assert entry is not None and entry.has_liveness_signal is False
 
 
@@ -85,11 +90,11 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
 
 
 def test_gpu_touch_latches_get_does_not() -> None:
-    """touch_instance marks ping-proven; get_context_entry only refreshes."""
+    """touch_instance marks ping-proven; get_and_touch_context_entry only refreshes."""
     module = _bare_gpu_module()
     module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, last_seen=0.0)
 
-    module.get_context_entry(1)
+    module.get_and_touch_context_entry(1)
     assert module._cache_contexts[1].last_seen > 0.0
     assert module._cache_contexts[1].has_liveness_signal is False
 
@@ -137,11 +142,11 @@ def test_non_gpu_reap_pops_strategy_as_pair() -> None:
     'strategy present iff entry present'."""
     module = _bare_non_gpu_module()
     old = time.monotonic() - 1000.0
-    module._non_gpu_contexts[1] = non_gpu_mod.NonGPUContextEntry(
+    module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
         MagicMock(), "m", 1, old, True
     )
     module._strategies[1] = MagicMock()
-    module._non_gpu_contexts[2] = non_gpu_mod.NonGPUContextEntry(
+    module._engine_driven_contexts[2] = non_gpu_mod.EngineDrivenContextEntry(
         MagicMock(), "m", 1, old, False
     )
     module._strategies[2] = MagicMock()
@@ -157,7 +162,7 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
     """_resolve_for_transfer returns (entry, strategy) and refreshes
     last_seen; an unknown id raises ValueError."""
     module = _bare_non_gpu_module()
-    module._non_gpu_contexts[1] = non_gpu_mod.NonGPUContextEntry(
+    module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
         MagicMock(), "m", 1, 0.0, False
     )
     strategy = MagicMock()

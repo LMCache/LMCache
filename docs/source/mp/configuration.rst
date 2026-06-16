@@ -103,7 +103,7 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - Silence budget (seconds) after which a worker that has sent at
        least one heartbeat PING but then gone quiet has its KV cache
        registration reaped, freeing the leaked GPU context and CUDA IPC
-       handles. ``0`` disables reaping. Keep this at least 3x the vLLM
+       handles. ``0`` disables reaping. Keep this at least 3x the engine
        adapter's ``lmcache.mp.heartbeat_interval`` (default 10s) so a few
        missed pings never reap a live worker; the adapter warns at startup
        if its interval is raised without raising this.

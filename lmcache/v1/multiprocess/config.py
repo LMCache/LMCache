@@ -71,8 +71,8 @@ class MPServerConfig:
 
     worker_reap_timeout_seconds: float = 120.0
     """Silence budget (seconds) after which a ping-proven worker's KV cache
-    registration is reaped. 0 disables worker reaping. Keep it >= 3 x the vLLM
-    adapter's heartbeat interval so a few missed pings never reap a live
+    registration is reaped. 0 disables worker reaping. Keep it >= 3 x the
+    engine adapter's heartbeat interval so a few missed pings never reap a live
     worker."""
 
     worker_registration_grace_seconds: float = 3600.0
@@ -296,7 +296,7 @@ def add_mp_server_args(
         default=120.0,
         help="Silence budget (s) before a ping-proven worker's KV cache "
         "registration is reaped. 0 disables reaping. Must be >= 3 x the "
-        "vLLM adapter's heartbeat interval. Default is 120.",
+        "engine adapter's heartbeat interval. Default is 120.",
     )
     mp_group.add_argument(
         "--worker-registration-grace-seconds",

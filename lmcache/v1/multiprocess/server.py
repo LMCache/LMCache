@@ -194,7 +194,8 @@ def _build_modules(
 
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
-    blend_modules: list[EngineModule] = []
+    # At most one blend module is ever built (engine_type selects one).
+    blend_module: EngineModule | None = None
     reap_listeners: list[InstanceReapListener] = []
 
     if mp_config.engine_type == "blend_legacy":
@@ -207,7 +208,7 @@ def _build_modules(
         # First Party
         from lmcache.v1.multiprocess.modules.blend import BlendModule
 
-        blend_modules.append(BlendModule(ctx))
+        blend_module = BlendModule(ctx)
 
     # "blend" selects CacheBlend V3 (the current implementation).
     if mp_config.engine_type == "blend":
@@ -232,7 +233,7 @@ def _build_modules(
         blend_v3 = BlendV3Module(
             ctx, transfer_module, lookup_module, coordinator=coordinator
         )
-        blend_modules.append(blend_v3)
+        blend_module = blend_v3
         reap_listeners.append(blend_v3)
 
     liveness_targets: list[InstanceLivenessTarget] = [
@@ -251,6 +252,7 @@ def _build_modules(
     # ManagementModule precedes the transfer/blend modules so close() stops
     # and joins the reaper before those modules clear their state and before
     # storage_manager.close() runs.
+    blend_modules = [blend_module] if blend_module is not None else []
     return [lookup_module, management, *transfer_modules, *blend_modules]
 
 

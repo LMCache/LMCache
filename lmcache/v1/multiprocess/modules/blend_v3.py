@@ -453,7 +453,7 @@ class BlendV3Module:
         Raises:
             ValueError: If ``instance_id`` has no registered KV cache.
         """
-        if self._transfer_module.get_context_entry(instance_id) is None:
+        if self._transfer_module.get_and_touch_context_entry(instance_id) is None:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
@@ -505,7 +505,7 @@ class BlendV3Module:
                 ``UNREGISTER_KV_CACHE`` to free the KV cache itself).
         """
         self._cb_rope_state.pop(instance_id, None)
-        if self._transfer_module.get_context_entry(instance_id) is None:
+        if self._transfer_module.get_and_touch_context_entry(instance_id) is None:
             logger.warning(
                 "cb_unregister_rope: instance %d not registered", instance_id
             )
@@ -976,7 +976,7 @@ class BlendV3Module:
             job = (tokens_in_range, chunk_hashes, start_chunk_idx, key.start)
             with self._pending_fp_lock:
                 self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
-            entry = self._transfer_module.get_context_entry(instance_id)
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
             if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
                 gpu_ctx.cupy_stream.launch_host_func(
@@ -1249,7 +1249,7 @@ class BlendV3Module:
             ValueError: If the instance has no registered KV cache or rope
                 state. MLA layouts are unsupported (raised during re-RoPE).
         """
-        entry = self._transfer_module.get_context_entry(instance_id)
+        entry = self._transfer_module.get_and_touch_context_entry(instance_id)
         if entry is None:
             raise ValueError(
                 f"Instance {instance_id} not registered for paged KV cache"

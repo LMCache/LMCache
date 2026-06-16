@@ -7,7 +7,6 @@ from typing import Any, Callable, NoReturn, Protocol
 import enum
 import os
 import threading
-import time
 import uuid
 
 # Third Party
@@ -420,11 +419,6 @@ class HeartbeatThread(PeriodicThread):
         self._health_event = health_event
         self._interval = interval
         self._instance_id = instance_id
-        # Monotonic time of the last successful cycle, used for freeze-gap
-        # detection. Baselined in start() (not here): under lazy start,
-        # construction can precede the first cycle by the whole warmup, which
-        # would otherwise misfire the detector on the first ping.
-        self._last_success: float = 0.0
 
         # Optional callback invoked on the unhealthy->healthy edge,
         # before the health event is set. See register_recover_callback.
@@ -455,15 +449,6 @@ class HeartbeatThread(PeriodicThread):
         """
         self._recover_callback = callback
 
-    def start(self) -> threading.Thread | None:
-        """Baseline the freeze-gap clock, then start the thread.
-
-        Returns:
-            The started thread, or None if already running.
-        """
-        self._last_success = time.monotonic()
-        return super().start()
-
     def _execute(self) -> ThreadRunSummary:
         """Run one heartbeat cycle: ping, recover callback, event update.
 
@@ -482,21 +467,6 @@ class HeartbeatThread(PeriodicThread):
                 message="stop requested; skipping health update",
             )
 
-        # Freeze-gap: a ping that succeeds while still "healthy" after a long
-        # no-ping gap means the whole process was frozen (SIGSTOP, cgroup
-        # freezer, VM migration) past the server's reap window, so the server
-        # may have reaped us. No edge would fire to re-register, so force one
-        # unhealthy cycle; the next success then takes the recovery edge.
-        now = time.monotonic()
-        if healthy and was_healthy and now - self._last_success > 3 * self._interval:
-            self._health_event.clear()
-            logger.warning(
-                "LMCache heartbeat gap of %.1fs (> 3x interval); forcing "
-                "re-registration in case the server reaped this worker",
-                now - self._last_success,
-            )
-            return ThreadRunSummary(success=True, message="freeze-gap")
-
         need_trigger_recover = (
             healthy and not was_healthy and self._recover_callback is not None
         )
@@ -511,9 +481,6 @@ class HeartbeatThread(PeriodicThread):
 
         if healthy:
             self._health_event.set()
-            # Stamp after the callback so a slow re-registration does not
-            # itself count as a freeze gap on the next cycle.
-            self._last_success = time.monotonic()
             if not was_healthy:
                 logger.warning(
                     "LMCache server is healthy again — resuming normal operation"
@@ -1217,7 +1184,7 @@ class LMCacheMPWorkerAdapter:
         ``last_seen``, so it is never reaped while alive -- no re-registration
         is needed at startup, and the first store/retrieve is not gated. The
         recover callback still re-registers on a genuine unhealthy->healthy
-        edge (server restart) and on freeze-gap recovery.
+        edge (server restart).
         """
         if self._heartbeat is not None:
             return
