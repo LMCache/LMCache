@@ -89,6 +89,24 @@ the transferred bytes against that pattern (no `--verify` needed on the server).
   front and may be CUDA-pinned; keep it within available host memory.
 - Requires a working transfer channel runtime (for `nixl`, a UCX backend).
 
+## Performance: NUMA placement
+
+On a multi-NUMA host with NICs spread across nodes (e.g. an 8-NIC, 2-socket
+box), run **both** the server and client under `numactl --interleave=all`:
+
+```bash
+numactl --interleave=all \
+python -m lmcache.tools.transfer_channel_benchmark --role server ...
+```
+
+Without it the registered buffer is allocated on a single NUMA node, so only the
+rails local to that node reach full bandwidth and the rest are throttled by the
+cross-socket link — roughly halving throughput. In testing on a 2-NUMA / 8-rail
+host this was the difference between **~110 GB/s** (no interleave) and
+**~210 GB/s** (`--interleave=all`), with everything else identical. Page size
+only matters in the small regime (descriptor-bound below ~64KB); from ~128KB up
+the transfer is bandwidth-bound and flat.
+
 ## Troubleshooting
 
 - **Client hangs after "connected" or during connect, then raises
