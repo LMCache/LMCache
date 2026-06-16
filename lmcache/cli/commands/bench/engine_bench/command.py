@@ -33,7 +33,10 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
     StatsCollector,
 )
-from lmcache.cli.commands.bench.engine_bench.workloads import create_workload
+from lmcache.cli.commands.bench.engine_bench.workloads import (
+    create_workload,
+    validate_max_output_length_supported,
+)
 from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
@@ -41,6 +44,10 @@ if TYPE_CHECKING:
     from lmcache.cli.commands.base import BaseCommand
 
 logger = init_logger(__name__)
+
+# Default for --ldqa-max-output-length; centralized so the "max output length
+# explicitly set" check stays in sync with the parser.
+_LDQA_MAX_OUTPUT_LENGTH_DEFAULT = 128
 
 
 # ---------------------------------------------------------------------------
@@ -233,12 +240,13 @@ def register_engine_parser(
         help="Max concurrent in-flight requests (default: 3).",
     )
     group.add_argument(
-        "--ldqa-output-length",
+        "--ldqa-max-output-length",
         type=int,
-        default=128,
+        default=_LDQA_MAX_OUTPUT_LENGTH_DEFAULT,
         help=(
-            "Max tokens to generate per benchmark query (default: 128). "
-            "Combine with --ignore-eos for a reproducible decode phase."
+            f"Max tokens to generate per benchmark query "
+            f"(default: {_LDQA_MAX_OUTPUT_LENGTH_DEFAULT}). Combine with "
+            "--ignore-eos for a reproducible decode phase."
         ),
     )
 
@@ -542,6 +550,11 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
 
     # 1. Parse config
     config = parse_args_to_config(args)
+
+    # 1a. A max output length can only be set for workloads that have a
+    # max-output-length parameter; reject it for any other workload.
+    if args.ldqa_max_output_length != _LDQA_MAX_OUTPUT_LENGTH_DEFAULT:
+        validate_max_output_length_supported(config.workload)
 
     # 1b. --export-config: save resolved config and exit
     export_path = getattr(args, "export_config", None)

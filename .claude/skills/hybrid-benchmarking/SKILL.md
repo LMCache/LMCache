@@ -51,7 +51,7 @@ saturation gap is exactly what LMCache's CPU pool fills.
 ## Make the criteria visible
 
 Default `long-doc-qa` is prefill-bound, which *hides* the decode gap. **Always** pass
-`--ignore-eos --ldqa-output-length <N>` (≈2048 at L=24 000) → decode-bound *and* deterministic
+`--ignore-eos --ldqa-max-output-length <N>` (≈2048 at L=24 000) → decode-bound *and* deterministic
 (identical total output tokens/run, so decode-throughput numbers are reproducible). Size the
 working set to **overflow the GPU pool but fit the LMCache pool with margin** (step 3).
 
@@ -59,7 +59,7 @@ working set to **overflow the GPU pool but fit the LMCache pool with margin** (s
 
 **0 — Versions + env.** Record for the report (benchmarks are meaningless without them):
 `vllm --version` (→ commit); LMCache `git rev-parse --short HEAD` + `git status --short` (note
-any local patch, e.g. the `--ignore-eos` / `--ldqa-output-length` bench patch → record "base
+any local patch, e.g. the `--ignore-eos` / `--ldqa-max-output-length` bench patch → record "base
 commit + with `<patch>`"). Export `HF_HOME` if weights live off-default — for **every** command
 (env doesn't persist across tool calls). Read the model's `docs/source/recipes/*.rst` for
 validated flags + quirks (else `docs/source/mp/hybrid_models.rst`, and warn it's unvalidated).
@@ -88,7 +88,7 @@ via `--tokens-per-gb-kvcache` so `num_documents` is identical across runs. (Real
 `P_B/(L+output)`, a meaningful prefix). `num_documents = floor(kv_cache_volume_gb × tokens_per_gb
 / L)` chosen so it **overflows GPU** (`num_docs × L > P_B`) and **fits LMCache with margin**
 (real storage ≈ 1.4×(tokens / tokens_per_gb) ≤ ~0.6 × `l1_size_gb`, watermark 0.95). `l1_size_gb`
-≤ host RAM and /dev/shm. Set `--ldqa-output-length` so decode dominates (≈2048 @ L=24 000). Log
+≤ host RAM and /dev/shm. Set `--ldqa-max-output-length` so decode dominates (≈2048 @ L=24 000). Log
 the operating point and proceed.
 
 **4 — Freeze one shared config.**
@@ -96,7 +96,7 @@ the operating point and proceed.
 lmcache bench engine --engine-url http://localhost:8000 --workload long-doc-qa \
     --model <model> --tokens-per-gb-kvcache <N> --kv-cache-volume <GB> \
     --ldqa-document-length <L> --ldqa-query-per-document 1 \
-    --ldqa-num-inflight-requests <≥ hybrid batch> --ldqa-output-length <out> --ignore-eos \
+    --ldqa-num-inflight-requests <≥ hybrid batch> --ldqa-max-output-length <out> --ignore-eos \
     --no-interactive --export-config "$OUT/shared.json"
 ```
 Replay every run with `--config "$OUT/shared.json"` (so `num_documents` is byte-identical, even in A/B with no server).
@@ -153,7 +153,7 @@ set → nothing for LMCache to serve); large `--l1-size-gb` (full per-token stat
 
 | Symptom | Fix |
 |--|--|
-| B decode ≈ A (not ≫) | run is prefill-bound — add `--ignore-eos`, raise `--ldqa-output-length` |
+| B decode ≈ A (not ≫) | run is prefill-bound — add `--ignore-eos`, raise `--ldqa-max-output-length` |
 | D hit ≪ 100 % | working set hit the watermark mid-fill — pre-pin before D; raise `--l1-size-gb`; shrink working set (real ≈1.4× est.) |
 | D aborts "register_kv_caches within 300s" | big pinned pool → set `lmcache.mp.mq_timeout` ≥ 900 |
 | reg hangs "Wrapping N KV tensors for IPC" | server/connector transfer-mode mismatch — use default (auto) on both |
@@ -167,7 +167,7 @@ set → nothing for LMCache to serve); large `--l1-size-gb` (full per-token stat
 
 - Allocator off: `--disable-hybrid-kv-cache-manager` (sliding-window/dense only).
 - Prefix caching: `--no-enable-prefix-caching` / `--enable-prefix-caching`.
-- Deterministic decode-bound: `--ignore-eos --ldqa-output-length <N>`.
+- Deterministic decode-bound: `--ignore-eos --ldqa-max-output-length <N>`.
 - Pools: `--max-model-len auto`; `lmcache server --l1-size-gb <GB> --eviction-trigger-watermark 0.95` (start early to pre-pin).
 - LMCache wiring: `--kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.port":5560,"lmcache.mp.mq_timeout":900}}'`.
 - Mamba/GDN: `--mamba-cache-mode align --max-num-batched-tokens 2N-1`, server `--chunk-size N`.

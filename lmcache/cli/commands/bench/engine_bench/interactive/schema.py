@@ -279,8 +279,8 @@ ALL_ITEMS: list[ConfigItem] = [
         phase=PHASE_WORKLOAD,
     ),
     ConfigItem(
-        key="ldqa_output_length",
-        display_name="Output length (tokens)",
+        key="ldqa_max_output_length",
+        display_name="Max output length (tokens)",
         description="Max tokens to generate per benchmark query.",
         input_type="int",
         default=128,
