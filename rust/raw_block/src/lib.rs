@@ -443,8 +443,7 @@ fn nvme_uring_cmd_prep(
     // Validate offset alignment
     if !(offset as usize).is_multiple_of(lba_size) {
         return Err(PyValueError::new_err(format!(
-            "offset must be aligned to LBA size ({} bytes), got offset={}",
-            lba_size, offset
+            "offset must be aligned to LBA size ({lba_size} bytes), got offset={offset}"
         )));
     }
 
