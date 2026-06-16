@@ -146,7 +146,13 @@ def discover_subclasses(
         def _scan_module(module: ModuleType) -> Iterator[type[T]]:
             """Yield classes from *module* that match all filters."""
             for _, obj in inspect.getmembers(module, inspect.isclass):
-                if not issubclass(obj, base_class) or obj is base_class:
+                try:
+                    if not issubclass(obj, base_class) or obj is base_class:
+                        continue
+                except TypeError:
+                    # typing.GenericAlias (e.g. ``list[Foo]``) passes
+                    # inspect.isclass on Python < 3.12 but issubclass
+                    # raises on ABCs; skip silently.
                     continue
                 if not include_abstract and inspect.isabstract(obj):
                     continue
