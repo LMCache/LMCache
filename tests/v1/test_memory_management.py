@@ -1132,3 +1132,99 @@ class TestMixedMemoryAllocatorCpuOom:
 
         allocator.close()
         allocator.close()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="LazyMemoryAllocator requires CUDA for memory pinning",
+)
+class TestLazyMemoryAllocatorCpuOom:
+    """Tests for LazyMemoryAllocator graceful handling of CPU RAM exhaustion."""
+
+    @pytest.fixture
+    def lazy_allocator_cls(self):
+        from lmcache.v1.lazy_memory_allocator import LazyMemoryAllocator
+
+        return LazyMemoryAllocator
+
+    def test_init_oom_sets_flag(self, lazy_allocator_cls):
+        """_cpu_oom is True when _pin_memory_chunk raises at init."""
+        from unittest.mock import patch
+
+        with patch.object(
+            lazy_allocator_cls,
+            "_pin_memory_chunk",
+            side_effect=RuntimeError("cudaHostRegister failed: out of memory"),
+        ):
+            allocator = lazy_allocator_cls(init_size=1 << 26, final_size=1 << 27)
+
+        assert allocator._cpu_oom
+        allocator.close()
+
+    def test_init_oom_allocate_returns_none(self, lazy_allocator_cls):
+        """allocate() returns None after init-time pin failure."""
+        from unittest.mock import patch
+
+        with patch.object(
+            lazy_allocator_cls,
+            "_pin_memory_chunk",
+            side_effect=RuntimeError("cudaHostRegister failed: out of memory"),
+        ):
+            allocator = lazy_allocator_cls(init_size=1 << 26, final_size=1 << 27)
+
+        result = allocator.allocate(torch.Size([512, 512]), torch.float32)
+        assert result is None
+        allocator.close()
+
+    def test_init_oom_batched_allocate_returns_none(self, lazy_allocator_cls):
+        """batched_allocate() returns None after init-time pin failure."""
+        from unittest.mock import patch
+
+        with patch.object(
+            lazy_allocator_cls,
+            "_pin_memory_chunk",
+            side_effect=RuntimeError("cudaHostRegister failed: out of memory"),
+        ):
+            allocator = lazy_allocator_cls(init_size=1 << 26, final_size=1 << 27)
+
+        result = allocator.batched_allocate(torch.Size([512, 512]), torch.float32, 4)
+        assert result is None
+        allocator.close()
+
+    def test_init_oom_close_does_not_raise(self, lazy_allocator_cls):
+        """close() is safe when the allocator OOM'd at init (no thread was started)."""
+        from unittest.mock import patch
+
+        with patch.object(
+            lazy_allocator_cls,
+            "_pin_memory_chunk",
+            side_effect=RuntimeError("cudaHostRegister failed: out of memory"),
+        ):
+            allocator = lazy_allocator_cls(init_size=1 << 26, final_size=1 << 27)
+
+        allocator.close()
+
+    def test_expansion_oom_sets_flag_and_thread_exits(self, lazy_allocator_cls):
+        """_expand_worker sets _cpu_oom and exits cleanly on mid-expansion pin failure."""
+        from unittest.mock import patch
+
+        original = lazy_allocator_cls._pin_memory_chunk
+        call_count = {"n": 0}
+
+        def fail_after_first(self_inner, offset, size):
+            call_count["n"] += 1
+            if call_count["n"] > 1:
+                raise RuntimeError("cudaHostRegister failed: out of memory")
+            original(self_inner, offset, size)
+
+        with patch.object(lazy_allocator_cls, "_pin_memory_chunk", fail_after_first):
+            allocator = lazy_allocator_cls(init_size=1 << 26, final_size=1 << 27)
+            # Join inside the patch context so the thread still sees the mock.
+            allocator._expand_thread.join(timeout=5.0)
+
+        assert not allocator._expand_thread.is_alive(), "expand thread did not exit"
+        assert allocator._cpu_oom
+
+        result = allocator.allocate(torch.Size([512, 512]), torch.float32)
+        assert result is None
+        allocator.close()
