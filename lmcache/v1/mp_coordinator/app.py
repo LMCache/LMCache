@@ -19,7 +19,6 @@ own adds a ``<name>_service.py`` stashed on ``app.state`` here; thin domains
 # Standard
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 import asyncio
 import contextlib
 
@@ -126,9 +125,8 @@ def create_app(config: MPCoordinatorConfig) -> FastAPI:
     app.state.eviction_manager = eviction_manager
     app.state.blend_directory = blend_directory
 
-    apis_path = Path(__file__).parent / "http_apis"
     package = f"{__package__}.http_apis"
-    for router in discover_api_routers(apis_path, package):
+    for router in discover_api_routers(package):
         app.include_router(router)
 
     return app

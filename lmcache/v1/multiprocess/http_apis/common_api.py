@@ -19,9 +19,6 @@ Note:
     multiprocess HTTP server.
 """
 
-# Standard
-from pathlib import Path
-
 # Third Party
 from fastapi import APIRouter
 
@@ -35,11 +32,9 @@ router = APIRouter()
 # therefore cannot run on the multiprocess HTTP server.
 _MP_INCOMPATIBLE_MODULES: frozenset[str] = frozenset()
 
-_common_path = Path(internal_api_server.__file__).parent / "common"
 _common_package = f"{internal_api_server.__name__}.common"
 
 for _discovered in discover_api_routers(
-    _common_path,
     _common_package,
     exclude=_MP_INCOMPATIBLE_MODULES,
 ):
