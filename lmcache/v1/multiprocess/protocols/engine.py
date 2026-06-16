@@ -21,7 +21,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
-    KVCache,
+    IPCKVCache,
     RegisterNonGpuContextPayload,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -90,7 +90,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Register KV Cache
         # Payload:
         #   - instance_id: int - Unique identifier for the engine instance
-        #   - kv_cache: KVCache - The KV cache configuration
+        #   - kv_cache: IPCKVCache - The KV cache configuration
         #   - model_name: str - Name of the model associated with the engine
         #   - world_size: int - World size of the engine
         #   - engine_type: EngineType - Which serving engine produced the
@@ -102,7 +102,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "REGISTER_KV_CACHE": ProtocolDefinition(
             payload_classes=[
                 int,
-                KVCache,
+                IPCKVCache,
                 str,
                 int,
                 EngineType,

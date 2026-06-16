@@ -568,7 +568,7 @@ def normalize_kv_and_discover_format(
 
     # SGLang MP hands us a flat ``list[Tensor]`` of length ``2 * num_layers``
     # (first half K layers, second half V layers) so the wire payload fits
-    # ``KVCache = list[CudaIPCWrapper]``. Restore the canonical depth-2
+    # ``IPCKVCache = list[CudaIPCWrapper]``. Restore the canonical depth-2
     # ``[K_layers, V_layers]`` shape, and reshape each per-layer tensor
     # from ``(page_buffer_size, num_heads, head_size)`` to ``(num_blocks,
     # block_size, num_heads, head_size)`` using the engine-supplied

@@ -11,7 +11,7 @@ from lmcache.utils import EngineType
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
-    KVCache,
+    IPCKVCache,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocol import KeyType
@@ -36,7 +36,7 @@ def noop_handler() -> str:
 
 def register_kv_cache_handler(
     gpu_id: int,
-    kv_cache: KVCache,
+    kv_cache: IPCKVCache,
     model_name: str,
     world_size: int,
     engine_type: EngineType,

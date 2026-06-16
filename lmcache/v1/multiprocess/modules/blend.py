@@ -27,7 +27,7 @@ from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.multiprocess.custom_types import (
     CBMatchResult,
     IPCCacheServerKey,
-    KVCache,
+    IPCKVCache,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -417,7 +417,7 @@ class BlendModule:
     def cb_register_kv_cache(
         self,
         instance_id: int,
-        kv_caches: KVCache,
+        kv_caches: IPCKVCache,
         model_name: str,
         world_size: int,
     ) -> None:
@@ -425,7 +425,7 @@ class BlendModule:
 
         Args:
             instance_id: Unique identifier for the blend engine instance.
-            kv_caches: KVCache object containing the GPU buffer pointers.
+            kv_caches: IPCKVCache object containing the GPU buffer pointers.
             model_name: The name of the model associated with this KV cache.
             world_size: The world size associated with this KV cache.
         """

@@ -20,7 +20,7 @@ from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
-    KVCache,
+    IPCKVCache,
 )
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
@@ -130,7 +130,7 @@ class _IpcEvent(Protocol):
     def ipc_handle(self) -> Any: ...
 
 
-def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
+def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> IPCKVCache:
     # Emit a per-layer (name, shape, dtype) summary so the operator can
     # verify the exact layer set & tensor geometry being shipped to the
     # LMCache server, then the low-noise count of handles being wrapped.
@@ -152,7 +152,7 @@ def wrap_kv_caches(kv_caches: dict[str, torch.Tensor]) -> KVCache:
     # registered with POSIX SHM so the named segments do not outlive
     # the failed batch. CUDA wrappers do not own a named segment and
     # are skipped via the duck-typed ``shm_name`` check.
-    wrappers: KVCache = []
+    wrappers: IPCKVCache = []
     try:
         for tensor in kv_caches.values():
             wrappers.append(wrap_one_kv_cache(tensor))

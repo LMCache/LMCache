@@ -23,7 +23,7 @@ from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheServerKey,
-    KVCache,
+    IPCKVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import (
@@ -114,7 +114,7 @@ class ClientContext:
             device, num_pages, num_layers, page_size, num_heads, head_size, dtype
         )
 
-    def get_kv_cache(self) -> KVCache:
+    def get_kv_cache(self) -> IPCKVCache:
         """
         Wrap GPU tensors in CudaIPCWrapper for IPC communication.
         """

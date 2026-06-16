@@ -38,7 +38,7 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.custom_types import IPCKVCache
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 
 # Backend selection (c_ops when CUDA is available, otherwise a pure-Python
@@ -50,7 +50,7 @@ import lmcache.c_ops as lmc_ops
 logger = init_logger(__name__)
 
 
-def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
+def unwrap_kv_cache_tensors(kv_caches: IPCKVCache) -> list[torch.Tensor]:
     unwrapped_tensors = []
     for ipc_wrapper in kv_caches:
         tensor = ipc_wrapper.to_tensor()
@@ -355,7 +355,7 @@ class GPUCacheContext:
 
     def __init__(
         self,
-        kv_caches: KVCache,
+        kv_caches: IPCKVCache,
         lmcache_tokens_per_chunk: int = 256,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
@@ -753,7 +753,7 @@ class PlainGPUCacheContext:
     A plain GPU cache context that have a single contiguous 2LTD buffer
     """
 
-    def __init__(self, kv_caches: KVCache, lmcache_tokens_per_chunk: int = 256):
+    def __init__(self, kv_caches: IPCKVCache, lmcache_tokens_per_chunk: int = 256):
         assert len(kv_caches) == 1, (
             "PlainGPUCacheContext only supports a single KV cache tensor"
         )

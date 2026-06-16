@@ -41,7 +41,7 @@ from lmcache.v1.gpu_connector.utils import (
     normalize_kv_and_discover_format,
 )
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-from lmcache.v1.multiprocess.custom_types import KVCache
+from lmcache.v1.multiprocess.custom_types import IPCKVCache
 from lmcache.v1.platform.cpu.stub_cpu_device import StubStream
 import lmcache.c_ops as lmc_ops
 
@@ -70,7 +70,7 @@ class CpuCacheContext:
 
     def __init__(
         self,
-        kv_caches: KVCache,
+        kv_caches: IPCKVCache,
         lmcache_tokens_per_chunk: int = 256,
         layout_hints: LayoutHints | None = None,
         engine_group_infos: "Sequence[EngineGroupInfo]" = (),

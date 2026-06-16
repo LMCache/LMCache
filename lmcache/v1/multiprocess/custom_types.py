@@ -141,7 +141,7 @@ class RawCudaIPCWrapper(CudaIPCWrapper):
 
     Subclassing (rather than introducing a parallel class with its own
     msgspec ext code) is load-bearing — msgspec does not support unions
-    of custom ext-encoded types. With subclassing, ``KVCache =
+    of custom ext-encoded types. With subclassing, ``IPCKVCache =
     list[CudaIPCWrapper]`` continues to type-check, the existing ext
     code 1 round-trips both wrappers, and pickle preserves the subclass
     identity through the wire so ``to_tensor`` dispatches correctly.
@@ -312,7 +312,7 @@ class IPCCacheServerKey:
 
 
 # Type exports
-KVCache = list[CudaIPCWrapper]
+IPCKVCache = list[CudaIPCWrapper]
 
 
 class RegisterNonGpuContextPayload(msgspec.Struct):
