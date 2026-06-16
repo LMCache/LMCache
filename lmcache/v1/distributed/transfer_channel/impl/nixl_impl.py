@@ -440,9 +440,23 @@ class NixlTransferChannelContext(TransferChannelContext):
             key: The peer advertise url to register the client under.
             client: The NixlTransferChannelClient instance to register.
         """
+        old_client = None
         with self._lock:
-            # Don't clobber an existing client view for the same key.
-            self._clients.setdefault(key, client)
+            old_client = self._clients.get(key)
+            if old_client is None:
+                self._clients[key] = client
+
+        if old_client is not None and old_client is not client:
+            logger.warning(
+                "Overwriting existing transfer channel client for %s.",
+                key,
+            )
+            try:
+                old_client.close()
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Error closing old transfer channel client for %s", key
+                )
 
     ############################################################
     # Cleanup
