@@ -24,6 +24,9 @@ from lmcache.v1.distributed.transfer_channel.api import (
     TransferChannelAddress,
     TransferChannelReadResult,
 )
+from lmcache.v1.distributed.transfer_channel.factory import (
+    register_transfer_channel_factory,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -239,12 +242,11 @@ class NixlTransferChannelServer(TransferChannelServer):
         self._thread.start()
 
     def _serve_loop(self) -> None:
-        # TODO: use poller to avoid 100ms busy waiting here
         poller = zmq.Poller()
         poller.register(self._socket, zmq.POLLIN)
         while self._running:
             try:
-                events = dict(poller.poll(timeout=100))  # ms
+                events = dict(poller.poll(timeout=1000))  # ms
                 if self._socket not in events:
                     continue
                 req_bytes = self._socket.recv()
@@ -506,3 +508,35 @@ class NixlTransferChannelContext(TransferChannelContext):
             remote_agent_name=server_agent_name,
             remote_dlist_handle=remote_handle,
         )
+
+
+############################################################
+# Factory registration
+############################################################
+def create_nixl_transfer_channel_context(
+    l1_memory_desc: L1MemoryDesc,
+    listen_url: str,
+    advertise_url: str,
+    **kwargs,
+) -> NixlTransferChannelContext:
+    """Create a ``NixlTransferChannelContext``.
+
+    Args:
+        l1_memory_desc: Describes the L1 memory region to register.
+        listen_url: ``host:port`` this peer's server binds to.
+        advertise_url: ``host:port`` this peer advertises as its identity.
+        **kwargs: Accepts ``backends`` (an optional list of nixl backends,
+            e.g. ``["UCX"]``).
+
+    Returns:
+        A new ``NixlTransferChannelContext`` instance.
+    """
+    return NixlTransferChannelContext(
+        l1_memory_desc=l1_memory_desc,
+        listen_url=listen_url,
+        advertise_url=advertise_url,
+        backends=kwargs.get("backends"),
+    )
+
+
+register_transfer_channel_factory("nixl", create_nixl_transfer_channel_context)
