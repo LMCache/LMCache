@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only cache context for platforms without CUDA GPUs.
 
-This module lives in the ``platform.cpu`` sub-package because it is
-the CPU-specific implementation of the cross-platform cache context
--- it provides the same public API as
-:class:`~lmcache.v1.multiprocess.gpu_context.GPUCacheContext` but
+This module sits next to :mod:`lmcache.v1.platform.cuda.cache_context`
+under :mod:`lmcache.v1.platform` and provides the same public API as
+:class:`~lmcache.v1.platform.cuda.cache_context.GPUCacheContext` but
 keeps all tensors on CPU. Stream / Event objects are provided by
 :class:`~lmcache.v1.platform.cpu.stub_cpu_device.StubStream` so
 CPU-only hosts never import ``cupy`` or instantiate a real CUDA
@@ -48,7 +47,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class CpuCacheContext(BaseCacheContext):
+class CPUCacheContext(BaseCacheContext):
     """CPU-only cache context with the same public API as
     :class:`GPUCacheContext`.
 
@@ -64,6 +63,8 @@ class CpuCacheContext(BaseCacheContext):
     client owns the buffers and the server only maps them.
     """
 
+    device_type = "cpu"
+
     def __init__(
         self,
         kv_caches: KVCache,
@@ -74,41 +75,56 @@ class CpuCacheContext(BaseCacheContext):
     ) -> None:
         if not kv_caches:
             raise ValueError(
-                "CpuCacheContext requires a non-empty list of "
+                "CPUCacheContext requires a non-empty list of "
                 "CpuShmTensorWrapper; the legacy server-side "
                 "self-allocation path has been removed."
             )
 
         # First Party
-        from lmcache.v1.multiprocess.gpu_context import (
+        from lmcache.v1.platform.cuda.cache_context import (
             unwrap_kv_cache_tensors,
         )
 
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
         self.device_ = torch.device("cpu")
-        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
 
         # Discover layout & build KV layer groups via the same path
         # GPUCacheContext uses, so we don't need to hand-roll any
         # PageBufferShapeDesc here. ``layout_hints`` / ``engine_type``
         # are forwarded so the signature matches GPUCacheContext.
         (
-            self._engine_kv_format,
+            engine_kv_format,
             kv_caches_normalized,
         ) = normalize_kv_and_discover_format(
             unwrapped,
             engine_type,
             layout_hints=layout_hints,
         )
-        self.kv_caches_: list[torch.Tensor] = list(kv_caches_normalized)
-        self.is_mla_ = is_mla(self._engine_kv_format)
-        self.num_layers_ = get_num_layers(self.kv_caches_, self._engine_kv_format)
-        self.num_blocks_ = get_num_blocks(self.kv_caches_, self._engine_kv_format)
-        self.kv_layer_groups_manager_ = KVLayerGroupsManager(
-            self.kv_caches_,
-            engine_kv_format=self._engine_kv_format,
-            num_blocks=self.num_blocks_,
+        kv_caches_list: list[torch.Tensor] = list(kv_caches_normalized)
+        is_mla_val = is_mla(engine_kv_format)
+        num_layers_val = get_num_layers(kv_caches_list, engine_kv_format)
+        num_blocks_val = get_num_blocks(kv_caches_list, engine_kv_format)
+        kv_layer_groups_manager = KVLayerGroupsManager(
+            kv_caches_list,
+            engine_kv_format=engine_kv_format,
+            num_blocks=num_blocks_val,
             engine_group_infos=engine_group_infos,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+        )
+
+        # Pre-allocated block IDs buffer (CPU).
+        _MAX_BLOCK_IDS = 1_000_000
+        block_ids_buffer = torch.empty(_MAX_BLOCK_IDS, dtype=torch.long)
+
+        super().__init__(
+            engine_kv_format=engine_kv_format,
+            kv_caches=kv_caches_list,
+            device=self.device_,
+            num_layers=num_layers_val,
+            num_blocks=num_blocks_val,
+            is_mla=is_mla_val,
+            kv_layer_groups_manager=kv_layer_groups_manager,
+            block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
         )
 
@@ -118,7 +134,7 @@ class CpuCacheContext(BaseCacheContext):
             torch.tensor(
                 get_group_data_ptrs(
                     self.kv_caches_,
-                    self.engine_kv_format_,
+                    self.engine_kv_format,
                     group.layer_indices,
                 ),
                 dtype=torch.long,
@@ -126,18 +142,9 @@ class CpuCacheContext(BaseCacheContext):
             for group in self.kv_layer_groups_manager_.kv_layer_groups
         ]
 
-        # Backwards-compat aliases (a few callers still expect these).
-        self.hidden_dim_sizes_: list[int] = [
-            group.hidden_dim_size
-            for group in self.kv_layer_groups_manager_.kv_layer_groups
-        ]
         self.kv_cache_pointers_ = torch.tensor(
             [t.data_ptr() for t in self.kv_caches_], dtype=torch.long
         )
-
-        # Pre-allocated block IDs buffer (CPU).
-        _MAX_BLOCK_IDS = 1_000_000
-        self.block_ids_buffer_ = torch.empty(_MAX_BLOCK_IDS, dtype=torch.long)
 
         # Temporary buffer for transfers (same layout as
         # GPUCacheContext but on CPU).
@@ -178,7 +185,7 @@ class CpuCacheContext(BaseCacheContext):
         self._check_shm_capacity()
 
         logger.info(
-            "CpuCacheContext: %d layers, %d blocks, dtype=%s (shm-backed)",
+            "CPUCacheContext: %d layers, %d blocks, dtype=%s (shm-backed)",
             self.num_layers_,
             self.num_blocks_,
             self.kv_caches_[0].dtype,
@@ -418,22 +425,6 @@ class CpuCacheContext(BaseCacheContext):
             .view(shape)
             for i in range(batch_size)
         ]
-
-    def stage_block_ids(self, block_ids: list[int]) -> torch.Tensor:
-        """Copy block IDs into the pre-allocated buffer."""
-        if not block_ids:
-            raise ValueError("stage_block_ids requires a non-empty block_ids list")
-        n = len(block_ids)
-        capacity = self.block_ids_buffer_.shape[0]
-        if n > capacity:
-            raise ValueError(
-                "stage_block_ids: %d block IDs exceeds buffer capacity %d"
-                % (n, capacity)
-            )
-        cpu_tensor = torch.tensor(block_ids, dtype=torch.long)
-        buf = self.block_ids_buffer_[:n]
-        buf.copy_(cpu_tensor)
-        return buf
 
     def cache_size_per_token(self) -> int:
         """Returns cache size per *logical* token in bytes,

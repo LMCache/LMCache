@@ -328,3 +328,219 @@ class TestInvalidPackage:
 
         with pytest.raises(TypeError):
             list(discover_subclasses(io, object))
+
+
+def _populate_nested_pkg(pkg_dir: Path) -> None:
+    """Layout exercising multi-level discovery:
+
+    * depth 1: ``base.py`` (Base + AbstractChild), ``leaf_top.py`` (TopChild)
+    * depth 1 sub-pkg ``mid/`` with its own ``leaf_mid.py`` (MidChild)
+    * depth 2 sub-pkg ``mid/deep/`` with ``leaf_deep.py`` (DeepChild)
+    """
+    _write_module(
+        pkg_dir,
+        "base",
+        """
+        from abc import ABC, abstractmethod
+
+        class Base(ABC):
+            @abstractmethod
+            def name(self) -> str: ...
+
+        class AbstractChild(Base):
+            pass
+        """,
+    )
+    _write_module(
+        pkg_dir,
+        "leaf_top",
+        """
+        from .base import Base
+
+        class TopChild(Base):
+            def name(self) -> str:
+                return "top"
+        """,
+    )
+    mid = pkg_dir / "mid"
+    mid.mkdir()
+    (mid / "__init__.py").write_text("")
+    _write_module(
+        mid,
+        "leaf_mid",
+        """
+        from ..base import Base
+
+        class MidChild(Base):
+            def name(self) -> str:
+                return "mid"
+        """,
+    )
+    deep = mid / "deep"
+    deep.mkdir()
+    (deep / "__init__.py").write_text("")
+    _write_module(
+        deep,
+        "leaf_deep",
+        """
+        from ...base import Base
+
+        class DeepChild(Base):
+            def name(self) -> str:
+                return "deep"
+        """,
+    )
+
+
+class TestLevels:
+    def test_default_keeps_legacy_top_level_only(
+        self, temp_pkg: Tuple[str, Path]
+    ) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                module_filter=lambda n: n != "base",
+            )
+        )
+        # No ``levels`` argument: behaves exactly like the historic
+        # direct-children-only scan.
+        assert _names(result) == ["TopChild"]
+
+    def test_levels_1_1_matches_default(self, temp_pkg: Tuple[str, Path]) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                module_filter=lambda n: n != "base",
+                levels=[1, 1],
+            )
+        )
+        assert _names(result) == ["TopChild"]
+
+    def test_levels_2_2_only_grandchildren(self, temp_pkg: Tuple[str, Path]) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                levels=[2, 2],
+            )
+        )
+        # Only ``mid/leaf_mid.py`` lives at depth 2.
+        assert _names(result) == ["MidChild"]
+
+    def test_levels_1_2_combines_both_layers(self, temp_pkg: Tuple[str, Path]) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                module_filter=lambda n: n != "base",
+                levels=[1, 2],
+            )
+        )
+        assert _names(result) == ["MidChild", "TopChild"]
+
+    def test_unlimited_via_empty_list(self, temp_pkg: Tuple[str, Path]) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                module_filter=lambda n: n != "base",
+                levels=[],
+            )
+        )
+        assert _names(result) == ["DeepChild", "MidChild", "TopChild"]
+
+    def test_unlimited_via_zero_zero(self, temp_pkg: Tuple[str, Path]) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                module_filter=lambda n: n != "base",
+                levels=[0, 0],
+            )
+        )
+        assert _names(result) == ["DeepChild", "MidChild", "TopChild"]
+
+    def test_module_filter_applies_per_level(self, temp_pkg: Tuple[str, Path]) -> None:
+        """The short-name filter is evaluated for every leaf module
+        regardless of its depth, matching the documented contract."""
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        # Add another depth-2 module that also happens to have the
+        # name ``leaf_mid`` shadowed under ``deep/`` -- proves the
+        # filter looks at the leaf short name, not the full path.
+        deep_dir = pkg_dir / "mid" / "deep"
+        _write_module(
+            deep_dir,
+            "leaf_mid",
+            """
+            from ...base import Base
+
+            class DeepShadow(Base):
+                def name(self) -> str:
+                    return "deep_shadow"
+            """,
+        )
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        result = list(
+            discover_subclasses(
+                pkg_name,
+                base_mod.Base,
+                module_filter=lambda n: n == "leaf_mid",
+                levels=[],
+            )
+        )
+        assert _names(result) == ["DeepShadow", "MidChild"]
+
+    @pytest.mark.parametrize(
+        "bad_levels",
+        [
+            [1],
+            [1, 2, 3],
+            [-1, 2],
+            [2, 1],
+            [0, 3],
+            [3, 0],
+        ],
+    )
+    def test_invalid_levels_raise(
+        self, temp_pkg: Tuple[str, Path], bad_levels: List[int]
+    ) -> None:
+        pkg_name, pkg_dir = temp_pkg
+        _populate_nested_pkg(pkg_dir)
+        base_mod = importlib.import_module(f"{pkg_name}.base")
+
+        with pytest.raises(ValueError):
+            list(
+                discover_subclasses(
+                    pkg_name,
+                    base_mod.Base,
+                    levels=bad_levels,
+                )
+            )

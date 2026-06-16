@@ -411,7 +411,7 @@ When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
   non-positive.
 - ``404``: ``instance_id`` not registered, or the registered KV tensors
   are empty.
-- ``501``: engine has no ``gpu_contexts``, or the GPU KV format is not
+- ``501``: engine has no ``cache_contexts``, or the KV format is not
   supported by this endpoint (page-buffer-fused and cross-layer layouts
   are declined until a real need appears).
 - ``503``: engine not yet initialized on ``app.state``.

@@ -116,7 +116,7 @@ class MPCacheServer:
         return self._context.storage_manager
 
     @property
-    def gpu_contexts(self) -> dict[int, BaseCacheContext] | None:
+    def cache_contexts(self) -> dict[int, BaseCacheContext] | None:
         """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
             if isinstance(module, LMCacheDrivenTransferModule):

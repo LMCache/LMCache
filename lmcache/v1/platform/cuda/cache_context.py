@@ -51,7 +51,7 @@ def unwrap_kv_cache_tensors(kv_caches: KVCache) -> list[torch.Tensor]:
 
 
 def list_to_gpu_tensor(lis: list[int], device: torch.device) -> torch.Tensor:
-    return torch.frombuffer(array.array("l", lis), dtype=torch.long).to(
+    return torch.frombuffer(array.array("q", lis), dtype=torch.long).to(
         device, non_blocking=True
     )
 
@@ -345,6 +345,8 @@ class GPUCacheContext(BaseCacheContext):
     Manages the shape and pointers to vLLM GPU KV cache tensors.
     """
 
+    device_type = "cuda"
+
     def __init__(
         self,
         kv_caches: KVCache,
@@ -354,39 +356,50 @@ class GPUCacheContext(BaseCacheContext):
         engine_type: EngineType = EngineType.VLLM,
     ):
         unwrapped = unwrap_kv_cache_tensors(kv_caches)
-        self._engine_kv_format, self.kv_caches_ = normalize_kv_and_discover_format(
+        engine_kv_format, kv_caches_norm = normalize_kv_and_discover_format(
             unwrapped,
             engine_type,
             layout_hints=layout_hints,
         )
-        self.device_ = get_device(self.kv_caches_)
-        self.is_mla_ = is_mla(self.engine_kv_format_)
-        self.num_layers_ = get_num_layers(self.kv_caches_, self.engine_kv_format_)
-        self.num_blocks_ = get_num_blocks(self.kv_caches_, self.engine_kv_format_)
-        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self.device_ = get_device(kv_caches_norm)
+        is_mla_val = is_mla(engine_kv_format)
+        num_layers_val = get_num_layers(kv_caches_norm, engine_kv_format)
+        num_blocks_val = get_num_blocks(kv_caches_norm, engine_kv_format)
 
-        self.kv_layer_groups_manager_ = KVLayerGroupsManager(
-            self.kv_caches_,
-            engine_kv_format=self.engine_kv_format_,
-            num_blocks=self.num_blocks_,
+        kv_layer_groups_manager = KVLayerGroupsManager(
+            kv_caches_norm,
+            engine_kv_format=engine_kv_format,
+            num_blocks=num_blocks_val,
             engine_group_infos=engine_group_infos,
+            lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
+        )
+
+        # Pre-allocated GPU buffer for block IDs (up to 1M elements).
+        # The caller copies block_ids into this buffer before launching the
+        # block-level kernel. Single-thread assumption: no lock needed.
+        _MAX_BLOCK_IDS = 1 << 20
+        block_ids_buffer = torch.empty(
+            _MAX_BLOCK_IDS, dtype=torch.long, device=self.device_
+        )
+
+        super().__init__(
+            engine_kv_format=engine_kv_format,
+            kv_caches=kv_caches_norm,
+            device=self.device_,
+            num_layers=num_layers_val,
+            num_blocks=num_blocks_val,
+            is_mla=is_mla_val,
+            kv_layer_groups_manager=kv_layer_groups_manager,
+            block_ids_buffer=block_ids_buffer,
             lmcache_tokens_per_chunk=lmcache_tokens_per_chunk,
         )
 
         self.group_kv_pointers_: list[torch.Tensor] = []
         for group in self.kv_layer_groups_manager_.kv_layer_groups:
             ptrs = get_group_data_ptrs(
-                self.kv_caches_, self.engine_kv_format_, group.layer_indices
+                self.kv_caches_, self.engine_kv_format, group.layer_indices
             )
             self.group_kv_pointers_.append(list_to_gpu_tensor(ptrs, self.device_))
-
-        # Pre-allocated GPU buffer for block IDs (up to 1M elements).
-        # The caller copies block_ids into this buffer before launching the
-        # block-level kernel. Single-thread assumption: no lock needed.
-        _MAX_BLOCK_IDS = 1 << 20
-        self.block_ids_buffer_ = torch.empty(
-            _MAX_BLOCK_IDS, dtype=torch.long, device=self.device_
-        )
 
         # Temporary GPU buffer for transfers — a single flat uint8 buffer
         self._temp_buffer = _TempGPUBuffer(
@@ -428,7 +441,7 @@ class GPUCacheContext(BaseCacheContext):
 
     @property
     def dtype(self) -> torch.dtype:
-        return get_dtype(self.kv_caches_, self.engine_kv_format_)
+        return get_dtype(self.kv_caches_, self.engine_kv_format)
 
     @property
     def stream(self) -> Any:

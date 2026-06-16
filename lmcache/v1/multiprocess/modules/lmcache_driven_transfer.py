@@ -52,7 +52,7 @@ logger = init_logger(__name__)
 
 
 def get_layout_desc(
-    gpu_context: BaseCacheContext,
+    cache_context: BaseCacheContext,
     num_tokens: int,
     object_group_id: int,
 ) -> MemoryLayoutDesc:
@@ -64,7 +64,7 @@ def get_layout_desc(
     may have different shapes and dtypes.
 
     Args:
-        cache_context: The GPU cache context containing the KV cache information.
+        cache_context: The cache context containing the KV cache information.
         num_tokens: The number of tokens to determine the layout for.
         object_group_id: Index of the object group whose layout to build.
 
@@ -72,9 +72,9 @@ def get_layout_desc(
         MemoryLayoutDesc: The memory layout description containing shapes and
         dtypes, one entry per kernel group in the object group.
     """
-    object_group = gpu_context.kv_layer_groups_manager.object_groups[object_group_id]
+    object_group = cache_context.kv_layer_groups_manager.object_groups[object_group_id]
     shapes_and_dtypes = [
-        gpu_context.get_kernel_group_shape_dtype(num_tokens, kernel_group_idx)
+        cache_context.get_kernel_group_shape_dtype(num_tokens, kernel_group_idx)
         for kernel_group_idx in object_group.kernel_group_indices
     ]
     shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
@@ -134,7 +134,7 @@ def downsample_and_stage_block_ids(
     Note that the we do NOT do any object-level skipping here.
 
     Args:
-        cache_context: The GPU cache context containing the KV cache information.
+        cache_context: The cache context containing the KV cache information.
         block_ids: The original block id lists, indexed by LMCache KV group index.
 
     Returns:
@@ -194,7 +194,7 @@ def downsample_and_stage_block_ids(
         block_ids[kernel_group_id] = new_block_ids
 
     # Stage the cut block ids into GPU tensors
-    block_ids_gpu = cache_context.copy_view_block_ids_to_gpu(block_ids)
+    block_ids_gpu = cache_context.stage_block_ids(block_ids)
     return block_ids_gpu
 
 
@@ -365,7 +365,7 @@ def transfer_kv_per_object_group(
                 direction,
                 cache_context.get_shape_desc(kernel_group_id),
                 group_lmcache_chunk_size,
-                cache_context.engine_kv_format_,
+                cache_context.engine_kv_format,
                 recalculated_skip_blocks,
             )
 
@@ -387,8 +387,8 @@ class ContextEntry:
     The concrete type is whatever :func:`create_cache_context` returned
     for the wrapper list at registration time -- a
     :class:`GPUCacheContext` for CUDA-IPC wrappers, a
-    :class:`CpuCacheContext` for POSIX-SHM wrappers. Both expose
-    the same ``kv_tensors`` / ``engine_kv_format_`` / ``num_layers`` / ...
+    :class:`CPUCacheContext` for POSIX-SHM wrappers. Both expose
+    the same ``kv_tensors`` / ``engine_kv_format`` / ``num_layers`` / ...
     duck-typed surface, so downstream consumers stay agnostic.
 
     Args:

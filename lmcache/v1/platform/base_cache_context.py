@@ -2,7 +2,7 @@
 """Abstract base class for platform cache contexts.
 
 Defines the common interface shared by :class:`GPUCacheContext` and
-:class:`CpuCacheContext`.  Concrete subclasses provide
+:class:`CPUCacheContext`.  Concrete subclasses provide
 device-specific implementations of stream / buffer / copy primitives
 while the base class owns layout-agnostic helpers (shape calculation,
 status reporting, block-ID staging).
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 import array
 
 # Third Party
@@ -36,23 +36,43 @@ if TYPE_CHECKING:
 class BaseCacheContext(ABC):
     """Abstract base for GPU and CPU cache contexts.
 
-    Subclasses must set the following instance attributes in
-    :meth:`__init__` and the class-level annotations below keep
-    static analysis happy without polluting the ABC with a
-    concrete :meth:`__init__`.
+    Subclasses call :meth:`__init__` after computing the common
+    layout parameters and before setting up device-specific state.
+    All keyword arguments are required so the contract is explicit.
+
+    Concrete subclasses MUST set :attr:`device_type` to the
+    ``torch.device.type`` string they handle (``"cuda"``, ``"cpu"``,
+    ...). The platform-agnostic :func:`create_cache_context` factory
+    uses this attribute (via the platform registry) to pick the right
+    subclass without any ``isinstance`` / ``if-elif`` chain.
     """
 
-    # -- Set by subclass __init__ (annotations silence IDE warnings) --
+    #: ``torch.device.type`` string the subclass handles. Concrete
+    #: subclasses MUST override this.
+    device_type: ClassVar[str] = ""
 
-    _engine_kv_format: Any
-    device_: torch.device
-    kv_caches_: list[torch.Tensor]
-    num_layers_: int
-    num_blocks_: int
-    is_mla_: bool
-    kv_layer_groups_manager_: KVLayerGroupsManager
-    block_ids_buffer_: torch.Tensor
-    lmcache_tokens_per_chunk: int
+    def __init__(
+        self,
+        *,
+        engine_kv_format: Any,
+        kv_caches: list[torch.Tensor],
+        device: torch.device,
+        num_layers: int,
+        num_blocks: int,
+        is_mla: bool,
+        kv_layer_groups_manager: KVLayerGroupsManager,
+        block_ids_buffer: torch.Tensor,
+        lmcache_tokens_per_chunk: int,
+    ) -> None:
+        self.engine_kv_format_ = engine_kv_format
+        self.kv_caches_ = kv_caches
+        self.device_ = device
+        self.num_layers_ = num_layers
+        self.num_blocks_ = num_blocks
+        self.is_mla_ = is_mla
+        self.kv_layer_groups_manager_ = kv_layer_groups_manager
+        self.block_ids_buffer_ = block_ids_buffer
+        self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
 
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
@@ -127,9 +147,9 @@ class BaseCacheContext(ABC):
     # ------------------------------------------------------------------
 
     @property
-    def engine_kv_format_(self) -> Any:
+    def engine_kv_format(self) -> Any:
         """Returns the EngineKVFormat enum value."""
-        return self._engine_kv_format
+        return self.engine_kv_format_
 
     @property
     def device(self) -> torch.device:
@@ -203,10 +223,10 @@ class BaseCacheContext(ABC):
             (sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size)
         )
 
-    def copy_view_block_ids_to_gpu(
+    def stage_block_ids(
         self, block_ids_per_group: list[list[int]]
     ) -> list[torch.Tensor]:
-        """Copy per-group block IDs into the shared staging buffer.
+        """Stage per-group block IDs into the shared staging buffer.
 
         Returns one non-overlapping view per LMCache group.
         """
@@ -238,64 +258,78 @@ class BaseCacheContext(ABC):
     @property
     def engine_kv_shape(self) -> str:
         """Returns the symbolic KV cache layout description."""
-        return get_engine_kv_shape_description(self.engine_kv_format_)
+        return get_engine_kv_shape_description(self.engine_kv_format)
 
     @property
     def attention_backend(self) -> str:
         """Returns the attention backend name."""
-        return get_attention_backend(self.engine_kv_format_)
+        return get_attention_backend(self.engine_kv_format)
 
     @property
     def concrete_engine_kv_shape(self) -> str:
         """Returns the engine KV shape with actual numeric values."""
         group = self.kv_layer_groups_manager.kv_layer_groups[0]
         return get_concrete_engine_kv_shape_from_shape_desc(
-            group.shape_desc, self.engine_kv_format_
+            group.shape_desc, self.engine_kv_format
         )
 
     # ------------------------------------------------------------------
     # Shared report_status
     # ------------------------------------------------------------------
 
+    def _build_group_report_map(self) -> dict[int, int]:
+        """Map each kernel-group index to its owning object-group index."""
+        return {
+            kg_idx: og_idx
+            for og_idx, og in enumerate(self.kv_layer_groups_manager.object_groups)
+            for kg_idx in og.kernel_group_indices
+        }
+
+    def _build_single_group_report(
+        self,
+        kernel_group_idx: int,
+        group: Any,
+        engine_kv_format: Any,
+        group_map: dict[int, int],
+    ) -> dict:
+        """Build a status dict for a single kernel group.
+
+        Override this in subclasses to inject extra per-group fields
+        without duplicating the whole :meth:`report_status` method.
+        """
+        return {
+            "kernel_group_idx": kernel_group_idx,
+            "engine_group_idx": group.engine_group_idx,
+            "object_group_idx": group_map.get(kernel_group_idx, 0),
+            "num_layers": group.num_layers,
+            "layer_indices": list(group.layer_indices),
+            "tokens_per_block": group.tokens_per_block,
+            "slots_per_block": group.slots_per_block,
+            "dtype": str(group.dtype),
+            "engine_kv_concrete_shape": (
+                get_concrete_engine_kv_shape_from_shape_desc(
+                    group.shape_desc, engine_kv_format
+                )
+            ),
+            "is_mla": is_mla(engine_kv_format),
+            "engine_kv_format": engine_kv_format.name,
+            "engine_kv_shape": get_engine_kv_shape_description(engine_kv_format),
+            "attention_backend": get_attention_backend(engine_kv_format),
+        }
+
     def report_status(self) -> dict:
         """Return this context's KV cache layout metadata."""
         manager = self.kv_layer_groups_manager
         kernel_groups = manager.kernel_groups
+        engine_kv_format = self.engine_kv_format
+        group_map = self._build_group_report_map()
 
-        kernel_group_to_object_group: dict[int, int] = {
-            kg_idx: og_idx
-            for og_idx, og in enumerate(manager.object_groups)
-            for kg_idx in og.kernel_group_indices
-        }
-
-        engine_kv_format = self.engine_kv_format_
-        group_reports: list[dict] = []
-        for kernel_group_idx, group in enumerate(kernel_groups):
-            group_reports.append(
-                {
-                    "kernel_group_idx": kernel_group_idx,
-                    "engine_group_idx": group.engine_group_idx,
-                    "object_group_idx": kernel_group_to_object_group.get(
-                        kernel_group_idx, 0
-                    ),
-                    "num_layers": group.num_layers,
-                    "layer_indices": list(group.layer_indices),
-                    "tokens_per_block": group.tokens_per_block,
-                    "slots_per_block": group.slots_per_block,
-                    "dtype": str(group.dtype),
-                    "engine_kv_concrete_shape": (
-                        get_concrete_engine_kv_shape_from_shape_desc(
-                            group.shape_desc, engine_kv_format
-                        )
-                    ),
-                    "is_mla": is_mla(engine_kv_format),
-                    "engine_kv_format": engine_kv_format.name,
-                    "engine_kv_shape": get_engine_kv_shape_description(
-                        engine_kv_format
-                    ),
-                    "attention_backend": get_attention_backend(engine_kv_format),
-                }
+        group_reports = [
+            self._build_single_group_report(
+                kernel_group_idx, group, engine_kv_format, group_map
             )
+            for kernel_group_idx, group in enumerate(kernel_groups)
+        ]
 
         return {
             "num_layers": self.num_layers,

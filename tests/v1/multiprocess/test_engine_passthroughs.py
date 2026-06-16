@@ -25,7 +25,7 @@ def test_storage_manager_returns_context_storage_manager() -> None:
     assert engine.storage_manager is sm
 
 
-def test_gpu_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
+def test_cache_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
     gpu0, gpu1 = MagicMock(name="gpu_ctx_0"), MagicMock(name="gpu_ctx_1")
     gpu_transfer = MagicMock(spec=LMCacheDrivenTransferModule)
     gpu_transfer.cache_contexts = {
@@ -35,12 +35,12 @@ def test_gpu_contexts_unwraps_entries_from_gpu_transfer_module() -> None:
 
     engine = MPCacheServer(MagicMock(), modules=[MagicMock(), gpu_transfer])
     # Values must be unwrapped GPUCacheContexts.
-    assert engine.gpu_contexts == {0: gpu0, 7: gpu1}
+    assert engine.cache_contexts == {0: gpu0, 7: gpu1}
 
 
-def test_gpu_contexts_returns_none_in_engine_driven_mode() -> None:
+def test_cache_contexts_returns_none_in_engine_driven_mode() -> None:
     engine = MPCacheServer(MagicMock(), modules=[MagicMock()])
-    assert engine.gpu_contexts is None
+    assert engine.cache_contexts is None
 
 
 def test_clear_delegates_to_management_module() -> None:
