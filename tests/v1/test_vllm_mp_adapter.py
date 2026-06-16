@@ -655,6 +655,7 @@ def test_register_uses_local_context_when_self_transfer_ctx_nulled(
         vllm_worker_id=0,
         tp_size=1,
         pp_size=1,
+        n_servers=1,
     )
     adapter = _NullingTransferCtxAdapter(
         server_url="tcp://127.0.0.1:0",
