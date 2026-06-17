@@ -23,6 +23,9 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey, TrimPolicy
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
+from lmcache.v1.distributed.l2_adapters.fault_inject_l2_adapter import (
+    FaultInjectL2Adapter,
+)
 from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
     MockL2Adapter,
     MockL2AdapterConfig,
@@ -311,6 +314,88 @@ class TestSingleAdapterPrefetch:
         l1_manager.finish_read(prefix_keys)
         ctrl.stop()
         adapter.close()
+
+    def test_segmented_prefix_with_gap(self, l1_manager):
+        """SEGMENTED_PREFIX retains the post-gap keys: L2 {0,1,3,4} -> {0,1,3,4}.
+
+        The PREFIX counterpart (test_prefix_with_gap) truncates the same gap to
+        {0,1}; SEGMENTED_PREFIX keeps the post-gap chunks L1-resident so only
+        the hole (index 2) needs recomputing.
+        """
+        adapter = make_adapter()
+        layout = make_layout()
+        all_keys = [make_object_key(i) for i in range(5)]
+        # Store only keys 0, 1, 3, 4 (gap at index 2).
+        store_keys_in_l2(adapter, [all_keys[i] for i in [0, 1, 3, 4]], layout)
+
+        ctrl = PrefetchController(
+            l1_manager=l1_manager,
+            l2_adapters=[adapter],
+            adapter_descriptors=[make_descriptor(0)],
+            policy=DefaultPrefetchPolicy(),
+        )
+        ctrl.start()
+
+        req_id = ctrl.submit_prefetch_request(
+            all_keys, layout, policy=TrimPolicy.SEGMENTED_PREFIX
+        )
+        retained = wait_for_prefetch_result_bitmap(ctrl, req_id)
+        assert retained is not None
+        assert retained.get_indices_list() == [0, 1, 3, 4], (
+            "SEGMENTED_PREFIX should retain post-gap keys, got "
+            f"{retained.get_indices_list()}"
+        )
+
+        # Retained keys {0,1,3,4} are read-locked in L1; the gap (2) is absent.
+        retained_keys = [all_keys[i] for i in [0, 1, 3, 4]]
+        read = l1_manager.unsafe_read(retained_keys)
+        for key in retained_keys:
+            assert read[key][0] == L1Error.SUCCESS
+        gap_read = l1_manager.reserve_read([all_keys[2]])
+        assert gap_read[all_keys[2]][0] == L1Error.KEY_NOT_EXIST
+
+        l1_manager.finish_read(retained_keys)
+        ctrl.stop()
+        adapter.close()
+
+    def test_fault_inject_load_gap_segmented_vs_prefix(self, l1_manager):
+        """fault_inject (load fails at index 2) drives the segmented path.
+
+        Lookup reports all 5 keys present; the *load* of index 2 fails (the L2
+        retrieve error the adapter simulates). SEGMENTED_PREFIX retains the
+        post-gap keys {0,1,3,4}; PREFIX truncates at the hole to {0,1}. Distinct
+        key ranges per policy keep the shared L1 from serving the second pass.
+        """
+        layout = make_layout()
+        for base, trim, expected in (
+            (0, TrimPolicy.SEGMENTED_PREFIX, [0, 1, 3, 4]),
+            (10, TrimPolicy.PREFIX, [0, 1]),
+        ):
+            keys = [make_object_key(base + i) for i in range(5)]
+            inner = make_adapter()
+            store_keys_in_l2(inner, keys, layout)  # all 5 present at lookup
+            # Drop task-position 2 at load -> a mid-prefix L2 retrieve failure.
+            fault = FaultInjectL2Adapter(inner, rate=0.0, seed=0, gap_indices=(2,))
+
+            ctrl = PrefetchController(
+                l1_manager=l1_manager,
+                l2_adapters=[fault],
+                adapter_descriptors=[make_descriptor(0)],
+                policy=DefaultPrefetchPolicy(),
+            )
+            ctrl.start()
+            req_id = ctrl.submit_prefetch_request(keys, layout, policy=trim)
+            retained = wait_for_prefetch_result_bitmap(ctrl, req_id)
+            assert retained is not None
+            assert retained.get_indices_list() == expected, (
+                f"{trim.name}: expected {expected}, got {retained.get_indices_list()}"
+            )
+
+            held = [keys[i] for i in retained.get_indices_list()]
+            if held:
+                l1_manager.finish_read(held)
+            ctrl.stop()
+            fault.close()
 
     def test_key0_missing(self, l1_manager):
         """L2 has keys {1,2,3} but not 0 → prefix = 0, nothing loaded."""
