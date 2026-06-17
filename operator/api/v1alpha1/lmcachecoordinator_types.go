@@ -85,12 +85,22 @@ type LMCacheCoordinatorSpec struct {
 	// +kubebuilder:default=1
 	TriggerWatermark *float64 `json:"triggerWatermark,omitempty"`
 
-	// NOTE: the global-CacheBlend knobs (blend_chunk_size / blend_probe_stride)
-	// are intentionally not typed fields yet. Their `--blend-*` CLI flags are not
-	// in released lmcache images (they ship in a separate CLI PR), and the
-	// coordinator already defaults them to 256 / 1. Until then, override via
-	// spec.env (LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE /
-	// LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE).
+	// blendChunkSize is the tokens per chunk for the global CacheBlend directory
+	// (the match unit). It MUST equal the LMCache chunk size the blend servers
+	// use, so the coordinator chunks published/queried tokens the same way.
+	// +optional
+	// +kubebuilder:default=256
+	// +kubebuilder:validation:Minimum=1
+	BlendChunkSize *int32 `json:"blendChunkSize,omitempty"`
+
+	// blendProbeStride is the number of positions between CacheBlend match
+	// probes. With partial-fill reuse any offset is usable, so 1 (probe every
+	// offset) gives full recall; raise it only to trade recall for coordinator
+	// CPU.
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	BlendProbeStride *int32 `json:"blendProbeStride,omitempty"`
 
 	// prometheus defines Prometheus monitoring configuration. The coordinator
 	// process does not yet expose a /metrics endpoint, so the ServiceMonitor is

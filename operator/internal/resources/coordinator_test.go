@@ -51,9 +51,12 @@ func TestBuildCoordinatorArgs_Defaults(t *testing.T) {
 	if got := findArgValue(t, args, "--eviction-ratio"); got != "0.2" {
 		t.Errorf("--eviction-ratio = %q, want 0.2", got)
 	}
-	// The blend flags are not in released images yet, so they must not be emitted.
-	if slices.Contains(args, "--blend-chunk-size") || slices.Contains(args, "--blend-probe-stride") {
-		t.Errorf("blend flags must not be emitted, got args %v", args)
+	// The blend flags render with the coordinator defaults (256 / 1).
+	if got := findArgValue(t, args, "--blend-chunk-size"); got != "256" {
+		t.Errorf("--blend-chunk-size = %q, want 256", got)
+	}
+	if got := findArgValue(t, args, "--blend-probe-stride"); got != "1" {
+		t.Errorf("--blend-probe-stride = %q, want 1", got)
 	}
 }
 
@@ -61,12 +64,20 @@ func TestBuildCoordinatorArgs_Overrides(t *testing.T) {
 	c := minimalCoordinator()
 	c.Spec.Port = ptr(int32(9400))
 	c.Spec.EvictionRatio = ptr(0.5)
+	c.Spec.BlendChunkSize = ptr(int32(512))
+	c.Spec.BlendProbeStride = ptr(int32(4))
 	c.Spec.ExtraArgs = []string{"--port", "1234"}
 
 	args := BuildCoordinatorArgs(&c.Spec)
 
 	if got := findArgValue(t, args, "--eviction-ratio"); got != "0.5" {
 		t.Errorf("--eviction-ratio = %q, want 0.5", got)
+	}
+	if got := findArgValue(t, args, "--blend-chunk-size"); got != "512" {
+		t.Errorf("--blend-chunk-size = %q, want 512", got)
+	}
+	if got := findArgValue(t, args, "--blend-probe-stride"); got != "4" {
+		t.Errorf("--blend-probe-stride = %q, want 4", got)
 	}
 	// ExtraArgs are appended last so they win when re-specifying a flag.
 	if args[len(args)-2] != "--port" || args[len(args)-1] != "1234" {

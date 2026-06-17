@@ -491,17 +491,14 @@ controller carries no finalizer — owner-reference GC cascade-deletes the child
 The spec mirrors `MPCoordinatorConfig` (`lmcache/v1/mp_coordinator/config.py`); the
 controller renders each field into the matching `lmcache coordinator` CLI flag:
 `host`, `port` (9300), `instanceTimeout` (30), `healthCheckInterval` (10),
-`evictionCheckInterval` (5), `evictionRatio` (0.2), `triggerWatermark` (1.0). It
-also carries `replicas`, `image`, `prometheus`, and the usual pod-shaping fields
-(resources, scheduling, env, etc.).
+`evictionCheckInterval` (5), `evictionRatio` (0.2), `triggerWatermark` (1.0),
+`blendChunkSize` (256), `blendProbeStride` (1). It also carries `replicas`,
+`image`, `prometheus`, and the usual pod-shaping fields (resources, scheduling,
+env, etc.).
 
-The global-CacheBlend knobs (`blend_chunk_size`, `blend_probe_stride`) are **not**
-typed spec fields yet: their `--blend-*` CLI flags are not in released lmcache
-images (they ship in a separate CLI PR), and the coordinator already defaults
-them to 256 / 1. To override before the flags land, set
-`LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE` / `..._BLEND_PROBE_STRIDE` via
-`spec.env`. Once the flags are released, add typed fields + flags. Note
-`blend_chunk_size` **must equal** the blend servers' chunk size.
+The global-CacheBlend knobs (`blendChunkSize`, `blendProbeStride`) render into the
+`--blend-chunk-size` / `--blend-probe-stride` flags and default to 256 / 1. Note
+`blendChunkSize` **must equal** the blend servers' chunk size.
 
 > **Metrics caveat:** the coordinator process exposes only `/healthz`, not a
 > Prometheus `/metrics` endpoint. ServiceMonitor support is wired for parity but

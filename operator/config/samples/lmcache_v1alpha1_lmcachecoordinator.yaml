@@ -29,14 +29,8 @@ spec:
   # triggerWatermark: 1.0         # default, range (0.0, 1.0]
 
   # -- Global CacheBlend directory --
-  # The coordinator defaults blend_chunk_size=256 and blend_probe_stride=1.
-  # Their --blend-* CLI flags are not in released images yet, so to override set
-  # them via env (config reads LMCACHE_MP_COORDINATOR_*):
-  # env:
-  #   - name: LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE
-  #     value: "256"             # MUST equal the blend servers' chunk size
-  #   - name: LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE
-  #     value: "1"
+  # blendChunkSize: 256           # default; MUST equal the blend servers' chunk size
+  # blendProbeStride: 1           # default; 1 probes every offset for full recall
 
   # -- Prometheus monitoring (coordinator has no /metrics endpoint yet) --
   # prometheus:

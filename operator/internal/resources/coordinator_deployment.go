@@ -83,15 +83,13 @@ func CoordinatorPort(spec *lmcachev1alpha1.LMCacheCoordinatorSpec) int32 {
 // `lmcache coordinator` CLI flags. User-supplied extraArgs are appended last so
 // they retain override precedence.
 //
-// The global-CacheBlend knobs (blend_chunk_size / blend_probe_stride) are NOT
-// rendered here: their `--blend-*` flags do not exist in released lmcache images
-// yet (they ship in a separate CLI PR), and the coordinator already defaults
-// them to 256 / 1. To override before the flags land, set the
-// LMCACHE_MP_COORDINATOR_BLEND_* env vars via spec.env (config.from_env() reads
-// them). Once the flags are released, add typed fields + flags here.
+// The global-CacheBlend knobs (blend_chunk_size / blend_probe_stride) are
+// rendered via their `--blend-chunk-size` / `--blend-probe-stride` flags, which
+// default to 256 / 1 (matching MPCoordinatorConfig). blendChunkSize MUST equal
+// the chunk size the blend servers use.
 func BuildCoordinatorArgs(spec *lmcachev1alpha1.LMCacheCoordinatorSpec) []string {
-	// 7 two-token flags plus the user-supplied extra args.
-	args := make([]string, 0, 14+len(spec.ExtraArgs))
+	// 9 two-token flags plus the user-supplied extra args.
+	args := make([]string, 0, 18+len(spec.ExtraArgs))
 	args = append(args,
 		"--host", derefString(spec.Host, "0.0.0.0"),
 		"--port", fmt.Sprintf("%d", CoordinatorPort(spec)),
@@ -100,6 +98,8 @@ func BuildCoordinatorArgs(spec *lmcachev1alpha1.LMCacheCoordinatorSpec) []string
 		"--eviction-check-interval", formatFloat(derefFloat64(spec.EvictionCheckInterval, 5.0)),
 		"--eviction-ratio", formatFloat(derefFloat64(spec.EvictionRatio, 0.2)),
 		"--trigger-watermark", formatFloat(derefFloat64(spec.TriggerWatermark, 1.0)),
+		"--blend-chunk-size", fmt.Sprintf("%d", derefInt32(spec.BlendChunkSize, 256)),
+		"--blend-probe-stride", fmt.Sprintf("%d", derefInt32(spec.BlendProbeStride, 1)),
 	)
 	args = append(args, spec.ExtraArgs...)
 	return args

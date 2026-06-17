@@ -595,6 +595,16 @@ func (in *LMCacheCoordinatorSpec) DeepCopyInto(out *LMCacheCoordinatorSpec) {
 		*out = new(float64)
 		**out = **in
 	}
+	if in.BlendChunkSize != nil {
+		in, out := &in.BlendChunkSize, &out.BlendChunkSize
+		*out = new(int32)
+		**out = **in
+	}
+	if in.BlendProbeStride != nil {
+		in, out := &in.BlendProbeStride, &out.BlendProbeStride
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Prometheus != nil {
 		in, out := &in.Prometheus, &out.Prometheus
 		*out = new(PrometheusSpec)

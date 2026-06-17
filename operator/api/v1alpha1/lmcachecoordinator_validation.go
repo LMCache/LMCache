@@ -66,5 +66,13 @@ func (c *LMCacheCoordinator) ValidateSpec() field.ErrorList {
 		}
 	}
 
+	if spec.BlendChunkSize != nil && *spec.BlendChunkSize < 1 {
+		errs = append(errs, field.Invalid(specPath.Child("blendChunkSize"), *spec.BlendChunkSize, "must be > 0"))
+	}
+
+	if spec.BlendProbeStride != nil && *spec.BlendProbeStride < 1 {
+		errs = append(errs, field.Invalid(specPath.Child("blendProbeStride"), *spec.BlendProbeStride, "must be > 0"))
+	}
+
 	return errs
 }
