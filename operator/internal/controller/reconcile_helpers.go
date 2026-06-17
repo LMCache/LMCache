@@ -120,7 +120,7 @@ func (r *LMCacheEngineReconciler) validateAndSetCondition(ctx context.Context, e
 func (r *LMCacheEngineReconciler) reconcileDaemonSet(ctx context.Context, engine *lmcachev1alpha1.LMCacheEngine) error {
 	// Resolve the coordinator connection (ref -> Service URL) so the DaemonSet
 	// builder emits --coordinator-url for server registration.
-	conn, err := resolveCoordinatorConnection(ctx, r.Client, engine.Namespace, engine.Spec.Coordinator)
+	conn, err := resources.ResolveCoordinatorConnection(ctx, r.Client, engine.Namespace, engine.Spec.Coordinator)
 	if err != nil {
 		return err
 	}

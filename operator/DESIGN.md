@@ -516,9 +516,13 @@ The global-CacheBlend knobs (`blendChunkSize`, `blendProbeStride`) render into t
   before building the DaemonSet, so `BuildContainerArgs` stays a pure function.
 - `url` — explicit escape hatch for a coordinator the operator does not manage.
   Exactly one of `ref`/`url` is required (enforced in validation).
-- `advertiseIP` (defaults to the pod IP via the downward API env
-  `LMCACHE_COORDINATOR_ADVERTISE_IP`), `heartbeatInterval`, `l2EventReporting`,
-  `l2EventFlushInterval`.
+- `advertiseIP` — **do not set this in almost every case.** It defaults to the
+  pod IP via the downward API env `LMCACHE_COORDINATOR_ADVERTISE_IP`, which is
+  correct for normal in-cluster deployments. Only override it if you know exactly
+  what you are doing (e.g. the coordinator runs outside the cluster and must
+  reach the server through a specific externally-routable address); an incorrect
+  value silently breaks coordinator-to-server connectivity.
+- `heartbeatInterval`, `l2EventReporting`, `l2EventFlushInterval`.
 
 When `coordinator` is unset, the server emits no `--coordinator-url` and does not
 register (unchanged behavior).

@@ -70,7 +70,7 @@ func (r *CacheBlendEngineReconciler) validateAndSetCondition(ctx context.Context
 func (r *CacheBlendEngineReconciler) reconcileDaemonSet(ctx context.Context, engine *lmcachev1alpha1.CacheBlendEngine) error {
 	// Resolve the coordinator connection (ref -> Service URL) so the DaemonSet
 	// builder emits --coordinator-url for server registration.
-	conn, err := resolveCoordinatorConnection(ctx, r.Client, engine.Namespace, engine.Spec.Coordinator)
+	conn, err := resources.ResolveCoordinatorConnection(ctx, r.Client, engine.Namespace, engine.Spec.Coordinator)
 	if err != nil {
 		return err
 	}

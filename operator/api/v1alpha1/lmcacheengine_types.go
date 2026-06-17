@@ -266,8 +266,14 @@ type CoordinatorConnectionSpec struct {
 	// +optional
 	URL *string `json:"url,omitempty"`
 
-	// advertiseIP is the IP the coordinator should reach this server at. When
-	// unset, the server's pod IP is injected via the downward API.
+	// advertiseIP is the IP the coordinator should reach this server at.
+	//
+	// DO NOT SET THIS IN ALMOST EVERY CASE. When unset, the server's pod IP is
+	// injected automatically via the downward API, which is the correct value
+	// for normal in-cluster deployments. Only set this if you know exactly what
+	// you are doing -- e.g. the coordinator runs outside the cluster and must
+	// reach the server through a specific externally-routable address. An
+	// incorrect value silently breaks coordinator-to-server connectivity.
 	// +optional
 	AdvertiseIP *string `json:"advertiseIP,omitempty"`
 

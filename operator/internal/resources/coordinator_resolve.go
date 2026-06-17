@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package resources
 
 import (
 	"context"
@@ -24,16 +24,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	lmcachev1alpha1 "github.com/LMCache/LMCache/api/v1alpha1"
-	"github.com/LMCache/LMCache/internal/resources"
 )
 
-// resolveCoordinatorConnection returns a copy of conn with URL populated. When
+// ResolveCoordinatorConnection returns a copy of conn with URL populated. When
 // conn references an LMCacheCoordinator (Ref), it is looked up in the given
 // namespace and its in-cluster Service endpoint is used. An explicit URL is
 // returned unchanged. A nil conn returns nil. The resolved copy is passed to the
 // resource builders so BuildContainerArgs can emit --coordinator-url without a
 // cluster read.
-func resolveCoordinatorConnection(
+func ResolveCoordinatorConnection(
 	ctx context.Context,
 	c client.Client,
 	namespace string,
@@ -58,7 +57,7 @@ func resolveCoordinatorConnection(
 		return nil, fmt.Errorf("failed to resolve coordinator ref %q: %w", conn.Ref.Name, err)
 	}
 
-	url := resources.CoordinatorEndpoint(coordinator)
+	url := CoordinatorEndpoint(coordinator)
 	resolved.URL = &url
 	return &resolved, nil
 }

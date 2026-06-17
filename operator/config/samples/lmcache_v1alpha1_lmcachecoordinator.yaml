@@ -5,10 +5,10 @@ metadata:
   namespace: default
 spec:
   # -- Container image (runs the same lmcache binary as the engines) --
-  # image:
-  #   repository: lmcache/vllm-openai   # default
-  #   tag: latest                        # default
-  #   pullPolicy: IfNotPresent           # Always | Never | IfNotPresent
+  image:
+    repository: lmcache/vllm-openai   # default
+    tag: latest                       # default
+    pullPolicy: IfNotPresent          # Always | Never | IfNotPresent
   # imagePullSecrets:
   #   - name: my-registry-secret
 
