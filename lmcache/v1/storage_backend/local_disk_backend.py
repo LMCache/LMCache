@@ -671,37 +671,37 @@ class LocalDiskBackend(StorageBackendInterface):
             f"Disk write size: {size} bytes, "
             f"Bandwidth: {size / disk_write_time / 1e6:.2f} MB/s"
         )
-    
-        @_lmcache_nvtx_annotate
-        def read_file(self, key, buffer, path):
-            start_time = time.time()
-            size = len(buffer)
-            fblock_aligned = size % self.os_disk_bs == 0
-            if not fblock_aligned and self.use_odirect:
-                logger.warning(
-                    "Cannot use O_DIRECT for this file, "
-                    "size is not aligned to disk block size."
-                )
-    
-            try:
-                if not fblock_aligned or not self.use_odirect:
-                    with open(path, "rb") as f:
-                        f.readinto(buffer)
-                else:
-                    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-                    with os.fdopen(fd, "rb", buffering=0) as fdo:
-                        fdo.readinto(buffer)
-            except FileNotFoundError:
-                logger.warning(f"File not found on disk: {path}")
-                if self.dict.get(key, None):
-                    self.dict.pop(key)
-                return
-    
-            disk_read_time = time.time() - start_time
-            logger.debug(
-                f"Disk read size: {size} bytes, "
-                f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
+
+    @_lmcache_nvtx_annotate
+    def read_file(self, key, buffer, path):
+        start_time = time.time()
+        size = len(buffer)
+        fblock_aligned = size % self.os_disk_bs == 0
+        if not fblock_aligned and self.use_odirect:
+            logger.warning(
+                "Cannot use O_DIRECT for this file, "
+                "size is not aligned to disk block size."
             )
+
+        try:
+            if not fblock_aligned or not self.use_odirect:
+                with open(path, "rb") as f:
+                    f.readinto(buffer)
+            else:
+                fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+                with os.fdopen(fd, "rb", buffering=0) as fdo:
+                    fdo.readinto(buffer)
+        except FileNotFoundError:
+            logger.warning(f"File not found on disk: {path}")
+            if self.dict.get(key, None):
+                self.dict.pop(key)
+            return
+
+        disk_read_time = time.time() - start_time
+        logger.debug(
+            f"Disk read size: {size} bytes, "
+            f"Bandwidth: {size / disk_read_time / 1e6:.2f} MB/s"
+        )
 
     def get_allocator_backend(self) -> LocalCPUBackend:
         return self.local_cpu_backend
