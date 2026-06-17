@@ -26,7 +26,10 @@ fi
 echo "Downloading opt-125m from GitHub release ${GH_RELEASE}..."
 mkdir -p "${SNAPSHOT_DIR}"
 
-TARBALL="$(mktemp -d)/opt-125m.tar.gz"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
+
+TARBALL="${TMP_DIR}/opt-125m.tar.gz"
 DOWNLOAD_URL="https://github.com/LMCache/opt-125m/archive/refs/tags/${GH_RELEASE}.tar.gz"
 
 for i in $(seq 1 5); do
@@ -42,16 +45,20 @@ done
 
 # Extract to temp dir first, then move files. GitHub archives
 # produce a top-level dir like ``opt-125m-1.0``.
-EXTRACT_DIR="$(mktemp -d)"
+EXTRACT_DIR="${TMP_DIR}/extract"
+mkdir -p "${EXTRACT_DIR}"
 tar -xzf "${TARBALL}" -C "${EXTRACT_DIR}"
 # Find the inner directory (only one should exist).
-INNER_DIR="$(find "${EXTRACT_DIR}" -mindepth 1 -maxdepth 1 -type d | head -1)"
+INNER_DIR="$(find "${EXTRACT_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+if [ -z "${INNER_DIR}" ]; then
+    echo "!! Failed to find extracted directory in ${EXTRACT_DIR}"
+    exit 1
+fi
 mv "${INNER_DIR}"/* "${SNAPSHOT_DIR}/"
-
-rm -rf "${TARBALL}" "${EXTRACT_DIR}"
 
 # Create the refs/main pointer so snapshot_download(local_files_only=True)
 # can resolve the snapshot hash.
+mkdir -p "${MODEL_DIR}/refs"
 echo "${SNAPSHOT}" > "${MODEL_DIR}/refs/main"
 
 echo "opt-125m cached at ${SNAPSHOT_DIR}"
