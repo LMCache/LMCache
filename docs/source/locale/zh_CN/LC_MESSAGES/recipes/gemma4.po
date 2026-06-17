@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -49,7 +49,11 @@ msgid ""
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
 "language-models>`_ (architectures ``Gemma4ForConditionalGeneration`` for "
 "31B/E4B and ``Gemma4UnifiedForConditionalGeneration`` for 12B)."
-msgstr "**引擎文档:** `Gemma 4 在 vLLM 支持的模型 <https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-language-models>`_ (架构 ``Gemma4ForConditionalGeneration`` 用于 31B/E4B 和 ``Gemma4UnifiedForConditionalGeneration`` 用于 12B)。"
+msgstr ""
+"**引擎文档:** `Gemma 4 在 vLLM 支持的模型 "
+"<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
+"language-models>`_ (架构 ``Gemma4ForConditionalGeneration`` 用于 31B/E4B 和 "
+"``Gemma4UnifiedForConditionalGeneration`` 用于 12B)。"
 
 #: ../../source/recipes/gemma4.rst:24
 msgid "**Status:** Validated with LMCache."
@@ -73,8 +77,8 @@ msgstr "较小的 ``google/gemma-4-12B-it`` 和 ``google/gemma-4-E4B-it`` 在单
 msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts), see "
-":doc:`../mp/quickstart`."
-msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../mp/quickstart`。"
+":doc:`../getting_started/quickstart`."
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机）的更多信息，请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma4.rst:60
 msgid ""
@@ -98,8 +102,10 @@ msgid "TRT-LLM"
 msgstr "TRT-LLM"
 
 #: ../../source/recipes/gemma4.rst:70
-msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。请参阅 :doc:`../getting_started/quickstart` 以获取 TRT-LLM + LMCache 的设置。"
 
 #: ../../source/recipes/gemma4.rst:73
 msgid "CacheBlend support"
@@ -174,4 +180,7 @@ msgstr ""
 #~ msgstr ""
 #~ "**确定性。** Gemma 4 在 Triton 注意力后端上运行，该后端在"
 #~ " vLLM 的批量不变模式下不是位精确的，因此检索到的结果可能与新计算的结果存在小的数值差异，而不是字节完全相同。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 

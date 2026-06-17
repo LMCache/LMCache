@@ -1,0 +1,56 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2024, The LMCache Team
+# This file is distributed under the same license as the LMCache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: LMCache \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../../source/legacy/index.rst:4
+msgid "Legacy (In-Process Mode)"
+msgstr "遗留（进程内模式）"
+
+#: ../../source/legacy/index.rst:8
+msgid ""
+"These pages document LMCache's original **in-process mode**, where "
+"LMCache ran *inside* the inference engine process (e.g. via "
+"``LMCacheConnectorV1`` on vLLM). In-process mode is **deprecated**; new "
+"deployments should use :doc:`Multiprocess (MP) mode <../mp/index>`."
+msgstr "这些页面记录了 LMCache 的原始 **内进程模式**，其中 LMCache 在推理引擎进程中 *运行*（例如通过 ``LMCacheConnectorV1`` 在 vLLM 上）。内进程模式是 **不推荐使用** 的；新的部署应使用 :doc:`多进程 (MP) 模式 <../mp/index>`。"
+
+#: ../../source/legacy/index.rst:14
+msgid "Background"
+msgstr "背景"
+
+#: ../../source/legacy/index.rst:16
+msgid ""
+"LMCache began as an in-process library embedded directly in the serving "
+"engine. The **multiprocess refactor** moved LMCache into a standalone "
+"``lmcache server`` and made an **asynchronous prefetching architecture** "
+"the default -- a ``LOOKUP`` followed by background L2→L1 loads -- "
+"alongside process isolation, shared caching across engine instances, and "
+"multi-tier (L1/L2) storage."
+msgstr "LMCache 最初作为一个嵌入在服务引擎中的进程内库。**多进程重构**将 LMCache 移动到一个独立的 ``lmcache server`` 中，并使 **异步预取架构** 成为默认设置——一个 ``LOOKUP`` 后跟后台 L2→L1 加载——同时实现进程隔离、引擎实例之间的共享缓存以及多层 (L1/L2) 存储。"
+
+#: ../../source/legacy/index.rst:22
+msgid ""
+"MP is now the recommended mode and is on track to support essentially "
+"everything in-process mode did. The pages below are kept for users still "
+"on in-process mode and as a historical reference while MP closes any "
+"remaining gaps; where a feature already has an MP equivalent, prefer the "
+"MP docs."
+msgstr "MP 现在是推荐的模式，并且正在努力支持几乎所有在进程模式下的功能。下面的页面保留给仍在进程模式下的用户，并作为历史参考，同时 MP 解决任何剩余的差距；如果某个功能已经有 MP 等效项，请优先参考 MP 文档。"
+

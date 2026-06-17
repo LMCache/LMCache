@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -93,8 +93,8 @@ msgstr "**Qwen3-Coder-30B-A3B-Instruct** (1 GPU):"
 msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts), see "
-":doc:`../mp/quickstart`."
-msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../mp/quickstart`。"
+":doc:`../getting_started/quickstart`."
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/qwen3.rst:92
 msgid ""
@@ -118,8 +118,10 @@ msgid "TRT-LLM"
 msgstr "TRT-LLM"
 
 #: ../../source/recipes/qwen3.rst:102
-msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。请参阅 :doc:`../getting_started/quickstart` 以获取 TRT-LLM + KV Cache 的设置。"
 
 #: ../../source/recipes/qwen3.rst:105
 msgid "CacheBlend support"
@@ -156,4 +158,7 @@ msgstr "注意事项"
 #: ../../source/recipes/qwen3.rst:124
 msgid "None known."
 msgstr "没有已知的问题。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 

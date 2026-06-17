@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -431,71 +431,9 @@ msgid ""
 "Returns a detailed snapshot of the MP engine's internal state: L1 cache, "
 "L2 adapters, registered GPU contexts, active sessions, and in-flight "
 "prefetch jobs. Intended for operators and debugging, not for monitoring "
-"(use Prometheus metrics for time-series data — see :doc:`observability`)."
-msgstr ""
-"返回 MP 引擎内部状态的详细快照：L1 缓存、L2 适配器、注册的 GPU "
-"上下文、活动会话和正在进行的预取任务。旨在供操作员和调试使用，而非监控（请使用 Prometheus 指标获取时间序列数据 — 参见 "
-":doc:`observability`）。"
-
-#: ../../source/mp/http_api.rst:239
-msgid "\"engine_type\": \"MPCacheServer\","
-msgstr "\"engine_type\": \"MPCacheServer\","
-
-#: ../../source/mp/http_api.rst:240
-msgid ""
-"\"chunk_size\": 256, \"hash_algorithm\": \"builtin-hash\", "
-"\"registered_gpu_ids\": [0, 1], \"gpu_context_meta\": {"
-msgstr "\"chunk_size\": 256, \"hash_algorithm\": \"builtin-hash\", \"registered_gpu_ids\": [0, 1], \"gpu_context_meta\": {"
-
-#: ../../source/mp/http_api.rst:244
-msgid "\"0\": {"
-msgstr "\\\"0\\\": {"
-
-#: ../../source/mp/http_api.rst:245
-msgid ""
-"\"model_name\": \"meta-llama/Llama-3.1-8B-Instruct\", \"world_size\": 1, "
-"\"kv_cache_layout\": {"
-msgstr "\\\"model_name\\\": \\\"meta-llama/Llama-3.1-8B-Instruct\\\", \\\"world_size\\\": 1, \\\"kv_cache_layout\\\": {"
-
-#: ../../source/mp/http_api.rst:248
-msgid ""
-"\"num_layers\": 32, \"num_blocks\": 12345, \"cache_size_per_token\": "
-"131072, \"kernel_groups\": ["
-msgstr "\\\"num_layers\\\": 32, \\\"num_blocks\\\": 12345, \\\"cache_size_per_token\\\": 131072, \\\"kernel_groups\\\": ["
-
-#: ../../source/mp/http_api.rst:252
-msgid "{"
-msgstr "{"
-
-#: ../../source/mp/http_api.rst:253
-msgid ""
-"\"kernel_group_idx\": 0, \"engine_group_idx\": 0, \"object_group_idx\": "
-"0, \"num_layers\": 32, \"layer_indices\": [0, 1, \"...\"], "
-"\"tokens_per_block\": 16, \"slots_per_block\": 16, \"dtype\": "
-"\"torch.bfloat16\", \"gpu_kv_concrete_shape\": \"...\", \"is_mla\": "
-"false, \"gpu_kv_format\": \"...\", \"gpu_kv_shape\": \"...\", "
-"\"attention_backend\": \"...\""
-msgstr "\\\"kernel_group_idx\\\": 0, \\\"engine_group_idx\\\": 0, \\\"object_group_idx\\\": 0, \\\"num_layers\\\": 32, \\\"layer_indices\\\": [0, 1, \\\"...\\\"], \\\"tokens_per_block\\\": 16, \\\"slots_per_block\\\": 16, \\\"dtype\\\": \\\"torch.bfloat16\\\", \\\"gpu_kv_concrete_shape\\\": \\\"...\\\", \\\"is_mla\\\": false, \\\"gpu_kv_format\\\": \\\"...\\\", \\\"gpu_kv_shape\\\": \\\"...\\\", \\\"attention_backend\\\": \\\"...\\\""
-
-#: ../../source/mp/http_api.rst:266 ../../source/mp/http_api.rst:268
-#: ../../source/mp/http_api.rst:269 ../../source/mp/http_api.rst:276
-#: ../../source/mp/http_api.rst:277
-msgid "}"
-msgstr "}"
-
-#: ../../source/mp/http_api.rst:267
-msgid "]"
-msgstr "]"
-
-#: ../../source/mp/http_api.rst:270
-msgid ""
-"}, \"active_sessions\": 2, \"active_prefetch_jobs\": 0, "
-"\"storage_manager\": {"
-msgstr "}, \\\"active_sessions\\\": 2, \\\"active_prefetch_jobs\\\": 0, \\\"storage_manager\\\": {"
-
-#: ../../source/mp/http_api.rst:274
-msgid "\"is_healthy\": true, \"...\": \"backend-specific fields\""
-msgstr "\\\"is_healthy\\\": true, \\\"...\\\": \\\"后端特定字段\\\""
+"(use Prometheus metrics for time-series data — see "
+":doc:`observability/index`)."
+msgstr "返回 MP 引擎内部状态的详细快照：L1 缓存、L2 适配器、注册的 GPU 上下文、活动会话和正在进行的预取任务。旨在供操作员和调试使用，而非监控（使用 Prometheus 指标获取时间序列数据 — 参见 :doc:`observability/index`）。"
 
 #: ../../source/mp/http_api.rst:279
 msgid ""
@@ -536,7 +474,10 @@ msgid ""
 "``backend``, ``operation``, and the JSON request body into the generic L2"
 " adapter reconfiguration API, while backend-specific validation and "
 "migration semantics stay inside the adapter."
-msgstr "这些端点在服务器具有可运行时重新配置的 L2 适配器时可用。它们仅更改 LMCache 的运行时映射和元数据；后端资源如 DAX 设备路径必须已经存在，并且服务器必须能够读取和写入。该端点将 ``backend``、``operation`` 和 JSON 请求体路由到通用 L2 适配器重新配置 API，而后端特定的验证和迁移语义则保留在适配器内部。"
+msgstr ""
+"这些端点在服务器具有可运行时重新配置的 L2 适配器时可用。它们仅更改 LMCache 的运行时映射和元数据；后端资源如 DAX "
+"设备路径必须已经存在，并且服务器必须能够读取和写入。该端点将 ``backend``、``operation`` 和 JSON 请求体路由到通用 "
+"L2 适配器重新配置 API，而后端特定的验证和迁移语义则保留在适配器内部。"
 
 #: ../../source/mp/http_api.rst:342
 #, python-brace-format
@@ -546,7 +487,10 @@ msgid ""
 "``/reconfigure/{backend}/{operation}``. If an L2 adapter is wrapped by "
 "serde, the backend string is still the configured L2 adapter type, not "
 "the serde wrapper type."
-msgstr "使用 ``GET /reconfigure/backends`` 列出可以在 ``/reconfigure/{backend}/status`` 和 ``/reconfigure/{backend}/{operation}`` 中使用的后端字符串。如果 L2 适配器被 serde 包装，后端字符串仍然是配置的 L2 适配器类型，而不是 serde 包装器类型。"
+msgstr ""
+"使用 ``GET /reconfigure/backends`` 列出可以在 ``/reconfigure/{backend}/status`` "
+"和 ``/reconfigure/{backend}/{operation}`` 中使用的后端字符串。如果 L2 适配器被 serde "
+"包装，后端字符串仍然是配置的 L2 适配器类型，而不是 serde 包装器类型。"
 
 #: ../../source/mp/http_api.rst:348
 msgid ""
@@ -555,7 +499,10 @@ msgid ""
 "``size`` as an integer byte count or a string such as ``\"100GiB\"``. "
 "``remove`` supports ``migrate``, ``evict``, and ``drain``; ``resize`` "
 "supports ``migrate`` and ``evict``."
-msgstr "对于 Device-DAX，请使用 ``backend=dax``。DAX 操作使用 JSON 请求体，因为 DAX 路径包含斜杠。``add`` 和 ``resize`` 接受 ``size`` 作为整数字节数或字符串，例如 ``\"100GiB\"``。``remove`` 支持 ``migrate``、``evict`` 和 ``drain``；``resize`` 支持 ``migrate`` 和 ``evict``。"
+msgstr ""
+"对于 Device-DAX，请使用 ``backend=dax``。DAX 操作使用 JSON 请求体，因为 DAX 路径包含斜杠。``add``"
+" 和 ``resize`` 接受 ``size`` 作为整数字节数或字符串，例如 ``\"100GiB\"``。``remove`` 支持 "
+"``migrate``、``evict`` 和 ``drain``；``resize`` 支持 ``migrate`` 和 ``evict``。"
 
 #: ../../source/mp/http_api.rst:354
 msgid ""
@@ -670,10 +617,10 @@ msgstr "``404``: ``instance_id`` 未注册，或者注册的 KV 张量为空。"
 
 #: ../../source/mp/http_api.rst:414
 msgid ""
-"``501``: engine has no ``gpu_contexts``, or the GPU KV format is not "
+"``501``: engine has no ``cache_contexts``, or the KV format is not "
 "supported by this endpoint (page-buffer-fused and cross-layer layouts are"
 " declined until a real need appears)."
-msgstr "``501``: 引擎没有 ``gpu_contexts``，或者该端点不支持 GPU KV 格式（页面缓冲融合和跨层布局在真正需要之前被拒绝）。"
+msgstr "``501``: 引擎没有 ``cache_contexts``，或者该端点不支持 KV 格式（页面缓冲融合和跨层布局在真正需要之前被拒绝）。"
 
 #: ../../source/mp/http_api.rst:417
 msgid "``503``: engine not yet initialized on ``app.state``."
@@ -931,10 +878,8 @@ msgstr "``GET /metrics``"
 msgid ""
 "Prometheus exposition format for every metric registered on the default "
 "``prometheus_client`` registry. Scrape this directly from Prometheus. See"
-" :doc:`observability` for the list of exported metrics."
-msgstr ""
-"默认 ``prometheus_client`` 注册表中注册的每个指标的 Prometheus 展示格式。直接从 Prometheus "
-"抓取此内容。有关导出指标的列表，请参见 :doc:`observability`。"
+" :doc:`observability/index` for the list of exported metrics."
+msgstr "默认 ``prometheus_client`` 注册表中注册的每个指标的 Prometheus 展示格式。直接从 Prometheus 抓取此数据。有关导出指标的列表，请参见 :doc:`observability/index`。"
 
 #: ../../source/mp/http_api.rst:679
 msgid "``POST /metrics/reset``"
@@ -1096,4 +1041,77 @@ msgid ""
 "page documenting the endpoint's purpose, request/response schema, and an "
 "example ``curl`` invocation."
 msgstr "添加新端点时，请在此页面上添加一个匹配的部分，记录端点的目的、请求/响应架构以及一个示例 ``curl`` 调用。"
+
+#~ msgid "\"engine_type\": \"MPCacheServer\","
+#~ msgstr "\"engine_type\": \"MPCacheServer\","
+
+#~ msgid ""
+#~ "\"chunk_size\": 256, \"hash_algorithm\": "
+#~ "\"builtin-hash\", \"registered_gpu_ids\": [0, 1],"
+#~ " \"gpu_context_meta\": {"
+#~ msgstr ""
+#~ "\"chunk_size\": 256, \"hash_algorithm\": "
+#~ "\"builtin-hash\", \"registered_gpu_ids\": [0, 1],"
+#~ " \"gpu_context_meta\": {"
+
+#~ msgid "\"0\": {"
+#~ msgstr "\\\"0\\\": {"
+
+#~ msgid ""
+#~ "\"model_name\": \"meta-llama/Llama-3.1-8B-"
+#~ "Instruct\", \"world_size\": 1, \"kv_cache_layout\":"
+#~ " {"
+#~ msgstr ""
+#~ "\\\"model_name\\\": \\\"meta-llama/Llama-3.1-8B-"
+#~ "Instruct\\\", \\\"world_size\\\": 1, "
+#~ "\\\"kv_cache_layout\\\": {"
+
+#~ msgid ""
+#~ "\"num_layers\": 32, \"num_blocks\": 12345, "
+#~ "\"cache_size_per_token\": 131072, \"kernel_groups\": "
+#~ "["
+#~ msgstr ""
+#~ "\\\"num_layers\\\": 32, \\\"num_blocks\\\": 12345,"
+#~ " \\\"cache_size_per_token\\\": 131072, "
+#~ "\\\"kernel_groups\\\": ["
+
+#~ msgid "{"
+#~ msgstr "{"
+
+#~ msgid ""
+#~ "\"kernel_group_idx\": 0, \"engine_group_idx\": 0,"
+#~ " \"object_group_idx\": 0, \"num_layers\": 32, "
+#~ "\"layer_indices\": [0, 1, \"...\"], "
+#~ "\"tokens_per_block\": 16, \"slots_per_block\": 16,"
+#~ " \"dtype\": \"torch.bfloat16\", "
+#~ "\"gpu_kv_concrete_shape\": \"...\", \"is_mla\": "
+#~ "false, \"gpu_kv_format\": \"...\", \"gpu_kv_shape\":"
+#~ " \"...\", \"attention_backend\": \"...\""
+#~ msgstr ""
+#~ "\\\"kernel_group_idx\\\": 0, \\\"engine_group_idx\\\": "
+#~ "0, \\\"object_group_idx\\\": 0, \\\"num_layers\\\":"
+#~ " 32, \\\"layer_indices\\\": [0, 1, "
+#~ "\\\"...\\\"], \\\"tokens_per_block\\\": 16, "
+#~ "\\\"slots_per_block\\\": 16, \\\"dtype\\\": "
+#~ "\\\"torch.bfloat16\\\", \\\"gpu_kv_concrete_shape\\\": "
+#~ "\\\"...\\\", \\\"is_mla\\\": false, "
+#~ "\\\"gpu_kv_format\\\": \\\"...\\\", \\\"gpu_kv_shape\\\":"
+#~ " \\\"...\\\", \\\"attention_backend\\\": \\\"...\\\""
+
+#~ msgid "}"
+#~ msgstr "}"
+
+#~ msgid "]"
+#~ msgstr "]"
+
+#~ msgid ""
+#~ "}, \"active_sessions\": 2, \"active_prefetch_jobs\":"
+#~ " 0, \"storage_manager\": {"
+#~ msgstr ""
+#~ "}, \\\"active_sessions\\\": 2, "
+#~ "\\\"active_prefetch_jobs\\\": 0, \\\"storage_manager\\\":"
+#~ " {"
+
+#~ msgid "\"is_healthy\": true, \"...\": \"backend-specific fields\""
+#~ msgstr "\\\"is_healthy\\\": true, \\\"...\\\": \\\"后端特定字段\\\""
 

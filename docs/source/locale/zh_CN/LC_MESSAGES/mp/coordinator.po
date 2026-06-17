@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -55,7 +55,12 @@ msgid ""
 "environment variable below. See :doc:`/cli/coordinator` for details. "
 "Equivalently, the coordinator can still be launched as a module with "
 "``python3 -m lmcache.v1.mp_coordinator``."
-msgstr "CLI 接受 ``--host``、``--port``、``--instance-timeout``、``--health-check-interval``、``--eviction-check-interval``、``--eviction-ratio`` 和 ``--trigger-watermark``；任何标志都会覆盖下面匹配的环境变量。有关详细信息，请参见 :doc:`/cli/coordinator`。同样，协调器仍然可以通过 ``python3 -m lmcache.v1.mp_coordinator`` 作为模块启动。"
+msgstr ""
+"CLI 接受 ``--host``、``--port``、``--instance-timeout``、``--health-check-"
+"interval``、``--eviction-check-interval``、``--eviction-ratio`` 和 "
+"``--trigger-watermark``；任何标志都会覆盖下面匹配的环境变量。有关详细信息，请参见 "
+":doc:`/cli/coordinator`。同样，协调器仍然可以通过 ``python3 -m "
+"lmcache.v1.mp_coordinator`` 作为模块启动。"
 
 #: ../../source/mp/coordinator.rst:32
 msgid "Configuration"
@@ -76,7 +81,7 @@ msgid "Default"
 msgstr "默认"
 
 #: ../../source/mp/coordinator.rst:43 ../../source/mp/coordinator.rst:84
-#: ../../source/mp/coordinator.rst:193
+#: ../../source/mp/coordinator.rst:194
 msgid "Description"
 msgstr "描述"
 
@@ -265,139 +270,141 @@ msgstr "L2 事件批量刷新之间的秒数（必须为 ``> 0``，默认值为 
 
 #: ../../source/mp/coordinator.rst:105
 msgid ""
-"The server registers under its telemetry identity (``--service-instance-"
-"id`` / OTel ``service.instance.id``); if that is unset, the coordinator "
-"assigns an id."
-msgstr ""
-"服务器在其遥测身份下注册 (``--service-instance-id`` / OTel "
-"``service.instance.id``)；如果未设置，则协调器会分配一个 ID。"
+"The server registers under its stable identity (``--instance-id`` / OTel "
+"``service.instance.id``); if the flag is not passed, the server mints a "
+"random UUID v4 at startup and registers under that."
+msgstr "服务器在其稳定身份下注册（``--instance-id`` / OTel ``service.instance.id``）；如果未传递该标志，服务器将在启动时生成一个随机的 UUID v4 并在该 UUID 下注册。"
 
-#: ../../source/mp/coordinator.rst:108
+#: ../../source/mp/coordinator.rst:109
 msgid ""
 "Registration is best-effort: if the coordinator is unreachable, the MP "
 "server logs a warning, keeps retrying, and continues serving. A malformed"
 " heartbeat-interval value is rejected at startup."
 msgstr "注册是尽力而为的：如果协调器无法访问，MP 服务器会记录警告，持续重试，并继续提供服务。启动时会拒绝格式错误的心跳间隔值。"
 
-#: ../../source/mp/coordinator.rst:113
+#: ../../source/mp/coordinator.rst:114
 msgid "Inspecting the fleet"
 msgstr "检查集群"
 
-#: ../../source/mp/coordinator.rst:115
+#: ../../source/mp/coordinator.rst:116
 msgid "Two read-only endpoints let you observe the coordinator:"
 msgstr "两个只读端点让您观察协调器："
 
-#: ../../source/mp/coordinator.rst:117
+#: ../../source/mp/coordinator.rst:118
 msgid "``GET /instances`` -- list every registered MP server."
 msgstr "``GET /instances`` -- 列出每个注册的 MP 服务器。"
 
-#: ../../source/mp/coordinator.rst:118
+#: ../../source/mp/coordinator.rst:119
 msgid "``GET /healthz`` -- coordinator liveness probe (for Kubernetes)."
 msgstr "``GET /healthz`` -- 协调器存活探测（用于 Kubernetes）。"
 
-#: ../../source/mp/coordinator.rst:129
+#: ../../source/mp/coordinator.rst:130
 msgid "L2 usage tracking and eviction"
 msgstr "L2 使用跟踪和逐出"
 
-#: ../../source/mp/coordinator.rst:131
+#: ../../source/mp/coordinator.rst:132
 msgid ""
 "When MP servers enable ``--coordinator-l2-event-reporting``, they stream "
 "L2 store and lookup events to the coordinator. The coordinator aggregates"
 " per-``cache_salt`` usage, enforces quotas, and selects LRU keys to "
 "evict."
-msgstr "当 MP 服务器启用 ``--coordinator-l2-event-reporting`` 时，它们将 L2 存储和查找事件流式传输到协调器。协调器聚合每个 ``cache_salt`` 的使用情况，强制执行配额，并选择 LRU 键进行逐出。"
+msgstr ""
+"当 MP 服务器启用 ``--coordinator-l2-event-reporting`` 时，它们将 L2 "
+"存储和查找事件流式传输到协调器。协调器聚合每个 ``cache_salt`` 的使用情况，强制执行配额，并选择 LRU 键进行逐出。"
 
-#: ../../source/mp/coordinator.rst:135
+#: ../../source/mp/coordinator.rst:136
 msgid ""
 "Each event batch carries the server's ``instance_id`` and a monotonically"
 " increasing sequence number (``seq``) scoped to that instance. These "
 "fields enable future gap detection to identify lost batches."
-msgstr "每个事件批次携带服务器的 ``instance_id`` 和一个单调递增的序列号 (``seq``)，该序列号限定于该实例。这些字段使未来的缺口检测成为可能，以识别丢失的批次。"
+msgstr ""
+"每个事件批次携带服务器的 ``instance_id`` 和一个单调递增的序列号 "
+"(``seq``)，该序列号限定于该实例。这些字段使未来的缺口检测成为可能，以识别丢失的批次。"
 
-#: ../../source/mp/coordinator.rst:139
+#: ../../source/mp/coordinator.rst:140
 msgid ""
 "**Quota management** -- set per-``cache_salt`` byte budgets. Salts "
 "without a quota default to a 0-byte limit (allowlist semantics)."
 msgstr "**配额管理** -- 为每个 ``cache_salt`` 设置字节预算。没有配额的盐默认为 0 字节限制（白名单语义）。"
 
-#: ../../source/mp/coordinator.rst:154
+#: ../../source/mp/coordinator.rst:155
 msgid "Use ``_default`` as the path parameter to target the empty-string salt."
 msgstr "使用 ``_default`` 作为路径参数以定位空字符串盐。"
 
-#: ../../source/mp/coordinator.rst:156
+#: ../../source/mp/coordinator.rst:157
 msgid ""
 "**Event ingestion** -- MP servers POST batched events; this is handled "
 "automatically by the event listener and is not typically called manually."
 msgstr "**事件摄取** -- MP 服务器通过 POST 批量事件；这由事件监听器自动处理，通常不需要手动调用。"
 
-#: ../../source/mp/coordinator.rst:172
+#: ../../source/mp/coordinator.rst:173
 msgid "**Status queries** -- inspect usage and quota info."
 msgstr "**状态查询** -- 检查使用情况和配额信息。"
 
-#: ../../source/mp/coordinator.rst:185
+#: ../../source/mp/coordinator.rst:186
 msgid "L2 endpoint summary"
 msgstr "L2 端点摘要"
 
-#: ../../source/mp/coordinator.rst:191
+#: ../../source/mp/coordinator.rst:192
 msgid "Method"
 msgstr "方法"
 
-#: ../../source/mp/coordinator.rst:192
+#: ../../source/mp/coordinator.rst:193
 msgid "Path"
 msgstr "路径"
 
-#: ../../source/mp/coordinator.rst:194
+#: ../../source/mp/coordinator.rst:195
 msgid "``PUT``"
 msgstr "``PUT``"
 
-#: ../../source/mp/coordinator.rst:195 ../../source/mp/coordinator.rst:198
+#: ../../source/mp/coordinator.rst:196 ../../source/mp/coordinator.rst:199
 #, python-brace-format
 msgid "``/l2/quota/{cache_salt}``"
 msgstr "``/l2/quota/{cache_salt}``"
 
-#: ../../source/mp/coordinator.rst:196
+#: ../../source/mp/coordinator.rst:197
 #, python-brace-format
 msgid "Create or update a quota (body: ``{\"limit_gb\": N}``)."
 msgstr "创建或更新配额（主体：``{\\\"limit_gb\\\": N}``）。"
 
-#: ../../source/mp/coordinator.rst:197
+#: ../../source/mp/coordinator.rst:198
 msgid "``DELETE``"
 msgstr "``DELETE``"
 
-#: ../../source/mp/coordinator.rst:199
+#: ../../source/mp/coordinator.rst:200
 msgid "Remove a salt's quota entry."
 msgstr "删除盐的配额条目。"
 
-#: ../../source/mp/coordinator.rst:200
+#: ../../source/mp/coordinator.rst:201
 msgid "``POST``"
 msgstr "``POST``"
 
-#: ../../source/mp/coordinator.rst:201
+#: ../../source/mp/coordinator.rst:202
 msgid "``/l2/events``"
 msgstr "``/l2/events``"
 
-#: ../../source/mp/coordinator.rst:202
+#: ../../source/mp/coordinator.rst:203
 msgid "Ingest a batch of L2 store/lookup events."
 msgstr "摄取一批 L2 存储/查找事件。"
 
-#: ../../source/mp/coordinator.rst:203 ../../source/mp/coordinator.rst:206
+#: ../../source/mp/coordinator.rst:204 ../../source/mp/coordinator.rst:207
 msgid "``GET``"
 msgstr "``GET``"
 
-#: ../../source/mp/coordinator.rst:204
+#: ../../source/mp/coordinator.rst:205
 #, python-brace-format
 msgid "``/l2/status/{cache_salt}``"
 msgstr "``/l2/status/{cache_salt}``"
 
-#: ../../source/mp/coordinator.rst:205
+#: ../../source/mp/coordinator.rst:206
 msgid "Quota and usage for a single salt."
 msgstr "单个盐的配额和使用情况。"
 
-#: ../../source/mp/coordinator.rst:207
+#: ../../source/mp/coordinator.rst:208
 msgid "``/l2/status``"
 msgstr "``/l2/status``"
 
-#: ../../source/mp/coordinator.rst:208
+#: ../../source/mp/coordinator.rst:209
 msgid "Total usage and per-salt breakdown."
 msgstr "总使用量和每个盐的细分。"
 

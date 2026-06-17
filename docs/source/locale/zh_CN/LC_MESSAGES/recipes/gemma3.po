@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -75,8 +75,8 @@ msgid ""
 "``google/gemma-3-4b-it`` is a gated model; authenticate with the Hugging "
 "Face Hub (e.g. set ``HF_TOKEN``) before serving. Adjust ``--tensor-"
 "parallel-size`` to match your hardware. For the generic LMCache + vLLM "
-"wiring (ports, remote hosts), see :doc:`../mp/quickstart`."
-msgstr "``google/gemma-3-4b-it`` 是一个受限模型；在服务之前，请通过 Hugging Face Hub 进行身份验证（例如，设置 ``HF_TOKEN``）。调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../mp/quickstart`。"
+"wiring (ports, remote hosts), see :doc:`../getting_started/quickstart`."
+msgstr "``google/gemma-3-4b-it`` 是一个受限模型；在服务之前，请通过 Hugging Face Hub 进行身份验证（例如，设置 ``HF_TOKEN``）。调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma3.rst:55
 msgid ""
@@ -100,8 +100,10 @@ msgid "TRT-LLM"
 msgstr "TRT-LLM"
 
 #: ../../source/recipes/gemma3.rst:65
-msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。有关 TRT-LLM + LMCache 设置，请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma3.rst:68
 msgid "CacheBlend support"
@@ -160,4 +162,7 @@ msgstr ""
 "**混合注意力。** Gemma 3 是一个混合（滑动窗口 + 全注意力）模型。LMCache 通过其混合内存分配器支持转移每个 KV Cache"
 " 组，因此缓存可以透明地工作。这适用于 Gemma 3 使用的标准分页注意力；不支持 Mamba / 线性注意力混合（其递归状态缓存 "
 "LMCache 目前尚无法转移）。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 

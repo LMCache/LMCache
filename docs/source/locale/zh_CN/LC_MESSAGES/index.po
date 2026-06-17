@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-08 10:45+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -18,70 +18,6 @@ msgstr ""
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
-
-#: ../../source/index.rst:63
-msgid "Welcome to LMCache"
-msgstr "欢迎使用 LMCache"
-
-#: ../../source/index.rst:69
-msgid "Getting Started"
-msgstr "入门指南"
-
-#: ../../source/index.rst:85
-msgid "Recipes"
-msgstr "使用指南"
-
-#: ../../source/index.rst:93
-msgid "KV Cache offloading and sharing"
-msgstr "KV Cache 卸载和共享"
-
-#: ../../source/index.rst:104
-msgid "Non-KV caching"
-msgstr "非 KV 缓存"
-
-#: ../../source/index.rst:112
-msgid "Multiprocess Mode"
-msgstr "多进程模式"
-
-#: ../../source/index.rst:120
-msgid "Disaggregated prefill"
-msgstr "分离式 Prefill"
-
-#: ../../source/index.rst:129
-msgid "KV Cache management"
-msgstr "KV Cache 管理"
-
-#: ../../source/index.rst:137
-msgid "KV Cache Optimizations"
-msgstr "KV Cache 优化"
-
-#: ../../source/index.rst:147
-msgid "Use LMCache in production"
-msgstr "在生产中使用 LMCache"
-
-#: ../../source/index.rst:159
-msgid "CLI"
-msgstr "命令行界面"
-
-#: ../../source/index.rst:167
-msgid "Internal API Server"
-msgstr "内部 API 服务器"
-
-#: ../../source/index.rst:175
-msgid "Controller WebUI"
-msgstr "控制器 WebUI"
-
-#: ../../source/index.rst:183
-msgid "Developer Guide"
-msgstr "开发者指南"
-
-#: ../../source/index.rst:196
-msgid "API Reference"
-msgstr "API 参考"
-
-#: ../../source/index.rst:207
-msgid "Community"
-msgstr "社区"
 
 #: ../../source/index.rst:10
 msgid "Welcome to LMCache!"
@@ -111,7 +47,10 @@ msgid ""
 "`Join LMCache slack workspace "
 "<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-"
 "3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
-msgstr "`加入 LMCache Slack 工作区 <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
+msgstr ""
+"`加入 LMCache Slack 工作区 "
+"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-"
+"3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
 
 #: ../../source/index.rst:50
 msgid "Our papers:"
@@ -137,18 +76,65 @@ msgid ""
 "<https://arxiv.org/abs/2409.13761>`_"
 msgstr "`大型语言模型需要内容分发网络吗？ <https://arxiv.org/abs/2409.13761>`_"
 
-#: ../../source/index.rst:56 ../../source/index.rst:83
-#: ../../source/index.rst:91 ../../source/index.rst:102
-#: ../../source/index.rst:110 ../../source/index.rst:118
-#: ../../source/index.rst:127 ../../source/index.rst:135
-#: ../../source/index.rst:145 ../../source/index.rst:157
-#: ../../source/index.rst:165 ../../source/index.rst:173
-#: ../../source/index.rst:181 ../../source/index.rst:194
-#: ../../source/index.rst:205 ../../source/index.rst:214
+#: ../../source/index.rst:56 ../../source/index.rst:68
+#: ../../source/index.rst:75 ../../source/index.rst:82
+#: ../../source/index.rst:89 ../../source/index.rst:96
+#: ../../source/index.rst:103 ../../source/index.rst:110
+#: ../../source/index.rst:117 ../../source/index.rst:124
+#: ../../source/index.rst:131 ../../source/index.rst:138
+#: ../../source/index.rst:145
 msgid ":raw-html:`<br />`"
 msgstr ":raw-html:`<br />`"
 
 #: ../../source/index.rst:60
 msgid "Documentation"
 msgstr "文档"
+
+#~ msgid "Welcome to LMCache"
+#~ msgstr "欢迎使用 LMCache"
+
+#~ msgid "Getting Started"
+#~ msgstr "入门指南"
+
+#~ msgid "Recipes"
+#~ msgstr "使用指南"
+
+#~ msgid "KV Cache offloading and sharing"
+#~ msgstr "KV Cache 卸载和共享"
+
+#~ msgid "Non-KV caching"
+#~ msgstr "非 KV 缓存"
+
+#~ msgid "Multiprocess Mode"
+#~ msgstr "多进程模式"
+
+#~ msgid "Disaggregated prefill"
+#~ msgstr "分离式 Prefill"
+
+#~ msgid "KV Cache management"
+#~ msgstr "KV Cache 管理"
+
+#~ msgid "KV Cache Optimizations"
+#~ msgstr "KV Cache 优化"
+
+#~ msgid "Use LMCache in production"
+#~ msgstr "在生产中使用 LMCache"
+
+#~ msgid "CLI"
+#~ msgstr "命令行界面"
+
+#~ msgid "Internal API Server"
+#~ msgstr "内部 API 服务器"
+
+#~ msgid "Controller WebUI"
+#~ msgstr "控制器 WebUI"
+
+#~ msgid "Developer Guide"
+#~ msgstr "开发者指南"
+
+#~ msgid "API Reference"
+#~ msgstr "API 参考"
+
+#~ msgid "Community"
+#~ msgstr "社区"
 
