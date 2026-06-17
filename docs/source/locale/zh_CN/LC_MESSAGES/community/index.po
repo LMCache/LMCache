@@ -27,5 +27,5 @@ msgstr "社区"
 msgid ""
 "Get involved with the LMCache community -- join our meetings and follow "
 "the blog."
-msgstr "参与 LMCache 社区——加入我们的会议并关注博客。"
+msgstr "欢迎参与 LMCache 社区：加入社区会议，关注最新博客动态。"
 

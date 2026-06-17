@@ -49,8 +49,8 @@ msgid ""
 "better, exposes management/observability endpoints, and supports sharing "
 "one cache across multiple engine instances."
 msgstr ""
-"**多进程 (MP) 模式** -- **推荐。** LMCache 作为独立服务运行，vLLM 通过 "
-"``LMCacheMPConnector`` 连接。扩展性更好，暴露管理/可观察性端点，并支持在多个引擎实例之间共享一个缓存。"
+"**MP 模式（多进程）** -- **推荐。** LMCache 作为独立服务运行，vLLM 通过 "
+"``LMCacheMPConnector`` 连接。扩展性更好，提供管理与可观察性端点，并支持在多个引擎实例之间共享同一缓存。"
 
 #: ../../source/getting_started/quickstart.rst:27
 msgid ""
@@ -80,13 +80,13 @@ msgstr "ZMQ 端口（默认 **5555**）接受来自 vLLM 的连接；HTTP 前端
 
 #: ../../source/getting_started/quickstart.rst:52
 msgid "Start vLLM with the MP connector in a separate terminal:"
-msgstr "在单独的终端中启动 vLLM 与 MP 连接器："
+msgstr "在另一个终端中使用 MP 连接器启动 vLLM："
 
 #: ../../source/getting_started/quickstart.rst:61
 msgid ""
 "**Where does** ``LMCacheMPConnector`` **resolve to?** This depends on "
 "your vLLM version:"
-msgstr "**``LMCacheMPConnector`` **解析到哪里？** 这取决于您的 vLLM 版本："
+msgstr "**``LMCacheMPConnector`` 解析到哪里？** 这取决于您的 vLLM 版本："
 
 #: ../../source/getting_started/quickstart.rst:63
 msgid ""
@@ -197,7 +197,7 @@ msgstr ""
 msgid ""
 "**You should see LMCache logs like this** -- in-process mode emits the "
 "logs inline with the vLLM engine core."
-msgstr "**您应该看到类似于 LMCache 的日志** -- 进程模式会将日志与 vLLM 引擎核心一起内联输出。"
+msgstr "**您应该看到类似这样的 LMCache 日志** -- 进程内模式会将日志与 vLLM 引擎核心内联输出。"
 
 #: ../../source/getting_started/quickstart.rst:202
 msgid "**First request** -- prompt is offloaded to LMCache:"
@@ -306,7 +306,7 @@ msgid ""
 "LMCache and skipped. Of the remaining 116 tokens, 112 (14 full 8-token "
 "chunks) are stored."
 msgstr ""
-"**存储 112 个中的 140 个**：24 个令牌（3 个完整块）已经在 LMCache 中并被跳过。在剩余的 116 个令牌中，112 "
+"**140 个中存储了 112 个**：24 个令牌（3 个完整块）已在 LMCache 中，予以跳过。在剩余的 116 个令牌中，112 "
 "个（14 个完整的 8 令牌块）被存储。"
 
 #: ../../source/getting_started/quickstart.rst
@@ -360,7 +360,7 @@ msgstr "通过环境变量配置 LMCache："
 
 #: ../../source/getting_started/quickstart.rst:363
 msgid "Build the TRT-LLM ``LLM`` with ``connector: lmcache``:"
-msgstr "构建 TRT-LLM ``LLM`` 与 ``connector: lmcache``："
+msgstr "使用 ``connector: lmcache`` 构建 TRT-LLM ``LLM``："
 
 #: ../../source/getting_started/quickstart.rst
 msgid "MP mode"
@@ -372,8 +372,8 @@ msgid ""
 "depends on a stable ``hash()``, and the server and client must agree on "
 "the seed."
 msgstr ""
-"``PYTHONHASHSEED=0`` 必须在 **两个** 终端中设置 -- 块哈希依赖于稳定的 ``hash()``, "
-"服务器和客户端必须就种子达成一致。"
+"``PYTHONHASHSEED=0`` 必须在 **两个** 终端中设置 -- 块哈希依赖于稳定的 ``hash()``，"
+"服务器端与客户端必须使用相同的种子值。"
 
 #: ../../source/getting_started/quickstart.rst:397
 msgid "In a separate terminal, point TRT-LLM at the server via ``server_url``:"
@@ -451,7 +451,7 @@ msgstr "**性能测试**：尝试 :doc:`benchmarking` 部分，以体验 LMCache
 msgid ""
 "**Production**: Deploy LMCache with Docker or Kubernetes, plus "
 "observability and tuning -- see :doc:`../mp/deployment`"
-msgstr "**生产**：使用 Docker 或 Kubernetes 部署 LMCache，并进行可观察性和调优 -- 请参阅 :doc:`../mp/deployment`。"
+msgstr "**生产部署**：使用 Docker 或 Kubernetes 部署 LMCache，并启用可观察性与调优 -- 请参阅 :doc:`../mp/deployment`。"
 
 #~ msgid ""
 #~ "**More Examples**: Explore the "

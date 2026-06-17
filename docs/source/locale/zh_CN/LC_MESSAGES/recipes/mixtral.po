@@ -67,7 +67,7 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/mixtral.rst:32
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr "启动 vLLM 与 LMCache MP 连接器："
+msgstr "使用 LMCache MP 连接器启动 vLLM："
 
 #: ../../source/recipes/mixtral.rst:34
 msgid "**Mixtral-8x7B-v0.1** (4 GPUs):"
@@ -100,7 +100,7 @@ msgstr "TRT-LLM"
 msgid ""
 "**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
 "LLM + LMCache setup."
-msgstr "**状态：** 支持。请参见 :doc:`../getting_started/quickstart` 以获取 TRT-LLM + LMCache 的设置。"
+msgstr "**状态：** 支持。请参见 :doc:`../getting_started/quickstart` 了解 TRT-LLM + LMCache 的设置。"
 
 #: ../../source/recipes/mixtral.rst:73
 msgid "CacheBlend support"
@@ -120,7 +120,7 @@ msgstr "状态"
 
 #: ../../source/recipes/mixtral.rst:84
 msgid "Notes"
-msgstr "笔记"
+msgstr "备注"
 
 #: ../../source/recipes/mixtral.rst:85
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"

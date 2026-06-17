@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:2
 msgid "Adding Native Backends"
-msgstr "添加本地后端"
+msgstr "添加原生后端"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:7
 msgid "Overview"
@@ -32,7 +32,7 @@ msgid ""
 "Native connectors are high-performance C++ storage backends that "
 "integrate with LMCache through pybind11. They work in **both** LMCache "
 "operating modes:"
-msgstr "本地连接器是高性能的 C++ 存储后端，通过 pybind11 与 LMCache 集成。它们在 **两种** LMCache 操作模式下均可工作："
+msgstr "原生连接器是高性能的 C++ 存储后端，通过 pybind11 与 LMCache 集成。它们在 **两种** LMCache 运行模式下均可工作："
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:12
 msgid ""
@@ -44,11 +44,11 @@ msgstr "**非 MP 模式**（单进程）：通过 ``ConnectorClientBase``（asyn
 msgid ""
 "**MP mode** (multiprocess): via ``NativeConnectorL2Adapter`` (L2 adapter "
 "interface)"
-msgstr "**多进程模式** (multiprocess): 通过 ``NativeConnectorL2Adapter`` (L2 适配器接口)"
+msgstr "**MP 模式**（多进程）：通过 ``NativeConnectorL2Adapter``（L2 适配器接口）"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:15
 msgid "Write the connector once, get both modes for free."
-msgstr "一次编写连接器，免费获得两种模式。"
+msgstr "连接器只需编写一次，即可同时支持两种模式。"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:17
 msgid ""
@@ -68,13 +68,13 @@ msgstr "**设计原则：**"
 msgid ""
 "**GIL release** at the pybind layer for true concurrency between native "
 "threads"
-msgstr "**在 pybind 层释放 GIL 以实现本地线程之间的真正并发**"
+msgstr "**在 pybind 层释放 GIL，实现原生线程间的真正并发**"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:44
 msgid ""
 "**Batching with tiling**: work for a batched request is split evenly "
 "among threads"
-msgstr "**批处理与分块**：批量请求的工作在线程之间均匀分配"
+msgstr "**批处理与分片**：批量请求的工作量在各线程间均匀分配"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:45
 msgid "**eventfd-based completions**: the kernel wakes Python -- no polling"
@@ -97,8 +97,8 @@ msgid ""
 "``ConnectorBase<YourConnectionType>``. You need to override 4 required "
 "methods (and optionally ``do_single_delete`` to support eviction)."
 msgstr ""
-"创建你的连接器目录（例如，``csrc/storage_backends/mybackend/``），并从 "
-"``ConnectorBase<YourConnectionType>`` 继承。你需要重写 4 个必需的方法（并可选地重写 "
+"创建您的连接器目录（例如，``csrc/storage_backends/mybackend/``），并从 "
+"``ConnectorBase<YourConnectionType>`` 继承。您需要重写 4 个必需的方法（并可选地重写 "
 "``do_single_delete`` 以支持逐出）。"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:56
@@ -107,11 +107,11 @@ msgstr "**connector.h:**"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:127
 msgid "**What ConnectorBase gives you for free:**"
-msgstr "**ConnectorBase 为您免费提供的内容：**"
+msgstr "**ConnectorBase 开箱即用为您提供的能力：**"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:129
 msgid "Worker thread pool with per-thread connections"
-msgstr "每个线程连接的工作线程池"
+msgstr "工作线程池，每个线程持有独立连接"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:130
 msgid "Submission queue (lock-free enqueue) and completion queue"
@@ -119,7 +119,7 @@ msgstr "提交队列（无锁入队）和完成队列"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:131
 msgid "Automatic tiling: batch operations are split across workers"
-msgstr "自动平铺：批量操作在工作节点之间拆分"
+msgstr "自动分片：批量操作拆分到各工作线程"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:132
 msgid "eventfd signaling on completion (kernel wakes Python)"
@@ -127,7 +127,7 @@ msgstr "完成时的 eventfd 信号（内核唤醒 Python）"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:133
 msgid "Graceful shutdown (stop flag, drain, join)"
-msgstr "优雅关闭（停止标志，排空，加入）"
+msgstr "优雅关闭（设置停止标志、排空队列、join 线程）"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:136
 msgid ""
@@ -206,7 +206,7 @@ msgstr "步骤 4：Python 客户端（非 MP 模式）"
 msgid ""
 "Inherit from ``ConnectorClientBase`` which provides asyncio event loop "
 "integration, future management, and both sync and async methods."
-msgstr "从 ``ConnectorClientBase`` 继承，该类提供 asyncio 事件循环集成、未来管理以及同步和异步方法。"
+msgstr "从 ``ConnectorClientBase`` 继承，该类提供 asyncio 事件循环集成、Future 管理，以及同步和异步方法。"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:226
 msgid ""
@@ -260,7 +260,7 @@ msgstr "**命令行使用：**"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:336
 msgid "How NativeConnectorL2Adapter Bridges the Gap"
-msgstr "原生连接器 L2Adapter 如何弥合差距"
+msgstr "NativeConnectorL2Adapter 如何弥合差异"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:338
 msgid ""
@@ -277,7 +277,7 @@ msgstr "L2 适配器方法"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:346
 msgid "Native Call"
-msgstr "本地调用"
+msgstr "原生调用"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:347
 msgid "Extra Logic"
@@ -365,7 +365,7 @@ msgid ""
 "operation type, routes the result to the correct completion dict, and "
 "signals the corresponding Python eventfd."
 msgstr ""
-"一个后台解复用线程轮询本地 eventfd，调用 ``drain_completions()``，查找每个 ``future_id`` "
+"一个后台解复用线程轮询原生 eventfd，调用 ``drain_completions()``，查找每个 ``future_id`` "
 "以确定其操作类型，将结果路由到正确的完成字典，并发出相应的 Python eventfd 信号。"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:376
@@ -418,7 +418,7 @@ msgstr "``native_plugin``"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:400
 msgid "What is loaded"
-msgstr "加载的内容是什么"
+msgstr "加载内容"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:401
 msgid "A full ``L2AdapterInterface`` subclass"
@@ -442,7 +442,7 @@ msgstr "从 ``NativeConnectorL2Adapter`` 重用"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:406
 msgid "Third-party effort"
-msgstr "第三方努力"
+msgstr "第三方工作量"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:407
 msgid "Must implement all abstract methods + 3 eventfds"
@@ -461,7 +461,7 @@ msgid ""
 "The dynamically loaded connector instance must expose the following "
 "methods (identical to the pybind ``LMCACHE_BIND_CONNECTOR_METHODS`` "
 "contract):"
-msgstr "动态加载的连接器实例必须暴露以下方法（与 pybind ``LMCACHE_BIND_CONNECTOR_METHODS`` 合同相同）："
+msgstr "动态加载的连接器实例必须暴露以下方法（与 pybind ``LMCACHE_BIND_CONNECTOR_METHODS`` 的契约一致）："
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:443
 msgid ""
@@ -534,7 +534,7 @@ msgstr "``dict``"
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:480
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:484
 msgid "no"
-msgstr "不"
+msgstr "否"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:481
 msgid "Forwarded as ``**kwargs`` to the connector class constructor."
@@ -595,7 +595,7 @@ msgstr "**使用 ``LMCACHE_BIND_CONNECTOR_METHODS`` 宏创建 pybind11 绑定：
 msgid ""
 "**Write a Python factory class** that selects the backend and returns the"
 " native connector instance:"
-msgstr "**编写一个 Python 工厂类**，选择后端并返回本地连接器实例："
+msgstr "**编写一个 Python 工厂类**，选择后端并返回原生连接器实例："
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:568
 msgid "**Build and install** the package:"
@@ -635,7 +635,7 @@ msgstr ""
 msgid ""
 "A thin Python factory class (``ExampleNativeConnector``) that selects the"
 " backend via a ``\"backend\"`` parameter."
-msgstr "一个薄的 Python 工厂类 (``ExampleNativeConnector``)，通过 ``\"backend\"`` 参数选择后端。"
+msgstr "一个轻量级 Python 工厂类（``ExampleNativeConnector``），通过 ``\"backend\"`` 参数选择后端。"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:601
 msgid ""
@@ -653,7 +653,7 @@ msgstr "清单"
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:608
 msgid "Use this checklist when adding a new native connector:"
-msgstr "在添加新的本地连接器时，请使用此检查清单："
+msgstr "在添加新的原生连接器时，请使用此检查清单："
 
 #: ../../source/developer_guide/extending_lmcache/native_connectors.rst:610
 msgid ""

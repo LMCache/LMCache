@@ -32,7 +32,7 @@ msgid ""
 "We are currently in the process of upgrading our documentation to provide"
 " better guidance and examples. Some sections may be under construction. "
 "Thank you for your patience!"
-msgstr "我们目前正在升级我们的文档，以提供更好的指导和示例。某些部分可能正在建设中。感谢您的耐心等待！"
+msgstr "我们目前正在升级文档，以提供更好的指导和示例。某些章节可能仍在建设中，感谢您的耐心等待！"
 
 #: ../../source/index.rst:46
 msgid "For more information, check out the following:"
@@ -61,7 +61,7 @@ msgid ""
 "`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
 "Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 msgstr ""
-"`CacheGen: KV Cache 压缩与流式传输以快速服务大型语言模型 "
+"`CacheGen: KV Cache 压缩与流式传输——面向大型语言模型的高速推理服务 "
 "<https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 
 #: ../../source/index.rst:53

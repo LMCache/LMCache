@@ -21,13 +21,13 @@ msgstr ""
 
 #: ../../source/mp/disaggregated_prefill.rst:4
 msgid "Disaggregated Prefill"
-msgstr "分离式 Prefill"
+msgstr "分离式预填充"
 
 #: ../../source/mp/disaggregated_prefill.rst:8
 msgid ""
 "The multiprocess (MP) implementation of disaggregated prefill is **coming"
 " soon**."
-msgstr "分离式 Prefill 的多进程 (MP) 实现 **即将推出**。"
+msgstr "分离式预填充的 MP 模式（多进程）实现 **即将推出**。"
 
 #: ../../source/mp/disaggregated_prefill.rst:11
 msgid ""

@@ -51,7 +51,7 @@ msgstr ""
 
 #: ../../source/recipes/devstral.rst:21
 msgid "**Status:** Validated with LMCache."
-msgstr "**状态:** 已通过 LMCache 验证。"
+msgstr "**状态：** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/devstral.rst:23
 msgid "Start the LMCache MP server:"
@@ -129,7 +129,7 @@ msgstr "注意事项"
 
 #: ../../source/recipes/devstral.rst:80
 msgid "None known."
-msgstr "没有已知的问题。"
+msgstr "暂无已知问题。"
 
 #~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
 #~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"

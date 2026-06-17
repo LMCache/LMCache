@@ -25,5 +25,5 @@ msgstr "非 KV 缓存"
 
 #: ../../source/non_kv_cache/index.rst:4
 msgid "Caching state beyond the attention KV cache."
-msgstr "超出注意力 KV Cache 的缓存状态。"
+msgstr "缓存注意力 KV 缓存之外的模型状态。"
 

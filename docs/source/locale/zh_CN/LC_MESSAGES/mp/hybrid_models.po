@@ -71,7 +71,7 @@ msgstr "``Gemma3ForConditionalGeneration``"
 #: ../../source/mp/hybrid_models.rst:30 ../../source/mp/hybrid_models.rst:33
 #: ../../source/mp/hybrid_models.rst:36
 msgid "Sliding-window + full"
-msgstr "滑动窗口 + 全部"
+msgstr "滑动窗口 + 全注意力"
 
 #: ../../source/mp/hybrid_models.rst:31
 msgid ":doc:`/recipes/gemma3`"
@@ -99,7 +99,7 @@ msgstr "``Qwen3_5ForConditionalGeneration``"
 
 #: ../../source/mp/hybrid_models.rst:39
 msgid "Mamba / GDN + full"
-msgstr "Mamba / GDN + full"
+msgstr "Mamba / GDN + 全注意力"
 
 #: ../../source/mp/hybrid_models.rst:40
 msgid ":doc:`/recipes/qwen3_5`"
@@ -119,7 +119,7 @@ msgstr ":doc:`/recipes/deepseek_v4_flash`"
 
 #: ../../source/mp/hybrid_models.rst:56
 msgid "What Works"
-msgstr "有效的内容"
+msgstr "已支持的内容"
 
 #: ../../source/mp/hybrid_models.rst:58
 msgid ""
@@ -130,7 +130,7 @@ msgstr "所有层均使用 **标准分页注意力** 的模型——包括混合
 
 #: ../../source/mp/hybrid_models.rst:66
 msgid "Model family"
-msgstr "模型家族"
+msgstr "模型系列"
 
 #: ../../source/mp/hybrid_models.rst:68
 msgid "Status"
@@ -142,7 +142,7 @@ msgstr "Gemma 2 / Gemma 3"
 
 #: ../../source/mp/hybrid_models.rst:70 ../../source/mp/hybrid_models.rst:73
 msgid "Interleaved sliding-window + full"
-msgstr "交错滑动窗口 + 完整"
+msgstr "交错滑动窗口 + 全注意力"
 
 #: ../../source/mp/hybrid_models.rst:71 ../../source/mp/hybrid_models.rst:74
 #: ../../source/mp/hybrid_models.rst:80
@@ -159,7 +159,7 @@ msgstr "Qwen3.5（以及其他 Gated-DeltaNet 混合模型）"
 
 #: ../../source/mp/hybrid_models.rst:76
 msgid "Interleaved Mamba/GDN + full"
-msgstr "交错 Mamba/GDN + 完整"
+msgstr "交错 Mamba/GDN + 全注意力"
 
 #: ../../source/mp/hybrid_models.rst:77
 msgid "Supported (see below)"
@@ -187,7 +187,7 @@ msgid ""
 "not fall back to a single unified group). You do not need ``--no-disable-"
 "hybrid-kv-cache-manager`` or any related flag."
 msgstr ""
-"因为 ``LMCacheMPConnector`` 向 vLLM 宣传了混合支持，vLLM 为这些模型保持其混合 KV 缓存管理器 "
+"因为 ``LMCacheMPConnector`` 向 vLLM 声明了混合支持，vLLM 为这些模型保持其混合 KV 缓存管理器 "
 "**启用**（它不会回退到单一统一组）。您不需要 ``--no-disable-hybrid-kv-cache-manager`` "
 "或任何相关标志。"
 
@@ -257,7 +257,7 @@ msgstr ""
 msgid ""
 "The number in ``to N tokens`` is your ``N``. Values grow with model size;"
 " for example:"
-msgstr "``to N tokens`` 中的数字就是你的 ``N``。随着模型大小的增加，值会增长；例如："
+msgstr "``to N tokens`` 中的数字就是您的 ``N``。随着模型大小的增加，值会增长；例如："
 
 #: ../../source/mp/hybrid_models.rst:155
 msgid "Model"
@@ -281,7 +281,7 @@ msgstr "784"
 
 #: ../../source/mp/hybrid_models.rst:160 ../../source/mp/hybrid_models.rst:163
 msgid "1"
-msgstr "一"
+msgstr "1"
 
 #: ../../source/mp/hybrid_models.rst:161
 msgid "``Qwen/Qwen3.5-0.8B``"
@@ -315,7 +315,7 @@ msgid ""
 msgstr ""
 "**vLLM** ``--max-num-batched-tokens`` **在 [N, 2·N)** — 将其设置为 ``N`` "
 "是简单且始终有效的选择。在此范围之外，LMCache 在引擎启动时会引发错误。``align`` 模式仅在每个调度器步骤的 *结束* 时快照 "
-"Mamba 状态，因此每个预取步骤必须精确推进一个块；更大的预算将允许步骤跳过块边界，从而在这些前缀处没有快照可供 LMCache 存储。"
+"Mamba 状态，因此每个预填充步骤必须精确推进一个块；更大的预算将允许步骤跳过块边界，从而在这些前缀处没有快照可供 LMCache 存储。"
 
 #: ../../source/mp/hybrid_models.rst:181
 msgid ""
@@ -341,7 +341,7 @@ msgid ""
 "selects the GDN backend."
 msgstr ""
 "不需要 ``--no-disable-hybrid-kv-cache-manager`` 或 attention-backend "
-"标志；``LMCacheMPConnector`` 宣布支持混合，并且 vLLM 自动选择 GDN 后端。"
+"标志；``LMCacheMPConnector`` 声明支持混合模型，vLLM 会自动选择 GDN 后端。"
 
 #: ../../source/mp/hybrid_models.rst:199
 msgid "Caveats"
@@ -355,7 +355,7 @@ msgid ""
 "level diff."
 msgstr ""
 "生成在缓存和新运行之间**不是位精确**的：GDN 后端不支持 vLLM 的批量不变模式。请使用**分数级**比较进行验证（参见 "
-"`验证正确性`_），而不是令牌级差异。"
+"`验证正确性`_），而不是 token 级差异。"
 
 #: ../../source/mp/hybrid_models.rst:205
 msgid ""
@@ -398,7 +398,7 @@ msgstr "尚未支持的内容"
 msgid ""
 "**DeepSeek-V4-style compressed / indexer caches** are not yet handled by "
 "the multiprocess connector."
-msgstr "**DeepSeek-V4 风格的压缩 / 索引器缓存** 还未被多进程连接器处理。"
+msgstr "**DeepSeek-V4 风格的压缩 / 索引器缓存** 暂不被多进程连接器支持。"
 
 #: ../../source/mp/hybrid_models.rst:223
 msgid "Verifying Correctness"
@@ -423,7 +423,7 @@ msgid ""
 "Reset *only* vLLM's local prefix cache, leaving the LMCache-managed cache"
 " intact (requires launching vLLM with ``VLLM_SERVER_DEV_MODE=1``)::"
 msgstr ""
-"重置 *仅* vLLM 的本地前缀缓存，保持 LMCache 管理的缓存不变（需要以 ``VLLM_SERVER_DEV_MODE=1`` 启动 "
+"*仅* 重置 vLLM 的本地前缀缓存，保持 LMCache 管理的缓存不变（需要以 ``VLLM_SERVER_DEV_MODE=1`` 启动 "
 "vLLM）::"
 
 #: ../../source/mp/hybrid_models.rst:235
@@ -443,7 +443,7 @@ msgstr "重新运行相同的评估。vLLM 现在在其本地缓存中未命中�
 msgid ""
 "The project ships this as the ``hma_lm_eval`` continuous-integration test"
 " (see ``.buildkite/k3_tests/multiprocess``)."
-msgstr "该项目将其作为 ``hma_lm_eval`` 持续集成测试发布（参见 ``.buildkite/k3_tests/multiprocess``）。"
+msgstr "该项目以 ``hma_lm_eval`` 持续集成测试的形式提供此验证（参见 ``.buildkite/k3_tests/multiprocess``）。"
 
 #: ../../source/mp/hybrid_models.rst:244
 msgid "See Also"
@@ -453,7 +453,7 @@ msgstr "另请参阅"
 msgid ""
 ":doc:`/getting_started/quickstart` — launching the LMCache server and a "
 "vLLM client."
-msgstr "`:doc:`/getting_started/quickstart` — 启动 LMCache 服务器和 vLLM 客户端。`"
+msgstr ":doc:`/getting_started/quickstart` — 启动 LMCache 服务器和 vLLM 客户端。"
 
 #: ../../source/mp/hybrid_models.rst:247
 msgid ""

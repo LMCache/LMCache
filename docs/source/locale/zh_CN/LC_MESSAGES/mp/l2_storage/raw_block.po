@@ -29,7 +29,7 @@ msgid ""
 " block device or pre-sized file using the Rust raw-device I/O bindings. "
 "It reuses the existing raw-block metadata checkpoint model and writes "
 "directly into the caller-provided load buffers during prefetch."
-msgstr "一个内置的 L2 适配器，使用 Rust 原始设备 I/O 绑定将 KV 对象存储在原始块设备或预先大小化的文件的固定大小槽中。它重用现有的原始块元数据检查点模型，并在预取期间直接写入调用者提供的加载缓冲区。"
+msgstr "一个内置的 L2 适配器，通过 Rust 原始设备 I/O 接口将 KV 对象存储在原始块设备或预设大小文件的固定大小槽位中。它复用现有的原始块元数据检查点模型，并在预取期间直接写入调用方提供的加载缓冲区。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:9
 msgid "**Required fields:**"
@@ -37,7 +37,7 @@ msgstr "**必填字段：**"
 
 #: ../../source/mp/l2_storage/raw_block.rst:11
 msgid "``device_path``: Raw device path or pre-sized file path."
-msgstr "``device_path``: 原始设备路径或预先大小的文件路径。"
+msgstr "``device_path``: 原始设备路径或预设大小的文件路径。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:12
 msgid ""
@@ -65,7 +65,7 @@ msgstr "``block_align``: 设备对齐字节数（默认 ``4096``）。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:20
 msgid "``header_bytes``: Per-slot header reservation (default ``4096``)."
-msgstr "``header_bytes``: 每个槽的头部保留（默认 ``4096``）。"
+msgstr "``header_bytes``: 每个槽位的头部预留大小（默认 ``4096``）。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:21
 msgid ""
@@ -77,14 +77,14 @@ msgstr "``meta_total_bytes``: 保留的元数据检查点区域（默认 ``256Mi
 msgid ""
 "``meta_magic`` / ``meta_version``: Metadata checkpoint identity/version "
 "knobs."
-msgstr "``meta_magic`` / ``meta_version``: 元数据检查点身份/版本控制。"
+msgstr "``meta_magic`` / ``meta_version``: 元数据检查点的标识符与版本号调节参数。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:23
 msgid ""
 "``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / "
 "``meta_enable_periodic`` / ``meta_verify_on_load``: Checkpoint and "
 "recovery controls carried over from the legacy raw-block backend."
-msgstr "``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / ``meta_enable_periodic`` / ``meta_verify_on_load``: 从遗留的原始块后端继承的检查点和恢复控制。"
+msgstr "``meta_checkpoint_interval_sec`` / ``meta_idle_quiet_ms`` / ``meta_enable_periodic`` / ``meta_verify_on_load``: 从旧版原始块后端沿用的检查点与恢复控制参数。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:26
 msgid ""
@@ -136,7 +136,7 @@ msgstr "**注意：**"
 msgid ""
 "``raw_block`` is a server-owned MP adapter. It does **not** support per-"
 "TP device-path mappings in MP mode."
-msgstr "``raw_block`` 是一个由服务器拥有的 MP 适配器。它 **不** 支持 MP 模式下的每个 TP 设备路径映射。"
+msgstr "``raw_block`` 是一个由服务端管理的 MP 适配器。它 **不** 支持 MP 模式下按 TP 粒度配置设备路径映射。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:47
 msgid ""
@@ -159,7 +159,7 @@ msgstr "如果启用了 ``use_odirect``，则服务器的 ``--l1-align-bytes`` �
 
 #: ../../source/mp/l2_storage/raw_block.rst:53
 msgid "``persist_enabled`` must remain ``true`` for this adapter."
-msgstr "``persist_enabled`` 必须保持为 ``true`` 以便此适配器正常工作。"
+msgstr "``persist_enabled`` 对此适配器必须保持为 ``true``。"
 
 #: ../../source/mp/l2_storage/raw_block.rst:54
 msgid ""

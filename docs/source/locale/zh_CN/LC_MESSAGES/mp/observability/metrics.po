@@ -280,7 +280,7 @@ msgid ""
 "chunk (regardless of sampling) so the chunks-gap reflects true storage "
 "volume; the histogram itself records gaps only for chunks that pass the "
 "(deterministic, hash-based) sampling gate."
-msgstr "这两个直方图都带有 ``cache_salt`` 标签，以实现每个租户的隔离。每个块的每次读取和写入都会使每个盐值的访问计数器增加（无论是否采样），因此块间隔反映了真实的存储量；直方图本身仅记录通过（确定性、基于哈希的）采样门的块的间隔。"
+msgstr "这两个直方图都带有 ``cache_salt`` 标签，以实现租户隔离。每个块的每次读取和写入都会使对应 ``cache_salt`` 的访问计数器递增（无论是否采样），因此块间隔反映了真实的存储量；直方图本身仅记录通过（确定性、基于哈希的）采样门控的块的间隔。"
 
 #: ../../source/mp/observability/metrics.rst:122
 msgid "``lmcache_mp.real_reuse_gap``"
@@ -308,7 +308,7 @@ msgid ""
 "chunk.  Captures storage volume — how many chunk-accesses occurred while "
 "this chunk waited for its next read.  Emitted on read events for sampled "
 "chunks."
-msgstr "每个 ``cache_salt`` 访问计数器在两次读取相同块之间的间隙。捕获存储量——在此块等待下一个读取时发生了多少次块访问。对于采样块的读取事件发出。"
+msgstr "同一块两次读取之间每 ``cache_salt`` 访问计数器的增量。反映存储量——在该块等待下次读取期间发生了多少次块访问。仅对采样块的读取事件发出。"
 
 #: ../../source/mp/observability/metrics.rst:135
 msgid "L2 Metrics"
@@ -467,7 +467,7 @@ msgid ""
 " — in MP mode ``reserve_read`` is only called after a successful lookup, "
 "so any non-zero value indicates a lookup/reserve race or unexpected "
 "eviction and should stay near zero in healthy operation."
-msgstr "L1 ``reserve_read`` 失败。标记为 ``during`` ∈ {``l2_store``, ``l1_retrieve``}，``reason`` ∈ {``not_found``, ``write_locked``}，加上 ``model_name``。**后查找异常计数器**，而不是缓存未命中计数器——在 MP 模式下，``reserve_read`` 仅在成功查找后调用，因此任何非零值都表示查找/保留竞争或意外逐出，并且在正常操作中应保持接近零。"
+msgstr "L1 ``reserve_read`` 失败。标记为 ``during`` ∈ {``l2_store``, ``l1_retrieve``}，``reason`` ∈ {``not_found``, ``write_locked``}，加上 ``model_name``。**后查找异常计数器**，而非缓存未命中计数器——在 MP 模式下，``reserve_read`` 仅在查找成功后调用，因此任何非零值均表明存在查找/预留竞争或意外逐出，健康运行时该值应接近零。"
 
 #: ../../source/mp/observability/metrics.rst:220
 msgid "``lmcache_mp.l2_prefetch_failure``"
@@ -508,7 +508,7 @@ msgid ""
 "by a lookup that were served from either L1 or L2. L0 (GPU prefix cache) "
 "is intentionally excluded — it is vLLM-owned and not observable from "
 "LMCache."
-msgstr "按令牌级别计数器，其比例表示通过查找请求的令牌中有多少比例是从 L1 或 L2 提供的。L0（GPU 前缀缓存）故意被排除在外——它是 vLLM 所有，无法从 LMCache 中观察到。"
+msgstr "令牌级计数器，其比值表示通过查找请求的令牌中有多少比例是从 L1 或 L2 提供的。L0（GPU 前缀缓存）被有意排除在外——它由 vLLM 管理，无法从 LMCache 中观察到。"
 
 #: ../../source/mp/observability/metrics.rst:251
 msgid "``lmcache_mp.lookup_requested``"
@@ -549,7 +549,7 @@ msgid ""
 "per-tenant hit rate. ``cache_salt`` can be high-cardinality (one entry "
 "per tenant or isolation domain); drop it at scrape time with "
 "``metric_relabel_configs`` if storage cost matters."
-msgstr "``model_name`` 和 ``cache_salt`` 属性在查找时从 ``IPCCacheServerKey`` 捕获，以便仪表板可以计算每个模型或每个租户的命中率。``cache_salt`` 可能具有高基数（每个租户或隔离域一个条目）；如果存储成本重要，请在抓取时使用 ``metric_relabel_configs`` 丢弃它。"
+msgstr "``model_name`` 和 ``cache_salt`` 属性在查找时从 ``IPCCacheServerKey`` 捕获，以便仪表板计算每个模型或每个租户的命中率。``cache_salt`` 可能具有高基数（每个租户或隔离域一个条目）；若存储成本敏感，请在抓取时通过 ``metric_relabel_configs`` 丢弃它。"
 
 #: ../../source/mp/observability/metrics.rst:270
 msgid "**PromQL for hit rate:**"
@@ -723,17 +723,17 @@ msgid ""
 "tenant / isolation domain (``cache_salt``). ``cache_salt`` may be high-"
 "cardinality; drop it at scrape time with ``metric_relabel_configs`` if "
 "storage cost matters."
-msgstr "引擎中加载的 LMCache 块的总数，按所有 ``retrieve()`` 完成的结果进行汇总。可以按工作者、模型和租户/隔离域（``cache_salt``）进行切片。``cache_salt`` 可能具有高基数；如果存储成本重要，请在抓取时通过 ``metric_relabel_configs`` 丢弃它。"
+msgstr "加载到引擎的 LMCache 块总数，汇总自所有 ``retrieve()`` 完成结果。可按工作者、模型及租户/隔离域（``cache_salt``）进行切片。``cache_salt`` 可能具有高基数；若存储成本敏感，请在抓取时通过 ``metric_relabel_configs`` 丢弃它。"
 
 #: ../../source/mp/observability/metrics.rst:405
 msgid "Observable Gauges"
-msgstr "可观察的仪表盘"
+msgstr "可观察仪表"
 
 #: ../../source/mp/observability/metrics.rst:407
 msgid ""
 "Point-in-time state snapshots registered via ``register_gauge`` (pull-"
 "based OTel observable gauges)."
-msgstr "通过 ``register_gauge`` 注册的瞬时状态快照（基于拉取的 OTel 可观察仪表）。"
+msgstr "通过 ``register_gauge`` 注册的即时状态快照（基于拉取的 OTel 可观察仪表）。"
 
 #: ../../source/mp/observability/metrics.rst:410
 msgid ""
@@ -818,7 +818,7 @@ msgid ""
 "poisoning the observation, so a missing datapoint for one ``l2_name`` can"
 " mean either \"not configured\" or \"adapter errored on this scrape\" — "
 "cross-check with the L2 store/load counters."
-msgstr "每个 L2 适配器当前持有的字节数，在抓取时从 ``adapter.get_usage()`` 采样。每个配置的适配器一个观测值，通过 ``l2_name`` 标记（适配器类型，例如 ``\"fs\"``, ``\"nixl_store\"``, ``\"mooncake_store\"``）。与 L2 层的 ``l1_memory_usage_bytes`` 并行——使用它来查看每个 L2 后端当前持有多少。那些 ``get_usage()`` 抛出异常的适配器会被静默跳过，而不是污染观测值，因此一个 ``l2_name`` 缺失的数据点可能意味着“未配置”或“适配器在此抓取时出错”——请与 L2 存储/负载计数器交叉检查。"
+msgstr "每个 L2 适配器当前持有的字节数，在抓取时从 ``adapter.get_usage()`` 采样。每个已配置的适配器对应一个观测值，通过 ``l2_name`` 标记（适配器类型，例如 ``\"fs\"``、``\"nixl_store\"``、``\"mooncake_store\"``）。它是 L2 层中与 ``l1_memory_usage_bytes`` 对应的指标——用于查看每个 L2 后端当前持有多少数据。``get_usage()`` 抛出异常的适配器会被静默跳过，而不会污染观测结果，因此某个 ``l2_name`` 缺失数据点可能意味着“未配置”或“该次抓取时适配器发生错误”——请与 L2 存储/加载计数器交叉核对。"
 
 #: ../../source/mp/observability/metrics.rst:456
 msgid "``lmcache_mp.num_inflight_l2_stores``"
@@ -858,7 +858,7 @@ msgid ""
 "signal that prefetch reservations are crowding out cacheable data.  Per-"
 "adapter byte attribution follows each request's ``load_plan`` bitmap, so "
 "summing across adapters never double-counts."
-msgstr "每个适配器的 L1 字节由正在进行的 L2 → L1 预取加载保留。随着正在进行的字节和 ``l1_memory_usage_bytes`` 的增加，预取保留挤占可缓存数据的信号。每个适配器的字节归属遵循每个请求的 ``load_plan`` 位图，因此在适配器之间求和时不会重复计数。"
+msgstr "每个适配器由正在进行的 L2 → L1 预取加载所预留的 L1 字节数。若正在进行的字节数与 ``l1_memory_usage_bytes`` 同步上升，则表明预取预留正在挤占可缓存数据的空间。每个适配器的字节归属遵循每个请求的 ``load_plan`` 位图，因此跨适配器求和时不会重复计数。"
 
 #: ../../source/mp/observability/metrics.rst:476
 msgid "EventBus Self-Monitoring"
@@ -880,7 +880,7 @@ msgid ""
 "zero ``dropped_events_total`` or a sustained non-zero "
 "``drain_lag_seconds`` indicates the bus is at ``--event-bus-queue-size`` "
 "and tail-dropping; raise that flag or investigate slow subscribers."
-msgstr "使用它们来回答：EventBus 是否能够跟上发布者，是否有任何事件被丢弃，以及是否有任何订阅者回调抛出异常？非零的 ``dropped_events_total`` 或持续非零的 ``drain_lag_seconds`` 表明总线处于 ``--event-bus-queue-size`` 并且正在尾部丢弃；请提高该标志或调查慢速订阅者。"
+msgstr "使用它们来回答：EventBus 是否能跟上发布者的速度，是否有事件被丢弃，是否有订阅者回调抛出异常？非零的 ``dropped_events_total`` 或持续非零的 ``drain_lag_seconds`` 表明总线队列已达 ``--event-bus-queue-size`` 上限并正在进行尾部丢弃；请调大该参数值或排查慢速订阅者。"
 
 #: ../../source/mp/observability/metrics.rst:497
 msgid "``lmcache_mp.event_bus.queue_depth``"
@@ -898,7 +898,7 @@ msgstr "``lmcache_mp.event_bus.drain_lag_seconds``"
 msgid ""
 "Seconds since the oldest queued event was published; ``0.0`` when empty."
 "  Rising values mean the drain thread is falling behind."
-msgstr "自最旧的排队事件发布以来的秒数；当为空时为 ``0.0``。值上升意味着排出线程落后。"
+msgstr "自最旧的排队事件发布以来的秒数；队列为空时为 ``0.0``。值持续上升意味着排空线程处理速度跟不上。"
 
 #: ../../source/mp/observability/metrics.rst:506
 msgid "``lmcache_mp.event_bus.dropped_events_total``"

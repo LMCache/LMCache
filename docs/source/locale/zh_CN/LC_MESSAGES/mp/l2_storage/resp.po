@@ -28,7 +28,7 @@ msgid ""
 "An L2 adapter backed by a native RESP (Redis Serialization Protocol) "
 "connector, targeting **Redis** or **Valkey** servers. I/O is dispatched "
 "through a C++ worker-thread pool."
-msgstr "一个由原生 RESP（Redis 序列化协议）连接器支持的 L2 适配器，目标是 **Redis** 或 **Valkey** 服务器。I/O 通过 C++ 工作线程池进行调度。"
+msgstr "由原生 RESP（Redis 序列化协议）连接器驱动的 L2 适配器，面向 **Redis** 或 **Valkey** 服务器。I/O 通过 C++ 工作线程池进行调度。"
 
 #: ../../source/mp/l2_storage/resp.rst:8
 msgid "**Required fields:**"
@@ -56,13 +56,13 @@ msgstr "``username`` (字符串，默认 ``\"\"``)：认证用户名。"
 
 #: ../../source/mp/l2_storage/resp.rst:17
 msgid "``password`` (string, default ``\"\"``): Auth password."
-msgstr "``password`` (string, default ``\\\"\\\"``): 认证密码。"
+msgstr "``password`` (字符串，默认 ``\"\"``)：认证密码。"
 
 #: ../../source/mp/l2_storage/resp.rst:18
 msgid ""
 "``max_capacity_gb`` (float, default ``0``): Max L2 capacity in GB for "
 "usage tracking / aggregate eviction. ``0`` disables tracking."
-msgstr "``max_capacity_gb`` (float, default ``0``): 用于使用跟踪/聚合逐出的最大 L2 容量（以 GB 为单位）。``0`` 禁用跟踪。"
+msgstr "``max_capacity_gb`` (float，默认 ``0``)：L2 存储的最大容量上限（GB），用于容量跟踪与聚合逐出。设为 ``0`` 则禁用跟踪。"
 
 #: ../../source/mp/l2_storage/resp.rst:21
 msgid ""

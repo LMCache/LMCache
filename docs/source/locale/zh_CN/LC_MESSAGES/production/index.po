@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/production/index.rst:2
 msgid "Use LMCache in Production"
-msgstr "在生产中使用 LMCache"
+msgstr "在生产环境中使用 LMCache"
 
 #: ../../source/production/index.rst:4
 msgid "Deploying, scaling, and operating LMCache in production."
