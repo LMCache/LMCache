@@ -98,7 +98,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: opt-125m-gh-v1
+          key: opt-125m-gh-v2
 
       - name: Install vLLM CPU (prebuilt nightly from PyPI)
         run: bash .github/scripts/install_vllm_cpu.sh
