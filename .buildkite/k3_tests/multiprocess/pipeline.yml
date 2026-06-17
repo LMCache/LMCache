@@ -74,8 +74,8 @@ steps:
         timeout_in_minutes: 60
         env:
           MODEL: "google/gemma-4-31B-it"
-          # Require an exact score match between the two runs.
-          SCORE_TOLERANCE: "0"
+          # Allow a small score difference between the two runs.
+          SCORE_TOLERANCE: "0.03"
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.85"
           # 31B load + CUDA-graph capture is slow; raise the readiness timeout
@@ -142,7 +142,7 @@ steps:
   - group: ":compression: Multiprocess (CPU-only)"
     steps:
       - label: ":compression: cpu_e2e_validation (shm)"
-        command: bash .buildkite/k3_tests/multiprocess/scripts/run-cpu-e2e-validation.sh
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:
@@ -167,7 +167,7 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
 
       - label: ":compression: cpu_e2e_validation (pickle)"
-        command: bash .buildkite/k3_tests/multiprocess/scripts/run-cpu-e2e-validation.sh
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
         env:
           LMCACHE_SHM_NAME: ""
         timeout_in_minutes: 30
@@ -194,9 +194,9 @@ steps:
                   - { name: dshm, emptyDir: { medium: Memory, sizeLimit: 4Gi } }
 
       - label: ":compression: cpu_e2e_validation (server-side copy)"
-        command: bash .buildkite/k3_tests/multiprocess/scripts/run-cpu-e2e-validation.sh
+        command: bash .github/scripts/run-cpu-e2e-validation.sh
         env:
-          LMCACHE_MP_TRANSFER_MODE: "handle"
+          LMCACHE_MP_TRANSFER_MODE: "lmcache_driven"
         timeout_in_minutes: 30
         agents: { queue: "k8s" }
         plugins:

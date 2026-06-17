@@ -22,7 +22,7 @@ from lmcache.v1.mp_observability.config import DEFAULT_OBSERVABILITY_CONFIG
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
-    IPCCacheEngineKey,
+    IPCCacheServerKey,
     KVCache,
 )
 from lmcache.v1.multiprocess.mq import MessageQueueClient
@@ -129,13 +129,13 @@ class ClientContext:
         return self.gpu_kv_caches[layer][:, start_page : start_page + num_pages]
 
 
-def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheEngineKey:
+def create_cache_key(index: int, model: str = "testmodel") -> IPCCacheServerKey:
     """
     Create a cache key for testing.
     """
     global CHUNK_SIZE
     token_ids = [index] * CHUNK_SIZE
-    return IPCCacheEngineKey.from_token_ids(
+    return IPCCacheServerKey.from_token_ids(
         model,
         1,
         0,
@@ -151,7 +151,7 @@ BLOCKS_PER_KEY = 16
 
 def lookup_all(
     client: MessageQueueClient,
-    keys: list[IPCCacheEngineKey],
+    keys: list[IPCCacheServerKey],
     timeout: float = DEFAULT_TIMEOUT,
 ) -> int:
     """Lookup all keys individually and return total found count.
@@ -183,7 +183,7 @@ def lookup_all(
 
 def store_keys(
     client: MessageQueueClient,
-    keys: list[IPCCacheEngineKey],
+    keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
     event: torch.cuda.Event,
@@ -205,7 +205,7 @@ def store_keys(
 
 def retrieve_keys(
     client: MessageQueueClient,
-    keys: list[IPCCacheEngineKey],
+    keys: list[IPCCacheServerKey],
     instance_id: int,
     gpu_block_ids: list[int],
     event: torch.cuda.Event,

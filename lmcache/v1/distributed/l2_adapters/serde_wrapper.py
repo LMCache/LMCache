@@ -38,7 +38,7 @@ import threading
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -296,6 +296,11 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
     # ------------------------------------------------------------------
 
     @property
+    def inner_adapter(self) -> L2AdapterInterface:
+        """Return the wrapped L2 adapter."""
+        return self._inner
+
+    @property
     def supports_global_eviction(self) -> bool:
         return self._inner.supports_global_eviction
 
@@ -304,6 +309,18 @@ class SerdeL2AdapterWrapper(L2AdapterInterface):
 
     def delete(self, keys: list[ObjectKey]) -> None:
         self._inner.delete(keys)
+
+    def list_l2_keys(
+        self,
+        model_name: str | None = None,
+        page_size: int = 500,
+        cursor: str | None = None,
+    ) -> KeyListPage:
+        return self._inner.list_l2_keys(
+            model_name=model_name,
+            page_size=page_size,
+            cursor=cursor,
+        )
 
     def register_listener(self, listener: L2AdapterListener) -> None:
         # Listeners track what's actually stored — which is inner's job.

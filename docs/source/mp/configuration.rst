@@ -20,6 +20,14 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - Argument
      - Default
      - Description
+   * - ``--instance-id``
+     - *(unset, default UUID v4)*
+     - Stable identity of this MP server. Used as the coordinator
+       membership key and projected onto the OTel
+       ``service.instance.id`` resource attribute on every metric and
+       span (so telemetry and coordinator membership share one id).
+       When the flag is not passed, defaults to a random UUID v4
+       minted at startup.
    * - ``--host``
      - ``localhost``
      - Host address to bind the ZMQ server.
@@ -49,18 +57,22 @@ Source: ``lmcache/v1/multiprocess/config.py``
    * - ``--engine-type``
      - ``default``
      - Cache engine backend type. ``default`` uses standard prefix
-       caching; ``blend`` enables CacheBlend non-prefix KV reuse
-       (composes a ``BlendModule`` into the engine, which requires
-       ``--supported-transfer-mode`` to be ``gpu`` or ``auto``).
-       Choices: ``default``, ``blend``.
+       caching; ``blend`` selects the current CacheBlend V3 implementation
+       (composes a ``BlendV3Module`` into the engine);
+       ``blend_legacy`` selects the original CacheBlend
+       (composes a ``BlendModule``). Both blend variants require
+       ``--supported-transfer-mode`` to be ``lmcache_driven`` or ``auto``.
+       Choices: ``default``, ``blend``, ``blend_legacy``.
    * - ``--supported-transfer-mode``
      - ``auto``
      - Which worker → server transfer paths the server loads.
-       ``gpu`` enables only GPU-based IPC transfer (STORE/RETRIEVE);
-       ``non_gpu`` enables only the non-GPU (PREPARE/COMMIT) transfer
-       path; ``auto`` (default) loads both so workers of either device
-       type can connect without manual configuration.
-       Choices: ``gpu``, ``non_gpu``, ``auto``.
+       ``lmcache_driven`` enables only the server-driven transfer
+       path (STORE/RETRIEVE, supports both CUDA IPC and CPU SHM);
+       ``engine_driven`` enables only the non-GPU (PREPARE/COMMIT)
+       transfer path; ``auto`` (default) loads both
+       so workers of either device type can connect without manual
+       configuration.
+       Choices: ``lmcache_driven``, ``engine_driven``, ``auto``.
    * - ``--runtime-plugin-locations``
      - ``[]``
      - Zero or more paths to runtime plugin scripts or directories to
@@ -81,11 +93,33 @@ Source: ``lmcache/v1/multiprocess/config.py``
      - *(not set)*
      - SHM segment name for non-GPU KV transfer (only used when the
        non-GPU path is loaded, i.e. ``--supported-transfer-mode`` is
-       ``auto`` or ``non_gpu``).
+       ``auto`` or ``engine_driven``).
        Not set (default): auto-allocate a shared-memory pool.
        ``""`` (empty string): disable SHM and force the pickle transfer
        path.  Any other value: use that exact name for the SHM pool
        segment.
+   * - ``--worker-reap-timeout-seconds``
+     - ``120.0``
+     - Silence budget (seconds) after which a worker that has sent at
+       least one heartbeat PING but then gone quiet has its KV cache
+       registration reaped, freeing the leaked GPU context and CUDA IPC
+       handles. ``0`` disables reaping. Keep this at least 3x the engine
+       adapter's ``lmcache.mp.heartbeat_interval`` (default 10s) so a few
+       missed pings never reap a live worker; the adapter warns at startup
+       if its interval is raised without raising this.
+   * - ``--worker-registration-grace-seconds``
+     - ``3600.0``
+     - Silence budget (seconds) for a worker that registered but has never
+       sent a PING (still warming up, or died before its first request).
+       Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
+       slow model warmup is never mistaken for a dead worker.
+   * - ``--enable-segmented-prefix``
+     - ``False``
+     - CacheBlend (``--engine-type blend``) only: on a mid-prefix L2 retrieve
+       failure, retain the gapped prefix so the post-gap chunks stay
+       L1-resident and only the dropped gap is recomputed, instead of
+       truncating the prefix at the gap. No effect for other engines. See
+       :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
 
 Lookup Hash Logging
 -------------------
@@ -173,6 +207,15 @@ Source: ``lmcache/v1/distributed/config.py``
    * - ``--l1-align-bytes``
      - ``4096``
      - Alignment size in bytes (default 4 KB).
+   * - ``--l1-devdax-path``
+     - *(not set)*
+     - Optional ``/dev/dax*`` device or mmap-able file to use as the L1
+       backing arena.  When set, disable lazy allocation with
+       ``--no-l1-use-lazy`` and disable SHM transfer advertising with
+       ``--shm-name ""`` because the L1 bytes live in the DAX mapping.  If a
+       DAX L2 adapter with the same ``device_path`` is registered, that
+       adapter's ``max_dax_size_gb`` is used as the L1 Device-DAX overflow
+       size.
 
 GDS L1 Tier
 -----------
@@ -305,106 +348,40 @@ Each JSON object must include a ``"type"`` field that selects the adapter type.
 The order of ``--l2-adapter`` arguments determines the adapter order (cascade).
 
 Registered adapter types: ``nixl_store``, ``nixl_store_dynamic``, ``fs``,
-``fs_native``, ``mock``, ``mooncake_store``, ``s3``, ``resp``, ``plugin``,
-``native_plugin``, ``raw_block``, ``dax``.
+``fs_native``, ``mock``, ``mooncake_store``, ``aerospike``, ``s3``, ``resp``,
+``plugin``, ``native_plugin``, ``raw_block``, ``dax``.
 
-``nixl_store`` -- NIXL-based persistent storage
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Each adapter type's required and optional fields, plus per-backend examples, are
+documented on its own page under :doc:`Secondary KV Storage <l2_storage/index>`
+-- including the adapters not detailed inline here (``fs_native``,
+``raw_block``, ``dax``, ``mooncake_store``, ``hfbucket``, ``resp``).
 
-Fields:
+``aerospike`` -- Aerospike native connector
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``backend`` *(required)*: One of ``POSIX``, ``GDS``, ``GDS_MT``, ``HF3FS``, ``OBJ``, ``AZURE_BLOB``.
-- ``backend_params`` *(required for file-based backends)*: Dict of string
-  key-value pairs.  File-based backends (``GDS``, ``GDS_MT``, ``POSIX``,
-  ``HF3FS``) require ``file_path`` and ``use_direct_io``.
-- ``pool_size`` *(required)*: Number of storage descriptors to pre-allocate (> 0).
-
-Examples:
-
-.. code-block:: bash
-
-    # POSIX backend (local file system)
-    --l2-adapter '{"type": "nixl_store", "backend": "POSIX", "backend_params": {"file_path": "/data/lmcache/l2", "use_direct_io": "false"}, "pool_size": 64}'
-
-    # GDS backend (GPU Direct Storage)
-    --l2-adapter '{"type": "nixl_store", "backend": "GDS", "backend_params": {"file_path": "/data/nvme/lmcache", "use_direct_io": "true"}, "pool_size": 128}'
-
-    # GDS_MT backend (multi-threaded GDS)
-    --l2-adapter '{"type": "nixl_store", "backend": "GDS_MT", "backend_params": {"file_path": "/data/nvme/lmcache", "use_direct_io": "true"}, "pool_size": 128}'
-
-    # HF3FS backend (shared file system)
-    --l2-adapter '{"type": "nixl_store", "backend": "HF3FS", "backend_params": {"file_path": "/mnt/hf3fs/lmcache", "use_direct_io": "false"}, "pool_size": 64}'
-
-    # OBJ backend (object store -- no file_path needed)
-    --l2-adapter '{"type": "nixl_store", "backend": "OBJ", "backend_params": {}, "pool_size": 32}'
-
-    # AZURE_BLOB backend
-    --l2-adapter '{"type": "nixl_store", "backend": "AZURE_BLOB", "backend_params": {"account_url": "https://<account_name>.blob.core.windows.net", "container_name": "<container_name>"}, "pool_size": 32}'
-
-
-``fs`` -- File-system backed storage
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-A pure file-system L2 adapter using async I/O.
+Native C++ Aerospike L2 adapter (optional; build with ``BUILD_AEROSPIKE=1``).
+See :doc:`l2_storage/index` for build prerequisites and the full field list.
 
 Fields:
 
-- ``base_path`` *(required)*: Directory for storing KV cache files.
-- ``relative_tmp_dir`` *(optional)*: Relative sub-dir for temp files.
-- ``read_ahead_size`` *(optional)*: Trigger read-ahead by reading this many bytes first.
-- ``use_odirect`` *(optional)*: Bypass page cache via ``O_DIRECT`` (default ``false``).
-
-Examples:
-
-.. code-block:: bash
-
-    # Basic FS adapter
-    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2"}'
-
-    # With temp directory
-    --l2-adapter '{"type": "fs", "base_path": "/data/lmcache/l2", "relative_tmp_dir": ".tmp"}'
-
-``mock`` -- Mock adapter for testing
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Fields:
-
-- ``max_size_gb`` *(required)*: Maximum size of the adapter in GB (> 0).
-- ``mock_bandwidth_gb`` *(required)*: Simulated bandwidth in GB/sec (> 0).
+- ``hosts`` *(required)*: Seed hosts ``host:port[,host:port...]``.
+- ``namespace`` *(optional, default ``"lmcache"``)*: Aerospike namespace.
+- ``set_name`` / ``set`` *(optional, default ``"kv_chunks"``)*: Aerospike set.
+- ``num_workers`` *(optional, default ``8``)*: C++ I/O worker threads.
+- ``read_timeout_ms`` / ``write_timeout_ms`` *(optional)*: Client timeouts.
+- ``default_ttl_seconds`` *(optional, default ``86400``)*: Record TTL
+  (``0`` = namespace default).
+- ``target_segment_bytes`` / ``max_record_bytes`` *(optional, default ``0``)*:
+  Shard target and record-cap override (``0`` = auto-discover).
+- ``username`` / ``password`` *(optional)*: Enterprise Edition auth.
+- ``max_capacity_gb`` *(optional, default ``0``)*: L2 capacity for eviction
+  (``0`` disables tracking).
 
 Example:
 
 .. code-block:: bash
 
-    --l2-adapter '{"type": "mock", "max_size_gb": 256, "mock_bandwidth_gb": 10}'
-
-``s3`` -- S3-compatible object store
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-S3-backed L2 adapter using the AWS CRT (Common Runtime) for high-throughput
-transfers to AWS S3 or any S3-compatible endpoint. See
-:doc:`l2_storage` for details.
-
-Fields:
-
-- ``s3_endpoint`` *(required)*: Bucket URL, either ``"s3://<bucket>"`` or
-  the bare host form.
-- ``s3_region`` *(required)*: AWS region string.
-- ``s3_num_io_threads`` *(optional, default ``64``)*: CRT I/O threads.
-- ``s3_prefer_http2`` *(optional, default ``true``)*: Negotiate HTTP/2 via ALPN.
-- ``s3_enable_s3express`` *(optional, default ``false``)*: Enable S3 Express signing.
-- ``disable_tls`` *(optional, default ``false``)*: Bypass TLS (for
-  non-AWS HTTP endpoints).
-- ``aws_access_key_id`` / ``aws_secret_access_key`` *(optional)*:
-  Static credentials; omit to use the default credential provider chain.
-- ``max_capacity_gb`` *(optional, default ``0.0``)*: Aggregate capacity
-  used by ``get_usage()``. A value of ``0`` disables aggregate eviction.
-
-Example:
-
-.. code-block:: bash
-
-    --l2-adapter '{"type": "s3", "s3_endpoint": "s3://my-bucket", "s3_region": "us-west-2"}'
+    --l2-adapter '{"type": "aerospike", "hosts": "127.0.0.1:3000", "namespace": "lmcache", "set_name": "kv_chunks", "num_workers": 8}'
 
 Multiple adapters (cascade)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -421,7 +398,7 @@ Observability
 
 Source: ``lmcache/v1/mp_observability/config.py``
 
-See :doc:`observability` for full details on the three modes (metrics,
+See :doc:`observability/index` for full details on the three modes (metrics,
 logging, tracing).
 
 .. list-table::
@@ -452,12 +429,6 @@ logging, tracing).
    * - ``--prometheus-port``
      - ``9090``
      - Port for the Prometheus ``/metrics`` endpoint.
-   * - ``--service-instance-id``
-     - *(unset, default UUID v4)*
-     - Identifier for this MP server instance, attached as the OTel
-       Resource attribute ``service.instance.id`` on every metric and
-       span. When the flag is not passed, defaults to a random UUID v4.
-       Pass ``--service-instance-id=""`` to force an empty value.
 
 vLLM Client Configuration
 --------------------------
@@ -506,8 +477,9 @@ All connector-level options are passed through
    * - ``lmcache.mp.mp_transfer_mode``
      - ``auto``
      - Routing mode for the worker -> server transfer context. One of
-       ``auto`` (CUDA -> handle, others -> data), ``handle`` (force IPC /
-       SHM zero-copy), or ``data`` (force worker-side gather/scatter copy).
+       ``auto`` (CUDA -> engine_driven, others -> lmcache_driven),
+       ``engine_driven`` (force IPC / SHM zero-copy), or
+       ``lmcache_driven`` (force worker-side gather/scatter copy).
        Overrides the ``LMCACHE_MP_TRANSFER_MODE`` env var when set.
 
 Environment Variables

@@ -312,7 +312,7 @@ L2 Storage
    * - ``l2Backends``
      - --
      - List of L2 backends (``type`` + ``config``).
-       See :doc:`l2_storage`.
+       See :doc:`l2_storage/index`.
 
 Scheduling
 ~~~~~~~~~~
@@ -570,7 +570,7 @@ Production with Prometheus Monitoring
         prometheus.io/port: "9090"
       priorityClassName: system-node-critical
 
-See :doc:`observability` for metric names and Grafana configuration.
+See :doc:`observability/index` for metric names and Grafana configuration.
 
 Override Auto-Computed Resources
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -603,7 +603,7 @@ for the technique itself.
 
 It has two halves the operator runs together:
 
-- a GPU-resident ``blend_v3`` engine (``lmcache server --engine-type blend_v3``),
+- a GPU-resident ``blend_v3`` engine (``lmcache server --engine-type blend``),
   deployed as a DaemonSet with the **same GPU model as** ``LMCacheEngine``
   (``privileged`` + ``runtimeClassName: nvidia`` + ``NVIDIA_VISIBLE_DEVICES=all``
   + ``hostIPC``, and **no** ``nvidia.com/gpu`` claim) so it shares the vLLM GPU
@@ -653,7 +653,7 @@ Deploying a CacheBlendEngine
         imagePullSecrets:
           - name: my-registry-secret
 
-The engine runs ``lmcache server --engine-type blend_v3`` as a DaemonSet and
+The engine runs ``lmcache server --engine-type blend`` as a DaemonSet and
 emits a ``my-cacheblend-connection`` ConfigMap with the ``CBKVConnector``
 ``kv-transfer-config`` (the operator wires the node-local Service host/port and
 the ``cb.*`` tunables).
