@@ -344,6 +344,26 @@ class IPCCacheServerKey:
 KVCache = list[DeviceIPCWrapper]
 
 
+class GroupLayoutInfo(msgspec.Struct):
+    """Layout metadata for a single KV-cache group in multi-group models.
+
+    Attributes:
+        block_size: Tokens per paged block for this group.
+        num_layers: Number of layers in this group.
+        hidden_dim_size: Flattened hidden dimension per token.
+        dtype_str: Torch dtype name (e.g. ``"float16"``).
+        use_mla: Whether this group uses MLA format.
+        tokens_per_block: Tokens per block (for GDN, may differ from block_size).
+    """
+
+    block_size: int
+    num_layers: int
+    hidden_dim_size: int
+    dtype_str: str
+    use_mla: bool
+    tokens_per_block: int = 0
+
+
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
     """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
@@ -356,6 +376,8 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
         hidden_dim_size: Flattened hidden dimension per token.
         dtype_str: Torch dtype name (e.g. ``"float16"``).
         use_mla: Whether the worker KV format is MLA.
+        group_layouts: Per-group layout info for hybrid models. Empty list
+            means single-group (backward compatible).
     """
 
     instance_id: int
@@ -366,6 +388,7 @@ class RegisterEngineDrivenContextPayload(msgspec.Struct):
     hidden_dim_size: int
     dtype_str: str
     use_mla: bool
+    group_layouts: list[GroupLayoutInfo] = field(default_factory=list)
 
 
 @dataclass
