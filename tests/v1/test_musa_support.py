@@ -1,10 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU-runnable tests for MUSA detection and vLLM connector dispatch."""
+"""
+MUSA support unit tests that do not require MUSA hardware.
+
+These tests cover the design contract documented in
+``docs/source/developer_guide/musa_support_design.rst``:
+
+- Device detection precedence in :func:`lmcache._detect_device`.
+- Factory dispatch in :func:`lmcache.v1.gpu_connector.CreateGPUConnector`,
+  including fail-fast validation when device-scoped features are requested on
+  accelerators without connector support.
+
+The tests stub ``torch_device_type`` / ``torch_dev`` (rather than mutating
+the global PyTorch namespace) so they run on any platform.
+"""
 
 # Standard
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
+import importlib
 
 # Third Party
 import pytest
@@ -18,13 +32,13 @@ from lmcache.v1.metadata import LMCacheMetadata
 import lmcache as lmc
 import lmcache.v1.gpu_connector as gpu_connector_module
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 
 def _make_metadata() -> LMCacheMetadata:
-    """Create minimal metadata accepted by ``CreateGPUConnector``.
-
-    Returns:
-        Metadata for a small synthetic KV cache.
-    """
+    """Minimal metadata accepted by ``CreateGPUConnector``."""
     return LMCacheMetadata(
         model_name="musa_support_test",
         world_size=1,
@@ -37,14 +51,7 @@ def _make_metadata() -> LMCacheMetadata:
 
 
 def _make_config(**overrides: Any) -> LMCacheEngineConfig:
-    """Create a default engine config with field overrides.
-
-    Args:
-        **overrides: Config attributes to set after construction.
-
-    Returns:
-        An LMCache engine config.
-    """
+    """Default config plus the requested overrides."""
     config = LMCacheEngineConfig.from_defaults(chunk_size=16)
     for key, value in overrides.items():
         setattr(config, key, value)
@@ -55,59 +62,34 @@ class _FakeTorchDev:
     """Stand-in for ``torch.musa`` / ``torch.xpu`` / ``torch.cuda``."""
 
     def __init__(self, device_count: int = 1) -> None:
-        """Initialize the fake accelerator module.
-
-        Args:
-            device_count: Number of devices to report.
-        """
         self._device_count = device_count
 
     def is_available(self) -> bool:
-        """Return whether the fake device is available.
-
-        Returns:
-            Always ``True``.
-        """
         return True
 
     def device_count(self) -> int:
-        """Return the fake device count.
-
-        Returns:
-            The configured device count.
-        """
         return self._device_count
 
     def current_device(self) -> int:
-        """Return the current fake device index.
-
-        Returns:
-            Always ``0``.
-        """
         return 0
 
     def set_device(self, _idx: int) -> None:
-        """Set the fake current device.
-
-        Args:
-            _idx: Ignored device index.
-        """
         return
 
 
 def _patch_device(monkeypatch: pytest.MonkeyPatch, device_type: str) -> None:
-    """Pretend the connector factory is running on ``device_type``.
-
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        device_type: Accelerator name to expose to the factory.
-    """
+    """Pretend the current accelerator is ``device_type`` in the factory."""
     monkeypatch.setattr(gpu_connector_module, "torch_device_type", device_type)
     monkeypatch.setattr(gpu_connector_module, "torch_dev", _FakeTorchDev())
 
 
+# ---------------------------------------------------------------------------
+# _detect_device
+# ---------------------------------------------------------------------------
+
+
 class _StubTorch:
-    """Minimal stand-in for ``torch`` exposing what ``_detect_device`` reads."""
+    """Minimal stand-in for ``torch`` exposing only what ``_detect_device`` reads."""
 
     def __init__(
         self,
@@ -119,16 +101,6 @@ class _StubTorch:
         xpu_available: bool = False,
         hpu_available: bool = False,
     ) -> None:
-        """Initialize the torch stub.
-
-        Args:
-            has_musa: Whether to expose ``torch.musa``.
-            has_xpu: Whether to expose ``torch.xpu``.
-            has_hpu: Whether to expose ``torch.hpu``.
-            musa_available: Return value for ``torch.musa.is_available``.
-            xpu_available: Return value for ``torch.xpu.is_available``.
-            hpu_available: Return value for ``torch.hpu.is_available``.
-        """
         self.cuda = SimpleNamespace(is_available=lambda: True)
         if has_musa:
             self.musa = SimpleNamespace(is_available=lambda: musa_available)
@@ -139,20 +111,13 @@ class _StubTorch:
 
 
 def _detect_with_stub(stub: _StubTorch) -> tuple[Any, str]:
-    """Run ``_detect_device`` with ``torch`` swapped for a stub.
-
-    Args:
-        stub: Stub torch module.
-
-    Returns:
-        The detected torch device module and device type.
-    """
+    """Run ``_detect_device`` with ``torch`` swapped for the stub."""
     with patch.dict("sys.modules", {"torch": stub}):
         return lmc._detect_device()
 
 
 def test_detect_device_prefers_musa_when_available() -> None:
-    """``_detect_device`` returns MUSA when ``torch.musa`` is available."""
+    """``_detect_device`` returns MUSA whenever ``torch.musa.is_available()``."""
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
@@ -167,7 +132,7 @@ def test_detect_device_prefers_musa_when_available() -> None:
 
 
 def test_detect_device_falls_back_past_unavailable_musa() -> None:
-    """``_detect_device`` falls through MUSA when it is unavailable."""
+    """Falls through MUSA when ``torch.musa.is_available()`` is False."""
     stub = _StubTorch(
         has_musa=True,
         has_xpu=True,
@@ -179,57 +144,84 @@ def test_detect_device_falls_back_past_unavailable_musa() -> None:
 
 
 def test_detect_device_cuda_fallback_when_no_alt_accelerator() -> None:
-    """``_detect_device`` returns CUDA when no alternate accelerator exists."""
+    """Default fallback is CUDA so existing CUDA tests/paths keep working."""
     stub = _StubTorch()
     dev, name = _detect_with_stub(stub)
     assert name == "cuda"
     assert dev is stub.cuda
 
 
-@pytest.mark.parametrize(
-    ("config_kwargs", "message"),
-    [
-        ({"enable_blending": True}, "enable_blending"),
-        ({"use_gpu_connector_v3": True}, "use_gpu_connector_v3"),
-        ({"use_layerwise": True}, "use_layerwise"),
-    ],
-)
-def test_create_gpu_connector_rejects_unsupported_musa_vllm_features(
-    monkeypatch: pytest.MonkeyPatch,
-    config_kwargs: dict[str, bool],
-    message: str,
-) -> None:
-    """MUSA vLLM dispatch fails fast for unsupported feature flags.
+# ---------------------------------------------------------------------------
+# CreateGPUConnector: MUSA branch + device-scoped feature guards
+# ---------------------------------------------------------------------------
 
-    Args:
-        monkeypatch: Pytest monkeypatch fixture.
-        config_kwargs: Config flag override under test.
-        message: Expected error message fragment.
+
+def test_create_gpu_connector_blending_rejected_on_musa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``enable_blending`` must fail fast on MUSA."""
+    _patch_device(monkeypatch, "musa")
+    config = _make_config(enable_blending=True, use_layerwise=True)
+    metadata = _make_metadata()
+    with pytest.raises(ValueError, match="enable_blending"):
+        CreateGPUConnector(config, metadata, EngineType.VLLM)
+
+
+@pytest.mark.parametrize("device_type", ["musa", "hpu"])
+def test_create_gpu_connector_blending_rejected_on_unsupported_devices(
+    monkeypatch: pytest.MonkeyPatch, device_type: str
+) -> None:
+    """The blending guard rejects devices without a blending connector."""
+    _patch_device(monkeypatch, device_type)
+    config = _make_config(enable_blending=True, use_layerwise=True)
+    metadata = _make_metadata()
+    with pytest.raises(ValueError, match="enable_blending"):
+        CreateGPUConnector(config, metadata, EngineType.VLLM)
+
+
+def test_create_gpu_connector_v3_rejected_on_musa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use_gpu_connector_v3`` must fail fast on MUSA."""
+    _patch_device(monkeypatch, "musa")
+    config = _make_config(use_gpu_connector_v3=True)
+    metadata = _make_metadata()
+    with pytest.raises(ValueError, match="use_gpu_connector_v3"):
+        CreateGPUConnector(config, metadata, EngineType.VLLM)
+
+
+def test_create_gpu_connector_layerwise_rejected_on_hpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HPU ships only ``VLLMPagedMemHPUConnectorV2`` (no layerwise variant).
+
+    Previously, ``use_layerwise=True`` on HPU silently fell through into
+    ``VLLMPagedMemLayerwiseGPUConnector`` — the CUDA layerwise connector —
+    which then crashed on HPU tensors when constructing
+    ``torch.cuda.Stream()``. The guard must reject this combination with a
+    clear error before any device-specific construction.
+    """
+    _patch_device(monkeypatch, "hpu")
+    config = _make_config(use_layerwise=True)
+    metadata = _make_metadata()
+    with pytest.raises(ValueError) as exc:
+        CreateGPUConnector(config, metadata, EngineType.VLLM)
+    message = str(exc.value)
+    assert "use_layerwise" in message
+    assert "hpu" in message.lower()
+
+
+def test_create_gpu_connector_musa_dispatches_to_musa_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``torch_device_type == 'musa'`` selects a MUSA connector class.
+
+    We do not need real MUSA hardware: the factory's ``torch.device`` call
+    is patched (PyTorch builds without ``torch_musa`` reject the 'musa'
+    string), and ``from_metadata`` is replaced on the MUSA connectors so
+    the assertion checks only the dispatch.
     """
     _patch_device(monkeypatch, "musa")
-    with pytest.raises(ValueError, match=message) as exc_info:
-        CreateGPUConnector(
-            _make_config(**config_kwargs), _make_metadata(), EngineType.VLLM
-        )
-    assert "this PR" not in str(exc_info.value)
-
-
-def test_create_gpu_connector_rejects_sglang_on_musa(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MUSA dispatch reports SGLang as unsupported without PR-only wording."""
-    _patch_device(monkeypatch, "musa")
-    with pytest.raises(ValueError, match="SGLang on MUSA") as exc_info:
-        CreateGPUConnector(_make_config(), _make_metadata(), EngineType.SGLANG)
-    assert "this PR" not in str(exc_info.value)
-
-
-def test_create_gpu_connector_musa_dispatches_to_vllm_musa_connector(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MUSA + vLLM + non-layerwise selects ``VLLMPagedMemMUSAConnectorV2``."""
-    _patch_device(monkeypatch, "musa")
-
     # First Party
     from lmcache.v1.gpu_connector import musa_connectors as musa_mod
 
@@ -238,13 +230,50 @@ def test_create_gpu_connector_musa_dispatches_to_vllm_musa_connector(
     )
 
     sentinel_v2 = object()
+    sentinel_layer = object()
     monkeypatch.setattr(
         musa_mod.VLLMPagedMemMUSAConnectorV2,
         "from_metadata",
         classmethod(lambda cls, *a, **kw: sentinel_v2),
     )
-
-    connector = CreateGPUConnector(
-        _make_config(use_layerwise=False), _make_metadata(), EngineType.VLLM
+    monkeypatch.setattr(
+        musa_mod.VLLMPagedMemLayerwiseMUSAConnector,
+        "from_metadata",
+        classmethod(lambda cls, *a, **kw: sentinel_layer),
     )
-    assert connector is sentinel_v2
+
+    metadata = _make_metadata()
+    assert (
+        CreateGPUConnector(_make_config(use_layerwise=False), metadata, EngineType.VLLM)
+        is sentinel_v2
+    )
+    assert (
+        CreateGPUConnector(_make_config(use_layerwise=True), metadata, EngineType.VLLM)
+        is sentinel_layer
+    )
+
+
+def test_create_gpu_connector_rejects_sglang_on_musa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage2 does not expose SGLang MUSA connector dispatch."""
+    _patch_device(monkeypatch, "musa")
+    with pytest.raises(ValueError, match="SGLang on MUSA"):
+        CreateGPUConnector(_make_config(), _make_metadata(), EngineType.SGLANG)
+
+
+# ---------------------------------------------------------------------------
+# Module import sanity
+# ---------------------------------------------------------------------------
+
+
+def test_lmcache_exports_torch_dev_and_torch_device_type() -> None:
+    """The contract used by every accelerator-aware module is the
+    ``torch_dev`` / ``torch_device_type`` pair exported from ``lmcache``.
+
+    Re-import to defeat any per-test monkeypatching above.
+    """
+    importlib.reload(lmc)
+    assert hasattr(lmc, "torch_dev")
+    assert isinstance(lmc.torch_device_type, str)
+    assert lmc.torch_device_type in {"cuda", "musa", "xpu", "hpu", "cpu"}
