@@ -546,6 +546,7 @@ def test_raw_block_l2_adapter_recovered_keys_seed_l2_eviction_state():
         adapter2 = RawBlockL2Adapter(config)
         try:
             state = L2AdapterEvictionState(
+                0,
                 adapter2,
                 EvictionConfig(eviction_policy="LRU", eviction_ratio=1.0),
             )

@@ -6,6 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from typing import Iterator, Literal, Optional
+import threading
 import time
 
 # First Party
@@ -17,12 +18,13 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     TrimPolicy,
 )
-from lmcache.v1.distributed.config import StorageManagerConfig
+from lmcache.v1.distributed.config import EvictionConfig, StorageManagerConfig
 from lmcache.v1.distributed.error import L1Error, strerror
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
@@ -74,17 +76,28 @@ class StorageManager:
         # a ``serde_config``, the adapter is wrapped with
         # ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
         # and serde is transparent.
-        l1_memory_desc = self._l1_manager.get_l1_memory_desc()
-        self._l2_adapters: list[L2AdapterInterface] = []
+        #
+        # Adapters and descriptors are keyed by a stable, monotonic
+        # ``adapter_id`` (never reused or shifted) so runtime add/remove
+        # never invalidates surviving ids or in-flight ``(adapter_id,
+        # task_id)`` keys. Initial ids are the config order ``0..n-1``.
+        self._l1_memory_desc = self._l1_manager.get_l1_memory_desc()
+        self._next_adapter_id = 0
+        # Serializes add/delete against each other; may be held across a
+        # delete's drain wait. No controller background thread acquires it.
+        self._lifecycle_lock = threading.Lock()
+        # Short-lived guard for the adapter/descriptor dicts so lock-free
+        # cross-thread readers (OTel gauges, HTTP status) never observe a
+        # mid-mutation dict.
+        self._adapters_lock = threading.Lock()
+        # External listeners re-applied to adapters added at runtime.
+        self._registered_l2_listeners: list[L2AdapterListener] = []
+        self._l2_adapters: dict[int, L2AdapterInterface] = {}
+        self._adapter_descriptors: dict[int, AdapterDescriptor] = {}
         for ac in config.l2_adapter_config.adapters:
-            adapter: L2AdapterInterface = create_l2_adapter(ac, l1_memory_desc)
-            if ac.serde_config is not None:
-                adapter = SerdeL2AdapterWrapper(
-                    inner=adapter,
-                    serde=create_serde_processor(ac.serde_config),
-                    l1_manager=self._l1_manager,
-                )
-            self._l2_adapters.append(adapter)
+            adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
+            self._l2_adapters[adapter_id] = adapter
+            self._adapter_descriptors[adapter_id] = descriptor
 
         PeriodicEventNotifier.create(
             interval_ms=config.periodic_notifier_interval_ms,
@@ -107,41 +120,31 @@ class StorageManager:
         # counts which the base class tracks regardless of capacity,
         # so they are wired up unconditionally.
         l2_eviction_states: list[L2AdapterEvictionState] = []
-        for adapter, ac in zip(
+        for adapter_id, ac in zip(
             self._l2_adapters, config.l2_adapter_config.adapters, strict=True
         ):
-            if ac.eviction_config is None:
-                continue
-            policy_name = ac.eviction_config.eviction_policy
-            if policy_name != "IsolatedLRU" and not adapter.supports_global_eviction:
-                logger.warning(
-                    "L2 adapter %s configured with '%s' eviction but does "
-                    "not support global eviction (max_capacity_bytes=0); "
-                    "skipping aggregate-usage eviction setup.",
-                    type(adapter).__name__,
-                    policy_name,
+            adapter = self._l2_adapters[adapter_id]
+            if self._should_enable_l2_eviction(adapter, ac.eviction_config):
+                assert ac.eviction_config is not None  # make linter happy
+                l2_eviction_states.append(
+                    L2AdapterEvictionState(
+                        adapter_id=adapter_id,
+                        adapter=adapter,
+                        eviction_config=ac.eviction_config,
+                    )
                 )
-                continue
-            l2_eviction_states.append(
-                L2AdapterEvictionState(
-                    adapter=adapter,
-                    eviction_config=ac.eviction_config,
-                )
-            )
         self._l2_eviction_controller = L2EvictionController(
             l2_eviction_states, quota_manager=self._quota_manager
         )
         self._l2_eviction_controller.start()
 
-        self._adapter_descriptors = [
-            AdapterDescriptor(index=i, config=ac)
-            for i, ac in enumerate(config.l2_adapter_config.adapters)
-        ]
-
+        # Controllers receive the initial set as ordered lists; they key
+        # their own copies by ``descriptor.index`` (== adapter_id) and learn
+        # of later changes via add_adapter/request_remove_adapter.
         self._store_controller = StoreController(
             l1_manager=self._l1_manager,
-            l2_adapters=self._l2_adapters,
-            adapter_descriptors=self._adapter_descriptors,
+            l2_adapters=list(self._l2_adapters.values()),
+            adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_store_policy(config.store_policy),
         )
         self._store_controller.start()
@@ -149,8 +152,8 @@ class StorageManager:
         # Prefetch controller
         self._prefetch_controller = PrefetchController(
             l1_manager=self._l1_manager,
-            l2_adapters=self._l2_adapters,
-            adapter_descriptors=self._adapter_descriptors,
+            l2_adapters=list(self._l2_adapters.values()),
+            adapter_descriptors=list(self._adapter_descriptors.values()),
             policy=create_prefetch_policy(config.prefetch_policy),
             max_in_flight=config.prefetch_max_in_flight,
         )
@@ -697,9 +700,13 @@ class StorageManager:
             silence over a poison observation).
         """
         out: list[tuple[int | float, dict[str, object]]] = []
-        for adapter, desc in zip(
-            self._l2_adapters, self._adapter_descriptors, strict=True
-        ):
+        with self._adapters_lock:
+            items = list(self._l2_adapters.items())
+            descriptors = dict(self._adapter_descriptors)
+        for adapter_id, adapter in items:
+            desc = descriptors.get(adapter_id)
+            if desc is None:
+                continue
             try:
                 usage = adapter.get_usage()
             except Exception:
@@ -720,7 +727,9 @@ class StorageManager:
         are additive.
         """
         totals: dict[str, int] = {}
-        for adapter in self._l2_adapters:
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
             snap = adapter.get_usage().bytes_by_cache_salt
             for salt, used in snap.items():
                 totals[salt] = totals.get(salt, 0) + used
@@ -739,7 +748,7 @@ class StorageManager:
             adapter,
         ) in enumerate(self._list_reconfigurable_l2_adapters()):
             status = dict(adapter.reconfigure_status())
-            if l2_adapter_index < len(getattr(self, "_adapter_descriptors", [])):
+            if l2_adapter_index in self._adapter_descriptors:
                 status["backend"] = self._adapter_descriptors[
                     l2_adapter_index
                 ].type_name
@@ -774,6 +783,81 @@ class StorageManager:
         result["adapter_index"] = adapter_index
         return result
 
+    def add_l2_adapter(self, config: L2AdapterConfigBase) -> int:
+        """Create and attach a new L2 adapter at runtime.
+
+        Builds the adapter (wrapping it for serde when the config requests
+        it), re-applies any registered L2 listeners, wires it into the
+        store, prefetch, and eviction controllers, and exposes it for
+        routing. The adapter receives a stable id that is never reused.
+
+        Args:
+            config: The adapter configuration.
+
+        Returns:
+            The stable id assigned to the new adapter.
+        """
+        with self._lifecycle_lock:
+            adapter_id, adapter, descriptor = self._build_l2_adapter(config)
+            for listener in self._registered_l2_listeners:
+                adapter.register_listener(listener)
+            with self._adapters_lock:
+                self._l2_adapters[adapter_id] = adapter
+                self._adapter_descriptors[adapter_id] = descriptor
+            self._store_controller.add_adapter(adapter_id, adapter, descriptor)
+            self._prefetch_controller.add_adapter(adapter_id, adapter, descriptor)
+            if self._should_enable_l2_eviction(adapter, config.eviction_config):
+                assert config.eviction_config is not None  # make linter happy
+                self._l2_eviction_controller.add_adapter_state(
+                    L2AdapterEvictionState(
+                        adapter_id=adapter_id,
+                        adapter=adapter,
+                        eviction_config=config.eviction_config,
+                    )
+                )
+            logger.info("Added L2 adapter %d (%s)", adapter_id, descriptor.type_name)
+            return adapter_id
+
+    def delete_l2_adapter(self, adapter_id: int, timeout: float = 30.0) -> None:
+        """Gracefully drain and detach an L2 adapter at runtime.
+
+        Stops routing new stores/prefetches to the adapter, waits for its
+        in-flight work to finish, removes it from the controllers, and
+        closes it. The adapter's backing data is left intact (detach only).
+
+        Args:
+            adapter_id: Stable id of the adapter to remove.
+            timeout: Maximum seconds to wait for in-flight work to drain.
+
+        Raises:
+            ValueError: If no adapter with ``adapter_id`` is attached.
+            TimeoutError: If draining did not complete within ``timeout``;
+                the adapter is left attached (draining) so the caller can
+                retry.
+        """
+        with self._lifecycle_lock:
+            if adapter_id not in self._l2_adapters:
+                raise ValueError(f"No L2 adapter with id {adapter_id}")
+
+            deadline = time.monotonic() + timeout
+            store_done = self._store_controller.request_remove_adapter(adapter_id)
+            prefetch_done = self._prefetch_controller.request_remove_adapter(adapter_id)
+            if not store_done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                raise TimeoutError(
+                    f"Timed out draining adapter {adapter_id} from store controller"
+                )
+            if not prefetch_done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                raise TimeoutError(
+                    f"Timed out draining adapter {adapter_id} from prefetch controller"
+                )
+
+            self._l2_eviction_controller.remove_adapter_state(adapter_id)
+            with self._adapters_lock:
+                adapter = self._l2_adapters.pop(adapter_id)
+                self._adapter_descriptors.pop(adapter_id, None)
+            adapter.close()
+            logger.info("Deleted L2 adapter %d", adapter_id)
+
     def clear(self, force: bool = False):
         """
         Clear data in the storage manager.
@@ -797,7 +881,7 @@ class StorageManager:
 
         PeriodicEventNotifier.shutdown()
 
-        for adapter in self._l2_adapters:
+        for adapter in self._l2_adapters.values():
             adapter.close()
 
         self._l1_manager.close()
@@ -809,7 +893,7 @@ class StorageManager:
         prefetch = self._prefetch_controller.report_status()
         l1_eviction = self._eviction_controller.report_status()
         l2_eviction = self._l2_eviction_controller.report_status()
-        adapters = [a.report_status() for a in self._l2_adapters]
+        adapters = [a.report_status() for a in self._l2_adapters.values()]
         children = [l1, store, prefetch, l1_eviction, l2_eviction] + adapters
         return {
             "is_healthy": all(c["is_healthy"] for c in children),
@@ -823,13 +907,18 @@ class StorageManager:
         }
 
     def register_l2_listener(self, listener: L2AdapterListener) -> None:
-        """Register a listener on all L2 adapters.
+        """Register a listener on all current and future L2 adapters.
+
+        The listener is recorded so that adapters added later via
+        :meth:`add_l2_adapter` receive it too.
 
         Args:
             listener: The listener to register.
         """
-        for adapter in self._l2_adapters:
-            adapter.register_listener(listener)
+        with self._lifecycle_lock:
+            self._registered_l2_listeners.append(listener)
+            for adapter in self._l2_adapters.values():
+                adapter.register_listener(listener)
 
     # Functions for debugging and testing
     def memcheck(self) -> bool:
@@ -840,6 +929,68 @@ class StorageManager:
             True if memory is consistent, False otherwise.
         """
         return self._l1_manager.memcheck()
+
+    def _build_l2_adapter(
+        self,
+        config: L2AdapterConfigBase,
+    ) -> tuple[int, L2AdapterInterface, AdapterDescriptor]:
+        """Allocate a stable id and construct an adapter + its descriptor.
+
+        Wraps the adapter with ``SerdeL2AdapterWrapper`` when the config
+        carries a ``serde_config``. Does not register the adapter with any
+        controller — the caller wires it up.
+
+        Args:
+            config: The adapter configuration.
+
+        Returns:
+            ``(adapter_id, adapter, descriptor)``.
+        """
+        adapter_id = self._next_adapter_id
+        self._next_adapter_id += 1
+        adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)
+        if config.serde_config is not None:
+            adapter = SerdeL2AdapterWrapper(
+                inner=adapter,
+                serde=create_serde_processor(config.serde_config),
+                l1_manager=self._l1_manager,
+            )
+        descriptor = AdapterDescriptor(index=adapter_id, config=config)
+        return adapter_id, adapter, descriptor
+
+    def _should_enable_l2_eviction(
+        self,
+        adapter: L2AdapterInterface,
+        eviction_config: EvictionConfig | None,
+    ) -> bool:
+        """Whether to wire an adapter into the L2 eviction controller.
+
+        Aggregate-usage policies (``LRU``, ``noop``) need a capacity
+        (``max_capacity_bytes > 0``) to compute a usage fraction, so an
+        adapter without capacity is skipped for those (logged). Isolated
+        policies (``IsolatedLRU``) track per-cache_salt bytes regardless of
+        capacity, so they are always enabled.
+
+        Args:
+            adapter: The adapter to evaluate.
+            eviction_config: The adapter's eviction config, if any.
+
+        Returns:
+            True if an eviction state should be created for this adapter.
+        """
+        if eviction_config is None:
+            return False
+        policy_name = eviction_config.eviction_policy
+        if policy_name != "IsolatedLRU" and not adapter.supports_global_eviction:
+            logger.warning(
+                "L2 adapter %s configured with '%s' eviction but does "
+                "not support global eviction (max_capacity_bytes=0); "
+                "skipping aggregate-usage eviction setup.",
+                type(adapter).__name__,
+                policy_name,
+            )
+            return False
+        return True
 
     def _unwrap_reconfigurable_l2_adapter(
         self,
@@ -858,7 +1009,7 @@ class StorageManager:
         self,
     ) -> list[tuple[int, L2ReconfigurableAdapter]]:
         adapters: list[tuple[int, L2ReconfigurableAdapter]] = []
-        for l2_adapter_index, adapter in enumerate(self._l2_adapters):
+        for l2_adapter_index, adapter in sorted(self._l2_adapters.items()):
             reconfigurable_adapter = self._unwrap_reconfigurable_l2_adapter(adapter)
             if reconfigurable_adapter is not None:
                 adapters.append((l2_adapter_index, reconfigurable_adapter))
