@@ -20,32 +20,6 @@ import zmq
 # First Party
 from lmcache.logging import init_logger
 
-MessageQueueClient: object | None
-RequestType: object | None
-get_response_class: object | None
-try:
-    # Import at module load time to follow the repo import convention. Some
-    # config-only tests import this launcher without installing torch; keep that
-    # import path available and fail only when MQ health probing is actually used.
-    # First Party
-    from lmcache.v1.multiprocess.mq import (
-        MessageQueueClient as _ImportedMessageQueueClient,
-    )
-    from lmcache.v1.multiprocess.protocol import RequestType as _ImportedRequestType
-    from lmcache.v1.multiprocess.protocol import (
-        get_response_class as _imported_get_response_class,
-    )
-except ModuleNotFoundError as exc:
-    if exc.name != "torch":
-        raise
-    MessageQueueClient = None
-    RequestType = None
-    get_response_class = None
-else:
-    MessageQueueClient = _ImportedMessageQueueClient
-    RequestType = _ImportedRequestType
-    get_response_class = _imported_get_response_class
-
 logger = init_logger(__name__)
 
 _AUTOSTART_KEY = "lmcache.mp.autostart"
@@ -62,29 +36,40 @@ _POLL_INTERVAL_SECONDS = 0.5
 _SHUTDOWN_TIMEOUT_SECONDS = 10.0
 
 
+def _load_mp_health_dependencies() -> tuple[
+    "_MessageQueueClientFactory",
+    "_RequestTypeNamespace",
+    Callable[[object], object | None],
+]:
+    # First Party
+    from lmcache.v1.multiprocess.mq import MessageQueueClient
+    from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
+
+    return (
+        cast(_MessageQueueClientFactory, MessageQueueClient),
+        cast(_RequestTypeNamespace, RequestType),
+        cast(Callable[[object], object | None], get_response_class),
+    )
+
+
 def _create_message_queue_client(
+    factory: _MessageQueueClientFactory,
     server_url: str,
     zmq_context: zmq.Context,
 ) -> _MessageQueueClient:
-    message_queue_client = MessageQueueClient
-    if message_queue_client is None:
-        raise RuntimeError("MessageQueueClient requires torch to be installed")
-    factory = cast(_MessageQueueClientFactory, message_queue_client)
     return factory(server_url, zmq_context)
 
 
-def _submit_ping(client: _MessageQueueClient) -> _MessagingFuture:
-    request_type = RequestType
-    response_class_getter = get_response_class
-    if request_type is None or response_class_getter is None:
-        raise RuntimeError("MP health probing requires torch to be installed")
-    ping_request_type = cast(_RequestTypeNamespace, request_type).PING
+def _submit_ping(
+    client: _MessageQueueClient,
+    request_type: _RequestTypeNamespace,
+    response_class_getter: Callable[[object], object | None],
+) -> _MessagingFuture:
+    ping_request_type = request_type.PING
     return client.submit_request(
         ping_request_type,
         [],
-        cast(Callable[[object], object | None], response_class_getter)(
-            ping_request_type
-        ),
+        response_class_getter(ping_request_type),
     )
 
 
@@ -501,8 +486,17 @@ def is_mp_server_healthy(
     """
     client: _MessageQueueClient | None = None
     try:
-        client = _create_message_queue_client(server_url, zmq_context)
-        future = _submit_ping(client)
+        (
+            message_queue_client_factory,
+            request_type,
+            response_class_getter,
+        ) = _load_mp_health_dependencies()
+        client = _create_message_queue_client(
+            message_queue_client_factory,
+            server_url,
+            zmq_context,
+        )
+        future = _submit_ping(client, request_type, response_class_getter)
         return bool(future.result(timeout=timeout))
     except Exception:
         logger.debug("LMCache MP server ZMQ PING failed", exc_info=True)
