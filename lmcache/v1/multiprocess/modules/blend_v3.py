@@ -45,12 +45,15 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
 )
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
-from lmcache.v1.multiprocess.engine_module import HandlerSpec, ThreadPoolType
-from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
+from lmcache.v1.multiprocess.engine_module import (
+    HandlerSpec,
+    InstanceLivenessTarget,
+    ThreadPoolType,
+)
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
     LMCacheDrivenTransferModule,
 )
-from lmcache.v1.multiprocess.modules.lookup import LookupModule
+from lmcache.v1.multiprocess.modules.lookup import compute_extra_count
 from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.token_hasher import (
     TokenHasher,
@@ -58,6 +61,7 @@ from lmcache.v1.multiprocess.token_hasher import (
     rolling_hash_windows_numba,
     update_table_id_numba,
 )
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -82,7 +86,12 @@ class _CBUnifiedJob:
 
     matches: list[CBMatchResult]
     num_tokens: int = 0
+    # Prefix leg (blend_v3-owned submit/poll). ``prefix_handle`` is None when
+    # there is no GPU context / no full chunk (poll reports 0 coverage).
+    prefix_handle: PrefetchHandle | None = None
+    prefix_world_size: int = 1
     prefix_chunks: int | None = None  # stashed when the prefix poll completes
+    retained_chunks: list[int] | None = None  # SEGMENTED_PREFIX: full gapped set
     sparse_started: bool = False  # prefix done -> sparse leg submitted/skipped
     handle: PrefetchHandle | None = None  # sparse handle, None if no sparse leg
     non_prefix: list[CBMatchResult] | None = None
@@ -141,7 +150,7 @@ class BlendTokenRangeMatcherV3:
             token_hashes (list[bytes]): Per-chunk content hashes (one per
                 chunk), used as the dedup/eviction key.
             start_chunk_idx (int): First chunk to index; 1 skips chunk 0 (the
-                standard prefix lookup owns it).
+                prefix lookup leg owns it).
             position_offset (int): Added to each recorded start position (for
                 indexing a tail-slice of a larger sequence).
 
@@ -314,7 +323,7 @@ def _unique_token_coverage(results: list[CBMatchResult]) -> int:
     return coverage
 
 
-class BlendV3Module:
+class BlendV3Module(InstanceLivenessTarget):
     """Paged-aware V3 CacheBlend. Wraps LMCacheDrivenTransfer STORE to register
     fingerprints; serves CB rope/lookup/retrieve RPCs; reads cross-module
     GPU state via :class:`LMCacheDrivenTransferModule.cache_contexts`."""
@@ -323,15 +332,14 @@ class BlendV3Module:
         self,
         ctx: MPCacheServerContext,
         lmcache_driven_transfer: LMCacheDrivenTransferModule,
-        lookup_module: LookupModule,
         coordinator: "BlendCoordinatorClient | None" = None,
+        enable_segmented_prefix: bool = False,
     ):
         self._ctx = ctx
         self._transfer_module = lmcache_driven_transfer
-        # Reused by cb_unified_lookup to run the standard prefix lookup
-        # (registers the prefix prefetch job + session state the retrieve
-        # path depends on) inside the single unified RPC.
-        self._lookup_module = lookup_module
+        # Server config (--enable-segmented-prefix): retain the gapped prefix on
+        # a mid-prefix L2 retrieve failure instead of truncating at the gap.
+        self._segmented_prefix = enable_segmented_prefix
         # Optional bridge to the fleet-wide fingerprint directory. ``None`` =>
         # purely local matching (publish/query paths skipped).
         self._coordinator = coordinator
@@ -406,7 +414,7 @@ class BlendV3Module:
     def report_status(self) -> dict:
         # Meta is derived live from MP server gpu_transfe
 
-        cache_contexts = self._transfer_module.cache_contexts
+        cache_contexts = self._transfer_module.context_entries_snapshot()
 
         def _meta(iid: int) -> "tuple[str, int] | None":
             entry = cache_contexts.get(iid)
@@ -453,8 +461,7 @@ class BlendV3Module:
         Raises:
             ValueError: If ``instance_id`` has no registered KV cache.
         """
-        cache_contexts = self._transfer_module.cache_contexts
-        if instance_id not in cache_contexts:
+        if self._transfer_module.get_and_touch_context_entry(instance_id) is None:
             raise ValueError(
                 f"Instance {instance_id} has no paged KV cache registered; "
                 "send REGISTER_KV_CACHE before CB_REGISTER_ROPE_V3."
@@ -506,12 +513,25 @@ class BlendV3Module:
                 ``UNREGISTER_KV_CACHE`` to free the KV cache itself).
         """
         self._cb_rope_state.pop(instance_id, None)
-        if instance_id not in self._transfer_module.cache_contexts:
+        if self._transfer_module.get_and_touch_context_entry(instance_id) is None:
             logger.warning(
                 "cb_unregister_rope: instance %d not registered", instance_id
             )
             return
         logger.info("Unregistered CB rope state for instance %d", instance_id)
+
+    def drop_instance_state(self, instance_id: int) -> None:
+        """Drop blend state for a reaped instance (InstanceLivenessTarget hook).
+
+        Only the CB rope state is held per instance; the GPU cache context is
+        owned by ``LMCacheDrivenTransferModule`` (no mirror here), so reaping
+        the GPU entry frees it directly. A no-op if no rope state is held.
+
+        Args:
+            instance_id: The reaped worker's instance ID.
+        """
+        if self._cb_rope_state.pop(instance_id, None) is not None:
+            logger.info("Dropped CB rope state for reaped instance %d", instance_id)
 
     # ------------------------------------------------------------------
     # Unified lookup (CB_UNIFIED_LOOKUP) + shared helpers
@@ -724,6 +744,132 @@ class BlendV3Module:
 
         return found_cb_match_result
 
+    def _submit_prefix_leg(
+        self,
+        key: IPCCacheServerKey,
+        tp_size: int,
+        policy: TrimPolicy,
+    ) -> "tuple[PrefetchHandle | None, int]":
+        """Submit the CB prefix prefetch (non-blocking).
+
+        Opens the ``cb.prefix_lookup`` span (CB namespace — CB requests no longer
+        feed the MP request / mp.lookup_prefetch spans or the MP hit-rate
+        aggregate; the CB hit-rate metric carries prefix tokens via
+        CB_LOOKUP_END) and writes the shared session (``set_tokens`` +
+        ``lookup_ipc_key``) so ``end_session``'s L1 keep-alive touch still
+        resolves the request's keys.
+
+        Args:
+            key (IPCCacheServerKey): Request key (token IDs, request_id, model,
+                world_size).
+            tp_size (int): Tensor-parallel size for MLA multi-reader locking.
+            policy (TrimPolicy): ``PREFIX`` or ``SEGMENTED_PREFIX``.
+
+        Returns:
+            tuple: ``(handle, world_size)``. ``handle`` is None when there is no
+            GPU context or no full chunk (the poll then reports 0 coverage).
+        """
+        rid = key.request_id
+        model_name, world_size = key.model_name, key.world_size
+        self._event_bus.publish(
+            Event(event_type=EventType.CB_PREFIX_LOOKUP_START, session_id=rid)
+        )
+
+        layout_desc = self._resolve_cb_layout_desc(model_name, world_size)
+        if layout_desc is None:
+            logger.error(
+                "No CB GPU context for model %s ws %d during prefix lookup!",
+                model_name,
+                world_size,
+            )
+            return None, world_size
+
+        chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
+        if not chunk_hashes:
+            return None, world_size
+
+        # Lookup-hash logger (chunk hashes, for debug); guarded so the metadata
+        # dict is built only when a subscriber is listening.
+        if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.MP_LOOKUP,
+                    session_id=rid,
+                    metadata={
+                        "request_id": rid,
+                        "chunk_hashes": chunk_hashes,
+                        "model_name": model_name,
+                        "chunk_size": self._ctx.chunk_size,
+                        "seq_len": len(key.token_ids),
+                        "dtypes": [str(d) for d in layout_desc.dtypes],
+                        "shapes": [list(s) for s in layout_desc.shapes],
+                    },
+                )
+            )
+
+        # Shared session: end_session reads lookup_ipc_key + the rolling hashes
+        # to keep the request's KV alive in L1.
+        session = self._ctx.session_manager.get_or_create(rid)
+        session.set_tokens(list(key.token_ids))
+        session.lookup_ipc_key = key
+
+        extra_count = compute_extra_count(tp_size, world_size)
+        obj_keys = ipc_key_to_object_keys(key, chunk_hashes, [0])[0]
+        handle = self._ctx.storage_manager.submit_prefetch_task(
+            obj_keys,
+            layout_desc,
+            extra_count=extra_count,
+            external_request_id=rid,
+            policy=policy,
+        )
+        return handle, world_size
+
+    def _poll_prefix_leg(
+        self, job: "_CBUnifiedJob", rid: str, segmented: bool
+    ) -> "tuple[int, list[int] | None] | None":
+        """Poll the CB prefix handle; on completion close the cb.prefix_lookup span.
+
+        Consume-once: publishes CB_PREFIX_LOOKUP_END exactly once when the
+        prefetch lands. The prefix hit tokens are accounted on the CB hit-rate
+        metric at CB_LOOKUP_END, not here. For SEGMENTED_PREFIX also surfaces the
+        gapped retained chunk set.
+
+        Args:
+            job (_CBUnifiedJob): Poll state holding the prefix handle + world size.
+            rid (str): Request ID (event session_id).
+            segmented (bool): SEGMENTED_PREFIX active -> also surface the gapped
+                retained chunk set.
+
+        Returns:
+            tuple | None: ``(leading_chunks, retained_or_None)`` when resident;
+            ``None`` while still loading. ``retained`` is the full gapped chunk
+            set for SEGMENTED_PREFIX, else None.
+        """
+        if job.prefix_handle is not None:
+            bm = self._ctx.storage_manager.query_prefetch_status(job.prefix_handle)
+            if bm is None:
+                return None  # still loading
+            ws = job.prefix_world_size
+            # NOTE(Kuntai): assumes uniform world size and prefix-ordered keys
+            # that break at the first miss.
+            leading = bm.count_leading_ones() // ws
+            retained = (
+                sorted({ki // ws for ki in bm.get_indices_list()})
+                if segmented
+                else None
+            )
+        else:
+            # No GPU context / no full chunk: nothing loaded.
+            leading, retained = 0, ([] if segmented else None)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.CB_PREFIX_LOOKUP_END,
+                session_id=rid,
+                metadata={"prefix_chunks": leading},
+            )
+        )
+        return leading, retained
+
     def cb_unified_lookup(
         self, key: IPCCacheServerKey, tp_size: int
     ) -> CBUnifiedLookupResult | None:
@@ -762,10 +908,21 @@ class BlendV3Module:
                     metadata={"num_tokens": len(key.token_ids)},
                 )
             )
-            # Prefix leg: submit (non-blocking). Already traced upstream by
-            # mp.lookup_prefetch (LookupModule self-instruments); prefix_chunks
-            # lands on cb.lookup via CB_LOOKUP_END below.
-            self._lookup_module.lookup(key, tp_size)
+            # SEGMENTED_PREFIX: request the contiguous prefix with gap-tolerant
+            # retention so a mid-prefix L2 retrieve failure leaves the post-gap
+            # chunks L1-resident (picked up by the sparse leg as L1 hits, hole
+            # recomputed) instead of truncating the prefix at the gap.
+            prefix_policy = (
+                TrimPolicy.SEGMENTED_PREFIX
+                if self._segmented_prefix
+                else TrimPolicy.PREFIX
+            )
+            # Prefix leg: blend_v3 owns the submit + the cb.prefix_lookup span
+            # (under cb.lookup); prefix hit tokens land on the CB hit-rate
+            # metric via CB_LOOKUP_END below.
+            prefix_handle, prefix_ws = self._submit_prefix_leg(
+                key, tp_size, prefix_policy
+            )
             # Local and coordinator matching are mutually exclusive: with a
             # coordinator the fleet directory is the only source, so skip the
             # local matcher (and its span). The coordinator leg is async
@@ -789,32 +946,57 @@ class BlendV3Module:
                         metadata={"matches": len(matches)},
                     )
                 )
-            job = _CBUnifiedJob(matches=matches, num_tokens=len(key.token_ids))
+            job = _CBUnifiedJob(
+                matches=matches,
+                num_tokens=len(key.token_ids),
+                prefix_handle=prefix_handle,
+                prefix_world_size=prefix_ws,
+            )
             job.coord_submitted = self._submit_coordinator_match(key)
             if job.coord_submitted and self._coordinator is not None:
                 job.coord_deadline = time.monotonic() + self._coordinator.match_budget_s
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
+        segmented = self._segmented_prefix
+
         # --- Prefix leg: poll (consume-once) until the L1+L2 prefix lands. ---
         if job.prefix_chunks is None:
-            p = self._lookup_module.query_prefetch_status(rid)
-            if p is None:
+            res = self._poll_prefix_leg(job, rid, segmented)
+            if res is None:
                 return None  # prefix still loading -> defer
-            job.prefix_chunks = p
+            job.prefix_chunks, prefix_retained = res
+            if segmented:
+                job.retained_chunks = prefix_retained
+        # Poll above set it (or we returned); narrow for the arithmetic below.
+        assert job.prefix_chunks is not None
+        prefix_chunks: int = job.prefix_chunks
 
         # Prefix done: reconcile the complement outside the prefix coverage and
         # submit one sparse prefetch for it (once). Prefix-covered chunks never
         # enter the sparse prefetch, so they cannot leak a read lock.
         if not job.sparse_started:
-            prefix_tokens = job.prefix_chunks * chunk_size
+            prefix_tokens = prefix_chunks * chunk_size
             if self._coordinator is not None:
                 candidates = self._poll_coordinator_match(job, rid)
                 if candidates is None:
                     return None  # coordinator still in flight (bounded by deadline)
             else:
                 candidates = job.matches
-            # Single prefix-filter + overlap dedup over the raw matches
+            # Under SEGMENTED_PREFIX, a same-position match the prefix leg already
+            # retained rides the segmented tail (prefix-class: pure load, no CHECK)
+            # -- drop it here so it is not scattered twice. A same-position match
+            # the tail does NOT cover is a genuine cross-context hit: keep it as
+            # non-prefix (re-RoPE no-ops at delta 0, but it still needs CHECK).
+            # Shifted (cur != old) matches are always kept. Then the single
+            # prefix-filter + overlap dedup over the rest.
+            if segmented:
+                retained = set(job.retained_chunks or [])
+                candidates = [
+                    c
+                    for c in candidates
+                    if c.old_st != c.cur_st or (c.cur_st // chunk_size) not in retained
+                ]
             job.non_prefix = self._non_overlapping_after_prefix(
                 candidates, prefix_tokens
             )
@@ -883,11 +1065,35 @@ class BlendV3Module:
         else:
             found = []
 
-        prefix_tokens = job.prefix_chunks * chunk_size
+        prefix_tokens = prefix_chunks * chunk_size
         num_tokens = job.num_tokens
-        # V3 hit rate = (prefix + non-prefix) reuse. The two ranges are disjoint
-        # (non_prefix has cur_st >= prefix_tokens), so they sum without double-
-        # counting. hit_tokens carries the sum (the hit_rate numerator).
+
+        # Segmented tail: post-gap chunks the SEGMENTED_PREFIX prefix leg kept
+        # resident (retained index > the leading run). Delivered at their
+        # original positions (old_st == cur_st) so the connector tags them
+        # ``prefix`` (pure load, no recompute); only the gap is recomputed. The
+        # storage key is the same prefix-chained chunk hash the prefix leg used,
+        # so no fingerprint match is needed to retrieve them.
+        segmented_tail: list[CBMatchResult] = []
+        if segmented and job.retained_chunks:
+            chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(
+                list(key.token_ids)
+            )
+            for i in job.retained_chunks:
+                if i < prefix_chunks or i >= len(chunk_hashes):
+                    continue  # leading run (already prefix) / sub-chunk tail
+                st = i * chunk_size
+                segmented_tail.append(
+                    CBMatchResult(
+                        old_st=st,
+                        old_ed=st + chunk_size,
+                        cur_st=st,
+                        cur_ed=st + chunk_size,
+                        hash=chunk_hashes[i],
+                    )
+                )
+
+        seg_tail_tokens = _unique_token_coverage(segmented_tail)
         non_prefix_hit_tokens = _unique_token_coverage(found)
         self._event_bus.publish(
             Event(
@@ -902,8 +1108,10 @@ class BlendV3Module:
                     "stale_chunks": len(job.non_prefix or []) - len(found),
                     "no_gpu_context": False,
                     "prefix_hit_tokens": prefix_tokens,
+                    "segmented_prefix_hit_tokens": seg_tail_tokens,
                     "non_prefix_hit_tokens": non_prefix_hit_tokens,
-                    "hit_tokens": prefix_tokens + non_prefix_hit_tokens,
+                    "hit_tokens": prefix_tokens
+                    + _unique_token_coverage(found + segmented_tail),
                     "requested_tokens": (num_tokens // chunk_size) * chunk_size,
                 },
             )
@@ -913,6 +1121,7 @@ class BlendV3Module:
         return CBUnifiedLookupResult(
             prefix_coverage_tokens=prefix_tokens,
             non_prefix_segments=found,
+            segmented_prefix_segments=segmented_tail,
         )
 
     def store(
@@ -964,7 +1173,7 @@ class BlendV3Module:
             job = (tokens_in_range, chunk_hashes, start_chunk_idx, key.start)
             with self._pending_fp_lock:
                 self._pending_fp_hashes.update(chunk_hashes[start_chunk_idx:])
-            entry = self._transfer_module.cache_contexts.get(instance_id)
+            entry = self._transfer_module.get_and_touch_context_entry(instance_id)
             gpu_ctx = entry.cache_context if entry is not None else None
             if gpu_ctx is not None and gpu_ctx.cupy_stream is not None:
                 gpu_ctx.cupy_stream.launch_host_func(
@@ -1139,7 +1348,7 @@ class BlendV3Module:
 
     def _apply_cb_rope_batched(
         self,
-        gpu_context: GPUCacheContext,
+        gpu_context: BaseCacheContext,
         rope_state: _CBRopeState,
         batch_len: int,
         slots_to_rope: list[tuple[int, int, int]],
@@ -1237,8 +1446,8 @@ class BlendV3Module:
             ValueError: If the instance has no registered KV cache or rope
                 state. MLA layouts are unsupported (raised during re-RoPE).
         """
-        cache_contexts = self._transfer_module.cache_contexts
-        if instance_id not in cache_contexts:
+        entry = self._transfer_module.get_and_touch_context_entry(instance_id)
+        if entry is None:
             raise ValueError(
                 f"Instance {instance_id} not registered for paged KV cache"
             )
@@ -1247,7 +1456,7 @@ class BlendV3Module:
                 f"Instance {instance_id} has no CB rope state; "
                 "send CB_REGISTER_ROPE_V3 before CB_RETRIEVE_PRE_COMPUTED_V3."
             )
-        gpu_context = cache_contexts[instance_id].cache_context
+        gpu_context = entry.cache_context
         rope_state = self._cb_rope_state[instance_id]
         chunk_size = self._ctx.chunk_size
 
@@ -1323,9 +1532,7 @@ class BlendV3Module:
             event = torch_dev.Event(interprocess=True)
 
             # Staged once (single group), sliced per chunk inside the loop.
-            all_block_ids_gpu = gpu_context.copy_view_block_ids_to_gpu([gpu_block_ids])[
-                0
-            ]
+            all_block_ids_gpu = gpu_context.stage_block_ids([gpu_block_ids])[0]
 
             self._event_bus.publish_on_stream(
                 gpu_context.cupy_stream,
@@ -1463,7 +1670,7 @@ class BlendV3Module:
                                     gpu_context.device,
                                     page_buffer_size,
                                     lmc_ops.TransferDirection.H2D,
-                                    gpu_context.engine_kv_format_,
+                                    gpu_context.engine_kv_format,
                                     block_size=bs,
                                     head_size=rope_state.head_size,
                                 )

@@ -46,12 +46,14 @@ class FakeHeartbeatThread:
         mq_client: object = None,
         health_event: threading.Event | None = None,
         interval: float = 0.0,
+        instance_id: int | None = None,
     ) -> None:
         self.mq_client = mq_client
         self.health_event = (
             health_event if health_event is not None else threading.Event()
         )
         self.interval = interval
+        self.instance_id = instance_id
         # Snapshot of the health event at construction time: lets tests
         # assert the adapter starts the heartbeat healthy (event still set).
         self.health_event_set_at_init = self.health_event.is_set()
@@ -435,7 +437,9 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     """Real HeartbeatThread: started with the health event cleared, the
     first successful ping invokes the recover callback while the event
     is still cleared, then sets the event."""
-    monkeypatch.setattr(adapter_mod, "send_ping", lambda mq_client, timeout: True)
+    monkeypatch.setattr(
+        adapter_mod, "send_ping", lambda mq_client, timeout, instance_id=None: True
+    )
     health_event = threading.Event()  # cleared: pessimistic start state
     heartbeat = HeartbeatThread(
         mq_client=MagicMock(name="mq_client"),
@@ -558,7 +562,9 @@ def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> Non
     ping_entered = threading.Event()
     release_ping = threading.Event()
 
-    def slow_ping(mq_client: object, timeout: float) -> bool:
+    def slow_ping(
+        mq_client: object, timeout: float, instance_id: int | None = None
+    ) -> bool:
         ping_entered.set()
         release_ping.wait(timeout=10.0)
         return True
