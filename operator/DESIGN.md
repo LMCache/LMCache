@@ -477,11 +477,72 @@ user-supplied `--flag=value`.
 
 ---
 
+## Coordinator: `LMCacheCoordinator` CRD
+
+The **coordinator** (`lmcache/v1/mp_coordinator/`) is the fleet-level HTTP service
+that engine servers register/heartbeat against, and which drives L2 quota
+eviction and global CacheBlend lookups. Unlike the engines (one DaemonSet pod per
+GPU node), the coordinator is a single fleet-wide service, so `LMCacheCoordinator`
+reconciles a **Deployment + ClusterIP Service** instead of a DaemonSet. The
+controller carries no finalizer — owner-reference GC cascade-deletes the children.
+
+### `LMCacheCoordinatorSpec`
+
+The spec mirrors `MPCoordinatorConfig` (`lmcache/v1/mp_coordinator/config.py`); the
+controller renders each field into the matching `lmcache coordinator` CLI flag:
+`host`, `port` (9300), `instanceTimeout` (30), `healthCheckInterval` (10),
+`evictionCheckInterval` (5), `evictionRatio` (0.2), `triggerWatermark` (1.0). It
+also carries `replicas`, `image`, `prometheus`, and the usual pod-shaping fields
+(resources, scheduling, env, etc.).
+
+The global-CacheBlend knobs (`blend_chunk_size`, `blend_probe_stride`) are **not**
+typed spec fields yet: their `--blend-*` CLI flags are not in released lmcache
+images (they ship in a separate CLI PR), and the coordinator already defaults
+them to 256 / 1. To override before the flags land, set
+`LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE` / `..._BLEND_PROBE_STRIDE` via
+`spec.env`. Once the flags are released, add typed fields + flags. Note
+`blend_chunk_size` **must equal** the blend servers' chunk size.
+
+> **Metrics caveat:** the coordinator process exposes only `/healthz`, not a
+> Prometheus `/metrics` endpoint. ServiceMonitor support is wired for parity but
+> defaults **disabled**; enabling it is only useful once a metrics endpoint is
+> added to the coordinator app.
+
+### Connecting engines to a coordinator
+
+`LMCacheEngineSpec` and `CacheBlendEngineSpec` gained a `coordinator` block
+(`CoordinatorConnectionSpec`) that maps to the server's coordinator-client flags
+(`lmcache/v1/multiprocess/config.py`: `add_coordinator_args`):
+
+- `ref` — name of an `LMCacheCoordinator` in the same namespace. The controller
+  resolves it to the coordinator's Service URL (`http://<name>.<ns>.svc:<port>`)
+  before building the DaemonSet, so `BuildContainerArgs` stays a pure function.
+- `url` — explicit escape hatch for a coordinator the operator does not manage.
+  Exactly one of `ref`/`url` is required (enforced in validation).
+- `advertiseIP` (defaults to the pod IP via the downward API env
+  `LMCACHE_COORDINATOR_ADVERTISE_IP`), `heartbeatInterval`, `l2EventReporting`,
+  `l2EventFlushInterval`.
+
+When `coordinator` is unset, the server emits no `--coordinator-url` and does not
+register (unchanged behavior).
+
+### Resources created (for an `LMCacheCoordinator` named `coord`)
+
+| Resource | Name | Purpose |
+|---|---|---|
+| Deployment | `coord` | `lmcache coordinator` HTTP server (port 9300) |
+| Service (ClusterIP) | `coord` | fleet-wide discovery endpoint for engines |
+| Service (headless) | `coord-metrics` | Prometheus scrape target (only if `prometheus.serviceMonitor.enabled`) |
+| ServiceMonitor | `coord` | Prometheus scrape config (gated, disabled by default) |
+
+---
+
 ## Future Extensibility
 
 - **L2 backends:** The RESP (Redis/Valkey) adapter is natively supported with typed CRD fields and Secret-based auth injection. Other adapter types (nixl_store, fs, mock, mooncake_store, raw_block) can be configured via the `raw` escape hatch. Currently only a single L2 adapter is supported at a time. LMCache MP mode is designed to support multiple adapters in cascade, but this is not yet fully tested — once validated, the operator will support multiple adapters.
 - **Blend mode:** Implemented as the separate `CacheBlendEngine` CRD + injection webhook — see [CacheBlend](#cacheblend-cacheblendengine-crd--injection-webhook) above. (This supersedes the earlier idea of a `blend.enabled` field on `LMCacheEngine`.)
 - **Update strategy:** Future `spec.updateStrategy` field for `RollingUpdate`/`OnDelete` control on the DaemonSet.
+- **Coordinator:** Implemented as the separate `LMCacheCoordinator` CRD (Deployment + Service) with engine-side `coordinator` connection wiring — see [Coordinator](#coordinator-lmcachecoordinator-crd) above.
 - **Additional CRDs:** `LMCacheKeyManager` (global key management), `LMCacheMonitor` (engine state monitoring), `LMCacheFederation` (cross-cluster P2P topology).
 
 ---
@@ -494,6 +555,9 @@ user-supplied `--flag=value`.
 | `lmcache/v1/mp_observability/config.py` | `PrometheusConfig`, `add_prometheus_args`, `parse_args_to_prometheus_config` |
 | `lmcache/v1/multiprocess/server.py` | `MPCacheServer`, server CLI entry point, argparse (lines 629–653) |
 | `lmcache/v1/multiprocess/http_server.py` | HTTP server with `/healthcheck` endpoint (FastAPI + ZMQ) |
+| `lmcache/v1/mp_coordinator/config.py` | `MPCoordinatorConfig` (coordinator knobs mapped by `LMCacheCoordinator`) |
+| `lmcache/cli/commands/coordinator.py` | `lmcache coordinator` CLI (flags rendered into the coordinator Deployment) |
+| `lmcache/v1/multiprocess/config.py` | `add_coordinator_args` (engine `coordinator` connection flags) |
 | `lmcache/v1/distributed/l2_adapters/config.py` | L2 adapter registry pattern, `L2AdapterConfigBase`, `L2AdaptersConfig` |
 | `examples/multi_process/lmcache-daemonset.yaml` | Reference DaemonSet manifest |
 | `examples/multi_process/vllm-deployment.yaml` | Reference vLLM deployment with kv-transfer-config |

@@ -132,6 +132,11 @@ type CacheBlendEngineSpec struct {
 	// +optional
 	L2Backend *L2BackendSpec `json:"l2Backend,omitempty"`
 
+	// coordinator configures registration with an MP coordinator. When unset,
+	// the server does not register with any coordinator.
+	// +optional
+	Coordinator *CoordinatorConnectionSpec `json:"coordinator,omitempty"`
+
 	// blend defines the CacheBlend tunables injected into the vLLM connect-config.
 	// +optional
 	Blend *BlendSpec `json:"blend,omitempty"`

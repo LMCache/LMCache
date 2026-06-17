@@ -71,6 +71,7 @@ func cbSpecToEngineSpec(spec *lmcachev1alpha1.CacheBlendEngineSpec) *lmcachev1al
 		Eviction:           spec.Eviction,
 		Prometheus:         spec.Prometheus,
 		L2Backend:          spec.L2Backend,
+		Coordinator:        spec.Coordinator,
 		ResourceOverrides:  spec.ResourceOverrides,
 		LogLevel:           spec.LogLevel,
 		NodeSelector:       spec.NodeSelector,
