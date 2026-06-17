@@ -199,9 +199,6 @@ class PrefetchController(StorageControllerInterface):
         max_in_flight: int = 8,
     ) -> None:
         self._l1_manager = l1_manager
-        # Keyed by a stable adapter id (== descriptor ``index``), not list
-        # position, so runtime removal never shifts surviving ids. Initial
-        # ids are the construction-order positions.
         self._l2_adapters: dict[int, L2AdapterInterface] = {
             desc.index: adapter
             for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
@@ -212,14 +209,12 @@ class PrefetchController(StorageControllerInterface):
         self._policy = policy
         self._max_in_flight = max_in_flight
 
-        # Adapters being gracefully drained: still poll for in-flight
-        # completions but receive no new lookups. Maps draining id -> the
-        # Event set once fully drained and unregistered.
+        # Adapters that are being drained and will be removed after all
+        # the in-flight operations are done.
         self._draining: dict[int, threading.Event] = {}
 
-        # Control-plane queue for runtime add/remove, applied on the loop
-        # thread (the only thread allowed to mutate the poll set / fd maps /
-        # adapter dicts).
+        # Control-plane queue for runtime add/remove, used by the internal
+        # loop thread
         self._adapter_ops_lock = threading.Lock()
         self._pending_adapter_ops: list[AddAdapterOp | RemoveAdapterOp] = []
         self._adapter_ctrl_efd = create_event_notifier()
@@ -527,10 +522,8 @@ class PrefetchController(StorageControllerInterface):
         adapter: L2AdapterInterface,
         descriptor: AdapterDescriptor,
     ) -> None:
-        """Attach an adapter at runtime under the stable id ``adapter_id``.
-
-        Enqueues the attach for the background loop and blocks until it is
-        live (its lookup/load eventfds registered in the poll set).
+        """Blocking function to add a new adapter into the prefetch
+        controller with the specified adapter ID and descriptor.
 
         Args:
             adapter_id: Stable id assigned by the StorageManager.
@@ -557,12 +550,11 @@ class PrefetchController(StorageControllerInterface):
             )
 
     def request_remove_adapter(self, adapter_id: int) -> threading.Event:
-        """Begin a graceful drain of the adapter under ``adapter_id``.
+        """Non-blocking function to request the removal of a L2 adapter
+        specified by the adapter ID.
 
-        Non-blocking. New lookups stop routing to the adapter immediately;
-        in-flight requests are allowed to complete. The returned Event is
-        set once the adapter is fully drained and its eventfds are
-        unregistered.
+        New lookups stop routing to the adapter immediately; in-flight
+        requests are allowed to complete.
 
         Args:
             adapter_id: Stable id of the adapter to drain.
@@ -599,8 +591,7 @@ class PrefetchController(StorageControllerInterface):
             poller.register(efd, select.POLLIN)
 
         while not self._stop_flag.is_set():
-            # Apply runtime add/remove first so a draining adapter is out of
-            # the lookup fan-out before any new request starts this iteration.
+            # First, apply runtime add/remove of the L2 adapters.
             self._apply_pending_adapter_ops(poller)
 
             ready = poller.poll(PREFETCH_LOOP_POLL_TIMEOUT_MS)
@@ -651,13 +642,12 @@ class PrefetchController(StorageControllerInterface):
                     "Unexpected error in prefetch loop while starting pending requests"
                 )
 
-            # Finalize any draining adapter no longer referenced by an
-            # in-flight request: unregister its fds and detach it.
+            # Finalize any draining adapter no longer have any in-flight
+            # requests.
             self._finalize_drained_adapters(poller)
 
     def _apply_pending_adapter_ops(self, poller: "select.poll") -> None:
-        """Apply queued add/remove ops on the loop thread (the only thread
-        that may mutate the poll set, fd maps, and adapter dicts)."""
+        """Apply queued add/remove ops on the prefetch loop thread."""
         with self._adapter_ops_lock:
             ops = self._pending_adapter_ops
             self._pending_adapter_ops = []
@@ -686,14 +676,7 @@ class PrefetchController(StorageControllerInterface):
                 )
 
     def _adapter_in_use(self, adapter_id: int) -> bool:
-        """True if any in-flight request still references ``adapter_id``.
-
-        Covers every structure that triggers an adapter call before a
-        request completes: pending lookup/load tasks, the load plan
-        (unlock + finalize), and lookup_results (which may still feed a
-        load plan or an unlock). A request only clears these by completing
-        via ``_complete_request``, so this waits for full completion.
-        """
+        """True if any in-flight request still references ``adapter_id``."""
         for request in self._in_flight_requests.values():
             if (
                 adapter_id in request.pending_lookup_tasks

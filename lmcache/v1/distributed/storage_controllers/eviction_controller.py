@@ -221,9 +221,7 @@ class L2EvictionController(StorageControllerInterface):
     ):
         self._adapter_states = l2_adapter_states
         self._quota_manager = quota_manager
-        # Guards ``_adapter_states`` against concurrent runtime add/remove.
-        # Held for the full duration of an eviction pass so a removal does
-        # not detach an adapter mid-``get_usage``/``delete``.
+        # Guards _adapter_states against concurrent runtime add/remove.
         self._states_lock = threading.Lock()
         self._stop_flag = threading.Event()
         self._thread = threading.Thread(

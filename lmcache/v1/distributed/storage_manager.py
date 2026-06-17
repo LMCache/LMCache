@@ -76,21 +76,12 @@ class StorageManager:
         # a ``serde_config``, the adapter is wrapped with
         # ``SerdeL2AdapterWrapper`` so controllers see a plain L2 adapter
         # and serde is transparent.
-        #
-        # Adapters and descriptors are keyed by a stable, monotonic
-        # ``adapter_id`` (never reused or shifted) so runtime add/remove
-        # never invalidates surviving ids or in-flight ``(adapter_id,
-        # task_id)`` keys. Initial ids are the config order ``0..n-1``.
         self._l1_memory_desc = self._l1_manager.get_l1_memory_desc()
         self._next_adapter_id = 0
-        # Serializes add/delete against each other; may be held across a
-        # delete's drain wait. No controller background thread acquires it.
+        # Serializes add_l2_adapter / delete_l2_adapter against each other.
         self._lifecycle_lock = threading.Lock()
-        # Short-lived guard for the adapter/descriptor dicts so lock-free
-        # cross-thread readers (OTel gauges, HTTP status) never observe a
-        # mid-mutation dict.
+        # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
-        # External listeners re-applied to adapters added at runtime.
         self._registered_l2_listeners: list[L2AdapterListener] = []
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
         self._adapter_descriptors: dict[int, AdapterDescriptor] = {}
@@ -786,12 +777,7 @@ class StorageManager:
         return result
 
     def add_l2_adapter(self, config: L2AdapterConfigBase) -> int:
-        """Create and attach a new L2 adapter at runtime.
-
-        Builds the adapter (wrapping it for serde when the config requests
-        it), re-applies any registered L2 listeners, wires it into the
-        store, prefetch, and eviction controllers, and exposes it for
-        routing. The adapter receives a stable id that is never reused.
+        """Blocking function to add a new L2 adapter at runtime. Thread-safe.
 
         Args:
             config: The adapter configuration.
@@ -821,20 +807,21 @@ class StorageManager:
             return adapter_id
 
     def delete_l2_adapter(self, adapter_id: int, timeout: float = 30.0) -> None:
-        """Gracefully drain and detach an L2 adapter at runtime.
+        """Blocking function to drain the L2 adapter gracefully at runtime.
+        Thread-safe.
 
         Stops routing new stores/prefetches to the adapter, waits for its
         in-flight work to finish, removes it from the controllers, and
-        closes it. The adapter's backing data is left intact (detach only).
+        closes it.
 
         Args:
             adapter_id: Stable id of the adapter to remove.
             timeout: Maximum seconds to wait for in-flight work to drain.
 
         Raises:
-            ValueError: If no adapter with ``adapter_id`` is attached.
+            ValueError: If no adapter with ``adapter_id`` is active.
             TimeoutError: If draining did not complete within ``timeout``;
-                the adapter is left attached (draining) so the caller can
+                the adapter is left active (draining) so the caller can
                 retry.
         """
         with self._lifecycle_lock:
@@ -861,10 +848,10 @@ class StorageManager:
             logger.info("Deleted L2 adapter %d", adapter_id)
 
     def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
-        """Return all attached L2 adapters paired with descriptors, in
+        """Return all active L2 adapters paired with descriptors, in
         ascending adapter-id order (== configuration order for the initial
-        set, then runtime-added adapters). The first element is the primary
-        adapter; the list is empty when no L2 is configured.
+        set, then runtime-added adapters). The list is empty when no L2 is
+        configured.
 
         Do not cache the returned pairs — ``reconfigure_l2_adapter``,
         ``add_l2_adapter``, and ``delete_l2_adapter`` may change the set at

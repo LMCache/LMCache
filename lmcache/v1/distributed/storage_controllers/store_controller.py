@@ -231,11 +231,6 @@ class StoreController(StorageControllerInterface):
         policy: StorePolicy,
     ) -> None:
         self._l1_manager = l1_manager
-        # Adapters and descriptors are keyed by a stable adapter id (== the
-        # descriptor's ``index``) rather than list position, so runtime
-        # removal never shifts the ids of surviving adapters or invalidates
-        # in-flight ``(adapter_id, task_id)`` keys.  Initial ids are the
-        # construction-order positions.
         self._l2_adapters: dict[int, L2AdapterInterface] = {
             desc.index: adapter
             for desc, adapter in zip(adapter_descriptors, l2_adapters, strict=True)
@@ -245,16 +240,12 @@ class StoreController(StorageControllerInterface):
         }
         self._policy = policy
 
-        # Adapters being gracefully drained: still process in-flight
-        # completions and stay registered in the poll set, but no new store
-        # task routes to them.  Maps draining id -> the Event set once the
-        # adapter is fully drained and unregistered.
+        # Adapters that are being drained and will be removed after all
+        # the in-flight operations are done.
         self._draining: dict[int, threading.Event] = {}
 
-        # Control-plane queue for runtime add/remove. External callers append
-        # ops and signal ``_adapter_ctrl_efd``; the background loop applies
-        # them at the top of its iteration so poll set / maps / dicts are
-        # only ever mutated on the loop thread.
+        # Control-plane queue for runtime add/remove, used by the internal
+        # loop thread
         self._adapter_ops_lock = threading.Lock()
         self._pending_adapter_ops: list[AddAdapterOp | RemoveAdapterOp] = []
         self._adapter_ctrl_efd = create_event_notifier()
@@ -349,10 +340,8 @@ class StoreController(StorageControllerInterface):
         adapter: L2AdapterInterface,
         descriptor: AdapterDescriptor,
     ) -> None:
-        """Attach an adapter at runtime under the stable id ``adapter_id``.
-
-        Enqueues the attach for the background loop and blocks until it is
-        live (its store eventfd registered in the poll set).
+        """Blocking function to add a new adapter into the store controller
+        with the specified adapter ID and descriptor.
 
         Args:
             adapter_id: Stable id assigned by the StorageManager.
@@ -379,12 +368,11 @@ class StoreController(StorageControllerInterface):
             )
 
     def request_remove_adapter(self, adapter_id: int) -> threading.Event:
-        """Begin a graceful drain of the adapter under ``adapter_id``.
+        """Non-blocking function to request the removal of a L2 adapter
+        specified by the adapter ID.
 
-        Non-blocking. New store tasks stop routing to the adapter
-        immediately; in-flight tasks are allowed to complete. The returned
-        Event is set once the adapter is fully drained and its eventfd is
-        unregistered.
+        New store tasks stop routing to the adapter immediately; in-flight
+        tasks are allowed to complete.
 
         Args:
             adapter_id: Stable id of the adapter to drain.
@@ -458,8 +446,7 @@ class StoreController(StorageControllerInterface):
             poller.register(efd, select.POLLIN)
 
         while not self._stop_flag.is_set():
-            # Apply runtime add/remove first so a draining adapter is out of
-            # the routing set before any new-key processing this iteration.
+            # First, apply runtime add/remove of the L2 adapters.
             self._apply_pending_adapter_ops(poller)
 
             ready = poller.poll(STORE_LOOP_POLL_TIMEOUT_MS)
@@ -510,13 +497,12 @@ class StoreController(StorageControllerInterface):
                             task_key[1],
                         )
 
-            # Finalize any draining adapter whose in-flight tasks have all
-            # completed: unregister its fd and detach it.
+            # Finalize any draining adapter no longer have any in-flight
+            # tasks.
             self._finalize_drained_adapters(poller)
 
     def _apply_pending_adapter_ops(self, poller: "select.poll") -> None:
-        """Apply queued add/remove ops on the loop thread (the only thread
-        that may mutate the poll set, fd map, and adapter dicts)."""
+        """Apply queued add/remove ops on the store loop thread."""
         with self._adapter_ops_lock:
             ops = self._pending_adapter_ops
             self._pending_adapter_ops = []
