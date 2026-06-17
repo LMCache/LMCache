@@ -76,6 +76,7 @@ class BlendTracingSubscriber(EventSubscriber):
         # V3 lookup sub-spans (nest under cb.lookup, see _SPAN_PARENTS).
         EventType.CB_FINGERPRINT_MATCH_START: "cb.fingerprint_match",
         EventType.CB_PREFIX_LOOKUP_START: "cb.prefix_lookup",
+        EventType.CB_COORDINATOR_MATCH_START: "cb.coordinator_match",
         EventType.CB_SPARSE_PREFETCH_START: "cb.sparse_prefetch",
         # V3 retrieve sub-span (nests under cb.retrieve).
         EventType.CB_SCATTER_START: "cb.scatter",
@@ -86,6 +87,7 @@ class BlendTracingSubscriber(EventSubscriber):
     _SPAN_PARENTS: dict[str, str] = {
         "cb.fingerprint_match": "cb.lookup",
         "cb.prefix_lookup": "cb.lookup",
+        "cb.coordinator_match": "cb.lookup",
         "cb.sparse_prefetch": "cb.lookup",
         "cb.scatter": "cb.retrieve",
     }
@@ -97,6 +99,7 @@ class BlendTracingSubscriber(EventSubscriber):
         EventType.CB_STORE_FINAL_END: EventType.CB_STORE_FINAL_START,
         EventType.CB_FINGERPRINT_MATCH_END: EventType.CB_FINGERPRINT_MATCH_START,
         EventType.CB_PREFIX_LOOKUP_END: EventType.CB_PREFIX_LOOKUP_START,
+        EventType.CB_COORDINATOR_MATCH_END: EventType.CB_COORDINATOR_MATCH_START,
         EventType.CB_SPARSE_PREFETCH_END: EventType.CB_SPARSE_PREFETCH_START,
         EventType.CB_SCATTER_END: EventType.CB_SCATTER_START,
     }
@@ -151,6 +154,8 @@ class BlendTracingSubscriber(EventSubscriber):
             EventType.CB_FINGERPRINT_MATCH_END: self._on_end,
             EventType.CB_PREFIX_LOOKUP_START: self._on_start,
             EventType.CB_PREFIX_LOOKUP_END: self._on_end,
+            EventType.CB_COORDINATOR_MATCH_START: self._on_start,
+            EventType.CB_COORDINATOR_MATCH_END: self._on_end,
             EventType.CB_SPARSE_PREFETCH_START: self._on_start,
             EventType.CB_SPARSE_PREFETCH_END: self._on_end,
             # V3 retrieve sub-span (nested under cb.retrieve, GPU-timed)

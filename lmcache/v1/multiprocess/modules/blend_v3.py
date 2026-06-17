@@ -955,6 +955,14 @@ class BlendV3Module(InstanceLivenessTarget):
             job.coord_submitted = self._submit_coordinator_match(key)
             if job.coord_submitted and self._coordinator is not None:
                 job.coord_deadline = time.monotonic() + self._coordinator.match_budget_s
+                # Coordinator match leg: async span, ended on the resolving poll
+                # (or deadline) in _poll_coordinator_match.
+                self._event_bus.publish(
+                    Event(
+                        event_type=EventType.CB_COORDINATOR_MATCH_START,
+                        session_id=rid,
+                    )
+                )
             with self._cb_jobs_lock:
                 self._cb_jobs[rid] = job
 
@@ -1288,11 +1296,24 @@ class BlendV3Module(InstanceLivenessTarget):
             logger.warning(
                 "CB coordinator match deadline exceeded for %s; local-only", rid
             )
+            self._event_bus.publish(
+                Event(
+                    event_type=EventType.CB_COORDINATOR_MATCH_END,
+                    session_id=rid,
+                    metadata={"matches": 0, "timed_out": True},
+                )
+            )
             return []
         coordinator.take_match(rid)
-        if isinstance(poll, list):
-            return self._build_global_segments(poll)
-        return []
+        segments = self._build_global_segments(poll) if isinstance(poll, list) else []
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.CB_COORDINATOR_MATCH_END,
+                session_id=rid,
+                metadata={"matches": len(segments), "timed_out": False},
+            )
+        )
+        return segments
 
     def _build_global_segments(
         self, matches: "list[RemoteMatch]"
