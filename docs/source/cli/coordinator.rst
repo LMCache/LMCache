@@ -62,5 +62,18 @@ Every flag is optional. Unset flags fall back to the
 defaults. A supplied flag always overrides the matching env-derived value, so
 env-only deployments keep working unchanged.
 
+A second set of env-only knobs controls the startup L2 resync —
+``LMCACHE_MP_COORDINATOR_ENABLE_STARTUP_RESYNC`` (default ``True``),
+``LMCACHE_MP_COORDINATOR_RESYNC_POLL_INTERVAL`` (``1``),
+``LMCACHE_MP_COORDINATOR_RESYNC_MAX_WAIT`` (``60``), and
+``LMCACHE_MP_COORDINATOR_RESYNC_PAGE_SIZE`` (``1000``). See
+:doc:`/mp/coordinator` for the boot-time resync flow and the active
+eviction loop.
+
+The coordinator drives fleet-wide L2 eviction by calling each MP
+server's ``DELETE /l2`` endpoint, and resync paginates ``GET /l2/keys``
+on a registered MP server. Both endpoints are documented at
+:ref:`mp-http-l2-keys-api`.
+
 See :doc:`/mp/coordinator` for the coordinator's architecture, registration
 protocol, and HTTP API.
