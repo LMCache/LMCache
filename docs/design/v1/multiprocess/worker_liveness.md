@@ -5,12 +5,12 @@ the vLLM multiprocess adapter.
 
 ## 1. Problem
 
-When a vLLM worker dies without sending `UNREGISTER_KV_CACHE` (SIGKILL, OOM-kill,
-node loss), its per-instance state leaks on the MP server forever: the GPU
-`ContextEntry` (a `GPUCacheContext` holding CUDA IPC handles), the
-`NonGPUContextEntry` + `TransferStrategy` pair, and any blend-mode per-instance
-state (e.g. CB rope caches). Nothing observes worker death; on a shared server,
-leaked contexts accumulate until device memory is exhausted.
+When an engine worker dies without sending `UNREGISTER_KV_CACHE` (SIGKILL,
+OOM-kill, node loss), its per-instance state leaks on the MP server forever: the
+LMCache-driven `ContextEntry` (a `GPUCacheContext` holding CUDA IPC handles), the
+`EngineDrivenContextEntry` + `TransferStrategy` pair, and any blend-mode
+per-instance state (e.g. CB rope caches). Nothing observes worker death; on a
+shared server, leaked contexts accumulate until device memory is exhausted.
 
 Worse, `instance_id` is `os.getpid()`: containerized pods reuse small PIDs, so a
 new worker can register with a dead worker's id, and the idempotent register
@@ -31,7 +31,7 @@ when the server returns the unhealthy-to-healthy edge fires the recover callback
 which re-registers — a noop when the entry survived.
 
 ```
-vLLM worker adapter                              MP server
+engine worker adapter                            MP server
 +---------------------------+                   +--------------------------------------+
 | HeartbeatThread           |   PING [id]       | ManagementModule                     |
 |  (instance_id, 10s)  -----+------------------>|  ping(id) -> touch_instance(id)      |
@@ -39,11 +39,12 @@ vLLM worker adapter                              MP server
 |   (starts healthy)        |                   |   -> reap_stale_instances(           |
 |  unhealthy->healthy edge  |                   |        timeout, registration_grace)  |
 |   -> re-register callback |   REGISTER        |   -> drop_instance_state(id) fan-out |
-|  freeze-gap detection ->  +------------------>|        |                |            |
-|   force 1 unhealthy cycle |   STORE/RETRIEVE  |        v                v            |
-|                           |   (refresh too)   | GPU / NonGPU            BlendV3      |
-| register_kv_caches        |                   |  TransferModule         (CB rope     |
-|  (no pings until traffic) |                   |  Entry{.., last_seen,    dropped)    |
+|                           +------------------>|        |                |            |
+| register_kv_caches        |   STORE/RETRIEVE  |        v                v            |
+|  (no pings until traffic) |   (refresh too)   | LMCacheDriven/          BlendV3      |
+|                           |                   |  EngineDriven           (CB rope     |
+|                           |                   |  TransferModule          dropped)    |
+|                           |                   |  Entry{.., last_seen,               |
 |                           |                   |   has_liveness_signal}               |
 +---------------------------+                   |  _lock (leaf); pop -> cleanup        |
                                                 +--------------------------------------+
@@ -73,13 +74,13 @@ Every id-carrying request reads the same field, so no other payloads change.
 
 ### 5.1 Liveness state and two-tier windows
 
-`ContextEntry` (GPU) and `NonGPUContextEntry` gain `last_seen: float`
-(`time.monotonic()`) and `has_liveness_signal: bool`, latched only by PING. The
-flag selects the staleness window: an entry that has pinged provably runs the
-heartbeat protocol and is judged on the reap timeout; one that never pinged (e.g.
-still warming under lazy start) is judged on the generous registration grace.
-`last_seen` is refreshed by PING (`touch_instance`: refresh if present, never
-insert), register (create and NOOP paths), and every GPU and non-GPU transfer
+`ContextEntry` (LMCache-driven) and `EngineDrivenContextEntry` gain
+`last_seen: float` (`time.monotonic()`) and `has_liveness_signal: bool`, latched
+only by PING. The flag selects the staleness window: an entry that has pinged
+provably runs the heartbeat protocol and is judged on the reap timeout; one that
+never pinged (e.g. still warming under lazy start) is judged on the generous
+registration grace. `last_seen` is refreshed by PING (`touch_instance`: refresh
+if present, never insert), register (create and NOOP paths), and every transfer
 path, so a worker mid-transfer is never reaped; traffic never latches the flag.
 
 ### 5.2 Locking
@@ -88,11 +89,11 @@ The reaper runs on its own thread, so the per-instance dicts are now mutated off
 the MQ handler threads. Each transfer module gains one `threading.Lock` so the
 reaper's scan-and-pop cannot race a concurrent register/unregister/transfer (which
 would otherwise corrupt the dict or hand out a half-removed entry). In
-`NonGPUTransferModule` the context and strategy dicts mutate as a pair under that
-lock, so a reap racing a re-register can never strand a fresh context without its
+`EngineDrivenTransferModule` the context and strategy dicts mutate as a pair under
+that lock, so a reap racing a re-register can never strand a fresh context without its
 strategy. It is a leaf lock — never held across context construction, storage
 calls, or any other component — so no thread ever holds two locks. External
-readers use the locked accessors `get_context_entry` (get-and-refresh) and
+readers use the locked accessors `get_and_touch_context_entry` (get-and-refresh) and
 `context_entries_snapshot` instead of touching the dict directly.
 
 ### 5.3 Reaper
@@ -101,37 +102,40 @@ readers use the locked accessors `get_context_entry` (get-and-refresh) and
 `reap_timeout / 4`. Each scan calls `reap_stale_instances` on every target: under
 the module lock, collect ids whose staleness exceeds their window and pop them;
 outside the lock, run the same cleanup as a client unregister and log a WARNING
-per instance (repeated reaps of one id signal a too-small timeout). Reaped ids fan
-out to every `InstanceReapListener.drop_instance_state(id)`; `BlendV3Module` drops
+per instance (repeated reaps of one id signal a too-small timeout). Reaped ids are
+then passed to `drop_instance_state(id)` on every target; `BlendV3Module` drops
 the reaped instance's per-instance CB state (e.g. rope state) there. (It no longer
 mirrors the GPU cache context — that mirror was removed upstream, so reaping the
 GPU entry now frees the context directly.) Collect+pop shares the module lock with
 register's refresh, serializing every register-vs-reap race; on close, the reaper
 is stopped and joined before any module clears state.
 
-### 5.4 Public protocols and config
+### 5.4 Public protocol and config
 
 ```python
 class InstanceLivenessTarget(Protocol):
+    # All methods default to a no-op; an implementer overrides only its role.
     def touch_instance(self, instance_id: int) -> None: ...
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]: ...
     def tracked_instance_count(self) -> int: ...
-
-class InstanceReapListener(Protocol):
     def drop_instance_state(self, instance_id: int) -> None: ...
 ```
 
-Both transfer modules implement `InstanceLivenessTarget`; `BlendV3Module` is an
-`InstanceReapListener`; `ManagementModule` receives both by constructor injection.
+One protocol covers both reaper-driven roles. The transfer modules override the
+liveness methods (`touch`/`reap`/`count`); `BlendV3Module` overrides only
+`drop_instance_state` to drop its mirrored CB state. `ManagementModule` receives
+all targets in a single injected list. (Earlier a separate one-method
+`InstanceReapListener` held `drop_instance_state`; it was folded in since only
+`BlendV3Module` ever implemented it.)
 
 Config: `worker_reap_timeout_seconds` (default `120.0`; `0` disables, otherwise
 `>= 30.0`) and `worker_registration_grace_seconds` (default `3600.0`; `>=` the
 reap timeout — a tighter grace would reap warming workers faster than crashed
-ones), with matching CLI flags. Freeze-gap recovery additionally requires the
-timeout `>= 3 x` the client's `lmcache.mp.heartbeat_interval`; the worker adapter
-warns at startup when `3 x interval` exceeds the 30 s config floor.
+ones), with matching CLI flags. Keep the timeout `>= 3 x` the client's
+`lmcache.mp.heartbeat_interval` so a few missed pings never reap a live worker;
+the worker adapter warns at startup when `3 x interval` exceeds the 30 s floor.
 
 ## 6. Adapter Side
 
@@ -142,23 +146,11 @@ warmup; the registration grace covers that window. It starts healthy (the event
 is set at construction), so the first store/retrieve is not gated. A live worker
 then pings every interval, refreshing its server-side `last_seen`, so it is never
 reaped while alive — no re-registration is needed at start. The recover callback
-re-registers only on a genuine recovery edge (Section 6.2/6.3). A retrieve dropped
+re-registers only on a genuine recovery edge (Section 6.2). A retrieve dropped
 while the server is unhealthy is still reported via `get_finished` so async loads
 cannot hang.
 
-### 6.2 Freeze-gap detection
-
-A whole-process freeze longer than the reap window (SIGSTOP, cgroup freezer, VM
-migration) produces no ping failures and no traffic: the server reaps while the
-client's `health_event` stays set, so on thaw no edge would fire and every store
-would hit a missing context. `HeartbeatThread` therefore tracks the time of its
-last successful cycle; when a ping succeeds while considered healthy and the gap
-exceeds `3 x interval`, it clears `health_event` and returns, forcing one
-unhealthy cycle — the next ping takes the normal edge and re-registers. Forcing a
-cycle keeps the recover callback from racing live submissions on `transfer_ctx`
-and drains futures parked between thaw and detection.
-
-### 6.3 Recovery after a reap
+### 6.2 Recovery after a reap
 
 ```
 T0        outage begins; pings time out -> health_event cleared, traffic stops
@@ -172,7 +164,7 @@ T1        recover callback re-registers (id absent -> fresh context) before
 A shorter outage hits the NOOP register path, which refreshes `last_seen` and
 builds nothing — the server never asks a worker to re-register.
 
-### 6.4 Shutdown
+### 6.3 Shutdown
 
 `shutdown()` stops the heartbeat before sending UNREGISTER, so no stray ping
 lands on a closing client. The heartbeat cycle skips the recover callback and
@@ -188,6 +180,5 @@ stop is already requested — a straggling cycle cannot re-create a ghost contex
 | Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (heartbeat never started). Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is never reaped regardless of traffic. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
 | Partition shorter than the reap window | No reap. On heal, the recover callback re-registers; the NOOP path refreshes `last_seen`; zero context churn. |
-| Whole-process freeze past the reap window | Reaped during the freeze. On thaw, freeze-gap detection forces one unhealthy cycle (parked futures drained), then edge → re-register. Worst case ~2 heartbeat intervals of degraded traffic. |
 | Worker crash + restart | The new process gets a fresh uuid-derived id and a fresh entry; the dead id is reaped independently. No PID-reuse aliasing. |
 | Mixed client/server versions | Every PING fails the payload-count check; the client sits permanently unhealthy. Loud, never silent corruption; upgrade both sides together. |

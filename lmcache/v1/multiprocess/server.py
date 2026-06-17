@@ -35,6 +35,7 @@ from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     HandlerSpec,
+    InstanceLivenessTarget,
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
@@ -120,7 +121,10 @@ class MPCacheServer:
         """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
             if isinstance(module, LMCacheDrivenTransferModule):
-                return {i: e.cache_context for i, e in module.cache_contexts.items()}
+                return {
+                    i: e.cache_context
+                    for i, e in module.context_entries_snapshot().items()
+                }
         return None
 
     def clear(self) -> None:
@@ -169,24 +173,36 @@ def _build_modules(
         ValueError: If blend engine is requested with
         supported_transfer_mode="engine_driven".
     """
-    modules: list[EngineModule] = [
-        LookupModule(ctx),
-        ManagementModule(ctx),
-    ]
+    lookup_module = LookupModule(ctx)
 
+    # Build the transfer and blend modules first so the ManagementModule can
+    # be constructed with them as liveness targets / reap listeners. They are
+    # the InstanceLivenessTargets the reaper scans.
+    transfer_modules: list[EngineModule] = []
     if mp_config.supported_transfer_mode == "lmcache_driven":
-        modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "engine_driven":
-        modules.append(EngineDrivenTransferModule(ctx))
+        transfer_modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
-        modules.append(LMCacheDrivenTransferModule(ctx))
-        modules.append(EngineDrivenTransferModule(ctx))
+        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(EngineDrivenTransferModule(ctx))
     else:
         raise ValueError(
             f"Unsupported supported_transfer_mode '{mp_config.supported_transfer_mode}'"
         )
 
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
+
+    # Targets the reaper scans (and reap-notifies). The transfer modules own
+    # per-instance liveness; BlendV3Module is appended below as a state mirror.
+    liveness_targets: list[InstanceLivenessTarget] = [
+        m
+        for m in transfer_modules
+        if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
+    ]
+
+    # At most one blend module is ever built (engine_type selects one).
+    blend_module: EngineModule | None = None
 
     if mp_config.engine_type == "blend_legacy":
         if mp_config.supported_transfer_mode == "engine_driven":
@@ -198,7 +214,7 @@ def _build_modules(
         # First Party
         from lmcache.v1.multiprocess.modules.blend import BlendModule
 
-        modules.append(BlendModule(ctx))
+        blend_module = BlendModule(ctx)
 
     # "blend" selects CacheBlend V3 (the current implementation).
     if mp_config.engine_type == "blend":
@@ -215,22 +231,34 @@ def _build_modules(
         from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
 
         transfer_module = next(
-            m for m in modules if isinstance(m, LMCacheDrivenTransferModule)
+            m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)
         )
-        lookup_module = next(m for m in modules if isinstance(m, LookupModule))
         # Opt-in: enabled only when LMCACHE_COORDINATOR_URL is set; otherwise
         # None and the blend module matches purely locally.
         coordinator = BlendCoordinatorClient.maybe_from_env()
-        modules.append(
-            BlendV3Module(
-                ctx,
-                transfer_module,
-                lookup_module,
-                coordinator=coordinator,
-            )
+        blend_v3 = BlendV3Module(
+            ctx,
+            transfer_module,
+            coordinator=coordinator,
+            enable_segmented_prefix=mp_config.enable_segmented_prefix,
         )
+        blend_module = blend_v3
+        # blend_v3 mirrors per-instance CB rope state, so the reaper must
+        # notify it via drop_instance_state when an instance is reaped.
+        liveness_targets.append(blend_v3)
 
-    return modules
+    management = ManagementModule(
+        ctx,
+        liveness_targets=liveness_targets,
+        worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
+        worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
+    )
+
+    # ManagementModule precedes the transfer/blend modules so close() stops
+    # and joins the reaper before those modules clear their state and before
+    # storage_manager.close() runs.
+    blend_modules = [blend_module] if blend_module is not None else []
+    return [lookup_module, management, *transfer_modules, *blend_modules]
 
 
 def run_cache_server(

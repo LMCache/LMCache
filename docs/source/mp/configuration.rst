@@ -98,6 +98,28 @@ Source: ``lmcache/v1/multiprocess/config.py``
        ``""`` (empty string): disable SHM and force the pickle transfer
        path.  Any other value: use that exact name for the SHM pool
        segment.
+   * - ``--worker-reap-timeout-seconds``
+     - ``120.0``
+     - Silence budget (seconds) after which a worker that has sent at
+       least one heartbeat PING but then gone quiet has its KV cache
+       registration reaped, freeing the leaked GPU context and CUDA IPC
+       handles. ``0`` disables reaping. Keep this at least 3x the engine
+       adapter's ``lmcache.mp.heartbeat_interval`` (default 10s) so a few
+       missed pings never reap a live worker; the adapter warns at startup
+       if its interval is raised without raising this.
+   * - ``--worker-registration-grace-seconds``
+     - ``3600.0``
+     - Silence budget (seconds) for a worker that registered but has never
+       sent a PING (still warming up, or died before its first request).
+       Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
+       slow model warmup is never mistaken for a dead worker.
+   * - ``--enable-segmented-prefix``
+     - ``False``
+     - CacheBlend (``--engine-type blend``) only: on a mid-prefix L2 retrieve
+       failure, retain the gapped prefix so the post-gap chunks stay
+       L1-resident and only the dropped gap is recomputed, instead of
+       truncating the prefix at the gap. No effect for other engines. See
+       :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
 
 Lookup Hash Logging
 -------------------

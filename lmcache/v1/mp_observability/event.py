@@ -110,9 +110,12 @@ class EventType(Enum):
     # span captures submit→resident incl. poll-wait.
     CB_FINGERPRINT_MATCH_START = "cb.fingerprint_match.start"
     CB_FINGERPRINT_MATCH_END = "cb.fingerprint_match.end"
-    # No cb.prefix_lookup span: the prefix lookup is already traced by
-    # mp.lookup_prefetch (CB reuses LookupModule). prefix_chunks rides on
-    # cb.lookup via CB_LOOKUP_END instead.
+    # Prefix leg: blend_v3 owns the submit/poll (direct storage_manager), so the
+    # prefix lookup is a CB-namespace span under cb.lookup. Its hit tokens ride
+    # the CB hit-rate metric via CB_LOOKUP_END (CB requests no longer feed the
+    # MP mp.lookup_prefetch span / hit-rate aggregate).
+    CB_PREFIX_LOOKUP_START = "cb.prefix_lookup.start"
+    CB_PREFIX_LOOKUP_END = "cb.prefix_lookup.end"
     CB_SPARSE_PREFETCH_START = "cb.sparse_prefetch.start"
     CB_SPARSE_PREFETCH_END = "cb.sparse_prefetch.end"
 
