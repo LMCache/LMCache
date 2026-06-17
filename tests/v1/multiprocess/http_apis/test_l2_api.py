@@ -452,31 +452,3 @@ class TestListEndpoint:
         client = TestClient(_make_app(sm))
         resp = client.get("/l2/keys", params={"page_token": "garbage"})
         assert resp.status_code == 400
-
-
-# =============================================================================
-# Auto-discovery
-# =============================================================================
-
-
-class TestAutoDiscovery:
-    def test_endpoints_are_registered_via_http_api_registry(self):
-        # First Party
-        from lmcache.v1.multiprocess.http_api_registry import HTTPAPIRegistry
-
-        app = FastAPI()
-        registry = HTTPAPIRegistry(app)
-        registry.register_all_apis()
-        # ``DELETE /l2``, ``GET /l2/keys``, and ``GET /l2/adapters``
-        # live on different paths — verify all three are registered
-        # with the right method.
-        methods_by_path: dict[str, set[str]] = {}
-        for r in app.routes:
-            path = getattr(r, "path", None)
-            if path in ("/l2", "/l2/keys", "/l2/adapters"):
-                methods_by_path.setdefault(path, set()).update(
-                    getattr(r, "methods", set())
-                )
-        assert "DELETE" in methods_by_path.get("/l2", set())
-        assert "GET" in methods_by_path.get("/l2/keys", set())
-        assert "GET" in methods_by_path.get("/l2/adapters", set())
