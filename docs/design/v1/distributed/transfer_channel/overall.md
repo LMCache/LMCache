@@ -61,7 +61,7 @@ All names below are exported from
 | Type | Fields | Notes |
 |---|---|---|
 | `TransferChannelAddress` | `offset: int`, `size: int` | A transfer-channel address (frozen). `offset` is relative to the L1 base. Wrapped in a class for future extensibility. |
-| `TransferChannelReadResult` | `finished: bool`, `succeeded: list[TransferChannelAddress]` | Result of `query_read_status`. `is_finished()` / `succeed_addresses()` accessors. `succeeded` is empty while in flight or on error. |
+| `TransferChannelReadResult` | `finished: bool`, `succeeded_mask: list[bool]` | Result of `query_read_status`. `is_finished()` accessor. `succeeded_mask` holds a per-object success flag aligned with the submitted addresses; empty while in flight. |
 
 ### Abstract interfaces (`abstract.py`)
 
@@ -116,8 +116,9 @@ typically obtained from `L1MemoryManager.get_l1_memory_desc()`.
    instances (they refer to the peer's region, so they are not validated against
    the local region).
 4. **Submit + poll.** `submit_read(local, remote)` returns a task id; the caller
-   polls `query_read_status(task_id)` until `is_finished()`. On success,
-   `succeed_addresses()` returns the remote addresses that were read.
+   polls `query_read_status(task_id)` until `is_finished()`. The result's
+   `succeeded_mask` holds a per-object success flag aligned with the submitted
+   addresses (all `True` on success, all `False` on error).
 
 > **Alignment contract.** Object offsets must be aligned to the registered
 > `align_bytes`, and the reader and the peer must use the **same** `align_bytes`,

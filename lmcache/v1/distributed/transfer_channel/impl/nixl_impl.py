@@ -445,8 +445,7 @@ class NixlTransferChannelContext(TransferChannelContext):
         old_client = None
         with self._lock:
             old_client = self._clients.get(key)
-            if old_client is None:
-                self._clients[key] = client
+            self._clients[key] = client
 
         if old_client is not None and old_client is not client:
             logger.warning(
