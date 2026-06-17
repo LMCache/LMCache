@@ -23,8 +23,9 @@ Expected log output:
 
 The CLI accepts ``--host``, ``--port``, ``--instance-timeout``,
 ``--health-check-interval``, ``--eviction-check-interval``,
-``--eviction-ratio``, and ``--trigger-watermark``; any flag overrides the
-matching environment variable below. See :doc:`/cli/coordinator` for details.
+``--eviction-ratio``, ``--trigger-watermark``, ``--blend-chunk-size``, and
+``--blend-probe-stride``; any flag overrides the matching environment variable
+below. See :doc:`/cli/coordinator` for details.
 Equivalently, the coordinator can still be launched as a module with
 ``python3 -m lmcache.v1.mp_coordinator``.
 
@@ -64,6 +65,14 @@ variables:
      - ``1.0``
      - Eviction fires when usage reaches this fraction of the quota
        (0.0 exclusive to 1.0).
+   * - ``LMCACHE_MP_COORDINATOR_BLEND_CHUNK_SIZE``
+     - ``256``
+     - Tokens per chunk for the global CacheBlend directory. Must equal the
+       LMCache chunk size the blend servers use.
+   * - ``LMCACHE_MP_COORDINATOR_BLEND_PROBE_STRIDE``
+     - ``1``
+     - Positions between CacheBlend match probes. ``1`` probes every offset
+       for full recall.
 
 Connecting MP servers
 ---------------------

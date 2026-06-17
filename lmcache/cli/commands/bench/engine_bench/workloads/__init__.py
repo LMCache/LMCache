@@ -52,6 +52,7 @@ __all__ = [
     "RandomPrefillConfig",
     "RandomPrefillWorkload",
     "create_workload",
+    "validate_max_output_length_supported",
 ]
 
 _WORKLOAD_NAMES = (
@@ -61,6 +62,34 @@ _WORKLOAD_NAMES = (
     "prefix-suffix-tuner",
     "random-prefill",
 )
+
+# Workloads that expose a user-configurable max output length, via a
+# ``max_output_length`` arg (``--ldqa-max-output-length`` / ``--mrc-output-length``).
+_WORKLOADS_WITH_MAX_OUTPUT_LENGTH: frozenset[str] = frozenset(
+    {"long-doc-qa", "multi-round-chat"}
+)
+
+
+def validate_max_output_length_supported(workload: str) -> None:
+    """Validate that a max output length can be specified for ``workload``.
+
+    Only workloads with a max-output-length parameter (``long-doc-qa``,
+    ``multi-round-chat``) support setting it; every other workload fixes its
+    generation length internally, so requesting one is rejected.
+
+    Args:
+        workload: The selected workload name (``EngineBenchConfig.workload``).
+
+    Raises:
+        ValueError: If ``workload`` has no max-output-length parameter.
+    """
+    if workload in _WORKLOADS_WITH_MAX_OUTPUT_LENGTH:
+        return
+    supported = ", ".join(sorted(_WORKLOADS_WITH_MAX_OUTPUT_LENGTH))
+    raise ValueError(
+        f"max output length cannot be specified for the {workload!r} workload: "
+        f"it has no max-output-length parameter. Supported workloads: {supported}."
+    )
 
 
 def create_workload(
@@ -114,6 +143,7 @@ def create_workload(
             query_per_document=args.ldqa_query_per_document,
             shuffle_policy=args.ldqa_shuffle_policy,
             num_inflight_requests=args.ldqa_num_inflight_requests,
+            max_output_length=args.ldqa_max_output_length,
         )
         return LongDocQAWorkload(
             config=ld_workload_config,
