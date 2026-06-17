@@ -9,10 +9,8 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import (
     PrefetchHandle,
-    TrimPolicy,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -165,8 +163,6 @@ class LookupModule:
         self,
         key: IPCCacheServerKey,
         tp_size: int,
-        *,
-        policy: TrimPolicy = TrimPolicy.PREFIX,
     ) -> None:
         """Submit a prefix lookup.
 
@@ -177,10 +173,6 @@ class LookupModule:
         Args:
             key: Cache key with request_id embedded.
             tp_size: Tensor-parallel size for MLA multi-reader locking.
-            policy: Trim policy for the prefetch. ``PREFIX`` (default) truncates
-                at the first gap; ``SEGMENTED_PREFIX`` retains a gapped contiguous
-                request (e.g. a mid-prefix L2 retrieve failure) so the hole is
-                recomputed instead of discarding everything after it.
         """
         model_name, world_size = key.model_name, key.world_size
         self._ctx.event_bus.publish(
@@ -281,7 +273,6 @@ class LookupModule:
             layout_desc,
             extra_count=extra_count,
             external_request_id=key.request_id,
-            policy=policy,
         )
         self._register_prefetch_job(
             _PrefetchJob(
@@ -325,46 +316,6 @@ class LookupModule:
         found_count = found // job.world_size
         return found_count
 
-    def _poll_and_publish(self, job: _PrefetchJob) -> tuple[int, Bitmap] | None:
-        """Poll a prefetch job's handle; on completion publish the
-        ``MP_LOOKUP_PREFETCH_END`` event and pop the job (exactly-once).
-
-        Shared core of :meth:`query_prefetch_status` and
-        :meth:`query_prefetch_status_segmented`. The caller handles the
-        missing-job case (whose empty return is policy-specific) before calling.
-
-        Args:
-            job: The prefetch job to poll.
-
-        Returns:
-            ``(leading_count, found_bitmap)`` when the prefetch is complete,
-            ``None`` while it is still in progress.
-        """
-        found = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found is None:
-            return None
-        # NOTE(Kuntai): this assumes two things:
-        # 1. the world size is the same between keys
-        # 2. the lookup sort the keys in prefix order and breaks at the
-        #    first failure
-        leading = found.count_leading_ones() // job.world_size
-        self._ctx.event_bus.publish(
-            Event(
-                event_type=EventType.MP_LOOKUP_PREFETCH_END,
-                session_id=job.request_id,
-                metadata={
-                    "found_count": leading,
-                    "requested_tokens": job.requested_tokens,
-                    "hit_tokens": leading * self._ctx.chunk_size,
-                    "model_name": job.model_name,
-                    "cache_salt": job.cache_salt,
-                },
-            )
-        )
-        with self._prefetch_job_lock:
-            self._prefetch_jobs.pop(job.request_id, None)
-        return leading, found
-
     def query_prefetch_status(
         self,
         request_id: str,
@@ -392,50 +343,35 @@ class LookupModule:
                 request_id,
             )
             return 0
-        result = self._poll_and_publish(job)
-        if result is None:
+
+        found = self._ctx.storage_manager.query_prefetch_status(job.handle)
+        if found is None:
             return None
-        leading, _ = result
-        return leading
 
-    def query_prefetch_status_segmented(
-        self,
-        request_id: str,
-    ) -> tuple[int, list[int]] | None:
-        """Poll a prefetch job, returning the leading prefix count and the
-        full retained chunk-index set.
+        # NOTE(Kuntai): this assumes two things:
+        # 1. the world size is the same between keys
+        # 2. the lookup sort the keys in prefix order and breaks at the
+        #    first failure
+        found_count = found.count_leading_ones() // job.world_size
 
-        Identical exactly-once semantics to :meth:`query_prefetch_status`, but
-        for ``SEGMENTED_PREFIX`` it also surfaces the gapped found-set so the
-        caller can deliver the post-gap retained chunks that
-        ``count_leading_ones`` alone discards. A chunk is reported retained when
-        its first worker-shard bit is set; the trim mask retains whole chunks,
-        so the first shard stands in for all of them.
-
-        Args:
-            request_id: The external request ID passed in the lookup key.
-
-        Returns:
-            ``(leading_count, retained_chunk_indices)`` when the prefetch is
-            complete, ``None`` while still in progress, or ``(0, [])`` if the
-            request_id is unknown.
-        """
-        with self._prefetch_job_lock:
-            job = self._prefetch_jobs.get(request_id)
-        if job is None:
-            logger.warning(
-                "Prefetch job for request %s not found (already completed or invalid)",
-                request_id,
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=job.request_id,
+                metadata={
+                    "found_count": found_count,
+                    "requested_tokens": job.requested_tokens,
+                    "hit_tokens": found_count * self._ctx.chunk_size,
+                    "model_name": job.model_name,
+                    "cache_salt": job.cache_salt,
+                },
             )
-            return 0, []
-        result = self._poll_and_publish(job)
-        if result is None:
-            return None
-        leading, found = result
-        ws = job.world_size
-        # Any set shard marks its chunk retained (trim keeps whole chunks).
-        retained = sorted({ki // ws for ki in found.get_indices_list()})
-        return leading, retained
+        )
+
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(request_id, None)
+
+        return found_count
 
     def free_lookup_locks(
         self,

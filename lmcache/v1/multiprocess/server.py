@@ -239,7 +239,6 @@ def _build_modules(
         blend_v3 = BlendV3Module(
             ctx,
             transfer_module,
-            lookup_module,
             coordinator=coordinator,
             enable_segmented_prefix=mp_config.enable_segmented_prefix,
         )
