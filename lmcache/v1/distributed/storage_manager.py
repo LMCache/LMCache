@@ -519,6 +519,7 @@ class StorageManager:
                 remaining_keys,
                 layout_desc,
                 extra_count=extra_count,
+                policy=policy,
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.
@@ -735,6 +736,7 @@ class StorageManager:
                 totals[salt] = totals.get(salt, 0) + used
         return totals
 
+    # L2 APIs
     def get_l2_adapter_reconfigure_status(self) -> dict:
         """Return status for all runtime-reconfigurable L2 adapters.
 
@@ -858,6 +860,23 @@ class StorageManager:
             adapter.close()
             logger.info("Deleted L2 adapter %d", adapter_id)
 
+    def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
+        """Return all attached L2 adapters paired with descriptors, in
+        ascending adapter-id order (== configuration order for the initial
+        set, then runtime-added adapters). The first element is the primary
+        adapter; the list is empty when no L2 is configured.
+
+        Do not cache the returned pairs — ``reconfigure_l2_adapter``,
+        ``add_l2_adapter``, and ``delete_l2_adapter`` may change the set at
+        runtime.
+        """
+        with self._adapters_lock:
+            return [
+                (self._adapter_descriptors[adapter_id], adapter)
+                for adapter_id, adapter in sorted(self._l2_adapters.items())
+            ]
+
+    # Management APIs
     def clear(self, force: bool = False):
         """
         Clear data in the storage manager.

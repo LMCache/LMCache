@@ -22,9 +22,9 @@ defaults:
     run:
         shell: bash
 
-# Cancel stale runs per ref; PR and dev-push refs differ, so workflow_call is unaffected.
+# Cancel older in-flight runs on the same PR / branch.
 concurrency:
-    group: ${{ github.workflow }}-${{ github.ref }}
+    group: build-cli-${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: true
 
 permissions:

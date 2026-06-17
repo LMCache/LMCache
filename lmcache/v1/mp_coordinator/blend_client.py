@@ -196,7 +196,7 @@ class BlendCoordinatorClient:
         """Build a client from ``LMCACHE_COORDINATOR_*`` env vars if configured.
 
         Reads ``LMCACHE_COORDINATOR_URL`` (required to enable) and
-        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (default 0.05s). This timeout is the
+        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (default 1.0s). This timeout is the
         wall-clock budget on the optional global leg: the blend module polls
         until the match resolves (matches, or ``[]`` on failure) but gives up
         once the budget elapses, so it bounds how long the critical path waits
@@ -211,7 +211,7 @@ class BlendCoordinatorClient:
         url = os.getenv("LMCACHE_COORDINATOR_URL", "").strip()
         if not url:
             return None
-        timeout = float(os.getenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "0.05"))
+        timeout = float(os.getenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.0"))
         logger.info("Blend coordinator client enabled -> %s", url)
         return cls(url, request_timeout=timeout, match_budget_s=timeout)
 

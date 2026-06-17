@@ -354,3 +354,25 @@ class TestStorageManagerRuntimeAdapters:
             )
         finally:
             sm.close()
+
+    def test_l2_adapters_reflects_runtime_changes(self, empty_storage_manager_config):
+        """l2_adapters() tracks runtime add/delete in stable-id order."""
+        sm = StorageManager(empty_storage_manager_config)
+        try:
+            assert sm.l2_adapters() == []
+
+            id0 = sm.add_l2_adapter(make_mock_config())
+            id1 = sm.add_l2_adapter(make_mock_config())
+            pairs = sm.l2_adapters()
+            assert [d.index for d, _ in pairs] == [id0, id1]
+            assert pairs[0][1] is sm._l2_adapters[id0]
+            assert pairs[1][1] is sm._l2_adapters[id1]
+
+            # Deleting the primary leaves the survivor; ordering is by id.
+            sm.delete_l2_adapter(id0, timeout=10.0)
+            pairs = sm.l2_adapters()
+            assert len(pairs) == 1
+            assert pairs[0][0].index == id1
+            assert pairs[0][1] is sm._l2_adapters[id1]
+        finally:
+            sm.close()

@@ -18,9 +18,11 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import quote as url_quote
+from urllib.parse import urlencode
 import asyncio
 import ctypes
 import threading
+import xml.etree.ElementTree as ET
 
 if TYPE_CHECKING:
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
@@ -33,7 +35,7 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
@@ -55,6 +57,110 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers (lifted from s3_connector.py / native_connector_l2_adapter.py)
 # ---------------------------------------------------------------------------
+
+
+def _string_to_object_key(name: str) -> ObjectKey:
+    """Reverse of :func:`_object_key_to_string`.
+
+    Expects
+    ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>[@<cache_salt>]``.
+
+    Raises:
+        ValueError: ``name`` does not match the expected format.
+    """
+    parts = name.split("@")
+    if len(parts) == 4:
+        model_name, kv_rank_hex, object_group_id_hex, chunk_hash_hex = parts
+        cache_salt = ""
+    elif len(parts) == 5:
+        (
+            model_name,
+            kv_rank_hex,
+            object_group_id_hex,
+            chunk_hash_hex,
+            cache_salt,
+        ) = parts
+    else:
+        raise ValueError(f"unparsable S3 object name {name!r}: wrong field count")
+    try:
+        kv_rank = int(kv_rank_hex, 16)
+    except ValueError as exc:
+        raise ValueError(
+            f"unparsable S3 object name {name!r}: bad kv_rank {kv_rank_hex!r}"
+        ) from exc
+    try:
+        object_group_id = int(object_group_id_hex, 16)
+    except ValueError as exc:
+        raise ValueError(
+            f"unparsable S3 object name {name!r}: "
+            f"bad object_group_id {object_group_id_hex!r}"
+        ) from exc
+    try:
+        chunk_hash = bytes.fromhex(chunk_hash_hex)
+    except ValueError as exc:
+        raise ValueError(
+            f"unparsable S3 object name {name!r}: bad chunk_hash {chunk_hash_hex!r}"
+        ) from exc
+    return ObjectKey(
+        chunk_hash=chunk_hash,
+        model_name=model_name,
+        kv_rank=kv_rank,
+        object_group_id=object_group_id,
+        cache_salt=cache_salt,
+    )
+
+
+def _parse_list_response_xml(
+    body: bytes,
+) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
+    """Parse a ListObjectsV2 XML response into ``(entries, next_token)``.
+
+    Entries this adapter can't parse (foreign objects in the bucket)
+    are skipped silently. ``next_token`` is ``None`` when the listing
+    is not truncated.
+
+    Raises:
+        ValueError: the response body is not valid XML.
+    """
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise ValueError(f"malformed ListObjectsV2 XML: {exc}") from None
+
+    # Strip the default XML namespace so ``findall("Contents")`` works.
+    # The tree is local to this function — do not cache or return it.
+    for elem in root.iter():
+        if "}" in elem.tag:
+            elem.tag = elem.tag.split("}", 1)[1]
+
+    entries: list[tuple[ObjectKey, int]] = []
+    for contents in root.findall("Contents"):
+        key_elem = contents.find("Key")
+        size_elem = contents.find("Size")
+        if key_elem is None or key_elem.text is None:
+            continue
+        try:
+            obj_key = _string_to_object_key(key_elem.text)
+        except ValueError as exc:
+            logger.debug(
+                "Skipping unparsable S3 object %r in listing: %s", key_elem.text, exc
+            )
+            continue
+        size = 0
+        if size_elem is not None and size_elem.text is not None:
+            try:
+                size = int(size_elem.text)
+            except ValueError:
+                pass
+        entries.append((obj_key, size))
+
+    next_token_elem = root.find("NextContinuationToken")
+    next_token = (
+        next_token_elem.text
+        if next_token_elem is not None and next_token_elem.text
+        else None
+    )
+    return entries, next_token
 
 
 def _object_key_to_string(key: ObjectKey) -> str:
@@ -81,9 +187,8 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
 
 def _format_safe_path(key_str: str) -> str:
-    """Flatten slashes and URL-encode to form a safe HTTP path."""
-    flat = key_str.replace("/", "_")
-    return "/" + url_quote(flat)
+    """URL-encode the object name to form a safe HTTP path."""
+    return "/" + url_quote(key_str)
 
 
 def _make_credentials_provider(
@@ -591,6 +696,62 @@ class S3L2Adapter(L2AdapterInterface):
     # ``max_capacity_gb`` was 0 (unlimited / no eviction signal).
 
     # ------------------------------------------------------------------
+    # Listing
+    # ------------------------------------------------------------------
+
+    def list_l2_keys(
+        self,
+        model_name: Optional[str] = None,
+        page_size: int = 500,
+        cursor: Optional[str] = None,
+    ) -> KeyListPage:
+        """List keys from the S3 bucket via ``ListObjectsV2``.
+
+        Args:
+            model_name: if set, restrict listing to objects whose name
+                starts with ``<model_name>@``.
+            page_size: target entries per page. Clamped to S3's
+                ``MaxKeys=1000`` ceiling.
+            cursor: opaque continuation token from the previous page.
+
+        Raises:
+            ValueError: ``page_size`` non-positive, malformed
+                ``cursor``, or malformed S3 response.
+            RuntimeError: connection is circuit-broken, or the
+                underlying CRT request errored out.
+        """
+        if page_size <= 0:
+            raise ValueError(f"page_size must be positive (got {page_size})")
+        # ListObjectsV2's ``MaxKeys`` is capped at 1000 by S3. The
+        # adapter clamps so callers asking for more just get the S3
+        # max plus a continuation token — they don't need to know
+        # about the server-side limit.
+        max_keys = min(page_size, 1000)
+        # ``model_name`` rides along as a ``prefix=`` query param so S3
+        # skips non-matching keys server-side. Keys are stored under
+        # their literal name (no path-flattening), so the prefix is
+        # just ``<model_name>@``.
+        prefix: Optional[str] = None
+        if model_name is not None:
+            prefix = f"{model_name}@"
+
+        with self._lock:
+            if self._connection_disabled:
+                raise RuntimeError(
+                    "S3 connection disabled (circuit-broken); listing unavailable"
+                )
+
+        fut = asyncio.run_coroutine_threadsafe(
+            self._execute_list(prefix, max_keys, cursor),
+            self._loop,
+        )
+        entries, next_token = fut.result(timeout=30.0)
+        page_entries = tuple(
+            KeyEntry(key=k.to_encoded_object_key(), size_bytes=sz) for k, sz in entries
+        )
+        return KeyListPage(entries=page_entries, next_page_token=next_token)
+
+    # ------------------------------------------------------------------
     # Status / Cleanup
     # ------------------------------------------------------------------
 
@@ -785,6 +946,63 @@ class S3L2Adapter(L2AdapterInterface):
             region=self._region,
         )
         return s3_req
+
+    def _list_request(
+        self,
+        prefix: Optional[str],
+        max_keys: int,
+        continuation_token: Optional[str],
+    ):
+        """Build a ListObjectsV2 request.
+
+        Returns ``(s3_req, body_chunks, captured)``. The caller awaits
+        ``s3_req.finished_future`` and assembles the XML from
+        ``body_chunks``.
+        """
+        params: list[tuple[str, str]] = [
+            ("list-type", "2"),
+            ("max-keys", str(max_keys)),
+        ]
+        if prefix:
+            params.append(("prefix", prefix))
+        if continuation_token:
+            params.append(("continuation-token", continuation_token))
+        # urlencode handles percent-escaping of values (continuation
+        # tokens are typically base64 with ``+``/``/``/``=`` chars).
+        path = "/?" + urlencode(params, quote_via=url_quote)
+
+        headers = HttpHeaders()
+        headers.add("Host", self._endpoint)
+        req = HttpRequest("GET", path, headers)
+
+        body_chunks: list[bytes] = []
+        captured: dict[str, Optional[int]] = {"status": None}
+
+        def on_body(chunk, offset, **kwargs):
+            body_chunks.append(bytes(chunk))
+
+        def on_headers(status_code, headers_in, **kwargs):
+            captured["status"] = status_code
+
+        def on_done(error=None, status_code=None, **kwargs):
+            captured["status"] = status_code or captured["status"]
+            if error or captured["status"] != 200:
+                raise RuntimeError(
+                    f"S3 ListObjectsV2 failed: {error or captured['status']}"
+                )
+
+        s3_req = s3.S3Request(
+            client=self._s3_client,
+            type=s3.S3RequestType.DEFAULT,
+            request=req,
+            operation_name="ListObjectsV2",
+            on_body=on_body,
+            on_headers=on_headers,
+            on_done=on_done,
+            credential_provider=self._credentials_provider,
+            region=self._region,
+        )
+        return s3_req, body_chunks, captured
 
     def _record_connection_outcome(self, error_msg: Optional[str]) -> None:
         """Update the circuit breaker under the lock."""
@@ -1004,6 +1222,19 @@ class S3L2Adapter(L2AdapterInterface):
         with self._lock:
             self._completed_load_tasks[task_id] = bitmap
         self._load_efd.notify()
+
+    async def _execute_list(
+        self,
+        prefix: Optional[str],
+        max_keys: int,
+        continuation_token: Optional[str],
+    ) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
+        """Issue one ``ListObjectsV2`` call and parse the response."""
+        s3_req, body_chunks, _captured = self._list_request(
+            prefix, max_keys, continuation_token
+        )
+        await asyncio.wrap_future(s3_req.finished_future)
+        return _parse_list_response_xml(b"".join(body_chunks))
 
     async def _execute_delete(
         self, keys: list[ObjectKey]

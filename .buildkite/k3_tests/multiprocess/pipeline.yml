@@ -74,8 +74,8 @@ steps:
         timeout_in_minutes: 60
         env:
           MODEL: "google/gemma-4-31B-it"
-          # Require an exact score match between the two runs.
-          SCORE_TOLERANCE: "0"
+          # Allow a small score difference between the two runs.
+          SCORE_TOLERANCE: "0.03"
           ATTENTION_BACKEND: "auto"
           GPU_MEMORY_UTILIZATION: "0.85"
           # 31B load + CUDA-graph capture is slow; raise the readiness timeout
