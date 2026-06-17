@@ -206,7 +206,7 @@ Known imbalance sources / tuning levers:
 glide handles `MOVED`/`ASK` redirects and topology refresh, and seed
 nodes need not be updated. A graceful reshard migrates keys and keeps the
 cache warm; dropping a node without migrating its slots loses those keys,
-which simply surface as cache misses and LMCache's byte accounting may drift afterward
+which simply surface as cache misses and LMCache's byte accounting may drift afterward.
 
 ## Authentication and TLS
 
@@ -234,9 +234,13 @@ Custom-certificate setups are a planned follow-up (exposing glide's
 
 ## Capacity and eviction
 
-- `max_capacity_gb > 0` enables aggregate (global) eviction signals
-  via `get_usage().usage_fraction`. Set this when LMCache should track
-  total bytes used and trigger eviction at a watermark.
+- `max_capacity_gb > 0` enables the **LMCache-driven** eviction signal
+  (`get_usage().usage_fraction`). This is **not** the default — server-driven
+  is recommended (`max_capacity_gb = 0`); see "Two eviction layers" below.
+  LMCache-driven eviction additionally requires an `"eviction"` config block
+  (`eviction_policy` / `trigger_watermark` / `eviction_ratio`); without it
+  `eviction_config` is `None`, the eviction controller is not wired for this
+  adapter, and `max_capacity_gb` has no effect.
 - Per-`cache_salt` quotas operate regardless of `max_capacity_gb` —
   the base class tracks per-salt totals from `_notify_keys_stored` /
   `_notify_keys_deleted` for any quota policy.
@@ -257,22 +261,24 @@ There are **two independent eviction mechanisms** and they can conflict:
 2. **The Valkey server** — its own `maxmemory` + `maxmemory-policy`
    evicts keys when server memory fills, **without notifying LMCache**.
 
-Pick exactly one as the authority. **The recommended setup is
-LMCache-driven: leave Valkey server-side eviction off (`maxmemory 0` /
-`noeviction`) and let LMCache evict via `max_capacity_gb > 0`.** LMCache's
-policy is strictly smarter than the server's — it honors prefix-chain
-ordering, per-`cache_salt` quotas, and read-locked keys, none of which a
-plain `allkeys-lru` understands.
+Pick exactly one as the authority. **Server-driven is the recommended
+default**: set `maxmemory <N>` + `allkeys-lfu` on the server and leave
+LMCache eviction off (`max_capacity_gb = 0`, the default). The server
+bounds real memory regardless of how many processes write, leftover data,
+or restarts (see the limitation note below). **LMCache-driven** is a
+special case for a single writer that owns the cluster: it enables
+LMCache's smarter policy — prefix-chain ordering, per-`cache_salt` quotas,
+and read-locked keys, none of which a plain `allkeys-*` understands — but
+only its per-process accounting is trustworthy in that case.
 
-| Setup | Valkey config | LMCache config |
-|-------|---------------|----------------|
-| **LMCache-driven** (recommended) | `maxmemory 0` (or large) + `noeviction` | `max_capacity_gb > 0` |
-| **Server-driven** (only if LMCache eviction is intentionally disabled) | `maxmemory <N>` + `allkeys-lru` | `max_capacity_gb = 0` |
+| Setup | Valkey config | LMCache config | Use when |
+|-------|---------------|----------------|----------|
+| **Server-driven** (recommended) | `maxmemory <N>` + `allkeys-lfu` | `max_capacity_gb = 0` | default; required for shared cluster or any process that restarts |
+| **LMCache-driven** | `maxmemory 0` + `noeviction` | `max_capacity_gb > 0` | single writer owns the cluster, no leftover data, no restart dependency |
 
 > **Note** — this guidance is specific to the MP-mode `valkey` L2
 > adapter. The non-MP `ValkeyConnector` has no eviction layer of its own
-> and *must* rely on Valkey server-side eviction, so the recommendation
-> there is the opposite.
+> and likewise relies on Valkey server-side eviction.
 
 Running both (a server `maxmemory` cap *and* `max_capacity_gb > 0`) lets
 the server silently drop keys that LMCache still counts, so LMCache's
@@ -285,6 +291,24 @@ LMCache-side LRU bookkeeping will hold ghost keys.
 This adapter does not set a TTL on SET, so keys never expire on the
 server by time; lifetime is governed entirely by whichever eviction
 authority is configured above.
+
+> **Known limitation.** LMCache-driven eviction relies on
+> `get_usage().total_bytes_used`, which is a **per-process logical
+> counter**: it counts only the bytes *this* process wrote and resets to
+> zero on restart. It therefore does **not** reflect the server's real
+> memory and is unreliable when:
+> - **multiple LMCache processes share one cluster** — per-process
+>   `max_capacity_gb` budgets do not compose and can overshoot the cluster;
+> - **the cluster holds leftover data** (another writer, app, or a prior
+>   run — keys persist since no TTL is set) — it is uncounted;
+> - **the process restarts on top of existing data** — both the byte
+>   counter and the eviction LRU start empty, so pre-existing keys are
+>   never evicted by LMCache.
+>
+> In all three cases prefer **server-driven** eviction (`maxmemory` +
+> `allkeys-lfu`, `max_capacity_gb = 0`): the server bounds real memory
+> regardless of writer or restart, and `allkeys-*` is required because
+> this adapter sets no TTL (`volatile-*` would evict nothing and OOM).
 
 ## Lock semantics
 
