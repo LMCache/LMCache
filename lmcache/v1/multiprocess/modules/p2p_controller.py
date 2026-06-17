@@ -13,6 +13,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
 )
+from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
@@ -20,7 +21,6 @@ from lmcache.v1.multiprocess.engine_module import (
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.protocol import RequestType
-from lmcache.v1.multiprocess.transfer_address import TransferChannelAddress
 
 logger = init_logger(__name__)
 

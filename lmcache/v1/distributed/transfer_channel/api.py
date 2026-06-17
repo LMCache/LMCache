@@ -26,6 +26,10 @@ class TransferChannelAddress:
     size: int
     """ The size (in bytes) of the memory object. """
 
+    def is_valid(self) -> bool:
+        """Whether the address is valid (non-negative offset and size)."""
+        return self.offset >= 0 and self.size > 0
+
 
 @dataclass
 class TransferChannelReadResult:

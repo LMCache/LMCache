@@ -10,8 +10,8 @@ This module defines the protocol for:
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
-from lmcache.v1.multiprocess.transfer_address import TransferChannelAddress
 
 # Define request names for this protocol group
 REQUEST_NAMES = [
