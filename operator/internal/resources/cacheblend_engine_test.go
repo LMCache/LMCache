@@ -52,7 +52,7 @@ func TestBuildCBEngineArgs_BlendFlags(t *testing.T) {
 	args := BuildCBEngineArgs(&minimalCBEngine().Spec)
 
 	// Blend-specific flags.
-	assertArg(t, args, "--engine-type", "blend_v3")
+	assertArg(t, args, "--engine-type", "blend")
 	assertArg(t, args, "--l1-align-bytes", "16777216")
 
 	// Reuses the proven LMCacheEngine serialization (NOT --l1-size).
@@ -86,8 +86,8 @@ func TestBuildCBEngineArgs_ExtraArgsAfterBlendFlags(t *testing.T) {
 	if firstIdx == lastIdx {
 		t.Fatalf("expected --engine-type to appear twice, got args=%v", args)
 	}
-	if args[firstIdx+1] != "blend_v3" {
-		t.Fatalf("expected operator-set --engine-type blend_v3 first, got %s", args[firstIdx+1])
+	if args[firstIdx+1] != "blend" {
+		t.Fatalf("expected operator-set --engine-type blend first, got %s", args[firstIdx+1])
 	}
 	if args[lastIdx+1] != "override-me" {
 		t.Fatalf("expected user --engine-type override-me last, got %s", args[lastIdx+1])
@@ -144,7 +144,7 @@ func TestBuildCBEngineDaemonSet_GPUAndSecurity(t *testing.T) {
 	}
 
 	// Blend args present on the container.
-	assertArg(t, c.Args, "--engine-type", "blend_v3")
+	assertArg(t, c.Args, "--engine-type", "blend")
 	assertArg(t, c.Args, "--l1-align-bytes", "16777216")
 }
 

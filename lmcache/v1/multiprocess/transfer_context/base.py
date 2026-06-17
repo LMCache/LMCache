@@ -2,12 +2,12 @@
 """Non-GPU context abstractions and utilities for multiprocess transport.
 
 This module provides:
-- ``NonGpuContextMetadata``: layout metadata dataclass for non-CUDA workers.
-- ``NonGpuContext``: abstract base class with a two-phase prepare/commit
+- ``EngineDrivenContextMetadata``: layout metadata dataclass for non-CUDA workers.
+- ``EngineDrivenContext``: abstract base class with a two-phase prepare/commit
   interface for CPU-side KV data transfer. Concrete implementations (e.g.
-  ``NonGpuContextPickle``) each decide *how* data is serialised and transported.
-- ``create_non_gpu_context()``: factory that returns the appropriate
-  ``NonGpuContext`` subclass.
+  ``EngineDrivenContextPickle``) each decide *how* data is serialised and transported.
+- ``create_engine_driven_context()``: factory that returns the appropriate
+  ``EngineDrivenContext`` subclass.
 - ``compute_kv_layout``, ``gather_paged_kv_to_cpu``, ``scatter_cpu_to_paged_kv``:
   shared gather/scatter utilities used by all concrete implementations.
 """
@@ -31,7 +31,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 
 if TYPE_CHECKING:
@@ -106,7 +106,7 @@ def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
 
 
 @dataclass
-class NonGpuContextMetadata:
+class EngineDrivenContextMetadata:
     """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
@@ -120,7 +120,7 @@ class NonGpuContextMetadata:
     use_mla: bool
 
 
-class NonGpuContext(ABC):
+class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
 
     All concrete implementations share a common message-queue client and
@@ -135,7 +135,7 @@ class NonGpuContext(ABC):
 
     def __init__(
         self,
-        metadata: NonGpuContextMetadata,
+        metadata: EngineDrivenContextMetadata,
         mq_client: MessageQueueClient,
         mq_timeout: float,
     ) -> None:
@@ -150,7 +150,7 @@ class NonGpuContext(ABC):
 
     @abstractmethod
     def prepare_store(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> tuple[list[torch.Tensor], list[int]] | None:
         """Prepare SHM buffers for a store operation.
 
@@ -172,20 +172,20 @@ class NonGpuContext(ABC):
 
     @abstractmethod
     def commit_store(
-        self, key: IPCCacheEngineKey, instance_id: int, chunks: list[torch.Tensor]
+        self, key: IPCCacheServerKey, instance_id: int, chunks: list[torch.Tensor]
     ) -> bool:
         """Commit store. Pickle: serialize and send. Shm: notify server."""
         ...
 
     @abstractmethod
     def prepare_retrieve(
-        self, key: IPCCacheEngineKey, instance_id: int
+        self, key: IPCCacheServerKey, instance_id: int
     ) -> list[torch.Tensor] | None:
         """Prepare retrieve. Returns chunks or shm views, or None on miss."""
         ...
 
     @abstractmethod
-    def commit_retrieve(self, key: IPCCacheEngineKey, instance_id: int) -> bool:
+    def commit_retrieve(self, key: IPCCacheServerKey, instance_id: int) -> bool:
         """Commit retrieve. Pickle: no-op. Shm: release read locks."""
         ...
 
@@ -195,16 +195,16 @@ class NonGpuContext(ABC):
         ...
 
 
-def create_non_gpu_context(
-    metadata: NonGpuContextMetadata,
+def create_engine_driven_context(
+    metadata: EngineDrivenContextMetadata,
     mq_client: MessageQueueClient,
     mq_timeout: float,
     shm_name: str,
     pool_size: int,
     *,
     use_pickle: bool = False,
-) -> NonGpuContext:
-    """Factory that returns the appropriate :class:`NonGpuContext` implementation.
+) -> EngineDrivenContext:
+    """Factory that returns the appropriate :class:`EngineDrivenContext` implementation.
 
     Returns SHM-based implementation when shared-memory pool information is
     available; otherwise falls back to the pickle-based implementation.
@@ -222,22 +222,22 @@ def create_non_gpu_context(
             available.
 
     Returns:
-        A concrete :class:`NonGpuContext` instance.
+        A concrete :class:`EngineDrivenContext` instance.
     """
     if not shm_name or pool_size <= 0:
         use_pickle = True
 
     if not use_pickle:
         # Local
-        from .shm import NonGpuContextShm
+        from .shm import EngineDrivenContextShm
 
         try:
             logger.info(
-                "Creating NonGpuContextShm (shm_name=%s, pool_size=%d)",
+                "Creating EngineDrivenContextShm (shm_name=%s, pool_size=%d)",
                 shm_name,
                 pool_size,
             )
-            return NonGpuContextShm(
+            return EngineDrivenContextShm(
                 metadata, mq_client, mq_timeout, shm_name, pool_size
             )
         except Exception:
@@ -249,10 +249,10 @@ def create_non_gpu_context(
             )
 
     # Local
-    from .pickle import NonGpuContextPickle
+    from .pickle import EngineDrivenContextPickle
 
-    logger.info("Creating NonGpuContextPickle (pickle transport)")
-    return NonGpuContextPickle(metadata, mq_client, mq_timeout)
+    logger.info("Creating EngineDrivenContextPickle (pickle transport)")
+    return EngineDrivenContextPickle(metadata, mq_client, mq_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ def create_non_gpu_context(
 def compute_kv_layout(
     kv_caches: dict[str, torch.Tensor],
     layout_hints: LayoutHints | None = None,
-) -> tuple[int, int, int, str, "lmc_ops.GPUKVFormat"]:
+) -> tuple[int, int, int, str, "lmc_ops.EngineKVFormat"]:
     """Compute KV layout metadata from KV tensors.
 
     Args:
@@ -272,7 +272,7 @@ def compute_kv_layout(
 
     Returns:
         Tuple of ``(block_size, num_layers, hidden_dim_size, dtype_str,``
-        ``gpu_kv_format)``.
+        ``engine_kv_format)``.
 
     Raises:
         ValueError: If ``kv_caches`` is empty.
@@ -289,14 +289,14 @@ def compute_kv_layout(
     if not tensors:
         raise ValueError("kv_caches is empty. Cannot compute KV layout.")
 
-    gpu_kv_format, normalized = normalize_kv_and_discover_format(
+    engine_kv_format, normalized = normalize_kv_and_discover_format(
         tensors, EngineType.VLLM, layout_hints=layout_hints
     )
-    block_size = get_block_size(normalized, gpu_kv_format)
-    num_layers = get_num_layers(normalized, gpu_kv_format)
-    hidden_dim_size = get_hidden_dim_size(normalized, gpu_kv_format)
+    block_size = get_block_size(normalized, engine_kv_format)
+    num_layers = get_num_layers(normalized, engine_kv_format)
+    hidden_dim_size = get_hidden_dim_size(normalized, engine_kv_format)
     dtype_str = str(tensors[0].dtype).replace("torch.", "")
-    return block_size, num_layers, hidden_dim_size, dtype_str, gpu_kv_format
+    return block_size, num_layers, hidden_dim_size, dtype_str, engine_kv_format
 
 
 def gather_paged_kv_to_cpu(
@@ -304,7 +304,7 @@ def gather_paged_kv_to_cpu(
     block_ids: list[int],
     blocks_per_chunk: int,
     layout_hints: LayoutHints | None = None,
-    gpu_kv_format: "lmc_ops.GPUKVFormat" | None = None,
+    engine_kv_format: "lmc_ops.EngineKVFormat" | None = None,
     out: list[torch.Tensor] | None = None,
     chunk_indices: list[int] | None = None,
 ) -> list[torch.Tensor]:
@@ -315,7 +315,7 @@ def gather_paged_kv_to_cpu(
         block_ids: Flattened block IDs for all chunks.
         blocks_per_chunk: Number of paged blocks in one LMCache chunk.
         layout_hints: Optional engine layout hints.
-        gpu_kv_format: Optional pre-detected KV format.
+        engine_kv_format: Optional pre-detected KV format.
         out: Optional pre-allocated output tensors.  If provided, length
             must be at least ``len(chunk_indices)`` when ``chunk_indices``
             is given, or the total number of chunks otherwise.  Any extra
@@ -352,19 +352,19 @@ def gather_paged_kv_to_cpu(
     fmt, normalized = normalize_kv_and_discover_format(
         tensors, EngineType.VLLM, layout_hints=layout_hints
     )
-    if gpu_kv_format is None:
-        gpu_kv_format = fmt
+    if engine_kv_format is None:
+        engine_kv_format = fmt
 
-    block_size = get_block_size(normalized, gpu_kv_format)
-    num_layers = get_num_layers(normalized, gpu_kv_format)
-    hidden_dim_size = get_hidden_dim_size(normalized, gpu_kv_format)
-    num_blocks = get_num_blocks(normalized, gpu_kv_format)
+    block_size = get_block_size(normalized, engine_kv_format)
+    num_layers = get_num_layers(normalized, engine_kv_format)
+    hidden_dim_size = get_hidden_dim_size(normalized, engine_kv_format)
+    num_blocks = get_num_blocks(normalized, engine_kv_format)
     num_chunks = len(block_ids) // blocks_per_chunk
     chunk_tokens = blocks_per_chunk * block_size
 
     shape_desc = make_page_buffer_shape_desc(
         normalized,
-        gpu_kv_format,
+        engine_kv_format,
         layer_idx=0,
         num_layers_in_group=num_layers,
         num_blocks=num_blocks,
@@ -390,7 +390,7 @@ def gather_paged_kv_to_cpu(
     staged_chunks = []
 
     if out is None:
-        use_mla = is_mla(gpu_kv_format)
+        use_mla = is_mla(engine_kv_format)
         if use_mla:
             chunks = [
                 torch.empty(
@@ -464,7 +464,7 @@ def gather_paged_kv_to_cpu(
                 lmc_ops.TransferDirection.D2H,
                 shape_desc,
                 chunk_tokens,
-                gpu_kv_format,
+                engine_kv_format,
                 0,
             )
 
@@ -508,7 +508,7 @@ def gather_paged_kv_to_cpu(
                     lmc_ops.TransferDirection.D2H,
                     shape_desc,
                     chunk_tokens,
-                    gpu_kv_format,
+                    engine_kv_format,
                     0,
                 )
 
@@ -545,7 +545,7 @@ def scatter_cpu_to_paged_kv(
     blocks_per_chunk: int,
     skip_first_n_tokens: int = 0,
     layout_hints: LayoutHints | None = None,
-    gpu_kv_format: "lmc_ops.GPUKVFormat" | None = None,
+    engine_kv_format: "lmc_ops.EngineKVFormat" | None = None,
 ) -> None:
     """Scatter CPU chunk tensors back into paged KV tensors.
 
@@ -562,7 +562,7 @@ def scatter_cpu_to_paged_kv(
             to the nearest whole block and an error is logged (matching the
             GPU transfer path).
         layout_hints: Optional engine layout hints.
-        gpu_kv_format: Optional pre-detected KV format.
+        engine_kv_format: Optional pre-detected KV format.
 
     Raises:
         ValueError: If ``block_ids`` is shorter than
@@ -594,17 +594,17 @@ def scatter_cpu_to_paged_kv(
     fmt, normalized = normalize_kv_and_discover_format(
         tensors, EngineType.VLLM, layout_hints=layout_hints
     )
-    if gpu_kv_format is None:
-        gpu_kv_format = fmt
+    if engine_kv_format is None:
+        engine_kv_format = fmt
 
-    block_size = get_block_size(normalized, gpu_kv_format)
-    num_layers = get_num_layers(normalized, gpu_kv_format)
-    num_blocks = get_num_blocks(normalized, gpu_kv_format)
+    block_size = get_block_size(normalized, engine_kv_format)
+    num_layers = get_num_layers(normalized, engine_kv_format)
+    num_blocks = get_num_blocks(normalized, engine_kv_format)
     chunk_tokens = blocks_per_chunk * block_size
 
     # Block-level transfer can only skip whole blocks. A non-aligned prefix is
-    # rounded down to the nearest block (matching the GPU transfer path in
-    # gpu_transfer.py) rather than raising, so a slightly misaligned skip
+    # rounded down to the nearest block (matching the lmcache-driven path in
+    # lmcache_driven_transfer.py) rather than raising, so a slightly misaligned skip
     # degrades gracefully instead of failing the whole retrieve.
     if skip_first_n_tokens % block_size != 0:
         logger.error(
@@ -618,7 +618,7 @@ def scatter_cpu_to_paged_kv(
 
     shape_desc = make_page_buffer_shape_desc(
         normalized,
-        gpu_kv_format,
+        engine_kv_format,
         layer_idx=0,
         num_layers_in_group=num_layers,
         num_blocks=num_blocks,
@@ -648,7 +648,7 @@ def scatter_cpu_to_paged_kv(
             lmc_ops.TransferDirection.H2D,
             shape_desc,
             chunk_tokens,
-            gpu_kv_format,
+            engine_kv_format,
             skip_prefix_n_blocks,
         )
     else:
@@ -705,7 +705,7 @@ def scatter_cpu_to_paged_kv(
                 lmc_ops.TransferDirection.H2D,
                 shape_desc,
                 chunk_tokens,
-                gpu_kv_format,
+                engine_kv_format,
                 skip_prefix_n_blocks if i == 0 else 0,
             )
     # Fast path: The async GPU copy might still be in progress.

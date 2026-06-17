@@ -1,4 +1,4 @@
-Hybrid-Attention Models
+Hybrid Attention Models
 =======================
 
 Some models interleave more than one attention type across their layers — most
@@ -13,6 +13,44 @@ caching and KV reuse work the same way they do for plain models.
 .. contents::
    :local:
    :depth: 2
+
+Validated hybrid models
+-----------------------
+
+Recipe pages for the validated hybrid-attention architectures:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 34 34 32
+
+   * - Architecture
+     - Attention layout
+     - Recipe
+   * - ``Gemma3ForConditionalGeneration``
+     - Sliding-window + full
+     - :doc:`/recipes/gemma3`
+   * - ``Gemma4ForConditionalGeneration``
+     - Sliding-window + full
+     - :doc:`/recipes/gemma4`
+   * - ``GptOssForCausalLM``
+     - Sliding-window + full
+     - :doc:`/recipes/gpt_oss`
+   * - ``Qwen3_5ForConditionalGeneration``
+     - Mamba / GDN + full
+     - :doc:`/recipes/qwen3_5`
+   * - ``DeepseekV4ForCausalLM``
+     - Sparse-MLA (multiple KV groups)
+     - :doc:`/recipes/deepseek_v4_flash`
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+
+   /recipes/gemma3
+   /recipes/gemma4
+   /recipes/gpt_oss
+   /recipes/qwen3_5
+   /recipes/deepseek_v4_flash
 
 What Works
 ----------
@@ -41,7 +79,7 @@ configuration. Examples:
      - Single attention type
      - Supported
 
-Just point vLLM at the LMCache server as usual (see :doc:`quickstart`); LMCache
+Just point vLLM at the LMCache server as usual (see :doc:`/getting_started/quickstart`); LMCache
 detects the model's KV cache groups automatically at registration time.
 
 .. note::
@@ -205,6 +243,6 @@ The project ships this as the ``hma_lm_eval`` continuous-integration test (see
 See Also
 --------
 
-- :doc:`quickstart` — launching the LMCache server and a vLLM client.
+- :doc:`/getting_started/quickstart` — launching the LMCache server and a vLLM client.
 - Design notes on how groups are detected and addressed:
   ``docs/design/integration/vllm/hybrid-kv-cache-groups.md`` in the source tree.

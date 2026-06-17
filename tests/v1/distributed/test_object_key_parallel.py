@@ -187,7 +187,7 @@ class TestStorageManagerTPLookup:
         # All keys should be found (5 chunks * 2 workers = 10)
         assert found_count == num_chunks * world_size
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         assert found_ipc_count == num_chunks
 
@@ -218,7 +218,7 @@ class TestStorageManagerTPLookup:
         # So we find chunk0_worker0 (1), then miss chunk0_worker1
         assert found_count == 1
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         # 1 // 2 = 0, so no complete cache hit
         assert found_ipc_count == 0
@@ -247,7 +247,7 @@ class TestStorageManagerTPLookup:
         # First lookup key is chunk0_worker0 which is missing
         assert found_count == 0
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         assert found_ipc_count == 0
 
@@ -281,7 +281,7 @@ class TestStorageManagerTPLookup:
         # First 3 chunks * 2 workers = 6 keys found, then stops at chunk3_worker0
         assert found_count == num_stored_chunks * world_size
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         assert found_ipc_count == num_stored_chunks
 
@@ -331,7 +331,7 @@ class TestStorageManagerTPLookup:
         # chunk2_w1: NOT found (stops)
         assert found_count == 5  # 2 complete chunks * 2 workers + 1 partial
 
-        # Simulating MPCacheEngine.lookup logic
+        # Simulating MPCacheServer.lookup logic
         found_ipc_count = found_count // world_size
         # 5 // 2 = 2, so only 2 complete chunks
         assert found_ipc_count == 2

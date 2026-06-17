@@ -41,7 +41,16 @@ details.
 Builds the manager image, loads it into a dedicated Kind cluster
 (`operator-test-e2e-<id>` by default), installs CRDs, deploys the controller,
 runs every `//go:build e2e` spec under `test/e2e/`, then tears the
-cluster down. No prereqs beyond Kind + Docker on `$PATH`.
+cluster down. No prereqs beyond Kind + Docker on `$PATH` (plus network
+egress to GitHub).
+
+The suite installs **cert-manager** into the cluster before deploying the
+controller — it issues the mutating webhook's serving cert and injects the
+CA bundle (see `config/certmanager`), so the controller-manager Deployment
+never reaches `Available` without it. Install is skipped when the cluster
+already ships cert-manager (e.g. an existing OpenShift/EKS cluster), and
+the suite only uninstalls what it installed. Override the release with
+`CERT_MANAGER_VERSION` (default `v1.16.3`).
 
 #### `test-e2e-cluster` — existing cluster (OpenShift, EKS, k3s, …)
 
