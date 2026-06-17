@@ -37,6 +37,7 @@ def base_namespace() -> argparse.Namespace:
         no_csv=False,
         json=False,
         quiet=False,
+        ignore_eos=False,
     )
 
 
@@ -68,6 +69,10 @@ class TestEngineBenchConfig:
         assert cfg.model == "test-model"
         assert cfg.workload == "long-doc-qa"
         assert cfg.tokens_per_gb_kvcache == 50000
+
+    def test_ignore_eos_defaults_false_and_overridable(self) -> None:
+        assert self._make_config().ignore_eos is False
+        assert self._make_config(ignore_eos=True).ignore_eos is True
 
     def test_empty_engine_url(self) -> None:
         with pytest.raises(ValueError, match="engine_url must be non-empty"):

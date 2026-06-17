@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from itertools import islice
 from typing import Generator, Sequence
+import threading
 import time
 
 # Third Party
@@ -36,6 +37,7 @@ from lmcache.v1.multiprocess.custom_types import (
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     HandlerSpec,
+    InstanceLivenessTarget,
     ThreadPoolType,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -396,14 +398,21 @@ class ContextEntry:
             shape and pointers to the registered KV cache tensors.
         model_name: The name of the model associated with this KV cache.
         world_size: The world size associated with this KV cache.
+        last_seen: ``time.monotonic()`` of the most recent activity from
+            this instance (register, PING, store, or retrieve). Drives reaping.
+        has_liveness_signal: True once the instance has sent at least one
+            PING. Selects the reap window (timeout vs registration grace).
+            Latched only by PING, never by traffic.
     """
 
     cache_context: BaseCacheContext
     model_name: str
     world_size: int
+    last_seen: float = 0.0
+    has_liveness_signal: bool = False
 
 
-class LMCacheDrivenTransferModule:
+class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     """Handles LMCache-driven KV cache transfer operations.
 
     Owns GPU context registrations and provides handlers for
@@ -416,6 +425,12 @@ class LMCacheDrivenTransferModule:
     def __init__(self, ctx: MPCacheServerContext) -> None:
         self._ctx = ctx
         self._cache_contexts: dict[int, ContextEntry] = {}
+        # Guards all reads/writes of _cache_contexts. The reaper mutates it
+        # off the MQ main loop, so register/unregister/store/retrieve and
+        # report_status all serialize through this lock. Held only for dict
+        # ops -- never across context creation, layout-registry calls, or
+        # empty_cache (leaf-lock invariant: no thread holds two locks).
+        self._lock = threading.Lock()
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -437,10 +452,105 @@ class LMCacheDrivenTransferModule:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
 
-    @property
-    def cache_contexts(self) -> dict[int, ContextEntry]:
-        """Per-instance GPU context registry."""
-        return self._cache_contexts
+    def get_and_touch_context_entry(self, instance_id: int) -> ContextEntry | None:
+        """Return the entry for ``instance_id``, refreshing its last-seen time.
+
+        The refresh keeps an actively transferring worker from being reaped
+        even if its PINGs are briefly delayed. Does not latch the
+        ping-proven flag -- only PINGs do that.
+
+        Args:
+            instance_id: The worker instance ID.
+
+        Returns:
+            The entry, or None if the instance is not (or no longer) tracked.
+        """
+        now = time.monotonic()
+        with self._lock:
+            entry = self._cache_contexts.get(instance_id)
+            if entry is not None:
+                entry.last_seen = now
+            return entry
+
+    def context_entries_snapshot(self) -> dict[int, ContextEntry]:
+        """Return a shallow copy of the registry for iteration or status.
+
+        Returns:
+            A new dict mapping instance ID to entry; does not refresh
+            last-seen times.
+        """
+        with self._lock:
+            return dict(self._cache_contexts)
+
+    def touch_instance(self, instance_id: int) -> None:
+        """Refresh the worker's last-seen time and mark it ping-proven.
+
+        A no-op if the instance is not tracked.
+
+        Args:
+            instance_id: The worker instance ID.
+        """
+        now = time.monotonic()
+        with self._lock:
+            entry = self._cache_contexts.get(instance_id)
+            if entry is not None:
+                entry.last_seen = now
+                entry.has_liveness_signal = True
+
+    def tracked_instance_count(self) -> int:
+        """Return the number of currently registered instances."""
+        with self._lock:
+            return len(self._cache_contexts)
+
+    def reap_stale_instances(
+        self, reap_timeout_s: float, registration_grace_s: float
+    ) -> list[int]:
+        """Reap GPU registrations that have gone silent.
+
+        A ping-proven instance is judged against ``reap_timeout_s``; one
+        that has never pinged against the larger ``registration_grace_s``.
+
+        Args:
+            reap_timeout_s: Silence budget for ping-proven instances.
+            registration_grace_s: Silence budget for never-pinged instances.
+
+        Returns:
+            The instance IDs reaped this scan.
+        """
+        now = time.monotonic()
+        reaped: list[tuple[int, ContextEntry]] = []
+        with self._lock:
+            stale_ids = [
+                iid
+                for iid, entry in self._cache_contexts.items()
+                if now - entry.last_seen
+                > (
+                    reap_timeout_s
+                    if entry.has_liveness_signal
+                    else registration_grace_s
+                )
+            ]
+            for iid in stale_ids:
+                reaped.append((iid, self._cache_contexts.pop(iid)))
+        for iid, entry in reaped:
+            self._release_entry(entry)
+            logger.warning(
+                "Reaped GPU instance %d: silent for %.1fs (pinged=%s)",
+                iid,
+                now - entry.last_seen,
+                entry.has_liveness_signal,
+            )
+        return [iid for iid, _ in reaped]
+
+    def _release_entry(self, entry: ContextEntry) -> None:
+        """Release resources for a popped entry (run outside the lock).
+
+        Args:
+            entry: The entry removed from the registry.
+        """
+        entry.cache_context.close()
+        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        torch_dev.empty_cache()
 
     def get_handlers(self) -> list[HandlerSpec]:
         """Return handler specs for all request types this module serves.
@@ -482,7 +592,7 @@ class LMCacheDrivenTransferModule:
         registered_gpu_ids: list[int] = []
         cache_context_meta: dict[str, dict] = {}
 
-        for instance_id, entry in self._cache_contexts.items():
+        for instance_id, entry in self.context_entries_snapshot().items():
             registered_gpu_ids.append(instance_id)
             ctx = entry.cache_context
             cache_context_meta[str(instance_id)] = {
@@ -502,11 +612,12 @@ class LMCacheDrivenTransferModule:
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
 
-        had_contexts = len(self._cache_contexts) > 0
-        for entry in self._cache_contexts.values():
+        with self._lock:
+            entries = list(self._cache_contexts.values())
+            self._cache_contexts.clear()
+        for entry in entries:
             entry.cache_context.close()
-        self._cache_contexts.clear()
-        if had_contexts:
+        if entries:
             torch_dev.empty_cache()
 
     def register_kv_cache(
@@ -534,14 +645,22 @@ class LMCacheDrivenTransferModule:
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
         """
-        if instance_id in self._cache_contexts:
-            logger.warning(
-                "Instance %s's KV cache is already registered, "
-                "skipping the new registration",
-                instance_id,
-            )
-            return
+        now = time.monotonic()
+        # NOOP-register: an already-registered instance (e.g. a recovering
+        # worker re-registering on its first ping) refreshes its last-seen
+        # time so a stale entry is not reaped right after recovery. REGISTER
+        # is SYNC-serialized on the MQ main loop, so it is the sole inserter.
+        with self._lock:
+            existing = self._cache_contexts.get(instance_id)
+            if existing is not None:
+                existing.last_seen = now
+                logger.info(
+                    "Instance %d already registered; refreshing liveness",
+                    instance_id,
+                )
+                return
 
+        # Build the context and layout descriptor outside the lock.
         cache_context = create_cache_context(
             kv_caches,
             self._ctx.chunk_size,
@@ -549,16 +668,19 @@ class LMCacheDrivenTransferModule:
             engine_group_infos=engine_group_infos,
             engine_type=engine_type,
         )
-        self._cache_contexts[instance_id] = ContextEntry(
-            cache_context=cache_context,
-            model_name=model_name,
-            world_size=world_size,
-        )
-
         layout_desc = get_layout_desc(
             cache_context, self._ctx.chunk_size, object_group_id=0
         )
         self._ctx.layout_desc_registry.register(model_name, world_size, layout_desc)
+
+        with self._lock:
+            self._cache_contexts[instance_id] = ContextEntry(
+                cache_context=cache_context,
+                model_name=model_name,
+                world_size=world_size,
+                last_seen=now,
+                has_liveness_signal=False,
+            )
 
         logger.info(
             "Registered KV cache for GPU ID %d with %d layers",
@@ -572,17 +694,16 @@ class LMCacheDrivenTransferModule:
         Args:
             instance_id: The GPU instance ID (such as PID).
         """
-        entry = self._cache_contexts.pop(instance_id, None)
+        with self._lock:
+            entry = self._cache_contexts.pop(instance_id, None)
         if entry is None:
             logger.warning(
                 "No registered GPU context found for instance ID %d", instance_id
             )
             return
 
-        entry.cache_context.close()
-        self._ctx.layout_desc_registry.unregister(entry.model_name, entry.world_size)
+        self._release_entry(entry)
         logger.info("Unregistered KV cache for GPU ID %d", instance_id)
-        torch_dev.empty_cache()
 
     @_lmcache_nvtx_annotate
     def store(
@@ -623,7 +744,7 @@ class LMCacheDrivenTransferModule:
         """
         st = time.perf_counter()
 
-        entry = self._cache_contexts.get(instance_id)
+        entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
         cache_context = entry.cache_context
@@ -827,7 +948,7 @@ class LMCacheDrivenTransferModule:
         """
         st = time.perf_counter()
 
-        entry = self._cache_contexts.get(instance_id)
+        entry = self.get_and_touch_context_entry(instance_id)
         if entry is None:
             raise ValueError(f"No GPU context registered for instance ID {instance_id}")
         cache_context = entry.cache_context
