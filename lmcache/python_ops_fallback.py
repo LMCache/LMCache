@@ -7,7 +7,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
 from multiprocessing import shared_memory
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, cast
 import ctypes
 import ctypes.util
 import os
@@ -471,7 +471,10 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     shm = shared_memory.SharedMemory(name=name, create=True, size=size)
 
     array_type = ctypes.c_uint8 * size
-    buf = array_type.from_buffer(shm.buf)
+    shm_buf = shm.buf
+    if shm_buf is None:
+        raise RuntimeError("Shared memory buffer is unavailable")
+    buf = array_type.from_buffer(shm_buf)
     ptr = ctypes.addressof(buf)
 
     # Store references to keep them alive
@@ -1094,6 +1097,48 @@ def _to_block_id_list(block_ids: torch.Tensor | list[int]) -> list[int]:
     raise TypeError("block_ids must be a torch.Tensor or list[int]")
 
 
+def _device_type_name(device: torch.device | str) -> str:
+    """Return the device type without constructing backend-specific devices."""
+    if isinstance(device, torch.device):
+        return device.type
+    return str(device).split(":", maxsplit=1)[0]
+
+
+def _try_platform_multi_layer_block_kv_transfer(
+    *,
+    paged_layers: Any,
+    object_tensors: list[torch.Tensor],
+    block_ids: torch.Tensor | list[int],
+    device: torch.device | str,
+    direction: TransferDirection,
+    shape_desc: PageBufferShapeDesc,
+    lmcache_chunk_size: int,
+    engine_kv_format: EngineKVFormat,
+    skip_prefix_n_blocks: int,
+) -> bool:
+    """Try an optional platform fast path behind block KV transfer."""
+    if _device_type_name(device) != "musa":
+        return False
+    try:
+        # First Party
+        from lmcache.v1.platform.musa.native_kv_transfer import (
+            try_native_multi_layer_block_kv_transfer,
+        )
+
+        return try_native_multi_layer_block_kv_transfer(
+            paged_layers=paged_layers,
+            object_tensors=object_tensors,
+            block_ids=block_ids,
+            direction=direction,
+            shape_desc=shape_desc,
+            lmcache_chunk_size=lmcache_chunk_size,
+            engine_kv_format=engine_kv_format,
+            skip_prefix_n_blocks=skip_prefix_n_blocks,
+        )
+    except Exception:
+        return False
+
+
 def multi_layer_block_kv_transfer(
     paged_buffer_ptrs_tensor: "torch.Tensor | list",
     lmcache_objects_ptrs: list[int] | list[torch.Tensor],
@@ -1168,9 +1213,22 @@ def multi_layer_block_kv_transfer(
     blocks_per_object = lmcache_chunk_size // int(shape_desc.bs)
     block_size = int(shape_desc.bs)
 
+    if _try_platform_multi_layer_block_kv_transfer(
+        paged_layers=normalized,
+        object_tensors=object_tensors,
+        block_ids=block_ids,
+        device=device,
+        direction=direction,
+        shape_desc=shape_desc,
+        lmcache_chunk_size=lmcache_chunk_size,
+        engine_kv_format=engine_kv_format,
+        skip_prefix_n_blocks=skip_prefix_n_blocks,
+    ):
+        return
+
     if _is_cross_layer_format(engine_kv_format):
         _transfer_cross_layer(
-            normalized,
+            cast(torch.Tensor, normalized),
             object_tensors,
             block_ids,
             n_block_ids,
@@ -1182,7 +1240,7 @@ def multi_layer_block_kv_transfer(
         )
     elif _is_sglang_mha_format(engine_kv_format):
         _transfer_sglang_mha(
-            normalized,
+            cast(list[list[torch.Tensor]], normalized),
             object_tensors,
             block_ids,
             n_block_ids,
@@ -1194,7 +1252,7 @@ def multi_layer_block_kv_transfer(
         )
     elif _is_mla_format(engine_kv_format):
         _transfer_per_layer_mla(
-            normalized,
+            cast(list[torch.Tensor], normalized),
             object_tensors,
             block_ids,
             n_block_ids,
@@ -1206,7 +1264,7 @@ def multi_layer_block_kv_transfer(
         )
     elif _is_hnd_format(engine_kv_format):
         _transfer_per_layer_hnd(
-            normalized,
+            cast(list[torch.Tensor], normalized),
             object_tensors,
             block_ids,
             n_block_ids,
@@ -1218,7 +1276,7 @@ def multi_layer_block_kv_transfer(
         )
     else:
         _transfer_per_layer_nhd(
-            normalized,
+            cast(list[torch.Tensor], normalized),
             object_tensors,
             block_ids,
             n_block_ids,

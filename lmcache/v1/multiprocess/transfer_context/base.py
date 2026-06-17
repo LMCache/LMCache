@@ -18,7 +18,7 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 import inspect
 
 # Third Party
@@ -36,6 +36,7 @@ from lmcache.v1.multiprocess.mq import MessageQueueClient
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.v1.gpu_connector.utils import DiscoverableKVCache
     import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -100,6 +101,25 @@ logger.info(
 def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
     """Convert a list of tensors to a list of their data_ptr() values."""
     return [t.data_ptr() for t in tensors]
+
+
+def _block_transfer_accepts_tensor_for_device(device: torch.device) -> bool:
+    """Return whether block transfer should use tensor-list arguments."""
+    return _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR or device.type == "cpu"
+
+
+def _block_transfer_ops_for_device(device: torch.device) -> Any:
+    """Return the block-transfer module appropriate for the paged tensor device."""
+    if not _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR and device.type == "cpu":
+        # First Party
+        import lmcache.python_ops_fallback as py_lmc_ops
+
+        return py_lmc_ops
+
+    # First Party
+    import lmcache.c_ops as lmc_ops
+
+    return lmc_ops
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +310,9 @@ def compute_kv_layout(
         raise ValueError("kv_caches is empty. Cannot compute KV layout.")
 
     engine_kv_format, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        cast("DiscoverableKVCache", tensors),
+        EngineType.VLLM,
+        layout_hints=layout_hints,
     )
     block_size = get_block_size(normalized, engine_kv_format)
     num_layers = get_num_layers(normalized, engine_kv_format)
@@ -350,7 +372,9 @@ def gather_paged_kv_to_cpu(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        cast("DiscoverableKVCache", tensors),
+        EngineType.VLLM,
+        layout_hints=layout_hints,
     )
     if engine_kv_format is None:
         engine_kv_format = fmt
@@ -385,12 +409,12 @@ def gather_paged_kv_to_cpu(
 
     # Determine if pinned memory is strictly required
     # (only for the compiled C++ path which does not accept tensor)
-    requires_pinned = not _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR
+    requires_pinned = not _block_transfer_accepts_tensor_for_device(tensors[0].device)
     needs_staging = False
     staged_chunks = []
 
+    use_mla = is_mla(engine_kv_format)
     if out is None:
-        use_mla = is_mla(engine_kv_format)
         if use_mla:
             chunks = [
                 torch.empty(
@@ -449,19 +473,20 @@ def gather_paged_kv_to_cpu(
         )
 
     if selected_block_ids:
-        if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR:
+        if _block_transfer_accepts_tensor_for_device(tensors[0].device):
             # Python fallback: accepts tensor list directly for all params.
-            paged_arg = normalized
-            objs_arg = chunks
-            block_ids_arg = selected_block_ids
+            transfer_ops = _block_transfer_ops_for_device(tensors[0].device)
+            paged_tensor_arg = normalized
+            objs_tensor_arg = chunks
+            block_ids_list_arg = selected_block_ids
 
             # call kernel in one shot
-            lmc_ops.multi_layer_block_kv_transfer(
-                paged_arg,
-                objs_arg,
-                block_ids_arg,
+            transfer_ops.multi_layer_block_kv_transfer(
+                paged_tensor_arg,
+                objs_tensor_arg,
+                block_ids_list_arg,
                 tensors[0].device,
-                lmc_ops.TransferDirection.D2H,
+                transfer_ops.TransferDirection.D2H,
                 shape_desc,
                 chunk_tokens,
                 engine_kv_format,
@@ -470,38 +495,39 @@ def gather_paged_kv_to_cpu(
 
         else:
             # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
+            normalized_tensors = cast(list[torch.Tensor], normalized)
             _ptrs_np = np.array(
-                [t.data_ptr() for t in normalized],  # type: ignore[union-attr]
+                [t.data_ptr() for t in normalized_tensors],
                 dtype=np.uint64,
             ).view(np.int64)
-            paged_arg = torch.from_numpy(_ptrs_np).to(device=tensors[0].device)
+            paged_ptr_arg = torch.from_numpy(_ptrs_np).to(device=tensors[0].device)
 
             # This safely points to either the pre-pinned chunks
             # OR the temporary staged_chunks
-            objs_arg = _tensors_to_ptrs(chunks)
+            objs_ptr_arg = _tensors_to_ptrs(chunks)
 
-            block_ids_arg = torch.tensor(
+            block_ids_tensor_arg = torch.tensor(
                 selected_block_ids, dtype=torch.int64, device=tensors[0].device
             )
 
             # Split transfer to respect CUDA kernel's object count limitation
             MAX_OBJECTS = 4
             req_blocks_per_obj = blocks_per_chunk
-            total_objects = len(objs_arg)
+            total_objects = len(objs_ptr_arg)
 
             for i in range(0, total_objects, MAX_OBJECTS):
                 # Slice object pointers and corresponding block IDs
-                batch_objs_ptrs = objs_arg[i : i + MAX_OBJECTS]
+                batch_objs_ptrs = objs_ptr_arg[i : i + MAX_OBJECTS]
 
                 start_block = i * req_blocks_per_obj
                 end_block = min(
                     (i + MAX_OBJECTS) * req_blocks_per_obj, len(selected_block_ids)
                 )
-                batch_blocks = block_ids_arg[start_block:end_block]
+                batch_blocks = block_ids_tensor_arg[start_block:end_block]
 
                 # Execute batched transfer
                 lmc_ops.multi_layer_block_kv_transfer(
-                    paged_arg,
+                    paged_ptr_arg,
                     batch_objs_ptrs,
                     batch_blocks,
                     tensors[0].device,
@@ -592,7 +618,9 @@ def scatter_cpu_to_paged_kv(
 
     tensors = list(kv_caches.values())
     fmt, normalized = normalize_kv_and_discover_format(
-        tensors, EngineType.VLLM, layout_hints=layout_hints
+        cast("DiscoverableKVCache", tensors),
+        EngineType.VLLM,
+        layout_hints=layout_hints,
     )
     if engine_kv_format is None:
         engine_kv_format = fmt
@@ -604,8 +632,8 @@ def scatter_cpu_to_paged_kv(
 
     # Block-level transfer can only skip whole blocks. A non-aligned prefix is
     # rounded down to the nearest block (matching the lmcache-driven path in
-    # lmcache_driven_transfer.py) rather than raising, so a slightly misaligned skip
-    # degrades gracefully instead of failing the whole retrieve.
+    # lmcache_driven_transfer.py) rather than raising, so a slightly misaligned
+    # skip degrades gracefully instead of failing the whole retrieve.
     if skip_first_n_tokens % block_size != 0:
         logger.error(
             "skip_first_n_tokens (%d) is not block-aligned (block_size=%d); "
@@ -634,18 +662,19 @@ def scatter_cpu_to_paged_kv(
     if not selected_block_ids:
         return
 
-    if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR:
+    if _block_transfer_accepts_tensor_for_device(tensors[0].device):
         # Python fallback: accepts tensor list directly for all params.
-        paged_arg = normalized
-        objs_arg = chunks
-        block_ids_arg = selected_block_ids
+        transfer_ops = _block_transfer_ops_for_device(tensors[0].device)
+        paged_tensor_arg = normalized
+        objs_tensor_arg = chunks
+        block_ids_list_arg = selected_block_ids
 
-        lmc_ops.multi_layer_block_kv_transfer(
-            paged_arg,
-            objs_arg,
-            block_ids_arg,
+        transfer_ops.multi_layer_block_kv_transfer(
+            paged_tensor_arg,
+            objs_tensor_arg,
+            block_ids_list_arg,
             tensors[0].device,
-            lmc_ops.TransferDirection.H2D,
+            transfer_ops.TransferDirection.H2D,
             shape_desc,
             chunk_tokens,
             engine_kv_format,
@@ -669,13 +698,14 @@ def scatter_cpu_to_paged_kv(
             ]
 
         # Compiled C++/CUDA/XPU: requires int64 pointer tensor and list[int].
+        normalized_tensors = cast(list[torch.Tensor], normalized)
         _ptrs_np = np.array(
-            [t.data_ptr() for t in normalized],  # type: ignore[union-attr]
+            [t.data_ptr() for t in normalized_tensors],
             dtype=np.uint64,
         ).view(np.int64)
-        paged_arg = torch.from_numpy(_ptrs_np).to(device=tensors[0].device)
-        objs_arg = _tensors_to_ptrs(chunks)
-        block_ids_arg = torch.tensor(
+        paged_ptr_arg = torch.from_numpy(_ptrs_np).to(device=tensors[0].device)
+        objs_ptr_arg = _tensors_to_ptrs(chunks)
+        block_ids_tensor_arg = torch.tensor(
             selected_block_ids, dtype=torch.int64, device=tensors[0].device
         )
 
@@ -688,17 +718,17 @@ def scatter_cpu_to_paged_kv(
 
         for i in range(0, total_chunks, MAX_OBJECTS):
             # Slice objects and block IDs for this batch
-            batch_objs_ptrs = objs_arg[i : i + MAX_OBJECTS]
+            batch_objs_ptrs = objs_ptr_arg[i : i + MAX_OBJECTS]
 
             start_block = i * req_blocks_per_obj
             end_block = min(
                 (i + MAX_OBJECTS) * req_blocks_per_obj, len(selected_block_ids)
             )
-            batch_blocks = block_ids_arg[start_block:end_block]
+            batch_blocks = block_ids_tensor_arg[start_block:end_block]
 
             # Execute transfer for this batch
             lmc_ops.multi_layer_block_kv_transfer(
-                paged_arg,
+                paged_ptr_arg,
                 batch_objs_ptrs,
                 batch_blocks,
                 tensors[0].device,

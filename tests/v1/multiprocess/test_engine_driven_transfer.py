@@ -25,6 +25,7 @@ from lmcache.v1.multiprocess.protocol import RequestType
 from lmcache.v1.multiprocess.protocols.engine import (
     PrepareRetrieveResponse,
     PrepareStoreResponse,
+    RegisterEngineDrivenContextResponse,
 )
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContextMetadata,
@@ -390,6 +391,193 @@ def test_create_transfer_context_handle_mode_unsupported_device_raises(
         platform_registry.restore(snapshot)
 
 
+def test_musa_data_context_keeps_layout_validation_device_agnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUSA MP data path must not put device layout gates in transfer context."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+    import lmcache.c_ops as lmc_ops
+
+    def _fake_compute_kv_layout(
+        *_args: Any, **_kwargs: Any
+    ) -> tuple[int, int, int, str, Any]:
+        return (
+            4,
+            2,
+            16,
+            "float32",
+            lmc_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        )
+
+    monkeypatch.setattr(worker_transfer, "compute_kv_layout", _fake_compute_kv_layout)
+    monkeypatch.setattr(
+        worker_transfer,
+        "create_engine_driven_context",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
+    future = MagicMock()
+    future.result.return_value = RegisterEngineDrivenContextResponse()
+    ctx = EngineDrivenTransferContext(device_type="musa")
+
+    ctx.register(
+        instance_id=1,
+        kv_caches=_make_hnd_kv_caches(),
+        model_name="m",
+        world_size=1,
+        blocks_in_chunk=2,
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        send_request=MagicMock(return_value=future),
+    )
+
+
+def test_musa_data_context_store_uses_device_agnostic_gather(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage3 store keeps MUSA native details behind block-transfer entry."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+    import lmcache.c_ops as lmc_ops
+
+    class _FakeEngineDrivenContext:
+        def prepare_store(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def commit_store(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
+
+        def close(self) -> None:
+            return None
+
+    captured_kwargs: dict[str, Any] = {}
+    future = MagicMock()
+    future.result.return_value = RegisterEngineDrivenContextResponse()
+    monkeypatch.setattr(
+        worker_transfer,
+        "compute_kv_layout",
+        lambda *_args, **_kwargs: (
+            4,
+            2,
+            16,
+            "float32",
+            lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        ),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "create_engine_driven_context",
+        lambda *_args, **_kwargs: _FakeEngineDrivenContext(),
+    )
+
+    def _fake_gather(*_args: Any, **kwargs: Any) -> list[torch.Tensor]:
+        captured_kwargs.update(kwargs)
+        return [torch.zeros(2, 2, 8, 16)]
+
+    monkeypatch.setattr(worker_transfer, "gather_paged_kv_to_cpu", _fake_gather)
+    ctx = EngineDrivenTransferContext(device_type="musa")
+    ctx.register(
+        instance_id=1,
+        kv_caches=_make_kv_caches(),
+        model_name="m",
+        world_size=1,
+        blocks_in_chunk=2,
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        send_request=MagicMock(return_value=future),
+    )
+
+    result = ctx.submit_store(
+        "req",
+        _default_key(),
+        1,
+        _make_kv_caches(),
+        [[0, 1]],
+        MagicMock(),
+        2,
+    ).result()
+
+    assert result is True
+    assert "prefer_musa_native" not in captured_kwargs
+
+
+def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage3 retrieve keeps MUSA native details behind block-transfer entry."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import (
+        EngineDrivenTransferContext,
+        worker_transfer,
+    )
+    import lmcache.c_ops as lmc_ops
+
+    class _FakeEngineDrivenContext:
+        def prepare_retrieve(self, *_args: Any, **_kwargs: Any) -> list[torch.Tensor]:
+            return [torch.zeros(2, 2, 8, 16)]
+
+        def commit_retrieve(self, *_args: Any, **_kwargs: Any) -> bool:
+            return True
+
+        def close(self) -> None:
+            return None
+
+    captured_kwargs: dict[str, Any] = {}
+    future = MagicMock()
+    future.result.return_value = RegisterEngineDrivenContextResponse()
+    monkeypatch.setattr(
+        worker_transfer,
+        "compute_kv_layout",
+        lambda *_args, **_kwargs: (
+            4,
+            2,
+            16,
+            "float32",
+            lmc_ops.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS,
+        ),
+    )
+    monkeypatch.setattr(
+        worker_transfer,
+        "create_engine_driven_context",
+        lambda *_args, **_kwargs: _FakeEngineDrivenContext(),
+    )
+
+    def _fake_scatter(*_args: Any, **kwargs: Any) -> None:
+        captured_kwargs.update(kwargs)
+
+    monkeypatch.setattr(worker_transfer, "scatter_cpu_to_paged_kv", _fake_scatter)
+    ctx = EngineDrivenTransferContext(device_type="musa")
+    ctx.register(
+        instance_id=1,
+        kv_caches=_make_kv_caches(),
+        model_name="m",
+        world_size=1,
+        blocks_in_chunk=2,
+        mq_client=MagicMock(),
+        mq_timeout=1.0,
+        send_request=MagicMock(return_value=future),
+    )
+
+    result = ctx.submit_retrieve(
+        "req",
+        _default_key(),
+        1,
+        _make_kv_caches(),
+        [[0, 1]],
+        MagicMock(),
+        2,
+    ).result()
+
+    assert result is True
+    assert "prefer_musa_native" not in captured_kwargs
+
+
 def test_create_transfer_context_env_var_overrides_default(
     monkeypatch: Any,
 ) -> None:
@@ -417,11 +605,11 @@ def test_create_transfer_context_env_var_overrides_default(
     ("builder_fn", "expected_block_size", "expected_hidden_dim", "layout_hints"),
     [
         pytest.param(
-            lambda: _make_kv_caches(num_layers=2, num_blocks=8, block_size=4),
+            lambda: _make_hnd_kv_caches(num_layers=2, num_blocks=8, block_size=4),
             4,
             16,
-            None,
-            id="nhd",
+            {"kv_layout": "HND"},
+            id="hnd",
         ),
         pytest.param(
             lambda: _make_mla_kv_caches(
@@ -463,9 +651,22 @@ def test_compute_kv_layout_and_gather_scatter_roundtrip(
     assert detected_kv_format is not None
 
     blocks_per_chunk = 2
-    gathered = gather_paged_kv_to_cpu(source, [0, 1], blocks_per_chunk)
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        [0, 1],
+        blocks_per_chunk,
+        layout_hints=layout_hints,
+        engine_kv_format=detected_kv_format,
+    )
     destination = {name: torch.zeros_like(tensor) for name, tensor in source.items()}
-    scatter_cpu_to_paged_kv(destination, [4, 5], gathered, blocks_per_chunk)
+    scatter_cpu_to_paged_kv(
+        destination,
+        [4, 5],
+        gathered,
+        blocks_per_chunk,
+        layout_hints=layout_hints,
+        engine_kv_format=detected_kv_format,
+    )
 
     for name in source:
         if source[name].dim() == 5:
@@ -553,14 +754,16 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
         "skip_tokens",
         "expected_unchanged_blocks",
         "expected_copied_blocks",
+        "layout_hints",
     ),
     [
         pytest.param(
-            lambda: _make_kv_caches(num_layers=2, num_blocks=8, block_size=4),
+            lambda: _make_hnd_kv_caches(num_layers=2, num_blocks=8, block_size=4),
             8,
             [0, 1],
             [2, 3],
-            id="nhd-skip-two-blocks",
+            {"kv_layout": "HND"},
+            id="hnd-skip-two-blocks",
         ),
         pytest.param(
             lambda: _make_mla_kv_caches(
@@ -569,6 +772,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
             8,
             [0, 1],
             [2, 3],
+            None,
             id="mla-skip-two-blocks",
         ),
         pytest.param(
@@ -578,6 +782,7 @@ def test_compute_kv_layout_empty_raises_value_error() -> None:
             40,
             [0, 1, 2, 3],
             [],
+            None,
             id="mla-skip-past-chunk",
         ),
     ],
@@ -587,6 +792,7 @@ def test_scatter_respects_skip_first_n_tokens(
     skip_tokens: int,
     expected_unchanged_blocks: list[int],
     expected_copied_blocks: list[int],
+    layout_hints: "LayoutHints | None",
 ) -> None:
     """Ensure scatter honors skip_first_n_tokens and preserves skipped blocks."""
     # First Party
@@ -599,13 +805,19 @@ def test_scatter_respects_skip_first_n_tokens(
     destination = {
         name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
     }
-    gathered = gather_paged_kv_to_cpu(source, [0, 1, 2, 3], blocks_per_chunk=4)
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        [0, 1, 2, 3],
+        blocks_per_chunk=4,
+        layout_hints=layout_hints,
+    )
     scatter_cpu_to_paged_kv(
         destination,
         [0, 1, 2, 3],
         gathered,
         blocks_per_chunk=4,
         skip_first_n_tokens=skip_tokens,
+        layout_hints=layout_hints,
     )
 
     for name in destination:
@@ -626,12 +838,125 @@ def test_scatter_respects_skip_first_n_tokens(
                 )
 
 
+@pytest.mark.parametrize(
+    ("builder_fn", "layout_hints"),
+    [
+        pytest.param(
+            lambda: _make_hnd_kv_caches(num_layers=2, num_blocks=4, block_size=4),
+            {"kv_layout": "HND"},
+            id="hnd",
+        ),
+        pytest.param(
+            lambda: _make_mla_kv_caches(
+                num_layers=2, num_blocks=4, block_size=4, hidden_size=16
+            ),
+            None,
+            id="mla",
+        ),
+    ],
+)
+def test_scatter_rounds_down_partial_block_skip_first_n_tokens(
+    builder_fn: Callable[[], dict[str, torch.Tensor]],
+    layout_hints: "LayoutHints | None",
+) -> None:
+    """Scatter rounds non-block-aligned prefix skips down to whole blocks."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context.base import (
+        gather_paged_kv_to_cpu,
+        scatter_cpu_to_paged_kv,
+    )
+
+    source = builder_fn()
+    destination = {
+        name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
+    }
+    gathered = gather_paged_kv_to_cpu(
+        source,
+        [0, 1],
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+    )
+    scatter_cpu_to_paged_kv(
+        destination,
+        [0, 1],
+        gathered,
+        blocks_per_chunk=2,
+        skip_first_n_tokens=2,
+        layout_hints=layout_hints,
+    )
+
+    for name in destination:
+        for block_idx in (0, 1):
+            if destination[name].dim() == 5:
+                assert torch.allclose(
+                    destination[name][:, block_idx],
+                    source[name][:, block_idx],
+                )
+            else:
+                assert torch.allclose(
+                    destination[name][block_idx],
+                    source[name][block_idx],
+                )
+        for block_idx in (2, 3):
+            if destination[name].dim() == 5:
+                assert torch.all(destination[name][:, block_idx] == 999.0)
+            else:
+                assert torch.all(destination[name][block_idx] == 999.0)
+
+
+def test_cpu_transfer_uses_python_fallback_when_block_transfer_is_ptr_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CPU paged tensors must not be sent through compiled ptr-only transfer."""
+    # First Party
+    from lmcache.v1.multiprocess.transfer_context import base as base_mod
+    import lmcache.c_ops as real_lmc_ops
+
+    fake_lmc_ops = type(sys)("lmcache.c_ops")
+    fake_lmc_ops.__dict__.update(real_lmc_ops.__dict__)
+
+    def _compiled_block_transfer_unexpected(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("compiled block transfer must not handle CPU tensors")
+
+    fake_lmc_ops.__dict__["multi_layer_block_kv_transfer"] = (
+        _compiled_block_transfer_unexpected
+    )
+    monkeypatch.setitem(sys.modules, "lmcache.c_ops", fake_lmc_ops)
+    monkeypatch.setattr(base_mod, "_LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR", False)
+
+    source = _make_hnd_kv_caches(num_layers=2, num_blocks=4, block_size=4)
+    layout_hints: LayoutHints = {"kv_layout": "HND"}
+    gathered = base_mod.gather_paged_kv_to_cpu(
+        source,
+        [0, 1],
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+    )
+    destination = {
+        name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
+    }
+    base_mod.scatter_cpu_to_paged_kv(
+        destination,
+        [0, 1],
+        gathered,
+        blocks_per_chunk=2,
+        layout_hints=layout_hints,
+    )
+
+    for name in destination:
+        assert torch.allclose(destination[name][:, 0], source[name][:, 0])
+        assert torch.allclose(destination[name][:, 1], source[name][:, 1])
+
+
 @pytest.fixture
 def stub_native_storage_ops() -> Any:
     """Stub native modules so server imports work in source-only test runs."""
     module = type(sys)("lmcache.native_storage_ops")
     module.TTLLock = type("TTLLock", (), {})  # type: ignore[attr-defined]
     module.Bitmap = type("Bitmap", (), {})  # type: ignore[attr-defined]
+    module.PeriodicEventNotifier = type(  # type: ignore[attr-defined]
+        "PeriodicEventNotifier", (), {}
+    )
     with patch.dict(
         sys.modules,
         {
@@ -1003,10 +1328,8 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
 
     # 3 chunks (6 blocks, 2 blocks per chunk), but we only want chunks 0 and 2
-    source = {
-        k: v.to(torch_device_type)
-        for k, v in _make_kv_caches(num_layers=2, num_blocks=6, block_size=4).items()
-    }
+    source = _make_hnd_kv_caches(num_layers=2, num_blocks=6, block_size=4)
+    layout_hints: "LayoutHints" = {"kv_layout": "HND"}
     blocks_per_chunk = 2
     # Pre-allocate output buffers for chunks 0 and 2 only (2 tensors, not 3).
     # Shape: [2, num_layers, chunk_tokens, hidden_dim] where
@@ -1023,6 +1346,7 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
         blocks_per_chunk=blocks_per_chunk,
         out=out_buffers,
         chunk_indices=[0, 2],
+        layout_hints=layout_hints,
     )
     torch_dev.synchronize()
     # Result should be the same list as out_buffers (in-place fill)
@@ -1031,7 +1355,12 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     # out_buffers[0] should contain chunk 0 (blocks 0,1) data
     # out_buffers[1] should contain chunk 2 (blocks 4,5) data
     # Verify by independently gathering all chunks and comparing
-    all_chunks = gather_paged_kv_to_cpu(source, [0, 1, 2, 3, 4, 5], blocks_per_chunk)
+    all_chunks = gather_paged_kv_to_cpu(
+        source,
+        [0, 1, 2, 3, 4, 5],
+        blocks_per_chunk,
+        layout_hints=layout_hints,
+    )
     torch_dev.synchronize()
 
     assert torch.allclose(out_buffers[0], all_chunks[0])

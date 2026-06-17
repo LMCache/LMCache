@@ -319,7 +319,8 @@ class EngineDrivenTransferContext(TransferContext):
     message-queue, and the server side persists/rehydrates from storage.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, device_type: str = "cpu") -> None:
+        self._device_type = device_type
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None
@@ -543,8 +544,8 @@ def create_transfer_context(
     if resolved_mode is MPTransferMode.LMCACHE_DRIVEN:
         return _build_lmcache_driven_context(device_type)
     if resolved_mode is MPTransferMode.ENGINE_DRIVEN:
-        return EngineDrivenTransferContext()
+        return EngineDrivenTransferContext(device_type=device_type)
     # AUTO: dispatch by device type (CUDA -> handle path, else -> data path).
     if device_type == "cuda":
         return LMCacheDrivenTransferContext()
-    return EngineDrivenTransferContext()
+    return EngineDrivenTransferContext(device_type=device_type)
