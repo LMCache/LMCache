@@ -72,7 +72,7 @@ def _get_storage_manager(request: Request) -> Any:
 
 @dataclass(frozen=True)
 class DeleteRequest:
-    """Wire body for :py:func:`delete_l2`.
+    """Wire body for :py:func:`delete_from_l2`.
 
     FastAPI / Pydantic still validate per-item :class:`EncodedObjectKey`
     field types before the handler runs (missing fields, wrong type for
@@ -133,7 +133,7 @@ async def list_adapters(request: Request) -> dict[str, object]:
 
 
 @router.delete("/l2", response_model=None)
-async def delete_l2(
+async def delete_from_l2(
     body: DeleteRequest,
     request: Request,
     adapter: str | None = Query(default=None, alias="adapter"),
