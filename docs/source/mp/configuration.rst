@@ -113,6 +113,13 @@ Source: ``lmcache/v1/multiprocess/config.py``
        sent a PING (still warming up, or died before its first request).
        Must be >= ``--worker-reap-timeout-seconds``. Generous by default so
        slow model warmup is never mistaken for a dead worker.
+   * - ``--enable-segmented-prefix``
+     - ``False``
+     - CacheBlend (``--engine-type blend``) only: on a mid-prefix L2 retrieve
+       failure, retain the gapped prefix so the post-gap chunks stay
+       L1-resident and only the dropped gap is recomputed, instead of
+       truncating the prefix at the gap. No effect for other engines. See
+       :doc:`/mp/l2_storage/fault_inject` for a way to exercise it.
 
 Lookup Hash Logging
 -------------------

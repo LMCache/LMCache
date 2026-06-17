@@ -45,6 +45,19 @@ an ``fs_native`` backend:
 
     --l2-adapter '{"type": "fault_inject", "inner": {"type": "fs_native", "base_path": "/dev/shm/cb_l2"}, "gap_tail_ratios": [0.5]}'
 
+To actually exercise CacheBlend's **segmented-prefix recovery**, pair the gap
+with the server flag ``--enable-segmented-prefix`` (CacheBlend only —
+``--engine-type blend``). The dropped mid chunk produces a gapped found-set;
+with segmented-prefix enabled the prefix leg **retains the post-gap chunks**
+(loads prefix + tail) and recomputes **only the dropped gap**, instead of
+truncating the prefix at the gap:
+
+.. code-block:: bash
+
+    lmcache server … \
+        --l2-adapter '{"type": "fault_inject", "inner": {"type": "fs_native", "base_path": "/dev/shm/cb_l2"}, "gap_tail_ratios": [0.5]}' \
+        --enable-segmented-prefix
+
 Randomly drop ~10% of loads (deterministic given the seed):
 
 .. code-block:: bash
