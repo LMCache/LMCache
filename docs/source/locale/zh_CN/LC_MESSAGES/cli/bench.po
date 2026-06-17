@@ -73,7 +73,7 @@ msgstr "针对 L2 缓存适配器的吞吐量/延迟基准测试（存储/查找
 
 #: ../../source/cli/bench.rst:33
 msgid "engine"
-msgstr "引擎"
+msgstr "engine"
 
 #: ../../source/cli/bench.rst:35
 msgid ""
@@ -111,7 +111,7 @@ msgstr "快速开始"
 
 #: ../../source/cli/bench.rst:56
 msgid "**Minimal (with all required arguments):**"
-msgstr "**最小化（包含所有必需参数）：**"
+msgstr "**最小示例（包含所有必需参数）：**"
 
 #: ../../source/cli/bench.rst:65
 msgid "**Interactive mode (guided setup):**"
@@ -175,11 +175,11 @@ msgstr "常规选项"
 #: ../../source/cli/bench.rst:396 ../../source/cli/bench.rst:460
 #: ../../source/cli/bench.rst:734 ../../source/cli/bench.rst:1112
 msgid "Flag"
-msgstr "标志"
+msgstr "参数选项"
 
 #: ../../source/cli/bench.rst:125
 msgid "Required"
-msgstr "必需"
+msgstr "是否必需"
 
 #: ../../source/cli/bench.rst:127
 msgid "``--config FILE``"
@@ -357,11 +357,11 @@ msgstr "然后计算::"
 
 #: ../../source/cli/bench.rst:204
 msgid "Workloads"
-msgstr "工作负载"
+msgstr "基准测试负载"
 
 #: ../../source/cli/bench.rst:207
 msgid "long-doc-qa"
-msgstr "长文档问答"
+msgstr "long-doc-qa"
 
 #: ../../source/cli/bench.rst:209
 msgid ""
@@ -434,7 +434,7 @@ msgstr "**示例：**"
 
 #: ../../source/cli/bench.rst:248
 msgid "multi-round-chat"
-msgstr "多轮聊天"
+msgstr "multi-round-chat"
 
 #: ../../source/cli/bench.rst:250
 msgid ""
@@ -1666,7 +1666,7 @@ msgstr ""
 #: ../../source/cli/bench.rst:1162
 #, python-brace-format
 msgid "``--only {lookup,store,load}``"
-msgstr "``--仅 {查找,存储,加载}``"
+msgstr "``--only {lookup,store,load}``"
 
 #: ../../source/cli/bench.rst:1164
 msgid ""
