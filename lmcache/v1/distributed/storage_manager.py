@@ -451,7 +451,7 @@ class StorageManager:
             )
 
             prefetch_request_id = -1
-            if remaining_keys and self._l2_adapters:
+            if remaining_keys and self._has_l2_adapters():
                 prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                     remaining_keys,
                     layout_desc,
@@ -505,7 +505,7 @@ class StorageManager:
         remaining_keys = keys[hit_count:]
         prefetch_request_id = -1
         l2_orig_indices: tuple[int, ...] = ()
-        if remaining_keys and self._l2_adapters:
+        if remaining_keys and self._has_l2_adapters():
             prefetch_request_id = self._prefetch_controller.submit_prefetch_request(
                 remaining_keys,
                 layout_desc,
@@ -692,13 +692,7 @@ class StorageManager:
             silence over a poison observation).
         """
         out: list[tuple[int | float, dict[str, object]]] = []
-        with self._adapters_lock:
-            items = list(self._l2_adapters.items())
-            descriptors = dict(self._adapter_descriptors)
-        for adapter_id, adapter in items:
-            desc = descriptors.get(adapter_id)
-            if desc is None:
-                continue
+        for _adapter_id, desc, adapter in self._snapshot_adapters():
             try:
                 usage = adapter.get_usage()
             except Exception:
@@ -719,9 +713,7 @@ class StorageManager:
         are additive.
         """
         totals: dict[str, int] = {}
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.values())
-        for adapter in adapters:
+        for _adapter_id, _desc, adapter in self._snapshot_adapters():
             snap = adapter.get_usage().bytes_by_cache_salt
             for salt, used in snap.items():
                 totals[salt] = totals.get(salt, 0) + used
@@ -735,16 +727,18 @@ class StorageManager:
             JSON-serializable status. If no reconfigurable adapter is configured,
             ``enabled`` is ``False`` and the adapter list is empty.
         """
+        type_names = {
+            adapter_id: desc.type_name
+            for adapter_id, desc, _ in self._snapshot_adapters()
+        }
         adapters = []
         for adapter_index, (
             l2_adapter_index,
             adapter,
         ) in enumerate(self._list_reconfigurable_l2_adapters()):
             status = dict(adapter.reconfigure_status())
-            if l2_adapter_index in self._adapter_descriptors:
-                status["backend"] = self._adapter_descriptors[
-                    l2_adapter_index
-                ].type_name
+            if l2_adapter_index in type_names:
+                status["backend"] = type_names[l2_adapter_index]
             status["adapter_index"] = adapter_index
             status["l2_adapter_index"] = l2_adapter_index
             adapters.append(status)
@@ -857,11 +851,9 @@ class StorageManager:
         ``add_l2_adapter``, and ``delete_l2_adapter`` may change the set at
         runtime.
         """
-        with self._adapters_lock:
-            return [
-                (self._adapter_descriptors[adapter_id], adapter)
-                for adapter_id, adapter in sorted(self._l2_adapters.items())
-            ]
+        return [
+            (desc, adapter) for _adapter_id, desc, adapter in self._snapshot_adapters()
+        ]
 
     # Management APIs
     def clear(self, force: bool = False):
@@ -899,7 +891,7 @@ class StorageManager:
         prefetch = self._prefetch_controller.report_status()
         l1_eviction = self._eviction_controller.report_status()
         l2_eviction = self._l2_eviction_controller.report_status()
-        adapters = [a.report_status() for a in self._l2_adapters.values()]
+        adapters = [a.report_status() for _id, _desc, a in self._snapshot_adapters()]
         children = [l1, store, prefetch, l1_eviction, l2_eviction] + adapters
         return {
             "is_healthy": all(c["is_healthy"] for c in children),
@@ -909,7 +901,7 @@ class StorageManager:
             "l1_eviction_controller": l1_eviction,
             "l2_eviction_controller": l2_eviction,
             "l2_adapters": adapters,
-            "num_l2_adapters": len(self._l2_adapters),
+            "num_l2_adapters": len(adapters),
         }
 
     def register_l2_listener(self, listener: L2AdapterListener) -> None:
@@ -936,21 +928,40 @@ class StorageManager:
         """
         return self._l1_manager.memcheck()
 
+    def _snapshot_adapters(
+        self,
+    ) -> list[tuple[int, AdapterDescriptor, L2AdapterInterface]]:
+        """Snapshot the active adapters under the lock, in ascending
+        adapter-id order. Iterate this instead of the live dicts so a
+        concurrent add/delete cannot change them mid-iteration.
+
+        Returns:
+            A list of ``(adapter_id, descriptor, adapter)`` tuples.
+        """
+        with self._adapters_lock:
+            return [
+                (adapter_id, self._adapter_descriptors[adapter_id], adapter)
+                for adapter_id, adapter in sorted(self._l2_adapters.items())
+            ]
+
+    def _has_l2_adapters(self) -> bool:
+        """Return whether any L2 adapter is currently active."""
+        with self._adapters_lock:
+            return bool(self._l2_adapters)
+
     def _build_l2_adapter(
         self,
         config: L2AdapterConfigBase,
     ) -> tuple[int, L2AdapterInterface, AdapterDescriptor]:
-        """Allocate a stable id and construct an adapter + its descriptor.
-
-        Wraps the adapter with ``SerdeL2AdapterWrapper`` when the config
-        carries a ``serde_config``. Does not register the adapter with any
-        controller — the caller wires it up.
+        """Create a L2 adapter instance based on the config.
 
         Args:
             config: The adapter configuration.
 
         Returns:
-            ``(adapter_id, adapter, descriptor)``.
+            A ``(adapter_id, adapter, descriptor)`` tuple. ``adapter_id`` is
+            the freshly allocated stable id, ``adapter`` is the new adapter
+            instance, and ``descriptor`` is its descriptor carrying that id.
         """
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
@@ -970,12 +981,6 @@ class StorageManager:
         eviction_config: EvictionConfig | None,
     ) -> bool:
         """Whether to wire an adapter into the L2 eviction controller.
-
-        Aggregate-usage policies (``LRU``, ``noop``) need a capacity
-        (``max_capacity_bytes > 0``) to compute a usage fraction, so an
-        adapter without capacity is skipped for those (logged). Isolated
-        policies (``IsolatedLRU``) track per-cache_salt bytes regardless of
-        capacity, so they are always enabled.
 
         Args:
             adapter: The adapter to evaluate.
@@ -1014,8 +1019,10 @@ class StorageManager:
     def _list_reconfigurable_l2_adapters(
         self,
     ) -> list[tuple[int, L2ReconfigurableAdapter]]:
+        with self._adapters_lock:
+            items = sorted(self._l2_adapters.items())
         adapters: list[tuple[int, L2ReconfigurableAdapter]] = []
-        for l2_adapter_index, adapter in sorted(self._l2_adapters.items()):
+        for l2_adapter_index, adapter in items:
             reconfigurable_adapter = self._unwrap_reconfigurable_l2_adapter(adapter)
             if reconfigurable_adapter is not None:
                 adapters.append((l2_adapter_index, reconfigurable_adapter))

@@ -441,6 +441,7 @@ class _FakeAdapterDescriptor:
 def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
     sm = StorageManager.__new__(StorageManager)
     adapter = _FakeReconfigurableAdapter()
+    sm._adapters_lock = threading.Lock()
     sm._l2_adapters = {0: cast(L2AdapterInterface, adapter)}
 
     result = sm.reconfigure_l2_adapter(0, "flip", {"enabled": True})
@@ -456,6 +457,7 @@ def test_storage_manager_routes_generic_l2_reconfigure_to_adapter():
 
 def test_storage_manager_finds_serde_wrapped_reconfigurable_adapter():
     sm = StorageManager.__new__(StorageManager)
+    sm._adapters_lock = threading.Lock()
     sm._l2_adapters = {
         0: cast(L2AdapterInterface, _SerdeLikeWrapper(_FakeReconfigurableAdapter()))
     }

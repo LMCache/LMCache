@@ -88,6 +88,20 @@ def make_descriptor(index: int) -> AdapterDescriptor:
     return AdapterDescriptor(index=index, config=make_mock_config())
 
 
+def adapter_by_id(sm: StorageManager, adapter_id: int) -> MockL2Adapter:
+    """Fetch an active adapter by stable id via the public ``l2_adapters()``
+    API (no private-member access)."""
+    for desc, adapter in sm.l2_adapters():
+        if desc.index == adapter_id:
+            return adapter  # type: ignore[return-value]
+    raise AssertionError(f"no active L2 adapter with id {adapter_id}")
+
+
+def active_adapter_ids(sm: StorageManager) -> set[int]:
+    """Set of active adapter ids exposed by the public ``l2_adapters()`` API."""
+    return {desc.index for desc, _ in sm.l2_adapters()}
+
+
 def write_keys_to_l1(
     l1_manager: L1Manager,
     keys: list[ObjectKey],
@@ -277,7 +291,7 @@ class TestStorageManagerRuntimeAdapters:
         sm = StorageManager(empty_storage_manager_config)
         try:
             adapter_id = sm.add_l2_adapter(make_mock_config())
-            adapter = sm._l2_adapters[adapter_id]
+            adapter = adapter_by_id(sm, adapter_id)
 
             layout = make_layout()
             keys = [make_object_key(i) for i in range(4)]
@@ -329,7 +343,7 @@ class TestStorageManagerRuntimeAdapters:
             assert id2 == 2, "Ids must not be reused after a delete"
 
             # The surviving adapter keeps its original id.
-            assert set(sm._l2_adapters.keys()) == {1, 2}
+            assert active_adapter_ids(sm) == {1, 2}
             assert sm.report_status()["num_l2_adapters"] == 2
         finally:
             sm.close()
@@ -341,7 +355,7 @@ class TestStorageManagerRuntimeAdapters:
             first = sm.add_l2_adapter(make_mock_config())
             sm.delete_l2_adapter(first, timeout=10.0)
             second = sm.add_l2_adapter(make_mock_config())
-            adapter = sm._l2_adapters[second]
+            adapter = adapter_by_id(sm, second)
 
             layout = make_layout()
             keys = [make_object_key(i) for i in range(3)]
@@ -365,14 +379,14 @@ class TestStorageManagerRuntimeAdapters:
             id1 = sm.add_l2_adapter(make_mock_config())
             pairs = sm.l2_adapters()
             assert [d.index for d, _ in pairs] == [id0, id1]
-            assert pairs[0][1] is sm._l2_adapters[id0]
-            assert pairs[1][1] is sm._l2_adapters[id1]
+            a0, a1 = pairs[0][1], pairs[1][1]
+            assert a0 is not a1
 
-            # Deleting the primary leaves the survivor; ordering is by id.
+            # Deleting one leaves the survivor (same instance); order is by id.
             sm.delete_l2_adapter(id0, timeout=10.0)
             pairs = sm.l2_adapters()
             assert len(pairs) == 1
             assert pairs[0][0].index == id1
-            assert pairs[0][1] is sm._l2_adapters[id1]
+            assert pairs[0][1] is a1
         finally:
             sm.close()
