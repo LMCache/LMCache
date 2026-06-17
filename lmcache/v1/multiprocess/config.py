@@ -45,6 +45,12 @@ class MPServerConfig:
     ('default' for standard prefix caching, 'blend' when cacheblend is enabled).
     """
 
+    enable_segmented_prefix: bool = False
+    """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
+    failure, retain the gapped contiguous prefix so the post-gap chunks stay
+    L1-resident (served by the sparse leg as L1 hits, the hole recomputed)
+    instead of truncating the prefix at the gap. No effect for other engines."""
+
     supported_transfer_mode: str = "auto"
     """Transfer mode: 'lmcache_driven' for server-driven transfer
     (STORE/RETRIEVE, supports CUDA IPC and CPU SHM), 'engine_driven' for
@@ -306,6 +312,13 @@ def add_mp_server_args(
         "pinged (model warmup or early death). Must be >= the worker reap "
         "timeout. Default is 3600.",
     )
+    mp_group.add_argument(
+        "--enable-segmented-prefix",
+        action="store_true",
+        help="CacheBlend (--engine-type blend) only: on a mid-prefix L2 "
+        "retrieve failure, retain the gapped prefix so post-gap chunks stay "
+        "L1-resident instead of truncating at the gap. No effect otherwise.",
+    )
     return parser
 
 
@@ -338,6 +351,7 @@ def parse_args_to_mp_server_config(
         max_cpu_workers=max_cpu,
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
+        enable_segmented_prefix=args.enable_segmented_prefix,
         supported_transfer_mode=args.supported_transfer_mode,
         runtime_plugin_config=RuntimePluginConfig(
             locations=(args.runtime_plugin_locations or []),

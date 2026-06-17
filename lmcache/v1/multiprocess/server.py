@@ -237,7 +237,10 @@ def _build_modules(
         # None and the blend module matches purely locally.
         coordinator = BlendCoordinatorClient.maybe_from_env()
         blend_v3 = BlendV3Module(
-            ctx, transfer_module, lookup_module, coordinator=coordinator
+            ctx,
+            transfer_module,
+            coordinator=coordinator,
+            enable_segmented_prefix=mp_config.enable_segmented_prefix,
         )
         blend_module = blend_v3
         # blend_v3 mirrors per-instance CB rope state, so the reaper must
