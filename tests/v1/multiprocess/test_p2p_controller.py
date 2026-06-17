@@ -12,6 +12,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
+from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
 from lmcache.v1.multiprocess.mq import msgspec_decode, msgspec_encode
 from lmcache.v1.multiprocess.protocol import (
@@ -21,7 +22,6 @@ from lmcache.v1.multiprocess.protocol import (
     get_response_class,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType
-from lmcache.v1.multiprocess.transfer_address import TransferChannelAddress
 
 
 def _make_key(i: int) -> ObjectKey:
