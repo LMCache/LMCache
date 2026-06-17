@@ -16,6 +16,9 @@ import base64
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 import numpy as np
 
+# First Party
+from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
+
 
 def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
     """Encode token ids into a compact base64 wire string.
@@ -57,9 +60,6 @@ def decode_tokens(tokens_b64: str) -> np.ndarray:
             "(malformed uint32 token buffer)"
         )
     return np.frombuffer(raw, dtype="<u4").astype(np.uint64)
-
-# First Party
-from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
 
 
 class RegisterRequest(BaseModel):
