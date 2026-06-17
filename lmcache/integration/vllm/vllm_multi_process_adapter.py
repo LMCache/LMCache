@@ -755,6 +755,45 @@ class LMCacheMPSchedulerAdapter:
         self._pending_lookups.add(request_id)
         self._lookup_params[request_id] = (token_ids, cache_salt)
 
+    def _free_inconsistent_lookup_locks(
+        self,
+        request_id: str,
+        per_server: dict[str, int],
+        min_chunks: int,
+    ) -> None:
+        """Release over-hit tail locks on servers that reported more than min.
+
+        When servers disagree on hit chunk counts, servers reporting more
+        than min_chunks have locked chunks in the range
+        [min_chunks * tokens_per_chunk, hit_chunks * tokens_per_chunk)
+        that will never be retrieved. This method frees those tail locks.
+
+        Args:
+            request_id: The lookup request ID.
+            per_server: Per-server hit chunk counts.
+            min_chunks: Minimum hit chunk count across all servers.
+        """
+        token_ids_l, cs = self._lookup_params.pop(request_id, (None, None))
+        if token_ids_l is not None:
+            for url, hit_chunks in per_server.items():
+                if hit_chunks <= min_chunks:
+                    continue
+                tail_end = min(
+                    hit_chunks * self.lmcache_tokens_per_chunk, len(token_ids_l)
+                )
+                tail_key = self._create_key(
+                    token_ids=token_ids_l,
+                    start=min_chunks * self.lmcache_tokens_per_chunk,
+                    end=tail_end,
+                    request_id=request_id,
+                    cache_salt=cs or "",
+                ).no_worker_id_version()
+                send_lmcache_request(
+                    self.mq_clients[url],
+                    RequestType.FREE_LOOKUP_LOCKS,
+                    [tail_key, self.tp_size],
+                )
+
     @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         """
@@ -827,27 +866,7 @@ class LMCacheMPSchedulerAdapter:
                 dict(per_server),
                 min_chunks,
             )
-            # Release over-hit tail locks on servers that reported more than min.
-            token_ids_l, cs = self._lookup_params.pop(request_id, (None, None))
-            if token_ids_l is not None:
-                for url, hit_chunks in per_server.items():
-                    if hit_chunks <= min_chunks:
-                        continue
-                    tail_end = min(
-                        hit_chunks * self.lmcache_tokens_per_chunk, len(token_ids_l)
-                    )
-                    tail_key = self._create_key(
-                        token_ids=token_ids_l,
-                        start=min_chunks * self.lmcache_tokens_per_chunk,
-                        end=tail_end,
-                        request_id=request_id,
-                        cache_salt=cs or "",
-                    ).no_worker_id_version()
-                    send_lmcache_request(
-                        self.mq_clients[url],
-                        RequestType.FREE_LOOKUP_LOCKS,
-                        [tail_key, self.tp_size],
-                    )
+            self._free_inconsistent_lookup_locks(request_id, per_server, min_chunks)
 
         token_count = min_chunks * self.lmcache_tokens_per_chunk
 
