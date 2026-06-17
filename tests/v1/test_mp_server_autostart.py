@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from collections.abc import Callable
+from types import ModuleType
 from unittest.mock import MagicMock
 import subprocess
+import sys
 
 # Third Party
 import pytest
@@ -109,13 +110,47 @@ def fake_get_response_class(request_type: object) -> type[bool]:
     return bool
 
 
-def fake_load_mp_health_dependencies() -> tuple[
-    type[FakeMessageQueueClient],
-    type[FakeRequestType],
-    Callable[[object], type[bool]],
-]:
-    """Return fake MQ health dependencies for lazy-import tests."""
-    return FakeMessageQueueClient, FakeRequestType, fake_get_response_class
+def fake_module(name: str, attrs: dict[str, object]) -> ModuleType:
+    """Build a fake module for lazy-import health probe tests.
+
+    Args:
+        name: Fully qualified module name to expose in ``sys.modules``.
+        attrs: Attribute names and values the fake module should provide.
+
+    Returns:
+        A module object with the requested attributes.
+    """
+    module = ModuleType(name)
+    for attr_name, attr_value in attrs.items():
+        setattr(module, attr_name, attr_value)
+    return module
+
+
+def patch_mp_health_modules(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch the modules loaded lazily by ``is_mp_server_healthy``.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture used to update ``sys.modules``.
+    """
+    monkeypatch.setitem(
+        sys.modules,
+        "lmcache.v1.multiprocess.mq",
+        fake_module(
+            "lmcache.v1.multiprocess.mq",
+            {"MessageQueueClient": FakeMessageQueueClient},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "lmcache.v1.multiprocess.protocol",
+        fake_module(
+            "lmcache.v1.multiprocess.protocol",
+            {
+                "RequestType": FakeRequestType,
+                "get_response_class": fake_get_response_class,
+            },
+        ),
+    )
 
 
 def test_config_defaults_to_disabled_without_validating_remote_host() -> None:
@@ -564,9 +599,7 @@ def test_launcher_early_exit_raises_connection_error(monkeypatch) -> None:
 def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
     FakeMessageQueueClient.instances = []
     FakeMessageQueueClient.future = FakeFuture(True)
-    monkeypatch.setattr(
-        launcher_mod, "_load_mp_health_dependencies", fake_load_mp_health_dependencies
-    )
+    patch_mp_health_modules(monkeypatch)
     zmq_context = MagicMock()
 
     assert launcher_mod.is_mp_server_healthy(
@@ -586,9 +619,7 @@ def test_health_probe_sends_zmq_ping_and_closes_client(monkeypatch) -> None:
 def test_health_probe_returns_false_on_zmq_ping_timeout(monkeypatch) -> None:
     FakeMessageQueueClient.instances = []
     FakeMessageQueueClient.future = FakeFuture(error=TimeoutError())
-    monkeypatch.setattr(
-        launcher_mod, "_load_mp_health_dependencies", fake_load_mp_health_dependencies
-    )
+    patch_mp_health_modules(monkeypatch)
 
     assert not launcher_mod.is_mp_server_healthy(
         "tcp://localhost:5555",

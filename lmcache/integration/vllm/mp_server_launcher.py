@@ -41,6 +41,16 @@ def _load_mp_health_dependencies() -> tuple[
     "_RequestTypeNamespace",
     Callable[[object], object | None],
 ]:
+    """Load MQ health probe dependencies when a probe is executed.
+
+    The MQ modules may require torch through transitive imports, while most of
+    this module only parses config or builds process commands. Keeping these
+    imports lazy lets config-only callers import this launcher without torch.
+
+    Returns:
+        The MQ client factory, request type namespace, and response-class
+        resolver used to send a PING request.
+    """
     # First Party
     from lmcache.v1.multiprocess.mq import MessageQueueClient
     from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
@@ -57,6 +67,16 @@ def _create_message_queue_client(
     server_url: str,
     zmq_context: zmq.Context,
 ) -> _MessageQueueClient:
+    """Create an MQ client for MP server health probing.
+
+    Args:
+        factory: Lazy-loaded ``MessageQueueClient`` factory.
+        server_url: ZMQ URL of the LMCache MP server.
+        zmq_context: ZMQ context used to create the client.
+
+    Returns:
+        A message queue client connected to ``server_url``.
+    """
     return factory(server_url, zmq_context)
 
 
@@ -65,6 +85,16 @@ def _submit_ping(
     request_type: _RequestTypeNamespace,
     response_class_getter: Callable[[object], object | None],
 ) -> _MessagingFuture:
+    """Submit an MP server PING health probe through the MQ client.
+
+    Args:
+        client: MQ client used to submit the request.
+        request_type: Lazy-loaded request type namespace.
+        response_class_getter: Lazy-loaded response-class resolver.
+
+    Returns:
+        A messaging future for the PING response.
+    """
     ping_request_type = request_type.PING
     return client.submit_request(
         ping_request_type,
