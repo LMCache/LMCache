@@ -571,6 +571,66 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
         return result
 
+    def _commit_store_multi_group(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        cpu_data: bytes,
+        entry: EngineDrivenContextEntry,
+        strategy: TransferStrategy,
+    ) -> bool:
+        """Commit multi-group store by storing each group separately."""
+        import pickle
+
+        # Deserialize multi-group chunks
+        raw = pickle.loads(cpu_data)
+        group_chunks: list[list[torch.Tensor]] = [
+            [torch.from_numpy(arr) for arr in group] for group in raw
+        ]
+
+        num_groups = len(entry.metadata.group_layout_descs)
+        all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
+
+        st = time.perf_counter()
+        all_ok = True
+
+        for group_idx, group_chunk_list in enumerate(group_chunks):
+            if not group_chunk_list:
+                continue
+            g_layout_desc = entry.metadata.group_layout_descs[group_idx]
+            g_block_size = entry.metadata.group_block_sizes[group_idx]
+            g_use_mla = entry.metadata.group_use_mla[group_idx]
+            g_metadata = EngineDrivenContextMetadata(
+                layout_desc=g_layout_desc,
+                block_size=g_block_size,
+                use_mla=g_use_mla,
+            )
+            # Serialize this group's chunks for commit_store
+            group_cpu_data = pickle.dumps(
+                [chunk.contiguous().numpy() for chunk in group_chunk_list]
+            )
+            result = strategy.commit_store(
+                key=key,
+                instance_id=instance_id,
+                cpu_data=group_cpu_data,
+                context=g_metadata,
+                resolve_obj_keys=lambda k, gi=group_idx: all_obj_keys[gi],
+            )
+            if not result:
+                all_ok = False
+
+        if all_ok:
+            total_tokens = sum(
+                len(ok) for ok in all_obj_keys
+            ) * self._ctx.chunk_size
+            logger.info(
+                "Stored %d tokens (%d groups) in %.3f seconds",
+                total_tokens,
+                num_groups,
+                time.perf_counter() - st,
+            )
+        return all_ok
+
     @_lmcache_nvtx_annotate
     def commit_store_group(
         self,

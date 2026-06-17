@@ -360,6 +360,7 @@ class GroupLayoutInfo(msgspec.Struct):
     use_mla: bool
     tokens_per_block: int = 0
 
+
 class RegisterEngineDrivenContextPayload(msgspec.Struct):
     """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
     Attributes:

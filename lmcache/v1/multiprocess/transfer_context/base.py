@@ -320,7 +320,6 @@ class EngineDrivenContext(ABC):
                 self.mq_timeout, group_idx, skip_count,
             )
             return False
-
     def prepare_retrieve_raw(
         self, key: IPCCacheServerKey, instance_id: int
     ) -> bytes | None:
@@ -998,7 +997,6 @@ def _serialize_multi_group_chunks(
     group boundaries.
     """
     return _wire_encode(group_chunks)
-
 
 
 

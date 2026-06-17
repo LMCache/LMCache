@@ -666,6 +666,7 @@ class EngineDrivenTransferContext(TransferContext):
             cpu_chunks = gather_paged_kv_to_cpu(
                 kv_caches,
                 block_ids[0],
+
                 layout_hints=self._layout_hints,
                 engine_kv_format=self._engine_kv_format,
                 out=out_buffers,
