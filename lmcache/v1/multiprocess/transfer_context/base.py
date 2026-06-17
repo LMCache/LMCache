@@ -887,6 +887,12 @@ def gather_paged_kv_multi_group_to_cpu(
             )
             tokens_per_block = block_size
         blocks_in_chunk = lmcache_tokens_per_chunk // tokens_per_block
+        if blocks_in_chunk == 0:
+            raise ValueError(
+                f"Group {group_idx}: tokens_per_block ({tokens_per_block}) > "
+                f"lmcache_tokens_per_chunk ({lmcache_tokens_per_chunk}). "
+                "Each block is larger than the chunk size."
+            )
         group_chunks = gather_paged_kv_to_cpu(
             group_kv,
             block_ids[group_idx],
@@ -926,6 +932,12 @@ def scatter_cpu_multi_group_to_paged_kv(
             )
             tokens_per_block = block_size
         blocks_in_chunk = lmcache_tokens_per_chunk // tokens_per_block
+        if blocks_in_chunk == 0:
+            raise ValueError(
+                f"Group {group_idx}: tokens_per_block ({tokens_per_block}) > "
+                f"lmcache_tokens_per_chunk ({lmcache_tokens_per_chunk}). "
+                "Each block is larger than the chunk size."
+            )
         scatter_cpu_to_paged_kv(
             group_kv,
             block_ids[group_idx],
