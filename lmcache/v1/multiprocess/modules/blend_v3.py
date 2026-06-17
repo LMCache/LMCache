@@ -87,13 +87,9 @@ class _CBUnifiedJob:
     matches: list[CBMatchResult]
     num_tokens: int = 0
     # Prefix leg (blend_v3-owned submit/poll). ``prefix_handle`` is None when
-    # there is no GPU context / no full chunk (poll reports 0 coverage); the
-    # remaining fields feed MP_LOOKUP_PREFETCH_END at poll time.
+    # there is no GPU context / no full chunk (poll reports 0 coverage).
     prefix_handle: PrefetchHandle | None = None
     prefix_world_size: int = 1
-    prefix_requested_tokens: int = 0
-    prefix_model_name: str = ""
-    prefix_cache_salt: str = ""
     prefix_chunks: int | None = None  # stashed when the prefix poll completes
     retained_chunks: list[int] | None = None  # SEGMENTED_PREFIX: full gapped set
     sparse_started: bool = False  # prefix done -> sparse leg submitted/skipped
@@ -154,7 +150,7 @@ class BlendTokenRangeMatcherV3:
             token_hashes (list[bytes]): Per-chunk content hashes (one per
                 chunk), used as the dedup/eviction key.
             start_chunk_idx (int): First chunk to index; 1 skips chunk 0 (the
-                standard prefix lookup owns it).
+                prefix lookup leg owns it).
             position_offset (int): Added to each recorded start position (for
                 indexing a tail-slice of a larger sequence).
 
@@ -753,13 +749,15 @@ class BlendV3Module(InstanceLivenessTarget):
         key: IPCCacheServerKey,
         tp_size: int,
         policy: TrimPolicy,
-    ) -> "tuple[PrefetchHandle | None, int, int, str, str]":
+    ) -> "tuple[PrefetchHandle | None, int]":
         """Submit the CB prefix prefetch (non-blocking).
 
-        Publishes the same MP_REQUEST_START / MP_LOOKUP_PREFETCH_START / MP_LOOKUP
-        events as the standard prefix lookup and writes the shared session
-        (``set_tokens`` + ``lookup_ipc_key``) so ``end_session``'s L1 keep-alive
-        touch still resolves the request's keys. Non-blocking.
+        Opens the ``cb.prefix_lookup`` span (CB namespace — CB requests no longer
+        feed the MP request / mp.lookup_prefetch spans or the MP hit-rate
+        aggregate; the CB hit-rate metric carries prefix tokens via
+        CB_LOOKUP_END) and writes the shared session (``set_tokens`` +
+        ``lookup_ipc_key``) so ``end_session``'s L1 keep-alive touch still
+        resolves the request's keys.
 
         Args:
             key (IPCCacheServerKey): Request key (token IDs, request_id, model,
@@ -768,18 +766,13 @@ class BlendV3Module(InstanceLivenessTarget):
             policy (TrimPolicy): ``PREFIX`` or ``SEGMENTED_PREFIX``.
 
         Returns:
-            tuple: ``(handle, world_size, requested_tokens, model_name,
-            cache_salt)``. ``handle`` is None when there is no GPU context or no
-            full chunk (poll reports 0 coverage); the trailing fields feed
-            ``MP_LOOKUP_PREFETCH_END`` at poll time.
+            tuple: ``(handle, world_size)``. ``handle`` is None when there is no
+            GPU context or no full chunk (the poll then reports 0 coverage).
         """
         rid = key.request_id
         model_name, world_size = key.model_name, key.world_size
         self._event_bus.publish(
-            Event(event_type=EventType.MP_REQUEST_START, session_id=rid)
-        )
-        self._event_bus.publish(
-            Event(event_type=EventType.MP_LOOKUP_PREFETCH_START, session_id=rid)
+            Event(event_type=EventType.CB_PREFIX_LOOKUP_START, session_id=rid)
         )
 
         layout_desc = self._resolve_cb_layout_desc(model_name, world_size)
@@ -789,16 +782,14 @@ class BlendV3Module(InstanceLivenessTarget):
                 model_name,
                 world_size,
             )
-            return None, world_size, 0, model_name, key.cache_salt
+            return None, world_size
 
         chunk_hashes = self._ctx.token_hasher.compute_chunk_hashes(list(key.token_ids))
         if not chunk_hashes:
-            return None, world_size, 0, model_name, key.cache_salt
+            return None, world_size
 
-        # Chunk-aligned tokens submitted: the denominator of the token-level
-        # hit-rate (MP_LOOKUP_PREFETCH_END.requested_tokens). Sub-chunk tail
-        # tokens cannot hit at chunk granularity, so they are excluded.
-        requested_tokens = len(chunk_hashes) * self._ctx.chunk_size
+        # Lookup-hash logger (chunk hashes, for debug); guarded so the metadata
+        # dict is built only when a subscriber is listening.
         if self._event_bus.has_subscribers(EventType.MP_LOOKUP):
             self._event_bus.publish(
                 Event(
@@ -817,7 +808,7 @@ class BlendV3Module(InstanceLivenessTarget):
             )
 
         # Shared session: end_session reads lookup_ipc_key + the rolling hashes
-        # to keep the request's KV alive in L1 (and close the trace root).
+        # to keep the request's KV alive in L1.
         session = self._ctx.session_manager.get_or_create(rid)
         session.set_tokens(list(key.token_ids))
         session.lookup_ipc_key = key
@@ -831,19 +822,20 @@ class BlendV3Module(InstanceLivenessTarget):
             external_request_id=rid,
             policy=policy,
         )
-        return handle, world_size, requested_tokens, model_name, key.cache_salt
+        return handle, world_size
 
     def _poll_prefix_leg(
         self, job: "_CBUnifiedJob", rid: str, segmented: bool
     ) -> "tuple[int, list[int] | None] | None":
-        """Poll the CB prefix handle; on completion publish MP_LOOKUP_PREFETCH_END.
+        """Poll the CB prefix handle; on completion close the cb.prefix_lookup span.
 
-        Consume-once: emits the hit-rate metric exactly once when the prefetch
-        lands. For SEGMENTED_PREFIX also surfaces the gapped retained chunk set.
+        Consume-once: publishes CB_PREFIX_LOOKUP_END exactly once when the
+        prefetch lands. The prefix hit tokens are accounted on the CB hit-rate
+        metric at CB_LOOKUP_END, not here. For SEGMENTED_PREFIX also surfaces the
+        gapped retained chunk set.
 
         Args:
-            job (_CBUnifiedJob): Poll state holding the prefix handle + metric
-                inputs.
+            job (_CBUnifiedJob): Poll state holding the prefix handle + world size.
             rid (str): Request ID (event session_id).
             segmented (bool): SEGMENTED_PREFIX active -> also surface the gapped
                 retained chunk set.
@@ -871,15 +863,9 @@ class BlendV3Module(InstanceLivenessTarget):
             leading, retained = 0, ([] if segmented else None)
         self._event_bus.publish(
             Event(
-                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                event_type=EventType.CB_PREFIX_LOOKUP_END,
                 session_id=rid,
-                metadata={
-                    "found_count": leading,
-                    "requested_tokens": job.prefix_requested_tokens,
-                    "hit_tokens": leading * self._ctx.chunk_size,
-                    "model_name": job.prefix_model_name,
-                    "cache_salt": job.prefix_cache_salt,
-                },
+                metadata={"prefix_chunks": leading},
             )
         )
         return leading, retained
@@ -931,16 +917,12 @@ class BlendV3Module(InstanceLivenessTarget):
                 if self._segmented_prefix
                 else TrimPolicy.PREFIX
             )
-            # Prefix leg: blend_v3 owns the submit + the mp.lookup_prefetch
-            # span/hit-rate metric; prefix_chunks lands on cb.lookup via
-            # CB_LOOKUP_END below.
-            (
-                prefix_handle,
-                prefix_ws,
-                prefix_req_tokens,
-                prefix_model,
-                prefix_salt,
-            ) = self._submit_prefix_leg(key, tp_size, prefix_policy)
+            # Prefix leg: blend_v3 owns the submit + the cb.prefix_lookup span
+            # (under cb.lookup); prefix hit tokens land on the CB hit-rate
+            # metric via CB_LOOKUP_END below.
+            prefix_handle, prefix_ws = self._submit_prefix_leg(
+                key, tp_size, prefix_policy
+            )
             # Local and coordinator matching are mutually exclusive: with a
             # coordinator the fleet directory is the only source, so skip the
             # local matcher (and its span). The coordinator leg is async
@@ -969,9 +951,6 @@ class BlendV3Module(InstanceLivenessTarget):
                 num_tokens=len(key.token_ids),
                 prefix_handle=prefix_handle,
                 prefix_world_size=prefix_ws,
-                prefix_requested_tokens=prefix_req_tokens,
-                prefix_model_name=prefix_model,
-                prefix_cache_salt=prefix_salt,
             )
             job.coord_submitted = self._submit_coordinator_match(key)
             if job.coord_submitted and self._coordinator is not None:
