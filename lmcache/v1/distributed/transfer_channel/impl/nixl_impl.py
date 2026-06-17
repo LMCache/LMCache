@@ -163,7 +163,7 @@ class NixlTransferChannelClient(TransferChannelClient):
 
         Returns:
             A TransferChannelReadResult indicating whether the transfer is finished
-            and which remote addresses succeeded (if finished).
+            and which objects succeeded (if finished).
         """
         with self._lock:
             if task_id not in self._tasks:
@@ -172,7 +172,7 @@ class NixlTransferChannelClient(TransferChannelClient):
 
         status = self._ctx.agent.check_xfer_state(handle)
         if status == "PROC":
-            return TransferChannelReadResult(finished=False, succeeded=[])
+            return TransferChannelReadResult(finished=False, succeeded_mask=[])
 
         # Terminal state (DONE or ERR): release the handle and report.
         with self._lock:
@@ -181,11 +181,13 @@ class NixlTransferChannelClient(TransferChannelClient):
 
         if status == "DONE":
             return TransferChannelReadResult(
-                finished=True, succeeded=list(remote_addresses)
+                finished=True, succeeded_mask=[True] * len(remote_addresses)
             )
 
         # status == "ERR" (or any unexpected state): finished but nothing succeeded.
-        return TransferChannelReadResult(finished=True, succeeded=[])
+        return TransferChannelReadResult(
+            finished=True, succeeded_mask=[False] * len(remote_addresses)
+        )
 
     def close(self) -> None:
         """

@@ -272,7 +272,7 @@ def client_main(cfg: BenchmarkConfig) -> bool:
                 while not result.is_finished():
                     result = client.query_read_status(task_id)
                 elapsed = time.perf_counter() - start
-                succeeded = len(result.succeed_addresses())
+                succeeded = sum(result.succeeded_mask)
                 if succeeded != cfg.num_objects:
                     raise RuntimeError(
                         f"read failed: {succeeded}/{cfg.num_objects} objects succeeded."

@@ -34,14 +34,10 @@ class TransferChannelReadResult:
     finished: bool
     """ Whether the transfer has reached a terminal state (done or errored). """
 
-    succeeded: list[TransferChannelAddress] = field(default_factory=list)
-    """ The addresses that were successfully read. Empty while the transfer is still
-    in flight or if it errored. """
+    succeeded_mask: list[bool] = field(default_factory=list)
+    """ Per-object success flags, aligned with the submitted addresses. Empty while
+    the transfer is still in flight. """
 
     def is_finished(self) -> bool:
         """Whether the transfer reached a terminal state (done or errored)."""
         return self.finished
-
-    def succeed_addresses(self) -> list[TransferChannelAddress]:
-        """The addresses that were successfully read."""
-        return self.succeeded

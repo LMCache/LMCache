@@ -46,10 +46,9 @@ def test_addresses_with_same_fields_are_equal():
 # =========================================================
 # TransferChannelReadResult
 # =========================================================
-def test_read_result_succeeded_defaults_to_empty_list():
+def test_read_result_succeeded_mask_defaults_to_empty_list():
     result = TransferChannelReadResult(finished=False)
-    assert result.succeeded == []
-    assert result.succeed_addresses() == []
+    assert result.succeeded_mask == []
 
 
 def test_read_result_is_finished_reflects_finished_flag():
@@ -59,17 +58,13 @@ def test_read_result_is_finished_reflects_finished_flag():
     assert done.is_finished() is True
 
 
-def test_read_result_succeed_addresses_returns_succeeded():
-    addrs = [
-        TransferChannelAddress(offset=0, size=16),
-        TransferChannelAddress(offset=16, size=16),
-    ]
-    result = TransferChannelReadResult(finished=True, succeeded=addrs)
-    assert result.succeed_addresses() == addrs
+def test_read_result_succeeded_mask_returns_flags():
+    result = TransferChannelReadResult(finished=True, succeeded_mask=[True, False])
+    assert result.succeeded_mask == [True, False]
 
 
-def test_read_result_default_succeeded_lists_are_independent():
+def test_read_result_default_succeeded_masks_are_independent():
     a = TransferChannelReadResult(finished=False)
     b = TransferChannelReadResult(finished=False)
-    a.succeeded.append(TransferChannelAddress(offset=0, size=8))
-    assert b.succeeded == []
+    a.succeeded_mask.append(True)
+    assert b.succeeded_mask == []

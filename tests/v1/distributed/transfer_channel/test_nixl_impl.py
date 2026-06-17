@@ -128,7 +128,7 @@ def test_read_copies_remote_data_into_local_buffer(shared_contexts):
 
     result = _wait_finished(client, task_id)
     assert result.is_finished() is True
-    assert result.succeed_addresses() == remote
+    assert result.succeeded_mask == [True] * len(remote)
     assert torch.equal(buf_a[:512], buf_b[:512])
 
 
