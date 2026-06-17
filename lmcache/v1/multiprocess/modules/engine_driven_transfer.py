@@ -539,16 +539,21 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         """Commit multi-group store by storing each group separately."""
         import pickle
 
-        # Deserialize multi-group chunks
+        # Deserialize multi-group chunks (format: list of (arr, dtype_name) tuples)
         raw = pickle.loads(cpu_data)
         group_chunks: list[list[torch.Tensor]] = [
-            [torch.from_numpy(arr) for arr in group] for group in raw
+            [
+                torch.from_numpy(arr).to(torch.bfloat16) if dtype_name == "bfloat16" else torch.from_numpy(arr)
+                for arr, dtype_name in group
+            ]
+            for group in raw
         ]
 
         num_groups = len(entry.metadata.group_layout_descs)
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
 
-        st = time.perf_counter()
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        st = session.extras.pop("store_start_time", None)
         all_ok = True
 
         for group_idx, group_chunk_list in enumerate(group_chunks):
@@ -562,9 +567,16 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 block_size=g_block_size,
                 use_mla=g_use_mla,
             )
-            # Serialize this group's chunks for commit_store
+            # Serialize this group's chunks for strategy.commit_store
+            # strategy.commit_store expects pickle.dumps(list[torch.Tensor])
+            # We must convert back from (arr, dtype_name) tuples to plain numpy arrays
             group_cpu_data = pickle.dumps(
-                [chunk.contiguous().numpy() for chunk in group_chunk_list]
+                [
+                    c.contiguous().float().numpy()
+                    if c.dtype == torch.bfloat16
+                    else c.contiguous().numpy()
+                    for c in group_chunk_list
+                ]
             )
             result = strategy.commit_store(
                 key=key,
@@ -576,7 +588,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             if not result:
                 all_ok = False
 
-        if all_ok:
+        if all_ok and st is not None:
             total_tokens = sum(
                 len(ok) for ok in all_obj_keys
             ) * self._ctx.chunk_size
@@ -628,8 +640,9 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         num_groups = len(entry.metadata.group_layout_descs)
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
 
-        st = time.perf_counter()
-        group_data: list[list[bytes]] = []
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session.extras["retrieve_start_time"] = time.perf_counter()
+        group_data: list[list[tuple]] = []
 
         for group_idx in range(num_groups):
             g_layout_desc = entry.metadata.group_layout_descs[group_idx]
@@ -647,15 +660,28 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
             if response is None or not response.success or not response.data:
                 return PrepareRetrieveResponse(success=False, data=b"")
-            group_data.append(response.data)
+            # response.data is pickle.dumps(list[torch.Tensor]) from strategy
+            # Re-serialize as (arr, dtype_name) tuples to match worker format
+            group_tensors: list[torch.Tensor] = pickle.loads(response.data)
+            serialized_group = [
+                (
+                    t.contiguous().float().numpy(),
+                    "bfloat16",
+                )
+                if t.dtype == torch.bfloat16
+                else (t.contiguous().numpy(), None)
+                for t in group_tensors
+            ]
+            group_data.append(serialized_group)
 
-        # Serialize all groups together
+        # Final format matches _serialize_multi_group_chunks:
+        # pickle.dumps(list[list[(numpy_array, dtype_name)]])
         cpu_data = pickle.dumps(group_data)
 
         logger.info(
             "Retrieved %d groups in %.3f seconds",
             num_groups,
-            time.perf_counter() - st,
+            time.perf_counter() - session.extras.pop("retrieve_start_time"),
         )
         return PrepareRetrieveResponse(success=True, data=cpu_data)
 
