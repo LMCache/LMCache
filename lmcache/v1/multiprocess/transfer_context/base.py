@@ -17,7 +17,7 @@ from __future__ import annotations
 
 # Standard
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 import inspect
 
@@ -32,8 +32,8 @@ from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-
 if TYPE_CHECKING:
     # First Party
     import lmcache.c_ops as lmc_ops
@@ -110,15 +110,27 @@ class EngineDrivenContextMetadata:
     """Non-GPU context layout metadata for non-CUDA workers.
 
     Attributes:
-        layout_desc: Memory layout descriptor used to interpret chunk payloads.
-        block_size: Number of tokens per paged block.
-        use_mla: Whether the worker KV format is MLA.
+        layout_desc: Memory layout descriptor (single-group, backward compat).
+        block_size: Tokens per paged block (single-group, backward compat).
+        use_mla: Whether MLA format is used (single-group, backward compat).
+        group_layout_descs: Per-group layout descriptors for hybrid models.
+        group_block_sizes: Per-group block sizes for hybrid models.
+        group_use_mla: Per-group MLA flags for hybrid models.
+        group_blocks_in_chunk: Per-group blocks-in-chunk counts for hybrid models.
     """
 
     layout_desc: MemoryLayoutDesc
     block_size: int
     use_mla: bool
+    group_layout_descs: list[MemoryLayoutDesc] = field(default_factory=list)
+    group_block_sizes: list[int] = field(default_factory=list)
+    group_use_mla: list[bool] = field(default_factory=list)
+    group_blocks_in_chunk: list[int] = field(default_factory=list)
 
+    @property
+    def is_multi_group(self) -> bool:
+        """Return True if this metadata describes a hybrid multi-group model."""
+        return len(self.group_layout_descs) > 1
 
 class EngineDrivenContext(ABC):
     """Abstract base class for CPU-side KV data transfer contexts.
@@ -193,6 +205,51 @@ class EngineDrivenContext(ABC):
     def close(self) -> None:
         """Release any resources held by this context."""
         ...
+    def commit_store_raw(
+        self, key: IPCCacheServerKey, instance_id: int, cpu_data: bytes
+    ) -> bool:
+        """Send pre-serialized bytes directly via COMMIT_STORE.
+
+        Used by multi-group transfers where the caller has already serialized
+        the chunks. No additional pickle.dumps() is performed.
+        """
+        from lmcache.v1.multiprocess.protocol import RequestType
+        from lmcache.v1.multiprocess.protocols.base import get_response_class
+
+        future = self.mq_client.submit_request(
+            RequestType.COMMIT_STORE,
+            [key, instance_id, cpu_data],
+            get_response_class(RequestType.COMMIT_STORE),
+        )
+        try:
+            return bool(future.result(timeout=self.mq_timeout))
+        except TimeoutError:
+            return False
+
+    def prepare_retrieve_raw(
+        self, key: IPCCacheServerKey, instance_id: int
+    ) -> bytes | None:
+        """Send PREPARE_RETRIEVE and return raw bytes (no pickle.loads).
+
+        Used by multi-group transfers where the caller deserializes with
+        ``_deserialize_multi_group_chunks``. Returns ``None`` on cache-miss
+        or timeout.
+        """
+        from lmcache.v1.multiprocess.protocol import RequestType
+        from lmcache.v1.multiprocess.protocols.base import get_response_class
+
+        future = self.mq_client.submit_request(
+            RequestType.PREPARE_RETRIEVE,
+            [key, instance_id],
+            get_response_class(RequestType.PREPARE_RETRIEVE),
+        )
+        try:
+            response = future.result(timeout=self.mq_timeout)
+        except TimeoutError:
+            return None
+        if not response.success or not response.data:
+            return None
+        return response.data
 
 
 def create_engine_driven_context(
@@ -222,8 +279,15 @@ def create_engine_driven_context(
             available.
 
     Returns:
-        A concrete :class:`EngineDrivenContext` instance.
+    A concrete :class:`EngineDrivenContext` instance.
     """
+    if metadata.is_multi_group:
+        use_pickle = True
+        logger.info(
+            "Multi-group engine-driven context: forcing pickle transport "
+            "(SHM pool is sized for single-group layout)"
+        )
+
     if not shm_name or pool_size <= 0:
         use_pickle = True
 
@@ -712,3 +776,161 @@ def scatter_cpu_to_paged_kv(
     # We intentionally omit synchronization here for performance.
     # WARNING: The caller MUST explicitly call `torch_dev.synchronize()`
     # before consuming these chunks to ensure data validity.
+
+# ---------------------------------------------------------------------------
+# Multi-group serialization helpers
+# ---------------------------------------------------------------------------
+
+
+def _serialize_multi_group_chunks(
+    group_chunks: list[list[torch.Tensor]],
+) -> bytes:
+    """Serialize multiple groups as a compact pickle blob.
+
+    Format: pickle.dumps([
+        [numpy_array_chunk0, numpy_array_chunk1, ...],  # group 0
+        [numpy_array_chunk0, numpy_array_chunk1, ...],  # group 1
+        ...
+    ])
+
+    Args:
+        group_chunks: Per-group list of CPU chunk tensors.
+
+    Returns:
+        Pickled bytes suitable for COMMIT_STORE.
+    """
+    import pickle
+
+    # numpy has no bfloat16; we serialize as float32 + store dtype name
+    serializable = [
+        [
+            (
+                chunk.contiguous().float().numpy(),
+                "bfloat16",
+            )
+            if chunk.dtype == torch.bfloat16
+            else (chunk.contiguous().numpy(), None)
+            for chunk in group
+        ]
+        for group in group_chunks
+    ]
+    return pickle.dumps(serializable)
+
+
+def _deserialize_multi_group_chunks(
+    cpu_data: bytes,
+) -> list[list[torch.Tensor]]:
+    """Deserialize a multi-group pickle blob back to tensors."""
+    import pickle
+
+    raw = pickle.loads(cpu_data)
+    tensors = []
+    for group in raw:
+        t_group = []
+        for arr, dtype_name in group:
+            t = torch.from_numpy(arr)
+            if dtype_name == "bfloat16":
+                t = t.to(torch.bfloat16)
+            t_group.append(t)
+        tensors.append(t_group)
+    return tensors
+
+
+# ---------------------------------------------------------------------------
+# Multi-group gather / scatter utilities
+# ---------------------------------------------------------------------------
+
+
+def slice_kv_caches_for_group(
+    kv_caches: dict[str, torch.Tensor],
+    layer_indices: tuple[int, ...],
+) -> dict[str, torch.Tensor]:
+    """Extract a subset of KV tensors for a single group.
+
+    Args:
+        kv_caches: All layers, ordered as passed by the adapter.
+        layer_indices: 0-based indices of the layers belonging to this group.
+
+    Returns:
+        Ordered dict with only the layers of this group.
+    """
+    all_values = list(kv_caches.values())
+    return {str(i): all_values[idx] for i, idx in enumerate(sorted(layer_indices))}
+
+
+def gather_paged_kv_multi_group_to_cpu(
+    kv_caches: dict[str, torch.Tensor],
+    block_ids: list[list[int]],
+    engine_group_infos: list[EngineGroupInfo],
+    lmcache_tokens_per_chunk: int,
+    layout_hints: LayoutHints | None = None,
+) -> list[list[torch.Tensor]]:
+    """Gather all KV groups to CPU tensors.
+
+    Args:
+        kv_caches: All layers, ordered as passed by the adapter.
+        block_ids: Block IDs per group.
+        engine_group_infos: Group metadata from registration.
+        lmcache_tokens_per_chunk: Global LMCache chunk size in tokens.
+        layout_hints: Optional layout hints.
+
+    Returns:
+        ``group_chunks[group_idx][chunk_idx]`` = CPU tensor.
+    """
+    result: list[list[torch.Tensor]] = []
+    for group_idx, group_info in enumerate(engine_group_infos):
+        group_kv = slice_kv_caches_for_group(kv_caches, group_info.layer_indices)
+        tokens_per_block = group_info.tokens_per_block
+        if tokens_per_block <= 0:
+            block_size, _, _, _, _ = compute_kv_layout(
+                group_kv, layout_hints=layout_hints
+            )
+            tokens_per_block = block_size
+        blocks_in_chunk = lmcache_tokens_per_chunk // tokens_per_block
+        group_chunks = gather_paged_kv_to_cpu(
+            group_kv,
+            block_ids[group_idx],
+            blocks_in_chunk,
+            layout_hints=layout_hints,
+        )
+        result.append(group_chunks)
+    return result
+
+
+def scatter_cpu_multi_group_to_paged_kv(
+    kv_caches: dict[str, torch.Tensor],
+    block_ids: list[list[int]],
+    group_chunks: list[list[torch.Tensor]],
+    engine_group_infos: list[EngineGroupInfo],
+    lmcache_tokens_per_chunk: int,
+    skip_first_n_tokens: int = 0,
+    layout_hints: LayoutHints | None = None,
+) -> None:
+    """Scatter CPU tensors back into paged KV for all groups.
+
+    Args:
+        kv_caches: All layers, ordered as passed by the adapter.
+        block_ids: Block IDs per group.
+        group_chunks: ``group_chunks[group_idx][chunk_idx]`` = CPU tensor.
+        engine_group_infos: Group metadata from registration.
+        lmcache_tokens_per_chunk: Global LMCache chunk size in tokens.
+        skip_first_n_tokens: Tokens to skip at the start (for APC).
+        layout_hints: Optional layout hints.
+    """
+    for group_idx, group_info in enumerate(engine_group_infos):
+        group_kv = slice_kv_caches_for_group(kv_caches, group_info.layer_indices)
+        tokens_per_block = group_info.tokens_per_block
+        if tokens_per_block <= 0:
+            block_size, _, _, _, _ = compute_kv_layout(
+                group_kv, layout_hints=layout_hints
+            )
+            tokens_per_block = block_size
+        blocks_in_chunk = lmcache_tokens_per_chunk // tokens_per_block
+        scatter_cpu_to_paged_kv(
+            group_kv,
+            block_ids[group_idx],
+            group_chunks[group_idx],
+            blocks_in_chunk,
+            skip_first_n_tokens=skip_first_n_tokens if group_idx == 0 else 0,
+            layout_hints=layout_hints,
+        )
