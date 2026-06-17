@@ -1,5 +1,5 @@
-Adding Native Connectors
-========================
+Adding Native Backends
+======================
 
 .. _native-connectors-overview:
 

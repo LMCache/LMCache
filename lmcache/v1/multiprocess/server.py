@@ -35,19 +35,24 @@ from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import (
     EngineModule,
     HandlerSpec,
+    InstanceLivenessTarget,
     ThreadPoolType,
 )
-from lmcache.v1.multiprocess.gpu_context import GPUCacheContext
-from lmcache.v1.multiprocess.modules.gpu_transfer import GPUTransferModule
+from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+    EngineDrivenTransferModule,
+)
+from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
+    LMCacheDrivenTransferModule,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
-from lmcache.v1.multiprocess.modules.non_gpu_transfer import NonGPUTransferModule
 from lmcache.v1.multiprocess.mq import MessageQueueServer
 from lmcache.v1.multiprocess.protocol import (
     RequestType,
     get_handler_type,
     get_payload_classes,
 )
+from lmcache.v1.platform.base_cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 
@@ -112,11 +117,14 @@ class MPCacheServer:
         return self._context.storage_manager
 
     @property
-    def gpu_contexts(self) -> dict[int, GPUCacheContext] | None:
+    def cache_contexts(self) -> dict[int, BaseCacheContext] | None:
         """Used by ``/kvcache/check``; unwraps :class:`ContextEntry`."""
         for module in self._modules:
-            if isinstance(module, GPUTransferModule):
-                return {i: e.cache_context for i, e in module.cache_contexts.items()}
+            if isinstance(module, LMCacheDrivenTransferModule):
+                return {
+                    i: e.cache_context
+                    for i, e in module.context_entries_snapshot().items()
+                }
         return None
 
     def clear(self) -> None:
@@ -162,20 +170,22 @@ def _build_modules(
         List of initialized engine modules.
 
     Raises:
-        ValueError: If blend engine is requested with supported_transfer_mode="non_gpu".
+        ValueError: If blend engine is requested with
+        supported_transfer_mode="engine_driven".
     """
-    modules: list[EngineModule] = [
-        LookupModule(ctx),
-        ManagementModule(ctx),
-    ]
+    lookup_module = LookupModule(ctx)
 
-    if mp_config.supported_transfer_mode == "gpu":
-        modules.append(GPUTransferModule(ctx))
-    elif mp_config.supported_transfer_mode == "non_gpu":
-        modules.append(NonGPUTransferModule(ctx))
+    # Build the transfer and blend modules first so the ManagementModule can
+    # be constructed with them as liveness targets / reap listeners. They are
+    # the InstanceLivenessTargets the reaper scans.
+    transfer_modules: list[EngineModule] = []
+    if mp_config.supported_transfer_mode == "lmcache_driven":
+        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+    elif mp_config.supported_transfer_mode == "engine_driven":
+        transfer_modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
-        modules.append(GPUTransferModule(ctx))
-        modules.append(NonGPUTransferModule(ctx))
+        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(EngineDrivenTransferModule(ctx))
     else:
         raise ValueError(
             f"Unsupported supported_transfer_mode '{mp_config.supported_transfer_mode}'"
@@ -183,23 +193,36 @@ def _build_modules(
 
     logger.info("Supported transfer mode: %s", mp_config.supported_transfer_mode)
 
+    # Targets the reaper scans (and reap-notifies). The transfer modules own
+    # per-instance liveness; BlendV3Module is appended below as a state mirror.
+    liveness_targets: list[InstanceLivenessTarget] = [
+        m
+        for m in transfer_modules
+        if isinstance(m, (LMCacheDrivenTransferModule, EngineDrivenTransferModule))
+    ]
+
+    # At most one blend module is ever built (engine_type selects one).
+    blend_module: EngineModule | None = None
+
     if mp_config.engine_type == "blend_legacy":
-        if mp_config.supported_transfer_mode == "non_gpu":
+        if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
                 "Legacy blend engine requires supported_transfer_mode to be "
-                f"'gpu' or 'auto', got '{mp_config.supported_transfer_mode}'"
+                f"'lmcache_driven' or 'auto', got "
+                f"'{mp_config.supported_transfer_mode}'"
             )
         # First Party
         from lmcache.v1.multiprocess.modules.blend import BlendModule
 
-        modules.append(BlendModule(ctx))
+        blend_module = BlendModule(ctx)
 
     # "blend" selects CacheBlend V3 (the current implementation).
     if mp_config.engine_type == "blend":
-        if mp_config.supported_transfer_mode == "non_gpu":
+        if mp_config.supported_transfer_mode == "engine_driven":
             raise ValueError(
-                "blend (V3) engine requires supported_transfer_mode 'gpu' or "
-                f"'auto', got '{mp_config.supported_transfer_mode}'"
+                "blend (V3) engine requires supported_transfer_mode "
+                f"'lmcache_driven' or 'auto', got "
+                f"'{mp_config.supported_transfer_mode}'"
             )
         # First Party
         from lmcache.v1.mp_coordinator.blend_client import (
@@ -207,16 +230,35 @@ def _build_modules(
         )
         from lmcache.v1.multiprocess.modules.blend_v3 import BlendV3Module
 
-        gpu_transfer = next(m for m in modules if isinstance(m, GPUTransferModule))
-        lookup_module = next(m for m in modules if isinstance(m, LookupModule))
+        transfer_module = next(
+            m for m in transfer_modules if isinstance(m, LMCacheDrivenTransferModule)
+        )
         # Opt-in: enabled only when LMCACHE_COORDINATOR_URL is set; otherwise
         # None and the blend module matches purely locally.
         coordinator = BlendCoordinatorClient.maybe_from_env()
-        modules.append(
-            BlendV3Module(ctx, gpu_transfer, lookup_module, coordinator=coordinator)
+        blend_v3 = BlendV3Module(
+            ctx,
+            transfer_module,
+            coordinator=coordinator,
+            enable_segmented_prefix=mp_config.enable_segmented_prefix,
         )
+        blend_module = blend_v3
+        # blend_v3 mirrors per-instance CB rope state, so the reaper must
+        # notify it via drop_instance_state when an instance is reaped.
+        liveness_targets.append(blend_v3)
 
-    return modules
+    management = ManagementModule(
+        ctx,
+        liveness_targets=liveness_targets,
+        worker_reap_timeout_seconds=mp_config.worker_reap_timeout_seconds,
+        worker_registration_grace_seconds=mp_config.worker_registration_grace_seconds,
+    )
+
+    # ManagementModule precedes the transfer/blend modules so close() stops
+    # and joins the reaper before those modules clear their state and before
+    # storage_manager.close() runs.
+    blend_modules = [blend_module] if blend_module is not None else []
+    return [lookup_module, management, *transfer_modules, *blend_modules]
 
 
 def run_cache_server(
@@ -256,8 +298,9 @@ def run_cache_server(
 
     maybe_initialize_trace_recorder(event_bus, obs_config, storage_manager_config)
 
-    # For non-GPU transfer: apply shm_name from mp_config and verify capacity
-    if mp_config.supported_transfer_mode != "gpu":
+    # When the engine-driven path is loaded (auto or engine_driven):
+    # apply shm_name from mp_config and verify capacity.
+    if mp_config.supported_transfer_mode != "lmcache_driven":
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         if mp_config.shm_name is not None:
             mem_cfg.shm_name = mp_config.shm_name

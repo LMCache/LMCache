@@ -315,8 +315,8 @@ class IPCCacheServerKey:
 KVCache = list[CudaIPCWrapper]
 
 
-class RegisterNonGpuContextPayload(msgspec.Struct):
-    """Payload for the REGISTER_KV_CACHE_NON_GPU_CONTEXT protocol message.
+class RegisterEngineDrivenContextPayload(msgspec.Struct):
+    """Payload for the REGISTER_KV_CACHE_ENGINE_DRIVEN_CONTEXT protocol message.
 
     Attributes:
         instance_id: Worker instance identifier (typically PID).
@@ -391,10 +391,17 @@ class CBUnifiedLookupResult:
             those are merged in before the sparse prefetch -- prefix-covered and
             locally-duplicated ones dropped -- so they ride the identical
             prefetch + retrieve path and need no separate handling.
+        segmented_prefix_segments: Post-gap chunks retained by the
+            ``SEGMENTED_PREFIX`` prefix leg (beyond ``count_leading_ones``) — at
+            their original positions (``old_st == cur_st``), so the connector
+            tags them ``prefix`` (pure load, no recompute) and only the gap is
+            recomputed. Sourced from the prefix bitmap, not the fingerprint
+            matcher; empty when ``SEGMENTED_PREFIX`` is off.
     """
 
     prefix_coverage_tokens: int
     non_prefix_segments: list[CBMatchResult]
+    segmented_prefix_segments: list[CBMatchResult] = field(default_factory=list)
 
 
 _CUSTOMERIZED_SERIALIZERS = {

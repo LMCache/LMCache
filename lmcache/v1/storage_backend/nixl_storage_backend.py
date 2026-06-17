@@ -115,6 +115,7 @@ class NixlStorageConfig:
     use_hugepages: bool
     enable_prog_thread: bool
     sync_mode: Optional[Any]  # nixl_thread_sync_t, None if unsupported
+    presence_cache_only: bool
     path_sharding: str
 
     @staticmethod
@@ -194,6 +195,8 @@ class NixlStorageConfig:
                     f"in nixl_thread_sync_t."
                 )
             sync_mode = getattr(nixl_thread_sync_t, attr_name)
+        presence_cache_only = extra_config.get("nixl_presence_cache_only", False)
+
         path_sharding = extra_config.get("nixl_path_sharding", "by_gpu")
 
         assert pool_size is not None
@@ -253,6 +256,7 @@ class NixlStorageConfig:
             use_hugepages=use_hugepages,
             enable_prog_thread=enable_prog_thread,
             sync_mode=sync_mode,
+            presence_cache_only=presence_cache_only,
             path_sharding=path_sharding,
         )
 
@@ -1360,6 +1364,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         self.async_mode = nixl_config.enable_async_put
         self.enable_presence_cache = nixl_config.enable_presence_cache
+        self.presence_cache_only = nixl_config.presence_cache_only
         # The dynamic backend uses ``self.path`` directly as a single directory
         # (see ``_build_descs``/``key_exists``). Path sharding across multiple
         # paths is only supported for static pools via ``PathSharder``, so reject
@@ -1384,7 +1389,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         # DOCA_MEMOS needs object names that fit into 128 bits; other OBJ
         # backends use URL-safe names. See _format_object_key.
         self._use_b128_object_keys = nixl_config.backend == "DOCA_MEMOS"
-        # Presence cache to reduce remote contains checks
+        # Presence cache to reduce query_memory contains checks
         self.hit_counter = 0
         self.total_counter = 0
         self.key_presence_cache: Optional[PresenceCache] = None
@@ -1880,7 +1885,7 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
             logger.debug(f"Key {key.chunk_hash:x} is in put tasks")
             return True, False
 
-        # Check presence cache before hitting remote storage if not prefetching
+        # Check presence cache before issuing a query_memory call if not prefetching
         if self._cache_contains(key.chunk_hash):
             return True, True
 
@@ -1890,8 +1895,14 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         """
         Check whether key is in the storage backend.
 
-        This method uses nixl querymem to check existence.
-        If successful, it caches the name for later use.
+        Normally this checks local put-task state and the presence cache, then
+        falls back to a NIXL ``query_memory`` (queryMem) call for keys not known
+        locally; a hit from that call is added to the presence cache.
+
+        When ``presence_cache_only`` is enabled (the ``nixl_presence_cache_only``
+        config option), local put-task state and the presence cache are treated
+        as authoritative: a key not known locally reports a miss and the queryMem
+        call is skipped (DRAM-only metadata semantics).
 
         :param key: The key to check
         :param pin: Whether to pin the object in the backend
@@ -1903,6 +1914,9 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         found, local_result = self._exists_in_put_tasks_or_cache(key)
         if found:
             return local_result
+
+        if self.presence_cache_only:
+            return False
 
         xfer_state = self.key_exists(key)
         if xfer_state:
@@ -1921,6 +1935,11 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
         single batched ``query_memory`` call for the keys that cannot
         be resolved from local data structures (put-task set and
         presence cache).
+
+        When ``presence_cache_only`` is enabled (the ``nixl_presence_cache_only``
+        config option), the batched queryMem call is skipped: the method returns
+        the count of leading keys resolved from local data structures and treats
+        the first locally-unknown key as a miss (DRAM-only metadata semantics).
 
         :param List[CacheEngineKey] keys: The keys of the MemoryObj.
         :param bool pin: Whether to pin the key (not implemented).
@@ -1948,6 +1967,11 @@ class NixlDynamicStorageBackend(NixlStorageBackend):
 
         # If we checked all keys locally, return the count
         if true_count == len(keys):
+            return true_count
+
+        # DRAM-only metadata semantics: keys not already in the presence cache
+        # are treated as misses without issuing a query_memory call.
+        if self.presence_cache_only:
             return true_count
 
         # For remaining keys, use the new batched_nixl_desc_exists method
