@@ -94,14 +94,7 @@ class QuotaResponse(BaseModel):
 
 
 class EventType(str, Enum):
-    """L2 cache events reported by an MP server.
-
-    ``STORE`` / ``LOOKUP`` come from the hot path. ``DELETE`` is fired
-    by the L2 adapter after a deletion completes (currently triggered
-    by the coordinator's eviction dispatch, but any source of deletion
-    yields the same event so the coordinator's LRU + usage trackers
-    stay consistent).
-    """
+    """L2 cache events reported by an MP server."""
 
     STORE = "store"
     LOOKUP = "lookup"
@@ -109,13 +102,12 @@ class EventType(str, Enum):
 
 
 class UsageEvent(BaseModel):
-    """A single L2 store or lookup event reported by an MP server.
+    """A single L2 event reported by an MP server.
 
     Attributes:
         type: The event type.
-        key: The cache key this event applies to. The tenant
-            identifier (``cache_salt``) is carried inside the key.
-        bytes: Number of bytes stored (for ``"store"`` events).
+        key: The cache key this event applies to.
+        bytes: Bytes stored (``store`` only; ``0`` for other types).
     """
 
     type: EventType

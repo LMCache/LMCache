@@ -1,18 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Coordinator-side eviction manager with per-``cache_salt`` LRU.
+"""Coordinator-side per-``cache_salt`` LRU eviction.
 
-Wraps :class:`IsolatedLRUEvictionPolicy` for LRU key ordering,
-matching the eviction logic in
-:class:`~lmcache.v1.distributed.storage_controllers.eviction_controller.L2EvictionController`.
-
-The manager periodically checks per-salt usage
-(from :class:`L2UsageManager`) against ``watermark * quota``
-(from :class:`QuotaManager`). When a salt exceeds its threshold, the
-manager selects LRU keys, dispatches a ``DELETE /l2`` to one
-registered MP server, and updates its local LRU tracking after the
-delete returns. The MP server in turn calls the underlying L2
-adapter (S3 today), so a single dispatch is enough — all coordinators
-share the same backing bucket.
+Periodically compares per-salt usage against ``watermark * quota``;
+when over threshold, dispatches a ``DELETE /l2`` to one registered MP
+server. LRU bookkeeping is updated when the corresponding ``delete``
+event arrives back via ``POST /l2/events``.
 """
 
 # Future
@@ -41,25 +33,15 @@ logger = init_logger(__name__)
 class L2EvictionManager:
     """Per-``cache_salt`` LRU eviction manager for the coordinator.
 
-    Delegates LRU ordering to :class:`IsolatedLRUEvictionPolicy` and
-    the per-key size ledger to the shared :class:`L2UsageManager`.
-    Mirrors the trigger and ratio logic of
-    :class:`L2EvictionController._check_and_evict_by_cache_salt`:
-    eviction fires when ``usage >= watermark * quota``, and
-    ``eviction_ratio`` is passed directly to the policy as a
-    fraction of keys by count.
-
     Args:
-        quota_manager: The shared quota registry.
-        usage_manager: The shared usage manager; owns the per-key
-            size ledger that this class reads for logging. Writes to
-            the ledger (``record_stored`` / ``record_evicted``) are
-            the caller's responsibility — paired with
-            :meth:`on_store` / :meth:`on_remove`.
-        eviction_ratio: Fraction of tracked keys to evict per
-            cycle (by count). Passed to the policy.
-        trigger_watermark: Eviction fires when usage reaches
-            this fraction of the quota.
+        quota_manager: Shared quota registry.
+        usage_manager: Shared usage manager. Writes to the size ledger
+            (``record_stored`` / ``record_evicted``) are the caller's
+            responsibility, paired with :meth:`on_store` /
+            :meth:`on_remove`.
+        eviction_ratio: Fraction of tracked keys to evict per cycle.
+        trigger_watermark: Eviction fires when usage reaches this
+            fraction of the quota.
     """
 
     def __init__(
@@ -77,43 +59,25 @@ class L2EvictionManager:
         self._in_flight_dispatches: set[asyncio.Task] = set()
 
     def on_store(self, key: ObjectKey) -> None:
-        """Record that a key was stored — register it in the LRU policy.
-
-        Sizes / per-tenant byte accounting are owned by
-        :class:`L2UsageManager`; callers should invoke
-        ``usage_manager.record_stored(key, num_bytes)`` separately.
-        """
+        """Register a stored key in the LRU. Per-salt bytes are the
+        caller's responsibility (see :meth:`L2UsageManager.record_stored`)."""
         self._policy.on_keys_created([key])
 
     def on_lookup(self, key: ObjectKey) -> None:
-        """Record that a key was looked up (touch — move to MRU end)."""
+        """Touch ``key`` in the LRU (move to MRU end)."""
         self._policy.on_keys_touched([key])
 
     def on_remove(self, key: ObjectKey) -> None:
-        """Drop a single key from the LRU policy.
-
-        Callers must also invoke :meth:`L2UsageManager.record_evicted`
-        for the same key so the per-salt byte totals + per-key size
-        ledger stay consistent.
-        """
+        """Drop ``key`` from the LRU. Per-salt bytes are the caller's
+        responsibility (see :meth:`L2UsageManager.record_evicted`)."""
         self._policy.on_keys_removed([key])
 
     def compute_eviction_plan(self) -> dict[str, list[ObjectKey]]:
-        """Check all tracked salts against their quotas and select
-        eviction candidates per salt.
+        """Select eviction candidates per ``cache_salt``.
 
-        For every tracked salt, compare usage against
-        ``watermark * quota``. Salts over threshold get eviction
-        scoped to their own LRU list. Salts with no quota or zero
-        quota get a full eviction (ratio=1.0).
-
-        Pure: no network calls, no state mutation beyond logging. The
-        caller (:meth:`execute_evictions`) is responsible for applying
-        the plan against the fleet and updating the LRU.
-
-        Returns:
-            A mapping of ``cache_salt`` to the list of keys selected
-            for eviction.
+        Salts over ``watermark * quota`` get ``eviction_ratio`` of
+        their LRU keys; salts with no quota (or quota 0) get full
+        eviction. Pure — no network calls, no state mutation.
         """
         tracked_salts = self._policy.get_tracked_salts()
         eviction_plan: dict[str, list[ObjectKey]] = {}
@@ -160,41 +124,14 @@ class L2EvictionManager:
         registry: InstanceRegistry,
         http_client: httpx.AsyncClient,
     ) -> dict[str, list[ObjectKey]]:
-        """Compute the eviction plan and fire a fan-out DELETE.
+        """Compute the plan and fire-and-forget a ``DELETE /l2`` to
+        one random registered MP server.
 
-        Picks a uniformly random MP server from ``registry`` (via
-        :meth:`InstanceRegistry.random_instance`) and **fire-and-forget**
-        dispatches the full set of victim keys to its ``DELETE /l2``
-        endpoint. Since every MP server in the fleet shares the same
-        backing L2 (e.g. one S3 bucket), a single dispatch evicts the
-        keys for all of them — there is no need to broadcast. Random
-        selection spreads eviction-RPC load across the fleet.
-
-        The LRU + per-salt usage updates are **not** applied here.
-        After the MP server's L2 adapter finishes the deletion, it
-        fires ``on_l2_keys_deleted`` on its registered listeners —
-        :class:`L2EventListener` then ships ``DELETE`` events back
-        through ``POST /l2/events``, and the coordinator's
-        ``/l2/events`` handler calls :meth:`on_remove` on this
-        manager. That round-trip is the authoritative signal that the
-        keys are gone from the bucket.
-
-        If dispatch fails (network error, no instances registered) the
-        next eviction cycle will re-pick the same keys (the LRU still
-        carries them) and try again — at-least-once semantics, safe
-        because the lmcache delete is itself idempotent.
-
-        Args:
-            registry: Live MP server registry. Eviction is a no-op
-                when empty.
-            http_client: Shared async HTTP client owned by the
-                coordinator app lifespan.
-
-        Returns:
-            The eviction plan that was scheduled. ``execute_evictions``
-            returns as soon as the background dispatch task is
-            spawned; a non-empty return does NOT imply the dispatch
-            even left the process.
+        Returns the scheduled plan as soon as the background dispatch
+        task is spawned. The LRU is not cleared here — that happens
+        when the corresponding ``delete`` event arrives at
+        ``POST /l2/events``. At-least-once semantics; safe because the
+        underlying delete is idempotent.
         """
         plan = self.compute_eviction_plan()
         if not plan:
@@ -228,16 +165,7 @@ class L2EvictionManager:
         return plan
 
     async def wait_for_in_flight_dispatches(self) -> None:
-        """Await every outstanding fire-and-forget dispatch.
-
-        Called from the coordinator's lifespan on shutdown so the
-        shared ``httpx.AsyncClient`` is not closed out from under an
-        in-flight DELETE. Tests use it to observe HTTP side effects
-        of :meth:`execute_evictions` deterministically. Exceptions
-        from individual dispatches are swallowed — each task already
-        logs its own outcome. ``asyncio.gather`` over an empty set is
-        a no-op, so a no-dispatch run costs nothing.
-        """
+        """Await every outstanding fire-and-forget dispatch."""
         await asyncio.gather(*self._in_flight_dispatches, return_exceptions=True)
 
     @staticmethod
@@ -249,17 +177,10 @@ class L2EvictionManager:
         key_count: int,
         salt_count: int,
     ) -> None:
-        """Background task: send the DELETE and log the outcome.
-
-        Failures are logged but not retried here — the next eviction
-        cycle's :meth:`compute_eviction_plan` will pick the same keys
-        again (because the LRU is only cleared by ``DELETE`` events,
-        not by a successful dispatch).
-        """
+        """Send the DELETE and log the outcome. Failures are not retried."""
         try:
-            # ``httpx.AsyncClient.delete`` doesn't accept ``json=`` —
-            # ``request("DELETE", ...)`` is the supported form for
-            # DELETE-with-body.
+            # ``httpx.AsyncClient.delete`` doesn't accept ``json=``;
+            # ``request("DELETE", ...)`` is the supported form.
             resp = await http_client.request("DELETE", url, json=body)
             resp.raise_for_status()
         except (httpx.HTTPError, ValueError) as e:

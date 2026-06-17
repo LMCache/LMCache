@@ -2,19 +2,26 @@
 """
 HTTP endpoints for managing L2 KV cache keys.
 
-Both endpoints target the **primary** L2 adapter — the first one
-configured. The HTTP surface deliberately exposes no adapter selector:
-a deployment that wants these endpoints to operate on a specific
-adapter must list that adapter first in its L2 configuration.
+Three endpoints:
+
+- ``GET /l2/adapters`` — enumerate every configured L2 adapter with
+  its ``type_name`` (and whether it's the primary). Operators read this
+  to know which value to pass as ``?adapter=`` on the other endpoints.
 
 - ``DELETE /l2`` — delete the KV cache for a caller-supplied list of
   keys. Idempotent: keys absent from the adapter are skipped silently;
   keys currently locked by in-flight store/load tasks (S3) are skipped
   so deletion never corrupts an active transfer.
 
-- ``GET /l2/keys`` — paginate keys resident in the primary adapter,
-  optionally filtered by ``model_name``. Returns 501 when the primary
+- ``GET /l2/keys`` — paginate keys resident in the selected adapter,
+  optionally filtered by ``model_name``. Returns 501 when the selected
   adapter does not implement listing (in v1 only ``S3L2Adapter`` does).
+
+Both ``DELETE /l2`` and ``GET /l2/keys`` accept an optional
+``?adapter=<type_name>`` query parameter to target a specific adapter.
+Omitting the selector defaults to the **primary** (first-configured)
+adapter, preserving the v1 behavior. When multiple adapters share a
+``type_name``, the first match wins.
 
 L1 is intentionally NOT touched by ``DELETE /l2`` — keys removed from
 L2 may still return from L1 until natural L1 eviction expires them.
@@ -83,40 +90,69 @@ class DeleteRequest:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_primary_l2(request: Request):
-    """Look up the primary L2 adapter or raise the right ``HTTPException``.
+def _resolve_l2_adapter(request: Request, selector: str | None):
+    """Resolve the ``(descriptor, adapter)`` pair the handler targets.
 
-    Wraps ``StorageManager.primary_l2()``: maps the "no L2 adapters
-    configured" ``ValueError`` to HTTP 503 so handlers don't repeat
-    the try/except boilerplate.
+    ``selector=None`` picks the primary adapter; a string picks the
+    first adapter whose ``type_name`` matches.
 
-    Returns:
-        ``(descriptor, adapter)``.
+    Raises:
+        HTTPException: 503 if no L2 adapters are configured; 404 if
+            ``selector`` doesn't match any.
     """
-    sm = _get_storage_manager(request)
-    try:
-        return sm.primary_l2()
-    except ValueError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+    adapters = _get_storage_manager(request).l2_adapters()
+    if not adapters:
+        raise HTTPException(status_code=503, detail="no L2 adapters configured")
+    if selector is None:
+        return adapters[0]
+    for desc, adapter in adapters:
+        if desc.type_name == selector:
+            return desc, adapter
+    raise HTTPException(
+        status_code=404,
+        detail=f"no L2 adapter with type_name={selector!r}",
+    )
+
+
+@router.get("/l2/adapters", response_model=None)
+async def list_adapters(request: Request) -> dict[str, object]:
+    """Enumerate configured L2 adapters.
+
+    Responses:
+        200: ``{"adapters": [{"index", "type_name", "primary"}, ...]}``.
+            Empty list when no L2 backends are configured.
+        503: engine not initialized.
+    """
+    adapters = _get_storage_manager(request).l2_adapters()
+    return {
+        "adapters": [
+            {"index": i, "type_name": desc.type_name, "primary": i == 0}
+            for i, (desc, _) in enumerate(adapters)
+        ]
+    }
 
 
 @router.delete("/l2", response_model=None)
-async def delete_l2(body: DeleteRequest, request: Request) -> dict[str, object]:
-    """Delete a caller-supplied list of keys from the primary L2 adapter.
+async def delete_l2(
+    body: DeleteRequest,
+    request: Request,
+    adapter: str | None = Query(default=None, alias="adapter"),
+) -> dict[str, object]:
+    """Delete a caller-supplied list of keys from one L2 adapter.
 
-    Body schema: :class:`DeleteRequest` —
-    ``{"keys": [EncodedObjectKey, ...]}``.
+    Body: ``{"keys": [EncodedObjectKey, ...]}``.
+
+    Query parameters:
+        adapter: ``type_name`` of the target adapter (see
+            ``GET /l2/adapters``). Omit to target the primary.
 
     Responses:
-        200: ``{"requested": N, "adapter": "<type_name>", "ok": <bool>}``
-            (with optional ``"error"`` field on ``ok=False``).
-        400: batch exceeds ``_MAX_DELETE_BATCH`` OR a key's payload
-            survived field-level typing but violates an ``ObjectKey``
-            invariant (bad hex, ``@`` in ``model_name``, forbidden
-            ``cache_salt`` char, ...).
-        422: field-level validation failure (missing ``keys``, wrong
-            types).
-        503: engine not initialized OR no L2 adapters configured.
+        200: ``{"requested", "adapter", "ok"[, "error"]}``.
+        400: batch exceeds ``_MAX_DELETE_BATCH`` or a key violates
+            ``ObjectKey`` invariants.
+        404: ``?adapter=<name>`` does not match any adapter.
+        422: request body fails field-level validation.
+        503: engine not initialized, or no L2 adapters configured.
     """
     if len(body.keys) > _MAX_DELETE_BATCH:
         raise HTTPException(
@@ -134,23 +170,19 @@ async def delete_l2(body: DeleteRequest, request: Request) -> dict[str, object]:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"keys[{i}]: {exc}") from None
 
-    desc, adapter = _resolve_primary_l2(request)
+    desc, target_adapter = _resolve_l2_adapter(request, selector=adapter)
 
     response: dict[str, object] = {
         "requested": len(parsed),
         "adapter": desc.type_name,
     }
     try:
-        # ``adapter.delete`` is synchronous and blocks on adapter I/O
-        # (the S3 adapter bounces the call through
-        # ``run_coroutine_threadsafe(...).result(timeout=30.0)``).
-        # Off-load to a worker thread so the FastAPI event loop stays
-        # free for other requests.
-        await asyncio.to_thread(adapter.delete, parsed)
+        # ``adapter.delete`` is sync-blocking; off-load to a worker
+        # thread to keep the event loop free for other requests.
+        await asyncio.to_thread(target_adapter.delete, parsed)
     except Exception as exc:
-        # Best-effort contract: adapter exceptions are reported in the
-        # 200 body so operators see the failure cleanly, not as a 500
-        # with a stack trace.
+        # Adapter exceptions are surfaced in the 200 body so operators
+        # see a structured failure, not a 500.
         response["ok"] = False
         response["error"] = str(exc)
         return response
@@ -164,34 +196,31 @@ async def list_l2_keys(
     model_name: str | None = Query(default=None),
     page_size: int = Query(default=_DEFAULT_PAGE_SIZE, ge=1, le=_MAX_PAGE_SIZE),
     page_token: str | None = Query(default=None),
+    adapter: str | None = Query(default=None, alias="adapter"),
 ) -> dict[str, object]:
-    """List keys resident in the primary L2 adapter, paginated.
+    """List keys resident in one L2 adapter, paginated.
 
     Query parameters:
         model_name: restrict to one model name. Omit to return all.
-        page_size: max entries per page. Clamped to ``[1, 5000]``;
-            default ``500``.
-        page_token: opaque cursor returned by the previous page. Omit
-            on the first call. Pass back verbatim to get the next page.
+        page_size: max entries per page. Clamped to ``[1, 5000]``.
+        page_token: opaque cursor from the previous page; omit on the
+            first call.
+        adapter: ``type_name`` of the target adapter (see
+            ``GET /l2/adapters``). Omit to target the primary.
 
     Responses:
-        200: ``{"adapter": "<type>",
-                "entries": [{"key": <EncodedObjectKey>, "size_bytes": N},
-                            ...],
-                "next_page_token": "<opaque>" | null}``.
-        400: malformed page_token (adapter-level).
-        501: primary adapter does not implement listing.
-        503: engine not initialized OR no L2 adapters configured.
+        200: ``{"adapter", "entries", "next_page_token"}``.
+        400: malformed ``page_token``.
+        404: ``?adapter=<name>`` does not match any adapter.
+        501: selected adapter does not implement listing.
+        503: engine not initialized, or no L2 adapters configured.
     """
-    desc, adapter = _resolve_primary_l2(request)
+    desc, target_adapter = _resolve_l2_adapter(request, selector=adapter)
 
     try:
-        # Same rationale as ``delete_l2``: ``list_l2_keys`` is a
-        # synchronous adapter call that issues blocking S3
-        # ``ListObjectsV2`` requests, so off-load it to a worker
-        # thread to keep the event loop responsive.
+        # Sync-blocking; off-load to a worker thread.
         page = await asyncio.to_thread(
-            adapter.list_l2_keys,
+            target_adapter.list_l2_keys,
             model_name=model_name,
             page_size=page_size,
             cursor=page_token,
@@ -202,7 +231,7 @@ async def list_l2_keys(
     except NotImplementedError as exc:
         raise HTTPException(
             status_code=501,
-            detail=f"primary L2 adapter does not support listing: {exc}",
+            detail=f"L2 adapter {desc.type_name!r} does not support listing: {exc}",
         ) from None
 
     return {

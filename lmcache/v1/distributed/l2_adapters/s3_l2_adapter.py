@@ -35,11 +35,9 @@ from awscrt.io import ClientTlsContext, TlsConnectionOptions, TlsContextOptions
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import KeyEntry, KeyListPage, ObjectKey
 from lmcache.v1.distributed.internal_api import L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
-    KeyEntry,
-    KeyListPage,
     L2AdapterInterface,
     L2TaskId,
 )
@@ -64,15 +62,11 @@ logger = init_logger(__name__)
 def _string_to_object_key(name: str) -> ObjectKey:
     """Reverse of :func:`_object_key_to_string`.
 
-    Object names use ``@`` as a field separator:
+    Expects
     ``<model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>[@<cache_salt>]``.
-    Other layouts (wrong field count, malformed hex / rank) raise
-    ``ValueError`` — typically an object the bucket contains from
-    another tool that this adapter shouldn't try to interpret.
 
-    ``model_name`` is round-tripped byte-for-byte; the adapter stores
-    keys under their literal name on S3 (no path-flattening), so a
-    listed key recovers the original ObjectKey exactly.
+    Raises:
+        ValueError: ``name`` does not match the expected format.
     """
     parts = name.split("@")
     if len(parts) == 4:
@@ -119,34 +113,22 @@ def _string_to_object_key(name: str) -> ObjectKey:
 def _parse_list_response_xml(
     body: bytes,
 ) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
-    """Parse a ListObjectsV2 XML response.
+    """Parse a ListObjectsV2 XML response into ``(entries, next_token)``.
 
-    Returns the entries this adapter can recognize and S3's
-    ``NextContinuationToken`` (``None`` when ``IsTruncated`` is false).
-    Objects with names that don't parse via
-    :func:`_string_to_object_key` are skipped — they're presumably from
-    another tool sharing the bucket prefix and shouldn't be exposed
-    via this API.
+    Entries this adapter can't parse (foreign objects in the bucket)
+    are skipped silently. ``next_token`` is ``None`` when the listing
+    is not truncated.
 
     Raises:
-        ValueError: when the response is not valid XML or doesn't
-            contain a ``ListBucketResult`` root.
+        ValueError: the response body is not valid XML.
     """
     try:
         root = ET.fromstring(body)
     except ET.ParseError as exc:
         raise ValueError(f"malformed ListObjectsV2 XML: {exc}") from None
 
-    # S3 uses a default namespace; ElementTree includes it in tag names.
-    # Strip it in-place so simple ``findall("Contents")`` works. This
-    # mutation is safe because ``root`` is local to this function: it
-    # is built here, walked once, and discarded. **Do not** cache or
-    # return the parsed tree — callers downstream would see the
-    # stripped tags and break if a different parse layered namespaces
-    # back on. The "strip whatever URI is present" approach (vs.
-    # namespace-prefixed XPath) is intentional: it tolerates the
-    # different namespace URIs S3-compatible providers (MinIO, Ceph
-    # RGW, etc.) may emit, without hard-coding AWS's URI.
+    # Strip the default XML namespace so ``findall("Contents")`` works.
+    # The tree is local to this function — do not cache or return it.
     for elem in root.iter():
         if "}" in elem.tag:
             elem.tag = elem.tag.split("}", 1)[1]
@@ -205,13 +187,7 @@ def _object_key_to_string(key: ObjectKey) -> str:
 
 
 def _format_safe_path(key_str: str) -> str:
-    """URL-encode the object name to form a safe HTTP path.
-
-    ``url_quote`` keeps ``/`` (which is legal inside S3 object names)
-    and percent-encodes other reserved characters like ``@``. The
-    leading ``/`` is required by the HTTP path grammar — S3 strips it
-    when resolving to the object key.
-    """
+    """URL-encode the object name to form a safe HTTP path."""
     return "/" + url_quote(key_str)
 
 
@@ -731,41 +707,18 @@ class S3L2Adapter(L2AdapterInterface):
     ) -> KeyListPage:
         """List keys from the S3 bucket via ``ListObjectsV2``.
 
-        Unlike the in-memory tracker, this enumerates whatever is
-        actually on S3 — including keys written by other LMCache
-        instances sharing the bucket prefix, and including keys still
-        present after this instance was restarted. The cursor is S3's
-        ``NextContinuationToken``, passed back verbatim by callers.
-
         Args:
-            model_name: when not ``None``, restrict the S3 listing to
-                objects whose name starts with ``<model_name>@``.
-                Pushed down to S3 as a ``prefix`` query param so the
-                server skips non-matching keys.
-            page_size: target maximum entries per page. Clamped to
-                ``[1, 1000]`` because ``ListObjectsV2`` caps ``MaxKeys``
-                at 1000 — clients that ask for more get S3's max and
-                continue via the returned token.
-            cursor: opaque S3 ``ContinuationToken`` from the previous
-                call. ``None`` on the first call.
-
-        Returns:
-            An :class:`KeyListPage`. ``next_page_token`` is ``None``
-            iff S3 reported the listing as not truncated.
+            model_name: if set, restrict listing to objects whose name
+                starts with ``<model_name>@``.
+            page_size: target entries per page. Clamped to S3's
+                ``MaxKeys=1000`` ceiling.
+            cursor: opaque continuation token from the previous page.
 
         Raises:
-            ValueError: when ``page_size`` is non-positive, when the
-                ``cursor`` is rejected by S3, or when S3 returns a
-                malformed XML body.
-            RuntimeError: when the underlying CRT request errors out
-                (transient network failures, auth failures, etc.).
-
-        Note:
-            Keys are stored on S3 under their literal object name (no
-            path-flattening), so a listed key recovers the original
-            :class:`ObjectKey` byte-for-byte. Model names containing
-            ``/`` render as virtual folders in the S3 web console but
-            this has no effect on correctness.
+            ValueError: ``page_size`` non-positive, malformed
+                ``cursor``, or malformed S3 response.
+            RuntimeError: connection is circuit-broken, or the
+                underlying CRT request errored out.
         """
         if page_size <= 0:
             raise ValueError(f"page_size must be positive (got {page_size})")
@@ -1000,12 +953,11 @@ class S3L2Adapter(L2AdapterInterface):
         max_keys: int,
         continuation_token: Optional[str],
     ):
-        """Build a ListObjectsV2 request and its body-accumulation buffer.
+        """Build a ListObjectsV2 request.
 
         Returns ``(s3_req, body_chunks, captured)``. The caller awaits
-        ``s3_req.finished_future``; the response XML is assembled by
-        concatenating ``body_chunks``. ``captured["status"]`` carries
-        the HTTP status code S3 returned.
+        ``s3_req.finished_future`` and assembles the XML from
+        ``body_chunks``.
         """
         params: list[tuple[str, str]] = [
             ("list-type", "2"),
@@ -1277,28 +1229,11 @@ class S3L2Adapter(L2AdapterInterface):
         max_keys: int,
         continuation_token: Optional[str],
     ) -> tuple[list[tuple[ObjectKey, int]], Optional[str]]:
-        """Issue one ``ListObjectsV2`` call and parse its XML response.
-
-        Returns ``(entries, next_continuation_token)``. Entries are
-        already decoded into :class:`ObjectKey` via
-        :func:`_string_to_object_key`; objects with unrecognized names
-        (presumably from other tools sharing the bucket) are silently
-        dropped — see the helper for the parsing contract.
-
-        Wraps the CRT's ``concurrent.futures.Future`` so this coroutine
-        can ``await`` completion alongside other adapter coroutines on
-        the shared event loop.
-        """
+        """Issue one ``ListObjectsV2`` call and parse the response."""
         s3_req, body_chunks, _captured = self._list_request(
             prefix, max_keys, continuation_token
         )
-        try:
-            await asyncio.wrap_future(s3_req.finished_future)
-        except Exception:
-            # Propagate — caller (``list_l2_keys``) converts to the
-            # right user-facing error and records the outcome with the
-            # circuit breaker on its way out.
-            raise
+        await asyncio.wrap_future(s3_req.finished_future)
         return _parse_list_response_xml(b"".join(body_chunks))
 
     async def _execute_delete(

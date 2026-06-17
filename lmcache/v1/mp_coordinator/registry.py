@@ -125,22 +125,8 @@ class InstanceRegistry:
             return list(self._instances.values())
 
     def random_instance(self) -> "MPInstance | None":
-        """Return a uniformly random registered instance.
-
-        Used by callers that want to spread fan-out work (eviction
-        dispatch, startup resync, ...) across the fleet instead of
-        always hitting the first-registered MP server. Selection is
-        uniform across the live set at call time — no round-robin
-        state is maintained.
-
-        Returns:
-            One :class:`MPInstance` chosen uniformly at random, or
-            ``None`` when the registry is empty. The caller can race
-            with deregistration: the returned instance may already
-            have been removed by the time the caller uses it (this is
-            no different from the read-then-act gap any other
-            registry method has).
-        """
+        """Return a uniformly random registered instance, or ``None``
+        when the registry is empty."""
         with self._lock:
             instances = list(self._instances.values())
         if not instances:

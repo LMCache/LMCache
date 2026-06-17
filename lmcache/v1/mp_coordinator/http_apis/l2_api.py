@@ -42,17 +42,7 @@ def _gb(n_bytes: int) -> float:
 
 
 def _quota_manager(request: Request) -> QuotaManager:
-    """Return the shared quota manager from app state.
-
-    Args:
-        request: The incoming request.
-
-    Returns:
-        The shared :class:`QuotaManager`.
-
-    Raises:
-        RuntimeError: If the manager is not initialized.
-    """
+    """Return the shared :class:`QuotaManager` from ``app.state``."""
     mgr = getattr(request.app.state, "quota_manager", None)
     if mgr is None:
         raise RuntimeError("quota manager not initialized")
@@ -60,17 +50,7 @@ def _quota_manager(request: Request) -> QuotaManager:
 
 
 def _usage_manager(request: Request) -> L2UsageManager:
-    """Return the shared usage manager from app state.
-
-    Args:
-        request: The incoming request.
-
-    Returns:
-        The shared :class:`L2UsageManager`.
-
-    Raises:
-        RuntimeError: If the manager is not initialized.
-    """
+    """Return the shared :class:`L2UsageManager` from ``app.state``."""
     mgr = getattr(request.app.state, "usage_manager", None)
     if mgr is None:
         raise RuntimeError("usage manager not initialized")
@@ -78,17 +58,7 @@ def _usage_manager(request: Request) -> L2UsageManager:
 
 
 def _eviction_manager(request: Request) -> L2EvictionManager:
-    """Return the shared eviction manager from app state.
-
-    Args:
-        request: The incoming request.
-
-    Returns:
-        The shared :class:`L2EvictionManager`.
-
-    Raises:
-        RuntimeError: If the manager is not initialized.
-    """
+    """Return the shared :class:`L2EvictionManager` from ``app.state``."""
     mgr = getattr(request.app.state, "eviction_manager", None)
     if mgr is None:
         raise RuntimeError("eviction manager not initialized")
@@ -102,16 +72,14 @@ def _eviction_manager(request: Request) -> L2EvictionManager:
 async def set_quota(
     cache_salt: str, body: SetQuotaRequest, request: Request
 ) -> QuotaResponse | JSONResponse:
-    """Create or update a quota for the given ``cache_salt``.
+    """Create or update a quota.
 
     Args:
-        cache_salt: The tenant identifier. Use ``_default`` for the
-            empty salt.
+        cache_salt: Tenant identifier; use ``_default`` for the empty salt.
         body: Quota limit to apply.
-        request: The incoming request.
 
     Returns:
-        The applied quota.
+        The applied quota, or a 400 JSON response if the limit is invalid.
     """
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     limit_bytes = int(body.limit_gb * _GB)
@@ -131,12 +99,10 @@ async def delete_quota(cache_salt: str, request: Request) -> QuotaResponse:
     """Remove a salt's quota entry.
 
     Args:
-        cache_salt: The tenant identifier. Use ``_default`` for the
-            empty salt.
-        request: The incoming request.
+        cache_salt: Tenant identifier; use ``_default`` for the empty salt.
 
     Returns:
-        Whether the entry was found and removed.
+        ``QuotaResponse`` with ``status`` ``"removed"`` or ``"not_found"``.
     """
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     removed = _quota_manager(request).delete_quota(cache_salt)
@@ -154,11 +120,10 @@ async def delete_quota(cache_salt: str, request: Request) -> QuotaResponse:
 async def report_events(
     body: ReportUsageRequest, request: Request
 ) -> ReportUsageResponse:
-    """Record a batch of L2 store/lookup events.
+    """Record a batch of L2 ``store`` / ``lookup`` / ``delete`` events.
 
     Args:
-        body: Batch of store/lookup events to record.
-        request: The incoming request.
+        body: Event batch tagged with the reporter's ``instance_id`` and ``seq``.
 
     Returns:
         Number of events processed.
@@ -186,12 +151,10 @@ async def get_status(cache_salt: str, request: Request) -> L2StatusResponse:
     """Read quota and usage for a single salt.
 
     Args:
-        cache_salt: The tenant identifier. Use ``_default`` for the
-            empty salt.
-        request: The incoming request.
+        cache_salt: Tenant identifier; use ``_default`` for the empty salt.
 
     Returns:
-        Combined quota and usage detail.
+        Combined quota and live usage detail.
     """
     cache_salt = _resolve_salt_from_api_path(cache_salt)
     tracker = _usage_manager(request)
@@ -211,11 +174,8 @@ async def get_status(cache_salt: str, request: Request) -> L2StatusResponse:
 async def list_status(request: Request) -> L2StatusListResponse:
     """List quota and usage across all cache salts.
 
-    Args:
-        request: The incoming request.
-
     Returns:
-        Total usage and per-salt breakdown with quota info.
+        Total usage plus per-salt breakdown with quota info.
     """
     tracker = _usage_manager(request)
     store = _quota_manager(request)

@@ -1,19 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Coordinator-side L2 resync.
 
-On a fresh coordinator (or after a restart), the in-memory usage and
-eviction trackers know nothing about keys already resident in L2. This
-manager paginates an MP server's ``GET /l2/keys`` and feeds each entry
-into :class:`L2UsageManager` + :class:`L2EvictionManager`, so quota
-enforcement and LRU eviction work from a representative baseline
-rather than from zero.
-
-Best-effort: resync failures are logged and the manager gives up. The
-ongoing usage-event stream from MP servers will eventually correct any
-initial blind spots.
-
-Wired into the coordinator app's lifespan as a one-shot background
-task — see ``app.py``. Disable via ``enable_startup_resync=False``.
+On boot, paginates an MP server's ``GET /l2/keys`` and seeds the
+coordinator's usage + eviction trackers so quota enforcement starts
+from a representative baseline rather than zero. Best-effort: failures
+are logged and the manager gives up; the ongoing event stream corrects
+any initial blind spots.
 """
 
 # Future
@@ -37,24 +29,13 @@ logger = init_logger(__name__)
 
 class L2ResyncManager:
     """Backfill the coordinator's L2 trackers from a live MP server's
-    actual L2 contents.
+    actual L2 contents. Best-effort; not snapshot-isolated.
 
     Args:
-        usage_manager: The shared usage manager. Each resynced key
-            contributes ``size_bytes`` under its ``cache_salt`` bucket.
-        eviction_manager: The shared eviction manager. Each resynced
-            key is registered via ``on_store(key, size_bytes)``.
-        page_size: ``page_size`` query param forwarded to the MP
-            server's ``/l2/keys`` endpoint. The server clamps this to
-            its own ceiling.
-
-    Note:
-        The recorded state is a snapshot taken at the moment the
-        listing was issued. Concurrent stores and evictions during a
-        paginated walk may cause individual keys to be missed or
-        double-counted — the contract is best-effort, not
-        snapshot-isolated. See the design doc for
-        ``l2_apis`` for the underlying listing semantics.
+        usage_manager: Shared usage manager.
+        eviction_manager: Shared eviction manager.
+        page_size: ``page_size`` forwarded to the MP server's
+            ``/l2/keys`` endpoint.
     """
 
     def __init__(
@@ -77,14 +58,8 @@ class L2ResyncManager:
     ) -> int:
         """Page through ``instance``'s L2 keys and record each one.
 
-        Args:
-            instance: The MP server to query.
-            http_client: Shared async HTTP client.
-            request_timeout: Per-page HTTP timeout in seconds.
-
-        Returns:
-            Total number of keys successfully recorded. Stops early on
-            HTTP failure and returns whatever was recorded so far.
+        Returns the number of keys recorded; stops early on HTTP
+        failure and returns the partial count.
         """
         url = f"http://{instance.ip}:{instance.http_port}/l2/keys"
         page_token: str | None = None
@@ -149,24 +124,8 @@ class L2ResyncManager:
     ) -> int:
         """Poll the registry until an MP server registers, then resync.
 
-        Args:
-            registry: Live MP server registry.
-            http_client: Shared async HTTP client.
-            poll_interval: Seconds between registry checks.
-            max_wait: Maximum seconds to wait for the first
-                registration. After this the resync gives up and
-                returns ``0``.
-            request_timeout: Per-page HTTP timeout once a server is
-                found.
-
-        Returns:
-            Total keys recorded, or ``0`` if no MP server registered
-            within ``max_wait``.
-
-        Note:
-            Uses ``asyncio.get_running_loop().time()`` for the wait
-            budget so timing is monotonic and unaffected by wall-clock
-            adjustments.
+        Returns the number of keys recorded; ``0`` if no MP server
+        registered within ``max_wait``.
         """
         deadline = asyncio.get_running_loop().time() + max_wait
         while True:

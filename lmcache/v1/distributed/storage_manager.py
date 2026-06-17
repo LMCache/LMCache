@@ -774,35 +774,15 @@ class StorageManager:
         result["adapter_index"] = adapter_index
         return result
 
-    def primary_l2(self) -> tuple[AdapterDescriptor, L2AdapterInterface]:
-        """Return the primary (first-configured) L2 adapter and its descriptor.
+    def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
+        """Return all configured L2 adapters paired with descriptors,
+        in configuration order. The first element is the primary
+        adapter; the list is empty when no L2 is configured.
 
-        Callers that need to operate on the primary L2 adapter — the
-        ``DELETE /l2`` and ``GET /l2/keys`` HTTP handlers, the
-        coordinator's resync flow, ad-hoc admin tooling — pick the pair
-        up via this method and invoke the adapter's methods directly
-        rather than going through a per-operation facade on the storage
-        manager. The descriptor's ``type_name`` is what HTTP responses
-        surface as the ``"adapter"`` field.
-
-        Returns:
-            ``(descriptor, adapter)`` for the first configured L2
-            adapter.
-
-        Raises:
-            ValueError: when no L2 adapters are configured (callers
-                typically map this to HTTP 503).
-
-        Note:
-            Do NOT cache the returned reference across awaits or
-            request boundaries: ``reconfigure_l2_adapter`` may swap
-            adapters in/out at runtime, after which a held reference
-            points at a closed adapter. Re-call ``primary_l2`` on every
-            operation.
+        Do not cache the returned pairs — ``reconfigure_l2_adapter``
+        may swap adapters in/out at runtime.
         """
-        if not self._l2_adapters:
-            raise ValueError("no L2 adapters configured")
-        return self._adapter_descriptors[0], self._l2_adapters[0]
+        return list(zip(self._adapter_descriptors, self._l2_adapters, strict=True))
 
     def clear(self, force: bool = False):
         """

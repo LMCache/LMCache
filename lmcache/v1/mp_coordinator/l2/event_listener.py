@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MP-server-side L2 event client.
-
-Implements :class:`L2AdapterListener` to receive store/lookup/delete
-notifications from the L2 adapter, converts ``ObjectKey`` to
-``EncodedObjectKey``, buffers events, and flushes them to the coordinator in
-batches on a timer.
-
-Thread-safe: listener callbacks can fire from any thread while
-``run`` drains the buffer on the event loop.
-"""
+"""MP-server-side L2 event client: batches adapter store/lookup/delete
+events and flushes them to the coordinator on a timer."""
 
 # Standard
 import asyncio
@@ -34,17 +26,14 @@ _DEFAULT_FLUSH_INTERVAL = 1.0
 
 
 class L2EventListener(L2AdapterListener):
-    """L2 adapter listener that batches events and flushes to the coordinator.
-
-    Register as a listener on the L2 adapter via
-    ``adapter.register_listener(client)``. The ``run`` coroutine should
-    be started as a background task and cancelled on shutdown.
+    """L2 adapter listener that batches events and flushes to the
+    coordinator. Run :meth:`run` as a background task.
 
     Args:
-        client: The HTTP client to send with.
-        coordinator_url: Coordinator base URL (e.g. ``http://host:9300``).
-        instance_id: Identifier of this MP server (included in every batch).
-        flush_interval: Seconds between flush attempts.
+        client: HTTP client.
+        coordinator_url: Coordinator base URL.
+        instance_id: This MP server's id (sent with every batch).
+        flush_interval: Seconds between flushes.
     """
 
     def __init__(
@@ -87,13 +76,7 @@ class L2EventListener(L2AdapterListener):
                 self._buffer.append(event)
 
     def on_l2_keys_deleted(self, keys: list[ObjectKey]):
-        """Buffer DELETE events for each key. Thread-safe.
-
-        Fired by the L2 adapter after deletion completes (regardless
-        of who initiated it). The coordinator's ``/l2/events`` handler
-        consumes these to drop the keys from its LRU and adjust the
-        per-``cache_salt`` byte totals via the usage manager.
-        """
+        """Buffer DELETE events for each key. Thread-safe."""
         for obj in keys:
             event = UsageEvent(
                 type=EventType.DELETE,
@@ -106,11 +89,9 @@ class L2EventListener(L2AdapterListener):
     # -- Flush loop ----------------------------------------------------------
 
     async def run(self) -> None:
-        """Drain the buffer on a timer until cancelled.
-
-        Resilient: flush failures are logged and the batch is dropped
-        to prevent unbounded growth when the coordinator is down.
-        """
+        """Drain the buffer on a timer until cancelled. Flush failures
+        drop the batch to bound buffer growth when the coordinator is
+        down."""
         while True:
             await asyncio.sleep(self._flush_interval)
             await self._flush()

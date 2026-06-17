@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 # First Party
 from lmcache.logging import init_logger
-from lmcache.v1.distributed.api import EncodedObjectKey, ObjectKey
+from lmcache.v1.distributed.api import KeyListPage, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.memory_management import MemoryObj
 
@@ -73,33 +73,6 @@ class AdapterUsage:
         if self.total_capacity_bytes <= 0:
             return -1.0
         return self.total_bytes_used / self.total_capacity_bytes
-
-
-@dataclass(frozen=True)
-class KeyEntry:
-    """One entry in a :class:`KeyListPage` — the JSON-safe
-    :class:`EncodedObjectKey` (so it serializes cleanly when returned
-    over HTTP) and the bytes the adapter has on disk for it."""
-
-    key: EncodedObjectKey
-    size_bytes: int
-
-
-@dataclass(frozen=True)
-class KeyListPage:
-    """A page of keys returned by ``L2AdapterInterface.list_l2_keys``.
-
-    ``next_page_token`` is ``None`` when the listing is exhausted; pass
-    it verbatim to the next call to continue. The token is opaque — the
-    caller MUST NOT inspect or modify it.
-
-    Adapter-level: this type carries no adapter identification. The
-    storage manager attaches an ``adapter`` field when returning the
-    page to HTTP callers.
-    """
-
-    entries: tuple[KeyEntry, ...]
-    next_page_token: str | None
 
 
 class L2AdapterInterface(ABC):
@@ -501,42 +474,19 @@ class L2AdapterInterface(ABC):
         page_size: int = 500,
         cursor: str | None = None,
     ) -> KeyListPage:
-        """List keys currently resident in this adapter, with a
-        ``model_name`` filter and pagination.
+        """List keys currently resident in this adapter, paginated.
 
         Args:
-            model_name: when not ``None``, restrict the result to keys
-                whose ``ObjectKey.model_name`` equals this value.
-            page_size: maximum number of entries to return in this page.
-                Must be positive. Adapters MAY return fewer than
-                ``page_size`` entries even when more match the filter
-                (e.g. when an internal batch boundary is reached).
-            cursor: opaque per-adapter pagination cursor. ``None`` on the
-                first call; on subsequent calls, pass the
-                ``next_page_token`` returned by the previous page. The
-                token is private to the adapter and the caller MUST NOT
-                inspect it.
-
-        Returns:
-            An :class:`KeyListPage`. ``next_page_token`` is ``None``
-            iff the listing is exhausted.
+            model_name: if set, restrict to keys with this
+                ``ObjectKey.model_name``.
+            page_size: maximum entries to return in this page.
+            cursor: opaque cursor from the previous page; ``None`` on
+                the first call.
 
         Raises:
-            NotImplementedError: when the adapter does not maintain
-                enough state to enumerate its keys (default behavior).
-                Callers using :meth:`StorageManager.list_l2_keys` should
-                expect this exception to be swallowed and the adapter
-                silently skipped.
-            ValueError: when ``page_size`` is non-positive or ``cursor``
-                is malformed.
-
-        Note:
-            Adapters that support listing are expected to return a
-            **stable** ordering across calls for a given filter so that
-            cursor-based pagination converges. Concurrent stores or
-            evictions during a paginated walk may cause individual keys
-            to appear, disappear, or shift between pages; the contract
-            is best-effort consistency, not snapshot isolation.
+            NotImplementedError: the adapter does not support listing.
+            ValueError: ``page_size`` is non-positive or ``cursor`` is
+                malformed.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement list_l2_keys"

@@ -96,13 +96,20 @@ compatibility with the vLLM-embedded API server.
      - Compute MD5 checksums over the GPU KV cache for a set of block IDs.
        Intended for diagnostics and round-trip integrity checks from
        ``lmcache bench server``.
+   * - GET
+     - ``/l2/adapters``
+     - Enumerate every configured L2 adapter with its ``type_name``
+       and primary flag. Operators read this to learn which value to
+       pass as ``?adapter=`` on the endpoints below.
    * - DELETE
      - ``/l2``
-     - Delete a caller-supplied list of keys from the primary L2 adapter.
+     - Delete a caller-supplied list of keys from one L2 adapter
+       (default: primary; override with ``?adapter=<type_name>``).
    * - GET
      - ``/l2/keys``
-     - Paginate keys currently resident in the primary L2 adapter
-       (optionally filtered by ``model_name``).
+     - Paginate keys currently resident in one L2 adapter
+       (default: primary; override with ``?adapter=<type_name>``;
+       optionally filtered by ``model_name``).
    * - GET
      - ``/quota``
      - List every registered ``cache_salt`` quota with live usage.
@@ -436,15 +443,21 @@ When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
 ``/l2`` — L2 keys management
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Two endpoints — ``DELETE /l2`` and ``GET /l2/keys`` — let operators
-purge keys from L2 and enumerate what is currently resident. They
-target the **primary** L2 adapter (the first one configured in the
-storage manager's adapter list). There is no adapter selector on the
-wire; to target a different adapter, place it first in the L2
-configuration.
+Three endpoints — ``GET /l2/adapters``, ``DELETE /l2``, and
+``GET /l2/keys`` — let operators enumerate the configured L2
+backends, purge keys from one, and enumerate what is currently
+resident.
 
-Both endpoints are intended for operator / admin workflows ("purge
-this user's keys", "show me what's resident", "garbage-collect orphans
+``DELETE /l2`` and ``GET /l2/keys`` accept an optional
+``?adapter=<type_name>`` query parameter to target a specific adapter.
+Omit the selector to target the **primary** (first-configured)
+adapter — the v1 behavior, preserved for clients that don't care
+about multi-adapter deployments. When multiple adapters share a
+``type_name``, the first match wins. Use ``GET /l2/adapters`` to learn
+the valid selectors.
+
+All three are intended for operator / admin workflows ("purge this
+user's keys", "show me what's resident", "garbage-collect orphans
 after a rename"). They are **not** on the inference data path.
 
 L1 is intentionally not touched. Keys deleted from L2 may still return
@@ -462,13 +475,60 @@ For full request/response semantics, pagination, error codes, and the
 event flow back to the coordinator, see the design doc at
 ``docs/design/v1/multiprocess/l2_apis.md``.
 
+``GET /l2/adapters``
+^^^^^^^^^^^^^^^^^^^^
+
+Enumerate every L2 adapter the engine has loaded, in configuration
+order.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "adapters": [
+        {"index": 0, "type_name": "S3L2Adapter", "primary": true},
+        {"index": 1, "type_name": "FSL2Adapter", "primary": false}
+      ]
+    }
+
+``primary`` is ``true`` only on the first entry. An engine that has
+no L2 backends returns ``{"adapters": []}`` (still ``200`` — the
+engine is initialized, it just has no L2 storage).
+
+**HTTP status codes:**
+
+- ``200``: success (including the no-adapters case).
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/l2/adapters | jq
+
 ``DELETE /l2``
 ^^^^^^^^^^^^^^
 
-Delete a caller-supplied list of keys from the primary L2 adapter.
+Delete a caller-supplied list of keys from one L2 adapter.
 Idempotent: keys absent from the adapter are skipped silently; keys
 currently locked by in-flight store/load tasks are skipped so the
 delete never corrupts an active transfer.
+
+**Query parameters:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 13 69
+
+   * - Name
+     - Default
+     - Description
+   * - ``adapter``
+     - primary
+     - ``type_name`` of the target adapter (see ``GET /l2/adapters``).
+       Omit to target the primary (first-configured) adapter. First
+       match wins when multiple adapters share a ``type_name``.
 
 Per-key successful deletions fire ``on_l2_keys_deleted`` on the
 adapter's listeners — when the coordinator is wired (see
@@ -511,6 +571,7 @@ On adapter-level failure the response is still ``200`` with
 - ``400``: batch exceeds the limit, or a key payload violates an
   ``ObjectKey`` invariant (bad hex, ``@`` in ``model_name``, forbidden
   ``cache_salt`` character).
+- ``404``: ``?adapter=<name>`` does not match any configured adapter.
 - ``422``: Pydantic-level body-shape failure (missing ``keys``,
   wrong field types).
 - ``503``: engine not initialized, or no L2 adapters configured.
@@ -531,7 +592,7 @@ On adapter-level failure the response is still ``200`` with
 ``GET /l2/keys``
 ^^^^^^^^^^^^^^^^
 
-Paginate keys currently resident in the primary L2 adapter.
+Paginate keys currently resident in one L2 adapter.
 
 **Query parameters:**
 
@@ -542,6 +603,11 @@ Paginate keys currently resident in the primary L2 adapter.
    * - Name
      - Default
      - Description
+   * - ``adapter``
+     - primary
+     - ``type_name`` of the target adapter (see ``GET /l2/adapters``).
+       Omit to target the primary (first-configured) adapter. First
+       match wins when multiple adapters share a ``type_name``.
    * - ``model_name``
      - none
      - Restrict the result to keys whose ``model_name`` matches.
@@ -586,7 +652,8 @@ cause keys to appear, disappear, or shift between pages.
 
 - ``200``: success.
 - ``400``: malformed ``page_token`` (adapter-level).
-- ``501``: primary adapter does not implement listing. In v1 only
+- ``404``: ``?adapter=<name>`` does not match any configured adapter.
+- ``501``: selected adapter does not implement listing. In v1 only
   ``S3L2Adapter`` does; adapters wrapped by ``SerdeL2AdapterWrapper``
   inherit the wrapped adapter's behavior.
 - ``503``: engine not initialized, or no L2 adapters configured.

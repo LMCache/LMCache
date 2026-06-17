@@ -41,22 +41,15 @@ class MPCoordinatorConfig:
         blend_probe_stride: Positions between match probes. With partial-fill
             reuse any offset is usable, so ``1`` (probe every offset) gives full
             recall; raise only to trade recall for coordinator CPU.
-        enable_startup_resync: When ``True`` the coordinator runs a
-            one-shot L2 resync on startup that paginates an MP server's
-            ``GET /l2/keys`` and backfills usage + eviction trackers.
-            Set to ``False`` to skip — useful in tests and in
-            deployments that start the coordinator before any MP
-            servers exist and don't care about pre-existing L2 state.
+        enable_startup_resync: When ``True``, run a one-shot L2 resync
+            on startup to backfill trackers from an MP server's
+            ``GET /l2/keys``.
         resync_poll_interval: Seconds between registry checks while
-            waiting for the first MP server to register before startup
-            resync.
-        resync_max_wait: Maximum seconds the startup resync waits for
-            an MP server before giving up. Beyond this, the coordinator
-            keeps running with empty trackers until normal usage events
-            fill them in.
-        resync_page_size: ``page_size`` to request from ``GET /l2/keys``
-            during resync. Larger values reduce RTT count; the server
-            clamps to its own ceiling.
+            waiting for the first MP server to register.
+        resync_max_wait: Maximum seconds startup resync waits for an MP
+            server before giving up.
+        resync_page_size: ``page_size`` forwarded to ``GET /l2/keys``
+            during resync.
     """
 
     host: str = "0.0.0.0"

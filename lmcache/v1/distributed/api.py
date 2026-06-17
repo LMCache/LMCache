@@ -98,11 +98,7 @@ class ObjectKey:
             )
 
     def to_encoded_object_key(self) -> "EncodedObjectKey":
-        """Return the wire-format projection of this key.
-
-        See :class:`EncodedObjectKey` for the contract and round-trip
-        rules.
-        """
+        """Return the JSON-safe :class:`EncodedObjectKey` projection."""
         return EncodedObjectKey(
             chunk_hash_hex=self.chunk_hash.hex(),
             model_name=self.model_name,
@@ -177,48 +173,27 @@ class ObjectKey:
 
 @dataclass(frozen=True)
 class EncodedObjectKey:
-    """Wire-format projection of :class:`ObjectKey`.
-
-    Canonical HTTP / JSON encoding of an ``ObjectKey``: the bytes-typed
-    ``chunk_hash`` is hex-encoded so the structure is JSON-safe, and
-    every other field is preserved with its original semantics. Use
-    :meth:`ObjectKey.to_encoded_object_key` to project an ``ObjectKey``
-    into an ``EncodedObjectKey``, and
-    :meth:`EncodedObjectKey.to_object_key` to recover the ``ObjectKey``.
-
-    Field types are enforced by whatever validation layer materializes
-    the instance — Pydantic when used as a FastAPI request body,
-    ``bytes.fromhex`` / :class:`ObjectKey`'s own ``__post_init__`` when
-    :meth:`to_object_key` is called. Direct construction with garbage
-    values is permitted; the error surfaces at conversion time.
-
-    Frozen so instances are usable as dict keys / inside
-    ``OrderedDict``s — the coordinator's LRU relies on this.
-
-    Attributes:
-        chunk_hash_hex: Hex-encoded ``ObjectKey.chunk_hash``.
-        model_name: Same as ``ObjectKey.model_name``.
-        kv_rank: Same as ``ObjectKey.kv_rank``.
-        object_group_id: Same as ``ObjectKey.object_group_id``. Default
-            ``0`` so callers using the pre-``object_group_id`` wire
-            shape continue to deserialize.
-        cache_salt: Same as ``ObjectKey.cache_salt``. Default ``""``.
-    """
+    """JSON-safe wire form of :class:`ObjectKey` — ``chunk_hash`` is
+    hex-encoded; other fields are preserved verbatim."""
 
     chunk_hash_hex: str
+    """Hex-encoded ``ObjectKey.chunk_hash``."""
+
     model_name: str
     kv_rank: int
+
     object_group_id: int = 0
+    """Defaults to ``0`` so pre-``object_group_id`` wire payloads still
+    deserialize."""
+
     cache_salt: str = ""
 
     def to_object_key(self) -> ObjectKey:
-        """Construct the corresponding :class:`ObjectKey`.
+        """Recover the corresponding :class:`ObjectKey`.
 
         Raises:
-            ValueError: when ``chunk_hash_hex`` is not a valid hex
-                string, or when one of :class:`ObjectKey`'s field
-                invariants (no ``@`` in ``model_name``, salt charset,
-                etc.) is violated.
+            ValueError: ``chunk_hash_hex`` is not valid hex, or one of
+                :class:`ObjectKey`'s field invariants is violated.
         """
         return ObjectKey(
             chunk_hash=bytes.fromhex(self.chunk_hash_hex),
@@ -227,6 +202,27 @@ class EncodedObjectKey:
             object_group_id=self.object_group_id,
             cache_salt=self.cache_salt,
         )
+
+
+@dataclass(frozen=True)
+class KeyEntry:
+    """One entry in a :class:`KeyListPage` including the encoded object
+    key and its object size."""
+
+    key: EncodedObjectKey
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class KeyListPage:
+    """A page of keys returned by ``L2AdapterInterface.list_l2_keys``."""
+
+    entries: tuple[KeyEntry, ...]
+    """The keys in the current page."""
+
+    next_page_token: str | None
+    """``None`` means this is the last page. Otherwise pass the token
+    verbatim to the next call to fetch the next page."""
 
 
 @dataclass(frozen=True)
