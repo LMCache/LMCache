@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MP-server-side L2 event client.
-
-Implements :class:`L2AdapterListener` to receive store/lookup/delete
-notifications from the L2 adapter, converts ``ObjectKey`` to
-``CacheKey``, buffers events, and flushes them to the coordinator in
-batches on a timer.
-
-Thread-safe: listener callbacks can fire from any thread while
-``run`` drains the buffer on the event loop.
-"""
+"""MP-server-side L2 event client: batches adapter store/lookup/delete
+events and flushes them to the coordinator on a timer."""
 
 # Standard
 import asyncio
@@ -22,7 +14,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.mp_coordinator.schemas import (
-    CacheKey,
     EventType,
     ReportUsageRequest,
     ReportUsageResponse,
@@ -34,35 +25,15 @@ logger = init_logger(__name__)
 _DEFAULT_FLUSH_INTERVAL = 1.0
 
 
-def _object_key_to_cache_key(obj: ObjectKey) -> CacheKey:
-    """Convert an ``ObjectKey`` to a ``CacheKey``.
-
-    Args:
-        obj: The object key to convert.
-
-    Returns:
-        The equivalent cache key.
-    """
-    return CacheKey(
-        chunk_hash_hex=obj.chunk_hash.hex(),
-        model_name=obj.model_name,
-        kv_rank=obj.kv_rank,
-        cache_salt=obj.cache_salt,
-    )
-
-
 class L2EventListener(L2AdapterListener):
-    """L2 adapter listener that batches events and flushes to the coordinator.
-
-    Register as a listener on the L2 adapter via
-    ``adapter.register_listener(client)``. The ``run`` coroutine should
-    be started as a background task and cancelled on shutdown.
+    """L2 adapter listener that batches events and flushes to the
+    coordinator. Run :meth:`run` as a background task.
 
     Args:
-        client: The HTTP client to send with.
-        coordinator_url: Coordinator base URL (e.g. ``http://host:9300``).
-        instance_id: Identifier of this MP server (included in every batch).
-        flush_interval: Seconds between flush attempts.
+        client: HTTP client.
+        coordinator_url: Coordinator base URL.
+        instance_id: This MP server's id (sent with every batch).
+        flush_interval: Seconds between flushes.
     """
 
     def __init__(
@@ -87,7 +58,7 @@ class L2EventListener(L2AdapterListener):
         for obj, size in zip(keys, sizes, strict=True):
             event = UsageEvent(
                 type=EventType.STORE,
-                key=_object_key_to_cache_key(obj),
+                key=obj.to_encoded_object_key(),
                 bytes=size,
             )
             with self._lock:
@@ -98,23 +69,29 @@ class L2EventListener(L2AdapterListener):
         for obj in keys:
             event = UsageEvent(
                 type=EventType.LOOKUP,
-                key=_object_key_to_cache_key(obj),
+                key=obj.to_encoded_object_key(),
                 bytes=0,
             )
             with self._lock:
                 self._buffer.append(event)
 
     def on_l2_keys_deleted(self, keys: list[ObjectKey]):
-        """No-op — the coordinator handles deletion separately."""
+        """Buffer DELETE events for each key. Thread-safe."""
+        for obj in keys:
+            event = UsageEvent(
+                type=EventType.DELETE,
+                key=obj.to_encoded_object_key(),
+                bytes=0,
+            )
+            with self._lock:
+                self._buffer.append(event)
 
     # -- Flush loop ----------------------------------------------------------
 
     async def run(self) -> None:
-        """Drain the buffer on a timer until cancelled.
-
-        Resilient: flush failures are logged and the batch is dropped
-        to prevent unbounded growth when the coordinator is down.
-        """
+        """Drain the buffer on a timer until cancelled. Flush failures
+        drop the batch to bound buffer growth when the coordinator is
+        down."""
         while True:
             await asyncio.sleep(self._flush_interval)
             await self._flush()

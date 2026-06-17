@@ -208,12 +208,14 @@ class BlendCoordinatorClient:
     def maybe_from_env(cls) -> "BlendCoordinatorClient | None":
         """Build a client from ``LMCACHE_COORDINATOR_*`` env vars if configured.
 
-        Reads ``LMCACHE_COORDINATOR_URL`` (required to enable),
-        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (default 0.05s), and
-        ``LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY`` (default 8). The timeout
-        bounds how long the critical path waits on the global leg before
-        proceeding local-only; it serves as both the per-request HTTP timeout
-        and the module's per-lookup deadline. Keep it small.
+        Reads ``LMCACHE_COORDINATOR_URL`` (required to enable) and
+        ``LMCACHE_COORDINATOR_BLEND_TIMEOUT`` (default 1.0s). This timeout is the
+        wall-clock budget on the optional global leg: the blend module polls
+        until the match resolves (matches, or ``[]`` on failure) but gives up
+        once the budget elapses, so it bounds how long the critical path waits
+        -- including time queued behind other match queries -- before proceeding
+        local-only. It is used both as the per-request HTTP timeout and as the
+        module's per-lookup deadline. Keep it small.
 
         Returns:
             A started client, or ``None`` when no coordinator URL is configured
@@ -222,8 +224,8 @@ class BlendCoordinatorClient:
         url = os.getenv("LMCACHE_COORDINATOR_URL", "").strip()
         if not url:
             return None
-        timeout = float(os.getenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "0.05"))
         concurrency = int(os.getenv("LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY", "8"))
+        timeout = float(os.getenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.0"))
         logger.info("Blend coordinator client enabled -> %s", url)
         return cls(
             url,

@@ -775,6 +775,16 @@ class StorageManager:
         result["adapter_index"] = adapter_index
         return result
 
+    def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
+        """Return all configured L2 adapters paired with descriptors,
+        in configuration order. The first element is the primary
+        adapter; the list is empty when no L2 is configured.
+
+        Do not cache the returned pairs — ``reconfigure_l2_adapter``
+        may swap adapters in/out at runtime.
+        """
+        return list(zip(self._adapter_descriptors, self._l2_adapters, strict=True))
+
     def clear(self, force: bool = False):
         """
         Clear data in the storage manager.
