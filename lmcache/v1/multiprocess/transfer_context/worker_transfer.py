@@ -320,7 +320,10 @@ class EngineDrivenTransferContext(TransferContext):
     """
 
     def __init__(self, device_type: str = "cpu") -> None:
-        self._device_type = device_type
+        logger.debug(
+            "Initializing EngineDrivenTransferContext for device_type=%s",
+            device_type,
+        )
         self._engine_driven_context: EngineDrivenContext | None = None
         self._layout_hints: LayoutHints | None = None
         self._engine_kv_format: Any = None

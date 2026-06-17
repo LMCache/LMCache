@@ -6,6 +6,7 @@
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
+from importlib import import_module
 from multiprocessing import shared_memory
 from typing import Any, Optional, Tuple, cast
 import ctypes
@@ -21,6 +22,10 @@ import torch
 
 # First Party
 from lmcache import torch_dev
+from lmcache.logging import init_logger
+from lmcache.v1.platform import _registry as platform_registry
+
+logger = init_logger(__name__)
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -1116,16 +1121,33 @@ def _try_platform_multi_layer_block_kv_transfer(
     engine_kv_format: EngineKVFormat,
     skip_prefix_n_blocks: int,
 ) -> bool:
-    """Try an optional platform fast path behind block KV transfer."""
-    if _device_type_name(device) != "musa":
+    """Try a registered platform fast path for block KV transfer.
+
+    Args:
+        paged_layers: Normalized paged-KV tensors or page-buffer descriptor.
+        object_tensors: CPU LMCache chunk tensors for this transfer.
+        block_ids: Engine block IDs in tensor or Python-list form.
+        device: Target device for the paged tensors.
+        direction: Transfer direction (H2D or D2H).
+        shape_desc: Shape descriptor for the page buffer.
+        lmcache_chunk_size: Number of tokens in each LMCache chunk.
+        engine_kv_format: Engine KV-cache layout format.
+        skip_prefix_n_blocks: Number of leading blocks to skip.
+
+    Returns:
+        ``True`` if a platform hook completed the transfer; ``False`` if the
+        caller should continue through the generic Python fallback.
+    """
+    device_type = _device_type_name(device)
+    if device_type == "cpu":
         return False
     try:
-        # First Party
-        from lmcache.v1.platform.musa.native_kv_transfer import (
-            try_native_multi_layer_block_kv_transfer,
-        )
+        import_module(f"lmcache.v1.platform.{device_type}")
+        hook = platform_registry.get_block_transfer_hook(device_type)
+        if hook is None:
+            return False
 
-        return try_native_multi_layer_block_kv_transfer(
+        return hook(
             paged_layers=paged_layers,
             object_tensors=object_tensors,
             block_ids=block_ids,
@@ -1135,7 +1157,13 @@ def _try_platform_multi_layer_block_kv_transfer(
             engine_kv_format=engine_kv_format,
             skip_prefix_n_blocks=skip_prefix_n_blocks,
         )
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "Platform block-transfer hook failed for device type %s: %s",
+            device_type,
+            exc,
+            exc_info=True,
+        )
         return False
 
 

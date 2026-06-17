@@ -18,6 +18,7 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 import inspect
 
@@ -33,6 +34,7 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
+from lmcache.v1.platform import _registry as platform_registry
 
 if TYPE_CHECKING:
     # First Party
@@ -103,14 +105,43 @@ def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
     return [t.data_ptr() for t in tensors]
 
 
+def _platform_block_transfer_hook_available(device_type: str) -> bool:
+    """Return whether ``device_type`` registered a Python block-transfer hook.
+
+    Args:
+        device_type: Device type string from ``torch.device.type``.
+
+    Returns:
+        ``True`` if the device uses the built-in CPU fallback or has a
+        registered platform hook; otherwise ``False``.
+    """
+    if device_type == "cpu":
+        return True
+    try:
+        import_module(f"lmcache.v1.platform.{device_type}")
+        return platform_registry.get_block_transfer_hook(device_type) is not None
+    except Exception as exc:
+        logger.debug(
+            "Failed to inspect platform block-transfer hook for %s: %s",
+            device_type,
+            exc,
+            exc_info=True,
+        )
+        return False
+
+
 def _block_transfer_accepts_tensor_for_device(device: torch.device) -> bool:
     """Return whether block transfer should use tensor-list arguments."""
-    return _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR or device.type == "cpu"
+    return _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR or (
+        _platform_block_transfer_hook_available(device.type)
+    )
 
 
 def _block_transfer_ops_for_device(device: torch.device) -> Any:
     """Return the block-transfer module appropriate for the paged tensor device."""
-    if not _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR and device.type == "cpu":
+    if not _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR and (
+        _platform_block_transfer_hook_available(device.type)
+    ):
         # First Party
         import lmcache.python_ops_fallback as py_lmc_ops
 
