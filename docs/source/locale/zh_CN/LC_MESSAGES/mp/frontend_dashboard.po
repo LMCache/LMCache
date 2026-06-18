@@ -29,7 +29,8 @@ msgid ""
 "monitor and manage a fleet of LMCache multiprocess (MP) servers from a "
 "single browser tab.  It is shipped as part of the ``lmcache`` package and"
 " requires no extra infrastructure beyond a small discovery service."
-msgstr "**LMCache 前端仪表板**是一个轻量级的网页用户界面，允许您从一个浏览器标签页监控和管理一组 LMCache 多进程 (MP) 服务器。它作为 ``lmcache`` 包的一部分提供，不需要额外的基础设施，只需一个小型发现服务。"
+msgstr ""
+"**LMCache 前端仪表板**\\ 是一个轻量级的网页用户界面，允许您从一个浏览器标签页监控和管理一组 LMCache 多进程 (MP) 服务器。它作为 ``lmcache`` 包的一部分提供，不需要额外的基础设施，只需一个小型发现服务。"
 
 #: ../../source/mp/frontend_dashboard.rst:10
 msgid "Architecture Overview"
@@ -45,7 +46,8 @@ msgid ""
 "periodically sends a heartbeat to the discovery service.  The dashboard "
 "queries the discovery service to discover all live nodes and proxies "
 "their HTTP APIs through a built-in reverse proxy."
-msgstr "每个 LMCache MP 服务器运行一个 **前端插件子进程**，定期向发现服务发送心跳。仪表板查询发现服务以发现所有活动节点，并通过内置反向代理代理它们的 HTTP API。"
+msgstr ""
+"每个 LMCache MP 服务器运行一个 **前端插件子进程**\\ ，定期向发现服务发送心跳。仪表板查询发现服务以发现所有活动节点，并通过内置反向代理代理它们的 HTTP API。"
 
 #: ../../source/mp/frontend_dashboard.rst:45
 msgid "Components"
@@ -81,7 +83,8 @@ msgid ""
 "Runtime plugin subprocess launched by ``MPRuntimePluginLauncher``. Runs "
 "``HeartbeatService`` (``--no-http`` mode) to register the server with the"
 " discovery service."
-msgstr "由 ``MPRuntimePluginLauncher`` 启动的运行时插件子进程。运行 ``HeartbeatService``（``--no-http`` 模式）以将服务器注册到发现服务。"
+msgstr ""
+"由 ``MPRuntimePluginLauncher`` 启动的运行时插件子进程。运行 ``HeartbeatService``\\ （\\ ``--no-http`` 模式）以将服务器注册到发现服务。"
 
 #: ../../source/mp/frontend_dashboard.rst:61
 msgid "``lmcache.tools.simple_discover_service``"
@@ -147,7 +150,8 @@ msgstr "**步骤 3 — 启动仪表板**"
 
 #: ../../source/mp/frontend_dashboard.rst:124
 msgid "Open ``http://localhost:8000`` in your browser."
-msgstr "在浏览器中打开 ``http://localhost:8000``。"
+msgstr ""
+"在浏览器中打开 ``http://localhost:8000``\\ 。"
 
 #: ../../source/mp/frontend_dashboard.rst:127
 msgid ""
@@ -239,7 +243,8 @@ msgstr "*(无)*"
 msgid ""
 "URL of the discovery service's node-list endpoint, e.g. "
 "``http://localhost:5000/lmcache_infos``."
-msgstr "发现服务的节点列表端点的 URL，例如 ``http://localhost:5000/lmcache_infos``。"
+msgstr ""
+"发现服务的节点列表端点的 URL，例如 ``http://localhost:5000/lmcache_infos``\\ 。"
 
 #: ../../source/mp/frontend_dashboard.rst:164
 msgid "``--config``"
@@ -264,7 +269,8 @@ msgstr "``--nodes``"
 msgid ""
 "Inline JSON array of node dicts, e.g. "
 "``'[{\"name\":\"n1\",\"host\":\"127.0.0.1\",\"port\":\"8085\"}]'``."
-msgstr "节点字典的内联 JSON 数组，例如 ``'[{\\\"name\\\":\\\"n1\\\",\\\"host\\\":\\\"127.0.0.1\\\",\\\"port\\\":\\\"8085\\\"}]'``。"
+msgstr ""
+"节点字典的内联 JSON 数组，例如 ``'[{\\\"name\\\":\\\"n1\\\",\\\"host\\\":\\\"127.0.0.1\\\",\\\"port\\\":\\\"8085\\\"}]'``\\ 。"
 
 #: ../../source/mp/frontend_dashboard.rst:172
 msgid "``--heartbeat-url``"
@@ -328,7 +334,8 @@ msgstr "``plugin.frontend.heartbeat-interval``"
 
 #: ../../source/mp/frontend_dashboard.rst:197
 msgid "Heartbeat interval in seconds (default: ``30``)."
-msgstr "心跳间隔（单位：秒，默认值：``30``）。"
+msgstr ""
+"心跳间隔（单位：秒，默认值：\\ ``30``\\ ）。"
 
 #: ../../source/mp/frontend_dashboard.rst:198
 msgid "``plugin.frontend.heartbeat-initial-delay``"
@@ -336,7 +343,8 @@ msgstr "``plugin.frontend.heartbeat-initial-delay``"
 
 #: ../../source/mp/frontend_dashboard.rst:199
 msgid "Seconds to wait before the first heartbeat (default: ``0``)."
-msgstr "在第一次心跳之前等待的秒数（默认值：``0``）。"
+msgstr ""
+"在第一次心跳之前等待的秒数（默认值：\\ ``0``\\ ）。"
 
 #: ../../source/mp/frontend_dashboard.rst:202
 msgid "Using a Custom Discovery Service"

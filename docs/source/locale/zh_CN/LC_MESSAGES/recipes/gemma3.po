@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -55,7 +55,7 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/gemma3.rst:31
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr "启动 vLLM 与 LMCache MP 连接器："
+msgstr "使用 LMCache MP 连接器启动 vLLM："
 
 #: ../../source/recipes/gemma3.rst:42
 msgid ""
@@ -66,17 +66,16 @@ msgid ""
 "advertises ``SupportsHMA``, so vLLM does not auto-disable the hybrid "
 "manager and no extra configuration is required."
 msgstr ""
-"Gemma 3 交错使用局部（滑动窗口）和全局（完整）注意力层，因此 vLLM 保持其 **混合 KV Cache 管理器** 开启，并暴露多个 "
-"KV Cache 组。LMCache 通过其混合内存分配器支持存储和检索所有这些组 -- ``LMCacheMPConnector`` 宣告 "
-"``SupportsHMA``，因此 vLLM 不会自动禁用混合管理器，也不需要额外的配置。"
+"Gemma 3 交错使用 local (sliding-window) 和 global (full) attention 层，因此 vLLM 保持其 **混合 KV Cache 管理器** 开启，并公开多个 KV Cache 组。LMCache 通过其混合内存分配器支持存储和检索所有这些组——``LMCacheMPConnector`` 声明 ``SupportsHMA``\\ ，因此 vLLM 不会自动禁用混合管理器，也无需额外配置。"
 
 #: ../../source/recipes/gemma3.rst:49
 msgid ""
 "``google/gemma-3-4b-it`` is a gated model; authenticate with the Hugging "
 "Face Hub (e.g. set ``HF_TOKEN``) before serving. Adjust ``--tensor-"
 "parallel-size`` to match your hardware. For the generic LMCache + vLLM "
-"wiring (ports, remote hosts), see :doc:`../mp/quickstart`."
-msgstr "``google/gemma-3-4b-it`` 是一个受限模型；在服务之前，请通过 Hugging Face Hub 进行身份验证（例如，设置 ``HF_TOKEN``）。调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../mp/quickstart`。"
+"wiring (ports, remote hosts), see :doc:`../getting_started/quickstart`."
+msgstr ""
+"``google/gemma-3-4b-it`` 是一个受限模型；在启动服务之前，请通过 Hugging Face Hub 进行身份验证（例如，设置 ``HF_TOKEN``\\ ）。请根据您的硬件调整 ``--tensor-parallel-size``\\ 。有关通用 LMCache + vLLM 连接配置（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma3.rst:55
 msgid ""
@@ -100,8 +99,10 @@ msgid "TRT-LLM"
 msgstr "TRT-LLM"
 
 #: ../../source/recipes/gemma3.rst:65
-msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。有关 TRT-LLM + LMCache 设置，请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/gemma3.rst:68
 msgid "CacheBlend support"
@@ -125,7 +126,7 @@ msgstr "状态"
 
 #: ../../source/recipes/gemma3.rst:81
 msgid "Notes"
-msgstr "笔记"
+msgstr "备注"
 
 #: ../../source/recipes/gemma3.rst:82
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
@@ -145,8 +146,7 @@ msgid ""
 "on Hugging Face and authenticating (e.g. ``HF_TOKEN``) before it can be "
 "served."
 msgstr ""
-"**门控模型。** ``google/gemma-3-4b-it`` 需要在 Hugging Face 上接受许可并进行身份验证（例如 "
-"``HF_TOKEN``），才能提供服务。"
+"**门控模型。** ``google/gemma-3-4b-it`` 需要在 Hugging Face 上接受许可并进行身份验证（例如 ``HF_TOKEN``\\ ），才能提供服务。"
 
 #: ../../source/recipes/gemma3.rst:91
 msgid ""
@@ -157,7 +157,10 @@ msgid ""
 "hybrids (whose recurrent state caches LMCache cannot yet transfer) are "
 "not supported."
 msgstr ""
-"**混合注意力。** Gemma 3 是一个混合（滑动窗口 + 全注意力）模型。LMCache 通过其混合内存分配器支持转移每个 KV Cache"
-" 组，因此缓存可以透明地工作。这适用于 Gemma 3 使用的标准分页注意力；不支持 Mamba / 线性注意力混合（其递归状态缓存 "
-"LMCache 目前尚无法转移）。"
+"**hybrid attention。** Gemma 3 是一个混合（sliding window + full attention）模型。LMCache 通过其混合内存分配器支持传输每个 KV Cache"
+" 组，因此缓存可透明运作。这适用于 Gemma 3 使用的 standard paged attention；Mamba / linear attention 混合模型（其递归状态缓存 "
+"LMCache 目前尚无法传输）暂不支持。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 

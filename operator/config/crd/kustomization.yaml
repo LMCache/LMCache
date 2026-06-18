@@ -4,6 +4,7 @@
 resources:
 - bases/lmcache.lmcache.ai_lmcacheengines.yaml
 - bases/lmcache.lmcache.ai_cacheblendengines.yaml
+- bases/lmcache.lmcache.ai_lmcachecoordinators.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

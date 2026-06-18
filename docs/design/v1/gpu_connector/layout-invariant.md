@@ -31,7 +31,10 @@ are responsible for unwrapping to this form before calling any helper.
 
 ## Adding a new format
 
-1. Add the enum value in `csrc/mem_kernels.cuh` and `csrc/pybind.cpp`.
+1. Add the enum value in `csrc/kv_transfer_types.h` (the single
+   backend-agnostic definition shared by every accelerator backend), then
+   register it in each backend's pybind module — `csrc/pybind.cpp` (CUDA)
+   and `csrc/sycl/pybind_sycl.cpp` (SYCL/XPU).
 2. Extend `normalize_kv_and_discover_format` to detect it. The dispatch
    keys off `(list_depth, tensor_ndim)` — both are computed once in a
    single descent via the private `_list_depth_tensor_dim` probe, so

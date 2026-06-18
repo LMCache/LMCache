@@ -106,6 +106,29 @@ func BuildContainerArgs(spec *lmcachev1alpha1.LMCacheEngineSpec) []string {
 		)
 	}
 
+	// Coordinator registration. The URL is resolved by the controller (from a
+	// coordinator ref or an explicit url) before this builder runs; an empty URL
+	// means registration is disabled. The advertise IP falls back to the pod IP
+	// via the LMCACHE_COORDINATOR_ADVERTISE_IP env var injected by the DaemonSet
+	// builder, so it is only emitted as a flag when explicitly set.
+	if c := spec.Coordinator; c != nil {
+		if url := derefString(c.URL, ""); url != "" {
+			args = append(args, "--coordinator-url", url)
+			if c.AdvertiseIP != nil && *c.AdvertiseIP != "" {
+				args = append(args, "--coordinator-advertise-ip", *c.AdvertiseIP)
+			}
+			args = append(args,
+				"--coordinator-heartbeat-interval", formatFloat(derefFloat64(c.HeartbeatInterval, 5.0)),
+			)
+			if derefBool(c.L2EventReporting, false) {
+				args = append(args, "--coordinator-l2-event-reporting")
+			}
+			args = append(args,
+				"--coordinator-l2-event-flush-interval", formatFloat(derefFloat64(c.L2EventFlushInterval, 1.0)),
+			)
+		}
+	}
+
 	// User-supplied extra args (appended last so they can override defaults)
 	args = append(args, spec.ExtraArgs...)
 

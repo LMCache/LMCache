@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -27,7 +27,9 @@ msgstr "安装"
 msgid ""
 "**Prerequisites:** Linux · Python 3.9–3.13 · NVIDIA GPU (compute 7.0+) · "
 "CUDA 12.1+ · `uv <https://astral.sh/uv>`_"
-msgstr "**前提条件：** Linux · Python 3.9–3.13 · NVIDIA GPU (计算 7.0+) · CUDA 12.1+ · `uv <https://astral.sh/uv>`_"
+msgstr ""
+"**前提条件：** Linux · Python 3.9–3.13 · NVIDIA GPU（算力 7.0+）· CUDA 12.1+ · "
+"`uv <https://astral.sh/uv>`_"
 
 #: ../../source/getting_started/installation.rst:9
 msgid "Install LMCache"
@@ -59,14 +61,18 @@ msgstr "CUDA 12.9"
 msgid ""
 "The CUDA 12.9 wheel is published to a dedicated `GitHub Release "
 "<https://github.com/LMCache/LMCache/releases>`__ rather than PyPI."
-msgstr "CUDA 12.9 的 wheel 发布在专用的 `GitHub Release <https://github.com/LMCache/LMCache/releases>`__ 上，而不是 PyPI。"
+msgstr ""
+"CUDA 12.9 的 wheel 发布在专用的 `GitHub Release "
+"<https://github.com/LMCache/LMCache/releases>`__ 上，而不是 PyPI。"
 
 #: ../../source/getting_started/installation.rst:51
 msgid ""
 "``--extra-index-url https://download.pytorch.org/whl/cu129`` ensures the "
 "CUDA 12.9 build of PyTorch is resolved. Without it, pip may select a "
 "mismatched CUDA variant."
-msgstr "``--extra-index-url https://download.pytorch.org/whl/cu129`` 确保解析 PyTorch 的 CUDA 12.9 构建。没有它，pip 可能会选择不匹配的 CUDA 变体。"
+msgstr ""
+"``--extra-index-url https://download.pytorch.org/whl/cu129`` 确保解析 PyTorch"
+" 的 CUDA 12.9 构建。没有它，pip 可能会选择不匹配的 CUDA 变体。"
 
 #: ../../source/getting_started/installation.rst
 msgid "Nightly"
@@ -77,7 +83,9 @@ msgid ""
 "Nightly wheels are built from the latest ``dev`` branch each day at 07:30"
 " UTC and published to GitHub Releases. No version pinning required — "
 "``--pre`` picks the latest nightly automatically."
-msgstr "夜间构建的轮子每天在 UTC 时间 07:30 从最新的 ``dev`` 分支构建，并发布到 GitHub Releases。无需版本固定 — ``--pre`` 会自动选择最新的夜间版本。"
+msgstr ""
+"Nightly wheel 包每天 UTC 时间 07:30 从最新的 ``dev`` 分支构建并发布到 GitHub Releases。无需锁定版本 — "
+"``--pre`` 会自动选取最新的 nightly 版本。"
 
 #: ../../source/getting_started/installation.rst
 msgid "From Source"
@@ -102,7 +110,7 @@ msgstr "英特尔 XPU"
 msgid "Docker"
 msgstr "Docker"
 
-#: ../../source/getting_started/installation.rst:214
+#: ../../source/getting_started/installation.rst:218
 msgid "See :ref:`docker_deployment` for running the container and ROCm images."
 msgstr "请参阅 :ref:`docker_deployment` 以获取运行容器和 ROCm 镜像的信息。"
 
@@ -110,129 +118,127 @@ msgstr "请参阅 :ref:`docker_deployment` 以获取运行容器和 ROCm 镜像�
 msgid "CLI Only"
 msgstr "仅限 CLI"
 
-#: ../../source/getting_started/installation.rst:218
+#: ../../source/getting_started/installation.rst:222
 msgid ""
 "Lightweight CLI-only package for querying or benchmarking a remote "
 "LMCache server. No CUDA required, works on any OS."
-msgstr "轻量级的仅限 CLI 的软件包，用于查询或基准测试远程 LMCache 服务器。无需 CUDA，适用于任何操作系统。"
+msgstr "轻量级纯 CLI 软件包，用于查询或对远程 LMCache 服务器进行基准测试。无需 CUDA，支持任意操作系统。"
 
-#: ../../source/getting_started/installation.rst:227
+#: ../../source/getting_started/installation.rst:231
 msgid ""
 "``lmcache-cli`` and ``lmcache`` ship the same ``lmcache`` CLI command. Do"
 " not install both in the same environment."
 msgstr "``lmcache-cli`` 和 ``lmcache`` 提供相同的 ``lmcache`` CLI 命令。请勿在同一环境中同时安装两者。"
 
-#: ../../source/getting_started/installation.rst:231
+#: ../../source/getting_started/installation.rst:235
+msgid "Build the Docker Image"
+msgstr "构建 Docker 镜像"
+
+#: ../../source/getting_started/installation.rst:237
+msgid ""
+"Instead of pulling a prebuilt image, you can build the LMCache "
+"(integrated with vLLM) image yourself from the provided Dockerfile, "
+"located in `docker/ "
+"<https://github.com/LMCache/LMCache/tree/dev/docker>`_."
+msgstr "您也可以不拉取预构建镜像，而是直接使用仓库中提供的 Dockerfile 自行构建 LMCache（集成 vLLM）镜像，Dockerfile 位于 `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_。"
+
+#: ../../source/getting_started/installation.rst:241
+msgid "From the root of the LMCache repository:"
+msgstr "在 LMCache 仓库的根目录下："
+
+#: ../../source/getting_started/installation.rst:247
+msgid ""
+"Replace ``<IMAGE_NAME>`` and ``<TAG>`` with your desired image name and "
+"tag. See the example build file in `docker/ "
+"<https://github.com/LMCache/LMCache/tree/dev/docker>`_ for an explanation"
+" of all build arguments."
+msgstr "将 ``<IMAGE_NAME>`` 和 ``<TAG>`` 替换为所需的镜像名称和标签。各构建参数的说明请参阅 `docker/ <https://github.com/LMCache/LMCache/tree/dev/docker>`_ 中的示例构建文件。"
+
+#: ../../source/getting_started/installation.rst:252
 msgid "Verify Installation"
 msgstr "验证安装"
 
-#: ../../source/getting_started/installation.rst:238
-msgid "Compatibility Matrix"
-msgstr "兼容性矩阵"
+#~ msgid "Compatibility Matrix"
+#~ msgstr "兼容性矩阵"
 
-#: ../../source/getting_started/installation.rst:240
-msgid ""
-"✅ compatible · ❌ API incompatible · 🕯 torch mismatch (use ``--no-build-"
-"isolation``)"
-msgstr "✅ 兼容 · ❌ API 不兼容 · 🕯 torch 不匹配 (使用 ``--no-build-isolation``)"
+#~ msgid ""
+#~ "✅ compatible · ❌ API incompatible "
+#~ "· 🕯 torch mismatch (use ``--no-"
+#~ "build-isolation``)"
+#~ msgstr "✅ 兼容 · ❌ API 不兼容 · 🕯 torch 不匹配 (使用 ``--no-build-isolation``)"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "LMCache 0.4.2"
-msgstr "LMCache 0.4.2"
+#~ msgid "LMCache 0.4.2"
+#~ msgstr "LMCache 0.4.2"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "LMCache 0.4.1"
-msgstr "LMCache 0.4.1"
+#~ msgid "LMCache 0.4.1"
+#~ msgstr "LMCache 0.4.1"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "LMCache 0.3.15"
-msgstr "LMCache 0.3.15"
+#~ msgid "LMCache 0.3.15"
+#~ msgstr "LMCache 0.3.15"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "LMCache 0.3.14"
-msgstr "LMCache 0.3.14"
+#~ msgid "LMCache 0.3.14"
+#~ msgstr "LMCache 0.3.14"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "LMCache 0.3.13"
-msgstr "LMCache 0.3.13"
+#~ msgid "LMCache 0.3.13"
+#~ msgstr "LMCache 0.3.13"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "LMCache 0.3.12"
-msgstr "LMCache 0.3.12"
+#~ msgid "LMCache 0.3.12"
+#~ msgstr "LMCache 0.3.12"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "LMCache 0.3.11"
-msgstr "LMCache 0.3.11"
+#~ msgid "LMCache 0.3.11"
+#~ msgstr "LMCache 0.3.11"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "LMCache 0.3.10"
-msgstr "LMCache 0.3.10"
+#~ msgid "LMCache 0.3.10"
+#~ msgstr "LMCache 0.3.10"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.18.0.x"
-msgstr "vLLM 0.18.0.x"
+#~ msgid "vLLM 0.18.0.x"
+#~ msgstr "vLLM 0.18.0.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "✅"
-msgstr "✅"
+#~ msgid "✅"
+#~ msgstr "✅"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "🕯️"
-msgstr "🕯️"
+#~ msgid "🕯️"
+#~ msgstr "🕯️"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.17.1.x"
-msgstr "vLLM 0.17.1.x"
+#~ msgid "vLLM 0.17.1.x"
+#~ msgstr "vLLM 0.17.1.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.17.0.x"
-msgstr "vLLM 0.17.0.x"
+#~ msgid "vLLM 0.17.0.x"
+#~ msgstr "vLLM 0.17.0.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.16.0.x"
-msgstr "vLLM 0.16.0.x"
+#~ msgid "vLLM 0.16.0.x"
+#~ msgstr "vLLM 0.16.0.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.15.1.x"
-msgstr "vLLM 0.15.1.x"
+#~ msgid "vLLM 0.15.1.x"
+#~ msgstr "vLLM 0.15.1.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.15.0.x"
-msgstr "vLLM 0.15.0.x"
+#~ msgid "vLLM 0.15.0.x"
+#~ msgstr "vLLM 0.15.0.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.14.1.x"
-msgstr "vLLM 0.14.1.x"
+#~ msgid "vLLM 0.14.1.x"
+#~ msgstr "vLLM 0.14.1.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.14.0.x"
-msgstr "vLLM 0.14.0.x"
+#~ msgid "vLLM 0.14.0.x"
+#~ msgstr "vLLM 0.14.0.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.13.0.x"
-msgstr "vLLM 0.13.0.x"
+#~ msgid "vLLM 0.13.0.x"
+#~ msgstr "vLLM 0.13.0.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.12.0.x"
-msgstr "vLLM 0.12.0.x"
+#~ msgid "vLLM 0.12.0.x"
+#~ msgstr "vLLM 0.12.0.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.11.2.x"
-msgstr "vLLM 0.11.2.x"
+#~ msgid "vLLM 0.11.2.x"
+#~ msgstr "vLLM 0.11.2.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.11.1.x"
-msgstr "vLLM 0.11.1.x"
+#~ msgid "vLLM 0.11.1.x"
+#~ msgstr "vLLM 0.11.1.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.11.0.x"
-msgstr "vLLM 0.11.0.x"
+#~ msgid "vLLM 0.11.0.x"
+#~ msgstr "vLLM 0.11.0.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.10.2.x"
-msgstr "vLLM 0.10.2.x"
+#~ msgid "vLLM 0.10.2.x"
+#~ msgstr "vLLM 0.10.2.x"
 
-#: ../../source/getting_started/Installation_compatibility_matrix.csv:1
-msgid "vLLM 0.10.1.x"
-msgstr "vLLM 0.10.1.x"
+#~ msgid "vLLM 0.10.1.x"
+#~ msgstr "vLLM 0.10.1.x"
 

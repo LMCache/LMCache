@@ -14,6 +14,7 @@ class via ``__new__`` with only the two attributes the method reads:
 # Standard
 from dataclasses import dataclass
 from typing import cast
+import threading
 
 # First Party
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
@@ -37,10 +38,12 @@ def _make_sm(adapters: list[_StubAdapter], names: list[str]) -> StorageManager:
     sm = StorageManager.__new__(StorageManager)
     # ``_StubAdapter`` / ``_StubDescriptor`` only implement the surface
     # the method under test actually reads. Cast through the real types
-    # for mypy.
-    sm._l2_adapters = cast("list[L2AdapterInterface]", adapters)
+    # for mypy. Adapters/descriptors are keyed by stable adapter id.
+    sm._adapters_lock = threading.Lock()
+    sm._l2_adapters = cast("dict[int, L2AdapterInterface]", dict(enumerate(adapters)))
     sm._adapter_descriptors = cast(
-        "list[AdapterDescriptor]", [_StubDescriptor(type_name=n) for n in names]
+        "dict[int, AdapterDescriptor]",
+        {i: _StubDescriptor(type_name=n) for i, n in enumerate(names)},
     )
     return sm
 
@@ -94,9 +97,9 @@ class TestL2Adapters:
         assert first[0][0].type_name == "s3"
 
         # Reconfigure: swap a1 → a2 (and the descriptor with it).
-        sm._l2_adapters = cast("list[L2AdapterInterface]", [a2])
+        sm._l2_adapters = cast("dict[int, L2AdapterInterface]", {0: a2})
         sm._adapter_descriptors = cast(
-            "list[AdapterDescriptor]", [_StubDescriptor(type_name="fs")]
+            "dict[int, AdapterDescriptor]", {0: _StubDescriptor(type_name="fs")}
         )
 
         second = sm.l2_adapters()

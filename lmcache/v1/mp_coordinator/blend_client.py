@@ -14,6 +14,7 @@ It is **opt-in**: with no coordinator URL configured the blend module receives
 
 # Standard
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from queue import Empty, Queue
 import os
@@ -21,6 +22,7 @@ import threading
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.mp_coordinator.schemas import encode_tokens
 
 logger = init_logger(__name__)
 
@@ -67,10 +69,11 @@ class _MatchItem:
 class BlendCoordinatorClient:
     """Background bridge from the blend module to the coordinator directory.
 
-    Thread-safe. Publishes and match queries are enqueued by blend handler
-    threads and serviced by one daemon thread; match results are stored in a dict
-    the handler polls. Match queries are prioritized over publishes so lookup
-    latency is not held up by best-effort store traffic.
+    Thread-safe. Handler threads enqueue publishes and match queries; one daemon
+    thread dequeues them, dispatching each match query to a thread pool so
+    round-trips run concurrently. Match results land in a dict the handler
+    polls. Match queries drain ahead of publishes so lookup latency is not held
+    up by best-effort store traffic.
     """
 
     def __init__(
@@ -80,6 +83,7 @@ class BlendCoordinatorClient:
         request_fn: _RequestFn | None = None,
         request_timeout: float = 2.0,
         match_budget_s: float = 2.0,
+        match_concurrency: int = 8,
     ) -> None:
         """Create the client and start its daemon.
 
@@ -91,10 +95,15 @@ class BlendCoordinatorClient:
                 testing). Must raise on transport failure.
             request_timeout: Per-request HTTP timeout in seconds.
             match_budget_s: Per-lookup wall-clock budget the blend module uses to
-                bound the optional global leg. Unlike ``request_timeout`` (one
-                round-trip), this bounds total time including queue wait behind
-                other match queries, since the daemon services them serially.
+                bound the optional global leg, including queue wait.
+            match_concurrency: Max match round-trips in flight at once (the
+                match dispatch pool size). Must be >= 1.
+
+        Raises:
+            ValueError: If ``match_concurrency`` is not positive.
         """
+        if match_concurrency < 1:
+            raise ValueError(f"match_concurrency must be >= 1, got {match_concurrency}")
         self.match_budget_s = match_budget_s
         self._client = None
         if request_fn is None:
@@ -119,6 +128,9 @@ class BlendCoordinatorClient:
         self._results: dict[str, object] = {}
         self._results_lock = threading.Lock()
         self._stop = threading.Event()
+        self._match_pool = ThreadPoolExecutor(
+            max_workers=match_concurrency, thread_name_prefix="cb-coord-match"
+        )
         self._worker = threading.Thread(
             target=self._run, name="cb-coordinator-client", daemon=True
         )
@@ -185,9 +197,10 @@ class BlendCoordinatorClient:
             self._results.pop(rid, None)
 
     def close(self) -> None:
-        """Stop the daemon and close the HTTP client."""
+        """Stop the daemon, drain the match pool, and close the HTTP client."""
         self._stop.set()
         self._worker.join(timeout=2.0)
+        self._match_pool.shutdown(wait=False)
         if self._client is not None:
             self._client.close()
 
@@ -211,20 +224,28 @@ class BlendCoordinatorClient:
         url = os.getenv("LMCACHE_COORDINATOR_URL", "").strip()
         if not url:
             return None
+        concurrency = int(os.getenv("LMCACHE_COORDINATOR_BLEND_MATCH_CONCURRENCY", "8"))
         timeout = float(os.getenv("LMCACHE_COORDINATOR_BLEND_TIMEOUT", "1.0"))
         logger.info("Blend coordinator client enabled -> %s", url)
-        return cls(url, request_timeout=timeout, match_budget_s=timeout)
+        return cls(
+            url,
+            request_timeout=timeout,
+            match_budget_s=timeout,
+            match_concurrency=concurrency,
+        )
 
     # -- daemon ------------------------------------------------------------
 
     def _run(self) -> None:
-        """Service match queries (priority) then publishes until stopped."""
+        """Dispatch match queries to the pool (priority), then publishes."""
         while not self._stop.is_set():
             try:
-                self._handle_match(self._match_q.get(timeout=0.05))
-                continue
+                item = self._match_q.get(timeout=0.05)
             except Empty:
-                pass
+                item = None
+            if item is not None:
+                self._match_pool.submit(self._handle_match, item)
+                continue
             try:
                 self._handle_publish(self._publish_q.get_nowait())
             except Empty:
@@ -239,7 +260,7 @@ class BlendCoordinatorClient:
                 "/blend/match",
                 {
                     "model_scope": item.model_scope,
-                    "tokens": item.tokens,
+                    "tokens_b64": encode_tokens(item.tokens),
                 },
             )
             matches = [
