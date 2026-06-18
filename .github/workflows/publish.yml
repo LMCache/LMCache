@@ -342,15 +342,16 @@ jobs:
             - name: Free disk space
               uses: ./.github/actions/free-disk-space
 
-            - name: Get the latest tag (corresponds to release cut in publish-pypi job)
+            - name: Resolve the release tag that triggered this run
               run: |
-                echo "LATEST_TAG=$(git tag --list 'v[0-9]*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)" >> "$GITHUB_ENV"
+                echo "LATEST_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
 
             - name: Build lmcache/vllm-openai container image (cu13)
               run: |
                 docker build \
                 --build-arg BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.09-cuda13.0-devel-ubuntu24.04 \
                 --build-arg CUDA_VERSION=13.0 \
+                --build-arg LMCACHE_VERSION=${{ env.LATEST_TAG }} \
                 --build-arg torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX' \
                 --target image-release \
                 --tag lmcache/vllm-openai:latest --tag lmcache/vllm-openai:${{ env.LATEST_TAG }} \
