@@ -2,7 +2,7 @@
 """Shared context and layout descriptor registry for engine modules."""
 
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypedDict
 import threading
 
@@ -40,6 +40,9 @@ class _LayoutDescEntry:
 
     layout_desc: MemoryLayoutDesc
     ref_count: int
+    # Per-group layout descriptors for hybrid multi-group models. Empty
+    # for single-group models; the first entry equals ``layout_desc``.
+    group_layout_descs: list[MemoryLayoutDesc] = field(default_factory=list)
 
 
 class LayoutDescRegistry:
@@ -62,6 +65,7 @@ class LayoutDescRegistry:
         model_name: str,
         world_size: int,
         layout_desc: MemoryLayoutDesc,
+        group_layout_descs: list[MemoryLayoutDesc] | None = None,
     ) -> None:
         """Register a layout descriptor for a (model_name, world_size) pair.
 
@@ -72,7 +76,10 @@ class LayoutDescRegistry:
             model_name: The model name.
             world_size: The world size.
             layout_desc: The memory layout descriptor.
+            group_layout_descs: Per-group layout descriptors for hybrid
+                multi-group models. ``None`` or empty for single-group.
         """
+        groups = list(group_layout_descs) if group_layout_descs else []
         key = (model_name, world_size)
         with self._lock:
             entry = self._registry.get(key)
@@ -80,10 +87,12 @@ class LayoutDescRegistry:
                 self._registry[key] = _LayoutDescEntry(
                     layout_desc=layout_desc,
                     ref_count=1,
+                    group_layout_descs=groups,
                 )
                 return
 
             entry.layout_desc = layout_desc
+            entry.group_layout_descs = groups
             entry.ref_count += 1
 
     def unregister(self, model_name: str, world_size: int) -> None:
@@ -123,6 +132,28 @@ class LayoutDescRegistry:
             if entry is None:
                 return None
             return entry.layout_desc
+
+    def find_group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> list[MemoryLayoutDesc]:
+        """Look up per-group layout descriptors by (model_name, world_size).
+
+        Returns an empty list for single-group models (or unknown keys).
+        The i-th descriptor corresponds to ``object_group_id == i``.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            Per-group layout descriptors, or an empty list when the model
+            is single-group or not registered.
+        """
+        with self._lock:
+            entry = self._registry.get((model_name, world_size))
+            if entry is None:
+                return []
+            return list(entry.group_layout_descs)
 
 
 class MPCacheServerContext:

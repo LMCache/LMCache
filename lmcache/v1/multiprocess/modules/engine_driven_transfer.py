@@ -433,7 +433,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
 
         self._ctx.layout_desc_registry.register(
-            payload.model_name, payload.world_size, layout_desc
+            payload.model_name,
+            payload.world_size,
+            layout_desc,
+            group_layout_descs=metadata.group_layout_descs,
         )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name, pool_size=pool_size
