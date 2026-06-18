@@ -16,6 +16,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.config import (
     StorageManagerConfig,
     add_storage_manager_args,
+    l1_exposes_single_memory_region,
     parse_args_to_config,
 )
 from lmcache.v1.mp_coordinator.l2.event_listener import L2EventListener
@@ -213,14 +214,22 @@ def run_http_server(
             (an empty URL disables registration)
 
     Raises:
-        ValueError: If P2P is enabled without a coordinator URL.
+        ValueError: If P2P is enabled without a coordinator URL, or with an L1
+            tier that is not a single registerable memory region.
     """
-    if mp_config.p2p_config.enabled and not coordinator_config.url:
-        raise ValueError(
-            "P2P requires a coordinator for peer discovery: set "
-            "--coordinator-url (or LMCACHE_COORDINATOR_URL) when "
-            "--p2p-advertise-url is set."
-        )
+    if mp_config.p2p_config.enabled:
+        if not coordinator_config.url:
+            raise ValueError(
+                "P2P requires a coordinator for peer discovery: set "
+                "--coordinator-url (or LMCACHE_COORDINATOR_URL) when "
+                "--p2p-advertise-url is set."
+            )
+        if not l1_exposes_single_memory_region(storage_manager_config):
+            raise ValueError(
+                "P2P requires a single L1 memory region the transfer channel "
+                "can register; it is incompatible with GDS L1 (--gds-l1-path) "
+                "and Device-DAX L1 (--l1-devdax-path)."
+            )
     _configs["mp"] = mp_config
     _configs["storage_manager"] = storage_manager_config
     _configs["observability"] = obs_config

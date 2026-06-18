@@ -313,6 +313,28 @@ def validate_storage_manager_config(config: StorageManagerConfig) -> None:
         )
 
 
+def l1_exposes_single_memory_region(config: StorageManagerConfig) -> bool:
+    """Whether L1 is a single host-memory region a transfer channel can register.
+
+    This is the requirement for L2 adapters that register the whole L1 buffer
+    for RDMA (e.g. the P2P adapter). GDS L1 exposes no registerable buffer, and
+    Device-DAX L1 is not host DRAM the transfer channel can register.
+
+    Args:
+        config: Storage manager configuration to inspect.
+
+    Returns:
+        ``True`` when L1 is a single registerable host-memory region, ``False``
+        for GDS L1 or Device-DAX L1.
+    """
+    l1_config = config.l1_manager_config
+    if l1_config.gds_l1_config is not None:
+        return False
+    if l1_config.memory_config.devdax_path:
+        return False
+    return True
+
+
 def add_storage_manager_args(
     parser: argparse.ArgumentParser,
 ) -> argparse.ArgumentParser:
