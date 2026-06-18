@@ -866,7 +866,7 @@ def test_scatter_rounds_down_partial_block_skip_first_n_tokens(
         scatter_cpu_to_paged_kv,
     )
 
-    source = builder_fn()
+    source = {k: v.to(torch_device_type) for k, v in builder_fn().items()}
     destination = {
         name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
     }
@@ -1284,7 +1284,12 @@ def test_gather_paged_kv_with_chunk_indices_subset() -> None:
     from lmcache.v1.multiprocess.transfer_context.base import gather_paged_kv_to_cpu
 
     # 3 chunks (6 blocks, 2 blocks per chunk), but we only want chunks 0 and 2
-    source = _make_hnd_kv_caches(num_layers=2, num_blocks=6, block_size=4)
+    source = {
+        k: v.to(torch_device_type)
+        for k, v in _make_hnd_kv_caches(
+            num_layers=2, num_blocks=6, block_size=4
+        ).items()
+    }
     layout_hints: "LayoutHints" = {"kv_layout": "HND"}
     blocks_per_chunk = 2
     # Pre-allocate output buffers for chunks 0 and 2 only (2 tensors, not 3).
