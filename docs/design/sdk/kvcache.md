@@ -37,7 +37,7 @@ ok = lmc_sdk.store(
 lmc_sdk.close(ctx)
 ```
 
-Example of the token dropping API usage exists in 
+Example of the token dropping API usage in 
 [Token Dropping Example](../../../examples/token_dropping/multi_req_split.py).
 
 The model layout must already be registered in the server by a vLLM instance that called
@@ -67,7 +67,7 @@ SDK process                          LMCache server process
 -----------                          ----------------------
 LMCacheSDKContext
   └ MessageQueueClient ──ZMQ──▶ MQ dispatch
-                                  ├ NonGPUTransferModule  (PREPARE_/COMMIT_ STORE/RETRIEVE)
+                                  ├ EngineDrivenTransferModule  (PREPARE_/COMMIT_ STORE/RETRIEVE)
                                   │     └ ShmTransferStrategy
                                   │         └ StorageManager (L1 pool, locks, prefetch)
                                   └ LookupModule          (LOOKUP / QUERY_PREFETCH_STATUS)
@@ -94,8 +94,8 @@ All calls are blocking and bounded by `timeout`:
 	It **resolves the `MemoryLayoutDesc` from the model registry** via 
 	`resolve_model_name(model_name)` — populated when the vLLM instance called `REGISTER_KV_CACHE` 
 	then registers, keyed by `instance_id`:
-	- the per-instance non-GPU context (`NonGpuContextMetadata`: layout, block size, `use_mla`
-	derived from the layout shape), and
+	- the per-instance non-GPU context (`EngineDrivenContextMetadata`: layout, block size, `use_mla`
+	  derived from the layout shape), and
 	- the SHM transfer strategy.
 
 `instance_id` is the SDK process PID (`os.getpid()`).
@@ -130,10 +130,10 @@ Shuts down the MQ client and ZMQ context.
 
 ## Cache addressing
 
-Both store and retrieve build an `IPCCacheEngineKey`:
+Both store and retrieve build an `IPCCacheServerKey`:
 
 ```py
-IPCCacheEngineKey(
+IPCCacheServerKey(
     model_name, 
 	world_size=1, # for now only work for TP==1
 	worker_id=0, # for now only work for TP==1
@@ -190,16 +190,16 @@ The SDK uses the following MQ request types (defined in
 | `COMMIT_STORE` | Finalize the write and release the write locks. |
 | `END_SESSION` | Drop the per-request server session. |
 
-The server constructs/uses the `IPCCacheEngineKey` carried in each `PREPARE_*`/`COMMIT_*`
+The server constructs/uses the `IPCCacheServerKey` carried in each `PREPARE_*`/`COMMIT_*`
 payload; it resolves the layout for store/retrieve via the per-instance context registered
 at connect time.
 
 ## Retrieve flow (SHM)
 
 ```
- SDK                         Server (Lookup + NonGPUTransfer + Storage)
+ SDK                         Server (Lookup + EngineDrivenTransferModule + Storage)
   │                              │
-  │┐ key = IPCCacheEngineKey(worker_id=0); request_id = "retrieve-<uuid>"
+  │┐ key = IPCCacheServerKey(worker_id=0); request_id = "retrieve-<uuid>"
   │┘
   │ Phase 0 — lookup + prefetch
   │ LOOKUP [key(worker_id=None), world_size]
@@ -228,10 +228,10 @@ at connect time.
 ## Store flow (SHM)
 
 ```
- SDK                         Server (NonGPUTransfer + Storage)
+ SDK                         Server (EngineDrivenTransferModule + Storage)
   │                              │
   │┐ kv.detach().cpu().contiguous(); _validate_store_tensor
-  │┘ key = IPCCacheEngineKey(worker_id=0); request_id = "store-<uuid>"
+  │┘ key = IPCCacheServerKey(worker_id=0); request_id = "store-<uuid>"
   │ Phase 1 — prepare
   │ PREPARE_STORE [key, instance_id]
   │─────────────────────────────▶│ reserve_write(obj_keys, "new") → slots for MISSING chunks

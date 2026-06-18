@@ -18,7 +18,7 @@ import torch
 import zmq
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import IPCCacheEngineKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
 from lmcache.v1.multiprocess.protocol import RequestType, get_response_class
 from lmcache.v1.multiprocess.transfer_context.shm import ShmSlotDescriptor
@@ -188,14 +188,14 @@ class LMCacheSDKContext:
     
     def prepare_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
     ) -> list[dict[str, Any]] | None:
         """Called in phase 1: ask server to prepare KV in SHM or in pickle.
         KV data is already prefetched by the time this is called.
         Adapted from lmcache/v1/multiprocess/transfer_context/shm.py
         
         Args:
-            key: The IPC cache engine key containing the lookup metadata.
+            key: The IPC cache server key containing the lookup metadata.
         
         Returns:
             A list of SHM slot descriptors if using SHM transfer. 
@@ -218,12 +218,12 @@ class LMCacheSDKContext:
 
     def commit_retrieve(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
     ) -> bool:
         """Called in phase 3: tell server to release the SHM slots after retrieval is done.
         
         Args:
-            key: The IPC cache engine key containing the lookup metadata.
+            key: The IPC cache server key containing the lookup metadata.
         
         Returns:
             True if the commit is successful, False if it fails or times out.
@@ -240,13 +240,13 @@ class LMCacheSDKContext:
 
     def prepare_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
     ) -> list[dict[str, Any]] | None:
         """Called in phase 1: ask for slots or pickle path.
         Adapted from lmcache/v1/multiprocess/transfer_context/shm.py
 
         Args:
-            key: The IPC cache engine key containing the store metadata.
+            key: The IPC cache server key containing the store metadata.
         
         Returns:
             A list of SHM slot descriptors if using SHM transfer.
@@ -273,14 +273,14 @@ class LMCacheSDKContext:
 
     def commit_store(
         self,
-        key: IPCCacheEngineKey,
+        key: IPCCacheServerKey,
         _chunks: list[torch.Tensor] | bytes,
     ) -> bool:
         """Called in phase 3: tell server to commit the data in SHM.
         Still retain _chunks as format for Pickle (todo).
 
         Args:
-            key: The IPC cache engine key containing the store metadata.
+            key: The IPC cache server key containing the store metadata.
             _chunks: The list of tensors to store, or bytes if using Pickle.
         
         Returns:
@@ -322,7 +322,7 @@ class LMCacheSDKContext:
         request_id: str,
         cache_salt: str = "",
         worker_id: int | None = None,
-    ) -> IPCCacheEngineKey:
+    ) -> IPCCacheServerKey:
         """Convert token IDs to an IPC cache engine key.
 
         Args:
@@ -335,9 +335,9 @@ class LMCacheSDKContext:
                 If None, the key will be created without a worker ID (for lookups).
 
         Returns:
-            IPCCacheEngineKey: The constructed key.
+            IPCCacheServerKey: The constructed key.
         """
-        return IPCCacheEngineKey(
+        return IPCCacheServerKey(
             model_name=self._model_name,
             world_size=self._world_size,
             worker_id=worker_id,
