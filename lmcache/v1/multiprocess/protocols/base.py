@@ -54,11 +54,14 @@ class RequestType(enum.Enum):
     COMMIT_STORE = enum.auto()
     PREPARE_RETRIEVE = enum.auto()
     COMMIT_RETRIEVE = enum.auto()
+    REGISTER_SDK_TRANSFER_STRATEGY = enum.auto()
 
     # Controller operations
     CLEAR = enum.auto()
     GET_CHUNK_SIZE = enum.auto()
     PING = enum.auto()
+    GET_SHM_POOL_INFO = enum.auto()
+    GET_WORLD_SIZE = enum.auto()
 
     # Observability operations
     REPORT_BLOCK_ALLOCATION = enum.auto()

@@ -11,6 +11,7 @@ This module defines the protocol for:
 - LOOKUP: Submit a prefix lookup and return a prefetch job ID
 - QUERY_PREFETCH_STATUS: Poll a prefetch job for its result
 - END_SESSION: End a session and clean up associated resources
+- REGISTER_SDK_TRANSFER_STRATEGY: Register the SDK transfer strategy
 """
 
 # Standard
@@ -73,6 +74,7 @@ REQUEST_NAMES = [
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
+    "REGISTER_SDK_TRANSFER_STRATEGY",
 ]
 
 # Type alias for cache keys
@@ -236,5 +238,16 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[KeyType, int],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
+        ),
+        # Register SDK transfer strategy (for non-GPU transfers initiated by the SDK)
+        # Payload:
+        #   - instance_id: int - Unique identifier for the SDK instance
+        #   - model_name: str - Name of the model associated with the SDK instance
+        #   - world_size: int - World size of the SDK instance
+        # Returns: None
+        "REGISTER_SDK_TRANSFER_STRATEGY": ProtocolDefinition(
+            payload_classes=[int, str, int],
+            response_class=None,
+            handler_type=HandlerType.SYNC,
         ),
     }

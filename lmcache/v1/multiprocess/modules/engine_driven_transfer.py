@@ -135,6 +135,11 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 self.commit_retrieve,
                 ThreadPoolType.AFFINITY,
             ),
+            HandlerSpec(
+                RequestType.REGISTER_SDK_TRANSFER_STRATEGY,
+                self.register_sdk_transfer_strategy,
+                ThreadPoolType.SYNC,
+            ),
         ]
 
     def report_status(self) -> dict:
@@ -385,6 +390,45 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         )
         return RegisterEngineDrivenContextResponse(
             shm_name=shm_name, pool_size=pool_size
+        )
+
+    def register_sdk_transfer_strategy(
+        self,
+        instance_id: int,
+        model_name: str,
+        world_size: int,
+    ) -> None:
+        """Register the SDK transfer strategy for prepare/commit KV bytes by tokens.
+        
+        Args:
+            instance_id: The SDK instance ID to register the strategy for.
+            model_name: The model name associated with the SDK instance.
+            world_size: The world size associated with the SDK instance.
+        
+        Raises:
+            ValueError: If the model name is not registered in the layout descriptor registry.
+        """
+        layout_desc, _ = self._ctx.resolve_model_name(model_name)   # SDK path
+        if layout_desc is None:
+            raise ValueError(f"No KV layout registered for model {model_name}")
+        metadata = NonGpuContextMetadata(
+            layout_desc=layout_desc,
+            block_size=self._ctx.chunk_size,
+            use_mla=len(layout_desc.shapes[0]) == 3,
+        )
+        self._non_gpu_contexts[instance_id] = NonGPUContextEntry(
+            metadata=metadata,
+            model_name=model_name,
+            world_size=world_size,
+        )
+        self._strategies[instance_id] = create_transfer_strategy(
+            self._ctx.storage_manager,
+            shm_name=self._shm_pool_info["shm_name"],
+            pool_size=self._shm_pool_info["pool_size"],
+            pending_writes=self._pending_shm_writes,
+            pending_reads=self._pending_shm_reads,
+            pending_lock=self._pending_shm_lock,
+            transfer_key_factory=self._make_transfer_key,
         )
 
     def unregister_kv_cache(self, instance_id: int) -> None:
