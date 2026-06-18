@@ -22,9 +22,10 @@ from lmcache.v1.mp_coordinator.blend_directory import (
     GlobalBlendMatcher,
     StoreRange,
 )
+from lmcache.v1.mp_coordinator.schemas import decode_tokens
 
 CHUNK = 3
-SCOPE = "model-a@"
+SCOPE = "model-a"
 
 
 def _matcher_request(
@@ -48,7 +49,9 @@ def _matcher_request(
             keys = payload.get("object_keys", [])
             return {"removed": matcher.remove(keys) if keys else 0}
         if method == "POST" and path == "/blend/match":
-            matches = matcher.match(payload["model_scope"], payload["tokens"])
+            matches = matcher.match(
+                payload["model_scope"], decode_tokens(payload["tokens_b64"])
+            )
             return {
                 "matches": [
                     {"object_key": m.object_key, "old_st": m.old_st, "cur_st": m.cur_st}

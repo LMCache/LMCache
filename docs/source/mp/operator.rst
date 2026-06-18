@@ -759,6 +759,262 @@ Spec Reference above) and adds:
 ``server.chunkSize`` defaults to ``256`` and must equal 256 (the blend matcher
 requires ``chunk_size == vLLM --block-size * 4``).
 
+LMCacheCoordinator
+------------------
+
+The ``LMCacheCoordinator`` CRD runs the **mp coordinator** -- a fleet-wide HTTP
+service that tracks mp server instances, evicts those whose heartbeats lapse,
+performs L2 quota eviction, and hosts the global CacheBlend fingerprint
+directory.  It is a plain (non-GPU) ``Deployment`` exposed through a ClusterIP
+Service; engines reach it via ``coordinator.ref`` or ``coordinator.url``.
+
+Deploying a Coordinator
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A ready-to-edit manifest lives at
+``config/samples/lmcache_v1alpha1_lmcachecoordinator.yaml`` in the operator
+repo.  A minimal coordinator:
+
+.. code-block:: yaml
+
+    apiVersion: lmcache.lmcache.ai/v1alpha1
+    kind: LMCacheCoordinator
+    metadata:
+      name: my-coordinator
+    spec:
+      port: 9300
+
+.. code-block:: bash
+
+    kubectl get lmcc my-coordinator   # shortName: lmcc
+
+Connecting an Engine
+~~~~~~~~~~~~~~~~~~~~~
+
+Point an ``LMCacheEngine`` / ``CacheBlendEngine`` at the coordinator through its
+``coordinator`` block.  Use ``ref`` to name a coordinator in the same namespace
+(the operator resolves it to the in-cluster Service URL), or ``url`` for an
+explicit endpoint:
+
+.. code-block:: yaml
+
+    spec:
+      coordinator:
+        ref:
+          name: my-coordinator       # or: url: http://my-coordinator.default.svc:9300
+        heartbeatInterval: 5          # seconds; must be > 0
+        l2EventReporting: false       # report L2 store/lookup events for fleet eviction
+
+Coordinator CRD Spec Reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Topology
+^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``replicas``
+     - ``1``
+     - Coordinator pods.  The registry is per-process in-memory, so >1 only
+       makes sense behind a shared durable backend.  Must be >= 0.
+   * - ``image.repository`` / ``image.tag`` / ``image.pullPolicy``
+     - shared engine image
+     - Runs the same lmcache binary as the engines.
+   * - ``imagePullSecrets``
+     - --
+     - Image pull secret references.
+
+HTTP Server
+^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``host``
+     - ``0.0.0.0``
+     - Address the coordinator's HTTP server binds to.
+   * - ``port``
+     - ``9300``
+     - HTTP port (1--65535).
+
+Membership & Health
+^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``instanceTimeout``
+     - ``30``
+     - Seconds without a heartbeat after which an instance is evicted.  Set
+       comfortably above the engines' ``coordinator.heartbeatInterval``.
+   * - ``healthCheckInterval``
+     - ``10``
+     - Seconds between health-check sweeps; ``0`` disables the loop.
+
+L2 Quota Eviction
+^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``evictionCheckInterval``
+     - ``5``
+     - Seconds between L2 eviction sweeps; ``0`` disables the loop.
+   * - ``evictionRatio``
+     - ``0.2``
+     - Fraction of tracked keys (by count) to evict per cycle, [0.0, 1.0].
+   * - ``triggerWatermark``
+     - ``1.0``
+     - Usage fraction of the quota that fires eviction, (0.0, 1.0].
+
+Global CacheBlend Directory
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``blendChunkSize``
+     - ``256``
+     - Tokens per chunk for the global CacheBlend directory (the match unit).
+       **Must equal** the LMCache chunk size the blend servers use.  Must be > 0.
+   * - ``blendProbeStride``
+     - ``1``
+     - Positions between match probes.  ``1`` probes every offset for full
+       recall; raise it to trade recall for coordinator CPU.  Must be > 0.
+
+Prometheus, Scheduling & Overrides
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 20 45
+
+   * - Field
+     - Default
+     - Description
+   * - ``prometheus.enabled``
+     - ``true``
+     - Expose the metrics container port.  See the note below.
+   * - ``prometheus.port``
+     - ``9090``
+     - Metrics port.
+   * - ``prometheus.serviceMonitor.enabled``
+     - ``false``
+     - Create a ServiceMonitor CR (and headless metrics Service).
+   * - ``prometheus.serviceMonitor.interval``
+     - ``30s``
+     - Scrape interval.
+   * - ``logLevel``
+     - ``INFO``
+     - ``DEBUG`` | ``INFO`` | ``WARNING`` | ``ERROR``.
+   * - ``resourceOverrides``
+     - --
+     - Pod resource requests/limits (no auto-compute; the coordinator is
+       CPU/memory light).
+   * - ``nodeSelector`` / ``affinity`` / ``tolerations`` / ``priorityClassName``
+     - --
+     - Pod scheduling controls.
+   * - ``env`` / ``volumes`` / ``volumeMounts`` / ``podAnnotations`` / ``podLabels`` / ``serviceAccountName``
+     - --
+     - Standard pod-shaping fields.
+   * - ``extraArgs``
+     - --
+     - Extra CLI flags (appended last, can override any auto-generated flag).
+
+.. note::
+   The coordinator process does **not** yet expose a ``/metrics`` endpoint.  The
+   Prometheus wiring is present for parity but is only useful once metrics are
+   added; ``serviceMonitor.enabled`` defaults to ``false``.
+
+Coordinator Resources Created
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For an ``LMCacheCoordinator`` named ``my-coordinator``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 25 50
+
+   * - Resource
+     - Name
+     - Purpose
+   * - Deployment
+     - ``my-coordinator``
+     - Runs the coordinator HTTP server pods.
+   * - Service (ClusterIP)
+     - ``my-coordinator``
+     - Fleet-wide discovery on the HTTP port.
+   * - Service (headless)
+     - ``my-coordinator-metrics``
+     - Prometheus scrape target (when ``serviceMonitor.enabled``).
+   * - ServiceMonitor
+     - ``my-coordinator``
+     - Prometheus Operator integration (when ``serviceMonitor.enabled``).
+
+The status ``endpoint`` other components use to reach the coordinator is
+``http://<name>.<namespace>.svc:<port>`` (e.g.
+``http://my-coordinator.default.svc:9300``).
+
+Coordinator Status & Conditions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The status section includes:
+
+- **phase**: ``Pending``, ``Running``, ``Degraded``, or ``Failed``.
+- **replicas** / **readyReplicas**: Pod counts from the Deployment.
+- **endpoint**: In-cluster URL for reaching the coordinator.
+- **observedGeneration**: Most recent reconciled generation.
+- **conditions**:
+
+  - ``Available`` -- At least one replica is ready.
+  - ``AllInstancesReady`` -- All desired replicas are ready.
+  - ``ConfigValid`` -- Spec validation passed.
+
+Coordinator Validation Rules
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Field
+     - Rule
+   * - ``port``
+     - Must be in [1, 65535].
+   * - ``replicas``
+     - Must be >= 0.
+   * - ``instanceTimeout``
+     - Must be > 0.
+   * - ``healthCheckInterval`` / ``evictionCheckInterval``
+     - Must be >= 0.
+   * - ``evictionRatio``
+     - Must be in [0.0, 1.0].
+   * - ``triggerWatermark``
+     - Must be in (0.0, 1.0].
+   * - ``blendChunkSize`` / ``blendProbeStride``
+     - Must be > 0.
+
 Operator vs Manual Deployment
 -----------------------------
 
