@@ -179,12 +179,7 @@ class ManagementModule:
         return self._ctx.chunk_size
 
     def get_shm_pool_info(self) -> dict:
-        """Return information about the shared memory pool.
-
-        Returns:
-            A dict containing shared memory pool information:
-                name and pool size.
-        """
+        """Return information about the shared memory pool name and size."""
         shm_info = self._ctx.shm_pool_info
         return {
             "shm_name": shm_info["shm_name"],
@@ -195,11 +190,7 @@ class ManagementModule:
         self,
         model_name: str,
     ) -> int:
-        """Return the world size (number of processes in the distributed setup).
-
-        Returns:
-            The world size.
-        """
+        """Return the world size"""
         _, world_size = self._ctx.layout_desc_registry.find_by_model_name(model_name)
         if world_size is None:
             return 1
