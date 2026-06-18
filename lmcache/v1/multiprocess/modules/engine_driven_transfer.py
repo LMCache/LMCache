@@ -478,7 +478,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             self._resolve_all_group_obj_keys(key, num_groups)
             session = self._ctx.session_manager.get_or_create(key.request_id)
             session.extras["store_start_time"] = time.perf_counter()
-            return PrepareStoreResponse(success=True, context={})
+            return PrepareStoreResponse(context={})
 
         response = strategy.prepare_store(
             key=key,
