@@ -4,35 +4,39 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: lmcacheengines.lmcache.lmcache.ai
+  name: lmcachecoordinators.lmcache.lmcache.ai
 spec:
   group: lmcache.lmcache.ai
   names:
-    kind: LMCacheEngine
-    listKind: LMCacheEngineList
-    plural: lmcacheengines
+    kind: LMCacheCoordinator
+    listKind: LMCacheCoordinatorList
+    plural: lmcachecoordinators
     shortNames:
-    - lmc
-    singular: lmcacheengine
+    - lmcc
+    singular: lmcachecoordinator
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - jsonPath: .status.phase
       name: Phase
       type: string
-    - jsonPath: .status.readyInstances
+    - jsonPath: .status.readyReplicas
       name: Ready
       type: integer
-    - jsonPath: .status.desiredInstances
-      name: Desired
+    - jsonPath: .status.replicas
+      name: Replicas
       type: integer
+    - jsonPath: .status.endpoint
+      name: Endpoint
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: LMCacheEngine is the Schema for the lmcacheengines API.
+        description: LMCacheCoordinator is the Schema for the lmcachecoordinators
+          API.
         properties:
           apiVersion:
             description: |-
@@ -52,7 +56,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of LMCacheEngine.
+            description: spec defines the desired state of LMCacheCoordinator.
             properties:
               affinity:
                 description: affinity defines pod scheduling affinity rules.
@@ -966,61 +970,28 @@ spec:
                         x-kubernetes-list-type: atomic
                     type: object
                 type: object
-              coordinator:
+              blendChunkSize:
                 description: |-
-                  coordinator configures registration with an MP coordinator. When unset,
-                  the server does not register with any coordinator.
-                properties:
-                  advertiseIP:
-                    description: |-
-                      advertiseIP is the IP the coordinator should reach this server at.
-
-                      DO NOT SET THIS IN ALMOST EVERY CASE. When unset, the server's pod IP is
-                      injected automatically via the downward API, which is the correct value
-                      for normal in-cluster deployments. Only set this if you know exactly what
-                      you are doing -- e.g. the coordinator runs outside the cluster and must
-                      reach the server through a specific externally-routable address. An
-                      incorrect value silently breaks coordinator-to-server connectivity.
-                    type: string
-                  heartbeatInterval:
-                    default: 5
-                    description: heartbeatInterval is the seconds between heartbeats;
-                      must be > 0.
-                    type: number
-                  l2EventFlushInterval:
-                    default: 1
-                    description: |-
-                      l2EventFlushInterval is the seconds between L2 event flush attempts; must
-                      be > 0.
-                    type: number
-                  l2EventReporting:
-                    default: false
-                    description: |-
-                      l2EventReporting enables reporting L2 store/lookup events to the
-                      coordinator for fleet-wide usage tracking and eviction.
-                    type: boolean
-                  ref:
-                    description: |-
-                      ref names an LMCacheCoordinator in the same namespace. The operator
-                      resolves it to the coordinator's in-cluster Service URL.
-                    properties:
-                      name:
-                        default: ""
-                        description: |-
-                          Name of the referent.
-                          This field is effectively required, but due to backwards compatibility is
-                          allowed to be empty. Instances of this type with an empty value here are
-                          almost certainly wrong.
-                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
-                        type: string
-                    type: object
-                    x-kubernetes-map-type: atomic
-                  url:
-                    description: |-
-                      url is an explicit coordinator base URL (e.g. http://coordinator:9300),
-                      used to target a coordinator the operator does not manage.
-                    type: string
-                type: object
+                  blendChunkSize is the tokens per chunk for the global CacheBlend directory
+                  (the match unit). It MUST equal the LMCache chunk size the blend servers
+                  use, so the coordinator chunks published/queried tokens the same way.
+                  When unset the coordinator image applies its own default (256); the
+                  operator only passes --blend-chunk-size when this is explicitly set, so it
+                  stays compatible with images whose CLI predates the flag.
+                format: int32
+                minimum: 1
+                type: integer
+              blendProbeStride:
+                description: |-
+                  blendProbeStride is the number of positions between CacheBlend match
+                  probes. With partial-fill reuse any offset is usable, so 1 (probe every
+                  offset) gives full recall; raise it only to trade recall for coordinator
+                  CPU. When unset the coordinator image applies its own default (1); the
+                  operator only passes --blend-probe-stride when this is explicitly set, so
+                  it stays compatible with images whose CLI predates the flag.
+                format: int32
+                minimum: 1
+                type: integer
               env:
                 description: env defines additional environment variables.
                 items:
@@ -1178,46 +1149,40 @@ spec:
                   - name
                   type: object
                 type: array
-              eviction:
-                description: eviction defines the cache eviction configuration.
-                properties:
-                  evictionRatio:
-                    default: 0.2
-                    description: evictionRatio is the fraction of cache to evict when
-                      triggered.
-                    type: number
-                  policy:
-                    default: LRU
-                    description: policy is the eviction policy. Currently only LRU
-                      is supported.
-                    enum:
-                    - LRU
-                    type: string
-                  triggerWatermark:
-                    default: 0.8
-                    description: triggerWatermark is the cache usage ratio that triggers
-                      eviction.
-                    type: number
-                type: object
+              evictionCheckInterval:
+                default: 5
+                description: |-
+                  evictionCheckInterval is the seconds between L2 eviction sweeps. 0 disables
+                  the loop.
+                type: number
+              evictionRatio:
+                default: 0.2
+                description: |-
+                  evictionRatio is the fraction of tracked keys (by count) to evict per
+                  cycle, in [0.0, 1.0].
+                type: number
               extraArgs:
                 description: |-
-                  extraArgs are additional CLI flags appended to the server command.
+                  extraArgs are additional CLI flags appended to the coordinator command.
                   They are appended last and can override any auto-generated flag.
                 items:
                   type: string
                 type: array
-              gpuVendor:
-                default: nvidia
+              healthCheckInterval:
+                default: 10
                 description: |-
-                  gpuVendor selects the GPU vendor. "nvidia" (default) requires the NVIDIA
-                  GPU Operator's "nvidia" RuntimeClass; "amd" runs on the default container
-                  runtime with privileged: true.
-                enum:
-                - nvidia
-                - amd
+                  healthCheckInterval is the seconds between health-check sweeps. 0 disables
+                  the loop.
+                type: number
+              host:
+                default: 0.0.0.0
+                description: host is the address the coordinator's HTTP server binds
+                  to.
                 type: string
               image:
-                description: image defines the container image to use.
+                description: |-
+                  image defines the container image to use. The coordinator runs the same
+                  lmcache binary as the engines, so it shares the default image.
                 properties:
                   pullPolicy:
                     default: IfNotPresent
@@ -1256,127 +1221,15 @@ spec:
                   type: object
                   x-kubernetes-map-type: atomic
                 type: array
-              l1:
-                description: l1 defines the L1 memory cache configuration.
-                properties:
-                  sizeGB:
-                    description: |-
-                      sizeGB is the L1 cache size in gigabytes. Required, must be > 0.
-                      The CRD-level constraint (exclusiveMinimum=0) rejects invalid values
-                      at admission time so the controller never sees them; the in-Go
-                      ValidateSpec keeps the same rule for defense in depth.
-                    exclusiveMinimum: true
-                    minimum: 0
-                    type: number
-                required:
-                - sizeGB
-                type: object
-              l2Backend:
+              instanceTimeout:
+                default: 30
                 description: |-
-                  l2Backend defines the L2 storage backend.
-                  Currently only a single adapter is supported.
-                properties:
-                  prefetchMaxInFlight:
-                    default: 8
-                    description: |-
-                      prefetchMaxInFlight limits the number of concurrent prefetch
-                      (L2→L1 load) requests, preventing excessive L1 memory pressure.
-                    format: int32
-                    minimum: 1
-                    type: integer
-                  prefetchPolicy:
-                    default: default
-                    description: |-
-                      prefetchPolicy controls how keys flow from L2 back to L1 on
-                      cache misses. "default" picks the first adapter that has the key.
-                    enum:
-                    - default
-                    type: string
-                  raw:
-                    description: |-
-                      raw is an escape hatch for adapter types not yet natively
-                      supported by the operator (e.g. nixl_store, fs, mock).
-                      The JSON is passed through to --l2-adapter as-is.
-                    properties:
-                      config:
-                        additionalProperties:
-                          x-kubernetes-preserve-unknown-fields: true
-                        description: config is type-specific configuration as a free-form
-                          map.
-                        type: object
-                      type:
-                        description: type is the adapter type name (e.g. "nixl_store",
-                          "fs", "mock").
-                        type: string
-                    required:
-                    - type
-                    type: object
-                  resp:
-                    description: |-
-                      resp configures a Redis/Valkey RESP L2 adapter backed by the
-                      native C++ connector.
-                    properties:
-                      authSecretRef:
-                        description: |-
-                          authSecretRef is a reference to a Secret containing "username"
-                          and "password" keys for Redis authentication.
-                          The Secret may live in a different namespace; the operator will
-                          create a managed copy in the LMCacheEngine's namespace.
-                          The credentials are injected via environment variables so they
-                          do not appear in container args or kubectl describe output.
-                        properties:
-                          name:
-                            description: name is the name of the Secret.
-                            type: string
-                          namespace:
-                            description: |-
-                              namespace is the namespace of the Secret.
-                              If empty, defaults to the namespace of the LMCacheEngine resource.
-                            type: string
-                        required:
-                        - name
-                        type: object
-                      host:
-                        description: host is the Redis/Valkey server hostname or IP.
-                        type: string
-                      maxCapacityGB:
-                        default: 0
-                        description: |-
-                          maxCapacityGB is the max L2 capacity in GB for usage tracking
-                          and eviction. 0 means disabled.
-                        type: number
-                      numWorkers:
-                        default: 8
-                        description: numWorkers is the number of C++ worker threads
-                          for I/O.
-                        format: int32
-                        minimum: 1
-                        type: integer
-                      port:
-                        description: port is the Redis/Valkey server port.
-                        format: int32
-                        maximum: 65535
-                        minimum: 1
-                        type: integer
-                    required:
-                    - host
-                    - port
-                    type: object
-                  storePolicy:
-                    default: default
-                    description: |-
-                      storePolicy controls how keys flow from L1 to L2.
-                      "default" stores all keys to the adapter and keeps L1.
-                      "skip_l1" stores all keys to the adapter and deletes them from L1
-                      (buffer-only mode — pair with eviction.policy=noop).
-                    enum:
-                    - default
-                    - skip_l1
-                    type: string
-                type: object
+                  instanceTimeout is the seconds without a heartbeat after which an instance
+                  is evicted. Must be > 0.
+                type: number
               logLevel:
                 default: INFO
-                description: logLevel is the log level for the LMCache server.
+                description: logLevel is the log level for the coordinator process.
                 enum:
                 - DEBUG
                 - INFO
@@ -1386,23 +1239,38 @@ spec:
               nodeSelector:
                 additionalProperties:
                   type: string
-                description: nodeSelector determines which nodes get an LMCache instance.
+                description: nodeSelector constrains which nodes the coordinator runs
+                  on.
                 type: object
               podAnnotations:
                 additionalProperties:
                   type: string
-                description: podAnnotations are additional annotations added to pods.
+                description: podAnnotations are additional annotations added to the
+                  coordinator pod.
                 type: object
               podLabels:
                 additionalProperties:
                   type: string
-                description: podLabels are additional labels added to pods.
+                description: podLabels are additional labels added to the coordinator
+                  pod.
                 type: object
+              port:
+                default: 9300
+                description: port is the port the coordinator's HTTP server binds
+                  to.
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
               priorityClassName:
-                description: priorityClassName is the priority class for the pods.
+                description: priorityClassName is the priority class for the coordinator
+                  pod.
                 type: string
               prometheus:
-                description: prometheus defines Prometheus monitoring configuration.
+                description: |-
+                  prometheus defines Prometheus monitoring configuration. The coordinator
+                  process does not yet expose a /metrics endpoint, so the ServiceMonitor is
+                  disabled by default; enabling it is only useful once metrics are added.
                 properties:
                   enabled:
                     default: true
@@ -1432,8 +1300,18 @@ spec:
                         type: object
                     type: object
                 type: object
+              replicas:
+                default: 1
+                description: |-
+                  replicas is the number of coordinator pods. The coordinator's in-memory
+                  registry is per-process, so running more than one replica only makes sense
+                  behind a shared durable backend; the default of 1 fits the common case.
+                format: int32
+                minimum: 0
+                type: integer
               resourceOverrides:
-                description: resourceOverrides allows overriding auto-computed resource
+                description: |-
+                  resourceOverrides allows overriding the coordinator pod's resource
                   requirements.
                 properties:
                   claims:
@@ -1492,44 +1370,6 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
-              server:
-                description: server defines server configuration.
-                properties:
-                  chunkSize:
-                    default: 256
-                    description: chunkSize is the token chunk size.
-                    format: int32
-                    type: integer
-                  hashAlgorithm:
-                    default: blake3
-                    description: hashAlgorithm is the hash algorithm used for token
-                      hashing.
-                    enum:
-                    - builtin
-                    - sha256_cbor
-                    - blake3
-                    type: string
-                  httpPort:
-                    default: 8080
-                    description: httpPort is the HTTP frontend port (health checks,
-                      cache admin).
-                    format: int32
-                    maximum: 65535
-                    minimum: 1024
-                    type: integer
-                  maxWorkers:
-                    default: 1
-                    description: maxWorkers is the number of worker threads.
-                    format: int32
-                    type: integer
-                  port:
-                    default: 5555
-                    description: port is the server listening port.
-                    format: int32
-                    maximum: 65535
-                    minimum: 1024
-                    type: integer
-                type: object
               serviceAccountName:
                 description: serviceAccountName is the name of the ServiceAccount
                   to use.
@@ -1574,6 +1414,12 @@ spec:
                       type: string
                   type: object
                 type: array
+              triggerWatermark:
+                default: 1
+                description: |-
+                  triggerWatermark is the usage fraction of the quota that fires eviction,
+                  in (0.0, 1.0].
+                type: number
               volumeMounts:
                 description: volumeMounts defines additional volume mounts.
                 items:
@@ -3540,14 +3386,12 @@ spec:
                   - name
                   type: object
                 type: array
-            required:
-            - l1
             type: object
           status:
-            description: status defines the observed state of LMCacheEngine.
+            description: status defines the observed state of LMCacheCoordinator.
             properties:
               conditions:
-                description: conditions represent the current state of the LMCacheEngine
+                description: conditions represent the current state of the LMCacheCoordinator
                   resource.
                 items:
                   description: Condition contains details for one aspect of the current
@@ -3607,54 +3451,24 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
-              desiredInstances:
-                description: desiredInstances is the number of desired instances.
-                format: int32
-                type: integer
-              endpoints:
-                description: endpoints lists per-node connection info.
-                items:
-                  description: EndpointStatus represents a single LMCache instance
-                    endpoint.
-                  properties:
-                    hostIP:
-                      description: hostIP is the IP address of the host.
-                      type: string
-                    metricsPort:
-                      description: metricsPort is the Prometheus metrics port.
-                      format: int32
-                      type: integer
-                    nodeName:
-                      description: nodeName is the name of the node running this instance.
-                      type: string
-                    podName:
-                      description: podName is the name of the pod.
-                      type: string
-                    port:
-                      description: port is the server port.
-                      format: int32
-                      type: integer
-                    ready:
-                      description: ready indicates whether this instance is ready.
-                      type: boolean
-                  required:
-                  - hostIP
-                  - metricsPort
-                  - nodeName
-                  - podName
-                  - port
-                  - ready
-                  type: object
-                type: array
+              endpoint:
+                description: |-
+                  endpoint is the in-cluster URL other components use to reach the
+                  coordinator, e.g. http://<name>.<namespace>.svc:9300.
+                type: string
               observedGeneration:
                 description: observedGeneration is the most recent generation observed.
                 format: int64
                 type: integer
               phase:
-                description: phase is the overall phase of the LMCacheEngine.
+                description: phase is the overall phase of the LMCacheCoordinator.
                 type: string
-              readyInstances:
-                description: readyInstances is the number of ready instances.
+              readyReplicas:
+                description: readyReplicas is the number of ready coordinator pods.
+                format: int32
+                type: integer
+              replicas:
+                description: replicas is the number of desired coordinator pods.
                 format: int32
                 type: integer
             type: object
