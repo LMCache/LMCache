@@ -99,16 +99,6 @@ class ManagementModule:
                 self.report_block_allocations,
                 ThreadPoolType.NORMAL,
             ),
-            HandlerSpec(
-                RequestType.GET_SHM_POOL_INFO,
-                self.get_shm_pool_info,
-                ThreadPoolType.SYNC,
-            ),
-            HandlerSpec(
-                RequestType.GET_WORLD_SIZE,
-                self.get_world_size,
-                ThreadPoolType.SYNC,
-            ),
         ]
 
     def report_status(self) -> dict:
@@ -177,31 +167,6 @@ class ManagementModule:
             The chunk size.
         """
         return self._ctx.chunk_size
-
-    def get_shm_pool_info(self) -> dict:
-        """Return information about the shared memory pool name and size."""
-        shm_info = self._ctx.shm_pool_info
-        return {
-            "shm_name": shm_info["shm_name"],
-            "pool_size": shm_info["pool_size"],
-        }
-
-    def get_world_size(
-        self,
-        model_name: str,
-    ) -> int:
-        """Return the world size"""
-        _, world_size = self._ctx.layout_desc_registry.find_by_model_name(model_name)
-        if world_size is None:
-            return 1
-        return world_size
-
-    def clear(self) -> None:
-        """Clear all stored KV cache data from the storage manager."""
-        with self._clear_lock:
-            self._ctx.storage_manager.memcheck()
-            self._ctx.storage_manager.clear(force=True)
-            self._ctx.storage_manager.memcheck()
 
     def debug(self) -> str:
         """Return a simple health-check string.
