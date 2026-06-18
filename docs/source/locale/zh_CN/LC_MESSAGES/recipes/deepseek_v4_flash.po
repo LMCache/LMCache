@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -31,7 +31,9 @@ msgstr "验证过的模型"
 msgid ""
 "`deepseek-ai/DeepSeek-V4-Flash <https://huggingface.co/deepseek-"
 "ai/DeepSeek-V4-Flash>`_"
-msgstr "`deepseek-ai/DeepSeek-V4-Flash <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash>`_"
+msgstr ""
+"`deepseek-ai/DeepSeek-V4-Flash <https://huggingface.co/deepseek-"
+"ai/DeepSeek-V4-Flash>`_"
 
 #: ../../source/recipes/deepseek_v4_flash.rst
 msgid "vLLM"
@@ -42,11 +44,12 @@ msgid ""
 "**Engine documentation:** `DeepSeek-V4-Flash in vLLM supported models "
 "<https://docs.vllm.ai/en/latest/models/supported_models.html#text-"
 "generation>`_ (architecture ``DeepseekV4ForCausalLM``)."
-msgstr "**引擎文档：** `DeepSeek-V4-Flash 在 vLLM 支持的模型 <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ （架构 ``DeepseekV4ForCausalLM``）。"
+msgstr ""
+"**引擎文档：** `DeepSeek-V4-Flash 在 vLLM 支持的模型 <https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation>`_ （架构 ``DeepseekV4ForCausalLM``\\ ）。"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:21
 msgid "**Status:** Validated with LMCache."
-msgstr "**状态:** 已通过 LMCache 验证。"
+msgstr "**状态：** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:23
 msgid ""
@@ -56,7 +59,8 @@ msgid ""
 "DeepSeek-V4-Flash recipe "
 "<https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ (also "
 "mirrored at https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash)."
-msgstr "**安装 vLLM:** DeepSeek-V4-Flash 需要稀疏 MLA 注意力后端和 ``fp8_ds_mla`` KV Cache 内核，因此请按照其自己的食谱安装 vLLM，而不是简单地使用 ``pip install vllm``: `vLLM DeepSeek-V4-Flash 食谱 <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ (也可在 https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash 找到镜像)。"
+msgstr ""
+"**安装 vLLM：** DeepSeek-V4-Flash 需要稀疏 MLA 注意力后端和 ``fp8_ds_mla`` KV Cache 内核，因此请按照其专属指南安装 vLLM，而非直接使用 ``pip install vllm``\\ ：\\ `vLLM DeepSeek-V4-Flash 指南 <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_\\ （也可在 https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash 查看镜像）。"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:32
 msgid ""
@@ -64,7 +68,8 @@ msgid ""
 " vLLM development branch is broken for DeepSeek-V4-Flash (the ``fp4`` MoE"
 " experts are misdispatched and the real weights fail to load). Pin to the"
 " latest tagged release as the vLLM recipe instructs."
-msgstr "使用 **最新的 vLLM 版本**，而不是 ``main``/dev 分支。当前的 vLLM 开发分支对 DeepSeek-V4-Flash 是不兼容的（``fp4`` MoE 专家被错误调度，真实权重无法加载）。按照 vLLM 配方的指示，固定到最新的标记版本。"
+msgstr ""
+"请使用 **最新的 vLLM 正式版本**\\ ，而非 ``main``/dev 分支。当前 vLLM 开发分支对 DeepSeek-V4-Flash 存在兼容性问题（\\ ``fp4`` MoE 专家路由有误，实际权重无法加载）。请按照 vLLM 指南的说明，锁定到最新的标签版本。"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:37
 msgid "Start the LMCache MP server:"
@@ -80,15 +85,18 @@ msgid ""
 "required for this model; ``--enable-expert-parallel`` distributes the MoE"
 " experts across the tensor-parallel ranks. Adjust ``--tensor-parallel-"
 "size`` to match your hardware. For the generic LMCache + vLLM wiring "
-"(ports, remote hosts), see :doc:`../mp/quickstart`."
-msgstr "``--kv-cache-dtype fp8_ds_mla`` 和 ``--tokenizer-mode deepseek_v4`` 是该模型所需的；``--enable-expert-parallel`` 将 MoE 专家分配到张量并行的等级中。调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../mp/quickstart`。"
+"(ports, remote hosts), see :doc:`../getting_started/quickstart`."
+msgstr ""
+"``--kv-cache-dtype fp8_ds_mla`` 和 ``--tokenizer-mode deepseek_v4`` 是该模型的必选参数；\\ ``--enable-expert-parallel`` 将 MoE 专家分散到各张量并行 rank 上。请根据您的硬件调整 ``--tensor-parallel-size``\\ 。有关 LMCache + vLLM 的通用配置（端口、远程主机等），请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:67
 msgid ""
 "If there are any issues with vLLM setup, please refer to the `vLLM "
 "Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ "
 "for more details."
-msgstr "如果在 vLLM 设置中遇到任何问题，请参考 `vLLM Recipes <https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 以获取更多详细信息。"
+msgstr ""
+"如果在 vLLM 配置过程中遇到任何问题，请参阅 `vLLM Recipes "
+"<https://docs.vllm.ai/projects/recipes/en/latest/index.html>`_ 获取更多详细信息。"
 
 #: ../../source/recipes/deepseek_v4_flash.rst
 msgid "SGLang"
@@ -103,8 +111,10 @@ msgid "TRT-LLM"
 msgstr "TRT-LLM"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:77
-msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。有关 TRT-LLM + LMCache 的配置方法，请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:80
 msgid "CacheBlend support"
@@ -124,7 +134,7 @@ msgstr "状态"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:91
 msgid "Notes"
-msgstr "笔记"
+msgstr "备注"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:92
 msgid ":doc:`CacheGen <../kv_cache_optimizations/compression/cachegen>`"
@@ -143,7 +153,7 @@ msgid ""
 "**Requires the latest vLLM release.** The vLLM dev branch is currently "
 "broken for this model (see the warning above) -- use a tagged release "
 "installed via the vLLM recipe."
-msgstr "**需要最新的 vLLM 版本。** vLLM 开发分支目前对该模型已损坏（请参见上面的警告）-- 请使用通过 vLLM 配方安装的标记版本。"
+msgstr "**需要最新的 vLLM 正式版本。** vLLM 开发分支目前对该模型存在兼容性问题（请参见上方警告）——请使用通过 vLLM 指南安装的标签版本。"
 
 #: ../../source/recipes/deepseek_v4_flash.rst:102
 msgid ""
@@ -153,5 +163,9 @@ msgid ""
 " are ``float32``), so the groups do not share a single block size. "
 "LMCache stores and retrieves each group in its own block size; no extra "
 "flags are required beyond ``--kv-cache-dtype fp8_ds_mla``."
-msgstr "**稀疏-MLA 混合 KV Cache。** DeepSeek-V4-Flash 将多个具有不同块几何形状的 KV Cache 组交错在一起（压缩的 MLA 潜变量以 ``fp8``/``uint8`` 存储，而稀疏注意力索引器组为 ``float32``），因此这些组不共享单一的块大小。LMCache 在其各自的块大小中存储和检索每个组；除了 ``--kv-cache-dtype fp8_ds_mla`` 之外，不需要额外的标志。"
+msgstr ""
+"**稀疏 MLA 混合 KV Cache。** DeepSeek-V4-Flash 将多个具有不同块几何形状的 KV Cache 组交错排列（压缩的 MLA 潜变量以 ``fp8``/``uint8`` 格式存储，而稀疏注意力索引器组为 ``float32``\\ ），因此各组不共享统一的块大小。LMCache 会按各组自身的块大小分别进行存储和检索；除 ``--kv-cache-dtype fp8_ds_mla`` 外，无需设置额外标志。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 

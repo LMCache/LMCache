@@ -39,7 +39,8 @@ msgstr "我们有以下类型的跨实例 KV Cache 共享的示例："
 msgid ""
 "KV cache sharing through a centralized cache server: "
 "``centralized_sharing``"
-msgstr "通过集中式缓存服务器的 KV Cache 共享：``centralized_sharing``"
+msgstr ""
+"通过集中式缓存服务器的 KV Cache 共享：\\ ``centralized_sharing``"
 
 #: ../../source/getting_started/quickstart/share_kv_cache.rst:11
 msgid "KV cache sharing through p2p cache transfer: ``p2p_sharing``"
@@ -113,7 +114,8 @@ msgid ""
 "cases), ensure all processes use the same `PYTHONHASHSEED` to keep the "
 "hash of the KV cache consistent across processes: ``export "
 "PYTHONHASHSEED=0``."
-msgstr "**重要**：对于集中式缓存共享（跨进程情况），确保所有进程使用相同的 `PYTHONHASHSEED` 以保持 KV 缓存在进程之间的一致性：``export PYTHONHASHSEED=0``。"
+msgstr ""
+"**重要**\\ ：对于集中式缓存共享（跨进程情况），确保所有进程使用相同的 `PYTHONHASHSEED` 以保持 KV 缓存在进程之间的一致性：\\ ``export PYTHONHASHSEED=0``\\ 。"
 
 #: ../../source/getting_started/quickstart/share_kv_cache.rst:39
 msgid "Setup centralized sharing"
@@ -192,7 +194,8 @@ msgstr "实例 2 配置 (``p2p_example2.yaml``):"
 msgid ""
 "Save both files in the directory that you will mount into the container "
 "(referenced later as ``$YAML_FILES``)."
-msgstr "将两个文件保存在您将挂载到容器中的目录中（稍后称为 ``$YAML_FILES``）。"
+msgstr ""
+"将两个文件保存在您将挂载到容器中的目录中（稍后称为 ``$YAML_FILES``\\ ）。"
 
 #: ../../source/getting_started/quickstart/share_kv_cache.rst:177
 msgid "Run the P2P sharing workflow"
