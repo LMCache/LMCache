@@ -181,12 +181,16 @@ class CompositeCommand(BaseCommand):
         # that defines the composite command itself (the __init__.py).
         package = self.__class__.__module__
 
+        def _raise(module_name: str, exc: Exception) -> None:
+            raise exc
+
         self._subcmds: dict[str, BaseCommand] = {}
         for cls in discover_subclasses(
             package,
             BaseCommand,  # type: ignore[type-abstract]
             module_filter=lambda name: not name.startswith("_"),
             require_defined_in_module=True,
+            on_import_error=_raise,
         ):
             # Skip the composite command class itself
             if cls is self.__class__:
