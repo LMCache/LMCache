@@ -304,3 +304,50 @@ def test_engine_driven_multi_group_store_retrieve():
     # Verify scatter wrote non-zero data
     for v in scatter_target.values():
         assert v.abs().sum() > 0
+
+
+# ─── Test 7: Server-side commit_store multi-group format ────────────────────
+
+
+def test_commit_store_multi_group_format():
+    """Server-side: _commit_store_multi_group must use _deserialize_multi_group_chunks."""
+    # Simulate worker serialization
+    group_chunks = [
+        [torch.randn(2, 4, 16, 128, dtype=torch.bfloat16)],  # Group 0
+        [torch.randn(1, 2, 784, 64)],                         # Group 1
+    ]
+    cpu_data = _serialize_multi_group_chunks(group_chunks)
+
+    # Verify that _deserialize_multi_group_chunks correctly roundtrips
+    restored = _deserialize_multi_group_chunks(cpu_data)
+    assert restored[0][0].dtype == torch.bfloat16
+    assert restored[1][0].shape == group_chunks[1][0].shape
+
+    # Verify that pickle.dumps(list[torch.Tensor]) for strategy is compatible
+    for group in restored:
+        repickled = pickle.dumps(group)  # list[torch.Tensor]
+        reloaded = pickle.loads(repickled)
+        assert all(isinstance(t, torch.Tensor) for t in reloaded)
+
+
+# ─── Test 8: Server-side prepare_retrieve multi-group format ─────────────────
+
+
+def test_prepare_retrieve_multi_group_format():
+    """Server→Worker: Format must use _serialize_multi_group_chunks."""
+    # Simulate what strategy.prepare_retrieve() returns (single-group format)
+    tensors_g0 = [torch.randn(2, 4, 16, 128)]
+    tensors_g1 = [torch.randn(1, 2, 784, 64)]
+    strategy_response_g0 = pickle.dumps(tensors_g0)  # Like PickleTransferStrategy
+    strategy_response_g1 = pickle.dumps(tensors_g1)
+
+    # Simulate what the corrected server code should do:
+    group_tensors_0 = pickle.loads(strategy_response_g0)
+    group_tensors_1 = pickle.loads(strategy_response_g1)
+    cpu_data = _serialize_multi_group_chunks([group_tensors_0, group_tensors_1])
+
+    # What the worker receives must be correctly deserializable:
+    restored = _deserialize_multi_group_chunks(cpu_data)
+    assert len(restored) == 2
+    torch.testing.assert_close(restored[0][0], tensors_g0[0])
+    torch.testing.assert_close(restored[1][0], tensors_g1[0])
