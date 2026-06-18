@@ -214,7 +214,7 @@ class EngineDrivenContext(ABC):
         the chunks. No additional pickle.dumps() is performed.
         """
         from lmcache.v1.multiprocess.protocol import RequestType
-        from lmcache.v1.multiprocess.protocols.base import get_response_class
+        from lmcache.v1.multiprocess.protocol import get_response_class
 
         future = self.mq_client.submit_request(
             RequestType.COMMIT_STORE,
@@ -236,7 +236,7 @@ class EngineDrivenContext(ABC):
         or timeout.
         """
         from lmcache.v1.multiprocess.protocol import RequestType
-        from lmcache.v1.multiprocess.protocols.base import get_response_class
+        from lmcache.v1.multiprocess.protocol import get_response_class
 
         future = self.mq_client.submit_request(
             RequestType.PREPARE_RETRIEVE,
