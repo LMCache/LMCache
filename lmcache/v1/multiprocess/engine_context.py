@@ -262,13 +262,17 @@ class MPCacheServerContext:
             shm_name = f"lmcache_l1_pool_{bare}"
         return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
 
-    def resolve_model_name(self, model_name: str) -> tuple[str, int] | None:
-        """Look up the registered model name and world size for a given model name.
+    def resolve_model_name(
+        self, 
+        model_name: str
+    ) -> tuple[MemoryLayoutDesc | None, int | None]:
+        """Look up the registered layout descriptor and world size.
         
         Args:
             model_name: The model name.
 
         Returns:
-            A tuple of the registered model name and world size, or None if not found.
+            A tuple of the registered layout descriptor and world size.
+            (None, None) if not found.
         """
         return self._layout_desc_registry.find_by_model_name(model_name)
