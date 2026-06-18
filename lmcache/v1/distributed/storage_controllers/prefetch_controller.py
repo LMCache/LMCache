@@ -579,7 +579,7 @@ class PrefetchController(StorageControllerInterface):
 
         pending_lookup_tasks: dict[int, L2TaskId] = {}
         for i, adapter in enumerate(self._l2_adapters):
-            task_id = adapter.submit_lookup_and_lock_task(keys)
+            task_id = adapter.submit_lookup_and_lock_task(keys, layout_desc)
             pending_lookup_tasks[i] = task_id
 
         request = InFlightPrefetchRequest(
