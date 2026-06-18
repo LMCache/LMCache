@@ -4,10 +4,10 @@
 # First Party
 from lmcache.sdk.kvcache import (
     KVCacheSDKError,
-    LMCacheSDKContext
+    LMCacheKVCacheContext
 )
 
 __all__ = [
     "KVCacheSDKError",
-    "LMCacheSDKContext",
+    "LMCacheKVCacheContext",
 ]
