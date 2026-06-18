@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-18 17:25+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -19,11 +19,11 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
 
-#: ../../source/getting_started/troubleshoot.rst:2
-msgid "TroubleShoot"
-msgstr "故障排除"
+#: ../../source/production/index.rst:2
+msgid "Use LMCache in Production"
+msgstr "在生产环境中使用 LMCache"
 
-#: ../../source/getting_started/troubleshoot.rst:4
-msgid "Coming soon..."
-msgstr "敬请期待..."
+#: ../../source/production/index.rst:4
+msgid "Deploying, scaling, and operating LMCache in production."
+msgstr "在生产环境中部署、扩展和操作 LMCache。"
 

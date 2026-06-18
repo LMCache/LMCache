@@ -33,7 +33,10 @@ from lmcache.cli.commands.bench.engine_bench.stats import (
     FinalStats,
     StatsCollector,
 )
-from lmcache.cli.commands.bench.engine_bench.workloads import create_workload
+from lmcache.cli.commands.bench.engine_bench.workloads import (
+    create_workload,
+    validate_max_output_length_supported,
+)
 from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
@@ -41,6 +44,10 @@ if TYPE_CHECKING:
     from lmcache.cli.commands.base import BaseCommand
 
 logger = init_logger(__name__)
+
+# Default for --ldqa-max-output-length; centralized so the "max output length
+# explicitly set" check stays in sync with the parser.
+_LDQA_MAX_OUTPUT_LENGTH_DEFAULT = 128
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +155,15 @@ def register_engine_parser(
         help="Suppress real-time progress display.",
     )
     parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help=(
+            "Force generation to run for the full output length by ignoring "
+            "the model's EOS token (vLLM sampling extension). Makes decode "
+            "throughput reproducible regardless of when the model would stop."
+        ),
+    )
+    parser.add_argument(
         "--no-interactive",
         action="store_true",
         help=("Disable interactive mode. Errors if required arguments are missing."),
@@ -222,6 +238,16 @@ def register_engine_parser(
         type=int,
         default=3,
         help="Max concurrent in-flight requests (default: 3).",
+    )
+    group.add_argument(
+        "--ldqa-max-output-length",
+        type=int,
+        default=_LDQA_MAX_OUTPUT_LENGTH_DEFAULT,
+        help=(
+            f"Max tokens to generate per benchmark query "
+            f"(default: {_LDQA_MAX_OUTPUT_LENGTH_DEFAULT}). Combine with "
+            "--ignore-eos for a reproducible decode phase."
+        ),
     )
 
     # --- Multi-round-chat workload args ---
@@ -410,6 +436,7 @@ def _export_config(
     state.set("workload", config.workload)
     state.set("kv_cache_volume", config.kv_cache_volume_gb)
     state.set("tokens_per_gb_kvcache", config.tokens_per_gb_kvcache)
+    state.set("ignore_eos", config.ignore_eos)
 
     # Workload-specific args from namespace
     for item in state.get_workload_items():
@@ -524,6 +551,11 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
     # 1. Parse config
     config = parse_args_to_config(args)
 
+    # 1a. A max output length can only be set for workloads that have a
+    # max-output-length parameter; reject it for any other workload.
+    if args.ldqa_max_output_length != _LDQA_MAX_OUTPUT_LENGTH_DEFAULT:
+        validate_max_output_length_supported(config.workload)
+
     # 1b. --export-config: save resolved config and exit
     export_path = getattr(args, "export_config", None)
     if export_path:
@@ -546,7 +578,11 @@ def run_engine_bench(command: "BaseCommand", args: argparse.Namespace) -> None:
     )
 
     # 3. Create request sender (callbacks wired after workload creation)
-    request_sender = RequestSender(config.engine_url, config.model)
+    request_sender = RequestSender(
+        config.engine_url,
+        config.model,
+        ignore_eos=config.ignore_eos,
+    )
 
     # 4. Create workload
     workload = create_workload(

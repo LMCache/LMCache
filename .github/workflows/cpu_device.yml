@@ -94,11 +94,11 @@ jobs:
             pyproject.toml
             requirements/*.txt
 
-      - name: Cache HuggingFace models
+      - name: Cache opt-125m model (GitHub release)
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-opt-125m-v1
+          key: opt-125m-gh-v2
 
       - name: Install vLLM CPU (prebuilt nightly from PyPI)
         run: bash .github/scripts/install_vllm_cpu.sh
@@ -106,11 +106,8 @@ jobs:
       - name: Install lmcache (CPU-only, no vLLM)
         run: bash .github/scripts/install_lmcache_cpu.sh
 
-      - name: Download facebook/opt-125m
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          bash .github/scripts/download_model.sh facebook/opt-125m
+      - name: Download facebook/opt-125m (GitHub release)
+        run: bash .github/scripts/download_opt125m_github.sh
 
       - name: Server bench — LMCache-driven
         run: |

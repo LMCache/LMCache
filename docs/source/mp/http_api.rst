@@ -97,6 +97,20 @@ compatibility with the vLLM-embedded API server.
        Intended for diagnostics and round-trip integrity checks from
        ``lmcache bench server``.
    * - GET
+     - ``/l2/adapters``
+     - Enumerate every configured L2 adapter with its ``type_name``
+       and primary flag. Operators read this to learn which value to
+       pass as ``?adapter=`` on the endpoints below.
+   * - DELETE
+     - ``/l2``
+     - Delete a caller-supplied list of keys from one L2 adapter
+       (default: primary; override with ``?adapter=<type_name>``).
+   * - GET
+     - ``/l2/keys``
+     - Paginate keys currently resident in one L2 adapter
+       (default: primary; override with ``?adapter=<type_name>``;
+       optionally filtered by ``model_name``).
+   * - GET
      - ``/quota``
      - List every registered ``cache_salt`` quota with live usage.
    * - PUT
@@ -423,6 +437,238 @@ When ``layerwise=true``, ``chunk_checksums`` is a dict keyed by
     curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2"
 
     curl -s "http://localhost:8080/kvcache/check?block_ids=0,1,2,3&chunk_size=2&layerwise=true"
+
+.. _mp-http-l2-keys-api:
+
+``/l2`` — L2 keys management
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Three endpoints — ``GET /l2/adapters``, ``DELETE /l2``, and
+``GET /l2/keys`` — let operators enumerate the configured L2
+backends, purge keys from one, and enumerate what is currently
+resident.
+
+``DELETE /l2`` and ``GET /l2/keys`` accept an optional
+``?adapter=<type_name>`` query parameter to target a specific adapter.
+Omit the selector to target the **primary** (first-configured)
+adapter — the v1 behavior, preserved for clients that don't care
+about multi-adapter deployments. When multiple adapters share a
+``type_name``, the first match wins. Use ``GET /l2/adapters`` to learn
+the valid selectors.
+
+All three are intended for operator / admin workflows ("purge this
+user's keys", "show me what's resident", "garbage-collect orphans
+after a rename"). They are **not** on the inference data path.
+
+L1 is intentionally not touched. Keys deleted from L2 may still return
+from L1 until the L1 eviction controller expires them naturally;
+callers that need an L1+L2 purge should layer their own L1
+invalidation or wait for natural L1 eviction.
+
+The coordinator's eviction loop uses ``DELETE /l2`` automatically (see
+:doc:`coordinator` — "L2 usage tracking and eviction"); the
+``GET /l2/keys`` endpoint also powers the coordinator's startup
+resync. Manual ``curl`` usage is reserved for ad-hoc operator
+actions and debugging.
+
+For full request/response semantics, pagination, error codes, and the
+event flow back to the coordinator, see the design doc at
+``docs/design/v1/multiprocess/l2_apis.md``.
+
+``GET /l2/adapters``
+^^^^^^^^^^^^^^^^^^^^
+
+Enumerate every L2 adapter the engine has loaded, in configuration
+order.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "adapters": [
+        {"index": 0, "type_name": "S3L2Adapter", "primary": true},
+        {"index": 1, "type_name": "FSL2Adapter", "primary": false}
+      ]
+    }
+
+``primary`` is ``true`` only on the first entry. An engine that has
+no L2 backends returns ``{"adapters": []}`` (still ``200`` — the
+engine is initialized, it just has no L2 storage).
+
+**HTTP status codes:**
+
+- ``200``: success (including the no-adapters case).
+- ``503``: engine not initialized.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s http://localhost:8080/l2/adapters | jq
+
+``DELETE /l2``
+^^^^^^^^^^^^^^
+
+Delete a caller-supplied list of keys from one L2 adapter.
+Idempotent: keys absent from the adapter are skipped silently; keys
+currently locked by in-flight store/load tasks are skipped so the
+delete never corrupts an active transfer.
+
+**Query parameters:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 18 13 69
+
+   * - Name
+     - Default
+     - Description
+   * - ``adapter``
+     - primary
+     - ``type_name`` of the target adapter (see ``GET /l2/adapters``).
+       Omit to target the primary (first-configured) adapter. First
+       match wins when multiple adapters share a ``type_name``.
+
+Per-key successful deletions fire ``on_l2_keys_deleted`` on the
+adapter's listeners — when the coordinator is wired (see
+``--coordinator-l2-event-reporting``), the deletions show up at the
+coordinator's ``POST /l2/events`` as ``"type": "delete"`` events. The
+coordinator's eviction + usage trackers learn about the deletion from
+that event flow, not from the response of this call.
+
+**Body:** ``{"keys": [EncodedObjectKey, ...]}`` where each
+``EncodedObjectKey`` is
+
+.. code-block:: json
+
+    {
+      "chunk_hash_hex": "abc123...",
+      "model_name": "meta-llama/Llama-3-8B",
+      "kv_rank": 0,
+      "object_group_id": 0,
+      "cache_salt": "user-a"
+    }
+
+The batch is capped at ``10000`` keys per request.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "requested": 2,
+      "adapter": "S3L2Adapter",
+      "ok": true
+    }
+
+On adapter-level failure the response is still ``200`` with
+``ok=false`` and an ``error`` field carrying the reason.
+
+**HTTP status codes:**
+
+- ``200``: request reached the adapter (check ``ok`` for outcome).
+- ``400``: batch exceeds the limit, or a key payload violates an
+  ``ObjectKey`` invariant (bad hex, ``@`` in ``model_name``, forbidden
+  ``cache_salt`` character).
+- ``404``: ``?adapter=<name>`` does not match any configured adapter.
+- ``422``: Pydantic-level body-shape failure (missing ``keys``,
+  wrong field types).
+- ``503``: engine not initialized, or no L2 adapters configured.
+
+**Example:**
+
+.. code-block:: bash
+
+    curl -s -X DELETE http://localhost:8080/l2 \
+        -H 'Content-Type: application/json' \
+        -d '{
+            "keys": [
+              {"chunk_hash_hex": "aa", "model_name": "m",
+               "kv_rank": 0, "object_group_id": 0, "cache_salt": "user-a"}
+            ]
+        }'
+
+``GET /l2/keys``
+^^^^^^^^^^^^^^^^
+
+Paginate keys currently resident in one L2 adapter.
+
+**Query parameters:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 13 65
+
+   * - Name
+     - Default
+     - Description
+   * - ``adapter``
+     - primary
+     - ``type_name`` of the target adapter (see ``GET /l2/adapters``).
+       Omit to target the primary (first-configured) adapter. First
+       match wins when multiple adapters share a ``type_name``.
+   * - ``model_name``
+     - none
+     - Restrict the result to keys whose ``model_name`` matches.
+   * - ``page_size``
+     - ``500``
+     - Max entries per page. Clamped to ``[1, 5000]``.
+   * - ``page_token``
+     - none
+     - Opaque cursor from the previous page's ``next_page_token``.
+       Omit on the first call; pass back verbatim on subsequent calls.
+
+The page token is private to the adapter; do not parse or modify it.
+Adapters that support listing (currently only the S3 adapter via
+``ListObjectsV2``) guarantee best-effort consistency, not snapshot
+isolation — concurrent stores or deletes during a paginated walk may
+cause keys to appear, disappear, or shift between pages.
+
+**Response** (``200 OK``):
+
+.. code-block:: json
+
+    {
+      "adapter": "S3L2Adapter",
+      "entries": [
+        {
+          "key": {
+            "chunk_hash_hex": "abc123",
+            "model_name": "meta-llama/Llama-3-8B",
+            "kv_rank": 0,
+            "object_group_id": 0,
+            "cache_salt": "user-a"
+          },
+          "size_bytes": 4194304
+        }
+      ],
+      "next_page_token": "opaque-cursor-string"
+    }
+
+``next_page_token`` is ``null`` when the listing is exhausted.
+
+**HTTP status codes:**
+
+- ``200``: success.
+- ``400``: malformed ``page_token`` (adapter-level).
+- ``404``: ``?adapter=<name>`` does not match any configured adapter.
+- ``501``: selected adapter does not implement listing. In v1 only
+  ``S3L2Adapter`` does; adapters wrapped by ``SerdeL2AdapterWrapper``
+  inherit the wrapped adapter's behavior.
+- ``503``: engine not initialized, or no L2 adapters configured.
+
+**Example:** paginate every key for a model.
+
+.. code-block:: bash
+
+    next=""
+    while :; do
+      page=$(curl -s "http://localhost:8080/l2/keys?model_name=meta-llama/Llama-3-8B&page_size=500&page_token=$next")
+      echo "$page" | jq '.entries[]'
+      next=$(echo "$page" | jq -r '.next_page_token // empty')
+      [ -z "$next" ] && break
+    done
 
 .. _mp-http-quota-api:
 

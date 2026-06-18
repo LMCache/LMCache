@@ -12,6 +12,7 @@ timestamps, metadata. How to reach an instance for push is derived from its
 
 # Standard
 from dataclasses import dataclass, field
+import random
 import threading
 import time
 
@@ -122,6 +123,15 @@ class InstanceRegistry:
         """
         with self._lock:
             return list(self._instances.values())
+
+    def random_instance(self) -> "MPInstance | None":
+        """Return a uniformly random registered instance, or ``None``
+        when the registry is empty."""
+        with self._lock:
+            instances = list(self._instances.values())
+        if not instances:
+            return None
+        return random.choice(instances)
 
     def update_heartbeat(self, instance_id: str, timestamp: float) -> bool:
         """Record a heartbeat timestamp for an instance.

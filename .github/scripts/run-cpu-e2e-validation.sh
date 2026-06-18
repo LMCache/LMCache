@@ -345,9 +345,8 @@ else
   echo "✅ numpy<2 installed"
 fi
 
-echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (cache-aware)"
-HF_DOWNLOAD_FAIL_ON_ERROR=1 \
-  bash "${SHARED_SCRIPTS_DIR}/download_model.sh" facebook/opt-125m
+echo "[Phase 2 / Step 2] Downloading facebook/opt-125m model (GitHub release)"
+bash "${SHARED_SCRIPTS_DIR}/download_opt125m_github.sh"
 echo "✅ Model download/check complete"
 
 echo "[Phase 2 / Step 3] Starting LMCache server"

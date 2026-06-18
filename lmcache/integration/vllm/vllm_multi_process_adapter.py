@@ -271,14 +271,21 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
 def send_ping(
     mq_client: MessageQueueClient,
     timeout: float,
+    instance_id: int | None = None,
 ) -> bool:
     """Send a PING request and return the result.
+
+    Args:
+        mq_client: The message queue client.
+        timeout: Seconds to wait for the server's response.
+        instance_id: The worker's instance ID so the server can refresh its
+            liveness, or None for an untracked prober (scheduler adapter).
 
     Returns:
         True if server is healthy, False on timeout or error.
     """
     try:
-        future = send_lmcache_request(mq_client, RequestType.PING, [])
+        future = send_lmcache_request(mq_client, RequestType.PING, [instance_id])
         return future.result(timeout=timeout)
     except TimeoutError:
         return False
@@ -389,6 +396,7 @@ class HeartbeatThread(PeriodicThread):
         mq_client: MessageQueueClient,
         health_event: threading.Event,
         interval: float = DEFAULT_HEARTBEAT_INTERVAL,
+        instance_id: int | None = None,
     ):
         """
         Args:
@@ -398,6 +406,9 @@ class HeartbeatThread(PeriodicThread):
                 Adapters check this event to decide whether to proceed
                 with operations or enter degraded mode.
             interval: Seconds between heartbeat pings and ping timeout.
+            instance_id: The worker's instance ID sent with each PING so the
+                server can refresh its liveness, or None for an untracked
+                prober (the scheduler adapter).
         """
         super().__init__(
             name="lmcache-heartbeat",
@@ -407,6 +418,7 @@ class HeartbeatThread(PeriodicThread):
         self._mq_client = mq_client
         self._health_event = health_event
         self._interval = interval
+        self._instance_id = instance_id
 
         # Optional callback invoked on the unhealthy->healthy edge,
         # before the health event is set. See register_recover_callback.
@@ -445,7 +457,9 @@ class HeartbeatThread(PeriodicThread):
         UNREGISTER must not re-register a ghost context.
         """
         was_healthy = self._health_event.is_set()
-        healthy = send_ping(self._mq_client, timeout=self._interval)
+        healthy = send_ping(
+            self._mq_client, timeout=self._interval, instance_id=self._instance_id
+        )
 
         if self.stop_requested:
             return ThreadRunSummary(
@@ -1170,7 +1184,7 @@ class LMCacheMPWorkerAdapter:
         ``last_seen``, so it is never reaped while alive -- no re-registration
         is needed at startup, and the first store/retrieve is not gated. The
         recover callback still re-registers on a genuine unhealthy->healthy
-        edge (server restart) and on freeze-gap recovery.
+        edge (server restart).
         """
         if self._heartbeat is not None:
             return
@@ -1181,6 +1195,7 @@ class LMCacheMPWorkerAdapter:
                 mq_client=self.mq_client,
                 health_event=self._health_event,
                 interval=self._heartbeat_interval,
+                instance_id=self.instance_id,
             )
             heartbeat.register_recover_callback(self._reregister_kv_caches_callback)
             heartbeat.start()

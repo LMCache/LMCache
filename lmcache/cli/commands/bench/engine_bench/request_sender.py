@@ -73,10 +73,12 @@ class RequestSender:
         model: str,
         completions_mode: bool = False,
         on_finished: list[OnFinishedCallback] = [],  # noqa: B006
+        ignore_eos: bool = False,
     ) -> None:
         self._model = model
         self._completions_mode = completions_mode
         self._on_finished = list(on_finished)
+        self._ignore_eos = ignore_eos
 
         base_url = _normalize_url(engine_url)
         api_key = os.getenv("OPENAI_API_KEY", "")
@@ -220,7 +222,18 @@ class RequestSender:
         messages: list[dict[str, str]],
         max_tokens: int,
     ) -> collections.abc.AsyncIterator:
-        """Dispatch the streaming API call (chat or completions)."""
+        """Dispatch the streaming API call (chat or completions).
+
+        When ``ignore_eos`` is set on the sender, ``{"ignore_eos": true}`` is
+        added to the request body (a vLLM sampling extension) so generation
+        always runs for the full ``max_tokens`` instead of stopping at the
+        model's EOS token. This makes decode-throughput numbers reproducible.
+        """
+        # Attach extra_body only when ignore_eos is set; otherwise send the
+        # plain request so no vLLM-specific field reaches non-vLLM backends.
+        extra: dict[str, dict[str, bool]] = {}
+        if self._ignore_eos:
+            extra["extra_body"] = {"ignore_eos": True}
         if self._completions_mode:
             prompt = messages[0]["content"] if messages else ""
             return await self._client.completions.create(
@@ -230,6 +243,7 @@ class RequestSender:
                 max_tokens=max_tokens,
                 temperature=0.0,
                 stream_options={"include_usage": True},
+                **extra,
             )
         return await self._client.chat.completions.create(
             model=self._model,
@@ -238,4 +252,5 @@ class RequestSender:
             max_tokens=max_tokens,
             temperature=0.0,
             stream_options={"include_usage": True},
+            **extra,
         )

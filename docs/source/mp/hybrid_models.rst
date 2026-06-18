@@ -41,6 +41,9 @@ Recipe pages for the validated hybrid-attention architectures:
    * - ``DeepseekV4ForCausalLM``
      - Sparse-MLA (multiple KV groups)
      - :doc:`/recipes/deepseek_v4_flash`
+   * - ``GlmMoeDsaForCausalLM``
+     - Dynamic Sparse Attention (multiple KV groups)
+     - :doc:`/recipes/glm5_2`
 
 .. toctree::
    :hidden:
@@ -51,6 +54,7 @@ Recipe pages for the validated hybrid-attention architectures:
    /recipes/gpt_oss
    /recipes/qwen3_5
    /recipes/deepseek_v4_flash
+   /recipes/glm5_2
 
 What Works
 ----------
