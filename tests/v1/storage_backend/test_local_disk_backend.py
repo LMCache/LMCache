@@ -495,8 +495,9 @@ class TestAsyncSaveBytesToDiskExceptionSafety:
         mem_obj.metadata.fmt = MemoryFormat.KV_2LTD
         mem_obj.metadata.cached_positions = None
 
-        # Simulate state after submit_put_task: key is queued
+        # Simulate state after submit_put_task: key queued, cache size tracked
         local_disk_backend.disk_worker.insert_put_task(key)
+        local_disk_backend.current_cache_size = buf_size
 
         usage_before = local_disk_backend.usage
         cache_size_before = local_disk_backend.current_cache_size
