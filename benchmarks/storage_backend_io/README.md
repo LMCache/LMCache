@@ -170,6 +170,32 @@ print(f"rust vs local: {(rust / local - 1.0) * 100.0:+.2f}%")
 PY
 ```
 
+## Raw Block Recovery Bringup Benchmark
+
+`raw_block_recovery_bringup_bench.py` measures synthetic `RawBlockCore` restart
+recovery. The prepare step writes checkpoint metadata and per-slot headers only;
+it does not write full payload contents. Use it to compare checkpoint loading and
+slot-header validation across recovery thread counts.
+
+```bash
+python benchmarks/storage_backend_io/raw_block_recovery_bringup_bench.py \
+  --device-path /dev/nvme1n1 \
+  --cache-space-gb 250 \
+  --prepare \
+  --measure \
+  --i-understand-this-overwrites-device
+```
+
+Important options:
+- `--cache-space-gb`: Logical cache space to prepare/use, in GiB units.
+- `--slot-bytes`: Slot size, defaulting to 16 MiB.
+- `--threads`: Recovery thread counts to compare, defaulting to `1 8`.
+- `--use-odirect` / `--no-use-odirect`: Enable or disable O_DIRECT for recovery
+  measurement. O_DIRECT is enabled by default.
+
+Warning: `--prepare` overwrites raw-block metadata and slot headers on the target
+path. Use a disposable file or an unmounted raw device.
+
 ## Output
 
 The script prints a summary and optionally writes JSON results if `--output-json` is provided.
