@@ -1279,7 +1279,13 @@ class LMCacheMPWorkerAdapter:
                 mq_timeout.
         """
         self.kv_caches = kv_caches
-        transfer_ctx = create_transfer_context(kv_caches, mode=self._mp_transfer_mode)
+        transfer_ctx = create_transfer_context(
+            kv_caches,
+            mode=self._mp_transfer_mode,
+            num_engine_groups=len(self.engine_group_infos)
+            if self.engine_group_infos
+            else 1,
+        )
         layout_hints = vllm_layout_hints()
         self.transfer_ctx = transfer_ctx
         try:
