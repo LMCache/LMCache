@@ -346,6 +346,7 @@ class PeriodicThread(ABC):
             if self._stop_event.wait(timeout=self._interval):
                 break
 
+        self._running = False
         logger.info("PeriodicThread %s loop stopped", self._name)
 
     @abstractmethod
