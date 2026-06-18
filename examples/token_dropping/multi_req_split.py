@@ -9,16 +9,16 @@ import json
 import time
 import random
 import torch
+from concurrent.futures import ThreadPoolExecutor
+from timeit import default_timer
 
 # Third Party
 from transformers import AutoTokenizer, PreTrainedTokenizerBase, AutoConfig
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 import httpx
 from fastapi import FastAPI
-from concurrent.futures import ThreadPoolExecutor
 import uvicorn
 from pydantic import BaseModel
-from timeit import default_timer
 
 # First Party
 import lmcache.sdk.kvcache as lmc_sdk
@@ -392,6 +392,8 @@ def _retrieve_drop(req: CompletionRequest) -> DropResult:
     num_kv_heads = hidden_dim // app.state.head_size
 
     if req.drop_compression > 0.0:
+        if req.drop_compression < 1.0:
+            raise ValueError("drop_compression must be 0.0 or >= 1.0")
         # prefer compression rate over chunk count
         # so if drop_compression=2.0, will keep half the tokens, if drop_compression=4.0, will keep 1/4 the tokens
         # then round down to a multiple of chunk_size
@@ -494,7 +496,7 @@ def _retrieve_drop(req: CompletionRequest) -> DropResult:
 
     start_time = default_timer()
 
-    edited_salt = f"edited-{hash(tuple(SOURCE_TOKENS[req.id]["source"]))}-{req.id}"
+    edited_salt = f"edited-{hash(tuple(SOURCE_TOKENS[req.id]['source']))}-{req.id}"
     SOURCE_TOKENS[req.id]["edited_salt"] = edited_salt
 
     store_result = lmc_sdk.store(
@@ -589,6 +591,7 @@ def main() -> None:
     server_url = f"{server_host}:{server_port}"
     ctx = lmc_sdk.connect(
         url=server_url,
+        http_url=args.lmcache_url,
         model_name=app.state.lmcache_model_name,
         timeout=app.state.timeout,
     )

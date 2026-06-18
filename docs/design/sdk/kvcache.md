@@ -65,7 +65,7 @@ The SDK is a **separate process** from the LMCache server.
 ```
 SDK process                          LMCache server process
 -----------                          ----------------------
-LMCacheSDKContext
+LMCacheKVCacheContext
   └ MessageQueueClient ──ZMQ──▶ MQ dispatch
                                   ├ EngineDrivenTransferModule  (PREPARE_/COMMIT_ STORE/RETRIEVE)
                                   │     └ ShmTransferStrategy
@@ -83,7 +83,7 @@ LMCacheSDKContext
 
 ## Registration handshake
 
-`connect()` constructs an `LMCacheSDKContext`, whose `__init__` runs a one-time handshake.
+`connect()` constructs an `LMCacheKVCacheContext`, whose `__init__` runs a one-time handshake.
 All calls are blocking and bounded by `timeout`:
 
 1. `GET_WORLD_SIZE [model_name]` → `world_size`. **Raises `KVCacheSDKError` if 
@@ -102,11 +102,11 @@ All calls are blocking and bounded by `timeout`:
 
 ## Public API
 
-Exported from `lmcache.sdk`: `LMCacheSDKContext`, `KVCacheSDKError`.
+Exported from `lmcache.sdk`: `LMCacheKVCacheContext`, `KVCacheSDKError`.
 Operations are module-level functions in `lmcache.sdk.kvcache`: `connect`, `close`,
 `retrieve`, `store`.
 
-### `connect(url, model_name, timeout=60.0) -> LMCacheSDKContext`
+### `connect(url, model_name, timeout=60.0) -> LMCacheKVCacheContext`
 
 Opens a `MessageQueueClient` to `url` (TCP) and runs the [registration
 handshake](#registration-handshake). The returned context is context-manager capable
@@ -274,8 +274,8 @@ prefetch to complete before `PREPARE_RETRIEVE`. Each MQ call is bounded by `time
 - **Pickle not yet.** The SDK client requires SHM slot descriptors; the pickle transport is
   not yet implemented on the client.
   Implementation plan:
-  - The current LMCacheSDKContext will be an ABC, extended by LMCacheSDKContextShm and 
-  	LMCacheSDKContextPickle.
+  - The current LMCacheKVCacheContext will be an ABC, extended by LMCacheKVCacheContextShm and 
+  	LMCacheKVCacheContextPickle.
   - or, just put if else conditions based on the response form (e.g., SHM returns slots,
   	but pickle returns data in bytes).
 - Unlike original implementation, in which store() returns StoreResult(total_tokens,
