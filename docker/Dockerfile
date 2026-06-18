@@ -106,14 +106,17 @@ FROM base AS image-release
 
 ARG CUDA_VERSION
 
+ARG LMCACHE_VERSION
+
 RUN . /opt/venv/bin/activate && \
     CUDA_TAG=cu$(echo ${CUDA_VERSION} | tr -d '.') && \
     CUDA_MAJOR=$(echo ${CUDA_VERSION} | cut -d. -f1) && \
+    VER=$(echo "${LMCACHE_VERSION}" | sed 's/^v//') && \
     VLLM_PRECOMPILED_WHEEL_VARIANT=${CUDA_TAG} uv pip install --prerelease=allow \
         vllm[runai,tensorizer,flashinfer] \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match && \
-    uv pip install lmcache \
+    uv pip install "lmcache${VER:+==${VER}}" \
         --extra-index-url https://download.pytorch.org/whl/${CUDA_TAG} \
         --index-strategy unsafe-best-match --verbose && \
   

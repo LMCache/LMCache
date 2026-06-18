@@ -31,6 +31,10 @@ def _lookup(salt: str, **kw) -> dict:
     return {"type": "lookup", "key": _key(salt, **kw), "bytes": 0}
 
 
+def _delete(salt: str, **kw) -> dict:
+    return {"type": "delete", "key": _key(salt, **kw), "bytes": 0}
+
+
 _seq_counter = 0
 
 
@@ -149,9 +153,54 @@ def test_invalid_event_type_rejected():
     with _client() as client:
         resp = client.post(
             "/l2/events",
-            json=_events_body([{"type": "delete", "key": _key("a"), "bytes": 100}]),
+            json=_events_body([{"type": "purge", "key": _key("a"), "bytes": 100}]),
         )
         assert resp.status_code == 422
+
+
+def test_delete_event_drops_key_from_tracking():
+    """A DELETE event subtracts the key's bytes from per-salt usage and
+    removes it from the eviction LRU. The keys' sizes come from the
+    earlier STORE events the usage manager has on file."""
+    with _client() as client:
+        # Seed two keys for "user-a".
+        client.post(
+            "/l2/events",
+            json=_events_body(
+                [
+                    _store("user-a", 1000, h="01"),
+                    _store("user-a", 500, h="02"),
+                ]
+            ),
+        )
+        data = client.get("/l2/status/user-a").json()
+        assert abs(data["usage_gb"] - 1500 / 1024**3) < 1e-12
+
+        # Delete one of them — usage shrinks by exactly that key's
+        # recorded size (1000), not the wire ``bytes=0``.
+        resp = client.post(
+            "/l2/events",
+            json=_events_body([_delete("user-a", h="01")]),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["recorded"] == 1
+
+        data = client.get("/l2/status/user-a").json()
+        assert abs(data["usage_gb"] - 500 / 1024**3) < 1e-12
+
+
+def test_delete_event_for_unknown_key_is_noop():
+    """A DELETE for a key the coordinator never saw a STORE for is
+    accepted but has no observable effect (no usage to subtract from)."""
+    with _client() as client:
+        resp = client.post(
+            "/l2/events",
+            json=_events_body([_delete("user-a", h="ff")]),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["recorded"] == 1
+        data = client.get("/l2/status/user-a").json()
+        assert data["usage_gb"] == 0.0
 
 
 def test_negative_bytes_rejected():

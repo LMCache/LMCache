@@ -706,6 +706,12 @@ def _validate_config(self):
     if enable_nixl_storage:
         assert self.extra_config.get("nixl_backend") is not None
         assert self.extra_config.get("nixl_pool_size") is not None
+        if self.extra_config.get(
+            "nixl_presence_cache_only"
+        ) and not self.extra_config.get("nixl_presence_cache"):
+            raise ValueError(
+                "nixl_presence_cache must be true when nixl_presence_cache_only is true"
+            )
         assert self.nixl_buffer_device is not None
         if self.nixl_buffer_device == "cpu":
             # CPU mode shares LocalCPUBackend's pinned pool; nixl_buffer_size

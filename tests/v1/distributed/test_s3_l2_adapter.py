@@ -100,6 +100,59 @@ def _path_to_key(path: str) -> str:
     return unquote(path.lstrip("/"))
 
 
+def _build_list_objects_v2_response(
+    backend: "_FakeBackend",
+    prefix: str | None,
+    max_keys: int,
+    continuation_token: str | None,
+) -> bytes:
+    """Render a minimal ListObjectsV2 XML response from the fake backend.
+
+    The adapter's parser only consumes ``<Contents>/<Key>`` +
+    ``<Contents>/<Size>`` and ``<NextContinuationToken>``, so other
+    fields can be omitted. Continuation tokens here are just the
+    "start-after-this-key" cursor — opaque to the adapter, simple
+    enough for tests.
+    """
+    with backend._lock:
+        all_keys = sorted(backend._data.keys())
+        sizes = {k: len(backend._data[k]) for k in all_keys}
+
+    if prefix:
+        all_keys = [k for k in all_keys if k.startswith(prefix)]
+    if continuation_token is not None:
+        # In our fake, the token IS the last key returned on the
+        # previous page. Start strictly after it.
+        all_keys = [k for k in all_keys if k > continuation_token]
+
+    page = all_keys[:max_keys]
+    truncated = len(all_keys) > max_keys
+    next_token = page[-1] if (truncated and page) else None
+
+    body = ["<?xml version='1.0' encoding='UTF-8'?>"]
+    body.append("<ListBucketResult xmlns='http://s3.amazonaws.com/doc/2006-03-01/'>")
+    body.append(f"<IsTruncated>{'true' if truncated else 'false'}</IsTruncated>")
+    for k in page:
+        body.append(f"<Contents><Key>{k}</Key><Size>{sizes[k]}</Size></Contents>")
+    if next_token is not None:
+        body.append(f"<NextContinuationToken>{next_token}</NextContinuationToken>")
+    body.append("</ListBucketResult>")
+    return "".join(body).encode("utf-8")
+
+
+def _parse_list_query(path: str) -> tuple[str | None, int, str | None]:
+    """Pull ``prefix`` / ``max-keys`` / ``continuation-token`` out of the
+    ListObjectsV2 query string."""
+    # Standard
+    from urllib.parse import parse_qs, urlsplit
+
+    qs = parse_qs(urlsplit(path).query)
+    prefix = qs.get("prefix", [None])[0]
+    max_keys = int(qs.get("max-keys", ["1000"])[0])
+    cont = qs.get("continuation-token", [None])[0]
+    return prefix, max_keys, cont
+
+
 class _FakeS3Request:
     """In-process substitute for awscrt.s3.S3Request.
 
@@ -127,6 +180,30 @@ class _FakeS3Request:
         # Extract method + path from the HttpRequest
         method = request.method
         path = request.path
+
+        # ListObjectsV2 is dispatched as GET on the bucket root with a
+        # ``?list-type=2&...`` query string — intercept before the
+        # per-key GET branch below so it doesn't try to look up an
+        # object named "".
+        if (
+            method == "GET"
+            and operation_name == "ListObjectsV2"
+            and path.startswith("/?")
+        ):
+            prefix, max_keys, cont = _parse_list_query(path)
+            xml = _build_list_objects_v2_response(_BACKEND, prefix, max_keys, cont)
+            try:
+                if on_headers is not None:
+                    on_headers(200, [("content-type", "application/xml")])
+                if on_body is not None:
+                    on_body(xml, 0)
+                if on_done is not None:
+                    on_done(error=None, status_code=200)
+                self.finished_future.set_result(None)
+            except Exception as e:
+                if not self.finished_future.done():
+                    self.finished_future.set_exception(e)
+            return
         key_str = _path_to_key(path)
 
         err_inj = _BACKEND._inject_error
@@ -692,3 +769,132 @@ class TestFactoryRegistration:
             assert isinstance(adp, S3L2Adapter)
         finally:
             adp.close()
+
+
+# =============================================================================
+# list_l2_keys
+# =============================================================================
+#
+# These tests populate the fake S3 backend directly via ``_BACKEND.put``,
+# bypassing the adapter's store pipeline. The listing path is what's
+# under test: ListObjectsV2 dispatch, XML parse, prefix filter, and
+# cursor pagination.
+
+
+def _put_object(key: ObjectKey, size: int = 0) -> None:
+    """Place a key in the fake S3 backend with deterministic content.
+
+    Mirrors the production PUT pipeline: ``_object_key_to_string`` →
+    ``_format_safe_path`` (URL-encoding only — no path-flattening) →
+    URL-unquote in the fake → backend storage. So the fake's stored
+    name is byte-identical to the literal S3 object name a real PUT
+    would land.
+    """
+    # First Party
+    from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
+        _object_key_to_string,
+    )
+
+    _BACKEND.put(_object_key_to_string(key), b"\x00" * size)
+
+
+class TestS3L2AdapterListKeys:
+    def test_empty_bucket_returns_empty_page(self, adapter):
+        page = adapter.list_l2_keys()
+        assert page.entries == ()
+        assert page.next_page_token is None
+
+    def test_lists_all_keys_when_unfiltered(self, adapter):
+        for i in range(3):
+            _put_object(create_object_key(i, model_name="llama"), size=100 + i)
+
+        page = adapter.list_l2_keys(page_size=10)
+
+        assert len(page.entries) == 3
+        assert {e.size_bytes for e in page.entries} == {100, 101, 102}
+        assert page.next_page_token is None
+
+    def test_model_name_pushed_down_as_prefix(self, adapter):
+        llama = ObjectKey(chunk_hash=b"\x00" * 4, model_name="llama", kv_rank=0)
+        mistral = ObjectKey(chunk_hash=b"\x00" * 4, model_name="mistral", kv_rank=0)
+        _put_object(llama, size=1)
+        _put_object(mistral, size=1)
+
+        page = adapter.list_l2_keys(model_name="llama", page_size=10)
+        assert [e.key for e in page.entries] == [llama.to_encoded_object_key()]
+
+    def test_model_name_with_slash_round_trips(self, adapter):
+        # Real HF model ids contain ``/``. The adapter stores the
+        # literal object name on S3 (no path-flattening) and the
+        # listing decodes it back unchanged.
+        original = ObjectKey(
+            chunk_hash=b"\xde\xad\xbe\xef",
+            model_name="meta-llama/Llama-3.1-8B",
+            kv_rank=7,
+        )
+        encoded = original.to_encoded_object_key()
+        _put_object(original, size=128)
+
+        # The listing returns the original model_name (slash intact).
+        page = adapter.list_l2_keys(page_size=10)
+        assert len(page.entries) == 1
+        assert page.entries[0].key == encoded
+        assert page.entries[0].key.model_name == "meta-llama/Llama-3.1-8B"
+
+        # And the model_name filter accepts the caller-supplied form
+        # verbatim — no encoding magic to remember.
+        page = adapter.list_l2_keys(model_name="meta-llama/Llama-3.1-8B", page_size=10)
+        assert [e.key for e in page.entries] == [encoded]
+
+    def test_pagination_cursor_walks_full_set(self, adapter):
+        # 5 keys, page_size=2 → expect 3 calls: (0,1), (2,3), (4,).
+        for i in range(5):
+            _put_object(create_object_key(i, model_name="llama"), size=1)
+
+        collected = []
+        cursor = None
+        while True:
+            page = adapter.list_l2_keys(page_size=2, cursor=cursor)
+            collected.extend(page.entries)
+            cursor = page.next_page_token
+            if cursor is None:
+                break
+        assert len(collected) == 5
+
+    def test_page_size_must_be_positive(self, adapter):
+        with pytest.raises(ValueError):
+            adapter.list_l2_keys(page_size=0)
+
+    def test_page_size_clamped_to_s3_max(self, adapter):
+        # Ask for far more than S3's MaxKeys ceiling. The adapter
+        # clamps internally and the fake honors whatever it receives,
+        # so 5 keys come back without error.
+        for i in range(5):
+            _put_object(create_object_key(i, model_name="m"), size=1)
+        page = adapter.list_l2_keys(page_size=999_999)
+        assert len(page.entries) == 5
+        assert page.next_page_token is None
+
+    def test_circuit_breaker_blocks_listing(self, adapter):
+        # When the connection is disabled, listing must surface a
+        # clear error instead of issuing a doomed request.
+        with adapter._lock:
+            adapter._connection_disabled = True
+        with pytest.raises(RuntimeError) as exc:
+            adapter.list_l2_keys()
+        assert "disabled" in str(exc.value)
+
+    def test_unparsable_objects_silently_skipped(self, adapter):
+        # An object with a name that isn't this adapter's format
+        # (e.g. left behind by another tool) must not poison the
+        # response — it's just dropped from the listing.
+        _put_object(create_object_key(0, model_name="m"), size=1)
+        _BACKEND.put("not-our-format-key", b"junk")
+
+        page = adapter.list_l2_keys(page_size=10)
+
+        assert len(page.entries) == 1
+        assert (
+            page.entries[0].key
+            == create_object_key(0, model_name="m").to_encoded_object_key()
+        )

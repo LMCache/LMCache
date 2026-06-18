@@ -8,12 +8,14 @@ bodies and parse replies, so both sides agree on the schema in one place.
 """
 
 # Standard
-from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated
 
 # Third Party
 from pydantic import BaseModel, Field, StringConstraints
+
+# First Party
+from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
 
 
 class RegisterRequest(BaseModel):
@@ -91,46 +93,25 @@ class QuotaResponse(BaseModel):
 # -- L2 usage tracking -------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class CacheKey:
-    """Lightweight, torch-free equivalent of ``ObjectKey``.
-
-    Used both as the wire format in usage events and as the key type
-    in the eviction controller's per-salt LRU. Frozen so it can be
-    used as a dict key / in ``OrderedDict``.
-
-    Attributes:
-        chunk_hash_hex: Hex-encoded content hash of the chunk.
-        model_name: Name of the model this chunk belongs to.
-        kv_rank: Packed rank bitmap (world_size, global_rank, etc.).
-        cache_salt: The tenant identifier.
-    """
-
-    chunk_hash_hex: str
-    model_name: str
-    kv_rank: int
-    cache_salt: str
-
-
 class EventType(str, Enum):
-    """Type of L2 cache event."""
+    """L2 cache events reported by an MP server."""
 
     STORE = "store"
     LOOKUP = "lookup"
+    DELETE = "delete"
 
 
 class UsageEvent(BaseModel):
-    """A single L2 store or lookup event reported by an MP server.
+    """A single L2 event reported by an MP server.
 
     Attributes:
         type: The event type.
-        key: The cache key this event applies to. The tenant
-            identifier (``cache_salt``) is carried inside the key.
-        bytes: Number of bytes stored (for ``"store"`` events).
+        key: The cache key this event applies to.
+        bytes: Bytes stored (``store`` only; ``0`` for other types).
     """
 
     type: EventType
-    key: CacheKey
+    key: EncodedObjectKey
     bytes: int = Field(ge=0)
 
 

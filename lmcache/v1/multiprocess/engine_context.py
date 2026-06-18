@@ -239,7 +239,7 @@ class MPCacheServerContext:
         """
         mem_cfg = storage_manager_config.l1_manager_config.memory_config
         shm_name = mem_cfg.shm_name or ""
-        if not shm_name or mem_cfg.use_lazy:
+        if not shm_name or mem_cfg.use_lazy or mem_cfg.devdax_path:
             return {"shm_name": "", "pool_size": 0}
         bare = shm_name.lstrip("/")
         if not bare.startswith("lmcache_l1_pool_"):
