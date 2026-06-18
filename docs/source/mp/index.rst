@@ -93,7 +93,7 @@ Engine and Modules
 All server entry points share the same ``MPCacheServer`` and
 ``StorageManager`` core. ``MPCacheServer`` is now a thin compositor:
 it holds an ``MPCacheServerContext`` and a list of ``EngineModule``
-instances assembled by ``build_engine_modules()`` (in ``server.py``)
+instances assembled by ``_build_modules()`` (in ``server.py``)
 based on ``--engine-type`` and ``--supported-transfer-mode``.
 
 **``server.py``** -- The default ZMQ-only server.  Creates an
@@ -282,6 +282,24 @@ Communication between vLLM and LMCache uses ZMQ (DEALER/ROUTER pattern).
        match, reconciles, issues one sparse-coalesced prefetch, and
        classifies per-TP-rank. Returns ``CBUnifiedLookupResult`` (or
        ``None`` while the prefetch is still in flight).
+   * - ``P2P_LOOKUP_AND_LOCK``
+     - BLOCKING
+     - (P2P) Look up the given keys and read-lock the locally cached
+       prefix. Returns a task id which the caller passes to
+       ``P2P_QUERY_LOOKUP_RESULTS`` to poll for the transfer addresses.
+       Part of the peer-to-peer KV cache sharing surface; the handler
+       module is not yet wired into the default
+       ``_build_modules()`` path -- see :doc:`p2p`.
+   * - ``P2P_QUERY_LOOKUP_RESULTS``
+     - BLOCKING
+     - (P2P) Poll the transfer addresses for a lookup task. Returns a
+       list of ``TransferChannelAddress`` once the lookup is complete,
+       or ``None`` while the lookup is still in progress or its
+       results have already been consumed.
+   * - ``P2P_UNLOCK_OBJECTS``
+     - BLOCKING
+     - (P2P) Release the read locks previously taken by
+       ``P2P_LOOKUP_AND_LOCK`` on the given keys.
 
 **Handler types:**
 
