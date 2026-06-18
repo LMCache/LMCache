@@ -57,7 +57,11 @@ StoreController / PrefetchController
 ```
 
 This split lets LMCache reuse the same on-device metadata and recovery model in
-both non-MP and MP mode without duplicating the raw-block implementation.
+both non-MP and MP mode without duplicating the raw-block implementation. During
+restart recovery, the shared `RawBlockCore` validates POSIX per-slot headers with
+an internal pool of 8 reader threads. The `io_uring` recovery path intentionally
+keeps the existing serial validation behavior until batched header recovery is
+added for that engine.
 
 ## Zero-Copy Data Path
 

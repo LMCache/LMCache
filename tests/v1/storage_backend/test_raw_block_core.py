@@ -3,6 +3,9 @@
 # Future
 from __future__ import annotations
 
+# Standard
+import threading
+
 # Third Party
 import pytest
 
@@ -123,3 +126,114 @@ def test_raw_block_core_recovers_checkpoint_from_temp_file(tmp_path):
         assert memory_obj_bytes(loaded) == payload
     finally:
         recovered.close()
+
+
+def test_raw_block_core_drops_checkpoint_entry_with_stale_slot_header(tmp_path):
+    path = make_raw_block_file(tmp_path)
+    config = make_raw_block_core_config(path)
+    spec = encode_object_key(make_object_key(41))
+    payload = b"stale-slot-header-payload"
+
+    core = RawBlockCore(config, key_namespace="object")
+    try:
+        put_result = core.put_many([spec], [make_memory_obj(payload)])
+        assert put_result.results == [True]
+        offset = core.entry_offset(spec.encoded)
+        assert offset is not None
+        core.checkpoint_now()
+    finally:
+        core.close()
+
+    with path.open("r+b") as f:
+        f.seek(offset)
+        f.write(b"STALEHDR")
+
+    recovered = RawBlockCore(config, key_namespace="object")
+    try:
+        assert recovered.contains_key(spec.encoded) is False
+        loaded = make_empty_memory_obj(len(payload))
+        assert recovered.load_many_into([spec.encoded], [loaded]) == [False]
+    finally:
+        recovered.close()
+
+
+def test_raw_block_core_uses_bounded_posix_recovery_read_tasks(monkeypatch):
+    specs = [encode_object_key(make_object_key(i)) for i in range(50, 60)]
+    core = object.__new__(RawBlockCore)
+    core._lock = threading.Lock()
+    core._index = {
+        spec.encoded: type("Entry", (), {"offset": 4096 * (i + 1), "size": 7})()
+        for i, spec in enumerate(specs)
+    }
+    core._lock_refcnt = {}
+    core._meta_dirty_total = 0
+    core.io_engine = "posix"
+    core._recovery_read_threads = 3
+    core.key_namespace = "object"
+    core._read_slot_header = lambda offset: (
+        specs[(offset // 4096) - 1].slot_identity,
+        7,
+    )
+
+    max_worker_calls: list[int] = []
+    mapped_item_counts: list[int] = []
+
+    class RecordingThreadPoolExecutor:
+        def __init__(self, *, max_workers, thread_name_prefix):
+            max_worker_calls.append(max_workers)
+            self._max_workers = max_workers
+            self._thread_name_prefix = thread_name_prefix
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, fn, items):
+            mapped_items = list(items)
+            mapped_item_counts.append(len(mapped_items))
+            return map(fn, mapped_items)
+
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.raw_block.core.ThreadPoolExecutor",
+        RecordingThreadPoolExecutor,
+    )
+
+    core._validate_loaded_entries()
+
+    # 10 entries with 3 workers → 3 work ranges dispatched
+    assert max_worker_calls == [3]
+    assert mapped_item_counts == [3]
+    assert list(core._index) == [spec.encoded for spec in specs]
+
+
+def test_raw_block_core_iouring_recovery_does_not_use_posix_threads(monkeypatch):
+    specs = [encode_object_key(make_object_key(i)) for i in range(51, 61)]
+    core = object.__new__(RawBlockCore)
+    core._lock = threading.Lock()
+    core._index = {
+        spec.encoded: type("Entry", (), {"offset": 4096 * (i + 1), "size": 7})()
+        for i, spec in enumerate(specs)
+    }
+    core._lock_refcnt = {}
+    core._meta_dirty_total = 0
+    core.io_engine = "io_uring"
+    core._recovery_read_threads = 8
+    core.key_namespace = "object"
+    core._read_slot_header = lambda offset: (
+        specs[(offset // 4096) - 1].slot_identity,
+        7,
+    )
+
+    def fail_thread_pool_executor(*args, **kwargs):
+        raise AssertionError("io_uring recovery must not use POSIX read threads")
+
+    monkeypatch.setattr(
+        "lmcache.v1.storage_backend.raw_block.core.ThreadPoolExecutor",
+        fail_thread_pool_executor,
+    )
+
+    core._validate_loaded_entries()
+
+    assert list(core._index) == [spec.encoded for spec in specs]

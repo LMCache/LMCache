@@ -5,6 +5,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Optional
 import ctypes
@@ -43,6 +44,10 @@ _DEFAULT_META_VERSION = 1
 _META_HEADER_STRUCT = struct.Struct("<8sIQQI")
 RAW_BLOCK_IO_ENGINES = frozenset({"posix", "io_uring"})
 DEFAULT_IOURING_QUEUE_DEPTH = 256
+# Slot-header validation issues many small pread calls during POSIX restart
+# recovery. Use a conservative reader count to expose device parallelism without
+# relying on high thread counts; io_uring recovery should use batched reads.
+DEFAULT_RECOVERY_READ_THREADS = 8
 
 
 def round_up(x: int, align: int) -> int:
@@ -222,6 +227,7 @@ class RawBlockCore:
         self.io_engine = normalize_raw_block_io_engine(config.io_engine)
         self.iouring_queue_depth = int(config.iouring_queue_depth)
         self.use_uring_cmd = bool(config.use_uring_cmd)
+        self._recovery_read_threads = DEFAULT_RECOVERY_READ_THREADS
         if self.use_uring_cmd and self.use_odirect:
             logger.warning(
                 "RawBlockCore: use_odirect is ignored for NVMe namespace "
@@ -1876,29 +1882,19 @@ class RawBlockCore:
 
     def _validate_loaded_entries(self) -> None:
         """Drop recovered entries whose slot headers do not match metadata."""
-        to_drop: list[str] = []
         with self._lock:
             items = list(self._index.items())
 
-        for encoded_key, entry in items:
-            slot_hdr = self._read_slot_header(int(entry.offset))
-            if slot_hdr is None:
-                to_drop.append(encoded_key)
-                continue
-            try:
-                expected_identity = slot_identity_from_encoded_key(
-                    encoded_key,
-                    self.key_namespace,
-                )
-            except Exception:
-                to_drop.append(encoded_key)
-                continue
-            slot_identity, payload_len = slot_hdr
-            if int(slot_identity) != int(expected_identity):
-                to_drop.append(encoded_key)
-                continue
-            if int(payload_len) != int(entry.size):
-                to_drop.append(encoded_key)
+        if not items:
+            return
+
+        offsets = [int(entry.offset) for _, entry in items]
+        headers = self._read_slot_headers(offsets)
+        to_drop = [
+            encoded_key
+            for (encoded_key, entry), slot_hdr in zip(items, headers, strict=False)
+            if self._is_stale_header(encoded_key, entry, slot_hdr)
+        ]
 
         if not to_drop:
             return
@@ -1918,6 +1914,90 @@ class RawBlockCore:
             "slot-header validation",
             len(to_drop),
         )
+
+    def _read_slot_headers(
+        self,
+        offsets: list[int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Dispatch slot-header reads to the appropriate engine path."""
+        n = len(offsets)
+        if self.io_engine == "posix" and self._recovery_read_threads > 1 and n > 1:
+            return self._read_slot_headers_posix_parallel(offsets)
+        if self.io_engine == "io_uring" and not self.use_uring_cmd and n > 1:
+            return self._read_slot_headers_batched(offsets)
+        return [self._read_slot_header(off) for off in offsets]
+
+    def _read_slot_headers_posix_parallel(
+        self,
+        offsets: list[int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Return slot headers using a bounded POSIX reader thread pool."""
+        n = len(offsets)
+        max_workers = min(self._recovery_read_threads, n)
+        ranges = self._build_recovery_item_ranges(n, max_workers)
+        work_items = [(offsets, start, end) for start, end in ranges]
+        results: list[Optional[tuple[int, int]]] = [None] * n
+
+        def read_range(
+            work_item: tuple[list[int], int, int],
+        ) -> list[tuple[int, Optional[tuple[int, int]]]]:
+            offsets_in, start, end = work_item
+            return [
+                (i, self._read_slot_header(offsets_in[i])) for i in range(start, end)
+            ]
+
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="rawblk-recover",
+        ) as pool:
+            for range_results in pool.map(read_range, work_items):
+                for i, hdr in range_results:
+                    results[i] = hdr
+        return results
+
+    def _read_slot_headers_batched(
+        self,
+        offsets: list[int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Return slot headers using a batched io_uring read path (TODO)."""
+        # TODO: Add batched io_uring slot-header reads here. Use
+        # _build_recovery_item_ranges() to bound each batch, submit all
+        # slot-header reads for a range with one io_uring submission, then
+        # return headers in the same order as the input offsets.
+        return [self._read_slot_header(off) for off in offsets]
+
+    def _is_stale_header(
+        self,
+        encoded_key: str,
+        entry: _Entry,
+        slot_hdr: Optional[tuple[int, int]],
+    ) -> bool:
+        """Return True when the recovered slot header does not match metadata."""
+        if slot_hdr is None:
+            return True
+        try:
+            expected_identity = slot_identity_from_encoded_key(
+                encoded_key,
+                self.key_namespace,
+            )
+        except Exception:
+            return True
+        slot_identity, payload_len = slot_hdr
+        return int(slot_identity) != int(expected_identity) or int(payload_len) != int(
+            entry.size
+        )
+
+    def _build_recovery_item_ranges(
+        self,
+        item_count: int,
+        num_ranges: int,
+    ) -> list[tuple[int, int]]:
+        """Build bounded work ranges for recovered checkpoint entries."""
+        range_size = max(1, (item_count + num_ranges - 1) // num_ranges)
+        return [
+            (start, min(start + range_size, item_count))
+            for start in range(0, item_count, range_size)
+        ]
 
     def _load_checkpoint_from_device(self) -> None:
         """Load the newest valid checkpoint from the raw device if present."""
