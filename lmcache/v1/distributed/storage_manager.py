@@ -405,6 +405,7 @@ class StorageManager:
         extra_count: int = 0,
         external_request_id: str = "",
         policy: TrimPolicy = TrimPolicy.PREFIX,
+        skip_l2: bool = False,
     ) -> PrefetchHandle:
         """Prefetch objects into L1 asynchronously.
 
@@ -419,6 +420,7 @@ class StorageManager:
             policy: Which retained-subset policy to apply (see
                 :class:`TrimPolicy`).  ``PREFIX`` keeps the contiguous prefix;
                 ``SPARSE`` keeps every found key (gap-tolerant).
+            skip_l2: If True, only check L1 and return without submitting to L2.
 
         Returns:
             PrefetchHandle to track the task.
@@ -507,6 +509,16 @@ class StorageManager:
             )
         )
 
+        if skip_l2:
+            return PrefetchHandle(
+                prefetch_request_id=-1,
+                external_request_id=external_request_id,
+                l1_found_indices=tuple(range(hit_count)),
+                total_requested_keys=len(keys),
+                submit_time=time.monotonic(),
+                l2_orig_indices=(),
+            )
+
         # Submit remaining keys to L2 prefetch controller
         remaining_keys = keys[hit_count:]
         prefetch_request_id = -1
@@ -516,6 +528,7 @@ class StorageManager:
                 remaining_keys,
                 layout_desc,
                 extra_count=extra_count,
+                policy=policy,
             )
             # The controller indexes its result bitmap over remaining_keys
             # (0-based); map those local indices back to original positions.
@@ -773,6 +786,16 @@ class StorageManager:
         result = adapter.reconfigure(operation, payload)
         result["adapter_index"] = adapter_index
         return result
+
+    def l2_adapters(self) -> list[tuple[AdapterDescriptor, L2AdapterInterface]]:
+        """Return all configured L2 adapters paired with descriptors,
+        in configuration order. The first element is the primary
+        adapter; the list is empty when no L2 is configured.
+
+        Do not cache the returned pairs — ``reconfigure_l2_adapter``
+        may swap adapters in/out at runtime.
+        """
+        return list(zip(self._adapter_descriptors, self._l2_adapters, strict=True))
 
     def clear(self, force: bool = False):
         """
