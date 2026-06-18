@@ -10,7 +10,8 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.gpu_connector import musa_native
+from lmcache.v1.platform.musa import native_kv_transfer as musa_native
+import lmcache.python_ops_fallback as py_ops
 
 
 def _make_native_module() -> ModuleType:
@@ -24,11 +25,59 @@ def _make_native_module() -> ModuleType:
     return module
 
 
+def _make_block_shape_desc(
+    *,
+    num_layers: int = 2,
+    num_blocks: int = 4,
+    block_size: int = 4,
+    num_heads: int = 2,
+    head_size: int = 8,
+) -> py_ops.PageBufferShapeDesc:
+    """Create a page-buffer shape descriptor for block-transfer tests."""
+    shape_desc = py_ops.PageBufferShapeDesc()
+    shape_desc.nl = num_layers
+    shape_desc.nb = num_blocks
+    shape_desc.bs = block_size
+    shape_desc.nh = num_heads
+    shape_desc.hs = head_size
+    shape_desc.element_size = torch.empty((), dtype=torch.float32).element_size()
+    shape_desc.kv_size = 2
+    return shape_desc
+
+
 def test_native_transfer_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """Native MUSA transfer is opt-in so Stage1 behavior remains unchanged."""
     monkeypatch.delenv("LMCACHE_MUSA_NATIVE_KV_TRANSFER", raising=False)
 
     assert musa_native.is_native_musa_kv_transfer_enabled() is False
+
+
+def test_native_transfer_module_lives_under_musa_platform() -> None:
+    """The native KV-transfer adapter belongs to the MUSA platform package."""
+    assert musa_native.__name__ == "lmcache.v1.platform.musa.native_kv_transfer"
+
+
+def test_get_backend_prefers_musa_ops_over_cuda_when_musa_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backend composition follows device detection priority when MUSA is active."""
+    # First Party
+    from lmcache.v1.platform.musa import ops as musa_ops
+    import lmcache
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        torch,
+        "musa",
+        SimpleNamespace(is_available=lambda: True),
+        raising=False,
+    )
+
+    backend = lmcache._get_backend()
+
+    assert backend.multi_layer_block_kv_transfer is (
+        musa_ops.multi_layer_block_kv_transfer
+    )
 
 
 def test_native_transfer_enabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,3 +247,203 @@ def test_try_native_from_gpu_rejects_cpu_tensors(
     )
 
     assert used is False
+
+
+def test_native_block_gather_uses_device_staging_for_cpu_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block-level native gather stages CPU output and expands slot IDs."""
+    paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
+    out = torch.zeros(2, 8, 16)
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setenv("LMCACHE_MUSA_NATIVE_KV_TRANSFER", "1")
+    monkeypatch.setattr(
+        musa_native, "_is_musa_block_transfer_candidate", lambda *_args: True
+    )
+
+    def _fake_native_from_gpu(**kwargs: Any) -> bool:
+        memory_tensor = kwargs["memory_tensor"]
+        captured["used_cpu_out_directly"] = memory_tensor is out
+        captured["slot_mapping"] = kwargs["slot_mapping"].cpu()
+        memory_tensor.fill_(7.0)
+        return True
+
+    monkeypatch.setattr(musa_native, "try_native_from_gpu", _fake_native_from_gpu)
+
+    used = musa_native.try_native_multi_layer_block_kv_transfer(
+        paged_layers=paged_layers,
+        object_tensors=[out],
+        block_ids=[2, 4],
+        direction=py_ops.TransferDirection.D2H,
+        shape_desc=_make_block_shape_desc(head_size=16),
+        lmcache_chunk_size=8,
+        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        skip_prefix_n_blocks=0,
+    )
+
+    assert used is True
+    assert captured["used_cpu_out_directly"] is False
+    assert torch.equal(
+        captured["slot_mapping"], torch.tensor([8, 9, 10, 11, 16, 17, 18, 19])
+    )
+    assert torch.all(out == 7.0)
+
+
+def test_native_block_scatter_uses_device_staging_for_cpu_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block-level native scatter must not pass CPU/SHM chunks directly."""
+    paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
+    chunk = torch.zeros(2, 8, 16)
+    captured: dict[str, bool] = {}
+
+    monkeypatch.setenv("LMCACHE_MUSA_NATIVE_KV_TRANSFER", "1")
+    monkeypatch.setattr(
+        musa_native, "_is_musa_block_transfer_candidate", lambda *_args: True
+    )
+
+    def _fake_native_to_gpu(**kwargs: Any) -> bool:
+        captured["used_cpu_chunk_directly"] = kwargs["memory_tensor"] is chunk
+        return True
+
+    monkeypatch.setattr(musa_native, "try_native_to_gpu", _fake_native_to_gpu)
+
+    used = musa_native.try_native_multi_layer_block_kv_transfer(
+        paged_layers=paged_layers,
+        object_tensors=[chunk],
+        block_ids=[0, 1],
+        direction=py_ops.TransferDirection.H2D,
+        shape_desc=_make_block_shape_desc(head_size=16),
+        lmcache_chunk_size=8,
+        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        skip_prefix_n_blocks=0,
+    )
+
+    assert used is True
+    assert captured["used_cpu_chunk_directly"] is False
+
+
+def test_native_block_scatter_uses_whole_block_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block-level native scatter receives skip offsets in whole-block tokens."""
+    paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
+    chunk = torch.zeros(2, 8, 16)
+    captured: dict[str, int] = {}
+
+    monkeypatch.setenv("LMCACHE_MUSA_NATIVE_KV_TRANSFER", "1")
+    monkeypatch.setattr(
+        musa_native, "_is_musa_block_transfer_candidate", lambda *_args: True
+    )
+
+    def _fake_native_to_gpu(**kwargs: Any) -> bool:
+        captured["skip_prefix_n_tokens"] = kwargs["skip_prefix_n_tokens"]
+        return True
+
+    monkeypatch.setattr(musa_native, "try_native_to_gpu", _fake_native_to_gpu)
+
+    used = musa_native.try_native_multi_layer_block_kv_transfer(
+        paged_layers=paged_layers,
+        object_tensors=[chunk],
+        block_ids=[0, 1],
+        direction=py_ops.TransferDirection.H2D,
+        shape_desc=_make_block_shape_desc(head_size=16),
+        lmcache_chunk_size=8,
+        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        skip_prefix_n_blocks=1,
+    )
+
+    assert used is True
+    assert captured["skip_prefix_n_tokens"] == 4
+
+
+def test_native_block_gather_skips_native_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block-level native gather is not attempted when env opt-in is disabled."""
+    paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
+
+    monkeypatch.delenv("LMCACHE_MUSA_NATIVE_KV_TRANSFER", raising=False)
+    monkeypatch.setattr(
+        musa_native, "_is_musa_block_transfer_candidate", lambda *_args: True
+    )
+
+    def _raise_if_called(**_kwargs: Any) -> bool:
+        raise AssertionError("native path should not be called when disabled")
+
+    monkeypatch.setattr(musa_native, "try_native_from_gpu", _raise_if_called)
+
+    used = musa_native.try_native_multi_layer_block_kv_transfer(
+        paged_layers=paged_layers,
+        object_tensors=[torch.zeros(2, 8, 16)],
+        block_ids=[0, 1],
+        direction=py_ops.TransferDirection.D2H,
+        shape_desc=_make_block_shape_desc(head_size=16),
+        lmcache_chunk_size=8,
+        engine_kv_format=py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        skip_prefix_n_blocks=0,
+    )
+
+    assert used is False
+
+
+def test_native_block_transfer_rejects_unvalidated_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unsupported MUSA layouts fall back below the device-layer entry."""
+    monkeypatch.setenv("LMCACHE_MUSA_NATIVE_KV_TRANSFER", "1")
+    monkeypatch.setattr(
+        musa_native, "_is_musa_block_transfer_candidate", lambda *_args: True
+    )
+
+    used = musa_native.try_native_multi_layer_block_kv_transfer(
+        paged_layers=[torch.zeros(2, 4, 2, 4, 8)],
+        object_tensors=[torch.zeros(2, 2, 8, 16)],
+        block_ids=[0, 1],
+        direction=py_ops.TransferDirection.H2D,
+        shape_desc=_make_block_shape_desc(),
+        lmcache_chunk_size=8,
+        engine_kv_format=py_ops.EngineKVFormat.NL_X_TWO_NB_NH_BS_HS,
+        skip_prefix_n_blocks=0,
+    )
+
+    assert used is False
+
+
+def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MUSA ops backend hides native dispatch behind the c_ops-compatible API."""
+    # First Party
+    from lmcache.v1.platform.musa import ops as musa_ops
+
+    captured: dict[str, Any] = {}
+
+    def _fake_musa_block_transfer(**kwargs: Any) -> bool:
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        musa_native,
+        "try_native_multi_layer_block_kv_transfer",
+        _fake_musa_block_transfer,
+    )
+
+    paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
+    object_tensors = [torch.zeros(2, 8, 16)]
+    musa_ops.multi_layer_block_kv_transfer(
+        paged_layers,
+        object_tensors,
+        [0, 1],
+        "musa",
+        py_ops.TransferDirection.D2H,
+        _make_block_shape_desc(head_size=16),
+        8,
+        py_ops.EngineKVFormat.NL_X_NB_BS_HS,
+        0,
+    )
+
+    assert captured["paged_layers"] is paged_layers
+    assert captured["object_tensors"] is object_tensors
+    assert captured["block_ids"] == [0, 1]
