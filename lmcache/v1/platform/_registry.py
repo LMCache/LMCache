@@ -2,8 +2,8 @@
 """Platform backend registry.
 
 Each accelerator sub-package (``platform/cuda``, ``platform/cpu``,
-future ``platform/xpu`` ...) registers concrete factories and hooks
-consumed by platform-agnostic code.
+future ``platform/xpu`` ...) registers a concrete factory for the
+KV-cache IPC wrapper consumed by the multiprocess adapter.
 
 The :func:`get_kv_wrapper_factory` lookup keys on
 ``tensor.device.type`` so the call site in
@@ -19,8 +19,6 @@ from __future__ import annotations
 # Standard
 from typing import Any, Callable, Dict
 
-BlockTransferHook = Callable[..., bool]
-
 # Public sentinel used by callers who want the always-available
 # fall-back regardless of the running ``torch_device_type``.
 DEFAULT_BACKEND: str = "cpu"
@@ -35,11 +33,6 @@ _KV_WRAPPER_FACTORIES: Dict[str, Callable[..., Any]] = {}
 # Per-backend availability predicate (e.g. CUDA's ``is_available``).
 # Missing entry == always available.
 _AVAILABILITY: Dict[str, Callable[[], bool]] = {}
-
-# Optional fast-path hook for block-based paged-KV transfer. Backends that
-# need platform-specific dispatch register here so generic fallback code can
-# stay free of device-specific imports.
-_BLOCK_TRANSFER_HOOKS: Dict[str, BlockTransferHook] = {}
 
 
 def register_availability(device_type: str, predicate: Callable[[], bool]) -> None:
@@ -62,31 +55,6 @@ def register_kv_wrapper(device_type: str, factory: Callable[..., Any]) -> None:
             returns a wrapper instance ready for the multiprocess wire.
     """
     _KV_WRAPPER_FACTORIES[device_type] = factory
-
-
-def register_block_transfer_hook(device_type: str, hook: BlockTransferHook) -> None:
-    """Register a block-transfer hook for ``device_type``.
-
-    Args:
-        device_type: The device type string (e.g., ``"musa"``).
-        hook: A callable matching the keyword arguments passed by
-            ``python_ops_fallback.multi_layer_block_kv_transfer``. It should
-            return ``True`` when it completed the transfer and ``False`` when
-            callers should continue with the generic fallback.
-    """
-    _BLOCK_TRANSFER_HOOKS[device_type] = hook
-
-
-def get_block_transfer_hook(device_type: str) -> BlockTransferHook | None:
-    """Return the registered block-transfer hook for ``device_type``.
-
-    Args:
-        device_type: The device type string (e.g., ``"musa"``).
-
-    Returns:
-        The registered hook, or ``None`` when the backend has no hook.
-    """
-    return _BLOCK_TRANSFER_HOOKS.get(device_type)
 
 
 def is_available(device_type: str) -> bool:
@@ -141,14 +109,12 @@ def snapshot() -> Dict[str, Dict[str, Callable[..., Any]]]:
     fixture teardown clause.
 
     Returns:
-        A dict with keys ``"kv_wrapper"``, ``"availability"``, and
-        ``"block_transfer"``, each mapping device-type strings to their
-        registered callables.
+        A dict with keys ``"kv_wrapper"`` and ``"availability"``, each
+        mapping device-type strings to their registered callables.
     """
     return {
         "kv_wrapper": dict(_KV_WRAPPER_FACTORIES),
         "availability": dict(_AVAILABILITY),
-        "block_transfer": dict(_BLOCK_TRANSFER_HOOKS),
     }
 
 
@@ -156,13 +122,9 @@ def restore(state: Dict[str, Dict[str, Callable[..., Any]]]) -> None:
     """Restore registry tables to a previously :func:`snapshot`-ed state.
 
     Args:
-        state: A snapshot dict as returned by :func:`snapshot`. Older snapshots
-            without ``"block_transfer"`` are treated as having no registered
-            block-transfer hooks.
+        state: A snapshot dict as returned by :func:`snapshot`.
     """
     _KV_WRAPPER_FACTORIES.clear()
     _KV_WRAPPER_FACTORIES.update(state.get("kv_wrapper", {}))
     _AVAILABILITY.clear()
     _AVAILABILITY.update(state.get("availability", {}))
-    _BLOCK_TRANSFER_HOOKS.clear()
-    _BLOCK_TRANSFER_HOOKS.update(state.get("block_transfer", {}))

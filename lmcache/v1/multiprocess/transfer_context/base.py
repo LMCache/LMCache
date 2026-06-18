@@ -18,8 +18,7 @@ from __future__ import annotations
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from importlib import import_module
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 import inspect
 
 # Third Party
@@ -34,7 +33,6 @@ from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.mq import MessageQueueClient
-from lmcache.v1.platform import _registry as platform_registry
 
 if TYPE_CHECKING:
     # First Party
@@ -103,54 +101,6 @@ logger.info(
 def _tensors_to_ptrs(tensors: list[torch.Tensor]) -> list[int]:
     """Convert a list of tensors to a list of their data_ptr() values."""
     return [t.data_ptr() for t in tensors]
-
-
-def _platform_block_transfer_hook_available(device_type: str) -> bool:
-    """Return whether ``device_type`` registered a Python block-transfer hook.
-
-    Args:
-        device_type: Device type string from ``torch.device.type``.
-
-    Returns:
-        ``True`` if the device uses the built-in CPU fallback or has a
-        registered platform hook; otherwise ``False``.
-    """
-    if device_type == "cpu":
-        return True
-    try:
-        import_module(f"lmcache.v1.platform.{device_type}")
-        return platform_registry.get_block_transfer_hook(device_type) is not None
-    except Exception as exc:
-        logger.debug(
-            "Failed to inspect platform block-transfer hook for %s: %s",
-            device_type,
-            exc,
-            exc_info=True,
-        )
-        return False
-
-
-def _block_transfer_accepts_tensor_for_device(device: torch.device) -> bool:
-    """Return whether block transfer should use tensor-list arguments."""
-    return _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR or (
-        _platform_block_transfer_hook_available(device.type)
-    )
-
-
-def _block_transfer_ops_for_device(device: torch.device) -> Any:
-    """Return the block-transfer module appropriate for the paged tensor device."""
-    if not _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR and (
-        _platform_block_transfer_hook_available(device.type)
-    ):
-        # First Party
-        import lmcache.python_ops_fallback as py_lmc_ops
-
-        return py_lmc_ops
-
-    # First Party
-    import lmcache.c_ops as lmc_ops
-
-    return lmc_ops
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +390,7 @@ def gather_paged_kv_to_cpu(
 
     # Determine if pinned memory is strictly required
     # (only for the compiled C++ path which does not accept tensor)
-    requires_pinned = not _block_transfer_accepts_tensor_for_device(tensors[0].device)
+    requires_pinned = not _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR
     needs_staging = False
     staged_chunks = []
 
@@ -504,20 +454,19 @@ def gather_paged_kv_to_cpu(
         )
 
     if selected_block_ids:
-        if _block_transfer_accepts_tensor_for_device(tensors[0].device):
+        if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR:
             # Python fallback: accepts tensor list directly for all params.
-            transfer_ops = _block_transfer_ops_for_device(tensors[0].device)
             paged_tensor_arg = normalized
             objs_tensor_arg = chunks
             block_ids_list_arg = selected_block_ids
 
             # call kernel in one shot
-            transfer_ops.multi_layer_block_kv_transfer(
+            lmc_ops.multi_layer_block_kv_transfer(
                 paged_tensor_arg,
                 objs_tensor_arg,
                 block_ids_list_arg,
                 tensors[0].device,
-                transfer_ops.TransferDirection.D2H,
+                lmc_ops.TransferDirection.D2H,
                 shape_desc,
                 chunk_tokens,
                 engine_kv_format,
@@ -693,19 +642,18 @@ def scatter_cpu_to_paged_kv(
     if not selected_block_ids:
         return
 
-    if _block_transfer_accepts_tensor_for_device(tensors[0].device):
+    if _LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR:
         # Python fallback: accepts tensor list directly for all params.
-        transfer_ops = _block_transfer_ops_for_device(tensors[0].device)
         paged_tensor_arg = normalized
         objs_tensor_arg = chunks
         block_ids_list_arg = selected_block_ids
 
-        transfer_ops.multi_layer_block_kv_transfer(
+        lmc_ops.multi_layer_block_kv_transfer(
             paged_tensor_arg,
             objs_tensor_arg,
             block_ids_list_arg,
             tensors[0].device,
-            transfer_ops.TransferDirection.H2D,
+            lmc_ops.TransferDirection.H2D,
             shape_desc,
             chunk_tokens,
             engine_kv_format,

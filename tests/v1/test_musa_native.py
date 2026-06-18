@@ -57,6 +57,28 @@ def test_native_transfer_module_lives_under_musa_platform() -> None:
     assert musa_native.__name__ == "lmcache.v1.platform.musa.native_kv_transfer"
 
 
+def test_get_backend_selects_musa_ops_when_musa_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backend composition uses MUSA ops when MUSA is the active device."""
+    # First Party
+    from lmcache.v1.platform.musa import ops as musa_ops
+    import lmcache
+
+    monkeypatch.setattr(
+        torch,
+        "musa",
+        SimpleNamespace(is_available=lambda: True),
+        raising=False,
+    )
+
+    backend = lmcache._get_backend()
+
+    assert backend.multi_layer_block_kv_transfer is (
+        musa_ops.multi_layer_block_kv_transfer
+    )
+
+
 def test_native_transfer_enabled_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The opt-in environment variable enables native dispatch attempts."""
     monkeypatch.setenv("LMCACHE_MUSA_NATIVE_KV_TRANSFER", "1")
@@ -388,10 +410,13 @@ def test_native_block_transfer_rejects_unvalidated_layout(
     assert used is False
 
 
-def test_block_transfer_entry_dispatches_to_musa_platform(
+def test_musa_ops_block_transfer_entry_dispatches_to_musa_platform(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The block-transfer entry hides MUSA native dispatch behind device layer."""
+    """MUSA ops backend hides native dispatch behind the c_ops-compatible API."""
+    # First Party
+    from lmcache.v1.platform.musa import ops as musa_ops
+
     captured: dict[str, Any] = {}
 
     def _fake_musa_block_transfer(**kwargs: Any) -> bool:
@@ -406,7 +431,7 @@ def test_block_transfer_entry_dispatches_to_musa_platform(
 
     paged_layers = [torch.zeros(4, 4, 16) for _ in range(2)]
     object_tensors = [torch.zeros(2, 8, 16)]
-    py_ops.multi_layer_block_kv_transfer(
+    musa_ops.multi_layer_block_kv_transfer(
         paged_layers,
         object_tensors,
         [0, 1],

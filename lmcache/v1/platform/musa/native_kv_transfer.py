@@ -94,10 +94,11 @@ def try_native_multi_layer_block_kv_transfer(
 ) -> bool:
     """Try native MUSA acceleration for block-based paged-KV transfer.
 
-    This is the MUSA device-layer hook behind
-    ``lmc_ops.multi_layer_block_kv_transfer``.  It hides the MUSA-specific
-    eligibility checks, slot mapping, CPU staging, and native-vs-fallback
-    decision from the generic multiprocess transfer context.
+    This is the optional native fast path used by
+    ``lmcache.v1.platform.musa.ops`` behind
+    ``lmc_ops.multi_layer_block_kv_transfer``. It hides the MUSA-specific
+    eligibility checks, slot mapping, and CPU staging from the generic
+    multiprocess transfer context.
 
     Args:
         paged_layers: Normalized per-layer paged KV tensors.

@@ -84,6 +84,13 @@ def _get_backend() -> Any:
             "cuda_ops",
             lambda: torch.cuda.is_available(),
         ),
+        # MUSA currently uses a Python adapter under the platform package,
+        # unlike the compiled XPU/CUDA extension modules.
+        (
+            "lmcache.v1.platform.musa.ops",
+            "musa_ops",
+            lambda: hasattr(torch, "musa") and torch.musa.is_available(),  # type: ignore[attr-defined]
+        ),
         # should extend to more HWs..
     ]
 

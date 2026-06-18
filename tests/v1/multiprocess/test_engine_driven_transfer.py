@@ -2,7 +2,6 @@
 # Standard
 from collections.abc import Iterator
 from contextlib import contextmanager
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 from unittest.mock import MagicMock, patch
 import os
@@ -903,99 +902,6 @@ def test_scatter_rounds_down_partial_block_skip_first_n_tokens(
                 assert torch.all(destination[name][:, block_idx] == 999.0)
             else:
                 assert torch.all(destination[name][block_idx] == 999.0)
-
-
-def test_cpu_transfer_uses_python_fallback_when_block_transfer_is_ptr_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CPU paged tensors must not be sent through compiled ptr-only transfer."""
-    # First Party
-    from lmcache.v1.multiprocess.transfer_context import base as base_mod
-    import lmcache.c_ops as real_lmc_ops
-
-    fake_lmc_ops = type(sys)("lmcache.c_ops")
-    fake_lmc_ops.__dict__.update(real_lmc_ops.__dict__)
-
-    def _compiled_block_transfer_unexpected(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("compiled block transfer must not handle CPU tensors")
-
-    fake_lmc_ops.__dict__["multi_layer_block_kv_transfer"] = (
-        _compiled_block_transfer_unexpected
-    )
-    monkeypatch.setitem(sys.modules, "lmcache.c_ops", fake_lmc_ops)
-    monkeypatch.setattr(base_mod, "_LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR", False)
-
-    source = _make_hnd_kv_caches(num_layers=2, num_blocks=4, block_size=4)
-    layout_hints: LayoutHints = {"kv_layout": "HND"}
-    gathered = base_mod.gather_paged_kv_to_cpu(
-        source,
-        [0, 1],
-        blocks_per_chunk=2,
-        layout_hints=layout_hints,
-    )
-    destination = {
-        name: torch.full_like(tensor, 999.0) for name, tensor in source.items()
-    }
-    base_mod.scatter_cpu_to_paged_kv(
-        destination,
-        [0, 1],
-        gathered,
-        blocks_per_chunk=2,
-        layout_hints=layout_hints,
-    )
-
-    for name in destination:
-        assert torch.allclose(destination[name][:, 0], source[name][:, 0])
-        assert torch.allclose(destination[name][:, 1], source[name][:, 1])
-
-
-def test_musa_transfer_uses_python_fallback_when_block_transfer_is_ptr_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """MUSA paged tensors must route through the platform-aware Python op."""
-    # First Party
-    from lmcache.v1.multiprocess.transfer_context import base as base_mod
-    import lmcache.c_ops as real_lmc_ops
-    import lmcache.python_ops_fallback as py_ops
-
-    fake_lmc_ops = type(sys)("lmcache.c_ops")
-    fake_lmc_ops.__dict__.update(real_lmc_ops.__dict__)
-
-    def _compiled_block_transfer_unexpected(*_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("compiled block transfer must not handle MUSA tensors")
-
-    calls: list[tuple[Any, ...]] = []
-
-    def _python_block_transfer_expected(*args: Any, **_kwargs: Any) -> None:
-        calls.append(args)
-
-    fake_lmc_ops.__dict__["multi_layer_block_kv_transfer"] = (
-        _compiled_block_transfer_unexpected
-    )
-    monkeypatch.setitem(sys.modules, "lmcache.c_ops", fake_lmc_ops)
-    monkeypatch.setattr(base_mod, "_LMC_OPS_BLOCK_TRANSFER_ACCEPTS_TENSOR", False)
-    monkeypatch.setattr(
-        py_ops, "multi_layer_block_kv_transfer", _python_block_transfer_expected
-    )
-    monkeypatch.setattr(
-        torch.Tensor,
-        "device",
-        property(lambda _tensor: SimpleNamespace(type="musa")),
-    )
-    monkeypatch.setattr(torch.Tensor, "is_pinned", lambda _tensor: True)
-
-    source = _make_hnd_kv_caches(num_layers=2, num_blocks=4, block_size=4)
-    chunks = [torch.zeros(2, 2, 8, 16)]
-    base_mod.scatter_cpu_to_paged_kv(
-        source,
-        [0, 1],
-        chunks,
-        blocks_per_chunk=2,
-        layout_hints={"kv_layout": "HND"},
-    )
-
-    assert len(calls) == 1
-    assert calls[0][3].type == "musa"
 
 
 @pytest.fixture

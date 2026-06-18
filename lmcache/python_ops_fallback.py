@@ -6,7 +6,6 @@
 # Standard
 from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
-from importlib import import_module
 from multiprocessing import shared_memory
 from typing import Any, Optional, Tuple, cast
 import ctypes
@@ -22,10 +21,6 @@ import torch
 
 # First Party
 from lmcache import torch_dev
-from lmcache.logging import init_logger
-from lmcache.v1.platform import _registry as platform_registry
-
-logger = init_logger(__name__)
 
 # Store the tensor objects in memory so that they can be accessed
 # outside the scope of this file
@@ -1102,71 +1097,6 @@ def _to_block_id_list(block_ids: torch.Tensor | list[int]) -> list[int]:
     raise TypeError("block_ids must be a torch.Tensor or list[int]")
 
 
-def _device_type_name(device: torch.device | str) -> str:
-    """Return the device type without constructing backend-specific devices."""
-    if isinstance(device, torch.device):
-        return device.type
-    return str(device).split(":", maxsplit=1)[0]
-
-
-def _try_platform_multi_layer_block_kv_transfer(
-    *,
-    paged_layers: Any,
-    object_tensors: list[torch.Tensor],
-    block_ids: torch.Tensor | list[int],
-    device: torch.device | str,
-    direction: TransferDirection,
-    shape_desc: PageBufferShapeDesc,
-    lmcache_chunk_size: int,
-    engine_kv_format: EngineKVFormat,
-    skip_prefix_n_blocks: int,
-) -> bool:
-    """Try a registered platform fast path for block KV transfer.
-
-    Args:
-        paged_layers: Normalized paged-KV tensors or page-buffer descriptor.
-        object_tensors: CPU LMCache chunk tensors for this transfer.
-        block_ids: Engine block IDs in tensor or Python-list form.
-        device: Target device for the paged tensors.
-        direction: Transfer direction (H2D or D2H).
-        shape_desc: Shape descriptor for the page buffer.
-        lmcache_chunk_size: Number of tokens in each LMCache chunk.
-        engine_kv_format: Engine KV-cache layout format.
-        skip_prefix_n_blocks: Number of leading blocks to skip.
-
-    Returns:
-        ``True`` if a platform hook completed the transfer; ``False`` if the
-        caller should continue through the generic Python fallback.
-    """
-    device_type = _device_type_name(device)
-    if device_type == "cpu":
-        return False
-    try:
-        import_module(f"lmcache.v1.platform.{device_type}")
-        hook = platform_registry.get_block_transfer_hook(device_type)
-        if hook is None:
-            return False
-
-        return hook(
-            paged_layers=paged_layers,
-            object_tensors=object_tensors,
-            block_ids=block_ids,
-            direction=direction,
-            shape_desc=shape_desc,
-            lmcache_chunk_size=lmcache_chunk_size,
-            engine_kv_format=engine_kv_format,
-            skip_prefix_n_blocks=skip_prefix_n_blocks,
-        )
-    except Exception as exc:
-        logger.debug(
-            "Platform block-transfer hook failed for device type %s: %s",
-            device_type,
-            exc,
-            exc_info=True,
-        )
-        return False
-
-
 def multi_layer_block_kv_transfer(
     paged_buffer_ptrs_tensor: "torch.Tensor | list",
     lmcache_objects_ptrs: list[int] | list[torch.Tensor],
@@ -1240,19 +1170,6 @@ def multi_layer_block_kv_transfer(
     )
     blocks_per_object = lmcache_chunk_size // int(shape_desc.bs)
     block_size = int(shape_desc.bs)
-
-    if _try_platform_multi_layer_block_kv_transfer(
-        paged_layers=normalized,
-        object_tensors=object_tensors,
-        block_ids=block_ids,
-        device=device,
-        direction=direction,
-        shape_desc=shape_desc,
-        lmcache_chunk_size=lmcache_chunk_size,
-        engine_kv_format=engine_kv_format,
-        skip_prefix_n_blocks=skip_prefix_n_blocks,
-    ):
-        return
 
     if _is_cross_layer_format(engine_kv_format):
         _transfer_cross_layer(
