@@ -971,21 +971,24 @@ spec:
                     type: object
                 type: object
               blendChunkSize:
-                default: 256
                 description: |-
                   blendChunkSize is the tokens per chunk for the global CacheBlend directory
                   (the match unit). It MUST equal the LMCache chunk size the blend servers
                   use, so the coordinator chunks published/queried tokens the same way.
+                  When unset the coordinator image applies its own default (256); the
+                  operator only passes --blend-chunk-size when this is explicitly set, so it
+                  stays compatible with images whose CLI predates the flag.
                 format: int32
                 minimum: 1
                 type: integer
               blendProbeStride:
-                default: 1
                 description: |-
                   blendProbeStride is the number of positions between CacheBlend match
                   probes. With partial-fill reuse any offset is usable, so 1 (probe every
                   offset) gives full recall; raise it only to trade recall for coordinator
-                  CPU.
+                  CPU. When unset the coordinator image applies its own default (1); the
+                  operator only passes --blend-probe-stride when this is explicitly set, so
+                  it stays compatible with images whose CLI predates the flag.
                 format: int32
                 minimum: 1
                 type: integer

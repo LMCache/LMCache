@@ -51,12 +51,13 @@ func TestBuildCoordinatorArgs_Defaults(t *testing.T) {
 	if got := findArgValue(t, args, "--eviction-ratio"); got != "0.2" {
 		t.Errorf("--eviction-ratio = %q, want 0.2", got)
 	}
-	// The blend flags render with the coordinator defaults (256 / 1).
-	if got := findArgValue(t, args, "--blend-chunk-size"); got != "256" {
-		t.Errorf("--blend-chunk-size = %q, want 256", got)
+	// Unset blend knobs are omitted so the coordinator image applies its own
+	// defaults; emitting them would break images whose CLI predates the flags.
+	if slices.Contains(args, "--blend-chunk-size") {
+		t.Errorf("--blend-chunk-size should be omitted when unset, got args %v", args)
 	}
-	if got := findArgValue(t, args, "--blend-probe-stride"); got != "1" {
-		t.Errorf("--blend-probe-stride = %q, want 1", got)
+	if slices.Contains(args, "--blend-probe-stride") {
+		t.Errorf("--blend-probe-stride should be omitted when unset, got args %v", args)
 	}
 }
 

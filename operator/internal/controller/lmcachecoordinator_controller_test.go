@@ -109,9 +109,10 @@ var _ = Describe("LMCacheCoordinator Controller", func() {
 			container := podSpec.Containers[0]
 			Expect(container.Command).To(ContainElement("coordinator"))
 			Expect(argsContainFlagValue(container.Args, "--port", "9300")).To(BeTrue())
-			// The blend CLI flags render with the coordinator defaults (256 / 1).
-			Expect(argsContainFlagValue(container.Args, "--blend-chunk-size", "256")).To(BeTrue())
-			Expect(argsContainFlagValue(container.Args, "--blend-probe-stride", "1")).To(BeTrue())
+			// Blend knobs are omitted when unset so the coordinator image
+			// applies its own defaults (and older images stay compatible).
+			Expect(container.Args).NotTo(ContainElement("--blend-chunk-size"))
+			Expect(container.Args).NotTo(ContainElement("--blend-probe-stride"))
 
 			By("Verifying the probe targets /healthz")
 			Expect(container.ReadinessProbe).NotTo(BeNil())

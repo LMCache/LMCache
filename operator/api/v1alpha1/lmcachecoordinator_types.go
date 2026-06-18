@@ -88,17 +88,20 @@ type LMCacheCoordinatorSpec struct {
 	// blendChunkSize is the tokens per chunk for the global CacheBlend directory
 	// (the match unit). It MUST equal the LMCache chunk size the blend servers
 	// use, so the coordinator chunks published/queried tokens the same way.
+	// When unset the coordinator image applies its own default (256); the
+	// operator only passes --blend-chunk-size when this is explicitly set, so it
+	// stays compatible with images whose CLI predates the flag.
 	// +optional
-	// +kubebuilder:default=256
 	// +kubebuilder:validation:Minimum=1
 	BlendChunkSize *int32 `json:"blendChunkSize,omitempty"`
 
 	// blendProbeStride is the number of positions between CacheBlend match
 	// probes. With partial-fill reuse any offset is usable, so 1 (probe every
 	// offset) gives full recall; raise it only to trade recall for coordinator
-	// CPU.
+	// CPU. When unset the coordinator image applies its own default (1); the
+	// operator only passes --blend-probe-stride when this is explicitly set, so
+	// it stays compatible with images whose CLI predates the flag.
 	// +optional
-	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	BlendProbeStride *int32 `json:"blendProbeStride,omitempty"`
 
