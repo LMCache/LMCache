@@ -103,7 +103,7 @@ Ignores the EOS, so all requests will be generating `--max-tokens` tokens.
 python run_multi_req_split.py \
   --app-port 9000 \
   --num-requests 1 \
-  --compression 0.0 \
+  --compression 2.0 \
   --repeat 1 \
   --separate-repeats \
   --sleep-between-repeats 0 \

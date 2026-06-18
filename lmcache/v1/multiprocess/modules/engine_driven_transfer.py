@@ -408,20 +408,35 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
         Raises:
             ValueError: If the model name is not registered in the layout descriptor registry.
         """
-        layout_desc, _ = self._ctx.resolve_model_name(model_name)   # SDK path
+        now = time.monotonic()
+        with self._lock:
+            existing = self._engine_driven_contexts.get(instance_id)
+            if existing is not None:
+                existing.last_seen = now
+                logger.info(
+                    "Instance %d already registered (non-GPU); refreshing liveness",
+                    instance_id,
+                )
+        
+        layout_desc, _ = self._ctx.resolve_model_name(model_name)
         if layout_desc is None:
             raise ValueError(f"No KV layout registered for model {model_name}")
-        metadata = NonGpuContextMetadata(
+        
+        metadata = EngineDrivenContextMetadata(
             layout_desc=layout_desc,
             block_size=self._ctx.chunk_size,
             use_mla=len(layout_desc.shapes[0]) == 3,
         )
-        self._non_gpu_contexts[instance_id] = NonGPUContextEntry(
+        
+        entry = EngineDrivenContextEntry(
             metadata=metadata,
             model_name=model_name,
             world_size=world_size,
+            last_seen=now,
+            has_liveness_signal=False,
         )
-        self._strategies[instance_id] = create_transfer_strategy(
+        
+        strategy: TransferStrategy = create_transfer_strategy(
             self._ctx.storage_manager,
             shm_name=self._shm_pool_info["shm_name"],
             pool_size=self._shm_pool_info["pool_size"],
@@ -430,6 +445,10 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             pending_lock=self._pending_shm_lock,
             transfer_key_factory=self._make_transfer_key,
         )
+
+        with self._lock:
+            self._engine_driven_contexts[instance_id] = entry
+            self._strategies[instance_id] = strategy
 
     def unregister_kv_cache(self, instance_id: int) -> None:
         """Unregister a non-GPU KV cache context for the given instance ID.

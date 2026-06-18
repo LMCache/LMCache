@@ -125,13 +125,13 @@ class LayoutDescRegistry:
             return entry.layout_desc
 
     def find_by_model_name(self, model_name: str) -> tuple[MemoryLayoutDesc | None, int | None]:
-        """Look up all layout descriptors matching a model name.
+        """Look up the layout descriptors matching a model name.
 
         Args:
             model_name: The model name.
 
         Returns:
-            A list of layout descriptors matching the model name.
+            A layout descriptors matching the model name.
             World size.
         """
         with self._lock:
