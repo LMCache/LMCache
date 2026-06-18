@@ -228,7 +228,7 @@ class MPCacheServerContext:
             raise ValueError("Must resolve keys with worker_id != None")
         return ipc_key_to_object_keys(key, chunk_hashes, object_group_ids)
 
-    def resolve_q_obj_keys(self, key: IPCCacheEngineKey, layer_name: str) -> list[ObjectKey]:
+    def resolve_q_obj_keys(self, key: IPCCacheServerKey, layer_name: str) -> list[ObjectKey]:
         """Resolve object keys from an IPC cache key.
 
         Uses the session manager to track token state and the token hasher
