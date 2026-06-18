@@ -352,11 +352,27 @@ def test_unlock_empty_is_noop():
         mq.submit_request.assert_not_called()
 
 
-def test_store_is_noop():
+def test_store_completes_immediately_without_leaking():
     with _adapter() as (adapter, _mq, _tc, _notifier):
         task_id = adapter.submit_store_task([_key(0)], [MagicMock()])
-        assert task_id == p2p_mod._NOOP_STORE_TASK_ID
+        completed = adapter.pop_completed_store_tasks()
+        assert set(completed) == {task_id}
+        assert completed[task_id].is_successful() is True
+        assert completed[task_id].bytes_transferred() == 0
+        # Draining clears the completed set.
         assert adapter.pop_completed_store_tasks() == {}
+
+
+def test_load_missing_address_is_failure_not_raise():
+    keys = [_key(0)]
+    with _adapter() as (adapter, _mq, _tc, _notifier):
+        # No lookup ran, so no remote address is stashed for this key.
+        task_id = adapter.submit_load_task(
+            keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
+        )
+        bitmap = adapter.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.popcount() == 0
 
 
 def test_report_status():

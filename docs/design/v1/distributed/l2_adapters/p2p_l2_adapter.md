@@ -51,8 +51,8 @@ completes asynchronously inside the transfer engine. So the adapter registers
 its lookup and load event fds with the `PeriodicEventNotifier` singleton, which
 pulses them every few milliseconds. Each pulse drives the prefetch controller
 to re-poll `query_lookup_and_lock_result` / `query_load_result`, which in turn
-check the in-flight RPC / transfer state. The store fd is a dummy that is never
-signaled.
+check the in-flight RPC / transfer state. The store fd is not pulsed by the
+notifier; it is signaled directly on submit (see *No store* below).
 
 Both RPCs are non-blocking handlers, so the adapter uses **submit-then-wait**:
 `submit_lookup_and_lock_task` submits the lookup and waits (hard-coded ~3 s) for
@@ -70,12 +70,18 @@ those keys as if the peer never had them.
 
 ## No store / no eviction
 
-`submit_store_task` and `pop_completed_store_tasks` are no-ops — writing to a
-peer's L1 is intentionally unsupported (it would require remote allocation and
-existence/status checks that can corrupt both nodes on failure). The store
-policy never routes store tasks to a P2P adapter. The adapter is constructed
-with `max_capacity_bytes=0`, so `supports_global_eviction` is `False`, `delete`
-is the inherited no-op, and `get_usage` reports the (empty) base counters.
+Writing to a peer's L1 is intentionally unsupported (it would require remote
+allocation and existence/status checks that can corrupt both nodes on failure).
+But the store controller still tracks every task it submits — and the L1 read
+locks it reserved for that task — until the result is popped. So rather than
+drop store tasks, `submit_store_task` records a 0-byte success and signals the
+store fd immediately, and `pop_completed_store_tasks` returns it; the controller
+then finalizes its bookkeeping and releases the read locks instead of leaking
+them. No data is moved and no bytes are accounted.
+
+The adapter is constructed with `max_capacity_bytes=0`, so
+`supports_global_eviction` is `False`, `delete` is the inherited no-op, and
+`get_usage` reports the (empty) base counters.
 
 ## Configuration
 

@@ -9,11 +9,15 @@ Because neither the lookup RPC nor the transfer-channel read exposes a
 completion fd, the lookup and load event fds are pulsed by the
 ``PeriodicEventNotifier`` singleton so the prefetch controller re-polls
 ``query_*`` periodically.
+
+Thread model: the lookup / load / unlock calls all come from the single
+prefetch-controller loop thread, and the store calls come from the
+store-controller loop thread. The two paths share no mutable state (each owns
+its own task-id counter and bookkeeping dicts), so this class needs no locks.
 """
 
 # Standard
 from dataclasses import dataclass
-import threading
 import time
 
 # Third Party
@@ -41,7 +45,6 @@ logger = init_logger(__name__)
 
 _LOOKUP_RPC_TIMEOUT_S = 3.0
 _PERIODIC_NOTIFIER_INTERVAL_MS = 5
-_NOOP_STORE_TASK_ID: L2TaskId = -1
 
 
 @dataclass
@@ -57,6 +60,7 @@ class _LoadTask:
     keys: list[ObjectKey]
     read_task_id: int
     deadline: float
+    failed: bool = False
 
 
 class P2PL2AdapterConfig(L2AdapterConfigBase):
@@ -150,12 +154,17 @@ class P2PL2Adapter(L2AdapterInterface):
         self._notifier.register_fd(self._lookup_efd.fileno())
         self._notifier.register_fd(self._load_efd.fileno())
 
+        # Prefetch-loop-thread state (lookup / load).
         self._next_task_id: L2TaskId = 0
         self._lookup_tasks: dict[L2TaskId, _LookupTask] = {}
         self._load_tasks: dict[L2TaskId, _LoadTask] = {}
         self._remote_addresses: dict[ObjectKey, TransferChannelAddress] = {}
+
+        # Store-loop-thread state (store no-op completions).
+        self._next_store_task_id: L2TaskId = 0
+        self._completed_store_tasks: dict[L2TaskId, L2StoreResult] = {}
+
         self._closed = False
-        self._lock = threading.Lock()
 
     # --------------------
     # Event Fd Interface
@@ -179,12 +188,23 @@ class P2PL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
-        """No-op. The store policy never routes store tasks to a P2P adapter."""
-        return _NOOP_STORE_TASK_ID
+        """Record a 0-byte success and signal the store fd immediately.
+
+        The P2P adapter never writes to a peer, but the store controller still
+        tracks every submitted task (and the L1 read locks it reserved) until
+        the result is popped. Completing the task right away lets the
+        controller finalize that bookkeeping instead of leaking it.
+        """
+        task_id = self._next_store_task_id
+        self._next_store_task_id += 1
+        self._completed_store_tasks[task_id] = L2StoreResult(True, 0)
+        self._store_efd.notify()
+        return task_id
 
     def pop_completed_store_tasks(self) -> dict[L2TaskId, L2StoreResult]:
-        """No-op. The store event fd is never signaled."""
-        return {}
+        completed = self._completed_store_tasks
+        self._completed_store_tasks = {}
+        return completed
 
     # --------------------
     # Lookup and Lock Interface
@@ -195,15 +215,13 @@ class P2PL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         layout_desc: MemoryLayoutDesc,
     ) -> L2TaskId:
-        with self._lock:
-            task_id = self._next_task_id_locked()
-            closed = self._closed
+        task_id = self._next_task_id
+        self._next_task_id += 1
 
-        if closed:
-            with self._lock:
-                self._lookup_tasks[task_id] = _LookupTask(
-                    keys=keys, remote_task_id=-1, deadline=0.0, failed=True
-                )
+        if self._closed:
+            self._lookup_tasks[task_id] = _LookupTask(
+                keys=keys, remote_task_id=-1, deadline=0.0, failed=True
+            )
             return task_id
 
         future = self._mq_client.submit_request(
@@ -222,36 +240,29 @@ class P2PL2Adapter(L2AdapterInterface):
             )
             failed = True
 
-        with self._lock:
-            self._lookup_tasks[task_id] = _LookupTask(
-                keys=keys,
-                remote_task_id=remote_task_id,
-                deadline=time.monotonic() + self._config.lookup_timeout_s,
-                failed=failed,
-            )
+        self._lookup_tasks[task_id] = _LookupTask(
+            keys=keys,
+            remote_task_id=remote_task_id,
+            deadline=time.monotonic() + self._config.lookup_timeout_s,
+            failed=failed,
+        )
         return task_id
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
-        with self._lock:
-            task = self._lookup_tasks.get(task_id)
-            if task is None:
-                return None
-            if task.failed:
-                del self._lookup_tasks[task_id]
-                return Bitmap(len(task.keys))
-            expired = time.monotonic() > task.deadline
-            remote_task_id = task.remote_task_id
-            keys = task.keys
-
-        if expired:
-            with self._lock:
-                self._lookup_tasks.pop(task_id, None)
+        task = self._lookup_tasks.get(task_id)
+        if task is None:
+            return None
+        if task.failed:
+            del self._lookup_tasks[task_id]
+            return Bitmap(len(task.keys))
+        if time.monotonic() > task.deadline:
+            del self._lookup_tasks[task_id]
             logger.warning("P2P lookup task %d timed out; treating as a miss", task_id)
-            return Bitmap(len(keys))
+            return Bitmap(len(task.keys))
 
         future = self._mq_client.submit_request(
             RequestType.P2P_QUERY_LOOKUP_RESULTS,
-            [remote_task_id],
+            [task.remote_task_id],
             get_response_class(RequestType.P2P_QUERY_LOOKUP_RESULTS),
         )
         try:
@@ -262,13 +273,12 @@ class P2PL2Adapter(L2AdapterInterface):
         if addresses is None:
             return None
 
-        bitmap = Bitmap(len(keys))
-        with self._lock:
-            for i, (key, addr) in enumerate(zip(keys, addresses, strict=True)):
-                if addr.is_valid():
-                    bitmap.set(i)
-                    self._remote_addresses[key] = addr
-            self._lookup_tasks.pop(task_id, None)
+        bitmap = Bitmap(len(task.keys))
+        for i, (key, addr) in enumerate(zip(task.keys, addresses, strict=True)):
+            if addr.is_valid():
+                bitmap.set(i)
+                self._remote_addresses[key] = addr
+        del self._lookup_tasks[task_id]
         return bitmap
 
     def submit_unlock(self, keys: list[ObjectKey]) -> None:
@@ -279,9 +289,8 @@ class P2PL2Adapter(L2AdapterInterface):
             [keys],
             get_response_class(RequestType.P2P_UNLOCK_OBJECTS),
         )
-        with self._lock:
-            for key in keys:
-                self._remote_addresses.pop(key, None)
+        for key in keys:
+            self._remote_addresses.pop(key, None)
 
     # --------------------
     # Load Interface
@@ -292,49 +301,56 @@ class P2PL2Adapter(L2AdapterInterface):
         keys: list[ObjectKey],
         objects: list[MemoryObj],
     ) -> L2TaskId:
+        task_id = self._next_task_id
+        self._next_task_id += 1
+
+        remote_addresses = [self._remote_addresses.get(key) for key in keys]
+        if any(addr is None for addr in remote_addresses):
+            logger.warning(
+                "P2P load task %d is missing remote addresses; treating as a failure",
+                task_id,
+            )
+            self._load_tasks[task_id] = _LoadTask(
+                keys=keys, read_task_id=-1, deadline=0.0, failed=True
+            )
+            return task_id
+
         local_addresses = self._tc_context.get_transfer_channel_address(
             [(obj.shm_offset, obj.shm_byte_length) for obj in objects]
         )
-        with self._lock:
-            task_id = self._next_task_id_locked()
-            remote_addresses = [self._remote_addresses[key] for key in keys]
+        read_task_id = self._tc_client.submit_read(
+            local_addresses,
+            remote_addresses,  # type: ignore
+        )
 
-        read_task_id = self._tc_client.submit_read(local_addresses, remote_addresses)
-
-        with self._lock:
-            self._load_tasks[task_id] = _LoadTask(
-                keys=keys,
-                read_task_id=read_task_id,
-                deadline=time.monotonic() + self._config.load_timeout_s,
-            )
+        self._load_tasks[task_id] = _LoadTask(
+            keys=keys,
+            read_task_id=read_task_id,
+            deadline=time.monotonic() + self._config.load_timeout_s,
+        )
         return task_id
 
     def query_load_result(self, task_id: L2TaskId) -> Bitmap | None:
-        with self._lock:
-            task = self._load_tasks.get(task_id)
-            if task is None:
-                return None
-            expired = time.monotonic() > task.deadline
-            read_task_id = task.read_task_id
-            keys = task.keys
-
-        if expired:
-            with self._lock:
-                self._load_tasks.pop(task_id, None)
+        task = self._load_tasks.get(task_id)
+        if task is None:
+            return None
+        if task.failed:
+            del self._load_tasks[task_id]
+            return Bitmap(len(task.keys))
+        if time.monotonic() > task.deadline:
+            del self._load_tasks[task_id]
             logger.warning("P2P load task %d timed out; treating as a failure", task_id)
-            return Bitmap(len(keys))
+            return Bitmap(len(task.keys))
 
-        result = self._tc_client.query_read_status(read_task_id)
+        result = self._tc_client.query_read_status(task.read_task_id)
         if not result.is_finished():
             return None
 
-        bitmap = Bitmap(len(keys))
+        bitmap = Bitmap(len(task.keys))
         for i, succeeded in enumerate(result.succeeded_mask):
             if succeeded:
                 bitmap.set(i)
-
-        with self._lock:
-            self._load_tasks.pop(task_id, None)
+        del self._load_tasks[task_id]
         return bitmap
 
     # --------------------
@@ -342,10 +358,9 @@ class P2PL2Adapter(L2AdapterInterface):
     # --------------------
 
     def close(self) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
+        if self._closed:
+            return
+        self._closed = True
 
         self._notifier.unregister_fd(self._lookup_efd.fileno())
         self._notifier.unregister_fd(self._load_efd.fileno())
@@ -355,26 +370,16 @@ class P2PL2Adapter(L2AdapterInterface):
         self._load_efd.close()
 
     def report_status(self) -> dict:
-        with self._lock:
-            return {
-                "is_healthy": True,
-                "type": "P2PL2Adapter",
-                "peer_mq_server_url": self._config.peer_mq_server_url,
-                "peer_transfer_channel_server_url": (
-                    self._config.peer_transfer_channel_server_url
-                ),
-                "in_flight_lookups": len(self._lookup_tasks),
-                "in_flight_loads": len(self._load_tasks),
-            }
-
-    # --------------------
-    # Helpers
-    # --------------------
-
-    def _next_task_id_locked(self) -> L2TaskId:
-        task_id = self._next_task_id
-        self._next_task_id += 1
-        return task_id
+        return {
+            "is_healthy": True,
+            "type": "P2PL2Adapter",
+            "peer_mq_server_url": self._config.peer_mq_server_url,
+            "peer_transfer_channel_server_url": (
+                self._config.peer_transfer_channel_server_url
+            ),
+            "in_flight_lookups": len(self._lookup_tasks),
+            "in_flight_loads": len(self._load_tasks),
+        }
 
 
 # Self-register config type and adapter factory
