@@ -538,24 +538,15 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     ) -> bool:
         """Commit multi-group store by storing each group separately."""
         import pickle
-
-        # Deserialize multi-group chunks (format: list of (arr, dtype_name) tuples)
-        raw = pickle.loads(cpu_data)
-        group_chunks: list[list[torch.Tensor]] = [
-            [
-                torch.from_numpy(arr).to(torch.bfloat16) if dtype_name == "bfloat16" else torch.from_numpy(arr)
-                for arr, dtype_name in group
-            ]
-            for group in raw
-        ]
-
+        from lmcache.v1.multiprocess.transfer_context.base import (
+            _deserialize_multi_group_chunks,
+        )
+        group_chunks = _deserialize_multi_group_chunks(cpu_data)
         num_groups = len(entry.metadata.group_layout_descs)
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
-
         session = self._ctx.session_manager.get_or_create(key.request_id)
         st = session.extras.pop("store_start_time", None)
         all_ok = True
-
         for group_idx, group_chunk_list in enumerate(group_chunks):
             if not group_chunk_list:
                 continue
@@ -567,17 +558,7 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
                 block_size=g_block_size,
                 use_mla=g_use_mla,
             )
-            # Serialize this group's chunks for strategy.commit_store
-            # strategy.commit_store expects pickle.dumps(list[torch.Tensor])
-            # We must convert back from (arr, dtype_name) tuples to plain numpy arrays
-            group_cpu_data = pickle.dumps(
-                [
-                    c.contiguous().float().numpy()
-                    if c.dtype == torch.bfloat16
-                    else c.contiguous().numpy()
-                    for c in group_chunk_list
-                ]
-            )
+            group_cpu_data = pickle.dumps(group_chunk_list)
             result = strategy.commit_store(
                 key=key,
                 instance_id=instance_id,
@@ -587,16 +568,13 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
             if not result:
                 all_ok = False
-
         if all_ok and st is not None:
             total_tokens = sum(
                 len(ok) for ok in all_obj_keys
             ) * self._ctx.chunk_size
             logger.info(
                 "Stored %d tokens (%d groups) in %.3f seconds",
-                total_tokens,
-                num_groups,
-                time.perf_counter() - st,
+                total_tokens, num_groups, time.perf_counter() - st,
             )
         return all_ok
 
@@ -636,14 +614,13 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
     ) -> PrepareRetrieveResponse:
         """Retrieve multi-group chunks and return serialized data."""
         import pickle
-
+        from lmcache.v1.multiprocess.transfer_context.base import (
+            _serialize_multi_group_chunks,
+        )
         num_groups = len(entry.metadata.group_layout_descs)
         all_obj_keys = self._resolve_all_group_obj_keys(key, num_groups)
-
-        session = self._ctx.session_manager.get_or_create(key.request_id)
-        session.extras["retrieve_start_time"] = time.perf_counter()
-        group_data: list[list[tuple]] = []
-
+        st = time.perf_counter()
+        group_chunks_all: list[list[torch.Tensor]] = []
         for group_idx in range(num_groups):
             g_layout_desc = entry.metadata.group_layout_descs[group_idx]
             g_block_size = entry.metadata.group_block_sizes[group_idx]
@@ -660,28 +637,13 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             )
             if response is None or not response.success or not response.data:
                 return PrepareRetrieveResponse(success=False, data=b"")
-            # response.data is pickle.dumps(list[torch.Tensor]) from strategy
-            # Re-serialize as (arr, dtype_name) tuples to match worker format
             group_tensors: list[torch.Tensor] = pickle.loads(response.data)
-            serialized_group = [
-                (
-                    t.contiguous().float().numpy(),
-                    "bfloat16",
-                )
-                if t.dtype == torch.bfloat16
-                else (t.contiguous().numpy(), None)
-                for t in group_tensors
-            ]
-            group_data.append(serialized_group)
-
-        # Final format matches _serialize_multi_group_chunks:
-        # pickle.dumps(list[list[(numpy_array, dtype_name)]])
-        cpu_data = pickle.dumps(group_data)
-
+            group_chunks_all.append(group_tensors)
+        cpu_data = _serialize_multi_group_chunks(group_chunks_all)
         logger.info(
             "Retrieved %d groups in %.3f seconds",
             num_groups,
-            time.perf_counter() - session.extras.pop("retrieve_start_time"),
+            time.perf_counter() - st,
         )
         return PrepareRetrieveResponse(success=True, data=cpu_data)
 
