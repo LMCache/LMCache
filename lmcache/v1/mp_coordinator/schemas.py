@@ -10,12 +10,56 @@ bodies and parse replies, so both sides agree on the schema in one place.
 # Standard
 from enum import Enum
 from typing import Annotated
+import base64
 
 # Third Party
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, field_validator
+import numpy as np
 
 # First Party
 from lmcache.v1.distributed.api import EncodedObjectKey  # noqa: F401  re-exported
+
+
+def encode_tokens(tokens: "list[int] | np.ndarray") -> str:
+    """Encode token ids into a compact base64 wire string.
+
+    Token ids fit in ``uint32``, so a little-endian ``uint32`` buffer is far
+    smaller than a JSON integer list and decodes in one ``np.frombuffer`` call.
+
+    Args:
+        tokens: Token ids (a ``list[int]`` or any array castable to ``uint32``).
+
+    Returns:
+        Base64 of the little-endian ``uint32`` token buffer.
+    """
+    arr = np.ascontiguousarray(np.asarray(tokens, dtype="<u4"))
+    return base64.b64encode(arr.tobytes()).decode("ascii")
+
+
+def decode_tokens(tokens_b64: str) -> np.ndarray:
+    """Decode a base64 token string produced by :func:`encode_tokens`.
+
+    Args:
+        tokens_b64: Base64 of a little-endian ``uint32`` token buffer.
+
+    Returns:
+        A ``uint64`` array of token ids (widened so it feeds the hashers
+        directly).
+
+    Raises:
+        ValueError: If ``tokens_b64`` is not valid base64 or not a multiple of
+            4 bytes.
+    """
+    try:
+        raw = base64.b64decode(tokens_b64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"tokens_b64 is not valid base64: {exc}") from exc
+    if len(raw) % 4 != 0:
+        raise ValueError(
+            f"tokens_b64 byte length {len(raw)} is not a multiple of 4 "
+            "(malformed uint32 token buffer)"
+        )
+    return np.frombuffer(raw, dtype="<u4").astype(np.uint64)
 
 
 class RegisterRequest(BaseModel):
@@ -179,7 +223,7 @@ class StoreRangeModel(BaseModel):
     chunk ``i`` maps to ``object_keys[i]`` at ``old_st_base + i * chunk_size``.
 
     Attributes:
-        model_scope: ``f"{model_name}@{cache_salt}"`` reuse scope.
+        model_scope: Reuse scope (the model name).
         tokens: The stored tokens (``token_ids[start:end]``).
         object_keys: Shared-L2 storage key (hex) per chunk, in order.
         old_st_base: Token position of the range's first token.
@@ -236,11 +280,34 @@ class BlendMatchRequest(BaseModel):
 
     Attributes:
         model_scope: Scope to match within.
-        tokens: The request tokens (the coordinator hashes and probes them).
+        tokens_b64: The request tokens, packed via :func:`encode_tokens`
+            (base64 little-endian ``uint32``).
     """
 
     model_scope: str
-    tokens: list[int] = Field(default_factory=list)
+    tokens_b64: str = ""
+
+    @field_validator("tokens_b64")
+    @classmethod
+    def _validate_tokens_b64(cls, value: str) -> str:
+        """Reject a malformed token buffer at request validation.
+
+        Without this, ``decode_tokens`` would raise ``ValueError`` inside the
+        route handler, which FastAPI surfaces as a 500 (server error) for what
+        is really bad client input. Validating here returns a 422 instead.
+
+        Args:
+            value: The base64 ``tokens_b64`` field.
+
+        Returns:
+            The unchanged value once it is confirmed decodable.
+
+        Raises:
+            ValueError: If ``value`` is not valid base64 or not a whole number
+                of ``uint32`` tokens (surfaced by FastAPI as 422).
+        """
+        decode_tokens(value)
+        return value
 
 
 class GlobalMatchModel(BaseModel):

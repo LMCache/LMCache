@@ -1224,7 +1224,7 @@ class BlendV3Module(InstanceLivenessTarget):
         if coordinator is None or not chunk_hashes:
             return
         try:
-            model_scope = f"{key.model_name}@{key.cache_salt}"
+            model_scope = key.model_name
             store_range = {
                 "model_scope": model_scope,
                 "tokens": list(tokens_in_range),
@@ -1256,8 +1256,7 @@ class BlendV3Module(InstanceLivenessTarget):
             tokens = list(key.token_ids)
             if len(tokens) < self._ctx.chunk_size:
                 return False
-            model_scope = f"{key.model_name}@{key.cache_salt}"
-            coordinator.submit_match(key.request_id, model_scope, tokens)
+            coordinator.submit_match(key.request_id, key.model_name, tokens)
             return True
         except Exception:
             logger.warning(
@@ -1272,10 +1271,9 @@ class BlendV3Module(InstanceLivenessTarget):
 
         Mirrors the prefix/sparse legs: ``return None`` to defer while pending.
         A per-lookup wall-clock deadline (``job.coord_deadline``) bounds the
-        total wait: the daemon services match queries serially, so queue backlog
-        can keep a query ``PENDING`` well past one HTTP round-trip. Once the
-        deadline passes, the leg is abandoned and the lookup proceeds local-only
-        (the daemon's later fill, if any, is dropped via ``take_match``).
+        total wait, including queue/pool time. Past the deadline the leg is
+        abandoned and the lookup proceeds local-only (the client's later fill,
+        if any, is dropped via ``take_match``).
 
         Args:
             job: The per-request poll state.
