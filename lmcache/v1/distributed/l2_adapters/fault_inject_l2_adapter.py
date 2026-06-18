@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 # First Party
 from lmcache.logging import init_logger
 from lmcache.native_storage_ops import Bitmap
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
 from lmcache.v1.distributed.l2_adapters.base import (
     AdapterUsage,
@@ -308,9 +308,11 @@ class FaultInjectL2Adapter(L2AdapterInterface):
 
     # -- lookup and lock (pure delegation) ------------------------------------
 
-    def submit_lookup_and_lock_task(self, keys: list[ObjectKey]) -> L2TaskId:
+    def submit_lookup_and_lock_task(
+        self, keys: list[ObjectKey], layout_desc: MemoryLayoutDesc
+    ) -> L2TaskId:
         """Delegate the lookup-and-lock task to the inner adapter (not faulted)."""
-        return self._inner.submit_lookup_and_lock_task(keys)
+        return self._inner.submit_lookup_and_lock_task(keys, layout_desc)
 
     def query_lookup_and_lock_result(self, task_id: L2TaskId) -> Bitmap | None:
         """Delegate to the inner adapter; lookup results are passed through.

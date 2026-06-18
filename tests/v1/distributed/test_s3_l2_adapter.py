@@ -17,7 +17,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.internal_api import L2AdapterListener
 from lmcache.v1.distributed.l2_adapters import s3_l2_adapter as s3mod
 from lmcache.v1.distributed.l2_adapters.s3_l2_adapter import (
@@ -31,6 +31,8 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.platform import consume_fd
+
+_EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
 # =============================================================================
 # Fake awscrt.s3.S3Request
@@ -469,7 +471,7 @@ class TestStoreLookupLoad:
         assert completed[tid].is_successful()
 
         # Lookup
-        tid = adapter.submit_lookup_and_lock_task([key])
+        tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         assert wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         bm = adapter.query_lookup_and_lock_result(tid)
         assert bm is not None and bm.test(0) is True
@@ -492,7 +494,7 @@ class TestStoreLookupLoad:
 
         # Lookup 0, 1, 2, 3 — expect bitmap 1010
         keys = [create_object_key(i) for i in range(4)]
-        tid = adapter.submit_lookup_and_lock_task(keys)
+        tid = adapter.submit_lookup_and_lock_task(keys, _EMPTY_LAYOUT)
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         bm = adapter.query_lookup_and_lock_result(tid)
         assert bm is not None
@@ -512,7 +514,7 @@ class TestStoreLookupLoad:
 
     def test_query_lookup_returns_none_after_pop(self, adapter):
         key = create_object_key(1)
-        tid = adapter.submit_lookup_and_lock_task([key])
+        tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         assert adapter.query_lookup_and_lock_result(tid) is not None
         assert adapter.query_lookup_and_lock_result(tid) is None
@@ -530,7 +532,7 @@ class TestEviction:
         adapter.pop_completed_store_tasks()
 
     def _lookup(self, adapter, key):
-        tid = adapter.submit_lookup_and_lock_task([key])
+        tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         return adapter.query_lookup_and_lock_result(tid)
 
@@ -654,7 +656,7 @@ class TestCircuitBreaker:
         assert _BACKEND.counts()["put"] == put_before  # never reached the backend
 
         # Lookup and load also short-circuit to all-zero bitmaps.
-        tid = adapter.submit_lookup_and_lock_task([create_object_key(1)])
+        tid = adapter.submit_lookup_and_lock_task([create_object_key(1)], _EMPTY_LAYOUT)
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd(), timeout=2.0)
         bm = adapter.query_lookup_and_lock_result(tid)
         assert bm is not None and bm.test(0) is False
@@ -696,7 +698,7 @@ class TestListener:
         wait_for_event_fd(adapter.get_store_event_fd())
         adapter.pop_completed_store_tasks()
 
-        tid = adapter.submit_lookup_and_lock_task([key])
+        tid = adapter.submit_lookup_and_lock_task([key], _EMPTY_LAYOUT)
         wait_for_event_fd(adapter.get_lookup_and_lock_event_fd())
         adapter.query_lookup_and_lock_result(tid)
         time.sleep(0.05)
