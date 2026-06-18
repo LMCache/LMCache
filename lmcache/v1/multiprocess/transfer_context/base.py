@@ -788,10 +788,11 @@ def _serialize_multi_group_chunks(
     """Serialize multiple groups as a compact pickle blob.
 
     Format: pickle.dumps([
-        [numpy_array_chunk0, numpy_array_chunk1, ...],  # group 0
-        [numpy_array_chunk0, numpy_array_chunk1, ...],  # group 1
+        [(array_chunk0, dtype_str_or_None), (array_chunk1, dtype_str_or_None), ...],  # group 0
+        [(array_chunk0, dtype_str_or_None), (array_chunk1, dtype_str_or_None), ...],  # group 1
         ...
     ])
+    where dtype_str_or_None is "bfloat16" if original dtype was bfloat16, else None.
 
     Args:
         group_chunks: Per-group list of CPU chunk tensors.
