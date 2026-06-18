@@ -7,7 +7,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from enum import IntEnum
 from multiprocessing import shared_memory
-from typing import Any, Optional, Tuple, cast
+from typing import Any, Optional, Tuple
 import ctypes
 import ctypes.util
 import os
@@ -471,10 +471,7 @@ def alloc_shm_pinned_ptr(size: int, shm_name: str = "") -> int:
     shm = shared_memory.SharedMemory(name=name, create=True, size=size)
 
     array_type = ctypes.c_uint8 * size
-    shm_buf = shm.buf
-    if shm_buf is None:
-        raise RuntimeError("Shared memory buffer is unavailable")
-    buf = array_type.from_buffer(shm_buf)
+    buf = array_type.from_buffer(shm.buf)
     ptr = ctypes.addressof(buf)
 
     # Store references to keep them alive
@@ -1173,7 +1170,7 @@ def multi_layer_block_kv_transfer(
 
     if _is_cross_layer_format(engine_kv_format):
         _transfer_cross_layer(
-            cast(torch.Tensor, normalized),
+            normalized,
             object_tensors,
             block_ids,
             n_block_ids,
@@ -1185,7 +1182,7 @@ def multi_layer_block_kv_transfer(
         )
     elif _is_sglang_mha_format(engine_kv_format):
         _transfer_sglang_mha(
-            cast(list[list[torch.Tensor]], normalized),
+            normalized,
             object_tensors,
             block_ids,
             n_block_ids,
@@ -1197,7 +1194,7 @@ def multi_layer_block_kv_transfer(
         )
     elif _is_mla_format(engine_kv_format):
         _transfer_per_layer_mla(
-            cast(list[torch.Tensor], normalized),
+            normalized,
             object_tensors,
             block_ids,
             n_block_ids,
@@ -1209,7 +1206,7 @@ def multi_layer_block_kv_transfer(
         )
     elif _is_hnd_format(engine_kv_format):
         _transfer_per_layer_hnd(
-            cast(list[torch.Tensor], normalized),
+            normalized,
             object_tensors,
             block_ids,
             n_block_ids,
@@ -1221,7 +1218,7 @@ def multi_layer_block_kv_transfer(
         )
     else:
         _transfer_per_layer_nhd(
-            cast(list[torch.Tensor], normalized),
+            normalized,
             object_tensors,
             block_ids,
             n_block_ids,
