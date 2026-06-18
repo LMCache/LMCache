@@ -58,6 +58,7 @@ local_scheme = "no-local-version"
 # only treat vX.Y.Z-style tags as version anchors; ignores nightly/nightly-cu129 tags
 tag_regex = "^v?(?P<version>\\d+\\.\\d+\\.\\d+.*)$"
 git_describe_command = ["git", "describe", "--tags", "--long", "--match", "v[0-9]*.[0-9]*", "--exclude", "v*-*"]
+fallback_version = "0.1.dev4"
 
 [tool.setuptools.packages.find]
 where = [""]
