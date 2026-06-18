@@ -365,11 +365,26 @@ def test_store_completes_immediately_without_leaking():
 
 def test_load_missing_address_is_failure_not_raise():
     keys = [_key(0)]
-    with _adapter() as (adapter, _mq, _tc, _notifier):
+    with _adapter() as (adapter, _mq, tc_client, _notifier):
         # No lookup ran, so no remote address is stashed for this key.
         task_id = adapter.submit_load_task(
             keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
         )
+        tc_client.submit_read.assert_not_called()
+        bitmap = adapter.query_load_result(task_id)
+        assert bitmap is not None
+        assert bitmap.popcount() == 0
+
+
+def test_load_invalid_address_is_failure_not_raise():
+    keys = [_key(0)]
+    with _adapter() as (adapter, _mq, tc_client, _notifier):
+        # An invalid stashed address must be rejected, not read.
+        adapter._remote_addresses[keys[0]] = TransferChannelAddress(offset=-1, size=0)
+        task_id = adapter.submit_load_task(
+            keys, [MagicMock(shm_offset=0, shm_byte_length=10)]
+        )
+        tc_client.submit_read.assert_not_called()
         bitmap = adapter.query_load_result(task_id)
         assert bitmap is not None
         assert bitmap.popcount() == 0

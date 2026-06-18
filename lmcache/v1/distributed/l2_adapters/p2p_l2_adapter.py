@@ -304,16 +304,20 @@ class P2PL2Adapter(L2AdapterInterface):
         task_id = self._next_task_id
         self._next_task_id += 1
 
-        remote_addresses = [self._remote_addresses.get(key) for key in keys]
-        if any(addr is None for addr in remote_addresses):
-            logger.warning(
-                "P2P load task %d is missing remote addresses; treating as a failure",
-                task_id,
-            )
-            self._load_tasks[task_id] = _LoadTask(
-                keys=keys, read_task_id=-1, deadline=0.0, failed=True
-            )
-            return task_id
+        remote_addresses: list[TransferChannelAddress] = []
+        for key in keys:
+            addr = self._remote_addresses.get(key)
+            if addr is None or not addr.is_valid():
+                logger.warning(
+                    "P2P load task %d has a missing/invalid remote address; "
+                    "treating as a failure",
+                    task_id,
+                )
+                self._load_tasks[task_id] = _LoadTask(
+                    keys=keys, read_task_id=-1, deadline=0.0, failed=True
+                )
+                return task_id
+            remote_addresses.append(addr)
 
         local_addresses = self._tc_context.get_transfer_channel_address(
             [(obj.shm_offset, obj.shm_byte_length) for obj in objects]
