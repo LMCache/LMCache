@@ -476,6 +476,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             num_groups = len(entry.metadata.group_layout_descs)
             # Reserve object keys for all groups
             self._resolve_all_group_obj_keys(key, num_groups)
+            session = self._ctx.session_manager.get_or_create(key.request_id)
+            session.extras["store_start_time"] = time.perf_counter()
             return PrepareStoreResponse(success=True, context={})
 
         response = strategy.prepare_store(
@@ -640,6 +642,8 @@ class EngineDrivenTransferModule(InstanceLivenessTarget):
             group_tensors: list[torch.Tensor] = pickle.loads(response.data)
             group_chunks_all.append(group_tensors)
         cpu_data = _serialize_multi_group_chunks(group_chunks_all)
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        session.extras["retrieve_start_time"] = time.perf_counter()
         logger.info(
             "Retrieved %d groups in %.3f seconds",
             num_groups,
