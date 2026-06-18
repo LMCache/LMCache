@@ -88,11 +88,8 @@ class _P2PLookupJob:
 class P2PController:
     """Serves lookup requests from peers and maintains one L2 adapter per peer.
 
-    When P2P is enabled (the config carries an advertise URL), the controller
-    initializes the transfer-channel context, then runs a background thread that
-    polls the coordinator for live peers and adds/removes a peer L2 adapter on
-    the storage manager to match. It also answers lookup/unlock RPCs that peers'
-    adapters send back to this instance.
+    P2P is enabled when ``p2p_config`` carries an advertise URL; otherwise the
+    controller only answers lookup/unlock RPCs.
 
     Args:
         ctx: Shared engine context providing the storage manager and friends.
