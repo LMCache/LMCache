@@ -31,9 +31,7 @@ msgid ""
 "independently; the coordinator ties them together into one coordinated "
 "fleet."
 msgstr ""
-"当您运行多个 LMCache 多进程（MP）服务器时，**MP "
-"协调器**是一个独立服务，各服务器向其注册，从而为您提供覆盖所有运行中服务器的单一全局视图。每个 MP "
-"服务器独立缓存；协调器将它们整合为一个统一管理的集群。"
+"当您运行多个 LMCache 多进程（MP）服务器时，\\ **MP 协调器**\\ 是一个独立服务，各服务器向其注册，从而为您提供覆盖所有运行中服务器的单一全局视图。每个 MP 服务器独立缓存；协调器将它们整合为一个统一管理的集群。"
 
 #: ../../source/mp/coordinator.rst:10
 msgid "Running the coordinator"
@@ -56,11 +54,7 @@ msgid ""
 "Equivalently, the coordinator can still be launched as a module with "
 "``python3 -m lmcache.v1.mp_coordinator``."
 msgstr ""
-"CLI 接受 ``--host``、``--port``、``--instance-timeout``、``--health-check-"
-"interval``、``--eviction-check-interval``、``--eviction-ratio`` 和 "
-"``--trigger-watermark``；任何标志都会覆盖下面匹配的环境变量。有关详细信息，请参见 "
-":doc:`/cli/coordinator`。同样，协调器仍然可以通过 ``python3 -m "
-"lmcache.v1.mp_coordinator`` 作为模块启动。"
+"CLI 接受 ``--host``\\ 、\\ ``--port``\\ 、\\ ``--instance-timeout``\\ 、\\ ``--health-check-interval``\\ 、\\ ``--eviction-check-interval``\\ 、\\ ``--eviction-ratio`` 和 ``--trigger-watermark``\\ ；任何标志都会覆盖下面匹配的环境变量。有关详细信息，请参见 :doc:`/cli/coordinator`。同样，协调器仍然可以通过 ``python3 -m lmcache.v1.mp_coordinator`` 作为模块启动。"
 
 #: ../../source/mp/coordinator.rst:32
 msgid "Configuration"
@@ -133,7 +127,8 @@ msgstr "``10``"
 
 #: ../../source/mp/coordinator.rst:56
 msgid "Seconds between health-check sweeps. ``0`` disables eviction."
-msgstr "健康检查扫描之间的秒数。``0`` 禁用逐出。"
+msgstr ""
+"健康检查扫描之间的秒数。\\ ``0`` 禁用逐出。"
 
 #: ../../source/mp/coordinator.rst:57
 msgid "``LMCACHE_MP_COORDINATOR_EVICTION_CHECK_INTERVAL``"
@@ -145,7 +140,8 @@ msgstr "``5``"
 
 #: ../../source/mp/coordinator.rst:59
 msgid "Seconds between L2 eviction sweeps. ``0`` disables the loop."
-msgstr "L2 逐出清扫之间的秒数。``0`` 禁用循环。"
+msgstr ""
+"L2 逐出清扫之间的秒数。\\ ``0`` 禁用循环。"
 
 #: ../../source/mp/coordinator.rst:60
 msgid "``LMCACHE_MP_COORDINATOR_EVICTION_RATIO``"
@@ -187,10 +183,7 @@ msgid ""
 "environment variable (handy for the Kubernetes downward API); an explicit"
 " flag wins over the env var."
 msgstr ""
-"当您通过 ``--coordinator-url`` 为 MP 服务器（``lmcache "
-"server``）指定协调器地址时，该服务器便会加入协调器。它在启动时注册、运行时持续发送心跳、关闭时注销——所有操作均在服务器自身的事件循环中完成。此功能为可选项：若未设置 "
-"URL，服务器的行为与之前完全相同。每个标志均可回退到对应的 ``LMCACHE_COORDINATOR_*`` 环境变量（在使用 "
-"Kubernetes Downward API 时非常便捷）；显式标志优先于环境变量。"
+"当您通过 ``--coordinator-url`` 为 MP 服务器（\\ ``lmcache server``\\ ）指定协调器地址时，该服务器便会加入协调器。它在启动时注册、运行时持续发送心跳、关闭时注销——所有操作均在服务器自身的事件循环中完成。此功能为可选项：若未设置 URL，服务器的行为与之前完全相同。每个标志均可回退到对应的 ``LMCACHE_COORDINATOR_*`` 环境变量（在使用 Kubernetes Downward API 时非常便捷）；显式标志优先于环境变量。"
 
 #: ../../source/mp/coordinator.rst:82
 msgid "Flag (on the MP server)"
@@ -212,7 +205,8 @@ msgstr "``LMCACHE_COORDINATOR_URL``"
 msgid ""
 "Coordinator base URL, e.g. ``http://coordinator:9300``. Enables "
 "registration when set."
-msgstr "协调器基础 URL，例如 ``http://coordinator:9300``。设置后启用注册。"
+msgstr ""
+"协调器基础 URL，例如 ``http://coordinator:9300``\\ 。设置后启用注册。"
 
 #: ../../source/mp/coordinator.rst:89
 msgid "``--coordinator-advertise-ip``"
@@ -240,7 +234,8 @@ msgstr "``LMCACHE_COORDINATOR_HEARTBEAT_INTERVAL``"
 msgid ""
 "Seconds between heartbeats (must be ``> 0``, default ``5``). Keep it well"
 " below the coordinator's ``INSTANCE_TIMEOUT``."
-msgstr "心跳之间的秒数（必须为 ``> 0``，默认值为 ``5``）。保持远低于协调器的 ``INSTANCE_TIMEOUT``。"
+msgstr ""
+"心跳之间的秒数（必须为 ``> 0``\\ ，默认值为 ``5``\\ ）。保持远低于协调器的 ``INSTANCE_TIMEOUT``\\ 。"
 
 #: ../../source/mp/coordinator.rst:97
 msgid "``--coordinator-l2-event-reporting``"
@@ -266,14 +261,16 @@ msgstr "``LMCACHE_COORDINATOR_L2_EVENT_FLUSH_INTERVAL``"
 
 #: ../../source/mp/coordinator.rst:103
 msgid "Seconds between L2 event batch flushes (must be ``> 0``, default ``1``)."
-msgstr "L2 事件批量刷新之间的秒数（必须为 ``> 0``，默认值为 ``1``）。"
+msgstr ""
+"L2 事件批量刷新之间的秒数（必须为 ``> 0``\\ ，默认值为 ``1``\\ ）。"
 
 #: ../../source/mp/coordinator.rst:105
 msgid ""
 "The server registers under its stable identity (``--instance-id`` / OTel "
 "``service.instance.id``); if the flag is not passed, the server mints a "
 "random UUID v4 at startup and registers under that."
-msgstr "服务器在其稳定身份下注册（``--instance-id`` / OTel ``service.instance.id``）；如果未传递该标志，服务器将在启动时生成一个随机的 UUID v4 并在该 UUID 下注册。"
+msgstr ""
+"服务器在其稳定身份下注册（\\ ``--instance-id`` / OTel ``service.instance.id``\\ ）；如果未传递该标志，服务器将在启动时生成一个随机的 UUID v4 并在该 UUID 下注册。"
 
 #: ../../source/mp/coordinator.rst:109
 msgid ""
@@ -365,7 +362,8 @@ msgstr "``/l2/quota/{cache_salt}``"
 #: ../../source/mp/coordinator.rst:197
 #, python-brace-format
 msgid "Create or update a quota (body: ``{\"limit_gb\": N}``)."
-msgstr "创建或更新配额（请求体：``{\\\"limit_gb\\\": N}``）。"
+msgstr ""
+"创建或更新配额（请求体：\\ ``{\\\"limit_gb\\\": N}``\\ ）。"
 
 #: ../../source/mp/coordinator.rst:198
 msgid "``DELETE``"

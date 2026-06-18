@@ -126,8 +126,7 @@ msgid ""
 "The default model is ``Qwen/Qwen3-14B``.  For gated models (e.g., Llama),"
 " create a Secret with your Hugging Face token:"
 msgstr ""
-"默认模型是 ``Qwen/Qwen3-14B``。对于受限模型（例如 Llama），请使用您的 Hugging Face Token 创建一个 "
-"Secret："
+"默认模型是 ``Qwen/Qwen3-14B``\\ 。对于受限模型（例如 Llama），请使用您的 Hugging Face Token 创建一个 Secret："
 
 #: ../../source/mp/deployment.rst:105
 msgid "Then add the ``HF_TOKEN`` environment variable to the vLLM container spec."
@@ -246,14 +245,16 @@ msgstr "**逐出调优:**"
 msgid ""
 "``--eviction-trigger-watermark 0.8`` (default) triggers eviction when L1 "
 "is 80% full."
-msgstr "``--eviction-trigger-watermark 0.8``（默认值）在 L1 达到 80% 满时触发逐出。"
+msgstr ""
+"``--eviction-trigger-watermark 0.8``\\ （默认值）在 L1 达到 80% 满时触发逐出。"
 
 #: ../../source/mp/deployment.rst:213
 #, python-format
 msgid ""
 "``--eviction-ratio 0.2`` (default) frees 20% of allocated memory per "
 "eviction cycle."
-msgstr "``--eviction-ratio 0.2``（默认值）在每个逐出周期释放 20% 的分配内存。"
+msgstr ""
+"``--eviction-ratio 0.2``\\ （默认值）在每个逐出周期释放 20% 的分配内存。"
 
 #: ../../source/mp/deployment.rst:215
 msgid ""
@@ -267,8 +268,7 @@ msgid ""
 "verify L2 store/load activity.  Switch to ``INFO`` (default) for "
 "production to reduce log volume."
 msgstr ""
-"**日志记录:** 在初始设置期间使用 ``LMCACHE_LOG_LEVEL=DEBUG`` 来验证 L2 存储/加载活动。 在生产中切换到 "
-"``INFO``（默认）以减少日志量。"
+"**日志记录:** 在初始设置期间使用 ``LMCACHE_LOG_LEVEL=DEBUG`` 来验证 L2 存储/加载活动。 在生产中切换到 ``INFO``\\ （默认）以减少日志量。"
 
 #: ../../source/mp/deployment.rst:223
 msgid "Transfer Mode (``--supported-transfer-mode``, ``--shm-name``)"
@@ -309,7 +309,8 @@ msgid ""
 "LMCache by default creates a shared-memory (SHM) pool for KV transfers "
 "between the server and vLLM workers.  The ``--shm-name`` option lets you "
 "control this behavior:"
-msgstr "当加载引擎驱动路径（``auto`` 或 ``engine_driven``）时，LMCache 默认会为服务器与 vLLM 工作节点之间的 KV 传输创建一个共享内存（SHM）池。``--shm-name`` 选项让您可以控制此行为："
+msgstr ""
+"当加载引擎驱动路径（\\ ``auto`` 或 ``engine_driven``\\ ）时，LMCache 默认会为服务器与 vLLM 工作节点之间的 KV 传输创建一个共享内存（SHM）池。\\ ``--shm-name`` 选项让您可以控制此行为："
 
 #: ../../source/mp/deployment.rst:249
 msgid "Value"
@@ -342,7 +343,8 @@ msgstr ""
 
 #: ../../source/mp/deployment.rst:257
 msgid "``\"my_pool\"`` (any non-empty name)"
-msgstr "``\"my_pool\"``（任何非空名称）"
+msgstr ""
+"``\"my_pool\"``\\ （任何非空名称）"
 
 #: ../../source/mp/deployment.rst:258
 msgid ""

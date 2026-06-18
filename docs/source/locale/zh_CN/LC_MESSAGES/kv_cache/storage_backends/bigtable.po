@@ -51,26 +51,30 @@ msgid ""
 "**Chunk Size Optimization**: Set LMCache's logical ``chunk_size`` to "
 "**256 tokens**. This groups payloads to minimize sequential Point-Read "
 "gRPC calls, preventing Python event-loop (GIL) bottlenecks."
-msgstr "**块大小优化**：将 LMCache 的逻辑 ``chunk_size`` 设置为 **256 个 token**。这将对有效负载进行分组，以最小化顺序 Point-Read gRPC 调用，防止 Python 事件循环 (GIL) 瓶颈。"
+msgstr ""
+"**块大小优化**\\ ：将 LMCache 的逻辑 ``chunk_size`` 设置为 **256 个 token**\\ 。这将对有效负载进行分组，以最小化顺序 Point-Read gRPC 调用，防止 Python 事件循环 (GIL) 瓶颈。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:17
 msgid ""
 "**MutateRow Limit**: Enforces a strict **90.0 MB request limit** for a "
 "single ``MutateRow`` gRPC request."
-msgstr "**MutateRow 限制**：对单个 ``MutateRow`` gRPC 请求强制执行严格的 **90.0 MB 请求限制**。"
+msgstr ""
+"**MutateRow 限制**\\ ：对单个 ``MutateRow`` gRPC 请求强制执行严格的 **90.0 MB 请求限制**\\ 。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:18
 msgid ""
 "**Storage Tier Row Limits**: The **SSD Tier** ceiling is **100 MiB per "
 "cell/row**. The **Enterprise Plus In-Memory Tier** is limited to **1.0 "
 "MiB per row**."
-msgstr "**存储层行限制**：**SSD 层**的上限为**每个单元/行 100 MiB**。**企业增强内存层**的限制为**每行 1.0 MiB**。"
+msgstr ""
+"**存储层行限制**\\ ：\\ **SSD 层**\\ 的上限为\\ **每个单元/行 100 MiB**\\ 。\\ **企业增强内存层**\\ 的限制为\\ **每行 1.0 MiB**\\ 。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:19
 msgid ""
 "**TTLCache Shielding**: Embeds a thread-safe ``TTLCache`` (10-second TTL "
 "default) to shield Bigtable nodes from concurrent prefetch lookup spikes."
-msgstr "**TTLCache 保护**: 嵌入一个线程安全的 ``TTLCache``（默认 TTL 为 10 秒），以保护 Bigtable 节点免受并发预取查找峰值的影响。"
+msgstr ""
+"**TTLCache 保护**: 嵌入一个线程安全的 ``TTLCache``\\ （默认 TTL 为 10 秒），以保护 Bigtable 节点免受并发预取查找峰值的影响。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:22
 msgid "Infrastructure Setup"
@@ -171,7 +175,8 @@ msgid ""
 "Alternatively, you can set the environment variables ``BT_PROJECT_ID``, "
 "``BT_INSTANCE_ID``, and ``BT_TABLE_NAME`` instead of using "
 "``extra_config``."
-msgstr "或者，您可以设置环境变量 ``BT_PROJECT_ID``、``BT_INSTANCE_ID`` 和 ``BT_TABLE_NAME``，而不是使用 ``extra_config``。"
+msgstr ""
+"或者，您可以设置环境变量 ``BT_PROJECT_ID``\\ 、\\ ``BT_INSTANCE_ID`` 和 ``BT_TABLE_NAME``\\ ，而不是使用 ``extra_config``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:82
 msgid ""
@@ -243,13 +248,15 @@ msgid ""
 "omitted or ``null``, the connector natively invokes ADC. Compatible with "
 "local development via ``gcloud auth application-default login`` or GKE "
 "Workload Identity Federation."
-msgstr "**应用默认凭据 (ADC)**：如果 ``credentials_path`` 被省略或为 ``null``，连接器将原生调用 ADC。支持通过 ``gcloud auth application-default login`` 进行本地开发或 GKE 工作负载身份联合。"
+msgstr ""
+"**应用默认凭据 (ADC)**\\ ：如果 ``credentials_path`` 被省略或为 ``null``\\ ，连接器将原生调用 ADC。支持通过 ``gcloud auth application-default login`` 进行本地开发或 GKE 工作负载身份联合。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:118
 msgid ""
 "**Explicit Keys**: Pass the absolute filesystem path containing a mounted"
 " GCP Service Account JSON secret to ``credentials_path``."
-msgstr "**显式密钥**：将包含挂载的 GCP 服务账户 JSON 密钥的绝对文件系统路径传递给 ``credentials_path``。"
+msgstr ""
+"**显式密钥**\\ ：将包含挂载的 GCP 服务账户 JSON 密钥的绝对文件系统路径传递给 ``credentials_path``\\ 。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:121
 msgid "Verification"
@@ -281,7 +288,8 @@ msgid ""
 " limit and is skipped (e.g. ``Bigtable chunk size ... MB exceeds "
 "threshold ... MB. Skipping write to prevent hard failures``), choose one "
 "of the following approaches:"
-msgstr "如果您在日志中看到警告，指示块大小超过限制并被跳过（例如 ``Bigtable chunk size ... MB exceeds threshold ... MB. Skipping write to prevent hard failures``），请选择以下方法之一："
+msgstr ""
+"如果您在日志中看到警告，指示块大小超过限制并被跳过（例如 ``Bigtable chunk size ... MB exceeds threshold ... MB. Skipping write to prevent hard failures``\\ ），请选择以下方法之一："
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:140
 msgid ""
@@ -290,7 +298,8 @@ msgid ""
 "chunk) and model shape. You can reduce ``chunk_size`` (e.g., from ``256``"
 " to ``128``) in your configuration file to shrink individual chunk "
 "payloads."
-msgstr "**减少 LMCache 块大小（推荐）**：序列化块大小取决于 LMCache 的逻辑 ``chunk_size``（每块的令牌数量）和模型形状。您可以在配置文件中将 ``chunk_size``（例如，从 ``256`` 减少到 ``128``）来缩小单个块的有效负载。"
+msgstr ""
+"**减少 LMCache 块大小（推荐）**\\ ：序列化块大小取决于 LMCache 的逻辑 ``chunk_size``\\ （每块的令牌数量）和模型形状。您可以在配置文件中将 ``chunk_size``\\ （例如，从 ``256`` 减少到 ``128``\\ ）来缩小单个块的有效负载。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:143
 msgid ""
@@ -299,7 +308,8 @@ msgid ""
 "the maximum allowed write threshold in the configuration up to ``99.0`` "
 "MB using the ``bigtable_max_chunk_size_mb`` config key (or the "
 "``BT_MAX_CHUNK_SIZE_MB`` environment variable)."
-msgstr "**增加最大块大小**：如果您的 Bigtable 实例使用 SSD 存储层（支持每个单元/行最多 100 MB），您可以在配置中将允许的最大写入阈值提高到 ``99.0`` MB，使用 ``bigtable_max_chunk_size_mb`` 配置键（或 ``BT_MAX_CHUNK_SIZE_MB`` 环境变量）。"
+msgstr ""
+"**增加最大块大小**\\ ：如果您的 Bigtable 实例使用 SSD 存储层（支持每个单元/行最多 100 MB），您可以在配置中将允许的最大写入阈值提高到 ``99.0`` MB，使用 ``bigtable_max_chunk_size_mb`` 配置键（或 ``BT_MAX_CHUNK_SIZE_MB`` 环境变量）。"
 
 #: ../../source/kv_cache/storage_backends/bigtable.rst:147
 msgid ""

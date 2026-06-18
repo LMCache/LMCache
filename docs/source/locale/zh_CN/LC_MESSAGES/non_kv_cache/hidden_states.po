@@ -25,5 +25,6 @@ msgstr "隐藏状态"
 
 #: ../../source/non_kv_cache/hidden_states.rst:6
 msgid "Hidden-state caching is **in progress**."
-msgstr "隐藏状态缓存功能 **正在开发中**。"
+msgstr ""
+"隐藏状态缓存功能 **正在开发中**\\ 。"
 

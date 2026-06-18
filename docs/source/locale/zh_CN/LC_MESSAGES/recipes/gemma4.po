@@ -50,10 +50,7 @@ msgid ""
 "language-models>`_ (architectures ``Gemma4ForConditionalGeneration`` for "
 "31B/E4B and ``Gemma4UnifiedForConditionalGeneration`` for 12B)."
 msgstr ""
-"**引擎文档:** `vLLM 支持模型中的 Gemma 4 "
-"<https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-"
-"language-models>`_（架构 ``Gemma4ForConditionalGeneration`` 适用于 31B/E4B，"
-"``Gemma4UnifiedForConditionalGeneration`` 适用于 12B）。"
+"**引擎文档:** `vLLM 支持模型中的 Gemma 4 <https://docs.vllm.ai/en/latest/models/supported_models.html#multimodal-language-models>`_（架构 ``Gemma4ForConditionalGeneration`` 适用于 31B/E4B，\\ ``Gemma4UnifiedForConditionalGeneration`` 适用于 12B）。"
 
 #: ../../source/recipes/gemma4.rst:24
 msgid "**Status:** Validated with LMCache."
@@ -149,9 +146,7 @@ msgid ""
 "retrieves each KV cache group in its own block size; no extra flags are "
 "required."
 msgstr ""
-"**混合 KV Cache，具有异构块大小。** Gemma 4 交错了滑动窗口和全注意力层，两者的头维度不同（滑动窗口层为 256，全注意力层为 512），因此 "
-"vLLM 通过为这两种注意力类型分配不同的 ``block_size``\\\\ s（例如 ``google/gemma-4-E4B-"
-"it``：滑动窗口层为 32，全注意力层为 16）来统一物理页面大小。LMCache 按各自的块大小存储和检索每个 KV Cache 组，无需额外配置。"
+"**混合 KV Cache，具有异构块大小。** Gemma 4 交错了 sliding window 和 full attention 层，两者的头维度不同（sliding window 层为 256，full attention 层为 512），因此 vLLM 通过为这两种注意力类型分配不同的 ``block_size``\\\\ s（例如 ``google/gemma-4-E4B-it``\\ ：sliding window 层为 32，full attention 层为 16）来统一物理页面大小。LMCache 按各自的块大小存储和检索每个 KV Cache 组，无需额外配置。"
 
 #: ../../source/recipes/gemma4.rst:98
 msgid ""

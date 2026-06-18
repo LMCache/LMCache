@@ -27,11 +27,12 @@ msgstr "P2P KV 缓存共享"
 msgid ""
 "The multiprocess (MP) implementation of peer-to-peer (P2P) KV cache "
 "sharing is **coming soon**."
-msgstr "点对点（P2P）KV 缓存共享的多进程（MP）实现 **即将推出**。"
+msgstr ""
+"点对点（P2P）KV 缓存共享的多进程（MP）实现 **即将推出**\\ 。"
 
 #: ../../source/mp/p2p.rst:11
 msgid ""
 "Until it lands, the in-process implementation is documented in the "
 ":doc:`Legacy section <../legacy/index>`: :doc:`../kv_cache/p2p_sharing`."
-msgstr "在该功能落地之前，进程内实现的文档位于 :doc:`遗留部分 <../legacy/index>`：:doc:`../kv_cache/p2p_sharing`。"
+msgstr "在该功能落地之前，进程内实现的文档位于 :doc:`旧版部分 <../legacy/index>`：:doc:`../kv_cache/p2p_sharing`。"
 

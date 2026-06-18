@@ -75,19 +75,23 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/qwen3.rst:34
 msgid "**Qwen3-235B-A22B** (4 GPUs, expert parallel):"
-msgstr "**Qwen3-235B-A22B**（4 个 GPU，专家并行）："
+msgstr ""
+"**Qwen3-235B-A22B**\\ （4 个 GPU，专家并行）："
 
 #: ../../source/recipes/qwen3.rst:49
 msgid "**Qwen3-30B-A3B** (1 GPU):"
-msgstr "**Qwen3-30B-A3B**（1 个 GPU）："
+msgstr ""
+"**Qwen3-30B-A3B**\\ （1 个 GPU）："
 
 #: ../../source/recipes/qwen3.rst:62
 msgid "**Qwen3-Coder-480B-A35B-Instruct-FP8** (8 GPUs, expert parallel):"
-msgstr "**Qwen3-Coder-480B-A35B-Instruct-FP8**（8 个 GPU，专家并行）："
+msgstr ""
+"**Qwen3-Coder-480B-A35B-Instruct-FP8**\\ （8 个 GPU，专家并行）："
 
 #: ../../source/recipes/qwen3.rst:76
 msgid "**Qwen3-Coder-30B-A3B-Instruct** (1 GPU):"
-msgstr "**Qwen3-Coder-30B-A3B-Instruct**（1 个 GPU）："
+msgstr ""
+"**Qwen3-Coder-30B-A3B-Instruct**\\ （1 个 GPU）："
 
 #: ../../source/recipes/qwen3.rst:88
 msgid ""
