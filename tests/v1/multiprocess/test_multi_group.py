@@ -271,7 +271,7 @@ def test_engine_driven_multi_group_store_retrieve():
 
     # For group 0: lmcache_tokens_per_chunk = blocks_in_chunk * block_size
     # For group 1: tokens_per_block=784, so blocks_in_chunk = lmcache_tokens_per_chunk // 784
-    lmcache_tokens_per_chunk = 256  # e.g. 16 blocks * 16 tokens
+    lmcache_tokens_per_chunk = 784  # Must be >= max(tokens_per_block) across all groups
 
     # Gather all groups to CPU
     group_chunks = gather_paged_kv_multi_group_to_cpu(
