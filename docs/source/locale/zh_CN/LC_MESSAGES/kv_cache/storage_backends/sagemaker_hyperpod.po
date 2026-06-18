@@ -123,7 +123,8 @@ msgid ""
 "**sagemaker_hyperpod_use_https**: Enable HTTPS instead of HTTP (default: "
 "False). **Note**: Ignored if ``remote_url`` already contains ``http://`` "
 "or ``https://`` protocol."
-msgstr "**sagemaker_hyperpod_use_https**: 启用 HTTPS 而不是 HTTP（默认: False）。**注意**: 如果 ``remote_url`` 已经包含 ``http://`` 或 ``https://`` 协议，则忽略此设置。"
+msgstr ""
+"**sagemaker_hyperpod_use_https**: 启用 HTTPS 而不是 HTTP（默认: False）。\\ **注意**: 如果 ``remote_url`` 已经包含 ``http://`` 或 ``https://`` 协议，则忽略此设置。"
 
 #: ../../source/kv_cache/storage_backends/sagemaker_hyperpod.rst:38
 msgid ""

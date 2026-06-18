@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/cli/trace.rst:2
 msgid "lmcache trace"
-msgstr "lmcache 跟踪"
+msgstr "lmcache trace"
 
 #: ../../source/cli/trace.rst:4
 msgid ""
@@ -35,7 +35,8 @@ msgid ""
 "trace codecs, ``TraceReader``). It is not available in the lightweight "
 "``lmcache-cli`` install and exits with status ``2`` if those modules are "
 "missing."
-msgstr "``lmcache trace`` 需要完整的 ``lmcache`` 包（StorageManager、trace 编解码器、``TraceReader``）。在轻量级的 ``lmcache-cli`` 安装中不可用，如果缺少这些模块，则会以状态 ``2`` 退出。"
+msgstr ""
+"``lmcache trace`` 需要完整的 ``lmcache`` 包（StorageManager、trace 编解码器、\\ ``TraceReader``\\ ）。在轻量级的 ``lmcache-cli`` 安装中不可用，如果缺少这些模块，则会以状态 ``2`` 退出。"
 
 #: ../../source/cli/trace.rst:18
 msgid ""
@@ -58,7 +59,8 @@ msgstr "打印跟踪文件的一屏摘要：头部元数据加上每个 qualname
 msgid ""
 "The only argument is the positional ``FILE`` (path to a ``.lct`` trace "
 "file)."
-msgstr "唯一的参数是位置参数 ``FILE``（指向 ``.lct`` 跟踪文件的路径）。"
+msgstr ""
+"唯一的参数是位置参数 ``FILE``\\ （指向 ``.lct`` 跟踪文件的路径）。"
 
 #: ../../source/cli/trace.rst:50
 msgid "replay"
@@ -77,7 +79,8 @@ msgid ""
 "server --help`` for the full list. The replay-side config may differ from"
 " the config recorded in the trace, which can legitimately cause retrieve "
 "misses."
-msgstr "``replay`` 接受标准的存储管理器配置标志（``--l1-size-gb``, ``--eviction-policy``, ``--l2-...``）；有关完整列表，请参见 ``lmcache server --help``。重放侧的配置可能与记录在追踪中的配置不同，这可能会导致合法的查找未命中。"
+msgstr ""
+"``replay`` 接受标准的存储管理器配置标志（\\ ``--l1-size-gb``, ``--eviction-policy``, ``--l2-...``\\ ）；有关完整列表，请参见 ``lmcache server --help``\\ 。重放侧的配置可能与记录在追踪中的配置不同，这可能会导致合法的查找未命中。"
 
 #: ../../source/cli/trace.rst:68
 msgid ""
@@ -125,7 +128,8 @@ msgstr "``--jsonl-out PATH``"
 msgid ""
 "Write one JSON object per replayed record to ``PATH`` (qualname, "
 "latency_ms, failed)."
-msgstr "将每个重放记录写入一个 JSON 对象到 ``PATH``（qualname，延迟_ms，失败）。"
+msgstr ""
+"将每个重放记录写入一个 JSON 对象到 ``PATH``\\ （qualname，延迟_ms，失败）。"
 
 #: ../../source/cli/trace.rst:90
 msgid "``--output-dir DIR``"
@@ -166,5 +170,6 @@ msgid ""
 "The terminal summary reports overall replay stats (records replayed / "
 "skipped / failed, duration, config-digest match) and per-op latency "
 "percentiles. ``replay`` exits with status ``1`` if any record failed."
-msgstr "终端摘要报告整体重放统计信息（重放/跳过/失败的记录、持续时间、配置摘要匹配）和每个操作的延迟百分位数。如果任何记录失败，``replay`` 将以状态 ``1`` 退出。"
+msgstr ""
+"终端摘要报告整体重放统计信息（重放/跳过/失败的记录、持续时间、配置摘要匹配）和每个操作的延迟百分位数。如果任何记录失败，\\ ``replay`` 将以状态 ``1`` 退出。"
 

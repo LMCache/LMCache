@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-15 11:17+0000\n"
+"POT-Creation-Date: 2026-06-17 02:35+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -59,7 +59,7 @@ msgstr ""
 
 #: ../../source/recipes/phi3.rst:22
 msgid "**Status:** Validated with LMCache."
-msgstr "**状态:** 已通过 LMCache 验证。"
+msgstr "**状态：** 已通过 LMCache 验证。"
 
 #: ../../source/recipes/phi3.rst:24
 msgid "Start the LMCache MP server:"
@@ -67,7 +67,7 @@ msgstr "启动 LMCache MP 服务器："
 
 #: ../../source/recipes/phi3.rst:32
 msgid "Start vLLM with the LMCache MP connector:"
-msgstr "启动 vLLM 与 LMCache MP 连接器："
+msgstr "使用 LMCache MP 连接器启动 vLLM："
 
 #: ../../source/recipes/phi3.rst:34
 msgid "**Phi-4-mini-instruct** (1 GPU):"
@@ -81,8 +81,8 @@ msgstr "**Phi-3-medium-128k-instruct** (1 GPU):"
 msgid ""
 "Adjust ``--tensor-parallel-size`` to match your hardware. For the generic"
 " LMCache + vLLM wiring (ports, remote hosts), see "
-":doc:`../mp/quickstart`."
-msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../mp/quickstart`。"
+":doc:`../getting_started/quickstart`."
+msgstr "调整 ``--tensor-parallel-size`` 以匹配您的硬件。有关通用 LMCache + vLLM 连接（端口、远程主机），请参见 :doc:`../getting_started/quickstart`。"
 
 #: ../../source/recipes/phi3.rst
 msgid "SGLang"
@@ -97,8 +97,10 @@ msgid "TRT-LLM"
 msgstr "TRT-LLM"
 
 #: ../../source/recipes/phi3.rst:68
-msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
-msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
+msgid ""
+"**Status:** Supported. See :doc:`../getting_started/quickstart` for TRT-"
+"LLM + LMCache setup."
+msgstr "**状态：** 支持。请参见 :doc:`../getting_started/quickstart` 了解 TRT-LLM + LMCache 的设置方法。"
 
 #: ../../source/recipes/phi3.rst:71
 msgid "CacheBlend support"
@@ -135,4 +137,7 @@ msgstr "注意事项"
 #: ../../source/recipes/phi3.rst:90
 msgid "None known."
 msgstr "没有已知的问题。"
+
+#~ msgid "**Status:** Not supported. LMCache TRT-LLM integration is in progress."
+#~ msgstr "**状态：** 不支持。LMCache TRT-LLM 集成正在进行中。"
 

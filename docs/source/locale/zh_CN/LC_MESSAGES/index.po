@@ -8,80 +8,16 @@ msgid ""
 msgstr ""
 "Project-Id-Version: LMCache \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-08 10:45+0000\n"
+"POT-Creation-Date: 2026-06-17 16:06-0700\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
-"Content-Type: text/plain; charset=utf-8\n"
+"Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.18.0\n"
-
-#: ../../source/index.rst:63
-msgid "Welcome to LMCache"
-msgstr "欢迎使用 LMCache"
-
-#: ../../source/index.rst:69
-msgid "Getting Started"
-msgstr "入门指南"
-
-#: ../../source/index.rst:85
-msgid "Recipes"
-msgstr "使用指南"
-
-#: ../../source/index.rst:93
-msgid "KV Cache offloading and sharing"
-msgstr "KV Cache 卸载和共享"
-
-#: ../../source/index.rst:104
-msgid "Non-KV caching"
-msgstr "非 KV 缓存"
-
-#: ../../source/index.rst:112
-msgid "Multiprocess Mode"
-msgstr "多进程模式"
-
-#: ../../source/index.rst:120
-msgid "Disaggregated prefill"
-msgstr "分离式 Prefill"
-
-#: ../../source/index.rst:129
-msgid "KV Cache management"
-msgstr "KV Cache 管理"
-
-#: ../../source/index.rst:137
-msgid "KV Cache Optimizations"
-msgstr "KV Cache 优化"
-
-#: ../../source/index.rst:147
-msgid "Use LMCache in production"
-msgstr "在生产中使用 LMCache"
-
-#: ../../source/index.rst:159
-msgid "CLI"
-msgstr "命令行界面"
-
-#: ../../source/index.rst:167
-msgid "Internal API Server"
-msgstr "内部 API 服务器"
-
-#: ../../source/index.rst:175
-msgid "Controller WebUI"
-msgstr "控制器 WebUI"
-
-#: ../../source/index.rst:183
-msgid "Developer Guide"
-msgstr "开发者指南"
-
-#: ../../source/index.rst:196
-msgid "API Reference"
-msgstr "API 参考"
-
-#: ../../source/index.rst:207
-msgid "Community"
-msgstr "社区"
 
 #: ../../source/index.rst:10
 msgid "Welcome to LMCache!"
@@ -91,64 +27,141 @@ msgstr "欢迎使用 LMCache！"
 msgid "LMCache"
 msgstr "LMCache"
 
-#: ../../source/index.rst:25
-msgid ""
-"We are currently in the process of upgrading our documentation to provide"
-" better guidance and examples. Some sections may be under construction. "
-"Thank you for your patience!"
-msgstr "我们目前正在升级我们的文档，以提供更好的指导和示例。某些部分可能正在建设中。感谢您的耐心等待！"
+#: ../../source/index.rst:20
+msgid "**Supercharge Your LLM with the Fastest KV Cache Layer.**"
+msgstr "**极速 KV Cache 层，让大模型告别重复计算，全面提升推理效率。**"
 
-#: ../../source/index.rst:46
+#: ../../source/index.rst:23
+msgid ""
+"We are currently in the process of upgrading our documentation to provide "
+"better guidance and examples. Some sections may be under construction. Thank "
+"you for your patience!"
+msgstr ""
+"我们目前正在升级文档，以提供更好的指导和示例。某些章节可能仍在建设中，感谢您"
+"的耐心等待！"
+
+#: ../../source/index.rst:36
+msgid ""
+"LMCache lets LLMs prefill each text only once. By storing the KV caches of "
+"all reusable texts, LMCache can reuse the KV caches of any reused text (not "
+"necessarily prefix) in any serving engine instance. It thus reduces prefill "
+"delay, i.e., time to first token (TTFT), as well as saves the precious GPU "
+"cycles and memory."
+msgstr ""
+"LMCache 让 LLM 对每段文本只需预填充一次。通过存储所有可复用文本的 KV 缓存，"
+"LMCache 能在任意推理引擎实例中复用任意可复用文本（不必是前缀）的 KV 缓存。由此"
+"既降低了预填充延迟（即首 token 时间，TTFT），又节省了宝贵的 GPU 算力与显存。"
+
+#: ../../source/index.rst:38
+msgid ""
+"By combining LMCache with vLLM, LMCache achieves 3-10x delay savings and GPU "
+"cycle reduction in many LLM use cases, including multi-round QA and RAG."
+msgstr ""
+"将 LMCache 与 vLLM 结合后，在多轮问答、RAG 等众多 LLM 应用场景中，LMCache 可实现"
+" 3-10 倍的延迟节省并降低 GPU 算力消耗。"
+
+#: ../../source/index.rst:41
 msgid "For more information, check out the following:"
 msgstr "有关更多信息，请查看以下内容："
 
-#: ../../source/index.rst:48
+#: ../../source/index.rst:43
 msgid "`LMCache blogs <https://lmcache.github.io>`_"
 msgstr "`LMCache 博客 <https://lmcache.github.io>`_"
 
-#: ../../source/index.rst:49
+#: ../../source/index.rst:44
 msgid ""
-"`Join LMCache slack workspace "
-"<https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-"
-"3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
-msgstr "`加入 LMCache Slack 工作区 <https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
+"`Join LMCache slack workspace <https://join.slack.com/t/lmcacheworkspace/"
+"shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
+msgstr ""
+"`加入我们的 Slack 社区 <https://join.slack.com/t/lmcacheworkspace/"
+"shared_invite/zt-3zxjao8h0-lRfBfnLqbALOtLsWn2ITxA>`_"
 
-#: ../../source/index.rst:50
+#: ../../source/index.rst:45
 msgid "Our papers:"
 msgstr "我们的论文："
 
-#: ../../source/index.rst:52
+#: ../../source/index.rst:47
 msgid ""
-"`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
-"Model Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
+"`CacheGen: KV Cache Compression and Streaming for Fast Large Language Model "
+"Serving <https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 msgstr ""
-"`CacheGen: KV Cache 压缩与流式传输以快速服务大型语言模型 "
+"`CacheGen: KV Cache Compression and Streaming for Fast Large Language "
 "<https://dl.acm.org/doi/10.1145/3651890.3672274>`_"
 
-#: ../../source/index.rst:53
+#: ../../source/index.rst:48
 msgid ""
+"`CacheBlend: Fast Large Language Model Serving with Cached Knowledge Fusion "
+"<https://arxiv.org/abs/2405.16444>`_"
+msgstr ""
 "`CacheBlend: Fast Large Language Model Serving with Cached Knowledge "
-"Fusion <https://arxiv.org/abs/2405.16444>`_"
-msgstr "`CacheBlend: 基于缓存知识融合的快速大型语言模型服务 <https://arxiv.org/abs/2405.16444>`_"
+"<https://arxiv.org/abs/2405.16444>`_"
 
-#: ../../source/index.rst:54
+#: ../../source/index.rst:49
 msgid ""
-"`Do Large Language Models Need a Content Delivery Network? "
-"<https://arxiv.org/abs/2409.13761>`_"
-msgstr "`大型语言模型需要内容分发网络吗？ <https://arxiv.org/abs/2409.13761>`_"
+"`Do Large Language Models Need a Content Delivery Network? <https://"
+"arxiv.org/abs/2409.13761>`_"
+msgstr ""
+"`Do Large Language Models Need a Content Delivery Network? <https://"
+"arxiv.org/abs/2409.13761>`_"
 
-#: ../../source/index.rst:56 ../../source/index.rst:83
-#: ../../source/index.rst:91 ../../source/index.rst:102
-#: ../../source/index.rst:110 ../../source/index.rst:118
-#: ../../source/index.rst:127 ../../source/index.rst:135
-#: ../../source/index.rst:145 ../../source/index.rst:157
-#: ../../source/index.rst:165 ../../source/index.rst:173
-#: ../../source/index.rst:181 ../../source/index.rst:194
-#: ../../source/index.rst:205 ../../source/index.rst:214
+#: ../../source/index.rst:51 ../../source/index.rst:63
+#: ../../source/index.rst:70 ../../source/index.rst:77
+#: ../../source/index.rst:84 ../../source/index.rst:91
+#: ../../source/index.rst:98 ../../source/index.rst:105
+#: ../../source/index.rst:112 ../../source/index.rst:119
+#: ../../source/index.rst:126 ../../source/index.rst:133
+#: ../../source/index.rst:140
 msgid ":raw-html:`<br />`"
 msgstr ":raw-html:`<br />`"
 
-#: ../../source/index.rst:60
+#: ../../source/index.rst:55
 msgid "Documentation"
 msgstr "文档"
 
+#~ msgid "Welcome to LMCache"
+#~ msgstr "欢迎使用 LMCache"
+
+#~ msgid "Getting Started"
+#~ msgstr "入门指南"
+
+#~ msgid "Recipes"
+#~ msgstr "使用指南"
+
+#~ msgid "KV Cache offloading and sharing"
+#~ msgstr "KV Cache 卸载和共享"
+
+#~ msgid "Non-KV caching"
+#~ msgstr "非 KV 缓存"
+
+#~ msgid "Multiprocess Mode"
+#~ msgstr "多进程模式"
+
+#~ msgid "Disaggregated prefill"
+#~ msgstr "分离式 Prefill"
+
+#~ msgid "KV Cache management"
+#~ msgstr "KV Cache 管理"
+
+#~ msgid "KV Cache Optimizations"
+#~ msgstr "KV Cache 优化"
+
+#~ msgid "Use LMCache in production"
+#~ msgstr "在生产中使用 LMCache"
+
+#~ msgid "CLI"
+#~ msgstr "命令行界面"
+
+#~ msgid "Internal API Server"
+#~ msgstr "内部 API 服务器"
+
+#~ msgid "Controller WebUI"
+#~ msgstr "控制器 WebUI"
+
+#~ msgid "Developer Guide"
+#~ msgstr "开发者指南"
+
+#~ msgid "API Reference"
+#~ msgstr "API 参考"
+
+#~ msgid "Community"
+#~ msgstr "社区"

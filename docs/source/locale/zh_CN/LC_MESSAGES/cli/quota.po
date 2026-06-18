@@ -21,7 +21,7 @@ msgstr ""
 
 #: ../../source/cli/quota.rst:2
 msgid "lmcache quota"
-msgstr "lmcache 配额"
+msgstr "lmcache quota"
 
 #: ../../source/cli/quota.rst:4
 msgid ""
@@ -77,7 +77,8 @@ msgstr "是"
 msgid ""
 "The ``cache_salt`` identifier. Use ``_default`` for anonymous (un-salted)"
 " traffic."
-msgstr "``cache_salt`` 标识符。对于匿名（未加盐）流量，请使用 ``_default``。"
+msgstr ""
+"``cache_salt`` 标识符。对于匿名（未加盐）流量，请使用 ``_default``\\ 。"
 
 #: ../../source/cli/quota.rst:62
 msgid "``--limit-gb``"
@@ -106,7 +107,8 @@ msgstr "不"
 #: ../../source/cli/quota.rst:67 ../../source/cli/quota.rst:114
 #: ../../source/cli/quota.rst:189 ../../source/cli/quota.rst:236
 msgid "LMCache HTTP server URL (default: ``http://localhost:8080``)."
-msgstr "LMCache HTTP 服务器 URL（默认：``http://localhost:8080``）。"
+msgstr ""
+"LMCache HTTP 服务器 URL（默认：\\ ``http://localhost:8080``\\ ）。"
 
 #: ../../source/cli/quota.rst:68 ../../source/cli/quota.rst:115
 #: ../../source/cli/quota.rst:190 ../../source/cli/quota.rst:237
@@ -116,7 +118,8 @@ msgstr "``--format``"
 #: ../../source/cli/quota.rst:70 ../../source/cli/quota.rst:117
 #: ../../source/cli/quota.rst:192 ../../source/cli/quota.rst:239
 msgid "Output format: ``terminal`` (default) or ``json``."
-msgstr "输出格式：``terminal``（默认）或``json``。"
+msgstr ""
+"输出格式：\\ ``terminal``\\ （默认）或\\ ``json``\\ 。"
 
 #: ../../source/cli/quota.rst:71 ../../source/cli/quota.rst:118
 #: ../../source/cli/quota.rst:193 ../../source/cli/quota.rst:240
@@ -219,7 +222,8 @@ msgid ""
 "for anonymous / un-salted traffic. Since empty strings cannot appear in "
 "URL path parameters, the HTTP API (and this CLI) uses the sentinel "
 "``_default`` in its place."
-msgstr "LMCache 服务器使用空字符串 (``\"\"``) 作为匿名 / 未加盐流量的 ``cache_salt``。由于空字符串不能出现在 URL 路径参数中，HTTP API（以及此 CLI）使用哨兵 ``_default`` 代替。"
+msgstr ""
+"LMCache 服务器使用空字符串 (``\"\"``) 作为匿名 / 未加盐流量的 ``cache_salt``\\ 。由于空字符串不能出现在 URL 路径参数中，HTTP API（以及此 CLI）使用哨兵 ``_default`` 代替。"
 
 #: ../../source/cli/quota.rst:278
 msgid "Common Patterns"
