@@ -86,11 +86,9 @@ LMCacheKVCacheContext
 `connect()` constructs an `LMCacheKVCacheContext`, whose `__init__` runs a one-time handshake.
 All calls are blocking and bounded by `timeout`:
 
-1. `GET_WORLD_SIZE [model_name]` → `world_size`. **Raises `KVCacheSDKError` if 
-	`world_size != 1`.**
-2. `GET_CHUNK_SIZE []` → the server chunk size.
-3. `GET_SHM_POOL_INFO []` → `{shm_name, pool_size}` for the data plane.
-4. `REGISTER_SDK_TRANSFER_STRATEGY [instance_id, model_name, world_size]`.
+1. HTTP call to `/conf` API to get shm_name and chunk_size.
+2. HTTP call to `/status` API to get world_size of the first registered `non_cuda_context_meta`.
+3. `REGISTER_SDK_TRANSFER_STRATEGY [instance_id, model_name, world_size]`.
 	It **resolves the `MemoryLayoutDesc` from the model registry** via 
 	`resolve_model_name(model_name)` — populated when the vLLM instance called `REGISTER_KV_CACHE` 
 	then registers, keyed by `instance_id`:
@@ -178,9 +176,6 @@ The SDK uses the following MQ request types (defined in
 
 | Request | Purpose |
 | --- | --- |
-| `GET_WORLD_SIZE` | Learn the registered `world_size` for the model (SDK requires `1`). |
-| `GET_CHUNK_SIZE` | Learn the server chunk size. |
-| `GET_SHM_POOL_INFO` | Learn the SHM pool name + size (data plane). |
 | `REGISTER_SDK_TRANSFER_STRATEGY` | Register the per-instance context + SHM strategy; layout is resolved server-side from the model registry. |
 | `LOOKUP` | Submit a prefix lookup and kick off the server-side prefetch (retrieve only). |
 | `QUERY_PREFETCH_STATUS` | Poll prefetch completion → matched chunk count (`None` while in progress). |
@@ -269,8 +264,7 @@ prefetch to complete before `PREPARE_RETRIEVE`. Each MQ call is bounded by `time
 
 ## Constraints & known gaps
 
-- **`world_size == 1` only.** Enforced at connect (`GET_WORLD_SIZE`), since `worker_id=0`
-  addresses the whole chunk only when there is a single shard.
+- **`world_size == 1` only.**
 - **Pickle not yet.** The SDK client requires SHM slot descriptors; the pickle transport is
   not yet implemented on the client.
   Implementation plan:

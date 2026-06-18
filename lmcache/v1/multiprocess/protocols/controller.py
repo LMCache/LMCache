@@ -5,8 +5,6 @@ Controller protocol definitions for cache management and configuration.
 This module defines the protocol for:
 - CLEAR: Clear all caches in the server
 - GET_CHUNK_SIZE: Get the chunk size configuration from the server
-- GET_SHM_POOL_INFO: Get shared memory pool name and size
-- GET_WORLD_SIZE: Get the world size for a given model name
 """
 
 # First Party
@@ -17,8 +15,6 @@ REQUEST_NAMES = [
     "CLEAR",
     "GET_CHUNK_SIZE",
     "PING",
-    "GET_SHM_POOL_INFO",
-    "GET_WORLD_SIZE",
 ]
 
 
@@ -57,20 +53,5 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
             payload_classes=[int | None],
             response_class=bool,
             handler_type=HandlerType.BLOCKING,
-        ),
-        # Get shared memory pool info
-        # Payload: None
-        # Returns: ShmPoolInfo dict with 'shm_name' and 'pool_size'
-        "GET_SHM_POOL_INFO": ProtocolDefinition(
-            payload_classes=[],
-            response_class=dict,
-            handler_type=HandlerType.SYNC,
-        ),
-        # Get world size
-        # Payload: [model_name: str]
-        "GET_WORLD_SIZE": ProtocolDefinition(
-            payload_classes=[str],
-            response_class=int,
-            handler_type=HandlerType.SYNC,
         ),
     }
