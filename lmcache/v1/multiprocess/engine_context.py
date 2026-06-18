@@ -124,6 +124,22 @@ class LayoutDescRegistry:
                 return None
             return entry.layout_desc
 
+    def find_by_model_name(self, model_name: str) -> tuple[MemoryLayoutDesc | None, int | None]:
+        """Look up all layout descriptors matching a model name.
+
+        Args:
+            model_name: The model name.
+
+        Returns:
+            A list of layout descriptors matching the model name.
+            World size.
+        """
+        with self._lock:
+            for (name, world_size), entry in self._registry.items():
+                if name == model_name:
+                    return entry.layout_desc, world_size
+            return None, None
+
 
 class MPCacheServerContext:
     """Shared infrastructure for all engine modules.
@@ -245,3 +261,14 @@ class MPCacheServerContext:
         if not bare.startswith("lmcache_l1_pool_"):
             shm_name = f"lmcache_l1_pool_{bare}"
         return {"shm_name": shm_name, "pool_size": mem_cfg.size_in_bytes}
+
+    def resolve_model_name(self, model_name: str) -> tuple[str, int] | None:
+        """Look up the registered model name and world size for a given model name.
+        
+        Args:
+            model_name: The model name.
+
+        Returns:
+            A tuple of the registered model name and world size, or None if not found.
+        """
+        return self._layout_desc_registry.find_by_model_name(model_name)
