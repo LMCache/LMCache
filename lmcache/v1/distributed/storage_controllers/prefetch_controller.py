@@ -754,7 +754,7 @@ class PrefetchController(StorageControllerInterface):
 
         pending_lookup_tasks: dict[int, L2TaskId] = {}
         for adapter_id, adapter in routing_adapters.items():
-            task_id = adapter.submit_lookup_and_lock_task(keys)
+            task_id = adapter.submit_lookup_and_lock_task(keys, layout_desc)
             pending_lookup_tasks[adapter_id] = task_id
 
         request = InFlightPrefetchRequest(
