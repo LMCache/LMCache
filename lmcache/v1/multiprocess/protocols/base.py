@@ -60,8 +60,6 @@ class RequestType(enum.Enum):
     CLEAR = enum.auto()
     GET_CHUNK_SIZE = enum.auto()
     PING = enum.auto()
-    GET_SHM_POOL_INFO = enum.auto()
-    GET_WORLD_SIZE = enum.auto()
 
     # Observability operations
     REPORT_BLOCK_ALLOCATION = enum.auto()
