@@ -421,7 +421,7 @@ def test_musa_data_context_keeps_layout_validation_device_agnostic(
     )
     future = MagicMock()
     future.result.return_value = RegisterEngineDrivenContextResponse()
-    ctx = EngineDrivenTransferContext(device_type="musa")
+    ctx = EngineDrivenTransferContext()
 
     ctx.register(
         instance_id=1,
@@ -481,7 +481,7 @@ def test_musa_data_context_store_uses_device_agnostic_gather(
         return [torch.zeros(2, 2, 8, 16)]
 
     monkeypatch.setattr(worker_transfer, "gather_paged_kv_to_cpu", _fake_gather)
-    ctx = EngineDrivenTransferContext(device_type="musa")
+    ctx = EngineDrivenTransferContext()
     ctx.register(
         instance_id=1,
         kv_caches=_make_kv_caches(),
@@ -552,7 +552,7 @@ def test_musa_data_context_retrieve_uses_device_agnostic_scatter(
         captured_kwargs.update(kwargs)
 
     monkeypatch.setattr(worker_transfer, "scatter_cpu_to_paged_kv", _fake_scatter)
-    ctx = EngineDrivenTransferContext(device_type="musa")
+    ctx = EngineDrivenTransferContext()
     ctx.register(
         instance_id=1,
         kv_caches=_make_kv_caches(),
