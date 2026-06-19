@@ -151,6 +151,32 @@ class Bitmap:
         """String representation: '1' for set bits, '0' for clear bits."""
         ...
 
+def fold_unfold_ranked(
+    found: Bitmap,
+    num_chunks: int,
+    num_ranks: int,
+    group_windows: Sequence[int],
+) -> tuple[int, Bitmap]:
+    """Fold/unfold over the ``group x chunk x kv_rank`` ranked layout.
+
+    The longest model-wide prefix every object group can serve (full attention
+    or a cross-chunk sliding window) plus the keys each group must retain.
+
+    Args:
+        found: Group-major / chunk-major / rank-minor presence bitmap of length
+            ``len(group_windows) * num_chunks * num_ranks``.
+        num_chunks: Number of LMCache chunks in the request.
+        num_ranks: Number of kv_rank shards per chunk.
+        group_windows: Per-object-group cross-chunk window size in chunks;
+            ``<= 0`` means full attention.
+
+    Returns:
+        ``(hit_length, retain_mask)``: the hit length in chunks and a retain
+        mask over the same ranked layout (all ranks of each retained
+        ``(group, chunk)`` set).
+    """
+    ...
+
 class ParallelPatternMatcher:
     """
     Pattern matcher for integer vectors.

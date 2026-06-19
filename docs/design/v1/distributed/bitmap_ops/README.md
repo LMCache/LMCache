@@ -78,21 +78,21 @@ any other policy keeps every set bit (gaps included).
 
 ## Performance
 
-`fold_unfold_ranked` dispatches by size: the pure-Python scan for small
-requests, and a **vectorized torch** implementation once
-`num_groups · num_chunks · num_ranks` crosses `_TORCH_FOLD_MIN_KEYS`. The fold
-math (rank reduction, windowed servability, cross-group intersection, unfold)
-becomes a handful of tensor ops — sub-millisecond regardless of size. See
-`benchmark.py` (`python -m lmcache.v1.distributed.bitmap_ops.benchmark`):
+`fold_unfold_ranked` delegates to a **native C++ implementation**
+(`csrc/storage_manager/fold.cpp`, exported as
+`native_storage_ops.fold_unfold_ranked`) that scans the packed `Bitmap` buffer
+directly — no Python per-bit loop and no `Bitmap`↔tensor conversion. The
+pure-Python version is kept as a reference/oracle and as a fallback if the
+native op is unavailable. See `benchmark.py`
+(`python -m lmcache.v1.distributed.bitmap_ops.benchmark`):
 
-| Case (worst case: all present) | Python | torch |
-|---|---|---|
-| DeepSeek 1M @256, 8 groups, world_size=8 (262k keys) | ~178 ms | ~32 ms |
-| same, 50% prefix present | ~87 ms | ~11 ms |
-| stress: 4M keys | ~1584 ms | ~340 ms |
+| Case | Python | native | speedup |
+|---|---|---|---|
+| DeepSeek 1M @256, 8 groups, world_size=8 (262k keys), all present | ~195 ms | ~2.3 ms | ~83× |
+| same, 50% prefix present (realistic) | ~93 ms | ~0.34 ms | ~270× |
+| world_size=1 (32k keys) | ~76 ms | ~0.26 ms | ~300× |
+| stress: 4M keys | ~1630 ms | ~21 ms | ~78× |
 
-The torch path is bounded not by compute (<1 ms) but by the `Bitmap`↔tensor
-conversion (`get_indices_list` + scatter in, `batched_set` out), since `Bitmap`
-exposes no dense buffer. A native dense export (`Bitmap → uint8 array`) would
-remove that wall and recover the compute-only numbers (~100×); it's the
-follow-up if the fold ever sits on a latency-critical path.
+The native op is sub-millisecond for realistic prefix hits; the all-present
+worst case costs more only because the unfold then writes back nearly every
+key.

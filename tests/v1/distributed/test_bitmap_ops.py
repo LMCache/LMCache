@@ -18,10 +18,8 @@ from lmcache.v1.distributed.bitmap_ops import (
     select_retained,
     unfold_range,
 )
-from lmcache.v1.distributed.bitmap_ops.fold import (
-    _fold_unfold_ranked_python,
-    _fold_unfold_ranked_torch,
-)
+from lmcache.native_storage_ops import fold_unfold_ranked as _native_fold_unfold_ranked
+from lmcache.v1.distributed.bitmap_ops.fold import _fold_unfold_ranked_python
 
 
 def _make_presence(num_chunks: int, present_per_group: list[list[int]]) -> Bitmap:
@@ -287,8 +285,8 @@ class TestMergeBitmaps:
         assert merge_bitmaps([a, b], 5).get_indices_list() == [0, 3]
 
 
-class TestRankedTorchMatchesPython:
-    """The vectorized torch fold must match the pure-Python reference exactly."""
+class TestRankedNativeMatchesPython:
+    """The native C++ fold must match the pure-Python reference exactly."""
 
     @staticmethod
     def _result(fn, num_chunks, num_ranks, gw, present):
@@ -310,18 +308,18 @@ class TestRankedTorchMatchesPython:
             hit_py, mask_py = self._result(
                 _fold_unfold_ranked_python, num_chunks, num_ranks, gw, present
             )
-            hit_t, mask_t = self._result(
-                _fold_unfold_ranked_torch, num_chunks, num_ranks, gw, present
+            hit_native, mask_native = self._result(
+                _native_fold_unfold_ranked, num_chunks, num_ranks, gw, present
             )
-            assert (hit_py, mask_py) == (hit_t, mask_t), (
+            assert (hit_py, mask_py) == (hit_native, mask_native), (
                 f"mismatch gw={gw} C={num_chunks} R={num_ranks}"
             )
 
-    def test_dispatch_large_input_matches_reference(self):
-        # Above the dispatch threshold the public API uses torch; it must still
-        # match the Python reference (full + sliding-window groups, gappy data).
-        gw = [-1, -1, 4, 4, 8, 1, -1, 2]  # 8 groups
-        num_chunks, num_ranks = 64, 8  # 8 * 64 * 8 = 4096 keys >= threshold
+    def test_public_api_matches_reference(self):
+        # The public fold_unfold_ranked dispatches to native; it must match the
+        # Python reference (8 mixed full + sliding-window groups, gappy data).
+        gw = [-1, -1, 4, 4, 8, 1, -1, 2]
+        num_chunks, num_ranks = 64, 8
         nk = len(gw) * num_chunks * num_ranks
         rng = random.Random(7)
         present = [rng.random() < 0.7 for _ in range(nk)]

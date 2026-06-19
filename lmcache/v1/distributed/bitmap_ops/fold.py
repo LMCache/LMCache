@@ -32,22 +32,23 @@ chunk ``j`` is available for object group ``g``.
 # Standard
 from collections.abc import Iterable, Sequence
 
-# Third Party
-import torch
-
 # First Party
 from lmcache.native_storage_ops import Bitmap
 from lmcache.v1.distributed.api import TrimPolicy
 
+try:
+    # Native C++ fold (operates on the packed Bitmap buffer; no Python per-bit
+    # loop, no tensor conversion). Always present in a normally built package;
+    # the Python reference is used only if an older extension lacks it.
+    from lmcache.native_storage_ops import (
+        fold_unfold_ranked as _native_fold_unfold_ranked,
+    )
+except ImportError:  # pragma: no cover - stale/native-less build
+    _native_fold_unfold_ranked = None
+
 FULL_ATTENTION_WINDOW = -1
 """Sentinel ``group_windows`` value marking a full-attention object group
 (needs the whole prefix). Any value ``<= 0`` is treated as full attention."""
-
-# Above this many keys (``num_groups * num_chunks * num_ranks``) the vectorized
-# torch fold clearly beats the pure-Python scan (see ``benchmark.py``: torch
-# wins from ~1k keys up). Below it both are sub-millisecond and torch's per-call
-# tensor overhead can dominate, so the Python path is used. Set conservatively.
-_TORCH_FOLD_MIN_KEYS = 4096
 
 
 def unfold_range(prefix_len: int, window: int) -> tuple[int, int]:
@@ -171,9 +172,10 @@ def fold_unfold_ranked(
             or ``num_ranks`` is not positive.
 
     Note:
-        Dispatches to a vectorized torch implementation for large requests and
-        the pure-Python scan for small ones (see :data:`_TORCH_FOLD_MIN_KEYS`).
-        Both produce identical results.
+        Delegates to the native C++ implementation, which scans the packed
+        ``Bitmap`` buffer directly (no Python per-bit loop, no tensor
+        conversion). Falls back to the pure-Python reference only if the native
+        op is unavailable; both produce identical results.
     """
     if num_ranks < 1:
         raise ValueError(f"num_ranks must be >= 1 (got {num_ranks})")
@@ -182,9 +184,10 @@ def fold_unfold_ranked(
     if num_chunks < 0:
         raise ValueError(f"num_chunks must be >= 0 (got {num_chunks})")
 
-    num_keys = len(group_windows) * num_chunks * num_ranks
-    if num_keys >= _TORCH_FOLD_MIN_KEYS:
-        return _fold_unfold_ranked_torch(found, num_chunks, num_ranks, group_windows)
+    if _native_fold_unfold_ranked is not None:
+        return _native_fold_unfold_ranked(
+            found, num_chunks, num_ranks, list(group_windows)
+        )
     return _fold_unfold_ranked_python(found, num_chunks, num_ranks, group_windows)
 
 
@@ -195,8 +198,8 @@ def _fold_unfold_ranked_python(
     group_windows: Sequence[int],
 ) -> tuple[int, Bitmap]:
     """Pure-Python reference fold over the ranked layout (see
-    :func:`fold_unfold_ranked`). Also the oracle the torch path is tested
-    against."""
+    :func:`fold_unfold_ranked`). Fallback when the native op is unavailable and
+    the oracle the native op is tested against."""
     num_groups = len(group_windows)
     group_stride = num_chunks * num_ranks
 
@@ -218,64 +221,6 @@ def _fold_unfold_ranked_python(
         cbase = group_idx * group_stride + j * num_ranks
         for r in range(num_ranks):
             retain_mask.set(cbase + r)
-    return hit_length, retain_mask
-
-
-def _fold_unfold_ranked_torch(
-    found: Bitmap,
-    num_chunks: int,
-    num_ranks: int,
-    group_windows: Sequence[int],
-) -> tuple[int, Bitmap]:
-    """Vectorized torch fold over the ranked layout (see
-    :func:`fold_unfold_ranked`).
-
-    The whole fold (rank reduction, per-group windowed servability, cross-group
-    intersection, right-most-1, unfold) runs as a handful of tensor ops, so the
-    compute is ~constant regardless of size. The cost is dominated by
-    materializing the dense presence tensor from ``found`` (one
-    ``get_indices_list`` + scatter) and writing the mask back
-    (``batched_set``); a native dense ``Bitmap`` export would remove that.
-    """
-    num_groups = len(group_windows)
-    group_stride = num_chunks * num_ranks
-    num_keys = num_groups * group_stride
-    if num_chunks == 0:
-        return 0, Bitmap(num_keys)
-
-    # Bitmap -> dense (group, chunk, rank) bool tensor.
-    present = torch.zeros(num_keys, dtype=torch.bool)
-    set_indices = found.get_indices_list()
-    if set_indices:
-        present[torch.as_tensor(set_indices, dtype=torch.long)] = True
-    chunk_present = present.view(num_groups, num_chunks, num_ranks).all(dim=2)
-
-    # servable[g, L-1] iff the window [max(0, L-w), L) is fully present, with
-    # w = num_chunks for full attention. Using prefix counts: a window of size
-    # m is full iff pc[L] - pc[L-m] == m.
-    prefix_counts = torch.zeros(num_groups, num_chunks + 1, dtype=torch.int64)
-    prefix_counts[:, 1:] = torch.cumsum(chunk_present.to(torch.int64), dim=1)
-    lengths = torch.arange(1, num_chunks + 1)
-    windows = torch.tensor(
-        [num_chunks if w <= 0 else w for w in group_windows], dtype=torch.int64
-    ).unsqueeze(1)
-    eff = torch.minimum(windows, lengths.unsqueeze(0))
-    lo = lengths.unsqueeze(0) - eff
-    servable = (prefix_counts[:, 1:] - torch.gather(prefix_counts, 1, lo)) == eff
-    servable_all = servable.all(dim=0)
-
-    nonzero = torch.nonzero(servable_all, as_tuple=False)
-    hit_length = int(nonzero[-1].item()) + 1 if nonzero.numel() else 0
-
-    retain_mask = Bitmap(num_keys)
-    if hit_length > 0:
-        retain = torch.zeros(num_groups, num_chunks, num_ranks, dtype=torch.bool)
-        for group_idx, window in enumerate(group_windows):
-            window_lo = 0 if window <= 0 else max(0, hit_length - window)
-            retain[group_idx, window_lo:hit_length, :] = True
-        retain_mask.batched_set(
-            torch.nonzero(retain.reshape(-1), as_tuple=False).flatten().tolist()
-        )
     return hit_length, retain_mask
 
 
