@@ -294,13 +294,8 @@ See [Lmcache_engine_driven_multigroup.md](./Lmcache_engine_driven_multigroup.md)
 
 ## GPU Memory Comparison
 
-| Component | Before (Original) | After (This Fork) |
-|-----------|------------------|-------------------|
-| vLLM Worker | 36 GB | 36 GB |
-| LMCache Server | 666 MB × 2 GPUs | ~216 MB (CPU only) |
-| **Total GPU Memory** | **~37.3 GB** | **~36.4 GB** |
 
-Savings: **~900 MB per GPU** for LMCache server overhead elimination.
+Savings: **~668 MB per GPU** for LMCache server overhead elimination.
 
 ---
 
