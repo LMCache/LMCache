@@ -988,7 +988,7 @@ class S3L2Adapter(L2AdapterInterface):
         def on_body(chunk, offset, **kwargs):
             body_chunks.append(bytes(chunk))
 
-        def on_headers(status_code, headers_in, **kwargs):
+        def on_headers(status_code, headers, **kwargs):
             captured["status"] = status_code
 
         def on_done(error=None, status_code=None, **kwargs):
