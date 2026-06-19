@@ -69,6 +69,10 @@ PYBIND11_MODULE(native_storage_ops, m) {
            "Return a set of indices where the bit is set to 1.")
       .def("batched_set", &Bitmap::batched_set, py::arg("indices"),
            "Set every bit in indices to 1 (positions >= size ignored).")
+      .def("set_range", &Bitmap::set_range, py::arg("start"), py::arg("end"),
+           "Set every bit in the half-open range [start, end) to 1 (end "
+           "clamped to size). Fills whole bytes, so far cheaper than per-bit "
+           "set for a contiguous span.")
       .def(
           "gather",
           [](const Bitmap& self, const py::sequence& items) {

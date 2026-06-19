@@ -84,6 +84,14 @@ class Bitmap:
         """Set every bit in ``indices`` to 1 (positions >= size ignored)."""
         ...
 
+    def set_range(self, start: int, end: int) -> None:
+        """Set every bit in the half-open range ``[start, end)`` to 1.
+
+        ``end`` is clamped to the bitmap size. Fills whole bytes, so far cheaper
+        than per-bit ``set`` for a contiguous span.
+        """
+        ...
+
     def clear(self, index: int) -> None:
         """Clear the bit at the specified index to 0."""
         ...

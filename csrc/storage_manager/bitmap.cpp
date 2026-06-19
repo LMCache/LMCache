@@ -2,6 +2,8 @@
 
 #include "bitmap.h"
 
+#include <algorithm>
+
 namespace lmcache {
 namespace storage_manager {
 
@@ -43,6 +45,34 @@ void Bitmap::set(size_t index) {
 
 void Bitmap::batched_set(const std::vector<size_t>& indices) {
   for (size_t idx : indices) set(idx);
+}
+
+void Bitmap::set_range(size_t start, size_t end) {
+  if (end > size_) end = size_;
+  if (start >= end) return;
+
+  const size_t first_byte = start / kBitsPerByte;
+  const size_t last_byte = (end - 1) / kBitsPerByte;  // inclusive
+  const unsigned head_low = bit_offset(start);
+
+  if (first_byte == last_byte) {
+    // Whole range lives in one byte: set bits [head_low, head_low + width).
+    const unsigned width = static_cast<unsigned>(end - start);  // 1..8
+    const uint8_t mask = static_cast<uint8_t>(((1u << width) - 1u) << head_low);
+    data_[first_byte] |= mask;
+    return;
+  }
+
+  // Head partial byte: bits [head_low, 8).
+  data_[first_byte] |= static_cast<uint8_t>(0xFFu << head_low);
+  // Middle full bytes.
+  std::fill(data_.begin() + static_cast<std::ptrdiff_t>(first_byte + 1),
+            data_.begin() + static_cast<std::ptrdiff_t>(last_byte),
+            static_cast<uint8_t>(0xFF));
+  // Tail partial byte: bits [0, tail_width).
+  const unsigned tail_width =
+      static_cast<unsigned>(end - last_byte * kBitsPerByte);  // 1..8
+  data_[last_byte] |= static_cast<uint8_t>((1u << tail_width) - 1u);
 }
 
 void Bitmap::clear(size_t index) {

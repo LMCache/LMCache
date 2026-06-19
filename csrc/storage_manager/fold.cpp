@@ -52,11 +52,12 @@ std::pair<size_t, Bitmap> fold_unfold_ranked(
     }
   }
 
-  // Unfold: the concrete chunks each group needs to serve ``hit_length``,
-  // expanded over every kv_rank.
+  // Unfold: the chunks each group needs to serve ``hit_length``, expanded over
+  // every kv_rank. The retained cells of a group are a contiguous bit range
+  // ``[gbase + lo * num_ranks, gbase + hit_length * num_ranks)``, so a single
+  // ``set_range`` (whole-byte fill) covers each group.
   Bitmap retain_mask(num_keys);
   if (hit_length > 0) {
-    std::vector<size_t> indices;
     for (size_t g = 0; g < num_groups; ++g) {
       const int64_t window = group_windows[g];
       size_t lo = 0;
@@ -64,14 +65,9 @@ std::pair<size_t, Bitmap> fold_unfold_ranked(
         lo = hit_length - static_cast<size_t>(window);
       }
       const size_t gbase = g * group_stride;
-      for (size_t j = lo; j < hit_length; ++j) {
-        const size_t cbase = gbase + j * num_ranks;
-        for (size_t r = 0; r < num_ranks; ++r) {
-          indices.push_back(cbase + r);
-        }
-      }
+      retain_mask.set_range(gbase + lo * num_ranks,
+                            gbase + hit_length * num_ranks);
     }
-    retain_mask.batched_set(indices);
   }
   return {hit_length, retain_mask};
 }

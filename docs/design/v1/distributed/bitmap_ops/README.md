@@ -88,11 +88,13 @@ native op is unavailable. See `benchmark.py`
 
 | Case | Python | native | speedup |
 |---|---|---|---|
-| DeepSeek 1M @256, 8 groups, world_size=8 (262k keys), all present | ~195 ms | ~2.3 ms | ~83× |
-| same, 50% prefix present (realistic) | ~93 ms | ~0.34 ms | ~270× |
-| world_size=1 (32k keys) | ~76 ms | ~0.26 ms | ~300× |
-| stress: 4M keys | ~1630 ms | ~21 ms | ~78× |
+| DeepSeek 1M @256, 8 groups, world_size=8 (262k keys), all present | ~186 ms | ~0.57 ms | ~325× |
+| same, 50% prefix present (realistic) | ~90 ms | ~0.35 ms | ~258× |
+| world_size=1 (32k keys) | ~75 ms | ~0.17 ms | ~450× |
+| stress: 4M keys | ~1600 ms | ~4.7 ms | ~340× |
 
-The native op is sub-millisecond for realistic prefix hits; the all-present
-worst case costs more only because the unfold then writes back nearly every
-key.
+The unfold writes the retained keys back as contiguous spans via
+`Bitmap::set_range` (whole-byte fills) rather than per-bit sets, so even the
+all-present worst case stays sub-millisecond at the DeepSeek scale. The
+remaining cost is the presence scan; a word-level rank-reduction (all-ranks
+test over a contiguous span) is the next lever if it's ever needed.
