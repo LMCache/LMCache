@@ -39,7 +39,7 @@ class AzureConnector(RemoteConnector):
         connection_string: Optional[str] = None,
         account_key: Optional[str] = None,
         sas_token: Optional[str] = None,
-    ):
+    ) -> None:
         """Initialize the Azure Blob connector.
 
         Exactly one credential path is used, resolved most-explicit-first:
@@ -59,7 +59,9 @@ class AzureConnector(RemoteConnector):
             sas_token: Shared Access Signature token.
 
         Raises:
-            ImportError: If ``azure-storage-blob`` is not installed.
+            ImportError: If ``azure-storage-blob`` is not installed, or if
+                ``azure-identity`` is not installed when falling back to
+                ``DefaultAzureCredential``.
             ValueError: If neither ``connection_string`` nor ``account_url``
                 is provided.
         """
@@ -104,8 +106,17 @@ class AzureConnector(RemoteConnector):
                     "AzureConnector: no explicit credential, "
                     "falling back to DefaultAzureCredential"
                 )
-                # Third Party
-                from azure.identity.aio import DefaultAzureCredential
+                try:
+                    # Third Party
+                    from azure.identity.aio import DefaultAzureCredential
+                except ImportError as e:
+                    raise ImportError(
+                        "azure-identity is required to use "
+                        "DefaultAzureCredential. Install it with "
+                        "`pip install azure-identity`, or provide an "
+                        "explicit credential (connection_string, account_key, "
+                        "or sas_token)."
+                    ) from e
 
                 credential = DefaultAzureCredential()
             self.service_client = BlobServiceClient(
@@ -164,10 +175,10 @@ class AzureConnector(RemoteConnector):
         if cached is not None:
             return cached > 0
         size = await self._get_blob_size_async(key_str)
-        if size > 0:
-            self.object_size_cache[key_str] = size
-            return True
-        return False
+        # Cache misses too (size 0) so repeated lookups of an absent key
+        # don't trigger a network round-trip each time, matching get().
+        self.object_size_cache[key_str] = size
+        return size > 0
 
     def exists_sync(self, key: CacheEngineKey) -> bool:
         """Synchronous variant of :meth:`exists`.
@@ -242,12 +253,18 @@ class AzureConnector(RemoteConnector):
     # ------------------------------------------------------------------ #
     # put
     # ------------------------------------------------------------------ #
-    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj):
+    async def put(self, key: CacheEngineKey, memory_obj: MemoryObj) -> None:
         """Upload ``memory_obj`` to the container under ``key``.
 
         Only full chunks are supported: a chunk whose physical size does not
         match the connector's expected part size is skipped with an error log.
         Existing blobs with the same name are overwritten.
+
+        Note:
+            The caller (``InstrumentedRemoteConnector.put``) owns the reference
+            count of ``memory_obj`` and decrements it after this returns; this
+            method must not call ``ref_count_down`` itself, matching
+            ``S3Connector``.
 
         Args:
             key: The cache engine key to store under.
@@ -266,8 +283,10 @@ class AzureConnector(RemoteConnector):
 
         try:
             blob = self.container_client.get_blob_client(self._blob_name(key_str))
+            # Pass the memoryview directly (zero-copy); bytes() would copy the
+            # whole chunk.
             await blob.upload_blob(
-                bytes(memory_obj.byte_array),
+                memory_obj.byte_array,
                 overwrite=True,
                 length=memory_obj.get_physical_size(),
             )
@@ -290,7 +309,7 @@ class AzureConnector(RemoteConnector):
             names.append(blob.name)
         return names
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the underlying Azure Blob service client and release its
         network resources.
         """

@@ -9,6 +9,7 @@ Supported Backends
 .. toctree::
    :maxdepth: 1
 
+   azure
    cpu_ram
    custom_backend
    dax

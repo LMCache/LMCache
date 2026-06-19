@@ -28,11 +28,25 @@ class AzureConnectorAdapter(ConnectorAdapter):
         super().__init__("azure://")
 
     def create_connector(self, context: ConnectorContext) -> RemoteConnector:
+        """Create an :class:`AzureConnector` from the given context.
+
+        Args:
+            context: The connector context carrying the URL, event loop,
+                local CPU backend, config, and metadata.
+
+        Returns:
+            A configured :class:`AzureConnector`.
+
+        Raises:
+            ValueError: If ``context.config`` is missing, ``context.metadata``
+                is missing, or the URL does not include a container name.
+        """
         # Local
         from .azure_connector import AzureConnector
 
         config = context.config
-        assert config is not None
+        if config is None:
+            raise ValueError("config is required for AzureConnectorAdapter")
         extra_config = config.extra_config if config.extra_config is not None else {}
 
         if context.metadata is None:
