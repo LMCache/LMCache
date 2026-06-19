@@ -1959,12 +1959,77 @@ class RawBlockCore:
         self,
         offsets: list[int],
     ) -> list[Optional[tuple[int, int]]]:
-        """Return slot headers using a batched io_uring read path (TODO)."""
-        # TODO: Add batched io_uring slot-header reads here. Use
-        # _build_recovery_item_ranges() to bound each batch, submit all
-        # slot-header reads for a range with one io_uring submission, then
-        # return headers in the same order as the input offsets.
-        return [self._read_slot_header(off) for off in offsets]
+        """Return slot headers using the batched io_uring read path.
+
+        Splits the reads into ``iouring_queue_depth``-sized batches so a large
+        checkpoint does not allocate one buffer for every entry at once, then
+        reads each batch and concatenates results in input order.
+
+        Args:
+            offsets: Device byte offsets for each slot header to read.
+
+        Returns:
+            Decoded (slot_identity, payload_len) per slot, or None on error,
+            in the same order as ``offsets``.
+        """
+        n = len(offsets)
+        batch_size = max(1, self.iouring_queue_depth)
+        headers: list[Optional[tuple[int, int]]] = []
+        for start in range(0, n, batch_size):
+            headers.extend(
+                self._read_slot_header_batch(offsets[start : start + batch_size])
+            )
+        return headers
+
+    def _read_slot_header_batch(
+        self,
+        offsets: list[int],
+    ) -> list[Optional[tuple[int, int]]]:
+        """Read one bounded batch of slot headers via a single batched_read.
+
+        Allocates a single contiguous pointer-aligned buffer for the batch,
+        issues one ``batched_read`` + ``wait_iouring``, and decodes each header
+        independently. Used for the regular io_uring (block) path; NVMe
+        passthrough (``use_uring_cmd``) recovery uses the serial path until its
+        passthrough read is validated separately.
+
+        Args:
+            offsets: Device byte offsets for this batch (non-empty).
+
+        Returns:
+            Decoded (slot_identity, payload_len) per slot, or None on error.
+            A batched read fails as a whole even if only one slot errored and
+            does not report which; on any I/O exception this falls back to
+            per-slot reads so a single bad slot is isolated (only it becomes
+            None) instead of dropping every recovered entry in the batch.
+        """
+        n = len(offsets)
+        align = self.block_align
+        hdr = self.header_bytes
+        raw_buf = bytearray(n * hdr + align - 1)
+        addr = ctypes.addressof(ctypes.c_byte.from_buffer(raw_buf))
+        pad = (-addr) % align
+        views = [
+            memoryview(raw_buf)[pad + i * hdr : pad + (i + 1) * hdr] for i in range(n)
+        ]
+
+        with self._lock:
+            self._inflight_io_count += 1
+        try:
+            raw_dev = self._rawdev()
+            batch_id = raw_dev.batched_read(offsets, views, [hdr] * n)
+            raw_dev.wait_iouring(batch_id)
+        except Exception:
+            # TODO: when io_uring returns per-I/O completion results, use them
+            # to drop only the slot(s) that actually failed instead of
+            # re-reading every slot in this fallback.
+            return [self._read_slot_header(off) for off in offsets]
+        finally:
+            with self._lock:
+                self._inflight_io_count -= 1
+                self._last_io_ts = time.monotonic()
+
+        return [self._decode_slot_header(bytes(v)) for v in views]
 
     def _is_stale_header(
         self,
