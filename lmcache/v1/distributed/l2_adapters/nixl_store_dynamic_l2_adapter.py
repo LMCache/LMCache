@@ -34,6 +34,7 @@ Secondary lookup (always on):
 from __future__ import annotations
 
 # Standard
+from dataclasses import dataclass
 from typing import Any, Optional
 import asyncio
 import os
@@ -68,6 +69,8 @@ from lmcache.v1.platform import create_event_notifier
 
 logger = init_logger(__name__)
 
+DEFAULT_FILE_CREATE_MODE = 0o644
+
 
 # ---------------------------------------------------------------
 # ObjectKey <-> storage name helpers
@@ -101,6 +104,26 @@ def _object_key_to_object_name(key: ObjectKey) -> str:
 # ---------------------------------------------------------------
 
 
+@dataclass
+class DynamicStorageSpec:
+    """One object/file transfer target in a batched NIXL operation."""
+
+    mem_indices: list[int]
+    storage_name: str
+    size: int
+
+
+@dataclass
+class _DynamicStorageDesc:
+    """NIXL descriptor and local cleanup metadata for dynamic storage."""
+
+    device_id: int
+    meta_info: str
+    size: int
+    final_path: str | None = None
+    tmp_path: str | None = None
+
+
 class DynamicNixlStorageAgent:
     """Nixl storage agent that opens/registers files per operation.
 
@@ -118,7 +141,9 @@ class DynamicNixlStorageAgent:
     ):
         self.backend = backend
         self.device = device
-        self.backend_params = backend_params
+        self.backend_params = dict(backend_params)
+        if ca_bundle := self.backend_params.get("ca_bundle"):
+            self.backend_params["ca_bundle"] = os.path.expanduser(ca_bundle)
         self.l1_align_bytes = l1_memory_desc.align_bytes
         self.mem_type = "OBJ" if backend == "OBJ" else "FILE"
         self.file_path = backend_params.get("file_path", "")
@@ -133,7 +158,7 @@ class DynamicNixlStorageAgent:
         self.agent_name = "DynNixlAgent_" + str(uuid.uuid4())
         nixl_conf = NixlAgentConfig(backends=[])
         self.nixl_agent = NixlAgent(self.agent_name, nixl_conf)
-        self.nixl_agent.create_backend(backend, backend_params)
+        self.nixl_agent.create_backend(backend, self.backend_params)
 
         # Register L1 memory (same as static agent)
         self._init_mem_handlers(
@@ -251,7 +276,7 @@ class DynamicNixlStorageAgent:
         """
         file_size = len(mem_indices) * page_size
         tmp_path = f"{file_path}.tmp.{uuid.uuid4().hex}"
-        fd = os.open(tmp_path, self._open_flags(create=True))
+        fd = os.open(tmp_path, self._open_flags(create=True), DEFAULT_FILE_CREATE_MODE)
         try:
             reg_descs, xfer_handler = self._register_single_file(
                 fd, file_size, page_size
@@ -318,6 +343,227 @@ class DynamicNixlStorageAgent:
             os.unlink(file_path)
         except FileNotFoundError:
             logger.warning("File already deleted: %s", file_path)
+
+    def _alloc_device_ids(self, count: int) -> list[int]:
+        """Allocate unique OBJ device ids for one register/deregister cycle."""
+        with self._device_id_lock:
+            start = self._device_id_counter
+            self._device_id_counter += count
+        return list(range(start, start + count))
+
+    def _register_batched_files(
+        self,
+        descs: list[_DynamicStorageDesc],
+        page_size: int,
+    ) -> tuple[Any, Any]:
+        """Register a flattened list of file pages for one NIXL batch."""
+        reg_list = []
+        xfer_desc = []
+        for desc in descs:
+            num_pages = desc.size // page_size
+            reg_list.append((0, desc.size, desc.device_id, ""))
+            xfer_desc.extend(
+                (offset * page_size, page_size, desc.device_id)
+                for offset in range(num_pages)
+            )
+
+        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="FILE")
+        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="FILE")
+        xfer_handler = self.nixl_agent.prep_xfer_dlist(
+            self.agent_name, xfer_descs, mem_type="FILE"
+        )
+        return reg_descs, xfer_handler
+
+    def _register_batched_objects(
+        self,
+        specs: list[DynamicStorageSpec],
+        page_size: int,
+    ) -> tuple[Any, Any]:
+        """Register a flattened list of object pages for one NIXL batch."""
+        reg_list = []
+        xfer_desc = []
+        device_ids = self._alloc_device_ids(len(specs))
+        for spec, device_id in zip(specs, device_ids, strict=True):
+            num_pages = spec.size // page_size
+            reg_list.append((0, spec.size, device_id, spec.storage_name))
+            xfer_desc.extend(
+                (offset * page_size, page_size, device_id)
+                for offset in range(num_pages)
+            )
+
+        reg_descs = self.nixl_agent.register_memory(reg_list, mem_type="OBJ")
+        xfer_descs = self.nixl_agent.get_xfer_descs(xfer_desc, mem_type="OBJ")
+        xfer_handler = self.nixl_agent.prep_xfer_dlist(
+            self.agent_name, xfer_descs, mem_type="OBJ"
+        )
+        return reg_descs, xfer_handler
+
+    def _open_batched_file_descs(
+        self,
+        specs: list[DynamicStorageSpec],
+        *,
+        write: bool,
+    ) -> list[_DynamicStorageDesc]:
+        """Open storage files for a batched FILE transfer."""
+        descs: list[_DynamicStorageDesc] = []
+        try:
+            for spec in specs:
+                final_path = spec.storage_name
+                if write:
+                    tmp_path = f"{final_path}.tmp.{uuid.uuid4().hex}"
+                    fd = os.open(
+                        tmp_path,
+                        self._open_flags(create=True),
+                        DEFAULT_FILE_CREATE_MODE,
+                    )
+                    descs.append(
+                        _DynamicStorageDesc(
+                            device_id=fd,
+                            meta_info="",
+                            size=spec.size,
+                            final_path=final_path,
+                            tmp_path=tmp_path,
+                        )
+                    )
+                else:
+                    fd = os.open(final_path, self._open_flags(create=False))
+                    descs.append(
+                        _DynamicStorageDesc(
+                            device_id=fd,
+                            meta_info="",
+                            size=spec.size,
+                            final_path=final_path,
+                        )
+                    )
+        except BaseException:
+            self._close_file_descs(descs)
+            if write:
+                self._unlink_tmp_files(descs)
+            raise
+        return descs
+
+    @staticmethod
+    def _close_file_descs(descs: list[_DynamicStorageDesc]) -> None:
+        """Best-effort close of all file descriptors in ``descs``."""
+        for desc in descs:
+            try:
+                os.close(desc.device_id)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _unlink_tmp_files(descs: list[_DynamicStorageDesc]) -> None:
+        """Best-effort cleanup of temporary files for failed FILE stores."""
+        for desc in descs:
+            if desc.tmp_path is None:
+                continue
+            try:
+                os.unlink(desc.tmp_path)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _publish_tmp_files(descs: list[_DynamicStorageDesc]) -> None:
+        """Atomically rename temporary files to their final names."""
+        for desc in descs:
+            if desc.tmp_path is None or desc.final_path is None:
+                continue
+            os.rename(desc.tmp_path, desc.final_path)
+
+    def _release_batched_storage(
+        self,
+        reg_descs: Any,
+        xfer_handler: Any,
+        descs: list[_DynamicStorageDesc] | None = None,
+    ) -> None:
+        """Release NIXL resources and optional file descriptors."""
+        self._deregister_storage(reg_descs, xfer_handler)
+        if descs is not None:
+            self._close_file_descs(descs)
+
+    async def dynamic_store_batch(
+        self,
+        specs: list[DynamicStorageSpec],
+        page_size: int,
+    ) -> None:
+        """Write a batch of objects/files with one NIXL transfer."""
+        if not specs:
+            return
+
+        mem_indices = [idx for spec in specs for idx in spec.mem_indices]
+        storage_indices = list(range(len(mem_indices)))
+
+        if self.mem_type == "OBJ":
+            reg_descs, xfer_handler = self._register_batched_objects(specs, page_size)
+            descs = None
+        else:
+            descs = self._open_batched_file_descs(specs, write=True)
+            try:
+                reg_descs, xfer_handler = self._register_batched_files(descs, page_size)
+            except BaseException:
+                self._close_file_descs(descs)
+                self._unlink_tmp_files(descs)
+                raise
+
+        handle = None
+        try:
+            handle = self.nixl_agent.make_prepped_xfer(
+                "WRITE",
+                self.mem_xfer_handler,
+                mem_indices,
+                xfer_handler,
+                storage_indices,
+            )
+            await self._post_non_blocking(handle)
+        except BaseException:
+            if descs is not None:
+                self._unlink_tmp_files(descs)
+            raise
+        finally:
+            if handle is not None:
+                self.nixl_agent.release_xfer_handle(handle)
+            self._release_batched_storage(reg_descs, xfer_handler, descs)
+
+        if descs is not None:
+            self._publish_tmp_files(descs)
+
+    async def dynamic_load_batch(
+        self,
+        specs: list[DynamicStorageSpec],
+        page_size: int,
+    ) -> None:
+        """Read a batch of objects/files with one NIXL transfer."""
+        if not specs:
+            return
+
+        mem_indices = [idx for spec in specs for idx in spec.mem_indices]
+        storage_indices = list(range(len(mem_indices)))
+
+        if self.mem_type == "OBJ":
+            reg_descs, xfer_handler = self._register_batched_objects(specs, page_size)
+            descs = None
+        else:
+            descs = self._open_batched_file_descs(specs, write=False)
+            try:
+                reg_descs, xfer_handler = self._register_batched_files(descs, page_size)
+            except BaseException:
+                self._close_file_descs(descs)
+                raise
+
+        handle = None
+        try:
+            handle = self.nixl_agent.make_prepped_xfer(
+                "READ",
+                self.mem_xfer_handler,
+                mem_indices,
+                xfer_handler,
+                storage_indices,
+            )
+            await self._post_non_blocking(handle)
+        finally:
+            if handle is not None:
+                self.nixl_agent.release_xfer_handle(handle)
+            self._release_batched_storage(reg_descs, xfer_handler, descs)
 
     async def dynamic_store_object(
         self,
@@ -407,6 +653,18 @@ class DynamicNixlStorageAgent:
             logger.warning("NIXL object query failed for %s: %s", object_name, exc)
             return False
         return bool(resp and resp[0] is not None)
+
+    def batched_object_exists(self, object_names: list[str]) -> list[bool]:
+        """Return presence for object names using one NIXL ``query_memory``."""
+        if not object_names:
+            return []
+        reg_list = [(0, 0, 0, object_name) for object_name in object_names]
+        try:
+            resp = self.nixl_agent.query_memory(reg_list, self.backend, mem_type="OBJ")
+        except Exception as exc:
+            logger.warning("NIXL batched object query failed: %s", exc)
+            return [False] * len(object_names)
+        return [reg_desc is not None for reg_desc in resp]
 
     async def _post_non_blocking(self, handle):
         """Await a nixl transfer until done."""
@@ -742,19 +1000,19 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        """Store each key-object pair via dynamic DMA write."""
+        """Store eligible key-object pairs using one batched NIXL transfer."""
         success = True
         stored_keys: list[ObjectKey] = []
         stored_sizes: list[int] = []
-        try:
-            for key, obj in zip(keys, objects, strict=False):
-                mem_addr = obj.meta.address
-                mem_size = obj.meta.phy_size
+        store_specs: list[DynamicStorageSpec] = []
+        store_objects: list[MemoryObj] = []
 
-                # Reserve the key and capacity under the lock *before*
-                # the DMA write so that concurrent coroutines (other
-                # stores, secondary lookups) see the reservation.
-                with self._lock:
+        try:
+            with self._lock:
+                for key, obj in zip(keys, objects, strict=False):
+                    mem_addr = obj.meta.address
+                    mem_size = obj.meta.phy_size
+
                     if key in self._memory_objects or key in self._inflight_stores:
                         continue
                     if self.nixl_agent.mem_type == "FILE":
@@ -767,54 +1025,63 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                         self._total_bytes += mem_size
                     self._inflight_stores.add(key)
 
-                try:
                     mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
                     if self.nixl_agent.mem_type == "OBJ":
-                        object_name = self.nixl_agent.get_object_name_for_key(key)
-                        await self.nixl_agent.dynamic_store_object(
-                            mem_indices, object_name, self.nixl_agent.l1_align_bytes
-                        )
+                        storage_name = self.nixl_agent.get_object_name_for_key(key)
                     else:
-                        file_path = self.nixl_agent.get_file_path_for_key(key)
-                        await self.nixl_agent.dynamic_store_file(
-                            mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                        storage_name = self.nixl_agent.get_file_path_for_key(key)
+                    store_specs.append(
+                        DynamicStorageSpec(
+                            mem_indices=mem_indices,
+                            storage_name=storage_name,
+                            size=mem_size,
                         )
-
-                    store_obj = NixlStoreObj(
-                        page_indices=[],  # not used in dynamic mode
-                        size=mem_size,
-                        layout=MemoryLayoutDesc(
-                            [obj.meta.shape],
-                            [obj.meta.dtype],
-                        ),
-                        pin_count=1,
                     )
-                    with self._lock:
-                        self._inflight_stores.discard(key)
-                        self._memory_objects[key] = store_obj
-                        store_obj.decrease_pin_count()
+                    store_objects.append(obj)
                     stored_keys.append(key)
                     stored_sizes.append(mem_size)
-                except Exception:
-                    # Un-reserve on failure so capacity accounting
-                    # stays correct.
-                    with self._lock:
+
+            try:
+                await self.nixl_agent.dynamic_store_batch(
+                    store_specs, self.nixl_agent.l1_align_bytes
+                )
+            except Exception:
+                with self._lock:
+                    for key, size in zip(stored_keys, stored_sizes, strict=True):
                         self._inflight_stores.discard(key)
                         if self.nixl_agent.mem_type == "FILE":
-                            self._total_bytes -= mem_size
-                    raise
+                            self._total_bytes -= size
+                raise
+
+            stored_layouts = [
+                MemoryLayoutDesc([obj.meta.shape], [obj.meta.dtype])
+                for obj in store_objects
+            ]
+            with self._lock:
+                for key, size, layout in zip(
+                    stored_keys, stored_sizes, stored_layouts, strict=True
+                ):
+                    store_obj = NixlStoreObj(
+                        page_indices=[],  # not used in dynamic mode
+                        size=size,
+                        layout=layout,
+                        pin_count=1,
+                    )
+                    self._inflight_stores.discard(key)
+                    self._memory_objects[key] = store_obj
+                    store_obj.decrease_pin_count()
 
         except Exception:
             logger.exception("Dynamic NIXL store task %d failed", task_id)
             success = False
 
-        if stored_keys:
+        if success and stored_keys:
             if self.nixl_agent.mem_type == "OBJ":
                 self._notify_keys_stored_without_usage(stored_keys)
             else:
                 self._notify_keys_stored(stored_keys, stored_sizes)
 
-        bytes_transferred = sum(stored_sizes)
+        bytes_transferred = sum(stored_sizes) if success else 0
         with self._lock:
             self._completed_store_tasks[task_id] = L2StoreResult(
                 success, bytes_transferred
@@ -824,29 +1091,59 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
     def _execute_lookup_in_the_loop(
         self, keys: list[ObjectKey], task_id: L2TaskId
     ) -> None:
-        """Look up keys and pin found objects.
-
-        Also checks secondary storage (disk) for keys not in the
-        in-memory index and lazily populates ``_memory_objects`` for any
-        data files found on disk.
-        """
+        """Look up keys, batching secondary OBJ presence checks when needed."""
         bitmap = Bitmap(len(keys))
-        # Keys populated by secondary lookup need a ``_notify_keys_stored``
-        # so the base class accounting stays in sync with disk state.
         recovered_keys: list[ObjectKey] = []
         recovered_sizes: list[int] = []
+        secondary_indices: list[int] = []
+        secondary_keys: list[ObjectKey] = []
+
         with self._lock:
             for i, key in enumerate(keys):
                 obj = self._memory_objects.get(key)
-                if obj is None:
-                    obj = self._secondary_lookup_locked(key)
-                    if obj is not None and obj.size > 0:
-                        recovered_keys.append(key)
-                        recovered_sizes.append(obj.size)
+                if obj is not None:
+                    bitmap.set(i)
+                    obj.increase_pin_count()
+                    continue
+                if key in self._inflight_stores:
+                    continue
+                if self.nixl_agent.mem_type == "OBJ":
+                    secondary_indices.append(i)
+                    secondary_keys.append(key)
+                    continue
+                obj = self._secondary_lookup_locked(key)
                 if obj is None:
                     continue
+                if obj.size > 0:
+                    recovered_keys.append(key)
+                    recovered_sizes.append(obj.size)
                 bitmap.set(i)
                 obj.increase_pin_count()
+
+        if secondary_keys:
+            object_names = [
+                self.nixl_agent.get_object_name_for_key(key) for key in secondary_keys
+            ]
+            exists = self.nixl_agent.batched_object_exists(object_names)
+            with self._lock:
+                for i, key, found in zip(
+                    secondary_indices, secondary_keys, exists, strict=True
+                ):
+                    if not found:
+                        continue
+                    obj = self._memory_objects.get(key)
+                    if obj is None:
+                        obj = NixlStoreObj(
+                            page_indices=[],  # not used in dynamic mode
+                            # OBJ size is not discoverable through query_memory.
+                            size=0,
+                            layout=None,
+                        )
+                        self._memory_objects[key] = obj
+                    bitmap.set(i)
+                    obj.increase_pin_count()
+
+        with self._lock:
             self._completed_lookup_tasks[task_id] = bitmap
         if recovered_keys:
             self._notify_keys_stored(recovered_keys, recovered_sizes)
@@ -904,9 +1201,11 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
         objects: list[MemoryObj],
         task_id: L2TaskId,
     ) -> None:
-        """Load each found key via dynamic DMA read."""
+        """Load found keys using one batched NIXL transfer."""
         bitmap = Bitmap(len(keys))
         accessed_keys: list[ObjectKey] = []
+        load_specs: list[DynamicStorageSpec] = []
+        load_indices: list[int] = []
         try:
             for i, key in enumerate(keys):
                 with self._lock:
@@ -918,21 +1217,28 @@ class DynamicNixlStoreL2Adapter(L2AdapterInterface):
                 mem_size = objects[i].meta.phy_size
                 mem_indices = self.nixl_agent.get_memory_indices(mem_addr, mem_size)
                 if self.nixl_agent.mem_type == "OBJ":
-                    object_name = self.nixl_agent.get_object_name_for_key(key)
-                    await self.nixl_agent.dynamic_load_object(
-                        mem_indices, object_name, self.nixl_agent.l1_align_bytes
-                    )
+                    storage_name = self.nixl_agent.get_object_name_for_key(key)
                 else:
-                    file_path = self.nixl_agent.get_file_path_for_key(key)
-                    await self.nixl_agent.dynamic_load_file(
-                        mem_indices, file_path, self.nixl_agent.l1_align_bytes
+                    storage_name = self.nixl_agent.get_file_path_for_key(key)
+                load_specs.append(
+                    DynamicStorageSpec(
+                        mem_indices=mem_indices,
+                        storage_name=storage_name,
+                        size=mem_size,
                     )
-
-                bitmap.set(i)
+                )
+                load_indices.append(i)
                 accessed_keys.append(key)
+
+            await self.nixl_agent.dynamic_load_batch(
+                load_specs, self.nixl_agent.l1_align_bytes
+            )
+            for i in load_indices:
+                bitmap.set(i)
 
         except Exception:
             logger.exception("Dynamic NIXL load task %d failed", task_id)
+            accessed_keys = []
 
         if accessed_keys:
             self._notify_keys_accessed(accessed_keys)
