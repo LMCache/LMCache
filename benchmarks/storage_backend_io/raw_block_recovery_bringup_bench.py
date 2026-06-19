@@ -203,7 +203,7 @@ def prepare_fixture(args: argparse.Namespace) -> None:
         os.close(fd)
 
 
-def make_config(args: argparse.Namespace) -> RawBlockCoreConfig:
+def make_config(args: argparse.Namespace, io_engine: str) -> RawBlockCoreConfig:
     return RawBlockCoreConfig(
         device_path=args.device_path,
         capacity_bytes=args.capacity_bytes,
@@ -220,47 +220,72 @@ def make_config(args: argparse.Namespace) -> RawBlockCoreConfig:
         meta_enable_periodic=False,
         meta_verify_on_load=True,
         load_checkpoint_on_init=True,
-        io_engine="posix",
+        io_engine=io_engine,
         iouring_queue_depth=256,
         use_uring_cmd=False,
     )
 
 
-def time_bringup(args: argparse.Namespace, recovery_threads: int) -> float:
+# A measurement variant: (label, io_engine, recovery_threads).
+Variant = tuple[str, str, int]
+
+
+def time_bringup(args: argparse.Namespace, variant: Variant) -> float:
+    label, io_engine, recovery_threads = variant
     raw_block_core.DEFAULT_RECOVERY_READ_THREADS = recovery_threads
     started = time.perf_counter()
-    core = RawBlockCore(make_config(args), key_namespace="object")
+    core = RawBlockCore(make_config(args, io_engine), key_namespace="object")
     elapsed = time.perf_counter() - started
     status = core.report_status()
     core.close()
     print(
-        f"threads={recovery_threads}: {elapsed:.6f}s, "
+        f"{label}: {elapsed:.6f}s, "
         f"indexed={status['indexed_key_count']}, "
         f"free_slots={status['free_slot_count']}"
     )
     return elapsed
 
 
+def build_variants(args: argparse.Namespace) -> list[Variant]:
+    """Build measurement variants to compare.
+
+    POSIX is swept over --threads; io_uring uses one batched variant since its
+    recovery reads do not use the POSIX reader thread pool.
+    """
+    variants: list[Variant] = []
+    for io_engine in args.io_engine:
+        if io_engine == "io_uring":
+            variants.append(("io_uring/batched", "io_uring", 1))
+        else:
+            for threads in args.threads:
+                variants.append((f"posix/threads={threads}", "posix", threads))
+    return variants
+
+
 def measure(args: argparse.Namespace) -> None:
-    results: dict[int, list[float]] = {threads: [] for threads in args.threads}
+    variants = build_variants(args)
+    results: dict[str, list[float]] = {variant[0]: [] for variant in variants}
     for repeat in range(args.repeats):
         print(f"repeat {repeat + 1}/{args.repeats}")
-        for threads in args.threads:
-            results[threads].append(time_bringup(args, threads))
+        for variant in variants:
+            results[variant[0]].append(time_bringup(args, variant))
 
     print("\nsummary")
-    for threads, samples in results.items():
+    for label, samples in results.items():
         print(
-            f"threads={threads}: "
+            f"{label}: "
             f"median={statistics.median(samples):.6f}s "
             f"mean={statistics.mean(samples):.6f}s "
             f"samples={[round(sample, 6) for sample in samples]}"
         )
-    if 1 in results and 8 in results:
-        old = statistics.median(results[1])
-        new = statistics.median(results[8])
+    baseline_label = variants[0][0]
+    baseline = statistics.median(results[baseline_label])
+    for label, samples in results.items():
+        if label == baseline_label:
+            continue
+        new = statistics.median(samples)
         if new > 0:
-            print(f"speedup median threads=1/threads=8: {old / new:.2f}x")
+            print(f"speedup median {baseline_label}/{label}: {baseline / new:.2f}x")
 
 
 def parse_args() -> argparse.Namespace:
@@ -291,6 +316,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--measure", action="store_true")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--threads", type=int, nargs="+", default=[1, 8])
+    parser.add_argument(
+        "--io-engine",
+        nargs="+",
+        choices=["posix", "io_uring"],
+        default=["posix"],
+        help=(
+            "Engines to measure. posix is swept over --threads; io_uring uses a "
+            "single batched-read variant."
+        ),
+    )
     parser.add_argument("--max-entries", type=int)
     parser.add_argument(
         "--i-understand-this-overwrites-device",

@@ -175,7 +175,9 @@ PY
 `raw_block_recovery_bringup_bench.py` measures synthetic `RawBlockCore` restart
 recovery. The prepare step writes checkpoint metadata and per-slot headers only;
 it does not write full payload contents. Use it to compare checkpoint loading and
-slot-header validation across recovery thread counts.
+slot-header validation across I/O engines and recovery thread counts. POSIX
+recovery is swept over reader-thread counts; io_uring recovery uses a single
+batched-read variant.
 
 ```bash
 python benchmarks/storage_backend_io/raw_block_recovery_bringup_bench.py \
@@ -189,7 +191,10 @@ python benchmarks/storage_backend_io/raw_block_recovery_bringup_bench.py \
 Important options:
 - `--cache-space-gb`: Logical cache space to prepare/use, in GiB units.
 - `--slot-bytes`: Slot size, defaulting to 16 MiB.
-- `--threads`: Recovery thread counts to compare, defaulting to `1 8`.
+- `--io-engine`: Engines to measure, defaulting to `posix`. Pass
+  `--io-engine posix io_uring` to compare the POSIX thread-pool path against the
+  io_uring batched-read path on the same fixture.
+- `--threads`: POSIX recovery thread counts to compare, defaulting to `1 8`.
 - `--use-odirect` / `--no-use-odirect`: Enable or disable O_DIRECT for recovery
   measurement. O_DIRECT is enabled by default.
 
