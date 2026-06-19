@@ -1,5 +1,6 @@
 services:
   vllm-qwen36-27b-dual:
+    image: lmcache/vllm-openai:v0.4.7-cu129
     container_name: "${ESTATE_CONTAINER:-vllm-qwen36-27b-dual-balanced}"
     restart: no
     security_opt:
