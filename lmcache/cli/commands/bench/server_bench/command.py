@@ -61,6 +61,7 @@ from lmcache.cli.commands.bench.server_bench.helpers import (
     _process_request,
     _require_full_install,
     _send_register_kv_cache,
+    _send_unregister_kv_cache,
     shm_open_pool_as_mmap,
 )
 
@@ -314,6 +315,10 @@ def run_server_bench(
     ctx = zmq.Context()
     client = MessageQueueClient(url, ctx)
 
+    # Tracks whether REGISTER_KV_CACHE succeeded so the ``finally`` block
+    # only deregisters a context that was actually registered.
+    registered = False
+
     try:
         # Query chunk size from server
         chunk_size = _get_chunk_size(client)
@@ -483,6 +488,11 @@ def run_server_bench(
         )
         log("REGISTER_KV_CACHE: %s" % ("OK" if register_result else "FAIL"))
         log("")
+        # Mark the registration so the ``finally`` block knows to send the
+        # matching UNREGISTER. The data-mode register returns a response
+        # object (truthy) and the handle-mode register returns a bool;
+        # either way a truthy result means the server holds our context.
+        registered = bool(register_result)
 
         # In data mode the server reply carries the SHM pool name
         # and size; the bench mmaps the same pool so STORE/RETRIEVE
@@ -591,6 +601,21 @@ def run_server_bench(
     except KeyboardInterrupt:
         log("\nStopping...")
     finally:
+        # Deregister our context from the server before tearing down the
+        # client. Otherwise the server keeps the registration (and the
+        # CUDA-IPC / POSIX-SHM mappings it holds) alive forever, leaking
+        # one context entry per bench run. Must run while the client is
+        # still connected, hence before ``client.close()``.
+        if registered:
+            try:
+                ok = _send_unregister_kv_cache(
+                    client,
+                    instance_id=0,
+                    use_handle=use_handle,
+                )
+                log("UNREGISTER_KV_CACHE: %s" % ("OK" if ok else "FAIL"))
+            except zmq.ZMQError as exc:
+                log("  [warning] UNREGISTER_KV_CACHE failed: %s" % exc)
         # Release the bench-side mmap of the server SHM pool first
         # (data mode only; ``server_pool`` stays ``None`` otherwise).
         if "server_pool" in locals() and server_pool is not None:
